@@ -10,7 +10,7 @@ Paths are placeholders (`<run>` is the run directory). Nothing was uploaded, pub
 |---|---|
 | The builder, the card renderer and the gate | `orchard/audio_package.py` |
 | The command | `tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]` |
-| Tests (227, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
+| Tests (246, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
 | Hostile-input readers (4 registered) | `tests/hostile_inputs.py` |
 
 ## What was staged
@@ -137,3 +137,11 @@ Taken from the record and not re-verified by the gate (checked once, when the pa
 
 - `LICENSE-runtime` holds a notice and then tt-orchard's own `LICENSE` (the Apache License 2.0, matching the SPDX headers of the copied files). The notice says the Stability AI Community License covers only the model, that the stable-audio-3 library (MIT License) is not bundled and is fetched at the pinned commit, and names the Gemma Terms of Use. The gate requires each of those and the Apache text.
 - A relative cache path is made absolute in `run.sh` (before it is used or exported) and in `check_revision.py`; a test runs the script with a relative path and with spaces in it.
+
+## The pin on every path, and what the gate checks for attribution
+
+Where the revision is pinned: `check_revision.py` finds the pinned snapshot by its explicit revision in the user's cache and builds a private cache that holds only it; `run.sh` exports `HF_HUB_CACHE` (the private cache, made absolute first) and `AUDIO_PIN_REVISION`; the server starts each clip's process with the environment it was given (`serve_audio.py` copies `os.environ` and adds `PYTHONPATH`), so every clip inherits both. The generator script the server starts is `pinned_generate.py`; `chip_generate.py` is run by it. It resolves the checkpoint the way the library does and exits 3 with a message, before any device is opened, when the snapshot is not the pin (2 when there is no valid pin or the model is unknown). Only then does it run `chip_generate.py`, unmodified, with the same arguments and exit code. Checked with the real library on CPU: a wrong pin stopped with exit 3. The draft manifest uses the same script and sets `AUDIO_PIN_REVISION` in `serve.env`.
+
+The private cache refuses a symbolic link in place of the cache directory, the repository directory, `refs/` or `snapshots/` (exit 2, nothing written through the link). A link at `refs/main` is replaced by a file and its target is left alone; a stale `snapshots/<pin>` link is replaced; a real directory there is refused.
+
+Attribution ("Powered by Stability AI") is checked in: the card (`README.md`), the page (`demo/audio_app.py`), every `docs/*.md` file, and `run.sh` (its banner). `NOTICE` is checked for the exact attribution sentence of the agreement. The license copy and `NOTICE` are compared with the recorded hashes.

@@ -24,6 +24,9 @@ from pathlib import Path
 def build_private_cache(private: Path, repo_dir_name: str, pin: str, snapshot: Path) -> None:
     """`private/<repo_dir_name>/refs/main` holds `pin`, and `snapshots/<pin>` links to `snapshot`. A link or a ref that is already there is replaced."""
     repo = private / repo_dir_name
+    for d in (private, repo, repo / "refs", repo / "snapshots"):          # directories this script creates and writes in are never links
+        if d.is_symlink():
+            raise OSError(f"{d} is a symbolic link; the private cache is made of real directories. Remove it or choose another AUDIO_PKG_CACHE")
     (repo / "refs").mkdir(parents=True, exist_ok=True)
     (repo / "snapshots").mkdir(parents=True, exist_ok=True)
     tmp = repo / "refs" / f".main.{os.getpid()}"

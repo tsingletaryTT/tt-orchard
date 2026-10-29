@@ -992,6 +992,109 @@ def test_a_missing_runtime_license_is_a_refusal(tmp_path, monkeypatch):
         ap.repo_license_text(tmp_path)
 
 
+def run_pinned(tmp_path, pin_env, resolved, *, args=("--model", "small-music", "--out", "x"), model_known=True, fake_exit=0):
+    """pinned_generate.py in a child process beside a fake chip_generate.py, with a fake library that resolves the model to the snapshot `resolved`."""
+    d = tmp_path / "gen"
+    lib = tmp_path / "lib" / "stable_audio_3"
+    d.mkdir(exist_ok=True)
+    lib.mkdir(parents=True, exist_ok=True)
+    (lib / "__init__.py").write_text("")
+    known = "{'small-music': M()}" if model_known else "{}"
+    (lib / "model_configs.py").write_text("class M:\n    def resolve(self):\n        from pathlib import Path\n"
+                                          f"        return Path('/c/config.json'), Path('/c/snapshots/{resolved}/model.safetensors')\nall_models = {known}\n")
+    (d / "pinned_generate.py").write_text((Path(ap.__file__).parent / "skills" / "audio-chip-templates" / "pinned_generate.py").read_text())
+    (d / "chip_generate.py").write_text(f"import sys\nprint('GENERATED', sys.argv[1:])\nraise SystemExit({fake_exit})\n")
+    env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(tmp_path / "lib")}
+    if pin_env is not None:
+        env["AUDIO_PIN_REVISION"] = pin_env
+    return subprocess.run([sys.executable, str(d / "pinned_generate.py"), *args], env=env, capture_output=True, text=True, cwd=str(tmp_path))
+
+
+def test_the_pinned_generator_runs_chip_generate_with_the_same_arguments_when_the_revision_is_the_pin(tmp_path):
+    r = run_pinned(tmp_path, REV, REV)
+    assert r.returncode == 0 and "GENERATED ['--model', 'small-music', '--out', 'x']" in r.stdout
+
+
+def test_the_pinned_generator_refuses_when_the_loader_resolves_another_revision(tmp_path):
+    r = run_pinned(tmp_path, REV, "9" * 40)
+    assert r.returncode == 3 and "Not generating" in r.stderr and "9" * 40 in r.stderr and REV in r.stderr
+    assert "GENERATED" not in r.stdout                                  # chip_generate.py never ran
+
+
+@pytest.mark.parametrize("pin", [None, "", "short", "x" * 41])
+def test_the_pinned_generator_refuses_without_a_valid_pin(tmp_path, pin):
+    r = run_pinned(tmp_path, pin, REV)
+    assert r.returncode == 2 and "AUDIO_PIN_REVISION" in r.stderr and "GENERATED" not in r.stdout
+
+
+def test_the_pinned_generator_refuses_an_unknown_model_and_passes_the_models_own_name(tmp_path):
+    assert run_pinned(tmp_path, REV, REV, model_known=False).returncode == 2
+    r = run_pinned(tmp_path, REV, REV, args=("--model=small-music", "--out", "y"))
+    assert r.returncode == 0 and "--model=small-music" in r.stdout
+
+
+def test_the_pinned_generator_resolves_the_model_named_by_a_separate_model_argument(tmp_path):
+    r = run_pinned(tmp_path, REV, REV, args=("--model", "other", "--out", "y"))
+    assert r.returncode == 2 and "'other'" in r.stderr and "GENERATED" not in r.stdout
+
+
+def test_the_pinned_generator_passes_chip_generates_exit_code_on(tmp_path):
+    assert run_pinned(tmp_path, REV, REV, fake_exit=5).returncode == 5
+
+
+def test_run_sh_exports_the_pin_and_starts_the_server_with_the_pinned_generator(staged):
+    run_sh = (staged / "run.sh").read_text()
+    assert 'export AUDIO_PIN_REVISION="$REVISION"' in run_sh
+    assert "--script \"$HERE/runtime/orchard/skills/audio-chip-templates/pinned_generate.py\"" in run_sh and "chip_generate.py\"" not in run_sh
+    assert (staged / "runtime/orchard/skills/audio-chip-templates/pinned_generate.py").is_file()
+    assert f'AUDIO_PIN_REVISION: "{REV}"' in (staged / "tt-model.yaml").read_text()
+
+
+@pytest.mark.parametrize("old,new", [('export AUDIO_PIN_REVISION="$REVISION"', "true"), ("pinned_generate.py", "chip_generate.py")])
+def test_the_gate_refuses_a_launcher_that_does_not_use_the_pinned_generator(staged, old, new):
+    f = staged / "run.sh"
+    f.write_text(f.read_text().replace(old, new))
+    assert any("pinned_generate.py as the generator script" in p for p in gate(staged))
+
+
+def test_the_gate_refuses_a_launcher_that_does_not_display_the_attribution(staged):
+    f = staged / "run.sh"
+    f.write_text(f.read_text().replace('echo "Powered by Stability AI"', "true").replace("# Powered by Stability AI.", "#"))
+    assert any("run.sh must display" in p for p in gate(staged))
+
+
+@pytest.mark.parametrize("which", ["private", "repo", "refs", "snapshots"])
+def test_a_symlinked_cache_directory_is_refused_and_not_written_through(tmp_path, which):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    private = tmp_path / "pc" / "hub"
+    repo = private / "models--x--y"
+    if which == "private":
+        private.parent.mkdir(parents=True)
+        private.symlink_to(target, target_is_directory=True)
+    else:
+        repo.mkdir(parents=True)
+        {"repo": lambda: None, "refs": lambda: (repo / "refs").symlink_to(target, target_is_directory=True),
+         "snapshots": lambda: (repo / "snapshots").symlink_to(target, target_is_directory=True)}[which]()
+        if which == "repo":
+            repo.rmdir()
+            repo.symlink_to(target, target_is_directory=True)
+    r = run_check(tmp_path, REV, private=private)
+    assert r.returncode == 2 and "symbolic link" in r.stderr
+    assert list(target.iterdir()) == []                                        # nothing was written through the link
+
+
+def test_a_symlinked_main_reference_is_replaced_and_its_target_is_left_alone(tmp_path):
+    first = run_check(tmp_path, REV)
+    main = first.private / "models--x--y" / "refs" / "main"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    main.unlink()
+    main.symlink_to(outside)
+    again = run_check(tmp_path, REV, private=first.private)
+    assert again.returncode == 0 and not main.is_symlink() and main.read_text() == REV and outside.read_text() == "keep"
+
+
 def test_the_gate_refuses_a_launcher_that_leaves_the_cache_path_relative(staged):
     f = staged / "run.sh"
     f.write_text(f.read_text().replace('case "$PRIVATE_CACHE" in /*)', 'case "$PRIVATE_CACHE" in x)'))

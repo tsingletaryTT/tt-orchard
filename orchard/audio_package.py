@@ -85,6 +85,7 @@ DEMO_PATCHED = f'PAGE_NOTE = ("{POWERED_BY}. Describe the music'
 DEMO_FILES = (("demo/audio_client.py", "audio_client.py"), ("demo/audio_app.py", "audio_app.py"), ("serve/serve_audio.py", "serve_audio.py"))
 RUNTIME_FILES = (("skills/audio-chip-templates/chip_generate.py", "orchard/skills/audio-chip-templates/chip_generate.py"),
                  ("skills/audio-chip-templates/check_revision.py", "orchard/skills/audio-chip-templates/check_revision.py"),
+                 ("skills/audio-chip-templates/pinned_generate.py", "orchard/skills/audio-chip-templates/pinned_generate.py"),
                  ("skills/audio-chip-templates/chip_dit.py", "orchard/skills/audio-chip-templates/chip_dit.py"),
                  ("skills/audio-reference-templates/make_reference.py", "orchard/skills/audio-reference-templates/make_reference.py"),
                  ("audio_reference.py", "orchard/audio_reference.py"),
@@ -606,8 +607,10 @@ case "$PRIVATE_CACHE" in /*) ;; *) PRIVATE_CACHE="$PWD/$PRIVATE_CACHE" ;; esac  
 PYTHONPATH="$ORCHARD_AUDIO_SRC${{PYTHONPATH:+:$PYTHONPATH}}" "$ORCHARD_TTNN_PYTHON" "$HERE/runtime/orchard/skills/audio-chip-templates/check_revision.py" \\
   "$REVISION" {MODEL_KEY} "$PRIVATE_CACHE"
 export HF_HUB_CACHE="$PRIVATE_CACHE"
+# Every clip's process starts pinned_generate.py, which stops (exit 3) if the library resolves any other revision than this one, and then runs chip_generate.py.
+export AUDIO_PIN_REVISION="$REVISION"
 exec "$ORCHARD_TTNN_PYTHON" "$HERE/demo/serve_audio.py" --generator chip --src-dir "$ORCHARD_AUDIO_SRC" \\
-  --script "$HERE/runtime/orchard/skills/audio-chip-templates/chip_generate.py" --ui "$@"
+  --script "$HERE/runtime/orchard/skills/audio-chip-templates/pinned_generate.py" --ui "$@"
 """
 
 
@@ -637,11 +640,13 @@ source:
   python: "3.12"
 runtime:
   command: [python, demo/serve_audio.py, --generator, chip, --host, "{{host}}", --port, "{{port}}",
-            --script, runtime/orchard/skills/audio-chip-templates/chip_generate.py]
+            --script, runtime/orchard/skills/audio-chip-templates/pinned_generate.py]
   ready_line: "model ready"
   packages: ["numpy", "soundfile", "torch"]
 serve:
   port: 20100
+  env:
+    AUDIO_PIN_REVISION: "{f.revision}"
 serve_profiles:
   - name: p150
     description: One Blackhole chip (a P150, or the first chip of a P300 or QuietBox 2).
@@ -1039,6 +1044,10 @@ def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
             problems.append("run.sh must carry the evidence's model revision and run its check_revision.py before it starts the server")
         if 'case "$PRIVATE_CACHE" in /*)' not in run_sh:
             problems.append("run.sh must make the private cache path absolute before it uses it")
+        if 'export AUDIO_PIN_REVISION="$REVISION"' not in run_sh or "pinned_generate.py" not in run_sh:
+            problems.append("run.sh must export AUDIO_PIN_REVISION and start the server with pinned_generate.py as the generator script")
+        if POWERED_BY not in run_sh:
+            problems.append(f"run.sh must display {POWERED_BY!r}")
         if 'export HF_HUB_CACHE="$PRIVATE_CACHE"' not in run_sh:
             problems.append("run.sh must point the runtime at the private cache that holds only the pinned revision (export HF_HUB_CACHE)")
         if f'revision: "{facts.revision}"' not in manifest:
