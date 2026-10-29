@@ -53,7 +53,7 @@ class ChipMiniCPM3:
         self.cfg = c = json.load(open(f"{model_dir}/config.json"))
         self.L, self.H = n_layers or c["num_hidden_layers"], c["num_attention_heads"]
         self.hid, self.kvr, self.dn, self.dr = c["hidden_size"], c["kv_lora_rank"], c["qk_nope_head_dim"], c["qk_rope_head_dim"]
-        self.dv = 64
+        self.dv = c["hidden_size"] // c["num_attention_heads"]       # value head width (the config has no v_head_dim key)
         self.eps = c["rms_norm_eps"]
         self.max_len = -(-max_len // 128) * 128      # the flash MLA op needs a cache length that is a multiple of its key chunk size (128)
         self.wdtype = wdtype or ttnn.bfloat16

@@ -52,8 +52,8 @@ class RefModel:
         c = self.cfg
         self.nl = c["num_hidden_layers"]
         self.H = c["num_attention_heads"]
+        # the value head width is hidden size over head count (the model's code, and the native transformers class, derive it that way: the config has no v_head_dim)
         self.dn, self.dr, self.dv = c["qk_nope_head_dim"], c["qk_rope_head_dim"], c["hidden_size"] // c["num_attention_heads"]
-        self.dv = 64  # v_head_dim equals qk_nope_head_dim here (config has no v_head_dim key; the model code default is 128 for DeepSeek, 64 here)
         self.eps = c["rms_norm_eps"]
         self.w = {}
         with safe_open(weights_file, "pt") as f:

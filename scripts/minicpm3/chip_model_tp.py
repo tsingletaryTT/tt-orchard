@@ -33,7 +33,7 @@ class ChipMiniCPM3TP:
         self.L = n_layers or c["num_hidden_layers"]
         self.H = c["num_attention_heads"]
         self.Hl = self.H // 2
-        self.hid, self.kvr, self.dn, self.dr, self.dv = c["hidden_size"], c["kv_lora_rank"], c["qk_nope_head_dim"], c["qk_rope_head_dim"], 64
+        self.hid, self.kvr, self.dn, self.dr, self.dv = c["hidden_size"], c["kv_lora_rank"], c["qk_nope_head_dim"], c["qk_rope_head_dim"], c["hidden_size"] // c["num_attention_heads"]
         self.qa_n = c["q_lora_rank"]
         self.eps = c["rms_norm_eps"]
         self.max_len = -(-max_len // 128) * 128      # the flash MLA op needs a cache length that is a multiple of its key chunk size (128)
