@@ -154,13 +154,18 @@ def test_a_chip_run_with_no_decode_logits_has_no_agreement(tmp_path):
 
 # ---- perplexity -----------------------------------------------------------------------------------------------------------------
 
-def ppl(value, tokens=767, lps=None):
-    return {"tokens": tokens, "perplexity": value, "mean_nll": float(np.log(value)), "logprobs": lps or [-1.0, -2.0]}
+def ppl(value, tokens=6, lps=None):
+    """A perplexity record whose log probabilities give `value` (or, with `lps`, whatever they give)."""
+    lps = lps if lps is not None else [-float(np.log(value))] * tokens
+    nll = -float(np.mean(lps))
+    return {"tokens": len(lps), "perplexity": float(np.exp(nll)), "mean_nll": nll, "logprobs": lps}
 
 
 def test_perplexity_within_the_bar_passes():
-    r = tb.perplexity_report(ppl(8.0574), ppl(8.0070, lps=[-1.1, -1.9]))
-    assert r["ok"] and r["rel_diff"] == pytest.approx(-0.00625, abs=1e-4) and r["mean_abs_logprob_difference"] == pytest.approx(0.1)
+    r = tb.perplexity_report(ppl(None, lps=[-1.0, -2.0]), ppl(None, lps=[-1.1, -1.9]))
+    assert r["ok"] and r["rel_diff"] == pytest.approx(0.0, abs=1e-9) and r["mean_abs_logprob_difference"] == pytest.approx(0.1)
+    r = tb.perplexity_report(ppl(8.0574), ppl(8.0070))
+    assert r["ok"] and r["rel_diff"] == pytest.approx(-0.00625, abs=1e-4)
 
 
 def test_perplexity_outside_the_bar_fails():
@@ -169,7 +174,7 @@ def test_perplexity_outside_the_bar_fails():
 
 
 def test_perplexity_windows_must_match():
-    assert not tb.perplexity_report(ppl(8.0, tokens=767), ppl(8.0, tokens=500))["ok"]
+    assert not tb.perplexity_report(ppl(8.0, tokens=6), ppl(8.0, tokens=4))["ok"]
 
 
 @pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), None, True])

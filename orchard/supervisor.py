@@ -1584,7 +1584,10 @@ class Supervisor:
     def _text_context(self, rtm, stage_dir: Path) -> "text_runtime.TextContext":
         """The context of a text stage's commands: absolute paths, the stage directory as the output directory, stage 1's reference directory."""
         model_dir = str(Path(self.inputs["model"]).absolute())
-        paths = text_runtime.text_paths(self.paths.operator_home)
+        # A resumed run keeps the interpreter its stage 0 recorded: the orchestrator and the gates use it, so the commands must too.
+        sel = text_runtime.selection(self.ledger.read())
+        recorded = (sel or {}).get("paths") if isinstance((sel or {}).get("paths"), dict) else None
+        paths = text_runtime.TextPaths.from_record(recorded) if recorded and "python" in recorded else text_runtime.text_paths(self.paths.operator_home)
         cache = Path(self.paths.cache_root) / "text-runtime" / rtm.name
         weights = rtm.weights_path(model_dir, cache)
         parquet = text_runtime.find_ppl_parquet(self.paths.hf_home, self.inputs.get("text_ppl_parquet"))
@@ -1663,7 +1666,7 @@ class Supervisor:
         except (OSError, ValueError, text_runtime.safeio.SafeReadError) as exc:
             return "fail", [f"the model directory cannot be read: {exc}"], None
         (stage_dir / "evidence").mkdir(exist_ok=True)
-        evidence = {"runtime": rtm.name, "model": self.model_id, "facts": facts, "scripts": text_runtime.script_hashes(rtm), "context_limit_measured": rtm.context_limit}
+        evidence = {"runtime": rtm.name, "model": self.model_id, "snapshot": Path(model_dir).resolve().name, "facts": facts, "scripts": text_runtime.script_hashes(rtm), "context_limit_measured": rtm.context_limit}
         (stage_dir / "evidence" / "triage.json").write_text(json.dumps(evidence, indent=1, sort_keys=True) + "\n", encoding="utf-8")
         delta = {"model": self.model_id, "nearest_model": f"none: the {rtm.name} runtime (scripts in this repository) serves it",
                  "path": "full-port", "class": "full-port",

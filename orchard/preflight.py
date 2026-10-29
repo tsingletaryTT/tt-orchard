@@ -626,13 +626,13 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
                  f"{runtime_note} The base snapshot is still read by stage 0: {where}.{gated_note}", data=data)
 
 
-def _text_runtime_check(model_id: str, base_override: str | None) -> Check | None:
+def _text_runtime_check(model_id: str, base_override: str | None, *, allowed: bool = True) -> Check | None:
     """The base row for a text model the harness's own text runtime serves (orchard/text_runtime.py): no installed bundle, no research and no base model is
     needed, because the runtime's scripts in this checkout are the port. The run goes on to stages 0 to 2, 6 and 8 without the coder. A model with another
     base named by --base is not a text-runtime run: the operator chose a swap. Returns None for any other model."""
     from orchard import text_runtime
     rtm = text_runtime.runtime_for_model(model_id)
-    if rtm is None or base_override:
+    if rtm is None or base_override or not allowed:
         return None
     return Check("base", WARN, f"no installed bundle serves {model_id}, and none is needed: the harness's {rtm.name} text runtime (the scripts in {rtm.scripts_dir.name}) "
                  "serves it on one chip. The run goes on with stages 0 to 2, 6 and 8 as supervisor code and does not boot the local coder. Stage 2 compares the chip "
@@ -643,7 +643,7 @@ def _text_runtime_check(model_id: str, base_override: str | None) -> Check | Non
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
                installed: list, search: Callable | None, report: dict | None = None,
                accept_inferred: bool = False, stock: Callable | None = None, audio: str | None = None,
-               base_hub_info: Callable | None = None, audio_paths=None) -> Check:
+               base_hub_info: Callable | None = None, audio_paths=None, text_runtime_ok: bool = True) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
@@ -654,7 +654,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     text from audio_facts.audio_evidence when the model counts as audio; the base row then needs no bundle (_audio_base),
     and `base_hub_info(base)` returns the base's `(HubInfo | None, error)`."""
     from orchard import nearest
-    if (found := _text_runtime_check(model_id, base_override)) is not None:
+    if (found := _text_runtime_check(model_id, base_override, allowed=text_runtime_ok)) is not None:
         return found
     base = base_override or (hub.base_models[0] if hub and hub.base_models else None)
     inferred = False
@@ -1033,7 +1033,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                            accept_inferred=accept_inferred_base,
                            # the parameters directory is in this box's tt-metal tree; a lab runs its tests on another box
                            stock=None if getattr(cfg, "mode", "local") == "lab" else s.stock_params,
-                           audio=audio, base_hub_info=s.hub_info, audio_paths=_audio_paths_for(cfg))
+                           audio=audio, base_hub_info=s.hub_info, audio_paths=_audio_paths_for(cfg),
+                           text_runtime_ok=getattr(cfg, "mode", "local") != "lab")      # the supervisor's text stages do not run in lab mode
         if failed:
             from orchard.research.types import clean
             found.detail += f" (research failed: {clean(failed)})"
@@ -1073,12 +1074,15 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("credentials", "credentials-needed",
             lambda: check_credentials(list(s.credentials()), accept_credentials))
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
-    guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
-                                                          kept=_kept_on_port(cfg)))
+    # A text-runtime run never boots the coder, so a server already on its port and a CPU stand-in that is down are not reasons to refuse it.
+    text_route = bool((base_check.data or {}).get("text_runtime"))
+    if not text_route:
+        guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
+                                                              kept=_kept_on_port(cfg)))
     in_lab = getattr(cfg, "mode", "local") == "lab"
     # The stand-in takes the coder's place while stage 4's 4-chip test parks it. A lab run never parks (its tests run on
     # the lab), so the row would block a run for a server it never uses.
-    if s.cpu_standin is not None and not in_lab:
+    if s.cpu_standin is not None and not in_lab and not text_route:
         def cpu() -> Check:
             tier = next(t for t in s.load_tiers(Path(cfg.tiers)).tiers.values() if t.get("placement") == "cpu")
             return check_cpu_standin(s.cpu_standin(tier["endpoint"], tier["model"]), tier["endpoint"], tier["model"])

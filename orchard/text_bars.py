@@ -136,9 +136,12 @@ def chip_report(ref, floors: dict, chip) -> dict:
                    or (n == "final_norm" and ("other", n) in chip.entries)]
     other_entries = [_entry(ref, floors, chip, "other", n) for n in other_names]
     first_block = next((e for e in block_entries if e["leaves"]), None)
+    leaving_ops = [e for e in op_entries if e["leaves"]]
     first_op = None
     if first_block is not None:
-        first_op = next((e for e in op_entries if e["name"].startswith(first_block["name"] + ".") and e["leaves"]), None)
+        first_op = next((e for e in leaving_ops if e["name"].startswith(first_block["name"] + ".")), None)
+    if first_op is None and leaving_ops:
+        first_op = leaving_ops[0]              # an operation can leave while every block output is within its tolerance
     ratios = [e for e in block_entries if e["ratio_to_floor"] is not None]
     worst = max(ratios, key=lambda e: e["ratio_to_floor"], default=None)
     agree = agreement(ref, chip)
@@ -146,6 +149,8 @@ def chip_report(ref, floors: dict, chip) -> dict:
     reasons = []
     if first_block is not None:
         reasons.append(f"block {first_block['name']} leaves its tolerance: {first_block['why']}")
+    if first_op is not None and first_op["name"] != (first_block or {}).get("name"):
+        reasons.append(f"operation {first_op['name']} leaves its tolerance: {first_op['why']}")
     if leaving_other:
         reasons.append("these arrays leave their tolerance: " + ", ".join(leaving_other[:6]))
     if agree["problem"]:
@@ -158,6 +163,29 @@ def chip_report(ref, floors: dict, chip) -> dict:
             "agreement": agree, "ok": not reasons, "reasons": reasons, "cannot_show": list(CANNOT_SHOW)}
 
 
+def ppl_problems(d, label: str) -> list[str]:
+    """Why a perplexity file does not support its own numbers: the log probabilities are not as many finite values at or below zero as `tokens`, or the recorded mean
+    negative log likelihood and perplexity are not what they give. The perplexity is recomputed here and the recorded scalars only have to agree with it."""
+    if not isinstance(d, dict):
+        return [f"the {label} perplexity record is not an object"]
+    lps, n = d.get("logprobs"), d.get("tokens")
+    if not isinstance(lps, list) or isinstance(n, bool) or not isinstance(n, int) or len(lps) != n or n < 1:
+        return [f"the {label} log probabilities are not a list of as many values as its {n!r} tokens"]
+    try:
+        arr = np.asarray(lps, dtype=np.float64)
+    except (TypeError, ValueError):
+        return [f"the {label} log probabilities are not numbers"]
+    if arr.ndim != 1 or not np.isfinite(arr).all() or (arr > 1e-9).any():
+        return [f"the {label} log probabilities include a value that is not finite or is above zero"]
+    nll = float(-arr.mean())
+    out = []
+    for key, want in (("mean_nll", nll), ("perplexity", math.exp(min(nll, 700.0)))):
+        got = d.get(key)
+        if not isinstance(got, (int, float)) or isinstance(got, bool) or not math.isclose(got, want, rel_tol=1e-6, abs_tol=1e-9):
+            out.append(f"the {label} {key} {got!r} is not what its log probabilities give ({want:.6g})")
+    return out
+
+
 def perplexity_report(ref: dict, chip: dict) -> dict:
     """The chip's perplexity against the float32 reference's on the same token window. Both inputs are the JSON the runtime scripts write: `tokens`,
     `perplexity`, `mean_nll`, `logprobs`."""
@@ -166,6 +194,8 @@ def perplexity_report(ref: dict, chip: dict) -> dict:
         p = d.get("perplexity") if isinstance(d, dict) else None
         if not isinstance(p, (int, float)) or isinstance(p, bool) or not math.isfinite(p) or p <= 0:
             reasons.append(f"the {label} perplexity is not a positive finite number")
+        else:
+            reasons += ppl_problems(d, label)
     if not reasons and ref.get("tokens") != chip.get("tokens"):
         reasons.append(f"the two perplexity runs used windows of {ref.get('tokens')} and {chip.get('tokens')} tokens")
     rel = None
