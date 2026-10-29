@@ -1,0 +1,3 @@
+target = "0.9.65"
+summary = "README names the --updates-config flag in the form the flag test checks"
+pr = 241

@@ -2222,7 +2222,7 @@ timeout and a shared 60-second budget.
 | tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag |
 | Skills checkout | `orchard.skillsfresh` | upstream main |
 
-To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`. `--updates-config FILE` reads a different file.
+To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`. The flag `--updates-config` reads a different file.
 
 Some items must move together. The rule table is `RULES` in `orchard/updates.py`; a row that is behind names the other members
 and cites the rule.
