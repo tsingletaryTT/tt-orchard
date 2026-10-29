@@ -41,6 +41,7 @@ def parse(argv=None):
     p.add_argument("--repeats", type=int, default=None, help="measured runs at each size (default: the rule in orchard/resident.py)")
     p.add_argument("--threads", type=int, default=0, help="torch CPU threads, on the CPU runtime and for the host work of the chip runtime (0: the default)")
     p.add_argument("--device-id", type=int, default=0)
+    p.add_argument("--chip-decoder", action="store_true", help="chip device only: also run the autoencoder decoder's transformer on the chip")
     return p.parse_args(argv)
 
 
@@ -76,7 +77,7 @@ def main(argv=None, runtime_factory=None) -> int:
         if problems:
             raise SystemExit("; ".join(problems))
         if args.device == "chip":
-            runtime = rts.ChipRuntime(args.model, device_id=args.device_id, threads=args.threads, record_layers=False)
+            runtime = rts.ChipRuntime(args.model, device_id=args.device_id, threads=args.threads, record_layers=False, chip_decoder=args.chip_decoder)
         else:
             runtime = rts.LibraryRuntime(args.model, threads=args.threads, record_layers=False)
     else:
