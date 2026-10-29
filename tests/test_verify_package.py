@@ -268,6 +268,25 @@ def test_a_hub_failure_is_a_refusal_and_never_echoes_the_token(tmp_path, monkeyp
     assert code == 2 and "hf_" + "b" * 34 not in err and "<token>" in err
 
 
+def test_a_token_that_crosses_the_truncation_boundary_is_not_partly_echoed(tmp_path, monkeypatch, capsys):
+    token = "hf_" + "c" * 34
+    monkeypatch.setenv("HF_TOKEN", token)
+
+    class Down(FakeHub):
+        def info(self, repo, revision=None):
+            raise RuntimeError("x" * 185 + token)          # the token straddles character 200 of the message
+    code, _ = run(Down({}), tmp_path)
+    err = capsys.readouterr().err
+    assert code == 2 and "hf_" + "c" * 10 not in err and "<token>" in err
+
+
+def test_a_scratch_path_that_is_a_file_is_refused_not_a_traceback(tmp_path):
+    a_file = tmp_path / "scratch-is-a-file"
+    a_file.write_text("x")
+    args = SimpleNamespace(repo_id=REPO, scratch=str(a_file), staged=None, revision=None, plan=False, check=False)
+    assert vp.main(args, out=io.StringIO(), hub=FakeHub(good_files()), hostname="testhost", home="/home/nobody-here") == 2
+
+
 def test_the_command_never_starts_a_process(tmp_path, monkeypatch):
     import subprocess
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("verify-package started a process"))

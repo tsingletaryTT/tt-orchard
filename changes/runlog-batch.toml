@@ -1,0 +1,3 @@
+target = "0.9.67"
+summary = "Fix the staged-construction and read-first run-log scripts, wire a measured noise floor into audio stage 2 bars, pin the audio stage 0 coder boot"
+pr = 250

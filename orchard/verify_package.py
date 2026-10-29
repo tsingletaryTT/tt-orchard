@@ -402,6 +402,9 @@ def main(args, *, out=None, hub: Hub | None = None, hostname=None, home=None) ->
         return EXIT_REFUSED
     hub = hub or HubClient()
     scratch = Path(args.scratch) if getattr(args, "scratch", None) else None
+    if scratch is not None and scratch.exists() and not scratch.is_dir():
+        print(f"refused: --scratch {scratch} exists and is not a directory", file=sys.stderr)
+        return EXIT_REFUSED
     if scratch is not None and scratch.exists() and any(scratch.iterdir()):
         print(f"refused: --scratch {scratch} is not empty; the pull would mix files", file=sys.stderr)
         return EXIT_REFUSED
@@ -417,7 +420,7 @@ def main(args, *, out=None, hub: Hub | None = None, hostname=None, home=None) ->
         findings, boot = verify(repo, scratch, hub, staged=staged, revision=getattr(args, "revision", None),
                                 hostname=hostname, home=home, say=say)
     except Exception as exc:                      # a Hub or network failure is a refusal to judge and never counts as a pass
-        print(f"refused: could not read {repo} from the Hub: {type(exc).__name__}: {str(exc)[:200].replace(token, '<token>') if token else str(exc)[:200]}",
+        print(f"refused: could not read {repo} from the Hub: {type(exc).__name__}: {(str(exc).replace(token, '<token>') if token else str(exc))[:200]}",
               file=sys.stderr)
         return EXIT_REFUSED
     say(f"pulled into {scratch}")
