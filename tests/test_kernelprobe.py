@@ -3888,6 +3888,10 @@ def _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, *, checkout_at=None, sim
 
     def run(argv, timeout, env=None, cwd=None):
         text = " ".join(str(a) for a in argv)
+        if argv[0] == "git" and "show" in argv:             # the programs verify runs, as the pinned commit has them
+            return 0, "print('program')\n", ""
+        if argv[0] == "git" and ("ls-tree" in argv or "status" in argv):      # clean checkout
+            return 0, "", ""
         if argv[-1] == "--version":
             return 0, f"tt-lang-sim {sim or _pin.SIM_VERSION}\n", ""
         if "rev-parse" in argv:
