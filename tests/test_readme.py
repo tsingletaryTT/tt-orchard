@@ -44,6 +44,7 @@ OTHER_TOOL_FLAGS = {
     "--rotate": "tt-toplike (its kiosk rotation, one of the Machine views)",
     "--backend": "tt-toplike (the page always runs its sysfs backend)",
     "--owner-pid": "gozer acquire",
+    "--tt-metal-dir": "tt-lang-setup-external-tt-metal (section 5.9a); tt-orchard ttlang-consistency has its own",
     "--out": "tt-model package-thin",
     "--version": "tt-model --version",
     "--catalog": "tt model search / tt-model search (the research catalog row)",
@@ -230,3 +231,20 @@ def test_every_flag_of_the_tt_orchard_command_is_in_the_readme():
     missing = sorted(f for f in tt_orchard_flags() if f not in ("-h", "--help") and f"`{f}`" not in _text()
                      and f" {f}" not in _text() and f"[{f}" not in _text())
     assert not missing, f"the README does not mention these tt-orchard flags: {missing}"
+
+
+# ---- the tt-lang pair: README and site agree with orchard/ttlang_pin.py ---------------------------------------
+
+def test_the_readme_gives_the_pair_commands_from_the_pin_record():
+    from orchard import ttlang_pin
+    text = _text()
+    assert f"tt-lang-light=={ttlang_pin.WHEEL_VERSION}" in text and ttlang_pin.WHEEL_INDEX in text
+    assert "tt-lang-setup-external-tt-metal" in text and ttlang_pin.TT_METAL_REF[:7] in text
+    assert "(x + g - 1) // g" in text and "atom_rules.py" in text and "safetensors" in text
+
+
+def test_the_readme_and_the_site_link_the_granite_run_log_that_is_on_main():
+    log = "docs/run-logs/2026-10-28-granite-mamba2-real-port.md"
+    assert (REPO / log).is_file()
+    assert f"({log})" in _text()
+    assert log in (REPO / "site" / "index.html").read_text(encoding="utf-8")

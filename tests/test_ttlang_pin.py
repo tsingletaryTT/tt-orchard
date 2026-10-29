@@ -118,8 +118,17 @@ def test_defaults_and_the_environment_builder_read_the_one_record():
     assert ttlang_env.expected_version() == ttlang_pin.SIM_VERSION
 
 
-def test_the_tt_metal_ref_is_left_open_until_issue_95_is_settled():
-    assert ttlang_pin.TT_METAL_REF is None and "issue 95" in ttlang_pin.TT_METAL_NOTE
+def test_the_hardware_pair_is_recorded_next_to_the_pin():
+    """The pair PR 223 ran on the chip (docs/run-logs/2026-10-29-ttlang-pair-chip-check.md)."""
+    assert ttlang_pin.TT_METAL_REF == "0e9d200db976120c129ab0deb13aa3f6d972b723"
+    assert ttlang_pin.HARDWARE_TTLANG_SHA == ttlang_pin.SHA == "fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0"
+    assert ttlang_pin.WHEEL_VERSION == "1.1.10.dev20261026"
+    assert ttlang_pin.WHEEL_SHA256 == {
+        "tt_lang-1.1.10.dev20261026+light-cp312-cp312-manylinux_2_34_x86_64.whl":
+            "56d8f3e33b41fb41dcd013b05760f7c0deb6bcec61a4a7e8f58f417135bfdafc",
+        "tt_lang_light-1.1.10.dev20261026-py3-none-any.whl":
+            "5f28a7180c6d6866a2c57e42a586f25023a132d5470ce7c12153029220b99888"}
+    assert ttlang_pin.TT_METAL_REF != ttlang_pin.TT_METAL_NOTE and "issue 95" not in ttlang_pin.TT_METAL_NOTE
 
 
 def test_the_spec_version_comes_from_the_checkout_not_the_pin_file(tmp_path):
@@ -273,7 +282,7 @@ def test_a_consistent_machine_has_no_blocking_row(tmp_path):
     f = Fake(tmp_path)
     rows = rows_by_name(check(f, make_skill(tmp_path, "0.20")))
     assert {n: r.status for n, r in rows.items() if n != "hardware tree"} == {n: tc.OK for n in rows if n != "hardware tree"}
-    assert rows["hardware tree"].status == tc.TODO and "issue 95" in rows["hardware tree"].detail
+    assert rows["hardware tree"].status == tc.TODO and "leased run" in rows["hardware tree"].detail
     assert tc.blocking(list(rows.values())) == []
 
 
@@ -318,26 +327,81 @@ def test_the_reference_row_is_built_from_the_assembly_when_no_references_are_giv
     assert r.status == tc.OK and "0.20" in r.detail
 
 
-def test_the_hardware_tree_row_compares_the_tree_with_the_pinned_ref(tmp_path, monkeypatch):
+PAIR = {"version": "1.1.10.dev20261026+light", "tt_lang_commit": "fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0",
+        "tt_metal_tag": "v0.79.0-dev20260917", "tt_metal_commit": "0e9d200db976120c129ab0deb13aa3f6d972b723"}
+OLD = {"version": "1.1.6", "tt_lang_commit": "dede2973f1c738ef531ef4a57c47369964dc146c", "tt_metal_tag": "v0.74.0",
+       "tt_metal_commit": "c49bb7625e6a495337483353a5228339fece2c11"}
+
+
+def test_the_hardware_row_is_a_todo_for_a_leased_run_when_no_build_info_is_given(tmp_path):
+    f = Fake(tmp_path)
+    r = rows_by_name(check(f, make_skill(tmp_path, "0.20")))["hardware tree"]
+    assert r.status == tc.TODO and not r.blocks and "leased run" in r.detail and "build_info" in r.detail
+
+
+def test_the_hardware_row_is_ok_when_build_info_is_the_pinned_pair(tmp_path):
+    f = Fake(tmp_path)
+    r = rows_by_name(check(f, make_skill(tmp_path, "0.20"), build_info=PAIR))["hardware tree"]
+    assert r.status == tc.OK and not r.blocks and "0e9d200" in r.detail and "fec38c6" in r.detail
+
+
+def test_the_hardware_row_blocks_on_tt_lang_1_1_6_and_names_both_commits(tmp_path):
+    f = Fake(tmp_path)
+    r = rows_by_name(check(f, make_skill(tmp_path, "0.20"), build_info=OLD))["hardware tree"]
+    assert r.status == tc.MISMATCH and r.blocks and "\n" not in r.fix
+    for text in ("dede2973f1c7", "fec38c6de", "c49bb7625e6a", "0e9d200", "v0.74.0"):
+        assert text in r.detail
+
+
+def test_the_hardware_row_blocks_when_only_one_of_the_two_commits_differs(tmp_path):
+    f = Fake(tmp_path)
+    for i, patch in enumerate(({"tt_lang_commit": OLD["tt_lang_commit"]}, {"tt_metal_commit": OLD["tt_metal_commit"]})):
+        r = rows_by_name(check(f, make_skill(tmp_path, "0.20", f"s{i}"), build_info={**PAIR, **patch}))["hardware tree"]
+        assert r.status == tc.MISMATCH and r.blocks, patch
+
+
+def test_the_hardware_row_reports_build_info_that_lacks_a_commit_as_unknown(tmp_path):
+    f = Fake(tmp_path)
+    r = rows_by_name(check(f, make_skill(tmp_path, "0.20"), build_info={"version": "1.1.10"}))["hardware tree"]
+    assert r.status == tc.UNKNOWN and not r.blocks
+
+
+def test_a_short_commit_in_build_info_matches_by_prefix_but_not_when_shorter_than_seven(tmp_path):
+    f = Fake(tmp_path)
+    ok = {**PAIR, "tt_lang_commit": "fec38c6de", "tt_metal_commit": "0e9d200"}
+    assert rows_by_name(check(f, make_skill(tmp_path, "0.20"), build_info=ok))["hardware tree"].status == tc.OK
+    short = {**PAIR, "tt_metal_commit": "0e9"}
+    assert rows_by_name(check(f, make_skill(tmp_path, "0.20", "s2"), build_info=short))["hardware tree"].status == tc.MISMATCH
+
+
+def test_the_consistency_check_never_imports_ttl():
+    """build_info is data handed in by a caller that already holds a lease: the module must not import the device library."""
+    import ast, inspect
+    tree = ast.parse(inspect.getsource(tc))
+    names = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+             for a in (n.names if isinstance(n, ast.Import) else [ast.alias(name=n.module or "")])}
+    calls = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert not names & {"ttl", "ttnn", "ttml", "importlib", "subprocess"} and "build_info" not in calls
+
+
+def test_the_host_tree_is_only_read_and_is_named_in_the_detail(tmp_path):
     f = Fake(tmp_path)
     tree = tmp_path / "tree"
     (tree / ".git").mkdir(parents=True)
-    monkeypatch.setattr(ttlang_pin, "TT_METAL_REF", "v0.80.0")
-    ok = rows_by_name(check(f, make_skill(tmp_path, "0.20"), tree))["hardware tree"]
-    assert ok.status == tc.OK
-    f.tree_ref = "v0.81.0"
-    bad = rows_by_name(check(f, make_skill(tmp_path, "0.20", "skill2"), tree))["hardware tree"]
-    assert bad.status == tc.MISMATCH and bad.blocks and "v0.81.0" in bad.detail and "v0.80.0" in bad.detail
-
-
-def test_the_tt_metal_tree_is_only_read(tmp_path, monkeypatch):
-    f = Fake(tmp_path)
-    tree = tmp_path / "tree"
-    (tree / ".git").mkdir(parents=True)
-    monkeypatch.setattr(ttlang_pin, "TT_METAL_REF", "v0.80.0")
-    check(f, make_skill(tmp_path, "0.20"), tree)
+    r = rows_by_name(check(f, make_skill(tmp_path, "0.20"), tree, build_info=PAIR))["hardware tree"]
+    assert "v0.80.0" in r.detail
     git = [a for a in f.calls if a[0] == "git" and str(tree) in a]
     assert git and all(a[3] in {"describe", "rev-parse"} for a in git)
+
+
+def test_reference_source_skill_reaches_the_fallback_assembly_in_the_check(tmp_path):
+    """Issue 226: a 0.12 skill and a 0.20 checkout, references not handed in, reference_source="skill"."""
+    f = Fake(tmp_path)
+    skill = make_skill(tmp_path, "0.12")
+    r = rows_by_name(check(f, skill, reference_source="skill"))["references"]
+    assert r.status == tc.MISMATCH and not r.blocks and "0.12" in r.detail and "--reference-source skill" in r.detail
+    default = rows_by_name(check(f, make_skill(tmp_path, "0.12", "s2")))["references"]
+    assert default.status == tc.OK
 
 
 def test_render_prints_one_line_per_row_with_the_fix_on_a_mismatch(tmp_path):
@@ -922,7 +986,6 @@ def test_a_file_that_grew_between_the_size_check_and_the_open_is_still_not_read(
 
 def test_the_head_and_tree_reads_get_the_safe_environment_and_not_the_operators_git_variables(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
-    monkeypatch.setattr(ttlang_pin, "TT_METAL_REF", "v0.80.0")
     f = Fake(tmp_path)
     f.env.environ = {"PATH": "/usr/bin", "GIT_DIR": "/somewhere/else/.git", "GIT_WORK_TREE": "/x"}
     tree = tmp_path / "tree"

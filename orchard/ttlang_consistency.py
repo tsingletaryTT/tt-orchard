@@ -9,13 +9,17 @@ One row per place that must agree with the pin, each ok, mismatch, todo or unkno
     simulator       the tt-lang-sim wheel's version, which carries the commit it was built from
     skill           the specification version the installed tt-lang skill documents against the checkout's
     references      the specification version of every file the coder is given against the checkout's
-    hardware tree   the tt-metal tree's version against the pinned tt-metal ref (todo until issue 95 pins one)
+    hardware tree   the hardware venv's `ttl.build_info()` (tt-lang and tt-metal commits) against the pin and the pinned
+                    tt-metal ref. todo until a caller that holds a lease hands the build info in
 
 A row `blocks` when the kernel probe must refuse to run on it (the probe does, unless --allow-stale-skills). An old
 skill does not block: the probe then builds the guide from the checkout (orchard/ttlang_reference.py), so the coder
 still reads the version the simulator runs.
 
-Everything is read only. The tt-metal tree is read with `git describe` and `git rev-parse` and nothing else.
+Everything is read only. The tt-metal tree is read with `git describe` and `git rev-parse` and nothing else. This module
+never imports the device library: `ttl.build_info()` opens the runtime, so a caller that already holds a gozer lease
+runs it and passes the result in as `build_info` (a dict with `tt_lang_commit`, `tt_metal_commit` and optionally `version`
+and `tt_metal_tag`).
 """
 from __future__ import annotations
 
@@ -96,7 +100,7 @@ def _skill_row(env, skill_dir) -> Row:
 def _references_row(env, skill_dir, references, reference_source="checkout") -> Row:
     want = checkout_spec_version(env.src_dir)
     if references is None:
-        references, problems = ttlang_reference.assemble(env, skill_dir)
+        references, problems = ttlang_reference.assemble(env, skill_dir, reference_source=reference_source)
         if problems:
             return Row("references", MISMATCH, "the reference files cannot be assembled: " + "; ".join(problems),
                        "restore the missing files in the checkout or the skill", blocks=True)
@@ -128,37 +132,52 @@ def _exists(path: Path) -> bool:
         return False
 
 
-def _tree_row(env, tree: Path | None) -> Row:
-    ref = ttlang_pin.TT_METAL_REF
-    have = None
+def _same_commit(have: str | None, want: str) -> bool:
+    """Equal, or one is a prefix of the other (at least 7 characters, so a stub cannot match everything)."""
+    have = (have or "").strip().lower()
+    short = min(len(have), len(want))
+    return bool(have) and short >= 7 and have[:short] == want.lower()[:short]
+
+
+def _tree_row(env, tree: Path | None, build_info: dict | None = None) -> Row:
+    """The hardware row. The host tt-metal tree is only named in the detail: the compiler was built against another
+    tt-metal commit (ttlang_pin.TT_METAL_REF), so the tree's own version is not what the pin describes."""
+    seen = "no readable tt-metal tree"
     if tree is not None and _exists(Path(tree) / ".git"):
-        rc, out, _ = env.run(["git", "-C", str(tree), "describe", "--tags", "--always"], 30,
-                             ttlang_reference.git_env(env))
-        have = out.strip() if rc == 0 and out.strip() else None
-        rc, out, _ = env.run(["git", "-C", str(tree), "rev-parse", "HEAD"], 30, ttlang_reference.git_env(env))
-        sha = out.strip() if rc == 0 and out.strip() else None
-    else:
-        sha = None
-    seen = have or "no readable tt-metal tree"
-    if ref is None:
-        return Row("hardware tree", TODO, f"the tt-metal ref is {ttlang_pin.TT_METAL_NOTE}; the host tree is {seen}",
-                   "when issue 95 is settled, set TT_METAL_REF in orchard/ttlang_pin.py")
-    if have is None:
-        return Row("hardware tree", MISMATCH, f"no readable tt-metal tree; the pin wants {ref}",
-                   "name the tree with --tt-metal-dir or ORCHARD_TT_METAL_DIR", blocks=True)
-    if have == ref or sha == ref or (sha and len(ref) >= 7 and sha.startswith(ref)):
-        return Row("hardware tree", OK, f"the tt-metal tree is at {have}, the pinned ref {ref}")
-    return Row("hardware tree", MISMATCH, f"the tt-metal tree is at {have} and the pin wants {ref}",
-               "check out the pinned ref in the host tree, or move TT_METAL_REF with the tt-lang pin (issue 95)",
-               blocks=True)
+        rc, out, _ = env.run(["git", "-C", str(tree), "describe", "--tags", "--always"], 30, ttlang_reference.git_env(env))
+        seen = out.strip() if rc == 0 and out.strip() else seen
+        env.run(["git", "-C", str(tree), "rev-parse", "HEAD"], 30, ttlang_reference.git_env(env))
+    pin_lang, pin_metal = ttlang_pin.HARDWARE_TTLANG_SHA, ttlang_pin.TT_METAL_REF
+    if build_info is None:
+        return Row("hardware tree", TODO, f"todo: needs a leased run. `ttl.build_info()` in the hardware venv is compared with "
+                   f"tt-lang {pin_lang[:9]} and tt-metal {pin_metal[:7]}; the host tree is {seen}",
+                   "run `ttl.build_info()` under a gozer lease and pass the result in")
+    lang, metal = build_info.get("tt_lang_commit"), build_info.get("tt_metal_commit")
+    tag = build_info.get("tt_metal_tag")
+    if not lang or not metal:
+        return Row("hardware tree", UNKNOWN, "ttl.build_info() gave no " + " or ".join(
+            n for n, v in (("tt-lang commit", lang), ("tt-metal commit", metal)) if not v) + ", so it cannot be compared with the pin")
+    if _same_commit(lang, pin_lang) and _same_commit(metal, pin_metal):
+        return Row("hardware tree", OK, f"the hardware venv has tt-lang {lang[:9]} and tt-metal {metal[:7]}"
+                   f"{f' ({tag})' if tag else ''}, the pinned pair; the host tree is {seen}")
+    parts = []
+    if not _same_commit(lang, pin_lang):
+        parts.append(f"tt-lang {lang[:12]} where the pin has {pin_lang[:12]}")
+    if not _same_commit(metal, pin_metal):
+        parts.append(f"tt-metal {metal[:12]}{f' ({tag})' if tag else ''} where the pin has {pin_metal[:12]}")
+    return Row("hardware tree", MISMATCH, "the hardware venv has " + " and ".join(parts) +
+               f" (version {build_info.get('version') or 'unknown'})",
+               f"make the hardware venv from the pair: tt-lang-light=={ttlang_pin.WHEEL_VERSION} from {ttlang_pin.WHEEL_INDEX} "
+               "(README section 5.9a), or move the pin", blocks=True)
 
 
 def check(env, skill_dir, *, tt_metal_dir=None, references: list[dict] | None = None,
-          reference_source: str = "checkout") -> list[Row]:
+          reference_source: str = "checkout", build_info: dict | None = None) -> list[Row]:
     """Every row. `references` are the files the probe already assembled (so the check judges what the coder gets);
-    without them the check assembles them itself, in memory."""
+    without them the check assembles them itself, in memory, from `reference_source`. `build_info` is the hardware venv's
+    `ttl.build_info()`, taken by the caller under a lease; without it the hardware row is a todo."""
     return [_checkout_row(env), _simulator_row(env), _files_row(env), _skill_row(env, skill_dir),
-            _references_row(env, skill_dir, references, reference_source), _tree_row(env, tt_metal_dir)]
+            _references_row(env, skill_dir, references, reference_source), _tree_row(env, tt_metal_dir, build_info)]
 
 
 def blocking(rows: list[Row]) -> list[Row]:

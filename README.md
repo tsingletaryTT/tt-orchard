@@ -86,8 +86,14 @@ Short list of what landed on `main`. Each item links to its run log, which holds
   [Run log](docs/run-logs/2026-10-29-overnight-minicpm3-4b.md).
 - **Granite-4.0-H-1B (Mamba-2 hybrid) with kernels written by the local coder.** The model runs on one chip at the bf16 floor of agreement
   (22.6 tok/s with the Mamba-2 state update from stock ops). The coder's state-update kernel runs on the chip and in the model, but is slower
-  (16.7 and 18.0 tok/s). Its readout kernels pass the simulator and none compiles on the chip, because the pinned simulator and the chip's tt-lang
-  disagree on `reduce_sum`. The run stopped there. The run log is in PR 215 and is not on `main` yet.
+  (16.7 and 18.0 tok/s). Its readout kernels pass the simulator and none compiled on tt-lang 1.1.6, because the pinned simulator and that
+  compiler disagree on `reduce_sum`. [Run log](docs/run-logs/2026-10-28-granite-mamba2-real-port.md).
+- **A tt-lang pair verified on the chip.** The pinned simulator and the compiler wheel `tt-lang-light 1.1.10.dev20261026` (from the Tenstorrent S3
+  index) agree on the chip for 17 of 20 kernels, including every reduction kernel that failed on 1.1.6. One form does not compile: `-(-x // g)`
+  after a thread's `grid_size`; `(x + g - 1) // g` does. The pair is pinned in `orchard/ttlang_pin.py` and section 5.9a shows how to make its venv.
+  In the Granite model the coder's readout kernel is slower than composed ops (26.9 tok/s composed, 13.9 with the state kernel, 8.45 with both,
+  same session, untraced decode). [Chip check](docs/run-logs/2026-10-29-ttlang-pair-chip-check.md),
+  [readout in the model](docs/run-logs/2026-10-29-granite-readout-on-pair.md).
 - **One pinned tt-lang, a capability ladder and staged construction.** `tt-orchard ttlang-consistency` checks that the simulator, the coder's
   reference files and the hardware build agree. The kernel probe's ladder on the new coder passed `row_sum` 6 of 9, `center` 1 of 6 and
   `rmsnorm` 0 of 3 before the operator stopped it. The staged-construction experiment was not run; the log records two capability checks of an outside helper.
@@ -1477,6 +1483,36 @@ nothing.
 - `--tt-lang-skill-dir`: the installed tt-lang skill (default `~/.claude/skills/ttm-tt-lang`, or `$ORCHARD_TTLANG_SKILL`).
 - `--allow-stale-skills`: with `--check`, a stale tt-lang checkout or skill does not fail the check.
 
+#### The hardware venv: the tt-lang pair
+
+The kernel probe's hardware phase and `tt-orchard ttlang-consistency` expect a venv made from the pair that was run on the chip
+(`docs/run-logs/2026-10-29-ttlang-pair-chip-check.md`): tt-lang `fec38c6de` (the pin) and tt-metal `0e9d200` (`TT_METAL_REF` in
+`orchard/ttlang_pin.py`, which also holds the two wheel sha256 values). Public PyPI stops at 1.1.6, so the wheel comes from the
+Tenstorrent S3 index. These steps need no chip until the check at the end:
+
+```
+uv venv --python 3.12 <pair-venv>
+uv pip install --python <pair-venv>/bin/python \
+    --extra-index-url https://pypi.eng.aws.tenstorrent.com/tt-lang/2026-10/ "tt-lang-light==1.1.10.dev20261026"
+<pair-venv>/bin/tt-lang-setup-external-tt-metal --tt-metal-dir <host-tt-metal-tree>    # prints exports; apply them
+```
+
+Compare the downloaded wheels' sha256 with `WHEEL_SHA256` in `orchard/ttlang_pin.py`. The setup command points the venv at the host
+tree's `ttnn` (v0.80.0 was used) through `TT_METAL_HOME`, `PYTHONPATH` and `LD_LIBRARY_PATH`. The light wheel does not ship `safetensors`,
+which the Granite port needs: put a directory that links to another venv's `safetensors` at the end of `PYTHONPATH`, so the pair venv stays
+unchanged. Under a gozer lease, `ttl.build_info()` should print tt-lang `fec38c6de...` and tt-metal `0e9d200db976...`; the consistency check's
+`hardware tree` row compares those two commits with the pin when a caller passes the build info in (`build_info=` of
+`ttlang_consistency.check`), and is a todo without it, because `ttl.build_info()` opens the runtime.
+
+Known limits of the pair:
+
+- Inside a thread, `ttl.grid_size` returns a symbolic value. `-(-x // g)` as a loop bound fails to compile with
+  `'UnaryMinusOp' object has no attribute 'type'`; `(x + g - 1) // g` compiles. The simulator accepts both. The kernel-writing guidance the coder
+  reads states this rule.
+- The light wheel's own `tt-lang-sim` cannot find `atom_rules.py` (`could not locate atom_rules.py`). Run kernels in the simulator with the pinned
+  simulator venv from `tt-orchard kernel-env`.
+- One board, one seed and 20 kernels were tried. The probe's softmax, center, silu_mul and tile-scan specs were not.
+
 ### 5.9b Op inventory
 
 ```bash
@@ -1715,7 +1751,7 @@ result says what to run.
   tt-metal branch; tt-metal's `main` removed the path, so the branch is the only upstream copy. Its `SKILL.md` is
   compared after tt-warp's two edits are undone (the `ttm-` name prefix and the provenance block).
 - The tt-lang checkout is pinned, so "behind" means upstream `main` has moved past the pin. Moving the pin is a code
-  change (`TTLANG_PIN` and `TTLANG_DIAGNOSTICS_SHA256` in `orchard/defaults.py`) followed by `tt-orchard kernel-env`
+  change (edit `orchard/ttlang_pin.py`; `TTLANG_PIN` and `TTLANG_DIAGNOSTICS_SHA256` in `orchard/defaults.py` alias it) followed by `tt-orchard kernel-env`
   with the old checkout moved aside. Until then the probe needs `--allow-stale-skills`.
 - A comparison that cannot be made (no network, an origin off github.com, a malformed answer) is `unknown`, never
   current. A check from the last 24 hours that found the same local state current covers it; otherwise the probe

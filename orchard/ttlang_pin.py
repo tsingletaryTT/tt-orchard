@@ -6,7 +6,7 @@ One tt-lang commit supplies three things, so the coder is tested against the lan
 
   * the simulator (the tt-lang-sim wheel is built from this commit),
   * the specification, the guide and the examples the coder reads in reference/ (from the checkout at this commit),
-  * the hardware build, once tt-lang kernels build on the host's tt-metal tree (issue 95).
+  * the hardware build: the compiler wheel and tt-metal commit recorded at the bottom (issue 95).
 
 Everything else reads these constants: `defaults.TTLANG_PIN` and friends are aliases of them, `ttlang_env` clones and
 builds from them, and `ttlang_consistency` compares the machine with them. To move the pin, edit this file only, then
@@ -35,8 +35,23 @@ SIM_VERSION = f"{VERSION_TAG}+g{SHA[:7]}"
 # to if the file at the pin has changed.
 DIAGNOSTICS_SHA256 = "e3964f222cc5dc253157f97645a914f8751ab613f0fa82eb334e97046da8f84f"
 
-# The tt-metal ref the hardware build should use. None until it is known: tt-lang kernels do not build on tt-metal
-# v0.81 and the host tree is v0.80.0 (issue 95). Nobody has found a tt-lang commit that builds on a newer tree, so the
-# value is left open. The consistency check reports the hardware row as "to be pinned" while this is None.
-TT_METAL_REF: str | None = None
-TT_METAL_NOTE = "to be pinned with issue 95"
+# The hardware pair. PR 223 ran it on the chip and every kernel that passed the pinned simulator and compiled ran correctly
+# (docs/run-logs/2026-10-29-ttlang-pair-chip-check.md; the matrix that chose it is 2026-10-29-ttlang-compat-matrix.md).
+# `ttl.build_info()` in a venv made from the wheel below printed these two commits. TT_METAL_REF is the tt-metal commit
+# the compiler was built against (tag v0.79.0-dev20260917). It runs on the host tt-metal v0.80.0 runtime, so it is not the
+# host tree's commit: the "hardware tree" consistency row compares build_info, not the host tree, with it.
+TT_METAL_REF: str | None = "0e9d200db976120c129ab0deb13aa3f6d972b723"
+TT_METAL_TAG = "v0.79.0-dev20260917"
+TT_METAL_NOTE = f"tt-metal {TT_METAL_TAG} ({TT_METAL_REF[:7]}), the compiler's build tree; the host runtime is newer"
+
+# The compiler wheel of the pair, from https://pypi.eng.aws.tenstorrent.com/tt-lang/2026-10/ (public PyPI stops at 1.1.6).
+# Its tt-lang commit is SHA, so the simulator, the references and the compiler all come from one commit.
+HARDWARE_TTLANG_SHA = SHA
+WHEEL_INDEX = "https://pypi.eng.aws.tenstorrent.com/tt-lang/2026-10/"
+WHEEL_VERSION = "1.1.10.dev20261026"
+WHEEL_SHA256 = {
+    "tt_lang-1.1.10.dev20261026+light-cp312-cp312-manylinux_2_34_x86_64.whl":
+        "56d8f3e33b41fb41dcd013b05760f7c0deb6bcec61a4a7e8f58f417135bfdafc",
+    "tt_lang_light-1.1.10.dev20261026-py3-none-any.whl":
+        "5f28a7180c6d6866a2c57e42a586f25023a132d5470ce7c12153029220b99888",
+}
