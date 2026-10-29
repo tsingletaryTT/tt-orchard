@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage and check the Qwen3.5-35B-A3B package for one Blackhole p300 board (two dies).
 
-The package is a recipe, not a built image. It reproduces the setup measured in docs/run-logs/2026-10-29-fusion-port.md and
+The package is a recipe and holds no built image. It reproduces the setup measured in docs/run-logs/2026-10-29-fusion-port.md and
 docs/run-logs/2026-10-29-qwen35-package.md: the image of the fused-decode bundle `raahemnabeel/qwen3-coder-next` (pulled by the user),
 a 41-line patch that is mounted over that image's weight loader so it reads this checkpoint's layout, a script that fetches the text
 weights from the Hub at a pinned revision, and a launcher. It is not a v5.1 container package that `tt-model package` can build: that
@@ -62,6 +62,8 @@ def render_card(facts: dict) -> str:
     b, fl, q = facts["bench"], facts["floor"], facts["quality"]
     ab = facts["ablations"]
     cold = facts.get("cold_start_s")
+    max_gap = max((r['first_diff']['ref_gap_nats'] or 0) for r in q['rows'] if 'first_diff' in r)
+    assert all(r['first_diff']['device_token_in_ref_top5'] for r in q['rows'] if 'first_diff' in r), 'a first difference outside the reference top 5 needs its own wording'
     cold_text = (f"{cold} seconds from container start to the first answer on a first boot with empty kernel and tensor caches"
                  if cold else "not measured")
     rows = "\n".join(
@@ -103,7 +105,7 @@ and starts `vllm serve` for one sequence and a 4096-token context. The served mo
 
 ## Measured numbers
 
-One p300 board (chips 2 and 3 of a four-chip machine; the other board served a different model), two dies, mesh P300, precision policy
+One p300 board (chips 2 and 3 of a four-chip machine), two dies, mesh P300, precision policy
 `coder_next_routed_bfp4_mixers_bfp8` (bfp4 routed experts and head, bfp8 attention and shared experts), one sequence.
 
 | Quantity | Value | Label |
@@ -112,7 +114,7 @@ One p300 board (chips 2 and 3 of a four-chip machine; the other board served a d
 | Time to first token for a short prompt | {facts['ttft_ms']} ms | benchmark |
 | Estimated floor on decode speed | {_f(fl['floor_tok_s'], 0)} tok/s ({fl['floor_ms']} ms, {_f(fl['mb_per_token'], 0)} MB read per token) | estimate |
 | Share of the estimated floor | {_f(100 * b['median'] / fl['floor_tok_s'], 1)} percent | estimate |
-| Start, kernel and tensor caches warm | {facts['warm_start_s'][0]} to {facts['warm_start_s'][1]} seconds | single sample per run, three runs |
+| Start, kernel and tensor caches warm | {facts['warm_start_s'][0]} to {facts['warm_start_s'][1]} seconds | single sample per run, four runs |
 | Start, empty caches | {cold_text} | single sample |
 
 The floor is `orchard/decode_floor.py` with these inputs: 2 dies at 512 GB/s each (datasheet peak), {fl['policy']}.
@@ -127,8 +129,10 @@ The reference is the same checkpoint in bfloat16 on the CPU (Hugging Face transf
 | --- | --- | --- | --- |
 {rows}
 
-The device runs bfp4 routed experts, so near ties between two words can flip. The 16-token check on the earlier run (a prompt about the printing
-press) matched for 8 tokens, then flipped a tie of 0.125 nats ("developed" against "invented") and matched again from token 11.
+In every prompt the first difference is a position where the device's token is inside the reference's top 5 (largest gap {max_gap} nats). The
+device runs bfp4 routed experts, so a near tie between two words can flip. After a flip the two free-running texts diverge, so the leading-token counts
+are short even though each device text is fluent and answers the prompt. The counts are what was measured; no claim is made that a longer prefix would agree.
+The earlier 16-token check in `2026-10-29-fusion-port.md` (a different prompt) matched for 8 tokens, then flipped a tie of 0.125 nats and matched again from token 11.
 
 A short chat request through `/v1/chat/completions` answered: {facts['chat']['default']!r} (finish reason {facts['chat']['finish']}).
 With thinking off, a request for the primary colors answered: {facts['chat']['thinking_off']!r}.
@@ -139,8 +143,8 @@ A prompt of {facts['long_prompt']['tokens']} tokens with a code word at the star
 | Change | Median decode speed | Result |
 | --- | --- | --- |
 | Baseline | {_f(b['median'], 2)} tok/s | |
-| Sampler scan grid 10 x 5 instead of 10 x 10 | {_f(ab['grid_median'], 2)} tok/s | inside the baseline spread, under the 3 percent bar, not kept |
-| Router top-k constant 72 instead of 80 | {_f(ab['rk_median'], 2)} tok/s | inside the baseline spread, under the 3 percent bar, not kept |
+| Sampler scan grid 10 x 5 (default 10 x 10) | {_f(ab['grid_median'], 2)} tok/s | inside the baseline spread, under the 3 percent bar, dropped |
+| Router top-k constant 72 (default 80) | {_f(ab['rk_median'], 2)} tok/s | inside the baseline spread, under the 3 percent bar, dropped |
 
 A scan grid wider than 10 columns fails with a `TT_FATAL` (the merge core sits at column 10).
 
@@ -154,6 +158,8 @@ A scan grid wider than 10 columns fails with a `TT_FATAL` (the merge core sits a
 - Cold compile: {cold_text}.
 - The patch was made for one image (id above). `run.sh` refuses a loader whose sha256 differs.
 - The quality check covers {len(q['rows'])} prompts of {q['rows'][0]['tokens']} tokens. It is not an evaluation benchmark. No accuracy benchmark was run.
+- The default chat template starts a thinking section; a 96-token reply can end inside it (finish reason `length`). Pass `chat_template_kwargs {{"enable_thinking": false}}` to skip it.
+- Raw completion prompts are not chat-formatted: one test prompt (Spanish) continued into a thinking block after its first line.
 - The scores above are for the bfp4 routed-expert policy; a bfloat16 or bfp8 expert policy was not tried.
 
 ## License

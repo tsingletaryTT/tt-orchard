@@ -27,7 +27,7 @@ have=$(docker image inspect "$IMAGE" --format '{{.Id}}')
 mkdir -p "$WORK/cache" "$WORK/tensors" "$WORK/weights"
 if [ ! -f "$WORK/weights.py" ]; then
   docker run --rm --entrypoint cat "$IMAGE" "$LOADER" > "$WORK/weights.orig.py"
-  [ "$(sha256sum "$WORK/weights.orig.py" | cut -d' ' -f1)" = "$ORIG_SHA" ] || { echo "run.sh: the image's loader is not the one the patch was made for" >&2; exit 2; }
+  [ "$(sha256sum "$WORK/weights.orig.py" | cut -d' ' -f1)" = "$ORIG_SHA" ] || { echo "run.sh: the image's loader is not the file the patch was made for" >&2; exit 2; }
   patch -s -o "$WORK/weights.py" "$WORK/weights.orig.py" < "$here/weights_qwen35_moe.patch"
   [ "$(sha256sum "$WORK/weights.py" | cut -d' ' -f1)" = "$PATCHED_SHA" ] || { echo "run.sh: the patched loader does not match the measured one" >&2; exit 2; }
 fi
