@@ -241,7 +241,27 @@ def test_serve_passes_the_mlp_flags_to_the_model(monkeypatch, tmp_path):
         def serve_forever(self):
             raise KeyboardInterrupt
     monkeypatch.setattr(serve, "ThreadingHTTPServer", Srv)
-    monkeypatch.setattr(sys, "argv", ["serve.py", "--model-dir", str(tmp_path), "--weights", "w", "--mlp-dtype", "bfp8", "--mlp-fidelity", "lofi"])
+    monkeypatch.setattr(sys, "argv", ["serve.py", "--model-dir", str(tmp_path), "--weights", "w", "--mlp-dtype", "bfp8", "--mlp-fidelity", "lofi", "--batched-prefill"])
     with pytest.raises(KeyboardInterrupt):
         serve.main()
-    assert seen["mlp_dtype"] == "bfp8" and seen["mlp_fidelity"] == "lofi"
+    assert seen["mlp_dtype"] == "bfp8" and seen["mlp_fidelity"] == "lofi" and serve.STATE["batched_prefill"] is True
+
+
+def test_a_variant_that_missed_the_bar_is_labelled_so_on_the_card(done, tmp_path):
+    res = json.loads((done.run_dir / "stages" / "2" / "text_result.json").read_text())
+    bench = json.loads((done.run_dir / "stages" / "6" / "text_bench.json").read_text())
+    res["variants"]["mlp8"]["ok"] = False
+    rows = tp.number_rows(res, bench, None)
+    by = {r[0]: r[2] for r in rows}
+    assert by["teacher-forced next-token agreement, mlp8"] == "measured (the stage 2 bar was not met)"
+    assert by["teacher-forced next-token agreement, bf16"] == "measured (provisional bar met)"
+    assert by["perplexity on 767 tokens, mlp8"].endswith("not met)") and by["worst block error over the CPU bfloat16 error, mlp8"].endswith("not met)")
+
+
+def test_the_card_says_when_a_variant_missed_the_bar(done, tmp_path):
+    res = json.loads((done.run_dir / "stages" / "2" / "text_result.json").read_text())
+    bench = json.loads((done.run_dir / "stages" / "6" / "text_bench.json").read_text())
+    assert "did not meet the numeric bar" not in tp.render_card(M, res, bench, None, revision=REV, namespace="o", license_name="x", weights_terms="t")
+    res["variants"]["mlp8"]["ok"] = False
+    card = tp.render_card(M, res, bench, None, revision=REV, namespace="o", license_name="x", weights_terms="t")
+    assert "The `mlp8` variant did not meet the numeric bar" in card and "`bf16` variant did not" not in card

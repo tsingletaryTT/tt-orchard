@@ -80,13 +80,14 @@ def number_rows(res: dict, bench: dict, context: dict | None) -> list[tuple[str,
                      if "tokens_per_s" in v["floor"] else f"{v['share_of_floor_median'] * 100:.1f} percent", "estimate", "evidence/text_bench.json"))
     for name, v in sorted((res.get("variants") or {}).items()):
         a = v["numeric"]["agreement"]
-        rows.append((f"teacher-forced next-token agreement, {name}", f"{a['matches']} of {a['of']}", "measured (provisional bar)", "evidence/text_result.json"))
+        label = "measured (provisional bar met)" if v.get("ok") else "measured (the stage 2 bar was not met)"
+        rows.append((f"teacher-forced next-token agreement, {name}", f"{a['matches']} of {a['of']}", label, "evidence/text_result.json"))
         p = v["perplexity"]
         rows.append((f"perplexity on {p['tokens']} tokens, {name}", f"{fmt(p['chip_ppl'], 5)} on the chip, {fmt(p['reference_ppl'], 5)} on the CPU in float32",
-                     "measured (provisional bar)", "evidence/text_result.json"))
+                     label, "evidence/text_result.json"))
         w = v["numeric"]["worst_ratio_to_floor"]
         if w:
-            rows.append((f"worst block error over the CPU bfloat16 error, {name}", f"{fmt(w['ratio'], 3)} at {w['name']}", "measured (provisional bar)", "evidence/text_result.json"))
+            rows.append((f"worst block error over the CPU bfloat16 error, {name}", f"{fmt(w['ratio'], 3)} at {w['name']}", label, "evidence/text_result.json"))
     if context:
         rows.append(("decode speed at the deepest position measured", f"{fmt(context['tok_s'], 4)} tok/s for {context['steps']} steps from position {context['start_position']}",
                      "measured in an earlier run, not repeated by the stages", CONTEXT_EVIDENCE))
@@ -124,6 +125,10 @@ def render_card(rtm, res: dict, bench: dict, context: dict | None, *, revision: 
     lines += ["", NUMBERS_HEAD, "", "Every number comes from the run's result files under `evidence/`. The bars the stages used are provisional choices, set from the CPU "
               "bfloat16 error; they are not a measured chip noise level.", "", "| Number | Value | Label | Evidence |", "|---|---|---|---|"]
     lines += [_row(r) for r in rows]
+    for name, v in sorted((res.get("variants") or {}).items()):
+        if not v.get("ok"):
+            lines += ["", f"The `{name}` variant did not meet the numeric bar of stage 2: at least one block's error against the float32 reference is above the bar's multiple of the CPU "
+                      "bfloat16 error. Its agreement and perplexity rows are listed above as measured. `evidence/text_result.json` names the first block that left."]
     lines += ["", "## Running it", "", "See `docs/running.md`. In short: set `MINICPM3_DIR` and `MINICPM3_WEIGHTS` (the repository's files, and the weights as one safetensors file made by "
               "`convert_weights.py`), take a chip lease, and run `./run.sh`. The server listens on 127.0.0.1 and answers `POST /v1/chat/completions`.", "",
               LICENSE_HEAD, "", f"The model's repository card states the license `{rtm.license_id}` ({license_name}). `LICENSE` is that license's text. {weights_terms}", "",

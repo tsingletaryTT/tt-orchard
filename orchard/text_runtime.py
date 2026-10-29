@@ -189,7 +189,7 @@ class MiniCPM3(TextRuntime):
     context_limit = 2048           # the server's default cache length (serve.py --max-len); the model's own limit is 32768
     limits = ("One chip only on this route. The two-chip tensor-parallel version (chip_model_tp.py) is in the scripts and was not run by the stages.",
               "Decoding is greedy only; the server ignores temperature and top_p.",
-              "Prefill of the server's prompt is one token per step; a batched prefill exists in the single-chip model and is used by the benchmark.")
+              "The server feeds the prompt one token per decode step, so a long prompt starts slowly. The batched prefill is used by the benchmark only: in the server it hung the chip on the second request after a trace (found by the package's boot check).")
 
     def config_problems(self, model_dir) -> list[str]:
         try:
