@@ -65,9 +65,16 @@ TTLANG_SKILL_UPDATE = ("update the tt-metal checkout tt-warp copies from, then c
 OVERRIDE = "--allow-stale-skills"
 
 # git subcommands that only read. `remote` is allowed only as `remote get-url`.
-READ_ONLY_GIT = frozenset({"rev-parse", "symbolic-ref", "status", "remote", "ls-remote", "cat-file", "rev-list"})
+# `status` and `diff` are not here: they hash the working tree through the clone's own attributes and config, which can run a
+# clean filter or a textconv program. The dirty check reads the tree with `ls-tree` and compares file bytes in Python.
+READ_ONLY_GIT = frozenset({"rev-parse", "symbolic-ref", "ls-tree", "remote", "ls-remote", "cat-file", "rev-list"})
 GH_WRITE_OPTIONS = frozenset({"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"})
-GIT_SAFE_CONFIG = (("http.followRedirects", "false"), ("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null"))
+GIT_SAFE_CONFIG = (("http.followRedirects", "false"), ("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null"),
+                   ("core.attributesFile", "/dev/null"), ("core.useReplaceRefs", "false"))
+# Environment variables that point git at a different repository, work tree, index or object store.
+REDIRECTING_GIT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+                        "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_REPLACE_REF_BASE", "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE")
 # Options that take a value and come before a git subcommand.
 _GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree"})
 
@@ -155,7 +162,10 @@ class ReadOnlyRunner:
         self.run, self.budget_s, self.offline, self.clock = run or _raw_run, budget_s, offline, clock
         self.started: float | None = None
         base = dict(os.environ if environ is None else environ)
-        base.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GH_HOST": "github.com",
+        for name in REDIRECTING_GIT_VARS:       # the operator's own settings must not point git at another repository
+            base.pop(name, None)
+        base.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
+                     "GIT_ATTR_NOSYSTEM": "1", "GH_HOST": "github.com",
                      "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "LC_ALL": "C"})
         base.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10")
         # Configuration for every git call, added after any GIT_CONFIG_* entries the operator has: follow no HTTP
@@ -397,6 +407,21 @@ def _count(runner: ReadOnlyRunner, root: str, repo: str, head: str, remote: str)
     return None, None
 
 
+def _dirty(runner: ReadOnlyRunner, root: str, untracked: bool) -> bool | None:
+    """Does the working tree differ from HEAD? Found without `git status`: the tree is read with `ls-tree` and each file's
+    bytes are hashed in Python (orchard/ttlang_reference.py, scan_tree), so no filter, textconv program or fsmonitor
+    command of the clone's own can run. None when it cannot be told: git did not answer, or the walk was cut. A file
+    above the size cap is not compared and does not count."""
+    from orchard import ttlang_reference
+    rc, out, _ = runner(["git", "-C", root, "ls-tree", "-r", "-z", "HEAD"], network=False)
+    if rc != 0:
+        return None
+    dirty = ttlang_reference.scan_tree(Path(root), (".",), ttlang_reference.parse_tree(out))
+    if "(entries)" in dirty:
+        return None
+    return any(w != "unchecked" and (untracked or w != "untracked") for w in dirty.values())
+
+
 def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, update: Callable[..., str],
                 reuse_s: float = 0.0, branch_warning: bool = True, untracked: bool = True) -> Freshness:
     """Compare a git checkout's HEAD with its origin's main branch. `update(root, branch, remote)` gives the update
@@ -411,9 +436,7 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
         return result
     result.local = _out(runner, ["git", "-C", root, "rev-parse", "HEAD"])
     result.branch = _out(runner, ["git", "-C", root, "symbolic-ref", "--short", "-q", "HEAD"]) or None
-    status = _out(runner, ["git", "-C", root, "status", "--porcelain",
-                           "--untracked-files=normal" if untracked else "--untracked-files=no"])
-    result.dirty = bool(status) if status is not None else None
+    result.dirty = _dirty(runner, root, untracked)
     if result.dirty:
         result.warnings.append(f"{root} has uncommitted changes.")
     if branch_warning and result.branch and result.branch != "main":
@@ -493,11 +516,11 @@ def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: fl
 
 
 def ttlang_update(root: str, branch: str | None, remote: str | None = None) -> str:
-    """How to move to tt-lang's latest main. The checkout is pinned in code (defaults.TTLANG_PIN), so the fix is a
+    """How to move to tt-lang's latest main. The checkout is pinned in code (orchard/ttlang_pin.py), so the fix is a
     code change and a rebuild; the override runs on the pinned version."""
     target = f"upstream main {remote}" if remote else "upstream main"
-    return (f"The fix is to move the pin: in orchard/defaults.py set TTLANG_PIN to {target} and set "
-            "TTLANG_DIAGNOSTICS_SHA256 to the sha256 of python/ttl/diagnostics.py at that commit (review the file if it "
+    return (f"The fix is to move the pin: in orchard/ttlang_pin.py (TTLANG_PIN in orchard/defaults.py is its alias) set SHA to {target} and set "
+            "DIAGNOSTICS_SHA256 to the sha256 of python/ttl/diagnostics.py at that commit (review the file if it "
             f"changed), move {root} aside, then run `tt-orchard kernel-env`. To run on the pinned version until then, "
             f"pass {OVERRIDE}")
 

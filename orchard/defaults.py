@@ -271,13 +271,13 @@ PACKAGE_VERIFY_DEADLINE_S = 4200.0  # choice: the boot check's hardware deadline
                                     # short requests, and the server's stop
 
 # ---- tt-lang, for `tt-orchard kernel-env` and `kernel-probe` (spec 2026-10-15-kernel-attempt-design.md) ----
-TTLANG_URL = "https://github.com/tenstorrent/tt-lang.git"
-TTLANG_PIN = "fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0"   # choice: v1.1.10 plus 31 commits (five over the last pin: simulator emulator tooling and
-TTLANG_VERSION_TAG = "1.1.10"                             # compiler changes; diagnostics.py unchanged), read 2026-10-26
-# sha256 of python/ttl/diagnostics.py at TTLANG_PIN. The tt-lang-sim wheel looks for this file at
-# site-packages/ttl/ttl/diagnostics.py and does not ship it, so a diagnosed kernel error ends as
-# FileNotFoundError. kernel-env copies the file there, and refuses to if the file at the pin has changed.
-TTLANG_DIAGNOSTICS_SHA256 = "e3964f222cc5dc253157f97645a914f8751ab613f0fa82eb334e97046da8f84f"
+# The values live in orchard/ttlang_pin.py, the one record of the tt-lang the environment uses; these are aliases.
+from orchard import ttlang_pin as _ttlang_pin  # noqa: E402
+
+TTLANG_URL = _ttlang_pin.URL
+TTLANG_PIN = _ttlang_pin.SHA
+TTLANG_VERSION_TAG = _ttlang_pin.VERSION_TAG
+TTLANG_DIAGNOSTICS_SHA256 = _ttlang_pin.DIAGNOSTICS_SHA256
 # (example path under tt-lang's examples/, text that must appear in the simulator's output). A bare
 # non-zero exit proves nothing here: the wheel's bug also ends these examples with a non-zero exit.
 TTLANG_NEGATIVE_EXAMPLES = (

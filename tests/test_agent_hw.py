@@ -23,7 +23,7 @@ from fake_model import FakeModel, call, final, turn
 from orchard import hwtool, kernelprobe as kp
 from hwfakes import FakeGozer, wrapped
 from test_kernelprobe import (FACTS, GOOD_HW_SET, KERNELS, canned, env_ready, fake_kenv, hw_writer,  # noqa: F401
-                              probe_args, skills_current, ttlang_skill, _row_attempt, _report_md)
+                              probe_args, skills_current, consistency_ok, ttlang_skill, _row_attempt, _report_md)
 
 SKILL_LINES = None
 
