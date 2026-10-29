@@ -45,6 +45,7 @@ def parse(argv=None):
     p.add_argument("--sample-size", type=int, default=5292032)
     p.add_argument("--device-id", type=int, default=0, help="the chip as the process sees it (a lease sets TT_VISIBLE_DEVICES, so 0)")
     p.add_argument("--weights-dtype", choices=("bfloat16", "float32"), default="bfloat16", help="the dtype of the weights and the attention tensors")
+    p.add_argument("--chip-decoder", action="store_true", help="also run the autoencoder decoder's transformer on the chip (chip_decoder.py)")
     p.add_argument("--no-layers", action="store_true", help="do not record per-layer outputs of the first pass (each costs a read back)")
     p.add_argument("--repeats", type=int, default=1, help="recorded runs on the single loaded process (default 1)")
     p.add_argument("--warmup", type=int, default=0, help="unrecorded runs before the recorded ones, discarded (default 0)")
@@ -77,7 +78,8 @@ def main(argv=None, runtime_factory=None) -> int:
         problems = rts.settings_problems(settings)
         if problems:
             raise SystemExit("; ".join(problems))
-        runtime = rts.ChipRuntime(args.model, device_id=args.device_id, weights_dtype=args.weights_dtype, record_layers=not args.no_layers)
+        runtime = rts.ChipRuntime(args.model, device_id=args.device_id, weights_dtype=args.weights_dtype, record_layers=not args.no_layers,
+                                chip_decoder=args.chip_decoder)
     else:
         runtime = runtime_factory(args)
     try:

@@ -38,7 +38,7 @@ from __future__ import annotations
 import math
 import time
 
-NUM_HEADS = 16
+NUM_HEADS = 16                    # the default (small models); a model's own head count is read from its weights, `self.num_heads`
 HEAD_DIM = 64
 ROT_DIM = 32                      # RotaryEmbedding(max(dim_heads // 2, 32)): 16 inverse frequencies, 32 rotated dimensions of 64
 ROPE_BASE = 10000.0
@@ -55,8 +55,8 @@ SUPPORTED_DIFFUSION = {"type": "dit", "diffusion_objective": ("rf_denoiser", "re
 SUPPORTED_NETWORK = {
     "io_channels": None, "embed_dim": None, "depth": None, "num_heads": None, "cond_token_dim": None, "global_cond_dim": None,
     "local_add_cond_dim": None,                      # None: any value; the shapes are read from the weights
-    "global_cond_type": "adaLN", "timestep_features_type": "expo", "timestep_features_logsnr": False,
-    "attn_kwargs": {"qk_norm": "rms", "differential": False}, "norm_type": "rms_norm", "norm_kwargs": {"force_fp32": True},
+    "global_cond_type": "adaLN", "timestep_features_type": "expo",
+    "attn_kwargs": {"qk_norm": "rms"}, "norm_type": "rms_norm", "norm_kwargs": {"force_fp32": True},
     "ff_kwargs": {"mult": 4.0}, "num_memory_tokens": MEMORY_TOKENS,
 }
 
@@ -78,19 +78,33 @@ def config_problems(model_config) -> list[str]:
         if not ok:
             problems.append(f"model.diffusion.{key} is {got!r}; this path implements {want!r}")
     for key in net:
-        if key not in SUPPORTED_NETWORK:
+        if key not in SUPPORTED_NETWORK and key != "timestep_features_logsnr":
             problems.append(f"model.diffusion.config.{key} is not a setting this path implements")
     for key, want in SUPPORTED_NETWORK.items():
         if want is None:
             if key not in net:
                 problems.append(f"model.diffusion.config.{key} is missing")
+        elif key == "attn_kwargs":
+            # `differential` may be absent or False (plain attention) or True (differential attention, medium); `qk_norm` must be "rms"
+            attn = net.get(key)
+            if not isinstance(attn, dict):
+                problems.append("model.diffusion.config.attn_kwargs must be an object")
+                continue
+            for k, v in attn.items():
+                if k == "differential":
+                    if v not in (True, False):
+                        problems.append(f"model.diffusion.config.attn_kwargs.differential is {v!r}; this path implements true and false")
+                elif k != "qk_norm":
+                    problems.append(f"model.diffusion.config.attn_kwargs.{k} is not a setting this path implements")
+            if attn.get("qk_norm") != "rms":
+                problems.append(f"model.diffusion.config.attn_kwargs.qk_norm is {attn.get('qk_norm')!r}; this path implements 'rms'")
         elif net.get(key) != want:
             problems.append(f"model.diffusion.config.{key} is {net.get(key)!r}; this path implements {want!r}")
+    if net.get("timestep_features_logsnr") not in (None, False):           # the key is absent in the larger model's config; true is not implemented
+        problems.append("model.diffusion.config.timestep_features_logsnr is true; this path implements false")
     embed, heads = net.get("embed_dim"), net.get("num_heads")
     if isinstance(embed, int) and isinstance(heads, int) and heads > 0 and embed // heads != HEAD_DIM:
         problems.append(f"the head dimension is {embed // heads}; this path implements {HEAD_DIM}")
-    if isinstance(heads, int) and heads != NUM_HEADS:
-        problems.append(f"num_heads is {heads}; this path implements {NUM_HEADS}")
     return problems
 
 
@@ -177,23 +191,43 @@ def host_layer(torch, x, p, mod, context, local_rows, row_mask, vmask, n_real, c
         s = (q @ k.transpose(-1, -2)) / math.sqrt(HEAD_DIM) + kmask[0]
         return (s.softmax(-1) @ v).transpose(0, 1).reshape(q.shape[1], -1)
 
+    diff = p["self_attn.to_qkv.weight"].shape[0] == 5 * x.shape[1]            # differential attention: five projections instead of three
     h = rms(torch, x, p["pre_norm.gamma"], NORM_EPS) * sc_s + sh_s
-    q, k, v = (h @ p["self_attn.to_qkv.weight"].t()).chunk(3, dim=-1)
-    q, k, v = heads(q), heads(k), heads(v)
-    q, k = rms(torch, q, p["self_attn.q_norm.gamma"], QK_EPS), rms(torch, k, p["self_attn.k_norm.gamma"], QK_EPS)
-    q, k = apply_rotary(torch, q, cos, sin, rot), apply_rotary(torch, k, cos, sin, rot)
-    v = v * vmask.view(1, n, 1)
-    a = attend(q, k, v, key_mask(torch, n_real, n, n))
+    if diff:
+        q, k, v, qd, kd = (h @ p["self_attn.to_qkv.weight"].t()).chunk(5, dim=-1)
+        q, k, v, qd, kd = heads(q), heads(k), heads(v), heads(qd), heads(kd)
+        gq, gk = p["self_attn.q_norm.gamma"], p["self_attn.k_norm.gamma"]
+        q, qd = (apply_rotary(torch, rms(torch, t, gq, QK_EPS), cos, sin, rot) for t in (q, qd))
+        k, kd = (apply_rotary(torch, rms(torch, t, gk, QK_EPS), cos, sin, rot) for t in (k, kd))
+        v = v * vmask.view(1, n, 1)
+        m = key_mask(torch, n_real, n, n)
+        a = attend(q, k, v, m) - attend(qd, kd, v, m)
+    else:
+        q, k, v = (h @ p["self_attn.to_qkv.weight"].t()).chunk(3, dim=-1)
+        q, k, v = heads(q), heads(k), heads(v)
+        q, k = rms(torch, q, p["self_attn.q_norm.gamma"], QK_EPS), rms(torch, k, p["self_attn.k_norm.gamma"], QK_EPS)
+        q, k = apply_rotary(torch, q, cos, sin, rot), apply_rotary(torch, k, cos, sin, rot)
+        v = v * vmask.view(1, n, 1)
+        a = attend(q, k, v, key_mask(torch, n_real, n, n))
     x = x + (a @ p["self_attn.to_out.weight"].t()) * g_s
     if trace is not None:
         trace["attn"] = x
 
     h = rms(torch, x, p["cross_attend_norm.gamma"], NORM_EPS)
-    q = heads(h @ p["cross_attn.to_q.weight"].t())
-    k, v = (context @ p["cross_attn.to_kv.weight"].t()).chunk(2, dim=-1)
-    k, v = heads(k), heads(v)
-    q, k = rms(torch, q, p["cross_attn.q_norm.gamma"], QK_EPS), rms(torch, k, p["cross_attn.k_norm.gamma"], QK_EPS)
-    a = attend(q, k, v, key_mask(torch, ctx_real, context.shape[0], n))
+    cm = key_mask(torch, ctx_real, context.shape[0], n)
+    if diff:
+        q, qd = (heads(t) for t in (h @ p["cross_attn.to_q.weight"].t()).chunk(2, dim=-1))
+        k, kd, v = (heads(t) for t in (context @ p["cross_attn.to_kv.weight"].t()).chunk(3, dim=-1))
+        gq, gk = p["cross_attn.q_norm.gamma"], p["cross_attn.k_norm.gamma"]
+        q, qd = (rms(torch, t, gq, QK_EPS) for t in (q, qd))
+        k, kd = (rms(torch, t, gk, QK_EPS) for t in (k, kd))
+        a = attend(q, k, v, cm) - attend(qd, kd, v, cm)
+    else:
+        q = heads(h @ p["cross_attn.to_q.weight"].t())
+        k, v = (context @ p["cross_attn.to_kv.weight"].t()).chunk(2, dim=-1)
+        k, v = heads(k), heads(v)
+        q, k = rms(torch, q, p["cross_attn.q_norm.gamma"], QK_EPS), rms(torch, k, p["cross_attn.k_norm.gamma"], QK_EPS)
+        a = attend(q, k, v, cm)
     x = x + a @ p["cross_attn.to_out.weight"].t()
     if trace is not None:
         trace["cross"] = x
@@ -253,10 +287,19 @@ class ChipTransformer:
         g = g.detach().float().reshape(1, 1, -1, TILE)
         return self.ttnn.from_torch(g, dtype=self.dtype, layout=self.ttnn.ROW_MAJOR_LAYOUT, device=self.device)
 
+    def _w32(self, w):
+        return self.ttnn.from_torch(w.detach().float().t().contiguous(), dtype=self.ttnn.float32, layout=self.ttnn.TILE_LAYOUT, device=self.device)
+
+    def _g32(self, g):
+        g = g.detach().float().reshape(1, 1, -1, TILE)
+        return self.ttnn.from_torch(g, dtype=self.ttnn.float32, layout=self.ttnn.ROW_MAJOR_LAYOUT, device=self.device)
+
     def _load(self, m):
         torch, ttnn = self.torch, self.ttnn
         self.depth = len(m.layers)
         self.dim = m.project_in.weight.shape[0]
+        self.num_heads = m.layers[0].self_attn.num_heads
+        self.differential = bool(m.layers[0].self_attn.differential)
         self.num_memory = m.num_memory_tokens
         assert self.num_memory == MEMORY_TOKENS, "the memory-token count is a fixed part of this model's layout"
         self.w_in = self._w(m.project_in.weight)
@@ -276,6 +319,12 @@ class ChipTransformer:
             d["loc2"], d["loc2_b"] = self._w(l.to_local_embed[2].weight), self._b(l.to_local_embed[2].bias)
             d["ff1"], d["ff1_b"] = self._w(l.ff.ff[0].proj.weight), self._b(l.ff.ff[0].proj.bias)
             d["ff2"], d["ff2_b"] = self._w(l.ff.ff[2].weight), self._b(l.ff.ff[2].bias)
+            if self.differential:
+                # Differential attention subtracts two nearly equal attention outputs, so its projections, norms and attention run in float32
+                # (see chip_decoder.py, where a bfloat16 version lost the difference). The bfloat16 copies above stay for the other matrix multiplies.
+                d["qkv32"], d["cq32"], d["ckv32"] = self._w32(l.self_attn.to_qkv.weight), self._w32(l.cross_attn.to_q.weight), self._w32(l.cross_attn.to_kv.weight)
+                d["sq_g32"], d["sk_g32"] = self._g32(l.self_attn.q_norm.gamma), self._g32(l.self_attn.k_norm.gamma)
+                d["cq_g32"], d["ck_g32"] = self._g32(l.cross_attn.q_norm.gamma), self._g32(l.cross_attn.k_norm.gamma)
             self.layers.append(d)
         self.local_dim = m.layers[0].to_local_embed[0].weight.shape[1]
 
@@ -296,10 +345,10 @@ class ChipTransformer:
         n = padded_length(n_real)
         cp = padded_length(ctx_len)
         cos, sin = rotary_tables(torch, n_real, n)
-        cos4 = cos.view(1, 1, n, HEAD_DIM).expand(1, NUM_HEADS, n, HEAD_DIM).contiguous()
-        sin4 = sin.view(1, 1, n, HEAD_DIM).expand(1, NUM_HEADS, n, HEAD_DIM).contiguous()
+        cos4 = cos.view(1, 1, n, HEAD_DIM).expand(1, self.num_heads, n, HEAD_DIM).contiguous()
+        sin4 = sin.view(1, 1, n, HEAD_DIM).expand(1, self.num_heads, n, HEAD_DIM).contiguous()
         vm = value_mask(torch, None if padding_mask is None else padding_mask.reshape(-1), n, self.num_memory)
-        vm4 = vm.view(1, 1, n, 1).expand(1, NUM_HEADS, n, HEAD_DIM).contiguous()
+        vm4 = vm.view(1, 1, n, 1).expand(1, self.num_heads, n, HEAD_DIM).contiguous()
         row = torch.zeros(n)
         row[self.num_memory:self.num_memory + t_len] = 1.0
         mem = torch.zeros(n, self.dim)
@@ -313,6 +362,11 @@ class ChipTransformer:
             "self_mask": self._up(key_mask(torch, n_real, n, n), dtype=ttnn.bfloat16),
             "cross_mask": self._up(key_mask(torch, ctx_len, cp, n), dtype=ttnn.bfloat16),
         }
+        if self.differential:
+            f32 = ttnn.float32
+            c.update({"cos32": self._up(cos4, dtype=f32), "sin32": self._up(sin4, dtype=f32), "vmask32": self._up(vm4, dtype=f32),
+                      "rot32": self._up(rotate_matrix(torch).view(1, 1, HEAD_DIM, HEAD_DIM), dtype=f32),
+                      "self_mask32": self._up(key_mask(torch, n_real, n, n), dtype=f32), "cross_mask32": self._up(key_mask(torch, ctx_len, cp, n), dtype=f32)})
         self._consts[key] = c
         return c
 
@@ -331,14 +385,14 @@ class ChipTransformer:
     def _heads(self, x, n):
         """[1, 1, n, D] -> [1, H, n, 64]."""
         ttnn = self.ttnn
-        x = ttnn.reshape(x, (1, n, NUM_HEADS, HEAD_DIM))
+        x = ttnn.reshape(x, (1, n, self.num_heads, HEAD_DIM))
         return ttnn.permute(x, (0, 2, 1, 3))
 
     def _merge(self, x, n):
         """[1, H, n, 64] -> [1, 1, n, D]."""
         ttnn = self.ttnn
         x = ttnn.permute(x, (0, 2, 1, 3))
-        return ttnn.reshape(x, (1, 1, n, NUM_HEADS * HEAD_DIM))
+        return ttnn.reshape(x, (1, 1, n, self.num_heads * HEAD_DIM))
 
     def _rope(self, t, c):
         ttnn = self.ttnn
@@ -355,33 +409,77 @@ class ChipTransformer:
             q, k, v, attn_mask=mask, is_causal=False, scale=1.0 / math.sqrt(HEAD_DIM), compute_kernel_config=self.kernel)
         return ttnn.typecast(out, self.dtype) if wide else out
 
-    def _layer(self, i, x, ctx, c, mods, local):
+    def _probs(self, q, k, mask):
+        """softmax(q k^T / 8 + mask) in float32."""
+        ttnn = self.ttnn
+        s = ttnn.matmul(q, ttnn.transpose(k, -2, -1), compute_kernel_config=self.kernel)
+        s = ttnn.add(ttnn.multiply(s, 1.0 / math.sqrt(HEAD_DIM)), mask)
+        return ttnn.softmax(s, dim=-1, numeric_stable=True, compute_kernel_config=self.kernel)
+
+    def _rope32(self, t, c):
+        ttnn = self.ttnn
+        rot = ttnn.matmul(t, c["rot32"], compute_kernel_config=self.kernel)
+        return ttnn.add(ttnn.multiply(t, c["cos32"]), ttnn.multiply(rot, c["sin32"]))
+
+    def _diff_attention(self, i, h, ctx32, c, x, s_g, n):
+        """The two attention sections of a layer with differential attention (self, then cross), all in float32. `h` is the normed and modulated
+        stream for the self section (float32); returns the stream after both sections (float32)."""
+        ttnn = self.ttnn
+        d, dim, H = self.layers[i], self.dim, self.num_heads
+        f32 = ttnn.float32
+        qkv = ttnn.linear(h, d["qkv32"], dtype=f32, compute_kernel_config=self.kernel)               # [1, 1, n, 5 * dim]: q, k, v, q_diff, k_diff
+        parts = [self._heads(ttnn.slice(qkv, (0, 0, 0, j * dim), (1, 1, n, (j + 1) * dim)), n) for j in range(5)]
+        q, k, v, qd, kd = parts
+        q, qd = (self._norm(t, d["sq_g32"], QK_EPS) for t in (q, qd))
+        k, kd = (self._norm(t, d["sk_g32"], QK_EPS) for t in (k, kd))
+        q, qd, k, kd = (self._rope32(t, c) for t in (q, qd, k, kd))
+        v = ttnn.multiply(v, c["vmask32"])
+        a = ttnn.matmul(ttnn.subtract(self._probs(q, k, c["self_mask32"]), self._probs(qd, kd, c["self_mask32"])), v, compute_kernel_config=self.kernel)
+        a = self._lin(self._merge(a, n), d["out"], out=self.act)
+        x = ttnn.add(x, ttnn.multiply(a, s_g))
+        self._probe(i, "attn", x)
+        # cross attention: q, q_diff from to_q; k, k_diff, v from to_kv
+        h = self._norm(x, d["cross_g"], NORM_EPS)
+        cq = ttnn.linear(h, d["cq32"], dtype=f32, compute_kernel_config=self.kernel)                 # [1, 1, n, 2 * dim]
+        q, qd = (self._heads(ttnn.slice(cq, (0, 0, 0, j * dim), (1, 1, n, (j + 1) * dim)), n) for j in range(2))
+        ckv = ttnn.linear(ctx32, d["ckv32"], dtype=f32, compute_kernel_config=self.kernel)           # [1, 1, cp, 3 * dim]: k, k_diff, v
+        k, kd, v = (self._heads(ttnn.slice(ckv, (0, 0, 0, j * dim), (1, 1, c["cp"], (j + 1) * dim)), c["cp"]) for j in range(3))
+        q, qd = (self._norm(t, d["cq_g32"], QK_EPS) for t in (q, qd))
+        k, kd = (self._norm(t, d["ck_g32"], QK_EPS) for t in (k, kd))
+        a = ttnn.matmul(ttnn.subtract(self._probs(q, k, c["cross_mask32"]), self._probs(qd, kd, c["cross_mask32"])), v, compute_kernel_config=self.kernel)
+        return ttnn.add(x, self._lin(self._merge(a, n), d["cout"], out=self.act))
+
+    def _layer(self, i, x, ctx, c, mods, local, ctx32=None):
         ttnn = self.ttnn
         d, n = self.layers[i], c["n"]
         s_sc, s_sh, s_g, f_sc, f_sh, f_g = mods
         # self attention
         h = self._norm(x, d["pre_g"], NORM_EPS)
         h = ttnn.add(ttnn.multiply(h, s_sc), s_sh)
-        qkv = self._lin(h, d["qkv"])
-        q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(ttnn.reshape(qkv, (1, n, 3 * self.dim)), num_heads=NUM_HEADS,
-                                                                         transpose_key=False)
-        q, k = self._norm(q, d["sq_g"], QK_EPS), self._norm(k, d["sk_g"], QK_EPS)
-        q, k = self._rope(q, c), self._rope(k, c)
-        v = ttnn.multiply(v, c["vmask"])
-        a = self._sdpa(q, k, v, c["self_mask"])
-        a = self._lin(self._merge(a, n), d["out"], out=self.act)
-        x = ttnn.add(x, ttnn.multiply(a, s_g))
-        self._probe(i, "attn", x)
-        # cross attention
-        h = self._norm(x, d["cross_g"], NORM_EPS)
-        q = self._heads(self._lin(h, d["cq"]), n)
-        kv = self._lin(ctx, d["ckv"])
-        k = self._heads(ttnn.slice(kv, (0, 0, 0, 0), (1, 1, c["cp"], self.dim)), c["cp"])
-        v = self._heads(ttnn.slice(kv, (0, 0, 0, self.dim), (1, 1, c["cp"], 2 * self.dim)), c["cp"])
-        q, k = self._norm(q, d["cq_g"], QK_EPS), self._norm(k, d["ck_g"], QK_EPS)
-        a = self._sdpa(q, k, v, c["cross_mask"])
-        x = ttnn.add(x, self._lin(self._merge(a, n), d["cout"], out=self.act))
-        self._probe(i, "cross", x)
+        if self.differential:
+            x = self._diff_attention(i, h, ctx32, c, x, s_g, n)
+            self._probe(i, "cross", x)
+        else:
+            qkv = self._lin(h, d["qkv"])
+            q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(ttnn.reshape(qkv, (1, n, 3 * self.dim)), num_heads=self.num_heads,
+                                                                             transpose_key=False)
+            q, k = self._norm(q, d["sq_g"], QK_EPS), self._norm(k, d["sk_g"], QK_EPS)
+            q, k = self._rope(q, c), self._rope(k, c)
+            v = ttnn.multiply(v, c["vmask"])
+            a = self._sdpa(q, k, v, c["self_mask"])
+            a = self._lin(self._merge(a, n), d["out"], out=self.act)
+            x = ttnn.add(x, ttnn.multiply(a, s_g))
+            self._probe(i, "attn", x)
+            # cross attention
+            h = self._norm(x, d["cross_g"], NORM_EPS)
+            q = self._heads(self._lin(h, d["cq"]), n)
+            kv = self._lin(ctx, d["ckv"])
+            k = self._heads(ttnn.slice(kv, (0, 0, 0, 0), (1, 1, c["cp"], self.dim)), c["cp"])
+            v = self._heads(ttnn.slice(kv, (0, 0, 0, self.dim), (1, 1, c["cp"], 2 * self.dim)), c["cp"])
+            q, k = self._norm(q, d["cq_g"], QK_EPS), self._norm(k, d["ck_g"], QK_EPS)
+            a = self._sdpa(q, k, v, c["cross_mask"])
+            x = ttnn.add(x, self._lin(self._merge(a, n), d["cout"], out=self.act))
+            self._probe(i, "cross", x)
         # local conditioning (zero on the memory rows)
         if local is not None:
             le = ttnn.silu(self._lin(local, d["loc1"], d["loc1_b"]))
@@ -448,6 +546,7 @@ class ChipTransformer:
         cpad = torch.zeros(c["cp"], ctx.shape[-1])
         cpad[:ctx_len] = ctx.float()
         ctx_t = self._up(cpad.view(1, 1, c["cp"], -1))
+        ctx32 = self._up(cpad.view(1, 1, c["cp"], -1), dtype=ttnn.float32) if self.differential else None
         local_t = None
         if local is not None:
             lpad = torch.zeros(n, self.local_dim)
@@ -455,7 +554,7 @@ class ChipTransformer:
             local_t = self._up(lpad.view(1, 1, n, -1))
         self._probe(0, "in", h)
         for i in range(self.depth):
-            h = self._layer(i, h, ctx_t, c, mods[i], local_t)
+            h = self._layer(i, h, ctx_t, c, mods[i], local_t, ctx32)
             if self.record_enabled:
                 self._pending.setdefault(f"layer_{i:02d}", []).append(ttnn.to_torch(h).reshape(n, -1)[:c["n_real"]].float().unsqueeze(0))
         y = self._lin(h, self.w_out, out=self.act)
