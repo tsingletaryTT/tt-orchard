@@ -17,6 +17,12 @@ documents an older specification (0.12 against the checkout's 0.20 when this mod
   * when either version cannot be read, the skill's files are kept (nothing says they differ) and the record says the
     version is unknown.
 
+Threat model. The checkout is operator-owned and the harness installs it at the pin (`tt-orchard kernel-env`). The
+defenses here cover an accidental edit, an untracked file left in it, and a checkout that has configured git or contains
+links or very large files: nothing in it is run, and nothing in it is read, unless the pinned commit has it unchanged;
+verify() (ttlang_env.py) runs pinned copies in a directory made for the call with a minimal environment. They do not claim
+to defend against someone who can already write to the operator's files, who has easier ways to the same end.
+
 Each file carries its source, sha256, the specification version it documents (None when unknown) and whether it was
 generated. Nothing is written into the checkout, the skill directory or the venv. Files are read through
 ttlang_env._read_reference, which refuses links, devices and oversized files.
@@ -122,13 +128,16 @@ def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
                       "sha256": hashlib.sha256(data).hexdigest(), "data": data, "spec_version": src_ver,
                       "generated": False})
     # Every file taken from the checkout must be the file the pinned commit has: a modified or untracked one is refused.
+    for where in sorted(k for k, v in (dirty or {}).items() if v == "link"):
+        problems.append(f"{'the checkout root' if where == '.' else where} in {env.src_dir} is a link; the reference "
+                        "files must not be reached through a linked directory")
     if dirty:
         taken = [r for _, source, r in ttlang_env.REFERENCES if source == ttlang_env.CHECKOUT_SOURCE]
         taken += [f"examples/{n}" for n in extras] + [SPEC_REL]
         if use_checkout:
             taken += list(GUIDE_DOCS) + list(EXAMPLES_DOCS)
         for rel in dict.fromkeys(taken):
-            if rel in dirty:
+            if dirty.get(rel) not in (None, "deleted"):
                 problems.append(f"{rel} is {dirty[rel]} in the checkout {env.src_dir}; the reference files are taken "
                                 "only from files the pinned commit has, unchanged")
     return files, problems
@@ -139,9 +148,16 @@ def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
 # `git status` and `git diff` do (they hash the working tree through the checkout's own attributes and config), so they are
 # never used: modified and untracked files are found in Python (git_state). The settings below are a second layer, for the
 # day someone adds a call; a test fails on any argument list that lacks them or names status, diff or show.
-GIT_SAFE_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null")
+GIT_SAFE_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
+                   "-c", "core.useReplaceRefs=false")      # a refs/replace entry must not redirect the pinned commit
+# Limits of the working-tree scan: a file above FILE_CAP is not opened (reported "unchecked"), the files hashed together stop at
+# TOTAL_CAP, a walk stops at MAX_ENTRIES. Files are hashed CHUNK bytes at a time.
+FILE_CAP = 4 * 1024 * 1024         # choice: four times the largest file given to the coder (REFERENCE_MAX_BYTES, 1 MiB)
+TOTAL_CAP = 64 * 1024 * 1024       # choice: the checkout's examples/ and docs/ are about 37 MB at the pin; most of it is not compared
+MAX_ENTRIES = 20000                # choice: the checkout has about 180 files there
+CHUNK = 1024 * 1024
 WORKTREE_DIRS = ("examples", "docs")
-IGNORED_DIRS = ("__pycache__",)         # what running an example leaves behind; a file in one is never offered
+IGNORED_DIRS = ("__pycache__", ".git")         # what running an example leaves behind; a file in one is never offered
 
 
 def git_env(env) -> dict:
@@ -149,7 +165,13 @@ def git_env(env) -> dict:
     attributes, and no index refresh."""
     out = ttlang_env.minimal_env(env)
     out.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_ATTR_NOSYSTEM": "1"})
+                "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1"})
+    # The same safe settings as environment config, so a call that cannot take `-c` arguments (and a fake that matches on
+    # the argument list) still gets them. The operator's own GIT_DIR, GIT_WORK_TREE and the like are not inherited.
+    pairs = [(GIT_SAFE_CONFIG[i + 1].split("=", 1)) for i in range(0, len(GIT_SAFE_CONFIG), 2)]
+    out["GIT_CONFIG_COUNT"] = str(len(pairs))
+    for n, (key, value) in enumerate(pairs):
+        out[f"GIT_CONFIG_KEY_{n}"], out[f"GIT_CONFIG_VALUE_{n}"] = key, value
     return out
 
 
@@ -158,44 +180,68 @@ def git_argv(env, *args: str) -> list[str]:
     return ["git", "-C", str(env.src_dir), *GIT_SAFE_CONFIG, *args]
 
 
-def _blob_id(path: Path) -> str | None:
-    """The git blob id of a file or link in the working tree, computed here with no git and no filter. None when the
-    entry cannot be read (or is neither a file nor a link); a file that changes while it is read gives a different id."""
+def _blob_id(path: Path, size_cap: int) -> tuple[str | None, str]:
+    """(git blob id, "ok") of a file or link in the working tree, computed here with no git and no filter. The file is
+    opened without following a link, its size is taken from the open descriptor, and a file above `size_cap` is not read:
+    (None, "unchecked"). The bytes are hashed CHUNK at a time after the blob header, so no file is held whole. An entry that
+    cannot be read, is not a file or link, or changes while it is read gives (None, "unreadable")."""
     try:
         st = os.lstat(path)
         if stat.S_ISLNK(st.st_mode):
             data = os.fsencode(os.readlink(path))
-        elif stat.S_ISREG(st.st_mode):
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-            with os.fdopen(fd, "rb") as f:
-                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                    return None
-                data = f.read()
-        else:
-            return None
+            return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest(), "ok"
+        if not stat.S_ISREG(st.st_mode):
+            return None, "unreadable"
+        if st.st_size > size_cap:
+            return None, "unchecked"
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as f:
+            fst = os.fstat(f.fileno())
+            if not stat.S_ISREG(fst.st_mode):
+                return None, "unreadable"
+            if fst.st_size > size_cap:
+                return None, "unchecked"
+            h = hashlib.sha1(b"blob %d\0" % fst.st_size)
+            seen = 0
+            while True:
+                chunk = f.read(CHUNK)
+                if not chunk:
+                    break
+                seen += len(chunk)
+                if seen > fst.st_size:
+                    return None, "unreadable"       # it grew while it was read
+                h.update(chunk)
+            if seen != fst.st_size:
+                return None, "unreadable"           # it shrank while it was read
+            return h.hexdigest(), "ok"
     except OSError:
-        return None
-    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+        return None, "unreadable"
 
 
 def _walk(root: Path, top: str):
     """(relative path, absolute path) of every file and link under root/top, and a list of the directories that
-    could not be listed. Links to directories are entries, never entered."""
-    found, errors = [], []
+    could not be listed. Links to directories are entries, never entered; `top` itself must not be a link (the caller
+    checks). At most MAX_ENTRIES are returned, and the last item says whether the walk was cut."""
+    found, errors, cut = [], [], False
 
     def onerror(exc):
         if not isinstance(exc, FileNotFoundError):          # an absent directory has no files; anything else is reported
             errors.append(f"{top}: {exc.strerror or exc}")
     for base, dirs, files in os.walk(root / top, followlinks=False, onerror=onerror):
         dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRS and not os.path.islink(os.path.join(base, d)))
-        entries = list(files) + [d for d in os.listdir(base) if os.path.islink(os.path.join(base, d))
-                                 and os.path.isdir(os.path.join(base, d))]
-        for name in entries:
+        try:
+            links = [d for d in os.listdir(base) if os.path.islink(os.path.join(base, d))
+                     and os.path.isdir(os.path.join(base, d))]
+        except OSError:
+            links = []
+        for name in sorted(list(files) + links):
             if name.endswith(".pyc"):
                 continue
+            if len(found) >= MAX_ENTRIES:
+                return found, errors, True
             absolute = Path(base) / name
             found.append((absolute.relative_to(root).as_posix(), absolute))
-    return found, errors
+    return found, errors, cut
 
 
 def _state(env, allow_head: bool = False):
@@ -205,38 +251,75 @@ def _state(env, allow_head: bool = False):
     for candidate in [ttlang_pin.SHA] + (["HEAD"] if allow_head else []):
         rc, out, _ = env.run(git_argv(env, "ls-tree", "-r", "-z", candidate, "--", *WORKTREE_DIRS), 60, git_env(env))
         if rc == 0:
-            tracked, rev = {}, candidate
-            for record in out.split("\0"):
-                meta, _, path = record.partition("\t")
-                parts = meta.split()
-                if path and len(parts) == 3 and parts[1] == "blob":      # a submodule entry is not a file
-                    tracked[path] = parts[2]
+            tracked, rev = parse_tree(out), candidate
             break
     if tracked is None:
         return rev, None, None
-    dirty, root = {}, Path(env.src_dir)
-    seen = set()
-    for top in WORKTREE_DIRS:
-        files, errors = _walk(root, top)
+    return rev, tracked, scan_tree(Path(env.src_dir), WORKTREE_DIRS, tracked)
+
+
+def parse_tree(out: str) -> dict[str, str]:
+    """{path: blob id} from `git ls-tree -r -z` output. A submodule entry is not a file and is left out."""
+    tracked = {}
+    for record in out.split("\0"):
+        meta, _, path = record.partition("\t")
+        parts = meta.split()
+        if path and len(parts) == 3 and parts[1] == "blob":
+            tracked[path] = parts[2]
+    return tracked
+
+
+def scan_tree(root: Path, tops, tracked: dict[str, str]) -> dict[str, str]:
+    """{path: "modified"|"untracked"|"deleted"|"unchecked"|"unreadable"|"link"|"too many"} for the working tree under
+    root/top for each top ("." is the whole checkout, `.git` excluded), compared with `tracked`, read only, with no git. See
+    git_state for the meaning of each word."""
+    dirty = {}
+    seen, hashed, skipped = set(), 0, set()
+    if os.path.islink(root):                    # a linked checkout is not walked, hashed or run
+        return {".": "link"}
+    for top in tops:
+        if os.path.islink(root / top):          # os.walk would follow the starting directory
+            dirty[top] = "link"
+            skipped.add(top)
+            continue
+        files, errors, cut = _walk(root, top)
+        if cut:
+            dirty["(entries)"] = "too many"
         for rel, absolute in files:
             seen.add(rel)
             if rel not in tracked:
                 dirty[rel] = "untracked"
-            elif _blob_id(absolute) != tracked[rel]:
-                dirty[rel] = "modified"
+                continue
+            size = 0
+            try:
+                size = os.lstat(absolute).st_size
+            except OSError:
+                pass
+            if hashed + size > TOTAL_CAP:
+                dirty[rel] = "unchecked"
+                continue
+            blob, how = _blob_id(absolute, FILE_CAP)
+            if how == "ok":
+                hashed += size
+                if blob != tracked[rel]:
+                    dirty[rel] = "modified"
+            else:
+                dirty[rel] = how
         for why in errors:
             dirty[why] = "unreadable"
     for rel in tracked:
-        if rel not in seen:
+        if rel not in seen and (tops == (".",) or rel.split("/", 1)[0] in tops and rel.split("/", 1)[0] not in skipped):
             dirty[rel] = "deleted"
-    return rev, tracked, dirty
+    return dirty
 
 
 def git_state(env, allow_head: bool = False) -> tuple[set[str] | None, dict[str, str] | None]:
     """(tracked, dirty) for the checkout's examples/ and docs/, read only and with no filter run. `tracked` is the set of
     paths the pinned commit has there; `dirty` maps each path whose working-tree bytes differ from the commit's
-    ("modified"), that the commit does not have ("untracked") or that is missing ("deleted"), and each directory that could
-    not be listed ("unreadable"). Both are None when git cannot answer (no git, the pinned commit is not in the
+    ("modified"), that the commit does not have ("untracked") or that is missing ("deleted"); a file that was not compared
+    because it is above FILE_CAP or past TOTAL_CAP ("unchecked"); a file or directory that could not be read
+    ("unreadable"); examples/, docs/ or the checkout itself being a link ("link"); and "(entries)" when the walk was cut.
+    Only "unchecked" is not a difference. Both are None when git cannot answer (no git, the pinned commit is not in the
     checkout): the caller then does not trust the checkout's extra files, and the consistency check says it could not
     tell. File modes are not compared."""
     _, tracked, dirty = _state(env, allow_head)

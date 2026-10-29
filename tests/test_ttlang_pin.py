@@ -770,3 +770,168 @@ def test_the_working_tree_is_compared_with_the_pinned_blobs_in_python(tmp_path, 
     assert dirty == {"examples/compiler_only_add.hpp": "modified", "examples/new_scratch.py": "untracked",
                      "docs/note.md": "untracked", "examples/compiler_only_external_call.py": "deleted",
                      "examples/link.py": "untracked"}
+
+
+# ---- things git or the filesystem can redirect: replace refs, links, sizes (round 6) -----------------------------------
+
+def test_a_replace_ref_for_the_pinned_commit_does_not_redirect_what_we_read(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    src = env.src_dir
+    plain = {"GIT_NO_REPLACE_OBJECTS": "1", "PATH": os.environ["PATH"]}
+    git = ["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    program = src / "examples" / "errors" / "eltwise_add_error.py"
+    program.write_text("print('a different commit')\n")
+    subprocess.run(git + ["commit", "-q", "-a", "-m", "other"], check=True, capture_output=True, env=plain)
+    other = subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+                           env=plain).stdout.strip()
+    subprocess.run(git + ["reset", "-q", "--hard", sha], check=True, capture_output=True, env=plain)
+    subprocess.run(git + ["replace", sha, other], check=True, capture_output=True, env=plain)
+    # the control: without our settings, the pinned commit now reads as the other one
+    shown = subprocess.run(git + ["cat-file", "blob", f"{sha}:examples/errors/eltwise_add_error.py"],
+                           capture_output=True, text=True).stdout
+    assert shown == "print('a different commit')\n"
+    got = ttlang_env.verify(env)                       # the working tree is the pinned commit's, and still is
+    assert got.status == ttlang_env.OK, got.detail
+    assert tr.git_state(env)[1] == {}
+    assert "a different commit" not in marker.read_text()
+
+
+def test_every_git_call_switches_off_replace_refs(tmp_path):
+    f = Fake(tmp_path)
+    tr.git_state(f.env)
+    ttlang_env.verify(f.env)
+    git = [(a, e) for a, e in zip(f.calls, f.envs) if a[0] == "git"]
+    assert git
+    for argv, env in git:
+        assert "core.useReplaceRefs=false" in " ".join(argv) and env["GIT_NO_REPLACE_OBJECTS"] == "1"
+
+
+def make_link_repo(root: Path, which: str):
+    """make_repo, then `examples` (or the checkout root) replaced by a link to the real directory."""
+    env, sha, marker = make_repo(root)
+    src = env.src_dir
+    if which == "examples":
+        (src / "examples").rename(src / "examples-real")
+        (src / "examples").symlink_to("examples-real")
+    else:
+        moved = root / "tt-lang-real"
+        src.rename(moved)
+        src.symlink_to(moved)
+    return env, sha, marker
+
+
+def test_an_examples_directory_that_is_a_link_is_refused_before_anything_is_walked_or_run(tmp_path, monkeypatch):
+    env, sha, marker = make_link_repo(tmp_path, "examples")
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    assert tr.git_state(env)[1].get("examples") == "link"
+    got = ttlang_env.verify(env)
+    assert got.status == ttlang_env.FAIL and "examples" in got.detail and not marker.exists()
+    assert ttlang_env.verify(env, allow_pin_mismatch=True).status == ttlang_env.FAIL
+    _, problems = tr.assemble(env, make_skill(tmp_path, "0.20"))
+    assert any("is a link" in p for p in problems)
+    row = rows_by_name(tc.check(env, make_skill(tmp_path, "0.20", "s2")))["checkout files"]
+    assert row.status == tc.MISMATCH and row.blocks and "examples (link)" in row.detail
+
+
+def test_a_checkout_root_that_is_a_link_is_refused(tmp_path, monkeypatch):
+    env, sha, marker = make_link_repo(tmp_path, "root")
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    assert tr.git_state(env)[1] == {".": "link"}
+    got = ttlang_env.verify(env)
+    assert got.status == ttlang_env.FAIL and "link" in got.detail and not marker.exists()
+
+
+def test_a_file_above_the_size_cap_is_not_read_and_is_reported_unchecked(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    (env.src_dir / "docs").mkdir(exist_ok=True)
+    big = env.src_dir / "docs" / "big.bin"
+    big.write_bytes(b"x" * 100)
+    git = ["git", "-C", str(env.src_dir), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run(git + ["add", "-A"], check=True, capture_output=True)
+    subprocess.run(git + ["commit", "-q", "-m", "big"], check=True, capture_output=True)
+    sha = subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    monkeypatch.setattr(tr, "FILE_CAP", 50)
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr(tr.os, "open", lambda p, *a, **k: opened.append(str(p)) or real_open(p, *a, **k))
+    assert tr.git_state(env)[1] == {"docs/big.bin": "unchecked"}
+    assert not [p for p in opened if p.endswith("big.bin")]                 # never opened, so never read
+    assert rows_by_name(tc.check(env, make_skill(tmp_path, "0.20"), references=[]))["checkout files"].status == tc.OK
+
+
+def test_a_needed_program_above_the_size_cap_blocks_verify(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    monkeypatch.setattr(tr, "FILE_CAP", 5)
+    got = ttlang_env.verify(env)
+    assert got.status == ttlang_env.FAIL and "unchecked" in got.detail and not marker.exists()
+
+
+def test_files_are_hashed_in_chunks_and_give_git_s_blob_id(tmp_path, monkeypatch):
+    path = tmp_path / "f.bin"
+    path.write_bytes(bytes(range(256)) * 20)
+    want = subprocess.run(["git", "hash-object", "--no-filters", str(path)], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    monkeypatch.setattr(tr, "CHUNK", 7)
+    sizes = []
+    real = hashlib.sha1
+
+    class Spy:
+        def __init__(self, *a):
+            self.h = real(*a)
+
+        def update(self, data):
+            sizes.append(len(data))
+            self.h.update(data)
+
+        def hexdigest(self):
+            return self.h.hexdigest()
+    monkeypatch.setattr(tr.hashlib, "sha1", Spy)
+    assert tr._blob_id(path, 10_000)[0] == want
+    assert max(sizes[1:]) <= 7 and len(sizes) > 100
+
+
+def test_the_total_and_entry_caps_stop_the_scan_and_say_so(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    monkeypatch.setattr(tr, "TOTAL_CAP", 30)                # the three programs are 22 + 30 + 22 bytes or so
+    dirty = tr.git_state(env)[1]
+    assert dirty and all(v == "unchecked" for v in dirty.values())
+    monkeypatch.setattr(tr, "TOTAL_CAP", 10 ** 9)
+    monkeypatch.setattr(tr, "MAX_ENTRIES", 2)
+    assert tr.git_state(env)[1].get("(entries)") == "too many"
+
+
+def test_a_file_that_grew_between_the_size_check_and_the_open_is_still_not_read(tmp_path, monkeypatch):
+    path = tmp_path / "grew.bin"
+    path.write_bytes(b"x" * 100)
+    real = os.lstat
+
+    def lstat(p, *a, **k):                      # the size check sees a small file
+        st = real(p, *a, **k)
+        return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, st.st_gid, 1,
+                               int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+    monkeypatch.setattr(tr.os, "lstat", lstat)
+    monkeypatch.setattr(tr, "CHUNK", 1)
+    assert tr._blob_id(path, 50) == (None, "unchecked")
+
+
+def test_the_head_and_tree_reads_get_the_safe_environment_and_not_the_operators_git_variables(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+    monkeypatch.setattr(ttlang_pin, "TT_METAL_REF", "v0.80.0")
+    f = Fake(tmp_path)
+    f.env.environ = {"PATH": "/usr/bin", "GIT_DIR": "/somewhere/else/.git", "GIT_WORK_TREE": "/x"}
+    tree = tmp_path / "tree"
+    (tree / ".git").mkdir(parents=True)
+    ttlang_env.head_sha(f.env)
+    tc.check(f.env, make_skill(tmp_path, "0.20"), tt_metal_dir=tree)
+    reads = [(a, e) for a, e in zip(f.calls, f.envs) if a[0] == "git" and ("rev-parse" in a or "describe" in a)]
+    assert len(reads) >= 3
+    for argv, env in reads:
+        assert "GIT_DIR" not in env and "GIT_WORK_TREE" not in env
+        assert env["GIT_NO_REPLACE_OBJECTS"] == "1" and env["GIT_CONFIG_NOSYSTEM"] == "1"
+        cfg = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(env["GIT_CONFIG_COUNT"]))}
+        assert cfg["core.useReplaceRefs"] == "false" and cfg["core.fsmonitor"] == "false"

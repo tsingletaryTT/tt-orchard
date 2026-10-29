@@ -70,12 +70,15 @@ def _files_row(env) -> Row:
     if dirty is None or tracked is None:
         return Row("checkout files", UNKNOWN, f"git could not say which files under examples/ and docs/ of {env.src_dir} "
                    "the pinned commit has, so the extra examples are not given to the coder")
-    if dirty:
-        shown = ", ".join(f"{p} ({w})" for p, w in sorted(dirty.items())[:5])
-        return Row("checkout files", MISMATCH, f"{len(dirty)} file(s) under examples/ or docs/ of {env.src_dir} are "
+    differs = {p: w for p, w in dirty.items() if w != "unchecked"}
+    if differs:
+        shown = ", ".join(f"{p} ({w})" for p, w in sorted(differs.items())[:5])
+        return Row("checkout files", MISMATCH, f"{len(differs)} file(s) under examples/ or docs/ of {env.src_dir} are "
                    f"not as the pinned commit has them: {shown}",
                    "restore the listed files from the pinned commit or move them aside", blocks=True)
-    return Row("checkout files", OK, "every file under examples/ and docs/ is as the pinned commit has it")
+    note = f" ({len(dirty)} larger file(s) were not compared)" if dirty else ""
+    return Row("checkout files", OK, f"every file under examples/ and docs/ that was compared is as the pinned commit "
+                                     f"has it{note}")
 
 
 def _skill_row(env, skill_dir) -> Row:
@@ -126,9 +129,10 @@ def _tree_row(env, tree: Path | None) -> Row:
     ref = ttlang_pin.TT_METAL_REF
     have = None
     if tree is not None and _exists(Path(tree) / ".git"):
-        rc, out, _ = env.run(["git", "-C", str(tree), "describe", "--tags", "--always"], 30)
+        rc, out, _ = env.run(["git", "-C", str(tree), "describe", "--tags", "--always"], 30,
+                             ttlang_reference.git_env(env))
         have = out.strip() if rc == 0 and out.strip() else None
-        rc, out, _ = env.run(["git", "-C", str(tree), "rev-parse", "HEAD"], 30)
+        rc, out, _ = env.run(["git", "-C", str(tree), "rev-parse", "HEAD"], 30, ttlang_reference.git_env(env))
         sha = out.strip() if rc == 0 and out.strip() else None
     else:
         sha = None

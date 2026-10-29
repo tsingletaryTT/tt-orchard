@@ -234,3 +234,47 @@ The class: every way we inspect the checkout must use only operations that canno
 Each guard was removed once and a test went red: reintroducing a `git status` call (3 tests, including the marker), the hooks setting,
 the global-config setting, `cat-file` replaced by `show`, the content comparison, the untracked rule, the deleted rule, and the
 `__pycache__` skip.
+
+## Threat model (written in round 6, after six rounds on one class)
+
+The tt-lang checkout is owned by the operator and installed at the pin by the harness (`tt-orchard kernel-env`). The checks in this
+change cover three cases: an accidental edit, an untracked file left in the checkout, and a checkout that has configured git (a
+filter, a textconv driver, an fsmonitor program, hooks, a replace ref) or that contains links or very large files. In those cases
+nothing from the checkout is run or read unless the pinned commit has it unchanged, and `verify()` runs pinned copies from `git cat-file
+blob` in a directory made for the call, with an allow-listed environment. The change does not claim to defend against someone who can
+already write to the operator's files: that person has easier ways to the same end. The same text is in the docstring of
+`orchard/ttlang_reference.py`.
+
+## Review round 6 (Copilot, PR 198, head 4d3ed73)
+
+- The High finding (clean filters) is the previous round's, listed again. At this head the regression test with the hostile
+  repository passes, and its control shows `git status` writes the marker there. The marker never appears.
+- Replace refs. A local `refs/replace/<pin>` made `ls-tree` and `cat-file` read another commit as the pinned one. Every git call now sets
+  `GIT_NO_REPLACE_OBJECTS=1` and `-c core.useReplaceRefs=false`. The test builds a repository with a replace ref for the pin,
+  shows that plain git reads the other commit, and shows that verification still sees the pinned one. Each setting is enough alone, and
+  with both removed the test goes red.
+- Links at the start. `os.walk(followlinks=False)` still follows the directory it starts in. A checkout root that is a link,
+  or `examples/` or `docs/` that is a link, is now refused before any walk or hash (state `link`), and `verify` and the reference
+  assembly refuse on it.
+- Sizes. A file above 4 MiB is not opened and is reported `unchecked` (not a difference, unless it is a program `verify` would run); the
+  files hashed together stop at 64 MiB; a walk stops at 20000 entries and says so. Files are hashed 1 MiB at a time after the
+  blob header, and the size is read again from the open descriptor, so a file that grew after the size check is not read.
+
+### Sweep for the class "things git or the filesystem can redirect"
+
+| What can redirect | Where it was checked | Result |
+| --- | --- | --- |
+| Environment (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_*`, hook and filter variables) | every git call in `ttlang_reference`, `ttlang_env.verify`, `head_sha`, the tt-metal tree reads in `ttlang_consistency`; `skillsfresh.ReadOnlyRunner` | fixed: the first group uses an allow-listed environment; the runner now removes the variables that point git elsewhere. Found in this sweep: `head_sha` and the tree reads passed the operator's whole environment; the runner did too |
+| Repository config and hooks | same calls | fixed earlier and kept: `core.fsmonitor`, `core.hooksPath`, `core.attributesFile`, `core.useReplaceRefs`, and no system or user config |
+| Attributes, filters, textconv | `git status` in `skillsfresh.check_clone` | found in this sweep and fixed: the freshness check's dirty test used `git status`; it now reads the tree with `ls-tree` and compares bytes in Python, and `status` and `diff` are refused by the read-only runner. A real-repository test with filter, textconv, fsmonitor and hooks shows the marker is never written |
+| Replace refs, grafts, alternates | all git calls | replace refs off; the pin is a full 40-character id, so a branch or tag cannot stand in for it; object ids are content hashes, so an alternates file cannot substitute content |
+| Links | checkout root, `examples/`, `docs/`, directories on the way to a reference file, the file itself, entries in a walk, the skill directory | fixed: root and top directories refused; `_read_reference` refuses a linked intermediate directory and opens the file with `O_NOFOLLOW`; walks never enter a linked directory; the skill directory may itself be a link because the operator names it |
+| Sizes | reference files, the scan, generated guides | caps everywhere a file is read: 1 MiB per reference file and per generated file, 4 MiB per scanned file, 64 MiB total, 20000 entries, chunked hashing |
+| Relative paths | the run in the temporary directory | fixed in round 4 and kept: the simulator, program, `PATH` entries and `HOME` are absolute |
+| Build-time git calls (`init`, `remote add`, `fetch`, `checkout` in `step_clone`) | `ttlang_env` | not changed. They run in a directory the harness creates, before any check, need the operator's network credentials, and are outside the cases in the threat model |
+| Permissions | listing and stat calls on the checkout, the tt-metal tree | handled in round 4 and kept: an unsearchable directory is "no readable checkout" or a refusal, never a traceback |
+
+Each guard was removed once and a test went red: the replace-ref settings (the test needs both removed to see it), the start-directory
+and root link checks, the size cap before and after the open, chunked reading, the total cap, the entry cap, the needed-file
+`unchecked` block, the safe environment on the head and tree reads, the replace and attribute settings in the skills runner, the
+cut-walk rule in the freshness check, and the redirecting-variable removal.

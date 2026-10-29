@@ -66,11 +66,14 @@ class FakeSys:
             return 0, st["head"] + "\n", ""
         if rest == ["symbolic-ref", "--short", "-q", "HEAD"]:
             return (0, st["branch"] + "\n", "") if st.get("branch") else (1, "", "")
-        if rest[:2] == ["status", "--porcelain"]:
-            if st.get("dirty"):
-                return 0, " M README.md\n", ""
-            show = "--untracked-files=no" not in rest
-            return 0, ("?? build/\n" if st.get("untracked") and show else ""), ""
+        if rest[:3] == ["ls-tree", "-r", "-z"] or rest[:5] == ["ls-tree", "-r", "-z", "HEAD", "--"]:
+            # the commit has README.md; the working tree is made to match the state (clean, changed, or with a new file)
+            (root / "README.md").write_bytes(b"changed\n" if st.get("dirty") else b"readme\n")
+            if st.get("untracked"):
+                (root / "build").mkdir(exist_ok=True)
+                (root / "build" / "out.o").write_bytes(b"\0")
+            return 0, f"100644 blob {blob_sha(b'readme' + chr(10).encode())}\tREADME.md\0", ""
+        assert rest[0] not in ("status", "diff"), argv                 # these apply the clone's own filters
         if rest == ["remote", "get-url", "origin"]:
             return 0, st["origin"] + "\n", ""
         if rest == ["ls-remote", "origin", "refs/heads/main"]:
@@ -94,7 +97,7 @@ def assert_read_only(fake: FakeSys):
     for argv in fake.calls:
         if argv[0] == "git":
             sub = argv[3]
-            assert sub in {"rev-parse", "symbolic-ref", "status", "remote", "ls-remote", "cat-file", "rev-list"}, argv
+            assert sub in {"rev-parse", "symbolic-ref", "ls-tree", "remote", "ls-remote", "cat-file", "rev-list"}, argv
             for verb in ("pull", "fetch", "checkout", "reset", "stash", "commit", "push", "merge", "rebase", "clean",
                          "add", "switch", "restore", "gc", "prune", "update-ref", "config"):
                 assert verb not in argv[3:4], argv
@@ -162,14 +165,15 @@ def test_a_dirty_clone_on_another_branch_is_warned_about_by_name(tmp_path):
     assert_read_only(fake)
 
 
-def test_git_status_runs_without_taking_the_index_lock(tmp_path):
-    """`git status` refreshes the index and can write it. GIT_OPTIONAL_LOCKS=0 stops that, so the check never writes
-    in the clone."""
+def test_the_dirty_check_reads_objects_only_and_takes_no_index_lock(tmp_path):
+    """`git status` refreshes the index, can write it, and runs the clone's own filters on files it hashes. The dirty
+    check reads the tree with `ls-tree` and compares file bytes in Python, with GIT_OPTIONAL_LOCKS=0 as well."""
     root, st = skills_repo(tmp_path, head=MAIN)
     fake = FakeSys({root: st}, {SKILLS_URL: MAIN})
     check_skills(tmp_path, fake, root)
-    status_envs = [e for a, e in zip(fake.calls, fake.envs) if a[3:4] == ["status"]]
-    assert status_envs and all(e.get("GIT_OPTIONAL_LOCKS") == "0" for e in status_envs)
+    tree_envs = [e for a, e in zip(fake.calls, fake.envs) if a[3:4] == ["ls-tree"]]
+    assert tree_envs and all(e.get("GIT_OPTIONAL_LOCKS") == "0" for e in tree_envs)
+    assert not [a for a in fake.calls if a[3:4] in (["status"], ["diff"])]
     assert all(e.get("GIT_TERMINAL_PROMPT") == "0" for e in fake.envs)
 
 
@@ -684,33 +688,52 @@ def test_the_runner_turns_off_redirects_fsmonitor_and_hooks_for_git():
     runner = sf.ReadOnlyRunner(lambda a, t, env=None: seen.append(env) or (0, "", ""),
                                environ={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
                                         "GIT_CONFIG_VALUE_0": "kept"})
-    runner(["git", "-C", "/x", "status", "--porcelain"], network=False)
+    runner(["git", "-C", "/x", "ls-tree", "-r", "-z", "HEAD"], network=False)
     cfg = _git_config(seen[0])
     assert cfg["http.followRedirects"] == "false"
     assert cfg["core.fsmonitor"] == "false" and cfg["core.hooksPath"] == "/dev/null"
+    assert cfg["core.useReplaceRefs"] == "false" and cfg["core.attributesFile"] == "/dev/null"
+    assert seen[0]["GIT_NO_REPLACE_OBJECTS"] == "1" and seen[0]["GIT_ATTR_NOSYSTEM"] == "1"
     assert cfg["user.name"] == "kept"                         # the operator's own GIT_CONFIG_* entries stay
 
 
-def test_a_configured_fsmonitor_does_not_run_during_the_status_check(tmp_path):
-    """Real git in a scratch repository whose core.fsmonitor is a script that leaves a mark. `git status` with the
-    runner's environment must not run it."""
+def test_the_runner_refuses_git_status_and_git_diff(tmp_path):
+    runner = sf.ReadOnlyRunner(lambda a, t, env=None: (0, "", ""))
+    for sub in ("status", "diff"):
+        with pytest.raises(sf.NotReadOnly):
+            runner(["git", "-C", "/x", sub], network=False)
+
+
+def test_a_clone_with_a_filter_a_fsmonitor_and_hooks_never_runs_them_during_the_freshness_check(tmp_path):
+    """Real git in a scratch repository whose own config names a clean filter, a textconv driver, an fsmonitor program
+    and a hooks directory, each writing a mark. The control shows `git status` writes it; the dirty check must not."""
     import subprocess
     repo = tmp_path / "repo"
     repo.mkdir()
-    mark = tmp_path / "fsmonitor-ran"
-    hook = tmp_path / "fsmonitor.sh"
-    hook.write_text(f"#!/bin/sh\ntouch {mark}\nexit 1\n")
-    hook.chmod(0o755)
+    mark = tmp_path / "RAN"
+    writer = tmp_path / "writer.sh"
+    writer.write_text(f"#!/bin/sh\necho ran >> {mark}\ncat\n")
+    writer.chmod(0o755)
     plain = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    for argv in (["git", "init", "-q", str(repo)], ["git", "-C", str(repo), "config", "core.fsmonitor", str(hook)]):
-        subprocess.run(argv, check=True, env=plain, capture_output=True, timeout=30)
-    subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], env=plain, capture_output=True, timeout=30)
-    assert mark.exists(), "the scratch hook should run under plain git; otherwise this test proves nothing"
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=plain, capture_output=True, timeout=30)
+    (repo / "a.txt").write_text("one\n")
+    for argv in (["add", "-A"], ["commit", "-q", "-m", "x"]):
+        subprocess.run(git + argv, check=True, env=plain, capture_output=True, timeout=30)
+    for key in ("filter.evil.clean", "filter.evil.smudge", "diff.evil.textconv", "core.fsmonitor"):
+        subprocess.run(git + ["config", key, str(writer)], check=True, env=plain, capture_output=True, timeout=30)
+    subprocess.run(git + ["config", "core.hooksPath", str(tmp_path / "hooks")], check=True, env=plain,
+                   capture_output=True, timeout=30)
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    (repo / ".git" / "info" / "attributes").write_text("* filter=evil diff=evil\n")
+    (repo / "a.txt").write_text("two, and longer\n")                 # modified: git status would hash it
+    subprocess.run(git + ["status", "--porcelain"], env=plain, capture_output=True, timeout=30)
+    assert mark.exists(), "the scratch filter should run under plain git; otherwise this test proves nothing"
     mark.unlink()
     runner = sf.ReadOnlyRunner(REAL_RAW_RUN, environ=plain)
-    rc, _, err = runner(["git", "-C", str(repo), "status", "--porcelain"], network=False)
-    assert rc == 0, err
-    assert not mark.exists()
+    got = sf.check_clone(repo, source="s", runner=runner, cache=sf.Cache(tmp_path / "c.json"),
+                         update=lambda *a, **k: "")
+    assert got.dirty is True and not mark.exists()
 
 
 def test_a_timed_out_call_leaves_no_process_of_its_group_behind(tmp_path):
@@ -741,3 +764,21 @@ def test_a_timed_out_call_leaves_no_process_of_its_group_behind(tmp_path):
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def test_a_walk_that_was_cut_leaves_the_dirty_state_unknown_not_clean(tmp_path, monkeypatch):
+    from orchard import ttlang_reference
+    root, st = skills_repo(tmp_path, head=MAIN)
+    (root / "other.txt").write_text("x\n")
+    (root / "more.txt").write_text("y\n")
+    monkeypatch.setattr(ttlang_reference, "MAX_ENTRIES", 1)
+    got = check_skills(tmp_path, FakeSys({root: st}, {SKILLS_URL: MAIN}), root)
+    assert got.dirty is None
+
+
+def test_the_runner_does_not_pass_on_variables_that_point_git_at_another_repository():
+    seen = []
+    runner = sf.ReadOnlyRunner(lambda a, t, env=None: seen.append(env) or (0, "", ""),
+                               environ={name: "/elsewhere" for name in sf.REDIRECTING_GIT_VARS} | {"PATH": "/usr/bin"})
+    runner(["git", "-C", "/x", "rev-parse", "HEAD"], network=False)
+    assert seen[0]["PATH"] == "/usr/bin" and not set(sf.REDIRECTING_GIT_VARS) & set(seen[0])

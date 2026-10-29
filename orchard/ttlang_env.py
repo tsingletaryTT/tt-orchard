@@ -98,7 +98,8 @@ def head_sha(env: KEnv) -> str | None:
             return None
     except OSError:                      # a directory that cannot be searched has no readable checkout
         return None
-    rc, out, _ = env.run(["git", "-C", str(env.src_dir), "rev-parse", "HEAD"], 30)
+    from orchard import ttlang_reference
+    rc, out, _ = env.run(["git", "-C", str(env.src_dir), "rev-parse", "HEAD"], 30, ttlang_reference.git_env(env))
     return out.strip() if rc == 0 and out.strip() else None
 
 
@@ -281,8 +282,11 @@ def verify(env: KEnv, *, allow_pin_mismatch: bool = False) -> Result:
     if dirty is None:
         return Result("verify", FAIL, f"git could not say whether the files verify runs are as the pinned commit has "
                                       f"them in {env.src_dir}, so none of them is run")
-    bad = [f"{p} ({dirty[p]})" for p in needed if dirty.get(p) in ("modified", "untracked", "unreadable")]
+    bad = [f"{p} ({dirty[p]})" for p in needed if dirty.get(p) in ("modified", "untracked", "unreadable", "unchecked")]
     bad += [f"{p} (not in the commit)" for p in needed if p not in tracked]
+    # a link or an unreadable or oversized walk anywhere on the way to the programs: nothing is run
+    bad += [f"{p} ({v})" for p, v in sorted(dirty.items()) if v in ("link", "too many") or
+            (v == "unreadable" and p.split(":")[0] in ("examples", "docs"))]
     if bad:
         return Result("verify", FAIL, f"{', '.join(bad)} in {env.src_dir} is not as the pinned commit has it; nothing "
                                       "from it is run. Restore the file or move the checkout aside")
