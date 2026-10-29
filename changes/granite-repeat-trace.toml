@@ -1,0 +1,3 @@
+target = "0.9.64"
+summary = "Granite: repeat copies removed and decode traced; kernel readout modes 3 to 5% faster than composed when traced"
+pr = 238
