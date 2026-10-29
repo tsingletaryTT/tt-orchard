@@ -1,0 +1,3 @@
+target = "0.9.67"
+summary = "Thirty readers of outside files now read through safeio (strict JSON, size cap, no FIFO block); release rollback, linked-worktree dirty check, trial archive and virtual spend reporting fixed."
+pr = 249

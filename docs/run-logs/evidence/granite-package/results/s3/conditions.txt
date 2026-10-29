@@ -1,0 +1,12 @@
+start 2026-10-29T16:04:53-07:00 load 36.39 24.78 20.82 36/3279 1731077
+selftest-before rc=0
+first start 2026-10-29T16:05:04-07:00
+ready after 627 s (download of the weights and load)
+{"event": "ready", "model": "ibm-granite/granite-4.0-h-1b", "host": "127.0.0.1", "port": 20110, "context": 2048, "ssd": "composed", "traced": true, "ssd_precision": "fp32", "load_s": 1.9, "pid": 1732059}
+smoke rc=0 2026-10-29T16:16:16-07:00
+selftest-after rc=1
+2.8G	<pkg-run-dir>/fresh/hf-home
+bench start 2026-10-29T16:16:22-07:00 load 4.26 6.51 12.91 2/2508 1846154
+bench-fast rc=0 2026-10-29T16:24:09-07:00 load 30.95 23.13 18.38 33/3296 1933015
+bench-untraced rc=0 2026-10-29T16:25:33-07:00 load 36.10 26.77 20.08 39/3347 1939931
+end 2026-10-29T16:25:33-07:00

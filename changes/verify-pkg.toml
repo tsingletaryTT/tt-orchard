@@ -1,0 +1,3 @@
+target = "0.9.67"
+summary = "verify-package command, boards preflight row, and Node tests for the page script"
+pr = 248

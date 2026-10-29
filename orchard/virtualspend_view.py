@@ -53,13 +53,15 @@ def _entries(source, budget: list, base: Path):
                     if entry.is_dir(follow_symlinks=False):
                         yield entry.name, base / entry.name
                 except OSError:
+                    budget.append("cut")                             # an entry that cannot be examined may be a run folder: the listing is incomplete
                     continue
     except OSError:
+        budget.append("cut")                                         # a folder that cannot be listed is not an empty one (issue 149)
         return
 
 
 def discover(runs_root: Path, pin=None) -> tuple[list[tuple[str, Path]], bool]:
-    """((row name, directory) for each run folder and each kernel-probe output, True when the listing was cut short). Links are left
+    """((row name, directory) for each run folder and each kernel-probe output, True when the listing was cut short or a folder could not be listed). Links are left
     out. With a `pin` (see `virtualspend.open_pin`) the folders are listed through descriptors opened beneath it, so a runs folder
     replaced after it was pinned does not change what is listed; without one the path is used. The entry budget MAX_NAMES is applied
     while the folders are streamed, before anything is sorted, so it bounds the work and the memory of discovery. Which entries make it
@@ -83,6 +85,7 @@ def discover(runs_root: Path, pin=None) -> tuple[list[tuple[str, Path]], bool]:
                 try:
                     inner = pin.child((PROBE_PARENT,))
                 except OSError:
+                    budget.append("cut")                             # the probe folder could not be opened: its runs are missing, and the answer says so
                     continue
                 try:
                     out.extend((f"{PROBE_PARENT}/{n}", p) for n, p in sorted(_entries(inner.fd, budget, path)))

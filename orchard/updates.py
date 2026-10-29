@@ -20,6 +20,7 @@ reaches a row. The Hugging Face token is read from the environment, sent only to
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -88,7 +89,7 @@ def clean(x, n: int = TEXT_MAX) -> str:
 
 def load_config(path=None) -> dict:
     """DEFAULTS, overridden by a TOML file (default config/updates.toml beside the checkout, when it exists). Unknown keys fail."""
-    cfg = json.loads(json.dumps(DEFAULTS))
+    cfg = copy.deepcopy(DEFAULTS)          # a copy of a constant; this module reads no JSON file, so it is not a reader for the hostile-input registry
     p = Path(path) if path else Path(__file__).resolve().parent.parent / "config" / "updates.toml"
     if not p.exists():
         if path:

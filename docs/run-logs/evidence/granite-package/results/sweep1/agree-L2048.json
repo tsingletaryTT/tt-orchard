@@ -1,0 +1,64 @@
+{
+ "cmd": "agree",
+ "max_len": 2048,
+ "ssd": "composed",
+ "traced": true,
+ "load_s": 2.1,
+ "prompts": [
+  {
+   "prompt_index": 0,
+   "prompt_tokens": 5,
+   "rel_l2_mean": 0.007405657321214676,
+   "rel_l2_max": 0.00791449286043644,
+   "top1": 1.0,
+   "free_run_prefix": 3,
+   "free_run_len": 3
+  },
+  {
+   "prompt_index": 1,
+   "prompt_tokens": 16,
+   "rel_l2_mean": 0.018218642100691795,
+   "rel_l2_max": 0.058262795209884644,
+   "top1": 1.0,
+   "free_run_prefix": 24,
+   "free_run_len": 24
+  },
+  {
+   "prompt_index": 2,
+   "prompt_tokens": 7,
+   "rel_l2_mean": 0.0073002236895263195,
+   "rel_l2_max": 0.025755275040864944,
+   "top1": 0.9166666865348816,
+   "free_run_prefix": 14,
+   "free_run_len": 24
+  },
+  {
+   "prompt_index": 3,
+   "prompt_tokens": 12,
+   "rel_l2_mean": 0.013769290409982204,
+   "rel_l2_max": 0.027856582775712013,
+   "top1": 0.9583333134651184,
+   "free_run_prefix": 11,
+   "free_run_len": 24
+  }
+ ],
+ "long": {
+  "tokens": 1024,
+  "chip_s": 28.113572120666504,
+  "chip_vs_fp32": {
+   "rel_l2_mean": 0.041384220123291016,
+   "rel_l2_max": 0.6161776185035706,
+   "top1": 0.9550341963768005,
+   "top1_last_half": 0.94921875,
+   "rel_l2_mean_last_half": 0.059208836406469345
+  },
+  "bf16_cpu_vs_fp32": {
+   "rel_l2_mean": 0.008390320464968681,
+   "rel_l2_max": 0.0974595844745636,
+   "top1": 0.9726295471191406,
+   "top1_last_half": 0.974609375,
+   "rel_l2_mean_last_half": 0.010094993747770786
+  },
+  "chip_vs_bf16_cpu_top1": 0.9550341963768005
+ }
+}

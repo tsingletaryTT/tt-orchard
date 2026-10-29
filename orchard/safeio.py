@@ -46,7 +46,7 @@ from typing import Callable, Iterator, Sequence
 __all__ = [
     "SafeReadError", "ReadFailed", "PathRefused", "NotRegular", "TooLarge", "ChangedWhileReading", "NotText", "NotJson",
     "WrongType", "BadValue", "BadHeader", "IncompleteScan", "AppendBroken",
-    "read_bytes", "read_json", "parse_json_bytes", "open_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
+    "read_bytes", "read_prefix", "read_json", "read_jsonl", "resolved", "parse_json_bytes", "open_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
     "ScanResult", "atomic_write", "append_line", "finite_number", "whole_number", "bounded_str", "safetensors_header",
     "SafetensorsHeader", "TensorEntry", "DTYPE_BITS",
 ]
@@ -391,6 +391,35 @@ def read_bytes(path, *, max_bytes: int, anchor: int | None = None) -> bytes:
         os.close(fd)
 
 
+def read_prefix(path, *, max_bytes: int) -> bytes:
+    """The bytes of the regular file at `path` up to the size it had when it was opened, for a file that another process appends to
+    (a ledger). Opened as `read_bytes` opens (`O_NOFOLLOW | O_NONBLOCK`, `fstat` on the same descriptor, regular files only, a size over
+    `max_bytes` is `TooLarge` before any read). Bytes appended during the read are not returned and are not an error, because an append
+    leaves the earlier bytes unchanged. A file that is cut shorter than its initial size during the read is `ChangedWhileReading`.
+    A writer that rewrites bytes in place is not seen; use `read_bytes` for a file that is replaced as a whole."""
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+        raise ValueError("max_bytes must be a whole number, zero or more")
+    fd = _open_for_read(path, None)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise NotRegular("the file is not a regular file")
+        if st.st_size > max_bytes:
+            raise TooLarge(f"the file is larger than {max_bytes} bytes")
+        chunks, total = [], 0
+        while total < st.st_size:
+            chunk = os.pread(fd, min(_READ_CHUNK, st.st_size - total), total)
+            if not chunk:
+                raise ChangedWhileReading("the file was cut shorter while it was read")
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    except OSError as exc:
+        raise _os_failure(exc) from None
+    finally:
+        os.close(fd)
+
+
 # ------------------------------------------------------------------------------------------------------------- JSON
 
 class _Refuse(Exception):
@@ -515,6 +544,38 @@ def read_json(path, *, max_bytes: int, anchor: int | None = None, max_depth: int
     does not hold the file's content."""
     return parse_json_bytes(read_bytes(path, max_bytes=max_bytes, anchor=anchor), max_bytes=max_bytes,
                             max_depth=max_depth, max_int_digits=max_int_digits, expect=expect)
+
+
+def resolved(path) -> str:
+    """`path` with every link in it followed, for a file that is a link by design: a Hugging Face cache snapshot holds each file as a link into
+    the cache's blobs directory, and `read_json` refuses a link in the last component. Read the result with `read_json`. It never raises: a
+    loop or a missing target comes back as a path that the read then refuses, and a link to a device is refused by the regular-file check."""
+    try:
+        return os.path.realpath(os.fspath(path))
+    except (OSError, ValueError, TypeError):
+        return os.fspath(path) if isinstance(path, (str, bytes)) or hasattr(path, "__fspath__") else ""
+
+
+def read_jsonl(path, *, max_bytes: int, anchor: int | None = None, max_depth: int = MAX_JSON_DEPTH,
+               max_int_digits: int = MAX_INT_DIGITS, expect=None) -> list:
+    """The JSON values on the lines of the regular file at `path`, in order. Blank lines are skipped.
+
+    The file is read with `read_bytes` (so a FIFO, a link, a device and a file over `max_bytes` are refused before anything is
+    parsed) and split on the byte `\\n` only (`str.splitlines` also cuts at U+2028, U+2029 and U+0085, which a writer leaves
+    raw inside a JSON string). Each line is parsed with `parse_json_bytes`, so every guard of `read_json` applies to every
+    line, and `expect` is the type each line's value must have. The first bad line fails the whole read with a SafeReadError
+    whose reason names the line number and never holds its content."""
+    data = read_bytes(path, max_bytes=max_bytes, anchor=anchor)
+    rows = []
+    for number, line in enumerate(data.split(b"\n"), start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(parse_json_bytes(line, max_bytes=max_bytes, max_depth=max_depth, max_int_digits=max_int_digits,
+                                         expect=expect))
+        except SafeReadError as exc:
+            raise type(exc)(f"line {number}: {exc.reason}") from None
+    return rows
 
 
 # ------------------------------------------------------------------------------------------------------ directory scan

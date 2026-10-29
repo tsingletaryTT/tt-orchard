@@ -27,6 +27,10 @@ import json
 import sys
 from pathlib import Path
 
+from orchard import safeio
+
+MAX_SAMPLES_BYTES = 32 * 1024 * 1024    # choice: a real samples file is a few megabytes; a larger one is not read
+
 
 def samples_file(run_dir, phase: str) -> Path:
     found = sorted((Path(run_dir) / phase / "results").rglob("samples_*.jsonl"), key=lambda p: p.name)
@@ -36,12 +40,14 @@ def samples_file(run_dir, phase: str) -> Path:
 
 
 def read_samples(run_dir, phase: str) -> list[dict]:
-    rows = []
-    # Split on "\n" only. str.splitlines() also cuts at U+2028, U+2029 and U+0085, which lm-eval leaves raw inside a JSON string.
-    for line in samples_file(run_dir, phase).read_text(encoding="utf-8").split("\n"):
-        if line.strip():
-            rows.append(json.loads(line))
-    return rows
+    # `safeio.read_jsonl` splits on "\n" only (str.splitlines() also cuts at U+2028, U+2029 and U+0085, which lm-eval leaves raw inside
+    # a JSON string) and refuses a FIFO, a link, a directory, a file over MAX_SAMPLES_BYTES, NaN, Infinity, deep nesting and long
+    # integers. Every refusal is a ValueError, the documented error (issues 135 to 139).
+    path = samples_file(run_dir, phase)
+    try:
+        return safeio.read_jsonl(path, max_bytes=MAX_SAMPLES_BYTES)
+    except safeio.SafeReadError as exc:
+        raise ValueError(f"cannot read {path.name}: {exc.reason}") from exc
 
 
 def _empty(sample: dict) -> bool:

@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, bus, nearest
+from orchard import audio_reference_env, audio_runtime, bus, nearest, safeio
 from orchard import text_runtime
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -162,6 +162,8 @@ from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
                               TurnRepeat, Watchdog)
+
+MAX_SWAP_CONFIG_BYTES = 1024 * 1024    # choice: a stage's swap_config.json is a few kilobytes (issue 137)
 
 WHO = os.environ.get("ORCHARD_LEASE_WHO") or "orchard:supervisor"       # the name gozer shows for the supervisor's leases; an operator's session may set its own
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
@@ -2039,8 +2041,8 @@ class Supervisor:
     def _container_config(stage_dir: Path) -> bool:
         """Does the stage's swap_config.json name a container package (issue 60)? An unreadable or missing config is not one."""
         try:
-            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            cfg = safeio.read_json(stage_dir / "swap_config.json", max_bytes=MAX_SWAP_CONFIG_BYTES)
+        except safeio.SafeReadError:
             return False
         return isinstance(cfg, dict) and "package" in cfg
 
@@ -2387,7 +2389,7 @@ class Supervisor:
     def _set_stale_trial_outputs_aside(stage_dir: Path) -> None:
         """A skipped decision says no variant was served. A trial killed after its script wrote `trial-result.json` and before the supervisor wrote
         `test-result.json` leaves outputs that the stage 2 gate would read as a variant and then refuse the decision for (issue 194). Move them into
-        `sampling-trial/stale/`, which no reader looks at, so the evidence is kept. A trial whose test record exists is not touched."""
+        `sampling-trial/stale/` (or `stale-1`, `stale-2` when an earlier call already made one), which no reader looks at, so the evidence is kept. A trial whose test record exists is not touched."""
         trial_dir = stage_dir / sampling.TRIAL_DIR
         if (trial_dir / "test-result.json").exists():
             return
@@ -2395,9 +2397,16 @@ class Supervisor:
         leftovers = [x for x in leftovers if x.exists()]
         if not leftovers:
             return
-        stale = trial_dir / "stale"
-        shutil.rmtree(stale, ignore_errors=True)
-        stale.mkdir()
+        # Never remove an archive that an earlier, interrupted call made: it can hold the only copy of the trial result (issue 196). Each call
+        # moves into an unused name (stale, stale-1, stale-2, ...), and `mkdir` without `exist_ok` raises when the name is taken.
+        k, stale = 0, trial_dir / "stale"
+        while True:
+            try:
+                stale.mkdir()
+                break
+            except FileExistsError:
+                k += 1
+                stale = trial_dir / f"stale-{k}"
         for x in leftovers:
             os.replace(x, stale / x.name)
 
@@ -2602,8 +2611,8 @@ class Supervisor:
     @staticmethod
     def _swap_cache(stage_dir: Path) -> list[str]:
         try:
-            cache = json.loads((stage_dir / "swap_config.json").read_text()).get("tt_cache")
-        except (OSError, ValueError, AttributeError):
+            cache = safeio.read_json(stage_dir / "swap_config.json", max_bytes=MAX_SWAP_CONFIG_BYTES, expect=dict).get("tt_cache")
+        except safeio.SafeReadError:
             return []
         return [cache] if isinstance(cache, str) and cache else []
 

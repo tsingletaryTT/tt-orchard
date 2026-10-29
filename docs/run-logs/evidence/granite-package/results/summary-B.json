@@ -1,0 +1,198 @@
+{
+ "floor_tok_s": 175.2,
+ "decode": {
+  "mean": 34.34669186347731,
+  "min": 34.234688090363555,
+  "max": 34.48793858874313
+ },
+ "decode_label": "5 repeats after 1 warm-up, one process",
+ "decode_untraced": {
+  "mean": 24.039687704645733,
+  "min": 23.65674542394092,
+  "max": 24.363784949562554
+ },
+ "decode_untraced_label": "5 repeats after 1 warm-up, one process",
+ "context": 2048,
+ "first_token_s_12": 0.32749009132385254,
+ "prefill": [
+  {
+   "n": 128,
+   "tok_s": 37.39362365516879,
+   "label": "median of 3 runs"
+  },
+  {
+   "n": 512,
+   "tok_s": 37.436521479670645,
+   "label": "median of 3 runs"
+  },
+  {
+   "n": 1024,
+   "tok_s": 37.44718508194622,
+   "label": "median of 3 runs"
+  }
+ ],
+ "prefill_every_step": [
+  {
+   "n": 128,
+   "tok_s": 34.31684505702632
+  },
+  {
+   "n": 512,
+   "tok_s": 34.37211727980562
+  },
+  {
+   "n": 1024,
+   "tok_s": 34.38677214788596
+  }
+ ],
+ "context_sweep": [
+  {
+   "max_len": 512,
+   "mean": 35.44921320175671,
+   "label": "5 repeats after 1 warm-up, one process"
+  },
+  {
+   "max_len": 1024,
+   "mean": 34.786299940236624,
+   "label": "5 repeats after 1 warm-up, one process"
+  },
+  {
+   "max_len": 4096,
+   "mean": 32.35662415588756,
+   "label": "5 repeats after 1 warm-up, one process"
+  }
+ ],
+ "boot": {
+  "first_token_s": 0.634329080581665,
+  "decode_tok_s": 34.4123,
+  "label": "one request each (decode: a 64-token completion), after the server's load"
+ },
+ "decode_repeat_in_other_session": {
+  "mean": 34.35167677670451,
+  "min": 34.2744744434166,
+  "max": 34.439607399278096
+ },
+ "agreement": {
+  "floor": {
+   "rel_l2": [
+    0.004740937612950802,
+    0.01211125310510397,
+    0.004253352526575327,
+    0.011117835529148579
+   ],
+   "top1": [
+    1.0,
+    1.0,
+    0.875,
+    1.0
+   ],
+   "prefix": [
+    3,
+    24,
+    8,
+    24
+   ]
+  },
+  "chip": {
+   "rel_l2": [
+    0.006560212001204491,
+    0.018021656200289726,
+    0.00761692738160491,
+    0.01842891238629818
+   ],
+   "top1": [
+    1.0,
+    1.0,
+    0.9166666865348816,
+    1.0
+   ],
+   "prefix": [
+    3,
+    24,
+    13,
+    24
+   ]
+  }
+ },
+ "long": {
+  "tokens": 2048,
+  "chip": {
+   "rel_l2_mean": 0.01654667779803276,
+   "rel_l2_max": 0.2563013434410095,
+   "top1": 0.9838788509368896,
+   "top1_last_half": 0.990234375,
+   "rel_l2_mean_last_half": 0.019680960103869438
+  },
+  "floor": {
+   "rel_l2_mean": 0.01039961539208889,
+   "rel_l2_max": 0.13787777721881866,
+   "top1": 0.9780166149139404,
+   "top1_last_half": 0.9833984375,
+   "rel_l2_mean_last_half": 0.01240695733577013
+  },
+  "chip_top1_vs_bf16_cpu": 0.9775280952453613,
+  "rel_l2_by_128_positions": {
+   "chip": [
+    0.008767320339757134,
+    0.014244041632991866,
+    0.011345096538207144,
+    0.009664361627073959,
+    0.013748800605753786,
+    0.018496244032576215,
+    0.015864057015278377,
+    0.015137285230593989,
+    0.020620371273253113,
+    0.015266436190358945,
+    0.03189693466629251,
+    0.024755854128670762,
+    0.019789195563134854,
+    0.018050977907478227,
+    0.013574830025390838,
+    0.013501252381380384
+   ],
+   "bf16_cpu": [
+    0.006333974861263414,
+    0.00834050038793066,
+    0.006940240524272667,
+    0.0051047527813352644,
+    0.00875323376567394,
+    0.01194148528156802,
+    0.00968083292900701,
+    0.010009835517848842,
+    0.010197410580076394,
+    0.011102599779405864,
+    0.023165617871200084,
+    0.016315788372594398,
+    0.009525257300992962,
+    0.011777777230236097,
+    0.008372615511689219,
+    0.008819600279391633
+   ]
+  }
+ },
+ "numbers_note": "Load averages of the host during each session are in the evidence files.",
+ "agreement_note": "The relative L2 of this package is 1.4 to 1.8 times that of the bf16 CPU run on the four prompts. Top-1 agreement equals the bf16 CPU run's on prompts 0, 1 and 3 and is higher on prompt 2 (one position of 24), and the first difference from the reference comes at the same token on prompts 0, 1 and 3 and later on prompt 2. Four prompts of 24 tokens do not support a claim about other text.",
+ "long_note": "The sequence is 2048 tokens: the model's own card followed by an English project log. Mean relative L2 of this package is 1.6 times the bf16 CPU run's, the largest single-position relative L2 is 0.26 (bf16 CPU run: 0.14), and top-1 agreement with fp32 is 0.984 against 0.978. One sequence of one kind of text.",
+ "prefill_note": "Prefill is a loop of decode steps, one prompt token per step, with the logits read back after the last prompt token only: 37.4 tok/s for a 128-token prompt, 37.4 for 512 and 37.4 for 1,024 (34.4 when the logits are read at every step). A 1,000-token prompt takes about 27 seconds before the first token. A chunked scan for the prompt is not built. Through the server, a 1,481-token prompt took 39.6 seconds to the first token.",
+ "limitations": [
+  "One chip with bf16 weights. One request runs at a time; there is no batching and no multi-chip mode.",
+  "The context limit is 2048 tokens for prompt plus output. The model supports 131,072.",
+  "Prompts are processed one token per step (37 tokens per second), so a long prompt takes tens of seconds before the first token.",
+  "The Mamba-2 state, the step size and the decay are kept in float32 on the chip. `--ssd-precision bf16` is about 8% faster and less accurate on long sequences (see evidence/long1024-agree-bf16.json: mean relative L2 0.041 on a 1,024-token sequence against 0.013 with float32).",
+  "Tool calls and document inputs of the chat template are refused. Temperature above 0 samples on the host; sampled output was not evaluated.",
+  "The server has no sign-in and binds 127.0.0.1 only.",
+  "Decode speed is 20% of the one-die bf16 floor."
+ ],
+ "not_tested": [
+  "Answer quality on any task or benchmark. Agreement was measured on four short prompts and one long sequence only.",
+  "Several requests arriving together, long runs, and restarts.",
+  "Any hardware other than one chip of a Blackhole p300c board, and any tt-metal build other than v0.80.0.",
+  "A tt-model build of `tt-model.yaml` (it is a draft that was not built) and the tt-model catalog.",
+  "Contexts above the limit."
+ ],
+ "kernel_modes": {
+  "composed_bf16": 37.08238509947714,
+  "state_full_ro_bf16": 38.76929120363783,
+  "text": "The state update and the readout can run as tt-lang kernels written by a local coder model (`--ssd state_full`, `state_full_ro`, `bcast`, `bcast_ro`; they need tt-lang importable). They keep the state in bf16. Measured with this package's runtime at a 2048-position context, traced, in one session (one run each): composed with a bf16 state 37.1 tok/s, `state_full_ro` 38.8 tok/s. They are not the default, and their agreement was not re-checked with this runtime."
+ }
+}
