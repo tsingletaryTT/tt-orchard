@@ -7,16 +7,24 @@ import pytest
 
 from orchard import granite_package as gp
 
+def _sess(name, load, mean):
+    return {"name": name, "when": f"test, host load {load}", "load": load, "prompt_tokens": 12, "decode": {"mean": mean, "min": mean - 1, "max": mean + 1},
+            "decode_untraced": {"mean": 20.0, "min": 19.0, "max": 21.0}, "ttft_s": 0.3, "prefill": [(128, 40.0), (512, 39.0)],
+            "server": {"first_token_s": 0.4, "decode_tok_s": 33.0, "long_prompt_tokens": 1481, "long_prompt_first_token_s": 39.0},
+            "evidence": "`evidence/bench.json`", "server_evidence": "`evidence/smoke.json`"}
+
+
+_L = {"rel_l2_mean": 0.0165, "rel_l2_max": 0.256, "top1": 0.984}
+_F = {"rel_l2_mean": 0.0104, "rel_l2_max": 0.138, "top1": 0.978}
 SUMMARY = {
-    "floor_tok_s": 175.2, "decode": {"mean": 34.0, "min": 33.0, "max": 35.0}, "decode_label": "benchmark: 5 repeats after a warm-up",
-    "decode_untraced": {"mean": 20.0, "min": 19.0, "max": 21.0}, "decode_untraced_label": "benchmark: 5 repeats after a warm-up", "context": 2048,
-    "first_token_s_12": 0.3, "prefill": [{"n": 128, "tok_s": 40.0, "label": "median of 3"}], "context_sweep": [{"max_len": 512, "mean": 35.0, "label": "5 repeats"}],
-    "boot": {"first_token_s": 0.4, "decode_tok_s": 33.0, "label": "one request"}, "numbers_note": "Test note.",
-    "agreement": {"floor": {"rel_l2": [0.0047, 0.0121, 0.0043, 0.0111], "top1": [1.0, 1.0, 0.875, 1.0], "prefix": [3, 24, 8, 24]},
-                  "chip": {"rel_l2": [0.0066, 0.018, 0.0076, 0.0184], "top1": [1.0, 1.0, 0.917, 1.0], "prefix": [3, 24, 13, 24]}},
-    "agreement_note": "Four prompts only.", "long": {"tokens": 2048, "chip": {"rel_l2_mean": 0.0134, "rel_l2_max": 0.16, "top1": 0.978}, "floor": {"rel_l2_mean": 0.0084, "rel_l2_max": 0.097, "top1": 0.973}},
-    "long_note": "One sequence.", "prefill_note": "Prefill is a loop of decode steps.", "limitations": ["Limit one.", "Limit two."], "not_tested": ["Not tested one."],
-    "kernel_modes": {"text": "Optional kernel modes exist; see the run log."},
+    "version": "0.2.0", "floor_tok_s": 175.2, "context": 2048, "sessions": [_sess("session 1", 3.0, 34.0), _sess("session 2", 20.0, 25.0)],
+    "numbers_note": "Test note.", "sessions_note": "Sessions differ.",
+    "agreement_short": {"floor": {"rel_l2": [0.0047, 0.0121, 0.0043, 0.0111], "top1": [1.0, 1.0, 0.875, 1.0], "prefix": [3, 24, 8, 24]},
+                        "chip": {"rel_l2": [0.0066, 0.018, 0.0076, 0.0184], "top1": [1.0, 1.0, 0.917, 1.0], "prefix": [3, 24, 13, 24]}},
+    "agreement_note": "Four prompts only.", "agreement_long": [{"kind": "prose", "tokens": 2048, "chip": _L, "floor": _F, "first_1024": {"chip_vs_fp32": _L, "bf16_cpu_vs_fp32": _F}}],
+    "long_note": "One sequence of each kind.", "prefill_note": "Prefill is a loop of decode steps.", "context_sweep": [{"max_len": 512, "mean": 35.0}],
+    "limits": ["Limit one.", "Limit two."], "not_tested": ["Not tested one."], "kernel_modes": {"text": "Optional kernel modes exist; see the run log."},
+    "changelog": ["A change."],
 }
 
 
@@ -167,3 +175,45 @@ def test_self_test_prints_one_line_per_check_and_does_not_open_the_device(tmp_pa
 def test_run_sh_dispatches_self_test_before_starting_the_server(staged):
     text = (staged / "run.sh").read_text()
     assert "--self-test" in text and text.index("--self-test") < text.index("exec python server/serve.py")
+
+
+def test_sha256sums_catches_a_changed_unrecorded_file_and_an_extra_file(staged):
+    (staged / "tools" / "smoke.py").write_text((staged / "tools" / "smoke.py").read_text() + "\n# changed\n")
+    (staged / "extra.txt").write_text("x")
+    out = problems(staged)
+    assert any("SHA256SUMS: tools/smoke.py" in x for x in out) and any("SHA256SUMS does not list extra.txt" in x for x in out)
+
+
+def test_version_must_be_in_card_record_and_changelog(staged):
+    (staged / "README.md").write_text((staged / "README.md").read_text().replace("Version 0.2.0", "Version 0.1.0"))
+    (staged / "CHANGELOG.md").write_text("# Changelog\n")
+    out = problems(staged)
+    assert any("Version 0.2.0" in x for x in out) and any("CHANGELOG.md" in x for x in out)
+
+
+def test_card_has_the_machine_readable_measured_rows():
+    card = gp.render_card(SUMMARY, "")
+    assert "| Decode speed, `chat` prompt (12 tokens, traced), tok/s | 34.0 tok/s | measured |" in card
+    assert "| Time to first token, `chat` prompt (12 tokens) | 0.30 s | measured |" in card
+    assert "| top1 agreement with the fp32 CPU reference, mean of four prompts | 0.979 fraction | measured |" in card
+    assert "## Limits" in card and card.index("## Limits") < card.index("## Not tested")
+
+
+def test_self_test_treats_a_port_in_time_wait_as_free(tmp_path):
+    """Right after a server stops, its port is in TIME_WAIT. The server binds with SO_REUSEADDR, so the self-test must report the port free."""
+    import socket
+    import subprocess
+    import sys
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    c = socket.create_connection(("127.0.0.1", port))
+    conn, _ = srv.accept()
+    conn.close()                    # the side that closes first keeps the TIME_WAIT
+    c.close()
+    srv.close()
+    r = subprocess.run([sys.executable, str(gp.ROOT / "pkgsrc" / "tools" / "selftest.py"), "--port", str(port)],
+                       env={**__import__("os").environ, "HF_HOME": str(tmp_path), "TT_METAL_HOME": ""}, capture_output=True, text=True, timeout=120)
+    assert any(x.startswith("ok") and "port:" in x for x in r.stdout.splitlines()), r.stdout

@@ -50,6 +50,7 @@ def main():
     free = shutil.disk_usage(probe).free / 1e9
     line("ok" if have or free >= NEED_GB else "FAIL", "free disk", f"{free:.0f} GB free where the cache lives" + ("" if have or free >= NEED_GB else f" (need about {NEED_GB} GB for the download)"))
     s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)         # as the server does: a port in TIME_WAIT after a stop is usable
     try:
         s.bind(("127.0.0.1", a.port))
         line("ok", "port", f"127.0.0.1:{a.port} is free")
