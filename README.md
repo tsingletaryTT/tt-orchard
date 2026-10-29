@@ -1498,6 +1498,22 @@ uv pip install --python <pair-venv>/bin/python \
 <pair-venv>/bin/tt-lang-setup-external-tt-metal --tt-metal-dir <host-tt-metal-tree>    # prints exports; apply them
 ```
 
+`tt-orchard kernel-env --pair` prints these commands from the constants in `orchard/ttlang_pin.py` and then reports what the venv holds, read
+through the venv's own python with `importlib.metadata` (no import of `ttl` or `ttnn`, no device). It runs nothing that changes anything unless
+`--apply` is given; `--apply` downloads the two wheels, compares their sha256 with the pin before it installs anything, makes the venv with
+`uv venv`, installs the checked wheel files and records the setup tool's exports in `<venv>/orchard-pair-exports.sh`. `--check` only reports
+the venv and exits 2 when it is missing or is not the pair. `--pair-venv-dir` moves the venv (default `$ORCHARD_PAIR_VENV`, else
+`<cache root>/ttlang-pair/venv` with the cache root `$ORCHARD_CACHE_ROOT` or `~/.cache/tt-orchard`), `--pair-download-dir` moves the wheels and
+`--tt-metal-dir` names the host tree.
+
+The kernel probe's hardware phase runs in that venv when it exists and has its exports file, with those exports put in front of its python
+(`env TT_METAL_HOME=... PYTHONPATH=... LD_LIBRARY_PATH=... python`). `--shared-python` still wins. When the venv is missing the probe warns and runs
+on the old shared venv (tt-lang 1.1.6).
+
+`scripts/ttlang_build_info.py` writes `ttl.build_info()` as the JSON that `tt-orchard ttlang-consistency --build-info-file FILE` reads
+(`tt_lang_commit`, `tt_metal_commit`, optionally `version` and `tt_metal_tag`). Run it inside the pair venv under a gozer lease, since the call
+opens the runtime. With the file the `hardware tree` row compares the two commits with the pin; without it the row is a todo.
+
 Compare the downloaded wheels' sha256 with `WHEEL_SHA256` in `orchard/ttlang_pin.py`. The setup command points the venv at the host
 tree's `ttnn` (v0.80.0 was used) through `TT_METAL_HOME`, `PYTHONPATH` and `LD_LIBRARY_PATH`. The light wheel does not ship `safetensors`,
 which the Granite port needs: put a directory that links to another venv's `safetensors` at the end of `PYTHONPATH`, so the pair venv stays
@@ -2206,7 +2222,7 @@ timeout and a shared 60-second budget.
 | tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag |
 | Skills checkout | `orchard.skillsfresh` | upstream main |
 
-To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`.
+To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`. `--updates-config FILE` reads a different file.
 
 Some items must move together. The rule table is `RULES` in `orchard/updates.py`; a row that is behind names the other members
 and cites the rule.

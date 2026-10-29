@@ -1,0 +1,37 @@
+interpreter source: pair 
+{
+ "available": true,
+ "smoke_tail": [
+  "    cb_ctarg_2.pop_front(v5);",
+  "  }",
+  "  return;",
+  "}",
+  "",
+  "",
+  "============================================================",
+  "",
+  "Compiled kernel ready (compiled 3 threads)",
+  "============================================================",
+  "PASSED!",
+  "2026-10-29 11:03:21.585 | info     |    BuildKernels | JIT cache stats: 13/13 hits (100.0%) [13 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:268)",
+  "2026-10-29 11:03:21.585 | info     |    BuildKernels | JIT telemetry: 33 registered TelemetryTokens (build_cache_telemetry.cpp:325)",
+  "2026-10-29 11:03:21.594 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:528)",
+  "2026-10-29 11:03:21.594 | info     |             UMD | Closing devices in cluster (cluster.cpp:1480)",
+  "2026-10-29 11:03:21.684 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1490)",
+  "2026-10-29 11:03:21.684 | info     |             UMD | Cluster destructor started. (cluster.cpp:1211)",
+  "2026-10-29 11:03:21.684 | info     |             UMD | Cluster destructor completed. (cluster.cpp:1224)",
+  "gozer run: Resetting PCI BDFs: ['0000:03:00.0', '0000:04:00.0']",
+  "\u001b[95m Re-initializing boards after reset.... \u001b[0m"
+ ],
+ "watch": {
+  "max_quiet_s": 3.0,
+  "max_repeat": 1,
+  "quiet_limit_s": 60.0,
+  "repeat_limit": 20
+ }
+}
+1 True {"passed": false, "started": true, "category": "hw_numeric_mismatch", "first_line": "set seed0: pcc 0.249301940202713, finite True, bar 0.99", "pcc_min": 0.2490505874156952, "slope_range": [1.0008221090818237, 1.0022344742566531], "rel_l2_max": 3.8817154572225108, "sets": [{"name": "seed0", "seed": 0, "heavy_tail": false, "pcc": 0.249301940202713, "max_abs_err": 53.5, "finite": true, "rel_l2": 3.8786136105982756, "slope": 1.0014360618673324, "exp_abs_max": 53.33732986450195, "worst": [{"at": [43, 3], "expected": 0.0, "got": -53.5}, {"at": [43, 2], "expected": 0.0, "got": -53.5}, {"at": [43, 1], "expected": 0.0, "got": -53.5}]}, {"name": "seed0-tail", "seed": 0, "heavy_tail": true, "pcc": 0.2
+2 False null
+3 False null
+4 False null
+5 True {"passed": false, "started": true, "category": "compile_error", "first_line": "error: TTL subscript base must be a named value", "pcc_min": null, "slope_range": null, "rel_l2_max": null, "sets": [], "violations": [], "elapsed_s": 47.1, "watch": {"max_quiet_s": 3.0, "max_repeat": 1, "quiet_limit_s": 60.0, "repeat_limit": 20}, "device_s": 0.03}

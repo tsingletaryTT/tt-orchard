@@ -1,0 +1,8 @@
+{
+  "tt_lang_commit": "fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0",
+  "tt_metal_commit": "0e9d200db976120c129ab0deb13aa3f6d972b723",
+  "version": "1.1.10.dev20261026+light",
+  "tt_metal_tag": "v0.79.0-dev20260917",
+  "source": "ttl.build_info()",
+  "recorded_at": "2026-10-29T15:37:37Z"
+}

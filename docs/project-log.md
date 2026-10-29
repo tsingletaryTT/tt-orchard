@@ -3217,6 +3217,11 @@ Prompt (operator): "pick a model that would require a new kernel and try to brin
 - README section 5.9a gives the pair venv steps and limits; `-(-x // g)` after a thread's `grid_size` is one rule in `orchard/skills/kernel-probe.md` (file stays at 100 lines). README and site link the Granite run log and state the pair result.
 - Left open: the shared hardware venv still holds 1.1.6, and the probe's `--shared-python` default is unchanged. Nobody calls `ttl.build_info()` under a lease to feed the row yet. Issues 95 and 205 stay open.
 
+## 2026-10-29: managed pair venv, build-info record, probe on the pair (PR 240)
+- Operator instruction: "keep working the ttlang things". `tt-orchard kernel-env --pair` prints the pair venv's build commands from `orchard/ttlang_pin.py` and verifies a venv through `importlib.metadata` without importing ttl; `--apply` runs them (wheel sha256 checked before install). A real `--apply` found that the S3 index needs `--find-links`.
+- `ttlang-consistency --build-info-file` plus `scripts/ttlang_build_info.py`: one leased run wrote the record and the `hardware tree` row turned `ok`. The kernel probe's own report still shows the row as `todo`.
+- The probe's hardware phase uses the pair venv by default (exports put in front of its python), `--shared-python` wins, a missing venv warns and falls back. 11 mutations went red.
+- Reductions on the pair, 5 attempts each, seeds 2026120101 to 2026120105: rmsnorm 0 simulator passes; row_sum 2 passes, 1 compiled and ran at chip PCC 0.249, 1 did not compile. Board 1 was busy at the probe's own hardware phase, so `evidence/ttlang-next/hw_only.py` reran it. No effect is claimed. Run log: `docs/run-logs/2026-10-29-ttlang-next.md`.
 ## 2026-10-29: fusion port candidates (issue 184, PR 235)
 - Prompt: operator approved issue 184; experimental, speed over polish, one Copilot request, no iteration rounds.
 - Built `orchard/fusion_port.py` and `tt-orchard fusion-candidates`. It reads the Qwen3-Coder-Next fused bundle's code (copied out of the local image, never run), evaluates each op's own asserts against a model config and sorts the ops into three classes. Pair: Qwen3.5-35B-A3B on two dies (4 as is, 2 changed constant, 1 new code). The 80B Qwen3-Next siblings have the same dimensions as the coder, so they have nothing to port.

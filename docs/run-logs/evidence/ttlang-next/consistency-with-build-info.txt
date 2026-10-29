@@ -1,0 +1,8 @@
+tt-lang pin fec38c6de (simulator 1.1.10+gfec38c6)
+ok       checkout: <home>/orchard-src/tt-lang is at the pinned commit fec38c6de and documents specification 0.20
+ok       simulator: tt-lang-sim 1.1.10+gfec38c6, built from fec38c6, matches the pin
+ok       checkout files: every file under examples/ and docs/ that was compared is as the pinned commit has it (1 larger file(s) were not compared)
+mismatch skill: the skill documents specification 0.12 and the checkout documents 0.20
+         fix: nothing to run: the probe builds guide.md and examples.md from the checkout; update the skill with `tt-warp fastmodels sync` when upstream catches up
+ok       references: every reference file documents specification 0.20
+ok       hardware tree: the hardware venv has tt-lang fec38c6de and tt-metal 0e9d200 (v0.79.0-dev20260917), the pinned pair; the host tree is v0.80.0
