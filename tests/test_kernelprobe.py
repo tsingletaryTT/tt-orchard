@@ -3989,7 +3989,7 @@ def test_a_consistency_row_that_blocks_and_is_allowed_is_recorded_as_allowed(tmp
     assert data["header"]["ttlang_consistency"]["overridden"] is True
 
 
-# ---- --reference-source and --attempt-wall-s (the pinned-reference A/B) ------------------------------------------------
+# ---- --reference-source (the pinned-reference A/B) ------------------------------------------------
 
 def test_probe_reference_source_skill_runs_on_the_skills_guide_and_records_the_choice(tmp_path, fake_kenv, env_ready,
                                                                                     ttlang_skill, monkeypatch):
@@ -4022,35 +4022,12 @@ def test_probe_refuses_an_unknown_reference_source(tmp_path, fake_kenv, env_read
     assert code == 2 and "--reference-source" in capsys.readouterr().err
 
 
-def test_attempt_wall_s_sets_each_attempts_wall_budget(tmp_path, fake_kenv, env_ready, monkeypatch):
-    seen = []
-    real = kp.run_attempt
-    monkeypatch.setattr(kp, "run_attempt", lambda **kw: seen.append(kw.get("wall_s")) or real(**kw))
-    with FakeModel(lambda r: final("nothing")) as server:
-        kp.main(probe_args(tmp_path, endpoint=server.endpoint, attempts=2, attempt_wall_s=900.0), env=fake_kenv,
-                out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
-    assert seen == [900.0, 900.0]
-    seen.clear()
-    with FakeModel(lambda r: final("nothing")) as server:
-        kp.main(probe_args(tmp_path / "b", endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
-                probe=lambda e, m: True, run_watched_fn=no_run)
-    assert seen == [None]                                    # unset: run_attempt keeps its own default budget
-
-
-@pytest.mark.parametrize("bad", [0, -5, float("inf"), float("nan")])
-def test_attempt_wall_s_must_be_a_finite_number_above_zero(tmp_path, fake_kenv, env_ready, capsys, bad):
-    code = kp.main(probe_args(tmp_path, attempt_wall_s=bad), env=fake_kenv, out=io.StringIO(),
-                   probe=lambda e, m: True, run_watched_fn=no_run)
-    assert code == 2 and "--attempt-wall-s" in capsys.readouterr().err
-
-
-def test_the_command_line_has_both_flags_with_the_documented_defaults():
+def test_the_command_line_has_the_reference_source_flag_with_its_default():
     from orchard import cli
     a = cli._parser().parse_args(["kernel-probe", "--op", "add"])
-    assert a.reference_source == "checkout" and a.attempt_wall_s is None
-    b = cli._parser().parse_args(["kernel-probe", "--op", "add", "--reference-source", "skill",
-                                       "--attempt-wall-s", "900"])
-    assert b.reference_source == "skill" and b.attempt_wall_s == 900.0
+    assert a.reference_source == "checkout"
+    b = cli._parser().parse_args(["kernel-probe", "--op", "add", "--reference-source", "skill"])
+    assert b.reference_source == "skill"
 
 # ---- the capability ladder and --wall-s (issue 175) -------------------------------------------------------------
 

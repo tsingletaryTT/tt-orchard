@@ -26,7 +26,7 @@
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
                             [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
                             [--allow-stale-skills] [--allow-slow-coder]
-                            [--reference-source checkout|skill] [--attempt-wall-s S]
+                            [--reference-source checkout|skill]
                             [--hw-checks N | --no-agent-hw] [--hw-lease-s S] [--hw-call-timeout-s S] [--hw-wait-s S]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
@@ -462,8 +462,6 @@ def _parser() -> argparse.ArgumentParser:
                          "checkout when the skill documents another specification version, plus the checkout's other "
                          "eltwise, broadcast and reduce examples. skill: the set as it was before the pin (the skill's "
                          "guide.md and examples.md, no extra examples), to measure whether the pinned set helps")
-    kp.add_argument("--attempt-wall-s", type=float, default=None, metavar="S",
-                    help="the wall-clock budget of each attempt, checked between turns (default 1800)")
     kp.add_argument("--allow-stale-skills", action="store_true",
                     help="run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or "
                          "could not be compared; the report records it with the shas")

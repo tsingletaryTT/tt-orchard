@@ -5,7 +5,8 @@ test, not a benchmark. Coder: Qwen3-Coder-Next on port 8011, a client only; its 
 
 Setup. Ops `center` and `rmsnorm`, temperature 0.7, one attempt per probe process, `--library none --phase sim --no-agent-hw`,
 interleaved old, new, old, new, one process at a time. Attempt k of every cell used seed 2026110400 + k. Each attempt had a 900 s wall
-budget, set with the new `--attempt-wall-s 900` (it is checked between turns, so attempts ran up to 1166 s). `--allow-slow-coder` was
+budget (the run used a flag of mine, `--attempt-wall-s 900`; after merging main it is the probe's own `--wall-s 900`, which
+does the same and replaced mine). It is checked between turns, so attempts ran up to 1166 s. `--allow-slow-coder` was
 on, so a slow or shared coder never stopped a probe; the speed before each attempt is recorded. Old is the new `--reference-source
 skill` (the skill's guide.md and examples.md, no extra kernels). New is the default (`checkout`).
 
