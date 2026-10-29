@@ -115,7 +115,7 @@ def test_the_shipped_config_is_accepted():
     assert cdec.config_problems(GOOD) == []
 
 
-@pytest.mark.parametrize("key,value", [("differential", False), ("dyt", False), ("dim_heads", 128), ("sinusoidal_blocks", [1]),
+@pytest.mark.parametrize("key,value", [("differential", False), ("dyt", False), ("dim_heads", 128), ("sinusoidal_blocks", ["x"]), ("sliding_window", [2, 2]),
                                        ("chunk_size", 64), ("transformer_depths", [6, 6]), ("surprise", 1)])
 def test_a_changed_setting_is_refused(key, value):
     cfg = copy.deepcopy(GOOD)
@@ -125,3 +125,77 @@ def test_a_changed_setting_is_refused(key, value):
 
 def test_a_missing_decoder_is_refused():
     assert cdec.config_problems({}) and cdec.config_problems({"model": {}})
+
+
+# --- the sliding-window layout of the medium decoder ---------------------------------------------------------------------------------------
+
+def make_sliding_block(TransformerBlock, seed=0, sine=False):
+    torch.manual_seed(seed)
+    blk = TransformerBlock(DIM, dim_heads=64, causal=False, zero_init_branch_outputs=False, norm_type="dyt", add_rope=True,
+                           attn_kwargs={"qk_norm": "dyt", "qk_norm_eps": 1e-3, "differential": True, "feat_scale": False},
+                           ff_kwargs={"mult": 3, "no_bias": False, "sinusoidal": sine}, norm_kwargs={"eps": 1e-3})
+    blk.eval()
+    with torch.no_grad():
+        for p in blk.parameters():
+            p.add_(0.2 * torch.randn_like(p))
+    return blk
+
+
+def run_sliding(blk, x, frames, sine=False):
+    """x [17 * frames, D] -> the block decomposition's output as [17 * frames, D]."""
+    xb = torch.zeros(frames, cdec.SLIDE_ROWS, DIM)
+    xb[:, :17] = x.view(frames, 17, DIM)
+    cos, sin = cdec.sliding_rotary(torch, frames)
+    mask = cdec.sliding_masks(torch, frames)
+    out = cdec.host_sliding_layer(torch, xb, params_of(blk), cos, sin, cdec.rotate_matrix(torch), mask, sine=sine)
+    return out[:, :17].reshape(frames * 17, DIM)
+
+
+@pytest.mark.parametrize("frames", [1, 2, 5])
+@pytest.mark.parametrize("sine", [False, True])
+def test_sliding_layer_matches_the_library_block(frames, sine):
+    """The library, without flash attention, masks a band of 17 tokens each way over the whole run; the blocks of 17 with their two neighbours must agree."""
+    blk = make_sliding_block(library_block_class(), sine=sine)
+    x = torch.randn(17 * frames, DIM)
+    with torch.no_grad():
+        want = blk(x.unsqueeze(0), self_attention_flash_sliding_window=(17, 17))[0]
+        got = run_sliding(blk, x, frames, sine=sine)
+    assert torch.allclose(got, want, atol=3e-4, rtol=1e-4), float((got - want).abs().max())
+
+
+def test_a_wider_window_disagrees_with_the_library():
+    """Mutation check: the band mask is doing work. A window of 34 tokens each way (the blocks' own mask kept) must not match a library run with 17."""
+    blk = make_sliding_block(library_block_class())
+    x = torch.randn(17 * 4, DIM)
+    with torch.no_grad():
+        wide = blk(x.unsqueeze(0), self_attention_flash_sliding_window=(34, 34))[0]
+        got = run_sliding(blk, x, 4)
+    assert not torch.allclose(got, wide, atol=1e-3)
+
+
+def test_the_band_mask_has_one_visible_key_in_every_row_and_no_view_beyond_the_ends():
+    m = cdec.sliding_masks(torch, 3)
+    assert ((m == 0).sum(-1) >= 1).all()
+    assert (m[0, 0, :17, :32] < 0).all()              # no previous block before the first frame
+    assert (m[-1, 0, :17, 64:] < 0).all()             # no next block after the last frame
+    assert (m[1, 0, 0, :17] == 0).all() and (m[1, 0, 16, 32:49] == 0).all()
+    assert (m[1, 0, 0, 17:32] < 0).all()              # padded key rows are never visible
+
+
+MEDIUM = {"model": {"pretransform": {"config": {"decoder": {"type": "taae_v2", "config": {
+    "out_channels": 512, "channels": 256, "c_mults": [6], "strides": [16], "latent_dim": 256, "transformer_depths": [12], "sinusoidal_blocks": [8],
+    "use_snake": False, "use_dilated_conv": False, "checkpointing": False, "conformer": False, "layer_scale": False, "differential": True,
+    "conv_bias": False, "mapping_style": "none", "dim_heads": 64, "enable_inner_layer_dropout": False, "sliding_window": [1, 1],
+    "variable_stride": True, "mask_noise": 0.1}}}}}}
+
+
+def test_the_medium_decoder_config_is_accepted():
+    assert cdec.config_problems(MEDIUM) == []
+
+
+@pytest.mark.parametrize("key,value", [("sliding_window", [1, 2]), ("conformer", True), ("layer_scale", True), ("chunk_midpoint_shift", True),
+                                       ("differential", False), ("strides", [8])])
+def test_a_changed_medium_setting_is_refused(key, value):
+    cfg = copy.deepcopy(MEDIUM)
+    cfg["model"]["pretransform"]["config"]["decoder"]["config"][key] = value
+    assert cdec.config_problems(cfg), key
