@@ -13,7 +13,7 @@ from fake_model import FakeModel, call, final, turn
 from orchard import hwtool, kernelprobe as kp
 from test_agent_hw import (CLOCK, FACTS, GOOD_HW_SET, KERNELS, QUEUED, World, attempt_dir, canned, env_ready,  # noqa: F401
                            fake_kenv, good_hw, hang_answer, hw_writer, make_check, probe_args, queued,
-                           queued_runner, run_attempt, scripted_hw_agent, sim_pass_then_hw, skills_current,
+                           queued_runner, run_attempt, scripted_hw_agent, sim_pass_then_hw, skills_current, consistency_ok,
                            ttlang_skill)
 
 

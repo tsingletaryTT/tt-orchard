@@ -10,7 +10,7 @@ from pathlib import Path
 from fake_model import FakeModel
 from orchard import kernelprobe as kp
 # The fixtures of test_kernelprobe.py: the stand-in tt-lang skill and freshness answers (both autouse) and the fake environment.
-from test_kernelprobe import (env_ready, fake_kenv, probe_args, skills_current, ttlang_skill,  # noqa: F401
+from test_kernelprobe import (consistency_ok, env_ready, fake_kenv, probe_args, skills_current, ttlang_skill,  # noqa: F401
                               writes_good_kernel_once)
 
 

@@ -25,7 +25,7 @@ import pytest
 from hwfakes import CHIPS, PID, FakeGozer, wrapped
 from orchard import hwtool, kernelprobe as kp
 from test_agent_hw import CLOCK, WHO, make_check, attempt_dir, fake_gozer, run_attempt, scripted_hw_agent  # noqa: F401
-from test_agent_hw import fake_kenv, skills_current, ttlang_skill  # noqa: F401
+from test_agent_hw import fake_kenv, skills_current, consistency_ok, ttlang_skill  # noqa: F401
 from fake_model import FakeModel
 from test_kernelprobe import GOOD_HW_SET, KERNELS, canned, env_ready, hw_writer, probe_args  # noqa: F401
 

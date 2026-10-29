@@ -1,0 +1,4 @@
+target = "0.9.54"
+summary = "kernel-probe --staged builds a kernel in stages (copy, one step, the reduction, the broadcast back, the whole op), each ending at a simulator check, for center and rmsnorm"
+kind = "feature"
+pr = 199

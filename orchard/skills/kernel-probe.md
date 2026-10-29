@@ -12,8 +12,8 @@ Reference files:
   It passes in the simulator; tt-lang's CI marks it `TTLANG_HARDWARE_CI: xfail-compiler` (expected to fail on the hardware compiler).
 - `reference/TTLangSpecification.md`: the specification of that tt-lang (version 0.20). It is long: `grep -n "reduce_sum" <file>`
   finds a name's line N, `read_file` with offset N and limit 60 reads from there (offset and limit count lines).
-- `reference/guide.md` and `reference/examples.md`: the tt-lang skill's guide and worked examples. They were written for specification 0.12,
-  so take every name and signature from the two .py files and the specification.
+- `reference/guide.md` and `reference/examples.md`: the tt-lang skill's guide and worked examples. They were written for specification 0.12.
+  When the checkout documents another version, the probe builds both from the checkout's docs (their first line says so). Take every name and signature from the two .py files and the specification.
 
 `reference/library_*.py` are worked kernels that pass the simulator. Read the one nearest your op first and adapt it.
 Read first, by kind of op:

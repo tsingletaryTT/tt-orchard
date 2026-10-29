@@ -20,6 +20,9 @@ import pytest
 
 from fake_model import FakeModel, call, final, turn
 from orchard import kernelprobe as kp, ttlang_env
+from orchard import ttlang_consistency as _consistency, ttlang_pin as _pin
+
+_REAL_CONSISTENCY_CHECK = _consistency.check      # the autouse fixture below replaces it for most tests
 from orchard.agent import NO_CHIP
 
 REPO = Path(__file__).resolve().parent.parent
@@ -81,6 +84,14 @@ def skills_current(monkeypatch):
     return state
 
 
+@pytest.fixture(autouse=True)
+def consistency_ok(monkeypatch):
+    """The tt-lang consistency check (orchard/ttlang_consistency.py) finds no blocking row, so tests with a made-up
+    checkout and simulator reach the code they are about. tests/test_ttlang_pin.py tests the check itself, and the
+    test_probe_refuses_* tests at the end of this file run it for real."""
+    monkeypatch.setattr(kp.ttlang_consistency, "check", lambda env, skill_dir, **kw: [])
+
+
 FACTS = {"sim_version": "1.1.10+gtest", "source_sha": "a" * 40, "diagnostics_patched": True, "patch_sha256": "b" * 64}
 
 
@@ -99,7 +110,7 @@ def fake_kenv(tmp_path):
     lib = tmp_path / "purelib"
     lib.mkdir()
 
-    def run(argv, timeout, env=None):
+    def run(argv, timeout, env=None, cwd=None):
         if argv[-1] == "--version":
             return 0, "tt-lang-sim 1.1.10+gfake\n", ""
         if "rev-parse" in argv:
@@ -1027,7 +1038,7 @@ def env_ready(monkeypatch):
     """ttlang_env.ensure(check_only=True) answers all OK without running the simulator; the calls are recorded."""
     calls = []
 
-    def ensure(env, *, check_only=False, say=print):
+    def ensure(env, *, check_only=False, say=print, **kw):
         calls.append(check_only)
         return [ttlang_env.Result("verify", ttlang_env.OK, "faked")]
     monkeypatch.setattr(kp.ttlang_env, "ensure", ensure)
@@ -1083,7 +1094,7 @@ def test_main_refuses_when_the_endpoint_does_not_answer(tmp_path, fake_kenv, env
 def test_main_refuses_when_the_environment_check_fails(tmp_path, fake_kenv, monkeypatch, capsys):
     for status in (ttlang_env.FAIL, ttlang_env.TODO):
         seen = []
-        monkeypatch.setattr(kp.ttlang_env, "ensure", lambda env, *, check_only=False, say=print: seen.append(
+        monkeypatch.setattr(kp.ttlang_env, "ensure", lambda env, *, check_only=False, say=print, **kw: seen.append(
             check_only) or [ttlang_env.Result("clone", ttlang_env.OK, ""), ttlang_env.Result("wheel", status, "x")])
         asked = []
         code = kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(),
@@ -3777,6 +3788,205 @@ def test_the_probe_read_file_takes_limit_and_names_its_arguments_for_an_unknown_
     assert ok.startswith("line 5\nline 6\nline 7") and "[lines 5 to 7 of 30" in ok
     bad = tools.call("read_file", json.dumps({"path": "notes.txt", "offset": 5, "count": 3}))
     assert bad.startswith("error:") and "'count'" in bad and "path" in bad and "offset" in bad and "limit" in bad
+
+
+# ---- one tt-lang for the simulator, the coder's reading and the hardware build (orchard/ttlang_pin.py) ------------
+
+def _pinned_env(fake_kenv, *, checkout_at=None, sim=None):
+    """fake_kenv with the checkout's commit and the simulator version set to the pin (or to what a test names)."""
+    def run(argv, timeout, env=None, cwd=None):
+        if argv[-1] == "--version":
+            return 0, f"tt-lang-sim {sim or _pin.SIM_VERSION}\n", ""
+        if "rev-parse" in argv:
+            return 0, (checkout_at or _pin.SHA) + "\n", ""
+        return 1, "", "not faked"
+    return ttlang_env.KEnv(src_dir=fake_kenv.src_dir, venv_dir=fake_kenv.venv_dir, scratch_dir=fake_kenv.scratch_dir,
+                           run=run)
+
+
+def _spec(version):
+    return f"## Specification Versions\n\n| *Version* | *Date* |\n| :-- | :-- |\n| {version} | 2026-10-01 |\n"
+
+
+def test_probe_refuses_when_the_checkout_is_not_at_the_pin(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    out, asked = io.StringIO(), []
+    code = kp.main(probe_args(tmp_path), env=_pinned_env(fake_kenv, checkout_at="d" * 40), out=out,
+                   probe=lambda e, m: asked.append(e) or True, run_watched_fn=no_run)
+    assert code == 2 and asked == [] and not (tmp_path / "out").exists()
+    err = capsys.readouterr().err
+    assert "does not match the pin" in err and "checkout" in err and "kernel-env" in err
+    assert "mismatch checkout" in out.getvalue()
+
+
+def test_probe_refuses_when_the_simulator_was_built_from_another_commit(tmp_path, fake_kenv, env_ready, monkeypatch,
+                                                                        capsys):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    code = kp.main(probe_args(tmp_path), env=_pinned_env(fake_kenv, sim="1.1.10+gabcdef0"), out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and "simulator" in capsys.readouterr().err
+
+
+def test_allow_stale_skills_overrides_the_consistency_refusal(tmp_path, fake_kenv, env_ready, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint, allow_stale_skills=True),
+                       env=_pinned_env(fake_kenv, checkout_at="d" * 40), out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=no_run)
+    assert code == 0
+
+
+def test_an_older_skill_runs_on_a_guide_built_from_the_checkout_and_the_report_says_so(tmp_path, fake_kenv, env_ready,
+                                                                                    ttlang_skill, monkeypatch):
+    from orchard import ttlang_reference as tr
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    (fake_kenv.src_dir / "docs" / "sphinx" / "specs" / "TTLangSpecification.md").write_text(_spec("0.20"))
+    for rel in tr.GUIDE_DOCS + tr.EXAMPLES_DOCS:
+        p = fake_kenv.src_dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"# {rel}\n")
+    (ttlang_skill / "TTLangSpecification.md").write_text(_spec("0.12"))
+    out = io.StringIO()
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint), env=_pinned_env(fake_kenv), out=out,
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0, out.getvalue()
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    refs = {r["name"]: r for r in data["header"]["references"]}
+    assert refs["reference/guide.md"]["generated"] is True and refs["reference/guide.md"]["spec_version"] == "0.20"
+    assert data["header"]["ttlang_pin"]["sha"] == _pin.SHA and data["header"]["ttlang_pin"]["spec_version"] == "0.20"
+    attempt_guide = next((tmp_path / "out").rglob("reference/guide.md"))
+    assert hashlib.sha256(attempt_guide.read_bytes()).hexdigest() == refs["reference/guide.md"]["sha256"]
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "## Reference versions" in md and "The guide and the specification both document 0.20" in md
+    assert "mismatch skill" in out.getvalue()
+
+
+# ---- Copilot review of PR 198: the override reaches the environment gate, and the report records it ---------------
+
+def _fake_ls_tree(src):
+    """The tree listing of a clean checkout: every file under examples/ and docs/ with its real blob id, plus the programs
+    verify runs (absent from the fake checkout, so they count as deleted, which does not block)."""
+    entries = {}
+    for top in ("examples", "docs"):
+        for path in sorted((src / top).rglob("*")) if (src / top).is_dir() else []:
+            if path.is_file():
+                data = path.read_bytes()
+                entries[path.relative_to(src).as_posix()] = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    for rel in [f"examples/{r}" for r, _ in ttlang_env.defaults.TTLANG_NEGATIVE_EXAMPLES] + [
+            f"examples/{n}" for n in ttlang_env.VERIFY_SUPPORT_FILES]:
+        entries.setdefault(rel, "0" * 40)
+    return "".join(f"100644 blob {sha}\t{p}\0" for p, sha in entries.items())
+
+
+def _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, *, checkout_at=None, sim=None, venv_python=True):
+    """A KEnv for the REAL ttlang_env.ensure: every step's command is faked, so a made-up checkout and venv pass each
+    step. `checkout_at` and `sim` choose the commit and wheel version the fake commands report."""
+    src, venv = fake_kenv.src_dir, fake_kenv.venv_dir
+    diag = src / "python" / "ttl" / "diagnostics.py"
+    diag.parent.mkdir(parents=True)
+    diag.write_text("# diagnostics\n")
+    for rel in [f"examples/{r}" for r, _ in ttlang_env.defaults.TTLANG_NEGATIVE_EXAMPLES] + [
+            f"examples/{n}" for n in ttlang_env.VERIFY_SUPPORT_FILES]:        # the programs verify runs, committed
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text("print('program')\n")
+    monkeypatch.setattr(ttlang_env.defaults, "TTLANG_DIAGNOSTICS_SHA256", hashlib.sha256(diag.read_bytes()).hexdigest())
+    lib = tmp_path / "purelib"
+    (lib / "ttl" / "ttl").mkdir(parents=True, exist_ok=True)
+    (lib / "ttl" / "ttl" / "diagnostics.py").write_bytes(diag.read_bytes())
+    if venv_python:
+        (venv / "bin" / "python").write_text("#!/bin/sh\n")
+
+    def run(argv, timeout, env=None, cwd=None):
+        text = " ".join(str(a) for a in argv)
+        if argv[0] == "git" and "cat-file" in argv:         # the programs verify runs, as the pinned commit has them
+            return 0, "print('program')\n", ""
+        if argv[0] == "git" and "ls-tree" in argv:          # the pinned commit has what the checkout has, and the programs
+            return 0, _fake_ls_tree(src), ""
+        if argv[-1] == "--version":
+            return 0, f"tt-lang-sim {sim or _pin.SIM_VERSION}\n", ""
+        if "rev-parse" in argv:
+            return 0, (checkout_at or _pin.SHA) + "\n", ""
+        if "sysconfig" in text:
+            return 0, f"{lib}\n", ""
+        if "import torch" in text:
+            return 0, "", ""
+        if str(argv[0]).endswith("tt-lang-sim"):             # the negative examples: fail with upstream's own text
+            return 1, " ".join(n for _, needles in ttlang_env.defaults.TTLANG_NEGATIVE_EXAMPLES for n in needles), ""
+        return 1, "", "not faked"
+    return ttlang_env.KEnv(src_dir=src, venv_dir=venv, scratch_dir=tmp_path / "scratch", run=run)
+
+
+def _run_probe(tmp_path, env, **args):
+    out = io.StringIO()
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint, **args), env=env, out=out,
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+    return code, out.getvalue()
+
+
+def test_the_environment_gate_refuses_an_off_pin_checkout_without_the_override(tmp_path, fake_kenv, monkeypatch, capsys):
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, checkout_at="d" * 40)
+    code, _ = _run_probe(tmp_path, env)
+    assert code == 2 and "not ready" in capsys.readouterr().err
+
+
+def test_allow_stale_skills_lets_an_off_pin_checkout_through_the_real_environment_gate(tmp_path, fake_kenv, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, checkout_at="d" * 40)
+    code, text = _run_probe(tmp_path, env, allow_stale_skills=True)
+    assert code == 0, text
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["skills"]["stale_allowed"] is True
+    assert any(x.startswith("clone") for x in data["header"]["skills"]["stale"])
+    cons = data["header"]["ttlang_consistency"]
+    assert cons["overridden"] is True
+    assert {r["name"]: r["status"] for r in cons["rows"]}["checkout"] == "mismatch"
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "Consistency rows" in md and "let a mismatch through" in md and "Stale skills allowed" in md
+    for a in data["attempts"]:
+        assert a["provenance"]["skills"]["stale_allowed"] is True
+
+
+def test_allow_stale_skills_lets_a_simulator_off_the_pin_through_too(tmp_path, fake_kenv, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, sim="1.1.10+gabcdef0")
+    code, _ = _run_probe(tmp_path, env, allow_stale_skills=True)
+    assert code == 0
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert any(x.startswith("tt-lang-sim") for x in data["header"]["skills"]["stale"])
+
+
+def test_the_override_never_accepts_a_missing_or_broken_component(tmp_path, fake_kenv, monkeypatch, capsys):
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, checkout_at="d" * 40, venv_python=False)
+    code, _ = _run_probe(tmp_path, env, allow_stale_skills=True)          # no venv python: a missing component
+    assert code == 2 and "not ready" in capsys.readouterr().err and not (tmp_path / "out").exists()
+
+
+def test_a_clean_run_records_no_override_but_still_records_the_rows(tmp_path, fake_kenv, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch)
+    code, text = _run_probe(tmp_path, env)
+    assert code == 0, text
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["skills"]["stale_allowed"] is False and data["header"]["skills"]["stale"] == []
+    assert data["header"]["ttlang_consistency"]["overridden"] is False
+    assert [r["name"] for r in data["header"]["ttlang_consistency"]["rows"]][:2] == ["checkout", "simulator"]
+
+
+def test_a_consistency_row_that_blocks_and_is_allowed_is_recorded_as_allowed(tmp_path, fake_kenv, env_ready,
+                                                                           monkeypatch):
+    """A hardware-tree mismatch (once a tt-metal ref is pinned) passes the environment gate; only the override lets it
+    through, and the report must say so."""
+    row = _consistency.Row("hardware tree", _consistency.MISMATCH, "the tree is at v0.81.0, the pin wants v0.80.0",
+                           "check out the pinned ref", blocks=True)
+    monkeypatch.setattr(kp.ttlang_consistency, "check", lambda env, skill_dir, **kw: [row])
+    code, text = _run_probe(tmp_path, fake_kenv, allow_stale_skills=True)
+    assert code == 0
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["skills"]["stale_allowed"] is True
+    assert any("hardware tree" in x for x in data["header"]["skills"]["stale"])
+    assert data["header"]["ttlang_consistency"]["overridden"] is True
 
 
 # ---- the capability ladder and --wall-s (issue 175) -------------------------------------------------------------

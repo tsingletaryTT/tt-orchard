@@ -14,6 +14,7 @@
     tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
     tt-orchard reported show RUN_DIR
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
+    tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
@@ -313,6 +314,15 @@ def _parser() -> argparse.ArgumentParser:
     k.add_argument("--allow-stale-skills", action="store_true",
                    help="with --check: a tt-lang checkout or tt-lang skill that is not the latest upstream has does "
                         "not fail the check")
+    tc_ = sub.add_parser("ttlang-consistency", parents=[common],
+                         help="check the tt-lang pin against the checkout, the simulator, the skill, the reference files "
+                              "and the tt-metal tree; read only")
+    tc_.add_argument("--src-dir", help="the tt-lang checkout (default ~/orchard-src/tt-lang, or $ORCHARD_TTLANG_SRC)")
+    tc_.add_argument("--venv-dir", help="the simulator venv (default ~/orchard-venvs/ttlang, or $ORCHARD_TTLANG_VENV)")
+    tc_.add_argument("--tt-lang-skill-dir", help="the installed tt-lang skill (default ~/.claude/skills/ttm-tt-lang, "
+                                                 "or $ORCHARD_TTLANG_SKILL)")
+    tc_.add_argument("--tt-metal-dir", help="the host tt-metal tree, read only (default ~/tt-metal, or "
+                                            "$ORCHARD_TT_METAL_DIR)")
     d = sub.add_parser("demo-env", parents=[common],
                        help="build or check the interpreter that runs tt-metal demos and tt-train (numpy below 2, cv2, datasets, "
                             "the host tree's ttnn and ttml)")
@@ -410,6 +420,15 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--library", choices=("all", "others", "none"), default="all",
                     help="the worked kernels put into each attempt's reference/: all (default), others (leave out the "
                          "kernel for the op under test, so a pass is not a copy) or none; the report records the mode")
+    kp.add_argument("--staged", action="store_true",
+                    help="build the kernel in stages, each ending at a simulator check against a reference for that step "
+                         "(copy, one arithmetic step, the reduction, the broadcast back, the whole op); the verified "
+                         "prefix is the next stage's starting file. For ops with a stage table (center, rmsnorm); needs "
+                         "--no-agent-hw and --phase sim")
+    kp.add_argument("--stage-turns", dest="stage_turns", type=int, metavar="N",
+                    help="with --staged: the turns each stage may use (default: 40 divided by the op's stages)")
+    kp.add_argument("--stage-wall-s", dest="stage_wall_s", type=float, metavar="S",
+                    help="with --staged: the seconds each stage may use (default: 1800 divided by the op's stages)")
     kp.add_argument("--hw-checks", dest="hw_checks", type=int, metavar="N",
                     help="how many times each attempt may call the `hardware_check` tool, which runs its current kernel.py "
                          "on one leased chip (default 6; 0 turns the tool off). A call takes about 45 s with the lease "
@@ -945,6 +964,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "suite-control":
         from orchard import suite_control
         return suite_control.main([args.action, *args.rest], out=out)
+    if args.cmd == "ttlang-consistency":
+        from orchard import ttlang_consistency
+        return ttlang_consistency.main(args, out=out)
     if args.cmd == "kernel-env":
         from orchard import ttlang_env
         return ttlang_env.main(args, out=out)
