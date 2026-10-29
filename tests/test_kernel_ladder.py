@@ -704,3 +704,31 @@ def test_a_rung_report_with_the_wrong_shape_is_unreadable_and_no_crash(tmp_path,
     assert attempts == [] and header in (None, {})
     data = kl.write_ladder_report(tmp_path, ["add"])
     assert data["not_run"] == ["add"]
+
+
+def test_an_interrupt_between_rungs_still_writes_the_report_and_returns_4(tmp_path):
+    calls = []
+    inner = fake_main(calls)
+
+    def main(sub):
+        if sub.op == "mul":
+            raise KeyboardInterrupt
+        return inner(sub)
+    code = kl.run(Args(out=str(tmp_path), rungs="add,mul,rsqrt"), main, default_wall_s=1800.0, say=lambda l: None)
+    assert code == 4
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert "interrupted" in data["stopped"] and [r["op"] for r in data["rungs"]] == ["add"]
+    assert data["not_run"] == ["mul", "rsqrt"]
+
+
+def test_an_interrupt_while_the_projection_is_checked_still_writes_the_report(tmp_path):
+    ticks = iter([0.0])
+
+    def clock():
+        v = next(ticks, None)
+        if v is None:
+            raise KeyboardInterrupt
+        return v
+    code = kl.run(Args(out=str(tmp_path), rungs="add,mul", max_hours=1.0), fake_main([]), default_wall_s=300.0,
+                  say=lambda l: None, clock=clock)
+    assert code == 4 and (tmp_path / "ladder-report.md").is_file()

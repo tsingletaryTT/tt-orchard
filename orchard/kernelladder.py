@@ -431,38 +431,41 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
         if seed is None:
             seed, seed_from = str(kp.seed_base_from_probe_id(kp.new_probe_id())), "the ladder's id"
         ran = set()
-        for i, op in enumerate(rungs):
-            sub = copy.copy(args)
-            sub.op, sub.out, sub.wall_s, sub.ladder = op, str(out_dir / op), wall_of(op), False
-            sub.seed, sub.seed_from = seed, seed_from
-            sub.rungs = sub.rung_wall = sub.rung_expect_s = sub.max_hours = None      # the ladder's own options
-            sub.report_only = False
-            say(f"ladder rung {i + 1} of {len(rungs)}: {op} (wall budget {wall_of(op):.0f} s)")
-            # The rung's directory is locked from before its run to the end of the ladder, so no other probe can replace
-            # its report in between. The run is told, and neither takes the lock again nor releases it.
-            try:
-                held.append(kp.acquire_lock(out_dir / op))
-            except kp._Refused as exc:
-                stopped, code = f"rung {op}: {exc}", 2
-                break
-            sub.dir_locked = True
-            before = (load_rung(out_dir, op)[0] or {}).get("probe_id")
-            code = main(sub)
-            # The rung is this run's only when its report carries a new probe id. A refused run (2) wrote none, and a
-            # run that failed to write its report (3) leaves an older one in place.
-            after = (load_rung(out_dir, op)[0] or {}).get("probe_id")
-            if code != 2 and after is not None and after != before:
-                ran.add(op)
-            if code != 0:
-                stopped = f"rung {op} ended with exit code {code}"
-                break
-            left = [{"attempts": per_rung, "expected_s": expects.get(r, wall_of(r))} for r in rungs[i + 1:]]
-            if max_h is not None and left:
-                total_h = (clock() - started + projected_s(left)) / 3600.0
-                if total_h > max_h:
-                    stopped = (f"after rung {op} the projection is {total_h:.1f} hours, above --max-hours {max_h:g}; "
-                               f"not run: {', '.join(rungs[i + 1:])}")
+        try:
+            for i, op in enumerate(rungs):
+                sub = copy.copy(args)
+                sub.op, sub.out, sub.wall_s, sub.ladder = op, str(out_dir / op), wall_of(op), False
+                sub.seed, sub.seed_from = seed, seed_from
+                sub.rungs = sub.rung_wall = sub.rung_expect_s = sub.max_hours = None      # the ladder's own options
+                sub.report_only = False
+                say(f"ladder rung {i + 1} of {len(rungs)}: {op} (wall budget {wall_of(op):.0f} s)")
+                # The rung's directory is locked from before its run to the end of the ladder, so no other probe can replace
+                # its report in between. The run is told, and neither takes the lock again nor releases it.
+                try:
+                    held.append(kp.acquire_lock(out_dir / op))
+                except kp._Refused as exc:
+                    stopped, code = f"rung {op}: {exc}", 2
                     break
+                sub.dir_locked = True
+                before = (load_rung(out_dir, op)[0] or {}).get("probe_id")
+                code = main(sub)
+                # The rung is this run's only when its report carries a new probe id. A refused run (2) wrote none, and a
+                # run that failed to write its report (3) leaves an older one in place.
+                after = (load_rung(out_dir, op)[0] or {}).get("probe_id")
+                if code != 2 and after is not None and after != before:
+                    ran.add(op)
+                if code != 0:
+                    stopped = f"rung {op} ended with exit code {code}"
+                    break
+                left = [{"attempts": per_rung, "expected_s": expects.get(r, wall_of(r))} for r in rungs[i + 1:]]
+                if max_h is not None and left:
+                    total_h = (clock() - started + projected_s(left)) / 3600.0
+                    if total_h > max_h:
+                        stopped = (f"after rung {op} the projection is {total_h:.1f} hours, above --max-hours {max_h:g}; "
+                                   f"not run: {', '.join(rungs[i + 1:])}")
+                        break
+        except KeyboardInterrupt:                # Ctrl-C or SIGTERM between two rungs: the report still gets written
+            stopped, code = "interrupted", 4
         write_ladder_report(out_dir, rungs, stopped=stopped, ran=ran)
         say(f"ladder report: {out_dir / (REPORT_NAME + '.md')}")
         if stopped:
