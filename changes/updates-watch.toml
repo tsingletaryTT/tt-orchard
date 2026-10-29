@@ -1,0 +1,3 @@
+target = "0.9.62"
+summary = "tt-orchard updates: read-only check of tools, coder bundle and tt-lang pin against upstream"
+pr = 233

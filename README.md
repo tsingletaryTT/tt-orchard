@@ -2176,6 +2176,42 @@ and a file over the read caps are counted and shown as "Left out". The reader ne
 - Checked against the kernel-probe round `rms5` (5 attempts, no kernel passed): 137 turns, 3,373,905 prompt and 78,468 completion
   tokens, which is $0.3766 at `claude-haiku-5-5` and $7.53 at `claude-sonnet-5-5`.
 
+### Keeping tt-orchard's tools current
+
+`tt-orchard updates [--json] [--offline] [--refresh]` reports whether orchard is running on old tools. It is read only: it
+installs, upgrades, pulls and restarts nothing, takes no lease and opens no chip. Each upgrade appears as text for a person to run.
+
+For each tracked item the table shows what is installed or pinned here, the newest known upstream, the age of each, and a status:
+`current`, `behind`, `newer-candidate` or `unknown (why)`. A failed or offline call gives an `unknown` row. Answers are cached for
+6 hours (`--refresh` ignores the cache, `--offline` makes no network call and shows the last cache). The network calls go to Hugging
+Face (with `HF_TOKEN` from the environment, sent to that host only), GitHub, public PyPI and the Tenstorrent S3 index, each with a
+timeout and a shared 60-second budget.
+
+| Item | Installed | Upstream |
+| --- | --- | --- |
+| Coder bundle (`raahemnabeel/qwen3-coder-next` and the fallback) | revision in `~/.cache/tt-model/installed.json` | latest Hugging Face commit |
+| Coder candidates | the configured packages | repos by the same authors, and search hits, whose id contains a name in `family` (default `qwen3-coder`, `qwen3.5-coder`, `coder-next`) and that are not configured |
+| tt-lang | the pin in `orchard/ttlang_pin.py` | newest tag, newest S3 dev wheel, public PyPI |
+| tt-metal | `git describe` of the host tree | latest release |
+| tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag |
+| Skills checkout | `orchard.skillsfresh` | upstream main |
+
+To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`.
+
+Some items must move together. The rule table is `RULES` in `orchard/updates.py`; a row that is behind names the other members
+and cites the rule.
+
+| Rule | Members | Meaning |
+| --- | --- | --- |
+| R1 | tt-lang, tt-metal | A tt-lang commit builds against one tt-metal ref. A new tt-metal tag needs a tt-lang commit that builds on it (find it with `find-compatible-ttlang.sh` in the tt-lang repository). The verified pair is recorded in `orchard/ttlang_pin.py`. |
+| R2 | tt-metal, tt-model-manager, coder | Bundles carry a tt-metal build; host ttnn and the bundle must agree on the release. |
+| R3 | tt-model-manager, tt-cli | Upgrade together and rerun `tt doctor`. |
+
+The "ready to farm" line says `verified` only when `config/verifications.json` (or `$ORCHARD_VERIFICATIONS`) holds a passing record
+whose versions equal the new combination. Otherwise it says `unverified` and points at the smoke and probe kernel run. The file is
+written by a person or a verification run after a real run, never by `updates`. Preflight prints one informational line when the
+cache shows something behind or a candidate; it reads the cache only and never blocks.
+
 ## 6. Lessons that will bite you
 
 Each of these happened on the development machine. Details are in the

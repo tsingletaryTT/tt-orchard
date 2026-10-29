@@ -3204,6 +3204,11 @@ Prompt (operator): "pick a model that would require a new kernel and try to brin
 - One lease on board 1, about 4 minutes of runs. Same-session decode: composed 26.9 and 26.2 tok/s (before and after), state kernel + composed readout 13.9, state kernel + readout kernel 8.45 (4.8% of the floor). Agreement against the CPU reference matches the composed modes (1.2 to 2.0 times the bf16 floor).
 - Verdict: the kernel readout is slower than composed. Absolute numbers moved against the 2026-10-28 run because the toolchain changed; only same-session comparisons are used.
 
+## 2026-10-29 (UTC): tt-orchard updates (branch `updates-watch`, PR 233)
+- Prompt (coordinator, from the operator): make tt-orchard watch for a new coder model, and for synced upgrades of tt-lang, tt-metal, tt-model-manager and tt-cli, so it knows when it runs on old tools and when new ones are ready to farm with.
+- Added `tt-orchard updates` (read only; `--json`, `--offline`, `--refresh`; 6-hour cache). Rows: coder bundles (Hugging Face sha), coder candidates (family list, a config key), tt-lang, tt-metal, tt-model-manager, tt-cli, tt-gozer, skills. A rule table (`RULES`) names the items that move together. `config/verifications.json` holds recorded runs; a row says `verified` only on an exact match. Preflight prints one line from the cache.
+- Guards: all network and process calls go through `Tools`, which refuses anything but GET to four hosts, `<tool> --version` and read-only git. Each guard was mutated once and a test went red. Remote text is cut, type-checked and stripped of control characters.
+- Defaults taken without asking are in `docs/run-logs/2026-10-29-updates-watch.md`, with the output of a real run. The one verification record is the 2026-10-29 pair check. tt-model-manager and tt-gozer publish no tag, so their rows are unknown. Deferred: issues 229 to 232.
 ## 2026-10-29: switch the tt-lang environment to the verified pair (PR 228)
 
 - Operator instruction: use the pair PR 223 verified on the chip. `orchard/ttlang_pin.py` now sets `TT_METAL_REF` to `0e9d200db976120c129ab0deb13aa3f6d972b723` and records the wheel `tt-lang-light 1.1.10.dev20261026` with its two sha256 values. `TTLANG_PIN` was already `fec38c6de`.
