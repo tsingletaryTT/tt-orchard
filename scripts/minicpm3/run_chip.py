@@ -24,6 +24,15 @@ from make_reference import PROMPT, make_recorder, prompt_ids  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
+def build_model(a, dev):
+    """Construct the chip model the flags ask for. `--layers N` (debug) truncates the stack, so it goes to both constructors (0 = all layers)."""
+    if a.tp == 2:
+        from chip_model_tp import ChipMiniCPM3TP
+        return ChipMiniCPM3TP(dev, a.model_dir, a.weights, max_len=a.max_len, n_layers=a.layers, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
+    return ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard,
+                        n_layers=a.layers, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["agree", "bench"])
@@ -61,12 +70,7 @@ def main():
         dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
     try:
         t0 = time.time()
-        if a.tp == 2:
-            from chip_model_tp import ChipMiniCPM3TP
-            m = ChipMiniCPM3TP(dev, a.model_dir, a.weights, max_len=a.max_len, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
-        else:
-            m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard,
-                             mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
+        m = build_model(a, dev)
         m.skip = set(x for x in a.skip.split(",") if x)
         print(f"model loaded on chip in {time.time() - t0:.1f}s", flush=True)
         if a.mode == "agree":

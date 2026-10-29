@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-"""Run the plain-torch reference on a prompt: print greedy text, and (with --remote) compare with the transformers-native MiniCPM3 class (no remote code is run; the native class reads <model-dir>_w, a copy of config.json plus model.safetensors)."""
+"""Run the plain-torch reference on a prompt: print greedy text, and (with --remote) compare with the transformers-native MiniCPM3 class (no remote code is run; the native model is built from --model-dir and --weights by native_model.py)."""
 import argparse
 import sys
 import time
@@ -37,8 +37,8 @@ for _ in range(a.new):
 print("ref", out)
 print(tok.decode(out), f"({time.time() - t0:.1f}s)")
 if a.native:
-    from transformers import AutoModelForCausalLM
-    rm = AutoModelForCausalLM.from_pretrained(a.model_dir.rstrip("/") + "_w", trust_remote_code=False, torch_dtype=getattr(torch, a.dtype))
+    from native_model import build_native_model
+    rm = build_native_model(a.model_dir, a.weights, getattr(torch, a.dtype))
     with torch.no_grad():
         g = rm.generate(ids, max_new_tokens=a.new, do_sample=False)
     r = g[0, ids.shape[1]:].tolist()

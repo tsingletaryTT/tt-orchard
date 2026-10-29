@@ -51,6 +51,8 @@ def main():
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--weights", required=True)
     ap.add_argument("--out-dir", required=True, help="a new directory; fp32, bf16 and native runs go under it")
+    ap.add_argument("--native-model", help="a directory the transformers-native class can load (config with rope_parameters plus weights); "
+                    "by default the native model is built from --model-dir and --weights")
     ap.add_argument("--decode", type=int, default=16)
     ap.add_argument("--prompt-file", help="use this text (read as UTF-8) in place of the built-in prompt")
     a = ap.parse_args()
@@ -100,8 +102,12 @@ def main():
     run_plain("bfloat16", force=toks)
 
     # transformers-native bfloat16, hooks on the blocks (stream after each block, prefill, every position)
-    from transformers import AutoModelForCausalLM
-    nm = AutoModelForCausalLM.from_pretrained(a.model_dir.rstrip("/") + "_w", dtype=torch.bfloat16)
+    if a.native_model:
+        from transformers import AutoModelForCausalLM
+        nm = AutoModelForCausalLM.from_pretrained(a.native_model, dtype=torch.bfloat16)
+    else:
+        from native_model import build_native_model
+        nm = build_native_model(a.model_dir, a.weights, torch.bfloat16)
     rec = make_recorder(out / "native", "native", "bfloat16", n, a.decode, cfg_path, weights)
     mode = {"k": -1}
 
