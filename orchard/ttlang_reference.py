@@ -133,7 +133,7 @@ def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
     return files, problems
 
 
-def _git_env(env) -> dict:
+def git_env(env) -> dict:
     out = ttlang_env.minimal_env(env)
     out["GIT_OPTIONAL_LOCKS"] = "0"         # `git status` must not rewrite the checkout's index
     return out
@@ -147,10 +147,10 @@ def git_state(env) -> tuple[set[str] | None, dict[str, str] | None]:
     src = str(env.src_dir)
     # `-c core.fsmonitor=false`: a checkout's own config can name a program for git to run on `status`; it is not run.
     rc, out, _ = env.run(["git", "-C", src, "ls-tree", "-r", "--name-only", ttlang_pin.SHA, "--", "examples", "docs"],
-                         60, _git_env(env))
+                         60, git_env(env))
     tracked = {line for line in out.splitlines() if line} if rc == 0 else None
     rc, out, _ = env.run(["git", "-C", src, "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=all", "--", "examples", "docs"],
-                         60, _git_env(env))
+                         60, git_env(env))
     dirty = None
     if rc == 0:
         dirty = {}
@@ -167,15 +167,22 @@ EXTRA_EXAMPLE_SKIP = ("multidevice",)   # all-reduce across devices is not a sin
 EXTRA_EXAMPLE_MAX = 8       # choice: the checkout has five such files at the pin; the cap keeps a new checkout bounded
 
 
+def _is_file_entry(entry) -> bool:
+    try:
+        return not entry.is_dir(follow_symlinks=False)
+    except OSError:                          # an entry that cannot be examined is not offered
+        return False
+
+
 def extra_examples(src: Path, already: set[str], tracked: set[str] | None) -> tuple[list[str], str | None]:
     """(names, problem). The top-level examples/*.py files in the checkout that match EXTRA_EXAMPLE_WORDS, are not in
     the fixed list and are tracked at the pinned commit, sorted, at most EXTRA_EXAMPLE_MAX. A match that the pinned
     commit does not have is a problem, never an included file. When git could not say what is tracked (`tracked` is
     None) no extra is taken. A directory that cannot be listed is a problem, not an exception. Nothing is read here."""
     ex = src / "examples"
-    if os.path.islink(ex) or not ex.is_dir():
-        return [], None
     try:
+        if os.path.islink(ex) or not ex.is_dir():
+            return [], None
         entries = [e for e in os.scandir(ex)]
     except OSError as exc:
         return [], f"{ex} cannot be listed: {exc.strerror or exc}"
@@ -183,7 +190,7 @@ def extra_examples(src: Path, already: set[str], tracked: set[str] | None) -> tu
     for entry in entries:
         low = entry.name.lower()
         if (entry.name.endswith(".py") and entry.name not in already and any(w in low for w in EXTRA_EXAMPLE_WORDS)
-                and not any(w in low for w in EXTRA_EXAMPLE_SKIP) and not entry.is_dir(follow_symlinks=False)):
+                and not any(w in low for w in EXTRA_EXAMPLE_SKIP) and _is_file_entry(entry)):
             if tracked is None:
                 continue
             (names if f"examples/{entry.name}" in tracked else untracked).append(entry.name)

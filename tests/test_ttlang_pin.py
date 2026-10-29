@@ -64,7 +64,7 @@ class Fake:
         return sorted(p.relative_to(self.src).as_posix() for d in ("examples", "docs")
                       for p in (self.src / d).rglob("*") if p.is_file())
 
-    def run(self, argv, timeout, env=None):
+    def run(self, argv, timeout, env=None, cwd=None):
         self.calls.append(list(argv))
         self.envs.append(env)
         if "ls-tree" in argv:                               # the files the pinned commit has: all but the untracked
@@ -76,6 +76,8 @@ class Fake:
                 return 128, "", "fatal"
             return 0, "".join([f"?? {p}\n" for p in sorted(self.untracked)] +
                               [f" M {p}\n" for p in sorted(self.modified)]), ""
+        if "show" in argv and self.git_works:               # a file as the pinned commit has it
+            return 0, "# the pinned commit's program\n", ""
         if argv[-1] == "--version":
             return 0, self.sim, ""
         if "rev-parse" in argv:
@@ -464,7 +466,7 @@ def sim_env(tmp_path, *, head=PIN):
     ran = []
     base = f.run
 
-    def run(argv, timeout, env=None):
+    def run(argv, timeout, env=None, cwd=None):
         if "sysconfig" in " ".join(map(str, argv)):
             return 0, f"{lib}\n", ""
         if "import torch" in " ".join(map(str, argv)):
@@ -472,7 +474,7 @@ def sim_env(tmp_path, *, head=PIN):
         if str(argv[0]).endswith("tt-lang-sim") and argv[-1] != "--version":
             ran.append((list(argv), env))
             return 1, " ".join(n for _, needles in defaults.TTLANG_NEGATIVE_EXAMPLES for n in needles), ""
-        return base(argv, timeout, env)
+        return base(argv, timeout, env, cwd)
     f.env.run = run
     return f, ran, hashlib.sha256(diag.read_bytes()).hexdigest()
 
@@ -517,3 +519,132 @@ def test_an_example_at_the_pin_runs_in_the_same_minimal_environment(tmp_path, mo
 def test_the_example_environment_allow_list_is_the_agent_shells():
     from orchard import agent
     assert ttlang_env.VERIFY_ENV_ALLOW == agent.ENV_ALLOW and ttlang_env.NO_CHIP == agent.NO_CHIP
+
+
+# ---- verify() runs copies from the pinned commit, in a directory made for the call, after the integrity check -----------
+
+import os
+import subprocess
+import textwrap
+
+
+def make_repo(root: Path):
+    """A real git repository holding the programs verify() runs, committed once; returns (KEnv, commit sha, marker)."""
+    src = root / "tt-lang"
+    (src / "examples" / "errors").mkdir(parents=True)
+    (src / "examples" / "errors" / "eltwise_add_error.py").write_text("print('the pinned program')\n")
+    (src / "examples" / "compiler_only_external_call.py").write_text("print('the pinned program')\n")
+    (src / "examples" / "compiler_only_add.hpp").write_text("// header\n")
+    git = ["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    for argv in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "x"]):
+        subprocess.run(git + argv, check=True, capture_output=True)
+    sha = subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    venv = root / "venv"
+    (venv / "bin").mkdir(parents=True)
+    marker = root / "marker.txt"
+    needles = " ".join(n for _, ns in defaults.TTLANG_NEGATIVE_EXAMPLES for n in ns)
+    # A stand-in tt-lang-sim: it records its working directory and the program it was given, and runs the program.
+    (venv / "bin" / "tt-lang-sim").write_text(textwrap.dedent(f"""\
+        #!/bin/sh
+        echo "$PWD $1" >> {marker}
+        python3 "$1"
+        echo "{needles}"
+        exit 1
+        """))
+    (venv / "bin" / "tt-lang-sim").chmod(0o755)
+    env = ttlang_env.KEnv(src_dir=src, venv_dir=venv, scratch_dir=root / "scratch", environ={"PATH": os.environ["PATH"]})
+    return env, sha, marker
+
+
+def test_verify_runs_a_copy_from_the_pinned_commit_in_a_fresh_directory_that_is_then_removed(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    got = ttlang_env.verify(env)
+    assert got.status == ttlang_env.OK, got.detail
+    lines = marker.read_text().splitlines()
+    assert len(lines) == len(defaults.TTLANG_NEGATIVE_EXAMPLES)
+    for line in lines:
+        cwd, program = line.split(" ", 1)
+        assert Path(cwd).name.startswith("orchard-verify-") and program.startswith(cwd + "/examples/")
+        assert not Path(cwd).exists()                        # removed after the call
+        assert not str(env.src_dir) in program               # never the working tree's version
+    assert subprocess.run(["git", "-C", str(env.src_dir), "status", "--porcelain"], capture_output=True,
+                          text=True).stdout == ""
+
+
+def test_a_modified_negative_example_that_would_write_a_file_is_never_run(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    planted = tmp_path / "planted.txt"
+    (env.src_dir / "examples" / "errors" / "eltwise_add_error.py").write_text(
+        f"open({str(planted)!r}, 'w').write('ran')\n")
+    for allow in (False, True):                               # the override does not reach a modified program
+        got = ttlang_env.verify(env, allow_pin_mismatch=allow)
+        assert got.status == ttlang_env.FAIL and "eltwise_add_error.py (modified)" in got.detail
+    assert not planted.exists() and not marker.exists()
+
+
+def test_an_untracked_support_file_next_to_the_programs_blocks_verify(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    hpp = env.src_dir / "examples" / "compiler_only_add.hpp"
+    hpp.write_text("// edited\n")
+    got = ttlang_env.verify(env)
+    assert got.status == ttlang_env.FAIL and "compiler_only_add.hpp (modified)" in got.detail and not marker.exists()
+
+
+def test_verify_refuses_when_git_cannot_say_whether_the_programs_are_clean(tmp_path):
+    f = Fake(tmp_path)
+    f.git_works = False
+    got = ttlang_env.verify(f.env)
+    assert got.status == ttlang_env.FAIL and "git could not say" in got.detail
+
+
+def test_verify_without_the_override_never_falls_back_to_another_commit(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", "0" * 40)        # the pinned commit is not in the checkout
+    got = ttlang_env.verify(env)
+    assert got.status == ttlang_env.FAIL and "pinned commit" in got.detail and not marker.exists()
+    again = ttlang_env.verify(env, allow_pin_mismatch=True)  # with the override the checkout's own HEAD is used
+    assert again.status == ttlang_env.OK and marker.exists()
+
+
+def test_the_integrity_check_runs_before_any_program_in_ensure(tmp_path, monkeypatch):
+    f, ran, sha = sim_env(tmp_path)
+    monkeypatch.setattr(defaults, "TTLANG_DIAGNOSTICS_SHA256", sha)
+    f.modified = {"examples/errors/eltwise_add_error.py"}
+    results = ttlang_env.ensure(f.env, check_only=True, say=lambda s: None)
+    assert ran == [] and results[-1].name == "verify" and results[-1].status == ttlang_env.FAIL
+    order = [a for a in f.calls if a[0] == "git"]
+    assert any("status" in a for a in order)
+
+
+def test_kernel_env_check_runs_verify_through_the_same_guards(tmp_path, monkeypatch, capsys):
+    f, ran, sha = sim_env(tmp_path)
+    monkeypatch.setattr(defaults, "TTLANG_DIAGNOSTICS_SHA256", sha)
+    f.modified = {"examples/compiler_only_add.hpp"}
+    args = argparse.Namespace(check=True, src_dir=None, venv_dir=None, tt_lang_skill_dir=str(make_skill(tmp_path, "0.20")),
+                              allow_stale_skills=True)
+    monkeypatch.setattr(ttlang_env, "skills_status", lambda *a, **k: [])
+    code = ttlang_env.main(args, env=f.env)
+    assert code == 2 and ran == []
+    assert "verify" in capsys.readouterr().out
+
+
+def test_a_checkout_directory_that_cannot_be_searched_is_handled_wherever_it_is_looked_at(tmp_path):
+    f = Fake(tmp_path)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    os.chmod(f.src, 0)
+    os.chmod(tree, 0)
+    try:
+        names, why = tr.extra_examples(f.src, set(), {"examples/broadcast.py"})
+        assert names == [] and why and "cannot be listed" in why
+        assert ttlang_env.head_sha(f.env) is None
+        assert tc._tree_row(f.env, tree).name == "hardware tree"          # no PermissionError reaches the caller
+        f.git_works = False                                                # the fake git would walk the tree itself
+        files, problems = tr.assemble(f.env, make_skill(tmp_path, "0.20"))
+        assert problems                                                    # refused with reasons, no traceback
+    finally:
+        os.chmod(f.src, 0o755)
+        os.chmod(tree, 0o755)

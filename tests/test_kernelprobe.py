@@ -118,7 +118,7 @@ def fake_kenv(tmp_path):
     lib = tmp_path / "purelib"
     lib.mkdir()
 
-    def run(argv, timeout, env=None):
+    def run(argv, timeout, env=None, cwd=None):
         if argv[-1] == "--version":
             return 0, "tt-lang-sim 1.1.10+gfake\n", ""
         if "rev-parse" in argv:
@@ -3802,7 +3802,7 @@ def test_the_probe_read_file_takes_limit_and_names_its_arguments_for_an_unknown_
 
 def _pinned_env(fake_kenv, *, checkout_at=None, sim=None):
     """fake_kenv with the checkout's commit and the simulator version set to the pin (or to what a test names)."""
-    def run(argv, timeout, env=None):
+    def run(argv, timeout, env=None, cwd=None):
         if argv[-1] == "--version":
             return 0, f"tt-lang-sim {sim or _pin.SIM_VERSION}\n", ""
         if "rev-parse" in argv:
@@ -3886,7 +3886,7 @@ def _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, *, checkout_at=None, sim
     if venv_python:
         (venv / "bin" / "python").write_text("#!/bin/sh\n")
 
-    def run(argv, timeout, env=None):
+    def run(argv, timeout, env=None, cwd=None):
         text = " ".join(str(a) for a in argv)
         if argv[-1] == "--version":
             return 0, f"tt-lang-sim {sim or _pin.SIM_VERSION}\n", ""

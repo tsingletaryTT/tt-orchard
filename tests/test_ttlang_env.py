@@ -23,8 +23,13 @@ class FakeRun:
     def on(self, prefix, result=(0, "", ""), effect=None):
         self.rules.append((tuple(prefix), result, effect))
 
-    def __call__(self, argv, timeout, env=None):
+    git_ok = True           # read-only git calls on the checkout (ls-tree, status, show) answer: clean, one program text
+
+    def __call__(self, argv, timeout, env=None, cwd=None):
         self.calls.append((list(argv), dict(env or {})))
+        self.cwds = getattr(self, "cwds", []) + [cwd]
+        if self.git_ok and argv[:1] == ["git"] and any(w in argv for w in ("ls-tree", "status", "show")):
+            return 0, ("# program text\n" if "show" in argv else ""), ""
         for prefix, result, effect in self.rules:
             if tuple(argv[:len(prefix)]) == prefix:
                 if effect:
@@ -339,5 +344,5 @@ def test_ensure_runs_the_commands_in_order_on_a_fresh_machine(env, tmp_path):
     order = [at(lambda a: a[:1] == ["git"] and "init" in a), at(lambda a: a[:2] == ["uv", "venv"]),
              at(lambda a: a[:3] == ["uv", "pip", "install"] and "torch" in a), at(lambda a: a[:2] == ["uv", "build"]),
              at(lambda a: a[:3] == ["uv", "pip", "install"] and a[-1].endswith(".whl")),
-             at(lambda a: a == [str(env.sim), str(env.src_dir / "examples" / defaults.TTLANG_NEGATIVE_EXAMPLES[0][0])])]
+             at(lambda a: a[:1] == [str(env.sim)] and a[1].endswith(defaults.TTLANG_NEGATIVE_EXAMPLES[0][0]))]
     assert order == sorted(order)

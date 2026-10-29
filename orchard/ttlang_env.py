@@ -28,6 +28,7 @@ import os
 import shutil
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -50,10 +51,10 @@ class Result:
     pin_mismatch: bool = False
 
 
-def real_run(argv, timeout, env=None):
-    """(returncode, stdout, stderr). A timeout answers 124 and a missing program 127."""
+def real_run(argv, timeout, env=None, cwd=None):
+    """(returncode, stdout, stderr). A timeout answers 124 and a missing program 127. `cwd` is the working directory."""
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, cwd=cwd)
     except subprocess.TimeoutExpired:
         return 124, "", f"timed out after {timeout} s"
     except (OSError, subprocess.SubprocessError) as exc:
@@ -66,7 +67,7 @@ class KEnv:
     src_dir: Path
     venv_dir: Path
     scratch_dir: Path
-    run: Callable = real_run          # (argv, timeout, env=None) -> (returncode, stdout, stderr)
+    run: Callable = real_run          # (argv, timeout, env=None, cwd=None) -> (returncode, stdout, stderr)
     environ: dict | None = None
 
     @property
@@ -92,7 +93,10 @@ def sha256_file(path: Path) -> str:
 
 
 def head_sha(env: KEnv) -> str | None:
-    if not (env.src_dir / ".git").exists():
+    try:
+        if not (env.src_dir / ".git").exists():
+            return None
+    except OSError:                      # a directory that cannot be searched has no readable checkout
         return None
     rc, out, _ = env.run(["git", "-C", str(env.src_dir), "rev-parse", "HEAD"], 30)
     return out.strip() if rc == 0 and out.strip() else None
@@ -241,20 +245,67 @@ def minimal_env(env: KEnv) -> dict:
     return out
 
 
-def verify(env: KEnv) -> Result:
-    """Run the negative examples and require upstream's own diagnostic text. See the module docstring. The examples are
-    code from the checkout, so they run in minimal_env, and ensure() calls this only at the pinned commit or when the
-    operator asked to run off the pin."""
-    for rel, needles in defaults.TTLANG_NEGATIVE_EXAMPLES:
-        rc, out, err = env.run([str(env.sim), str(env.src_dir / "examples" / rel)], 300, minimal_env(env))
-        text = f"{out}\n{err}"
-        if rc == 0:
-            return Result("verify", FAIL, f"{rel} exited 0 but it must fail")
-        if FALLBACK_TEXT in text:
-            return Result("verify", FAIL, f"{rel} ended in {FALLBACK_TEXT}: the diagnostics file is still missing")
-        missing = [n for n in needles if n not in text]
-        if missing:
-            return Result("verify", FAIL, f"{rel} did not print {missing[0]!r}")
+# Programs verify() runs, and the files they need beside them: under examples/ in the checkout (the header is read by
+# compiler_only_external_call.py). Only these are ever executed from the checkout.
+VERIFY_SUPPORT_FILES = ("compiler_only_add.hpp",)
+
+
+def _show(env: KEnv, rev: str, path: str) -> tuple[str | None, str]:
+    """(text, why): the file as commit `rev` has it, read with `git show` and nothing else."""
+    from orchard import ttlang_reference
+    rc, out, err = env.run(["git", "-C", str(env.src_dir), "show", f"{rev}:{path}"], 60,
+                           ttlang_reference.git_env(env))
+    return (out, "") if rc == 0 else (None, (err.strip().splitlines() or ["no answer"])[-1][:200])
+
+
+def verify(env: KEnv, *, allow_pin_mismatch: bool = False) -> Result:
+    """Run the negative examples and require upstream's own diagnostic text. See the module docstring.
+
+    The examples are code from the checkout, so before any of them runs:
+      1. the programs and the files they need must be unmodified and tracked in the checkout (git status, read only);
+         one that is modified or untracked blocks verify, with or without the operator's override;
+      2. the programs are copied from the pinned commit (`git show <pin>:path`) into a directory made for this call, and
+         the copies run, never the working tree's version. With `allow_pin_mismatch` and no pinned commit in the checkout,
+         the checkout's HEAD is used instead;
+      3. they run in that directory, in minimal_env, and the directory is removed afterwards."""
+    from orchard import ttlang_pin, ttlang_reference
+    needed = [f"examples/{rel}" for rel, _ in defaults.TTLANG_NEGATIVE_EXAMPLES]
+    needed += [f"examples/{name}" for name in VERIFY_SUPPORT_FILES]
+    _, dirty = ttlang_reference.git_state(env)
+    if dirty is None:
+        return Result("verify", FAIL, f"git could not say whether the files verify runs are as the pinned commit has "
+                                      f"them in {env.src_dir}, so none of them is run")
+    bad = [f"{p} ({dirty[p]})" for p in needed if p in dirty]
+    if bad:
+        return Result("verify", FAIL, f"{', '.join(bad)} in {env.src_dir} is not as the pinned commit has it; nothing "
+                                      "from it is run. Restore the file or move the checkout aside")
+    revs = [ttlang_pin.SHA] + (["HEAD"] if allow_pin_mismatch else [])
+    work = tempfile.mkdtemp(prefix="orchard-verify-")
+    try:
+        for rev in revs:
+            texts = {p: _show(env, rev, p) for p in needed}
+            if all(t is not None for t, _ in texts.values()):
+                break
+        else:
+            first = next((f"{p}: {why}" for p, (t, why) in texts.items() if t is None), "")
+            return Result("verify", FAIL, f"the files verify runs could not be read from the pinned commit in "
+                                          f"{env.src_dir} ({first})")
+        for p, (text, _) in texts.items():
+            target = Path(work) / p
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+        for rel, needles in defaults.TTLANG_NEGATIVE_EXAMPLES:
+            rc, out, err = env.run([str(env.sim), str(Path(work) / "examples" / rel)], 300, minimal_env(env), work)
+            text = f"{out}\n{err}"
+            if rc == 0:
+                return Result("verify", FAIL, f"{rel} exited 0 but it must fail")
+            if FALLBACK_TEXT in text:
+                return Result("verify", FAIL, f"{rel} ended in {FALLBACK_TEXT}: the diagnostics file is still missing")
+            missing = [n for n in needles if n not in text]
+            if missing:
+                return Result("verify", FAIL, f"{rel} did not print {missing[0]!r}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     return Result("verify", OK, f"{len(defaults.TTLANG_NEGATIVE_EXAMPLES)} negative examples print their diagnostics")
 
 
@@ -280,7 +331,7 @@ def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print,
         r = Result("verify", TODO, "skipped: nothing from a checkout that is not at the pin is run without "
                                    "--allow-stale-skills")
     else:
-        r = verify(env)
+        r = verify(env, allow_pin_mismatch=allow_pin_mismatch)
     results.append(r)
     say(f"{r.status:5s} {r.name}: {r.detail}")
     return results

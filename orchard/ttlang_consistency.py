@@ -115,10 +115,17 @@ def _references_row(env, skill_dir, references) -> Row:
     return Row("references", OK, f"every reference file documents specification {want}")
 
 
+def _exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:                          # a directory that cannot be searched has no readable tree
+        return False
+
+
 def _tree_row(env, tree: Path | None) -> Row:
     ref = ttlang_pin.TT_METAL_REF
     have = None
-    if tree is not None and (Path(tree) / ".git").exists():
+    if tree is not None and _exists(Path(tree) / ".git"):
         rc, out, _ = env.run(["git", "-C", str(tree), "describe", "--tags", "--always"], 30)
         have = out.strip() if rc == 0 and out.strip() else None
         rc, out, _ = env.run(["git", "-C", str(tree), "rev-parse", "HEAD"], 30)

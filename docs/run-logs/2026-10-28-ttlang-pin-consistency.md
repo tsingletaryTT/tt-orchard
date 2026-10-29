@@ -177,3 +177,27 @@ The class: anything executed or read from the tt-lang checkout, the environment 
 Each guard was removed once and a test went red: the verify skip off the pin (1), the stop at a mismatch without the override (1),
 the minimal environment (2), the override passed to the gate (1), the permission handling (1), the tracked-at-the-pin filter (1), the
 rule for an unanswered git (1), the dirty-file refusal (1), the no-lock setting (1), the `checkout files` row (1).
+
+## Review round 3 (Copilot, PR 198, head 1e21162: a modified negative example could run before checkout integrity was checked)
+
+Round 2 let `verify` run the checkout's negative-example programs in a minimal environment, but it ran the working tree's version from
+wherever the process stood. A modified program could write files before the `checkout files` check ever ran, in `kernel-probe` and in
+`kernel-env`. The class: code from the checkout runs only after its integrity is settled, and it runs somewhere that cannot hurt.
+
+- `verify` now checks first, with read-only git, that the programs and the file they need beside them (`compiler_only_add.hpp`) are
+  unmodified and tracked. One that is modified or untracked makes `verify` fail with its name, with or without the operator's
+  override, and nothing runs. When git cannot answer, nothing runs either. `ensure` calls `verify` last, so in `kernel-env --check`
+  and in the probe (which calls `ensure` before anything else) this check is the first thing that touches the checkout's programs.
+- The programs are not run from the working tree. `git show <pinned commit>:examples/...` copies them into a directory made for the
+  call, and the copies run there, in the allow-listed environment, with that directory as the working directory. The directory is
+  removed afterwards. With the override and no pinned commit in the checkout, the checkout's own HEAD is used. Without the override
+  there is no fallback.
+- Permission errors in discovery: `examples/` is listed inside one guarded block, so a parent that cannot be searched is a refusal and
+  not a traceback; an entry that cannot be examined is not offered; the head-commit read and the tt-metal tree check treat an
+  unsearchable directory as "no readable checkout" and "no readable tree". A test locks a checkout directory and a tree directory
+  (mode 0) and calls each.
+
+Tests include a real git repository with a stand-in simulator that records its working directory, so they show where a program ran,
+that a program modified to write a file never ran, and that the checkout is clean afterwards. Each guard was removed once and a test went
+red: the modified-file block (4 tests), running the working tree's version (1), the working directory (1), removing the directory (1),
+the no-fallback rule (1), the unanswered-git rule (1), the `examples/` guard (1), the head-commit guard (1), the tree guard (1).
