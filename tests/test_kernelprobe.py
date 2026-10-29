@@ -1046,7 +1046,7 @@ def env_ready(monkeypatch):
     """ttlang_env.ensure(check_only=True) answers all OK without running the simulator; the calls are recorded."""
     calls = []
 
-    def ensure(env, *, check_only=False, say=print):
+    def ensure(env, *, check_only=False, say=print, **kw):
         calls.append(check_only)
         return [ttlang_env.Result("verify", ttlang_env.OK, "faked")]
     monkeypatch.setattr(kp.ttlang_env, "ensure", ensure)
@@ -1102,7 +1102,7 @@ def test_main_refuses_when_the_endpoint_does_not_answer(tmp_path, fake_kenv, env
 def test_main_refuses_when_the_environment_check_fails(tmp_path, fake_kenv, monkeypatch, capsys):
     for status in (ttlang_env.FAIL, ttlang_env.TODO):
         seen = []
-        monkeypatch.setattr(kp.ttlang_env, "ensure", lambda env, *, check_only=False, say=print: seen.append(
+        monkeypatch.setattr(kp.ttlang_env, "ensure", lambda env, *, check_only=False, say=print, **kw: seen.append(
             check_only) or [ttlang_env.Result("clone", ttlang_env.OK, ""), ttlang_env.Result("wheel", status, "x")])
         asked = []
         code = kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(),

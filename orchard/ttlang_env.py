@@ -224,10 +224,29 @@ def step_diagnostics(env: KEnv, check_only: bool) -> Result:
     return Result("diagnostics", OK, f"copied to {target} (local patch of the tt-lang-sim wheel)")
 
 
+# The environment the checkout's example programs run in: what an agent shell gets (orchard/agent.py, ENV_ALLOW), and
+# nothing else. No token, no credential file path and no device. A test holds this equal to agent.ENV_ALLOW.
+VERIFY_ENV_ALLOW = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "USER", "LOGNAME", "TERM")
+NO_CHIP = "0000:ff:00.0"                # matches no chip (orchard/agent.py, NO_CHIP)
+
+
+def minimal_env(env: KEnv) -> dict:
+    """An allow-listed environment for running code from the checkout. HOME is a directory that is not created."""
+    source = env.environ if env.environ is not None else os.environ
+    out = {k: source[k] for k in VERIFY_ENV_ALLOW if k in source}
+    home = str(Path(env.scratch_dir) / "verify-home")
+    out.update({"HOME": home, "XDG_CONFIG_HOME": home + "/.config", "XDG_CACHE_HOME": home + "/.cache",
+                "HF_TOKEN_PATH": home + "/no-hf-token", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+                "TT_VISIBLE_DEVICES": NO_CHIP, "TT_METAL_VISIBLE_DEVICES": NO_CHIP})
+    return out
+
+
 def verify(env: KEnv) -> Result:
-    """Run the negative examples and require upstream's own diagnostic text. See the module docstring."""
+    """Run the negative examples and require upstream's own diagnostic text. See the module docstring. The examples are
+    code from the checkout, so they run in minimal_env, and ensure() calls this only at the pinned commit or when the
+    operator asked to run off the pin."""
     for rel, needles in defaults.TTLANG_NEGATIVE_EXAMPLES:
-        rc, out, err = env.run([str(env.sim), str(env.src_dir / "examples" / rel)], 300)
+        rc, out, err = env.run([str(env.sim), str(env.src_dir / "examples" / rel)], 300, minimal_env(env))
         text = f"{out}\n{err}"
         if rc == 0:
             return Result("verify", FAIL, f"{rel} exited 0 but it must fail")
@@ -239,8 +258,13 @@ def verify(env: KEnv) -> Result:
     return Result("verify", OK, f"{len(defaults.TTLANG_NEGATIVE_EXAMPLES)} negative examples print their diagnostics")
 
 
-def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print) -> list[Result]:
-    """Run the steps in order and stop at the first failure. With check_only nothing changes the machine."""
+def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print,
+           allow_pin_mismatch: bool = False) -> list[Result]:
+    """Run the steps in order and stop at the first failure. With check_only nothing changes the machine.
+
+    `allow_pin_mismatch` is the operator's --allow-stale-skills. Without it a checkout at another commit stops the run,
+    and verify (which executes example programs from the checkout) never runs while any result is off the pin. With it a
+    check goes on past a mismatch, so the later steps are reported, and verify runs in an allow-listed environment."""
     results: list[Result] = []
     for step in (step_clone, step_venv, step_torch, step_wheel, step_diagnostics):
         r = step(env, check_only)
@@ -248,10 +272,13 @@ def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print) -> lis
         say(f"{r.status:5s} {r.name}: {r.detail}")
         # A real build stops at the first failure. A check goes on past a pin mismatch, so the steps after it are
         # still reported and the probe can tell a mismatch it may override from a component that is missing or broken.
-        if r.status == FAIL and not (check_only and r.pin_mismatch):
+        if r.status == FAIL and not (check_only and allow_pin_mismatch and r.pin_mismatch):
             return results
     if any(r.status == TODO and not r.pin_mismatch for r in results):
         r = Result("verify", TODO, "skipped until the steps above are done")
+    elif any(r.pin_mismatch for r in results) and not allow_pin_mismatch:
+        r = Result("verify", TODO, "skipped: nothing from a checkout that is not at the pin is run without "
+                                   "--allow-stale-skills")
     else:
         r = verify(env)
     results.append(r)

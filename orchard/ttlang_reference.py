@@ -27,7 +27,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from orchard import ttlang_env
+from orchard import ttlang_env, ttlang_pin
 
 # The checkout's docs a generated guide.md is made of, in reading order (paths under the checkout).
 GUIDE_DOCS = (
@@ -107,7 +107,11 @@ def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
                       "data": data, "spec_version": skill_ver if source == ttlang_env.SKILL_SOURCE else src_ver,
                       "generated": False})
     src = Path(env.src_dir)
-    for name in extra_examples(src, {n for n, _, _ in ttlang_env.REFERENCES}):
+    tracked, dirty = git_state(env)
+    extras, why = extra_examples(src, {n for n, _, _ in ttlang_env.REFERENCES}, tracked)
+    if why:
+        problems.append(why)
+    for name in extras:
         path = src / "examples" / name
         data, why = ttlang_env._read_reference(path, src)
         if why:
@@ -116,7 +120,44 @@ def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
         files.append({"name": name, "source": ttlang_env.CHECKOUT_SOURCE, "path": str(path),
                       "sha256": hashlib.sha256(data).hexdigest(), "data": data, "spec_version": src_ver,
                       "generated": False})
+    # Every file taken from the checkout must be the file the pinned commit has: a modified or untracked one is refused.
+    if dirty:
+        taken = [r for _, source, r in ttlang_env.REFERENCES if source == ttlang_env.CHECKOUT_SOURCE]
+        taken += [f"examples/{n}" for n in extras] + [SPEC_REL]
+        if use_checkout:
+            taken += list(GUIDE_DOCS) + list(EXAMPLES_DOCS)
+        for rel in dict.fromkeys(taken):
+            if rel in dirty:
+                problems.append(f"{rel} is {dirty[rel]} in the checkout {env.src_dir}; the reference files are taken "
+                                "only from files the pinned commit has, unchanged")
     return files, problems
+
+
+def _git_env(env) -> dict:
+    out = ttlang_env.minimal_env(env)
+    out["GIT_OPTIONAL_LOCKS"] = "0"         # `git status` must not rewrite the checkout's index
+    return out
+
+
+def git_state(env) -> tuple[set[str] | None, dict[str, str] | None]:
+    """(tracked, dirty) for the checkout's examples/ and docs/, read only. `tracked` is the set of paths the pinned
+    commit has there; `dirty` maps each modified or untracked path to a word saying which. Either is None when git
+    cannot answer (no git, the pinned commit is not in the checkout): the caller then does not trust the checkout's
+    extra files, and the consistency check says it could not tell."""
+    src = str(env.src_dir)
+    # `-c core.fsmonitor=false`: a checkout's own config can name a program for git to run on `status`; it is not run.
+    rc, out, _ = env.run(["git", "-C", src, "ls-tree", "-r", "--name-only", ttlang_pin.SHA, "--", "examples", "docs"],
+                         60, _git_env(env))
+    tracked = {line for line in out.splitlines() if line} if rc == 0 else None
+    rc, out, _ = env.run(["git", "-C", src, "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=all", "--", "examples", "docs"],
+                         60, _git_env(env))
+    dirty = None
+    if rc == 0:
+        dirty = {}
+        for line in out.splitlines():
+            if len(line) > 3:
+                dirty[line[3:].split(" -> ")[-1].strip('"')] = "untracked" if line.startswith("??") else "modified"
+    return tracked, dirty
 
 
 # The checkout's own example programs that show the patterns the failing kernels need (element-wise work, broadcast and
@@ -126,21 +167,32 @@ EXTRA_EXAMPLE_SKIP = ("multidevice",)   # all-reduce across devices is not a sin
 EXTRA_EXAMPLE_MAX = 8       # choice: the checkout has five such files at the pin; the cap keeps a new checkout bounded
 
 
-def extra_examples(src: Path, already: set[str]) -> list[str]:
-    """Names of the top-level examples/*.py files in the checkout that match EXTRA_EXAMPLE_WORDS and are not already
-    in the fixed list, sorted, at most EXTRA_EXAMPLE_MAX. A directory is not listed; a link is listed so that reading it
-    reports the refusal instead of skipping it quietly. Nothing is read here."""
+def extra_examples(src: Path, already: set[str], tracked: set[str] | None) -> tuple[list[str], str | None]:
+    """(names, problem). The top-level examples/*.py files in the checkout that match EXTRA_EXAMPLE_WORDS, are not in
+    the fixed list and are tracked at the pinned commit, sorted, at most EXTRA_EXAMPLE_MAX. A match that the pinned
+    commit does not have is a problem, never an included file. When git could not say what is tracked (`tracked` is
+    None) no extra is taken. A directory that cannot be listed is a problem, not an exception. Nothing is read here."""
     ex = src / "examples"
     if os.path.islink(ex) or not ex.is_dir():
-        return []
-    names = []
-    for entry in os.scandir(ex):
+        return [], None
+    try:
+        entries = [e for e in os.scandir(ex)]
+    except OSError as exc:
+        return [], f"{ex} cannot be listed: {exc.strerror or exc}"
+    names, untracked = [], []
+    for entry in entries:
         low = entry.name.lower()
         if (entry.name.endswith(".py") and entry.name not in already and any(w in low for w in EXTRA_EXAMPLE_WORDS)
-                and not any(w in low for w in EXTRA_EXAMPLE_SKIP)
-                and not entry.is_dir(follow_symlinks=False)):
-            names.append(entry.name)
-    return sorted(names)[:EXTRA_EXAMPLE_MAX]
+                and not any(w in low for w in EXTRA_EXAMPLE_SKIP) and not entry.is_dir(follow_symlinks=False)):
+            if tracked is None:
+                continue
+            (names if f"examples/{entry.name}" in tracked else untracked).append(entry.name)
+    if untracked:
+        return sorted(names)[:EXTRA_EXAMPLE_MAX], (
+            f"{', '.join('examples/' + n for n in sorted(untracked))} is not in the pinned commit; an untracked "
+            "example is never given to the coder")
+    return sorted(names)[:EXTRA_EXAMPLE_MAX], None
+
 
 
 def record(r: dict) -> dict:

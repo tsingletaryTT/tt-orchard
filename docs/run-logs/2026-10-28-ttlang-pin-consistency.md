@@ -151,3 +151,29 @@ The class: a pin, a version or an override is read in one place and decided in a
 Each guard was removed once and a test went red: the override in the gate (2 tests), the check going on past a mismatch (2), the
 `pin_mismatch` flag on the clone step (3), the consistency rows in the allowed list (1), the unknown branch (1), the rows in the
 header (3), the library exclusion (2).
+
+## Review round 2 (Copilot, PR 198, three findings, fixed by class)
+
+The class: anything executed or read from the tt-lang checkout, the environment it runs in, and whether the pinned commit has it.
+
+- Running code from an off-pin checkout. The first round let the environment check go on past a checkout at another commit, and
+  that reached `verify`, which runs the checkout's negative-example programs. Nothing from a checkout that is not at the pin runs
+  now unless `--allow-stale-skills` was given: without it the check stops at the mismatch, and `verify` is skipped while any
+  result is off the pin (a simulator built from another commit included). With the override, and at the pin too, the examples run
+  in an allow-listed environment: the same variables an agent shell gets, a `HOME` that is not created, no token or credential
+  path, and a device mask that matches no chip. A test holds the allow-list equal to the agent shells'. Real `kernel-env --check`
+  passes `verify` in that environment on this machine.
+- A directory that cannot be listed. `examples/` that raises a permission error is a refusal that names the directory, never a
+  traceback.
+- Extra examples and files taken from the checkout. The checkout's `git` is asked (read only, `GIT_OPTIONAL_LOCKS=0`,
+  `core.fsmonitor=false` so the checkout's own config cannot name a program for git to run) which files the pinned commit has under
+  `examples/` and `docs/`, and which are modified or untracked. An extra example that the pinned commit does not have is refused
+  and never given to the coder. A modified file among the files taken (the specification, the fixed examples, the docs a generated guide
+  is made of, the extras) is refused. When git cannot answer, no extra example is taken.
+- A new consistency row, `checkout files`, reports modified or untracked files under `examples/` and `docs/` as a blocking
+  mismatch, and "unknown" when git cannot answer. I put it in the consistency check (which the probe runs and `ttlang-consistency`
+  prints) and not in `skillsfresh`, which compares sources with upstream and has no view of the working tree.
+
+Each guard was removed once and a test went red: the verify skip off the pin (1), the stop at a mismatch without the override (1),
+the minimal environment (2), the override passed to the gate (1), the permission handling (1), the tracked-at-the-pin filter (1), the
+rule for an unanswered git (1), the dirty-file refusal (1), the no-lock setting (1), the `checkout files` row (1).

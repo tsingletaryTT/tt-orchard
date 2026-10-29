@@ -2272,8 +2272,8 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse("--staged gives the coder no hardware tool: pass --no-agent-hw")
     shared = getattr(args, "shared_python", None) or default_shared_python()
     env = env or default_env(args)
-    results = ttlang_env.ensure(env, check_only=True, say=say)
     allow_pin = bool(getattr(args, "allow_stale_skills", False))
+    results = ttlang_env.ensure(env, check_only=True, say=say, allow_pin_mismatch=allow_pin)
     # A component that is missing or broken always refuses. A result that only says "not the pinned tt-lang" refuses
     # too, unless --allow-stale-skills accepts it; the report then records it (pin_overridden below).
     not_ready = [r for r in results if r.status != ttlang_env.OK and not (allow_pin and r.pin_mismatch)]

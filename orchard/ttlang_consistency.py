@@ -5,6 +5,7 @@
 One row per place that must agree with the pin, each ok, mismatch, todo or unknown, with a one-line fix on a mismatch:
 
     checkout        the tt-lang checkout's HEAD against the pinned commit (and the specification it documents)
+    checkout files  every file under examples/ and docs/ is as the pinned commit has it (none modified or untracked)
     simulator       the tt-lang-sim wheel's version, which carries the commit it was built from
     skill           the specification version the installed tt-lang skill documents against the checkout's
     references      the specification version of every file the coder is given against the checkout's
@@ -62,6 +63,19 @@ def _simulator_row(env) -> Row:
         return Row("simulator", OK, f"tt-lang-sim {have}, built from {built}, matches the pin")
     return Row("simulator", MISMATCH, f"tt-lang-sim {have} was built from {built}; the pin wants {want} (built from "
                f"{ttlang_pin.SIM_SOURCE_SHA[:7]})", fix, blocks=True)
+
+
+def _files_row(env) -> Row:
+    tracked, dirty = ttlang_reference.git_state(env)
+    if dirty is None or tracked is None:
+        return Row("checkout files", UNKNOWN, f"git could not say which files under examples/ and docs/ of {env.src_dir} "
+                   "the pinned commit has, so the extra examples are not given to the coder")
+    if dirty:
+        shown = ", ".join(f"{p} ({w})" for p, w in sorted(dirty.items())[:5])
+        return Row("checkout files", MISMATCH, f"{len(dirty)} file(s) under examples/ or docs/ of {env.src_dir} are "
+                   f"not as the pinned commit has them: {shown}",
+                   f"run `git -C {env.src_dir} status` and restore or move the files aside", blocks=True)
+    return Row("checkout files", OK, "every file under examples/ and docs/ is as the pinned commit has it")
 
 
 def _skill_row(env, skill_dir) -> Row:
@@ -128,7 +142,7 @@ def _tree_row(env, tree: Path | None) -> Row:
 def check(env, skill_dir, *, tt_metal_dir=None, references: list[dict] | None = None) -> list[Row]:
     """Every row. `references` are the files the probe already assembled (so the check judges what the coder gets);
     without them the check assembles them itself, in memory."""
-    return [_checkout_row(env), _simulator_row(env), _skill_row(env, skill_dir),
+    return [_checkout_row(env), _simulator_row(env), _files_row(env), _skill_row(env, skill_dir),
             _references_row(env, skill_dir, references), _tree_row(env, tt_metal_dir)]
 
 

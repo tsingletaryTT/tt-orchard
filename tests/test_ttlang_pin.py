@@ -57,10 +57,25 @@ class Fake:
         (venv / "bin").mkdir(parents=True)
         (venv / "bin" / "tt-lang-sim").write_text("#!/bin/sh\n")
         self.head, self.sim, self.tree_ref, self.calls = head, sim, "v0.80.0", []
+        self.untracked, self.modified, self.git_works, self.envs = set(), set(), True, []
         self.env = ttlang_env.KEnv(src_dir=self.src, venv_dir=venv, scratch_dir=tmp_path / "scratch", run=self.run)
+
+    def _tree(self):
+        return sorted(p.relative_to(self.src).as_posix() for d in ("examples", "docs")
+                      for p in (self.src / d).rglob("*") if p.is_file())
 
     def run(self, argv, timeout, env=None):
         self.calls.append(list(argv))
+        self.envs.append(env)
+        if "ls-tree" in argv:                               # the files the pinned commit has: all but the untracked
+            if not self.git_works:
+                return 128, "", "fatal: not a valid object name"
+            return 0, "".join(f"{p}\n" for p in self._tree() if p not in self.untracked), ""
+        if "status" in argv:
+            if not self.git_works:
+                return 128, "", "fatal"
+            return 0, "".join([f"?? {p}\n" for p in sorted(self.untracked)] +
+                              [f" M {p}\n" for p in sorted(self.modified)]), ""
         if argv[-1] == "--version":
             return 0, self.sim, ""
         if "rev-parse" in argv:
@@ -345,9 +360,10 @@ def test_the_worked_kernel_library_does_not_make_the_references_row_unknown(tmp_
 
 def test_a_check_goes_on_past_a_pin_mismatch_and_a_real_build_stops_at_it(tmp_path):
     f = Fake(tmp_path, head="d" * 40)
-    ran = ttlang_env.ensure(f.env, check_only=True, say=lambda s: None)
+    ran = ttlang_env.ensure(f.env, check_only=True, say=lambda s: None, allow_pin_mismatch=True)
     assert ran[0].name == "clone" and ran[0].status == ttlang_env.FAIL and ran[0].pin_mismatch
-    assert len(ran) > 1                                # the steps after the mismatch were still reported
+    assert len(ran) > 1                                # with the override the steps after the mismatch are reported
+    assert [r.name for r in ttlang_env.ensure(f.env, check_only=True, say=lambda s: None)] == ["clone"]
     built = ttlang_env.ensure(f.env, check_only=False, say=lambda s: None)
     assert [r.name for r in built] == ["clone"]        # a build never goes on from a checkout at another commit
 
@@ -360,3 +376,144 @@ def test_only_a_pin_mismatch_is_marked_overridable(tmp_path):
     assert ttlang_env.step_clone(off.env, True).pin_mismatch is True
     gone = ttlang_env.KEnv(src_dir=tmp_path / "nowhere", venv_dir=tmp_path / "v", scratch_dir=tmp_path / "s", run=f.run)
     assert ttlang_env.step_wheel(gone, True).pin_mismatch is False                        # no wheel at all
+
+
+# ---- Copilot review of PR 198, round 2: what is executed or read from the checkout, and whether the pin has it ----------
+
+def test_the_checkouts_untracked_examples_are_refused_not_given_to_the_coder(tmp_path):
+    f = Fake(tmp_path)
+    (f.src / "examples" / "broadcast.py").write_text("# tracked\n")
+    (f.src / "examples" / "eltwise_scratch.py").write_text("print('operator scratch')\n")
+    f.untracked = {"examples/eltwise_scratch.py"}
+    files, problems = tr.assemble(f.env, make_skill(tmp_path, "0.20"))
+    assert any("eltwise_scratch.py" in p and "not in the pinned commit" in p for p in problems)
+    assert "eltwise_scratch.py" not in by_name(files) and "broadcast.py" in by_name(files)
+
+
+def test_a_modified_file_taken_from_the_checkout_is_refused(tmp_path):
+    f = Fake(tmp_path)
+    f.modified = {"examples/eltwise_add.py", tr.SPEC_REL}
+    _, problems = tr.assemble(f.env, make_skill(tmp_path, "0.20"))
+    assert any("examples/eltwise_add.py" in p and "modified" in p for p in problems)
+    assert any(tr.SPEC_REL in p for p in problems)
+
+
+def test_a_modified_file_that_is_not_used_does_not_refuse(tmp_path):
+    f = Fake(tmp_path)
+    f.modified = {"docs/unrelated.md"}
+    _, problems = tr.assemble(f.env, make_skill(tmp_path, "0.20"))
+    assert problems == []
+
+
+def test_when_git_cannot_say_what_is_tracked_no_extra_example_is_taken(tmp_path):
+    f = Fake(tmp_path)
+    (f.src / "examples" / "broadcast.py").write_text("# x\n")
+    f.git_works = False
+    files, problems = tr.assemble(f.env, make_skill(tmp_path, "0.20"))
+    assert problems == [] and "broadcast.py" not in by_name(files)
+
+
+def test_an_examples_directory_that_cannot_be_listed_is_a_problem_not_a_traceback(tmp_path, monkeypatch):
+    f = Fake(tmp_path)
+
+    def deny(path):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(tr.os, "scandir", deny)
+    files, problems = tr.assemble(f.env, make_skill(tmp_path, "0.20"))
+    assert any("cannot be listed" in p and "Permission denied" in p for p in problems)
+
+
+def test_git_is_only_asked_to_read_and_never_to_refresh_the_index(tmp_path):
+    f = Fake(tmp_path)
+    tr.git_state(f.env)
+    git = [a for a in f.calls if a[0] == "git"]
+    assert {w for a in git for w in a if w in ("ls-tree", "status")} == {"ls-tree", "status"}
+    assert all("fetch" not in a and "checkout" not in a and "reset" not in a for a in git)
+    status = next(a for a in git if "status" in a)
+    assert "core.fsmonitor=false" in status          # a checkout's own config must not name a program git runs
+    assert all(e and e["GIT_OPTIONAL_LOCKS"] == "0" for e in f.envs)
+    assert all("HF_TOKEN" not in e for e in f.envs)
+
+
+def test_the_checkout_files_row_reports_untracked_and_modified_files(tmp_path):
+    f = Fake(tmp_path)
+    skill = make_skill(tmp_path, "0.20")
+    assert rows_by_name(check(f, skill))["checkout files"].status == tc.OK
+    f.untracked = {"examples/eltwise_scratch.py"}
+    f.modified = {"docs/sphinx/overview.md"}
+    r = rows_by_name(check(f, skill))["checkout files"]
+    assert r.status == tc.MISMATCH and r.blocks and "eltwise_scratch.py (untracked)" in r.detail
+    assert "overview.md (modified)" in r.detail and "git -C" in r.fix
+    f.git_works = False
+    u = rows_by_name(check(f, skill))["checkout files"]
+    assert u.status == tc.UNKNOWN and not u.blocks
+
+
+# ---- nothing from an off-pin checkout runs without the override, and what runs gets a minimal environment ---------------
+
+def sim_env(tmp_path, *, head=PIN):
+    """A KEnv for the real ensure: every step passes, and the negative examples fail with the text upstream prints."""
+    f = Fake(tmp_path, head=head)
+    diag = f.src / "python" / "ttl" / "diagnostics.py"
+    diag.parent.mkdir(parents=True)
+    diag.write_text("# diagnostics\n")
+    lib = tmp_path / "purelib"
+    (lib / "ttl" / "ttl").mkdir(parents=True)
+    (lib / "ttl" / "ttl" / "diagnostics.py").write_bytes(diag.read_bytes())
+    (f.env.venv_dir / "bin" / "python").write_text("#!/bin/sh\n")
+    ran = []
+    base = f.run
+
+    def run(argv, timeout, env=None):
+        if "sysconfig" in " ".join(map(str, argv)):
+            return 0, f"{lib}\n", ""
+        if "import torch" in " ".join(map(str, argv)):
+            return 0, "", ""
+        if str(argv[0]).endswith("tt-lang-sim") and argv[-1] != "--version":
+            ran.append((list(argv), env))
+            return 1, " ".join(n for _, needles in defaults.TTLANG_NEGATIVE_EXAMPLES for n in needles), ""
+        return base(argv, timeout, env)
+    f.env.run = run
+    return f, ran, hashlib.sha256(diag.read_bytes()).hexdigest()
+
+
+def test_no_example_from_an_off_pin_checkout_runs_without_the_override(tmp_path, monkeypatch):
+    f, ran, sha = sim_env(tmp_path, head="d" * 40)
+    monkeypatch.setattr(defaults, "TTLANG_DIAGNOSTICS_SHA256", sha)
+    ttlang_env.ensure(f.env, check_only=True, say=lambda s: None)
+    assert ran == []
+
+
+def test_a_simulator_off_the_pin_also_runs_nothing_without_the_override(tmp_path, monkeypatch):
+    f, ran, sha = sim_env(tmp_path)
+    f.sim = "tt-lang-sim 1.1.10+gabcdef0\n"
+    monkeypatch.setattr(defaults, "TTLANG_DIAGNOSTICS_SHA256", sha)
+    results = ttlang_env.ensure(f.env, check_only=True, say=lambda s: None)
+    assert ran == [] and results[-1].name == "verify" and results[-1].status == ttlang_env.TODO
+
+
+def test_with_the_override_the_examples_run_in_an_allow_listed_environment(tmp_path, monkeypatch):
+    f, ran, sha = sim_env(tmp_path, head="d" * 40)
+    monkeypatch.setattr(defaults, "TTLANG_DIAGNOSTICS_SHA256", sha)
+    f.env.environ = {"PATH": "/usr/bin", "HF_TOKEN": "hf_secret", "OPENAI_API_KEY": "k", "HOME": "/home/operator",
+                     "LANG": "C.UTF-8"}
+    results = ttlang_env.ensure(f.env, check_only=True, say=lambda s: None, allow_pin_mismatch=True)
+    assert ran and results[-1].name == "verify" and results[-1].status == ttlang_env.OK
+    for _, env in ran:
+        assert env["PATH"] == "/usr/bin" and env["LANG"] == "C.UTF-8"
+        assert "HF_TOKEN" not in env and "OPENAI_API_KEY" not in env
+        assert env["HOME"] != "/home/operator" and env["HOME"].startswith(str(tmp_path))
+        assert env["TT_VISIBLE_DEVICES"] == ttlang_env.NO_CHIP
+
+
+def test_an_example_at_the_pin_runs_in_the_same_minimal_environment(tmp_path, monkeypatch):
+    f, ran, sha = sim_env(tmp_path)
+    monkeypatch.setattr(defaults, "TTLANG_DIAGNOSTICS_SHA256", sha)
+    f.env.environ = {"PATH": "/usr/bin", "HF_TOKEN": "hf_secret"}
+    ttlang_env.ensure(f.env, check_only=True, say=lambda s: None)
+    assert ran and all("HF_TOKEN" not in env for _, env in ran)
+
+
+def test_the_example_environment_allow_list_is_the_agent_shells():
+    from orchard import agent
+    assert ttlang_env.VERIFY_ENV_ALLOW == agent.ENV_ALLOW and ttlang_env.NO_CHIP == agent.NO_CHIP
