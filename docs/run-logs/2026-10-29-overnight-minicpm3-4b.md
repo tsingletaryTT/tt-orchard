@@ -64,3 +64,34 @@ leaves, at 1.0 percent against a floor of 0.17 percent: the floor holds two CPU 
 first block that leaves is layer 14 (0.028 before, 0.077 after, slope 1.076). Row 0 (the first token, norm 1,460 against about 45 for the others) carries 99.6 percent of the squared
 error: channels 48 and 1292 of that row are 8 percent too large. Layers 18 to 61 keep that error (relative L2 0.07, PCC 0.9999). The error enters in layer 14's MLP or at its
 add (the attention section is inside tolerance). Next: test HiFi4 with 32-bit accumulation in every matmul (`fidelity="hifi4"`).
+
+## Update 2 (about 20:50 Pacific): the layer 14 error found and fixed; agreement is inside the floor-based bars
+
+Cause of the layer 14 error (`scripts/minicpm3/exp_mlp14.py`, one MLP on the chip with the recorded layer 14 input row for token 0, norm 223 before the norm). The first operation is
+already wrong: `ttnn.rms_norm` with its default compute config is 3.7 percent off on that row (torch on the same bfloat16 input is the comparison). The gate, up and
+product errors (3.9, 3.8 and 6.0 percent) follow from it. With a compute config that has `fp32_dest_acc_en=True` the norm is 0.08 percent off (HiFi4 and approximate
+mode make no difference; LoFi is 2.0 percent off). The matmul fidelity setting I tried first (HiFi4 with 32-bit accumulation on every linear) did not change the
+layer 14 error, which is why the first-divergence probe's operation-level search mattered. The fix is `self._rms` in `chip_model.py`. Layers other than 14 were not
+visibly harmed because only the first token of a prompt carries channels that large.
+
+Agreement after the fix (chip with default matmul config, bfloat16 weights, against the float32 reference; floor pair is bfloat16 plain torch and bfloat16 transformers-native):
+
+| block | chip relative L2 | slope | floor relative L2 |
+|---|---|---|---|
+| layer 0 | 0.0086 | 0.9985 | 0.0017 |
+| layer 12 | 0.0177 | 0.9983 | 0.0062 |
+| layer 24 | 0.0087 | 0.9927 | 0.0013 |
+| layer 48 | 0.0107 | 0.9963 | 0.0029 |
+| layer 60 | 0.0387 | 1.0153 | 0.0133 |
+| layer 61 | 0.0555 | 1.0107 | 0.0196 |
+
+Prefill last-position logits: PCC 0.9991, relative L2 0.018. Decode step 0 and 15 logits: PCC 0.998 and 0.999, relative L2 0.042. Teacher-forced next-token match is 16 of 16.
+The chip is 2.8 to 6 times the CPU floor at the blocks above, as expected: the floor holds two CPU runs and the chip adds bfloat16 matmul arithmetic. The earlier run
+(default `rms_norm`, same weights) is the known-bad control: the probe located layer 14 in it, with a 5 percent stated tolerance.
+
+Speed: HiFi4 on every linear costs speed (16.5 against 18.8 tok/s) and does not help agreement, so it is off. Trace capture with a one-hot cache write
+(position from a device tensor) gives 18.5 tok/s, the same as no trace: the time is on the device (about 54 ms per token against a 15.9 ms floor), not in dispatch.
+Next: a timing breakdown (attention, MLP, head) and a DRAM-bandwidth probe of the decode matmuls (`exp_matmul.py`).
+
+Probes done for the trace path: `paged_update_cache` works with a height-sharded input and an index tensor; one-hot row write with broadcast multiply and `assign`
+works; the rope table by position through `ttnn.embedding` works; trace capture and replay with `copy_host_to_device_tensor` works.
