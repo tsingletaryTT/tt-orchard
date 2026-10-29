@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from orchard import audio_reference as ar
+from orchard import resident
 from orchard import safeio
 from orchard.audio_runtime import REFERENCE_FILE, RESULT_FILE, STAGE_DISK_GB
 from orchard.audio_plan import (CONFIG_FILE, DURATION_S, LIBRARY_NAMES, MODEL_SETTINGS, PROMPT, ROLE_CHIP, ROLE_CONTROL_CHIP, ROLE_CONTROL_REFERENCE,
@@ -460,6 +461,7 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
         discrimination = control_discrimination(run_dir / ref_rec["runs"][ROLE_CONTROL_REFERENCE]["dir"], run_dir / ref_rec["runs"][ROLE_REFERENCE]["dir"],
                                                 stage_dir / "chip" / plan[1]["name"])
     result = {"schema": SCHEMA, "runtime": "stable-audio-3-dit-on-chip", "settings": settings_for(plan[0]["name"]), "runs": runs,
+              "timing": timing_record(repeats, configured_warmup(stage_dir)),
               "reference_runs": ref_rec["runs"], "agreement": agreement, "environment_floor": ref_rec.get("environment_floor"),
               "control_difference": control, "control_discrimination": discrimination, "repeats": repeats,
               "limits": ["Nobody has listened to the clips; no check here says the music is good.",
@@ -468,6 +470,53 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
                          "Agreement is measured on one prompt, one duration and one seed."]}
     write_json(stage_dir / RESULT_FILE, result)
     return result
+
+
+def configured_warmup(stage_dir) -> int:
+    """The number of discarded runs the stage's config asked for (0 when it says none or cannot be read)."""
+    try:
+        w = load_json(Path(stage_dir) / CONFIG_FILE, CONFIG_FILE).get("warmup", 0)
+    except AudioStageError:
+        return 0
+    return w if isinstance(w, int) and not isinstance(w, bool) and w >= 0 else 0
+
+
+def timing_record(repeats: dict, warmup: int) -> dict:
+    """The timing record of a result: for each role, the label and the spread (min, median, max) of each timed part over its repeats, the load that
+    the single loaded process reported once, and the host load average of each run (orchard/resident.py `summarise_runs`). `warmup_runs` is the number
+    of discarded runs that came before the repeats."""
+    return {"warmup_runs": warmup, "min_repeats": resident.MIN_REPEATS,
+            "roles": {role: resident.summarise_runs([e.get("timings") for e in lst if isinstance(e, dict)], warmup) for role, lst in repeats.items()}}
+
+
+def timing_problems(stage_dir, res: dict, repeats) -> list[str]:
+    """The recorded timing is what the repeats give: the warm-up is the config's, each role has a record, its label is the label its number of repeats
+    earns, its spread, load and load averages are recomputed from the repeats' timings, and the load is reported in repeat 0 only."""
+    timing = res.get("timing")
+    if not isinstance(timing, dict) or not isinstance(timing.get("roles"), dict):
+        return [f"{RESULT_FILE} has no timing record"]
+    problems = []
+    if timing.get("warmup_runs") != configured_warmup(stage_dir):
+        problems.append(f"timing: the recorded warm-up is {timing.get('warmup_runs')!r} runs; the config asked for {configured_warmup(stage_dir)}")
+    if not isinstance(repeats, dict):
+        return problems
+    for role, lst in repeats.items():
+        if not isinstance(lst, list):
+            continue
+        entries = [e for e in lst if isinstance(e, dict) and isinstance(e.get("timings"), dict)]
+        for k, e in enumerate(entries):
+            if k >= 1 and any(key in e["timings"] for key in resident.LOAD_KEYS):
+                problems.append(f"{role} repeat {k}: it records a load time; the load happened once, in repeat 0")
+        fresh = resident.summarise_runs([e["timings"] for e in entries], configured_warmup(stage_dir))
+        rec = timing["roles"].get(role)
+        if not isinstance(rec, dict):
+            problems.append(f"{role}: the timing record has no entry for this role")
+            continue
+        if rec.get("label") != fresh["label"]:
+            problems.append(f"{role}: the timing label is {rec.get('label')!r}; {fresh['repeats']} repeats earn {fresh['label']!r}")
+        if not agree({k: v for k, v in rec.items() if k != "label"}, {k: v for k, v in fresh.items() if k != "label"}):
+            problems.append(f"{role}: the recorded timing spread is not what the repeats give")
+    return problems
 
 
 def repeat_problems(stage_dir, run_dir, res: dict, ref: dict, runs: dict) -> list[str]:
@@ -558,6 +607,7 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
             if not agree(recorded, fresh_i):
                 problems.append(f"{key}: the recorded comparison is not what the runs give now")
     problems += repeat_problems(stage_dir, run_dir, res, ref, runs)
+    problems += timing_problems(stage_dir, res, res.get("repeats"))
     if ROLE_CONTROL_CHIP in runs:
         try:
             fresh_d = control_discrimination(Path(run_dir) / ref_runs[ROLE_CONTROL_REFERENCE]["dir"], Path(run_dir) / ref_runs[ROLE_REFERENCE]["dir"],

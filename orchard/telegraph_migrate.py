@@ -353,6 +353,61 @@ def _take_old_lock(dir_fd: int, timeout_s: float = 30.0) -> int:
         raise
 
 
+def input_fingerprint(directory):
+    """What identifies every input of a migration, for a caller that checks once and migrates later: the ledger file, each
+    `telegraph.jsonl.torn-*` sidecar (an orphan one is counted as a torn call of unknown size) and every entry of `cache/` (each one is
+    imported as an answer). Each entry is (name, device, inode, size, modification time) from `lstat`, nothing is read or followed.
+    None when the ledger is not a plain file (there is nothing the checks could describe)."""
+    root = os.fspath(directory)
+
+    def one(path, name):
+        st = os.lstat(path)
+        return (name, stat.S_IFMT(st.st_mode), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+    # Each kind of input is read by its own name and kind, then the three parts are joined in a fixed order. Nothing depends on where
+    # an entry sorts among the others.
+    try:
+        ledger = one(os.path.join(root, ts.LEDGER), ts.LEDGER)
+        if not stat.S_ISREG(ledger[1]):
+            return None
+        with os.scandir(root) as it:
+            top = sorted(e.name for e in it)
+        sidecars = tuple(one(os.path.join(root, n), n) for n in top if n.startswith(SIDECAR_PREFIX))
+        cache_dir = one(os.path.join(root, "cache"), "cache") if "cache" in top else None
+        cache_entries = ()
+        if cache_dir is not None and stat.S_ISDIR(cache_dir[1]):
+            with os.scandir(os.path.join(root, "cache")) as it:
+                inner = sorted(e.name for e in it)
+            cache_entries = tuple(one(os.path.join(root, "cache", n), "cache/" + n) for n in inner)
+        return (("ledger", ledger), ("sidecars", sidecars), ("cache", cache_dir, cache_entries))
+    except OSError:
+        return None
+
+
+def lock_is_held(directory) -> bool:
+    """True when another process holds `telegraph.lock` (the lock the old writers take and the migration takes). It only looks: an
+    absent lock file is not created, a link is not followed, and a lock that was free is released again at once."""
+    try:
+        with safeio.pinned_root(directory) as pin:
+            try:
+                fd = os.open(ts.LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC, dir_fd=pin.fd)
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return True                                                   # it cannot be looked at, so it is not known to be free
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except (BlockingIOError, PermissionError):
+                    return True
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return False
+            finally:
+                os.close(fd)
+    except safeio.SafeReadError:
+        return True
+
+
 def migrate(directory, *, scope: str = ts.DEFAULT_SCOPE, max_output_tokens: int = 1500, accept_malformed: int | None = None,
             dry_run: bool = False, hook=None) -> dict:
     """Migrate (or resume migrating) a telegraph directory. Returns a dict of what was done and the totals before and after.

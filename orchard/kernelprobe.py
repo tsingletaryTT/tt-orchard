@@ -87,6 +87,7 @@ OPS = defaults.KERNEL_PROBE_OPS
 # about 9 tok/s. At 4096 a degenerate reply ends as finish_reason "length" in about 7 minutes at that speed, which the
 # agent loop nudges, and not as a 900 s request timeout (twice). The generic loop's 16384 is for reasoning models.
 BUDGET = {"max_turns": 40, "wall_s": 1800.0, "sim_timeout_s": 300.0, "hw_backstop_s": 600.0, "max_tokens": 4096}
+MAX_WALL_S = 7200.0       # choice: the largest --wall-s; two hours for one attempt is more likely a typo than a plan
 GOZER_WHO = "claude:orchard-kernel-probe"
 # How long a `gozer run` gets after the watcher's SIGTERM before the SIGKILL. gozer forwards the SIGTERM to its child,
 # waits for it, and then releases its lease in a `finally`; the release resets the chip, measured at 41.7 s on this
@@ -1510,18 +1511,19 @@ def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_wat
 # ---- the report -------------------------------------------------------------------------------------------------
 
 def report_header(*, env, coder_model, probe_id, ops, hw=None, tt_lang: dict | None = None,
-                  ignored_records: int = 0) -> dict:
+                  ignored_records: int = 0, wall_s: float | None = None) -> dict:
     """The report's header: the tt-lang facts, the coder's model id, the probe id, the provisional bars of each op,
     the budget, and the hardware phase's result (None when it was not run)."""
     check = _template("kernel_check")
+    wall = BUDGET["wall_s"] if wall_s is None else float(wall_s)       # --wall-s replaces the default wall budget
     bars = {}
     for op in ops:
         spec = load_spec(op)
         bars[op] = {phase: check.bars_from_spec(spec, phase) for phase in ("sim", "hw")}
     return {"tt_lang": tt_lang if tt_lang is not None else tt_lang_facts(env), "coder_model": coder_model,
-            "probe_id": probe_id, "ops": list(ops), "bars": bars, "provisional": True, "budget": dict(BUDGET),
+            "probe_id": probe_id, "ops": list(ops), "bars": bars, "provisional": True, "budget": {**BUDGET, "wall_s": wall},
             "inputs": "synthetic", "hw": hw, "ignored_records": ignored_records,
-            "budget_note": (f"The wall budget ({BUDGET['wall_s']:.0f} s) is checked between turns, so an attempt can "
+            "budget_note": (f"The wall budget ({wall:.0f} s) is checked between turns, so an attempt can "
                             f"overrun it by up to one tool timeout ({AGENT_TOOL_TIMEOUT_S:.0f} s at most, for the "
                             "kernel check).")}
 
@@ -2245,8 +2247,23 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         print(f"refused: {message}", file=sys.stderr)
         return EXIT_REFUSED
 
-    if args.op not in OPS:
-        return refuse(f"unknown op {args.op!r}; the ops are {', '.join(OPS)}")
+    if getattr(args, "ladder", False):
+        # The capability ladder (issue 175): one ordinary run of this function per rung, each in its own directory.
+        from orchard import kernelladder
+        return kernelladder.run(
+            args, lambda sub: main(sub, env=env, out=out, http=http, probe=probe, run_watched_fn=run_watched_fn,
+                                   tier_config=tier_config, speed_check=speed_check),
+            default_wall_s=BUDGET["wall_s"], say=say)
+    ladder_only = [flag for flag, name in (("--rungs", "rungs"), ("--rung-wall", "rung_wall"),
+                                          ("--rung-expect-s", "rung_expect_s"), ("--max-hours", "max_hours"))
+                   if getattr(args, name, None) is not None]          # given counts, even when it is 0 or empty
+    if getattr(args, "report_only", False):
+        ladder_only.append("--report-only")
+    if ladder_only:
+        return refuse(f"{', '.join(ladder_only)} only {'applies' if len(ladder_only) == 1 else 'apply'} with --ladder")
+    if getattr(args, "op", None) not in OPS:
+        return refuse(f"unknown op {getattr(args, 'op', None)!r}; the ops are {', '.join(OPS)} "
+                      "(or give --ladder to run the capability ladder)")
     staged = bool(getattr(args, "staged", False))
     if staged:
         from orchard import kernelstaged
@@ -2257,6 +2274,16 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     attempts = int(getattr(args, "attempts", 5) or 0)
     if attempts < 1:
         return refuse("--attempts must be at least 1")
+    wall_s = getattr(args, "wall_s", None)
+    if wall_s is None:
+        wall_s = BUDGET["wall_s"]
+    else:
+        try:
+            wall_s = float(wall_s)
+        except (TypeError, ValueError):
+            return refuse(f"--wall-s: {wall_s!r} is not a number")
+        if not (0 < wall_s <= MAX_WALL_S):                          # NaN fails this too
+            return refuse(f"--wall-s {wall_s:g} is not above 0 and at most {MAX_WALL_S:g} seconds")
     try:
         plan = parse_sampling(args, attempts)
         hw_policy = hw_policy_from_args(args)
@@ -2338,16 +2365,22 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                       "no server: start the coder with `tt-orchard bringup`, or pass --endpoint and --model for a "
                       "server that runs")
 
-    probe_dir = Path(getattr(args, "out", None) or "kernel-probe")
+    # Absolute, because the check runs with its own directory as the working directory: a relative path on its command
+    # line would point into that directory, and the check would write no result.
+    probe_dir = Path(os.path.abspath(getattr(args, "out", None) or "kernel-probe"))
+    lock = None
     try:
-        lock = acquire_lock(probe_dir)
+        # A ladder locks each rung's directory before the run and keeps the lock to its end (`dir_locked`); then the run
+        # neither takes the lock again nor releases it.
+        if not getattr(args, "dir_locked", False):
+            lock = acquire_lock(probe_dir)
     except _Refused as exc:
         return refuse(str(exc))
     try:
         probe_id = new_probe_id()
         base = plan["seed"] if plan["seed"] is not None else seed_base_from_probe_id(probe_id)
         sampling = {"temperatures": plan["temperatures"], "top_p": plan["top_p"], "seed_base": base,
-                    "seed_base_from": "--seed" if plan["seed"] is not None else "probe id",
+                    "seed_base_from": getattr(args, "seed_from", None) or ("--seed" if plan["seed"] is not None else "probe id"),
                     "attempts_per_temperature": attempts}
         facts = tt_lang_facts(env)
         temps = ", ".join(f"{t:g}" for t in plan["temperatures"])
@@ -2385,7 +2418,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                     record = attempt_fn(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint,
                                          model=model, coder_model=model, probe_id=probe_id, http=http,
                                          run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
-                                         top_p=plan["top_p"], seed=attempt_seed(base, n, temperature),
+                                         top_p=plan["top_p"], seed=attempt_seed(base, n, temperature), wall_s=wall_s,
                                          references=references, skills=skills_record, coder_speed=speed,
                                          hw_policy=hw_policy, shared_python=shared, **attempt_extra)
                     records.append(record)
@@ -2429,7 +2462,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             elif hw and not hw.get("available") and not hw.get("hung"):
                 say("hardware unavailable: the smoke test failed (the report has its last lines)")
             header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
-                                   ignored_records=0)
+                                   ignored_records=0, wall_s=wall_s)
             if stopped:
                 header["stopped"] = stopped
             if blocked:
@@ -2460,4 +2493,5 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             return EXIT_ERROR
         return code
     finally:
-        release_lock(lock)
+        if lock is not None:
+            release_lock(lock)
