@@ -63,3 +63,21 @@ SiLU gated linear unit with inner width 2304 and biases.
   feed-forward blocks) and the standalone autoencoders SAME-S and SAME-L. The account can open the gated small-sfx and medium repositories (config download returned 200).
   Plan: small-sfx through the same path as a second checkpoint (CPU reference, chip, benchmark); then the medium model, which needs differential attention in the diffusion
   transformer and a different decoder block, as a further real new-code step.
+- 20:35 second model: `stabilityai/stable-audio-3-small-sfx` (sound effects), same architecture as small-music, both the diffusion transformer and the decoder paths unchanged.
+  - CPU reference (reference environment, float32, prompt "Futuristic laser blast, sharp energy pulse, stereo movement, arcade game", 10 s, 8 steps, guidance 1.0, pingpong, seed 42):
+    `generate_and_decode_s` 54.7 s (one sample, host load average above 10).
+  - Chip, resident runtime, 1 warm-up and 3 measured repeats, transformer and decoder on the chip: `generate_and_decode_s` 0.930, 0.938, 0.943 s; chip decoder call 0.456,
+    0.461, 0.470 s; transformer calls 0.321, 0.328, 0.336 s; load average 18.7.
+  - `audio_reference check --cross-precision` against the CPU reference: all arrays ok with the provisional bars. Final latent relative L2 0.162 (PCC 0.987); waveform PCC 0.929,
+    relative L2 0.374. The waveform number is looser than small-music's (0.976). Sound-effect clips hold sharp transients, which a phase-sensitive measure scores harshly; no
+    floor was measured for this model, so the number is a measurement and not a pass against a set bar. A first run with the wrong prompt (the script's default) was
+    discarded and rerun; the mismatch was caught by the settings check of the comparison.
+- 20:40 third model: `stabilityai/stable-audio-3-medium` (music and sound effects; 9.2 GB float32 checkpoint). New code needed:
+  - Diffusion transformer: differential attention in both the self and the cross section, 24 layers, width 1536, 24 heads (`chip_dit.py`, float32 projections, norms, attention and
+    probability difference as for the decoder; the plain path is unchanged). The host decomposition passes the library-block comparison for both variants.
+  - CPU reference (float32, same prompt as the music runs, 10 s, 8 steps, guidance 1.0): `generate_and_decode_s` 38.0 s (one sample).
+  - Chip, transformer on the chip and the decoder on the host (one run, no warm-up, so a single sample): `generate_and_decode_s` 60.2 s, of which the transformer calls were 20.2 s
+    (8 passes, the first includes the kernel compile); weights upload 7.0 s. All 24 layer outputs of the first pass agree with the reference with relative L2 error 0.004 to 0.014
+    (PCC at least 0.99992); final latent after 8 steps PCC 0.997, relative L2 0.076; waveform PCC 0.9885, relative L2 0.152; every array ok against the provisional bars.
+  - Next: the medium decoder (12 layers, width 1536, sliding window of one latent frame each side, sine gate in the last 8 layers) on the chip; implemented as the block layout in
+    `chip_decoder.py` and tested on the host against the library with random weights (frames 1, 2 and 5, with and without the sine gate, a mutation with a wider window).
