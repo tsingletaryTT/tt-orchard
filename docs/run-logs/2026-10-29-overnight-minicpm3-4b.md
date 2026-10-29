@@ -286,3 +286,6 @@ The records written before the floor policy was fixed in `run_chip.py` (the firs
 
 Harness change from this port: `orchard.hazards` has a row `mla_flash_decode_needs_core_grid` for multi-latent attention (the flash MLA decode op needs an explicit core grid at one latent head and
 batch 1; issue 213). It is detected from `kv_lora_rank`, needs no nearest bundle, and has a test plus a mutation check (removing the detection turns four tests red).
+
+Two chips with bfloat8_b MLP weights and LoFi (44.1 tok/s): 16 of 16 teacher-forced tokens, layer 30 error 0.0127 and layer 61 error 0.0690 (CPU floor 0.0196), last-position prefill logits
+PCC 0.9984, decode step 0 logits PCC 0.9970 (relative L2 0.058), perplexity 8.047 against 8.057 for the float32 reference (mean absolute log probability difference 0.057). Record `ppl_chip_tp2_bfp8_lofi.json`.
