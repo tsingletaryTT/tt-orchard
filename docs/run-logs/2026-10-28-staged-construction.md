@@ -4,7 +4,10 @@ Issue 176. Code: pull request 199 (`kernel-probe --staged`, `orchard/kernelstage
 
 ## Outcome and status
 
-Pre-registered before the first counted attempt. Results are added below the line "Results" after the runs.
+Arms W and S were NOT run: superseded by the operator's decision to attempt a real model instead. The pre-registration below
+stays as written; no attempt of either arm exists. The capability check through the Telegraph helper was run and is reported
+under "Results". The staged probe itself is in pull request 199 and is tested there; nothing here measures whether it helps
+the local coder.
 
 ## Pre-registration (written 2026-10-28, before any coder attempt of this experiment)
 
@@ -106,4 +109,37 @@ PR 177's ladder run on the same coder: `center` and `rmsnorm` as in the question
 
 ## Results
 
-(to be filled in after the runs)
+Arms W and S: not run (see the status above). No pass counts, stage histograms, failure classes or decode speeds exist for them.
+
+### Capability check through the Telegraph helper (run 2026-10-28)
+
+As pre-registered: five one-shot whole-kernel `rmsnorm` answers from `anthropic/claude-sonnet-5-5` (one model in the list),
+temperature 0 (the helper's setting), no tools and no simulator feedback between requests, `--library none`. The prompt held the
+probe skill text, arm W's user message and the text of `kernel_spec.json` and every file in `reference/` (the specification, the
+guide, the examples and the two checkout examples). A line was added to the telegraph decisions file first. Each answer's first
+code block was written as `kernel.py` and judged by the unedited shipped check on the simulator. The helper wraps the prompt in its
+own system text, so the request is not byte-for-byte the coder's. The 5 requests differ only by their attempt number.
+
+| attempt | passed | tokens in | tokens out | seconds | cost USD |
+| --- | --- | --- | --- | --- | --- |
+| 1 | yes | 80798 | 3444 | 24.4 | 0.196036 |
+| 2 | yes | 80798 | 2898 | 20.7 | 0.190576 |
+| 3 | yes | 80798 | 3004 | 20.2 | 0.191636 |
+| 4 | yes | 80798 | 3221 | 21.7 | 0.193806 |
+| 5 | yes | 80798 | 2765 | 18.7 | 0.189246 |
+
+Total: 5 of 5 passed, 5 calls, $0.961 (0.961 = sum of the column). Failure classes: none.
+
+Similarity of the five passing kernels to the orchard library kernels and to the checkout's examples
+(`2026-10-28-staged-construction-similarity.py`: comments and blank lines removed, difflib ratio over lines, flag at 0.80):
+
+| attempt | best library match | best checkout-example match | flag |
+| --- | --- | --- | --- |
+| 1 | 0.23 (rmsnorm.py) | 0.18 | ok |
+| 2 | 0.20 (rmsnorm.py) | 0.15 | ok |
+| 3 | 0.28 (rmsnorm.py) | 0.21 | ok |
+| 4 | 0.33 (rmsnorm.py) | 0.22 | ok |
+| 5 | 0.33 (rmsnorm.py) | 0.22 | ok |
+
+Not determined: whether the same prompt in an agent loop with check feedback (the next entry) changes this; whether the
+local coder would pass with the specification text pasted whole into its prompt (it reads files in parts).
