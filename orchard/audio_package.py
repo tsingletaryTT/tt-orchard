@@ -87,6 +87,11 @@ RUNTIME_FILES = (("skills/audio-chip-templates/chip_generate.py", "orchard/skill
                  ("skills/audio-chip-templates/check_revision.py", "orchard/skills/audio-chip-templates/check_revision.py"),
                  ("skills/audio-chip-templates/pinned_generate.py", "orchard/skills/audio-chip-templates/pinned_generate.py"),
                  ("skills/audio-chip-templates/chip_dit.py", "orchard/skills/audio-chip-templates/chip_dit.py"),
+                 # chip_generate.py loads audio_runtimes.py, which loads chip_dit.py and (for the decoder on the chip, the default of the packaged
+                 # generate command) chip_decoder.py, and imports orchard.resident. All three are needed for the command the card gives to run.
+                 ("skills/audio-chip-templates/audio_runtimes.py", "orchard/skills/audio-chip-templates/audio_runtimes.py"),
+                 ("skills/audio-chip-templates/chip_decoder.py", "orchard/skills/audio-chip-templates/chip_decoder.py"),
+                 ("resident.py", "orchard/resident.py"),
                  ("skills/audio-reference-templates/make_reference.py", "orchard/skills/audio-reference-templates/make_reference.py"),
                  ("audio_reference.py", "orchard/audio_reference.py"),
                  ("pinned_files.py", "orchard/pinned_files.py"))
@@ -106,6 +111,16 @@ REQUIRED_FILES = (("README.md", "LICENSE.md", "NOTICE", "LICENSE-runtime", "tt-m
                   + tuple(f"demo/{name}" for _, name in DEMO_FILES) + tuple(f"runtime/{dest}" for _, dest in RUNTIME_FILES))
 RUNTIME_INIT = '"""A stand-in package so the copied chip runtime files import `orchard.audio_reference` from this directory."""\n'
 RECORD_FILE = "package-record.json"
+PROBE_EVIDENCE = "evidence/decode-probe.json"                  # optional: the decoder probe's summary (chip against the CPU, layer by layer)
+REPORT_EVIDENCE = "evidence/audio-agreement-report.json"       # optional: the full per-array comparison the agreement numbers summarise
+HOME_PLACEHOLDER = "<home>"
+LISTENING_HEAD = "## Operator's listening note"
+DECODER_CLAIM = "the autoencoder decoder's six transformer layers"
+ONLY_DIT = "Only the diffusion transformer runs on the chip"
+FALLBACK_ENV = "AUDIO_HOST_DECODER"
+FALLBACK_FLAG = "--host-decoder"
+MAX_NOTE_CHARS = 600
+DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 BENCH_EVIDENCE = "evidence/bench-chip.json"
 RESULT_EVIDENCE = "evidence/audio_result.json"
 NUMBERS_HEAD = "## Numbers"
@@ -207,11 +222,17 @@ class Facts:
     load: dict
     bench_file: str                         # package-relative path of the benchmark copy
     result_file: str
+    derived: bool = False                   # the result file was derived from a newer chip run (orchard/audio_result_derive.py)
+    chip_decoder: bool = False              # the benchmark and the agreement run both had the autoencoder decoder's transformer on the chip
+    cpu: tuple = ()                         # (row name, seconds) of the CPU float32 clips of the result, one sample each
 
 
 MAIN_PART = "generate_and_decode_s"
 CARD_PARTS = (("generate_and_decode_s", "generate and decode"), ("chip_transformer_call_s", "diffusion transformer calls"),
               ("conditioning_s", "T5Gemma encoder on the host"))
+DECODER_PART = ("chip_decoder_call_s", "decoder call on the chip")      # present only in a sweep made with the decoder's transformer on the chip
+CPU_RUNS = (("reference", "reference environment"), ("host_same_env", "same environment as the chip run"))
+CPU_MATCH = ("prompt", "steps", "cfg_scale", "sampler", "seed", "sample_size", "duration")
 
 
 def bench_sizes(bench: dict, settings: dict) -> tuple[tuple[SizeRow, ...], dict]:
@@ -234,6 +255,10 @@ def bench_sizes(bench: dict, settings: dict) -> tuple[tuple[SizeRow, ...], dict]
     if not isinstance(sizes, list) or not sizes:
         raise AudioPackageError(f"{what} has no sizes")
     rows = []
+    # A sweep made with the decoder on the chip has the decoder's call time in its runs. Either every run of every size has it or none does.
+    has_dec = any(isinstance(e, dict) and isinstance(e.get("runs"), list) and any(isinstance(r, dict) and isinstance(r.get("timings"), dict)
+                                                                                 and DECODER_PART[0] in r["timings"] for r in e["runs"]) for e in sizes)
+    wanted = CARD_PARTS[:2] + ((DECODER_PART,) if has_dec else ()) + CARD_PARTS[2:]
     for entry in sizes:
         if not isinstance(entry, dict):
             raise AudioPackageError(f"{what} has a size that is not an object")
@@ -252,7 +277,7 @@ def bench_sizes(bench: dict, settings: dict) -> tuple[tuple[SizeRow, ...], dict]
             raise AudioPackageError(f"{what}: the {seconds:g} s size is labelled {entry.get('label')!r} and its {len(runs)} runs after "
                                     f"{warmup} warm-up run(s) make {label!r}")
         parts: dict = {}
-        for name, _ in CARD_PARTS:
+        for name, _ in wanted:
             vals = []
             for r in runs:
                 t = r.get("timings") if isinstance(r, dict) else None
@@ -269,7 +294,8 @@ def bench_sizes(bench: dict, settings: dict) -> tuple[tuple[SizeRow, ...], dict]
     load = bench.get("load")
     if not isinstance(load, dict):
         raise AudioPackageError(f"{what} has no load record")
-    load = {k: _num(load.get(k), k) for k in ("model_load_s", "chip_weights_upload_s")}
+    keys = ("model_load_s", "chip_weights_upload_s") + (("chip_decoder_upload_s",) if load.get("chip_decoder_upload_s") is not None else ())
+    load = {k: _num(load.get(k), k) for k in keys}
     return tuple(sorted(rows, key=lambda r: r.seconds)), load
 
 
@@ -288,6 +314,25 @@ def _obj(x, what: str) -> dict:
     if not isinstance(x, dict):
         raise AudioPackageError(f"{what} is not a JSON object")
     return x
+
+
+def cpu_timings(result: dict, settings: dict) -> tuple:
+    """(row name, seconds) for each CPU float32 clip of the result that was made with the chip run's own settings. A clip made on another device, in another
+    dtype or with other settings is not a comparison with the chip run and gives no row. Each is one sample (the clip was made once)."""
+    runs = result.get("reference_runs")
+    out = []
+    for key, where in CPU_RUNS:
+        r = runs.get(key) if isinstance(runs, dict) else None
+        if not isinstance(r, dict) or not isinstance(r.get("settings"), dict) or not isinstance(r.get("timings"), dict):
+            continue
+        got = r["settings"]
+        if got.get("device") != "cpu" or got.get("dtype") != "float32" or any(got.get(k) != settings.get(k) for k in CPU_MATCH):
+            continue
+        secs = r["timings"].get("generate_and_decode_s")
+        if isinstance(secs, bool) or not isinstance(secs, (int, float)) or secs < 0 or secs != secs or secs == float("inf"):
+            continue
+        out.append((f"{got['duration']:g} s clip on the CPU in float32 ({where}), generate and decode, one sample", secs))
+    return tuple(out)
 
 
 def facts_from_evidence(result, bench, *, snapshot_name: str | None = None) -> Facts:
@@ -319,19 +364,25 @@ def facts_from_evidence(result, bench, *, snapshot_name: str | None = None) -> F
     if not isinstance(bars, str) or "provisional" not in bars:
         raise AudioPackageError("the agreement record does not say its bars are provisional; this builder labels agreement by that statement")
     sizes, load = bench_sizes(_obj(bench, "the benchmark file"), settings)
+    bench_decoder = any(DECODER_PART[0] in s.parts for s in sizes)
+    if bench_decoder != (chip.get("chip_decoder") is True):
+        raise AudioPackageError("the benchmark file and the audio result disagree about the decoder: one of them has the autoencoder decoder's transformer on the "
+                                "chip and the other does not, so the card's timings and its agreement numbers would describe different runs")
     if not any(s.label == LABEL_BENCHMARK for s in sizes):
         raise AudioPackageError(f"no size of the benchmark file is a benchmark (it needs {MIN_REPEATS} or more measured runs after {MIN_WARMUP} or more "
                                 "warm-up run(s) in one process); the card would have no number it may call one")
     return Facts(MODEL_ID, revision, library, {k: settings[k] for k in sorted(settings)}, str(chip.get("device", "")), _agreement(agreement, "chip_vs_reference"),
-                 _agreement(floor, "environment_floor"), bars, sizes, load, BENCH_EVIDENCE, RESULT_EVIDENCE)
+                 _agreement(floor, "environment_floor"), bars, sizes, load, BENCH_EVIDENCE, RESULT_EVIDENCE,
+                 chip_decoder=bench_decoder, cpu=cpu_timings(result, settings), derived=isinstance(result.get("derived_from"), dict))
 
 
-def read_facts(run_dir, bench_path, *, snapshot_name: str | None = None) -> tuple[Facts, bytes, bytes]:
+def read_facts(run_dir, bench_path, *, snapshot_name: str | None = None, result_path=None) -> tuple[Facts, bytes, bytes]:
     """(facts, the bytes of the audio result, the bytes of the benchmark file) for the run at `run_dir`. Refuses a run that cannot back a package
     (see `facts_from_evidence`), a run whose ledger names another model, and any file of an unexpected shape."""
     run = Path(run_dir)
-    result_path = run / "stages" / "2" / "audio_result.json"
-    result = read_json_file(result_path, "stages/2/audio_result.json")
+    named = result_path is not None                  # an explicit file (--result), for a newer chip run than the one stage 2 recorded
+    result_path = Path(result_path) if named else run / "stages" / "2" / "audio_result.json"
+    result = read_json_file(result_path, "the result file given with --result" if named else "stages/2/audio_result.json")
     bench_bytes = _file_bytes(bench_path, "the benchmark file", MAX_JSON_BYTES)
     try:
         bench = safeio.parse_json_bytes(bench_bytes, max_bytes=MAX_JSON_BYTES)
@@ -466,7 +517,7 @@ def number_rows(f: Facts) -> list[tuple[str, str, str, tuple[str, ...]]]:
     rows = []
     bench = (f.bench_file,)
     for s in f.sizes:
-        for part, text in CARD_PARTS:
+        for part, text in CARD_PARTS[:2] + ((DECODER_PART,) if f.chip_decoder else ()) + CARD_PARTS[2:]:
             stats = s.parts[part]
             if part != MAIN_PART:
                 rows.append((f"{s.seconds:g} s clip, {text}, median of {s.runs}", f"{_fmt(stats['median'])} s", s.label, bench))
@@ -475,7 +526,11 @@ def number_rows(f: Facts) -> list[tuple[str, str, str, tuple[str, ...]]]:
                 rows.append((f"{s.seconds:g} s clip, {text}, {k} of {s.runs}", f"{_fmt(stats[k])} s", s.label, bench))
     rows.append(("model load, once per process (first run)", f"{_fmt(f.load['model_load_s'])} s", LABEL_SINGLE, bench))
     rows.append(("weight upload to the chip, once per process (first run)", f"{_fmt(f.load['chip_weights_upload_s'])} s", LABEL_SINGLE, bench))
+    if "chip_decoder_upload_s" in f.load:
+        rows.append(("decoder weight upload to the chip, once per process (first run)", f"{_fmt(f.load['chip_decoder_upload_s'])} s", LABEL_SINGLE, bench))
     res = (f.result_file,)
+    for name, secs in f.cpu:
+        rows.append((name, f"{_fmt(secs)} s", LABEL_SINGLE, res))
     a, e = f.agreement, f.floor
     for name, key, nd in (("final latent PCC", "latent_pcc", 4), ("final latent relative L2", "latent_rel_l2", 4), ("waveform PCC", "wave_pcc", 4),
                           ("waveform relative L2", "wave_rel_l2", 4), ("log-spectrum distance", "log_spectrum", 4)):
@@ -492,13 +547,43 @@ def _row(name, value, label, evidence) -> str:
     return f"| {name} | {value} | {label} | {ev} |"
 
 
-def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
+def check_note(note) -> str | None:
+    """The operator's listening note as the card prints it, or None when there is none. One line with a date (YYYY-MM-DD): a note is dated because a
+    listening judgment belongs to a day and a set of clips. Refuses anything else with the reason."""
+    if note is None:
+        return None
+    if not isinstance(note, str) or not note.strip():
+        raise AudioPackageError("the listening note is empty")
+    note = note.strip()
+    if "\n" in note or "\r" in note or len(note) > MAX_NOTE_CHARS or note[0] in "#|>-*`":
+        raise AudioPackageError(f"the listening note is one line of plain text of at most {MAX_NOTE_CHARS} characters that does not start like markdown")
+    if not DATE.search(note):
+        raise AudioPackageError("the listening note must carry its date as YYYY-MM-DD (the operator's judgment belongs to a day)")
+    return note
+
+
+def runs_where(f: Facts) -> list[str]:
+    """The card's account of what runs on the chip and what runs on the host, from what the evidence shows."""
+    if f.chip_decoder:
+        return ["- On the chip: the 20-layer diffusion transformer and " + DECODER_CLAIM + ".",
+                "- On the host CPU, from the model library's own code: the T5Gemma text encoder, the sampler, the decoder's first linear layer and final "
+                "convolution, and the unpatching of the waveform.",
+                f"- The packaged generate command runs the decoder's transformer layers on the chip by default. `{FALLBACK_FLAG}` (or `{FALLBACK_ENV}=1` in "
+                "the environment of `run.sh`) runs the whole decoder on the host instead. The Numbers table below was measured with the decoder on the chip, and "
+                "the fallback was not measured for this card."]
+    return ["- On the chip: the 20-layer diffusion transformer.",
+            "- On the host CPU, from the model library's own code: the T5Gemma text encoder, the sampler and the autoencoder decoder."]
+
+
+def render_card(f: Facts, *, namespace: str, license_bytes: bytes, listening_note: str | None = None) -> str:
+    note = check_note(listening_note)
     q = {name: quote(license_bytes.decode("utf-8"), start, end) for name, start, end in QUOTES}
     a = f.settings
     lines = ["---", "license: other", f"license_name: {LICENSE_FRONT_NAME}", "license_link: LICENSE.md", "pipeline_tag: text-to-audio",
              f"base_model: {f.model_id}", "tags:", "- blackhole", "- p150", "- text-to-audio", "- music-generation", "- diffusion", "---", "",
              f"# {PACKAGE_NAME}", "", f"**{POWERED_BY}**", "",
-             f"A package that runs {f.model_id} (revision `{f.revision}`) on one Tenstorrent Blackhole chip: the diffusion transformer runs on the chip, "
+             f"A package that runs {f.model_id} (revision `{f.revision}`) on one Tenstorrent Blackhole chip: the diffusion transformer "
+             + ("and the autoencoder decoder's transformer layers run " if f.chip_decoder else "runs ") + "on the chip, "
              "and a local job server and a Gradio page start it and play the clips. The tt-orchard harness staged it from a run of that model. "
              f"The package is staged locally and was not published when this card was written (the repository would be `{namespace}/{PACKAGE_NAME}`).", "",
              "## License", "",
@@ -517,8 +602,7 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
              "The download also holds the T5Gemma text encoder, which is provided under the "
              f"[Gemma Terms of Use]({GEMMA_LINK}); accepting the model's terms includes accepting those.", "",
              "## What runs where", "",
-             "- On the chip: the 20-layer diffusion transformer.",
-             "- On the host CPU, from the model library's own code: the T5Gemma text encoder, the sampler and the autoencoder decoder.",
+             *runs_where(f),
              f"- The model library is [stable-audio-3]({LIBRARY_LINK}) at commit `{f.library_commit}`, the commit the run used.",
              f"- Settings of the run: {a.get('steps')} steps, guidance scale {a.get('cfg_scale')}, the {a.get('sampler')} sampler, seed {a.get('seed')}.", "",
              "## Try it", "",
@@ -536,8 +620,28 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
              "| Number | Value | Label | Evidence |", "| --- | --- | --- | --- |"]
     lines += [_row(*r) for r in number_rows(f)]
     lines += ["", "The timings are from one process that loaded the model once. The job server in this package starts a new process for each clip, so it loads the "
-              "model again for each clip and a clip takes longer than the table shows by about the load rows.", "",
-              NOT_MEASURED_HEAD, "",
+              "model again for each clip and a clip takes longer than the table shows by about the load rows.", ""]
+    if f.chip_decoder:
+        lines += ["What these numbers measured, and their limits:", "",
+                  "- One prompt, one seed and the settings listed above. The sweep file lists the clip lengths it covers and the host's load average at its start, "
+                  "its end and for each run; the host was shared with other work while it ran, so the timings include that contention.",
+                  "- The chip rows are medians of repeated runs after a discarded warm-up run."
+                  + (" The CPU rows are one clip each, made once in float32. They are single samples, so they are a different kind of measurement from the chip "
+                     "rows." if f.cpu else "")
+                  + (" The table gives a CPU clip from the chip run's own environment and one from the reference environment, and they differ." if len(f.cpu) == 2 else ""),
+                  "- Agreement with the CPU reference was measured on the shortest clip of the sweep only. The longer clips were timed and were not compared with "
+                  "the CPU reference.",
+                  "- The agreement rows describe a separate run (one clip, in its own process) that had both the diffusion transformer and the decoder's transformer "
+                  "layers on the chip, and not the runs of the sweep. The environment floor rows come from comparing two CPU environments.", ""]
+    if f.derived:
+        lines += ["The result file in `evidence/` was derived from an earlier stage 2 result and a later chip run. Its `derived_from` entry lists what was replaced "
+                  "(the chip run and its agreement numbers) and what was kept from the earlier result (the CPU reference, the environment floor and the control "
+                  "that told the fine-tune from the base model). The control was measured on the earlier run, with the decoder on the host. The later run's "
+                  "identity as the fine-tune rests on its agreement with the fine-tune's own CPU reference.", ""]
+    if note:
+        lines += [LISTENING_HEAD, "", note, "",
+                  "This is the operator's listening judgment on the date above.", ""]
+    lines += [NOT_MEASURED_HEAD, "",
               "- Sound quality. No quality evaluation was run, and this card makes no claim about it.",
               "- A boot of this package on a chip, and a download of it from the Hub: neither has been done.",
               "- Requests that arrive together, and a server that keeps the model loaded.",
@@ -545,7 +649,9 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
               "## Intended use", "",
               "Making music clips from a text prompt on a Tenstorrent Blackhole chip, for research, evaluation, testing or personal use under the license above.", "",
               "## Limitations", "",
-              "- The text encoder, the sampler and the decoder run on the host CPU. Only the diffusion transformer runs on the chip.",
+              *(["- The text encoder, the sampler, the decoder's first linear layer and final convolution, and the waveform unpatching run on the host CPU. "
+                 "The diffusion transformer and the decoder's transformer layers run on the chip."] if f.chip_decoder else
+                ["- The text encoder, the sampler and the decoder run on the host CPU. " + ONLY_DIT + "."]),
               "- The server makes one clip at a time and keeps a short queue. A request is refused when the queue is full.",
               "- The pass bars for agreement are provisional.",
               "- The server has no sign-in. Run it on a network you trust.", "",
@@ -570,7 +676,10 @@ def running_doc(f: Facts) -> str:
             "new process for each clip, so a later download of another revision would change what the next clip loads. `run.sh` therefore builds a cache directory "
             "that holds only the pinned revision (links to your download; your own cache is not written to), points the runtime and every clip's process at it, and "
             "stops if the pinned revision is not in your cache. The directory is `$AUDIO_PKG_CACHE`, or under `$XDG_CACHE_HOME` (default `~/.cache`). "
-            "On a shared machine, hold a chip lease for the whole run.\n\n"
+            "On a shared machine, hold a chip lease for the whole run.\n"
+            f"4. The autoencoder decoder: the generate command that `run.sh` starts runs the decoder's transformer layers on the chip by default (it adds "
+            f"`--chip-decoder` for you). To run the whole decoder on the host instead, start the server with `{FALLBACK_ENV}=1 ./run.sh`, or give "
+            f"`{FALLBACK_FLAG}` to `runtime/orchard/skills/audio-chip-templates/pinned_generate.py` when you run it by hand. Giving both flags is refused.\n\n"
             "The model is licensed under the " + LICENSE_NAME + " (`LICENSE.md`). Read it before you use or share the model or this package. "
             "This package does not include the model weights.\n")
 
@@ -599,6 +708,8 @@ REVISION="{f.revision}"
 : "${{ORCHARD_TTNN_PYTHON:?set ORCHARD_TTNN_PYTHON to a Python that has ttnn}}"
 : "${{ORCHARD_AUDIO_SRC:?set ORCHARD_AUDIO_SRC to the stable-audio-3 checkout named in README.md}}"
 echo "{POWERED_BY}"
+# The packaged generate command (pinned_generate.py) runs the autoencoder decoder's transformer layers on the chip by default. To run the whole decoder on
+# the host instead, start this script with {FALLBACK_ENV}=1 (the server passes its environment to each clip's process).
 # The runtime finds the model through the Hugging Face cache's `main` reference, and the server starts a new process for each clip, so a later download of
 # another revision would change what the next clip loads. Build a cache directory that holds only the pinned revision (links to your download) and point the
 # runtime and every clip's process at it. This opens no device and writes nothing in your own cache.
@@ -867,6 +978,18 @@ def card_problems(card: str, pkg: Path, *, license_bytes: bytes | None = None, n
         hit = re.search(pattern, prose, re.I)
         if hit:
             problems.append(f"the card makes a claim about sound quality, which the run did not measure: {hit.group(0)!r}")
+    if facts is not None:
+        if DECODER_CLAIM in card and not facts.chip_decoder:
+            problems.append("the card says the autoencoder decoder runs on the chip and the evidence does not show it (the benchmark has no decoder call time "
+                            "and the result does not record a chip decoder)")
+        if ONLY_DIT in card and facts.chip_decoder:
+            problems.append(f"the card says {ONLY_DIT!r} and the evidence shows the decoder's transformer layers on the chip too")
+        if facts.derived and "derived_from" not in card:
+            problems.append("the evidence's result file was derived from a newer chip run, and the card does not say so (it must name `derived_from`)")
+    if LISTENING_HEAD in card:
+        section = card.split(LISTENING_HEAD, 1)[1].split("\n## ", 1)[0]
+        if not DATE.search(section):
+            problems.append("the card's listening note carries no date (YYYY-MM-DD); a listening judgment belongs to a day")
     if "No quality evaluation was run" not in card:
         problems.append("the card must say under Not measured that no quality evaluation was run")
     for head in ("## Intended use", "## Limitations", "## Risks and safety considerations", NOT_MEASURED_HEAD):
@@ -973,6 +1096,7 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
 
 
 RECORDED = ("LICENSE.md", "NOTICE", RUNTIME_LICENSE, RESULT_EVIDENCE, BENCH_EVIDENCE)
+OPTIONAL_RECORDED = (PROBE_EVIDENCE, REPORT_EVIDENCE)           # compared with the record when the package has them
 
 
 def record_problems(pkg: Path) -> list[str]:
@@ -989,7 +1113,7 @@ def record_problems(pkg: Path) -> list[str]:
     if not recorded:
         return [f"{RECORD_FILE} is missing or has no file list, so the license and evidence files cannot be compared with what was staged"]
     out = []
-    for name in RECORDED:
+    for name in RECORDED + tuple(n for n in OPTIONAL_RECORDED if (pkg / n).exists()):
         data = _text(pkg / name)
         if name not in recorded:
             out.append(f"{RECORD_FILE} does not list {name}")
@@ -1019,6 +1143,9 @@ def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
     for d in docs:
         if POWERED_BY not in (_text(d) or ""):
             problems.append(f"docs/{d.name} must display {POWERED_BY!r}")
+    for name in ("docs/running.md", "run.sh"):
+        if FALLBACK_ENV not in (_text(pkg / name) or ""):
+            problems.append(f"{name} must document the host-decoder fallback ({FALLBACK_ENV}=1)")
     for name in REQUIRED_FILES:
         if not (pkg / name).is_file():
             problems.append(f"the package has no {name}")
@@ -1114,8 +1241,28 @@ def gradio_requirement(demo_repo: Path) -> str:
     return m.group(1)
 
 
-def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, repo_root=None, out=None) -> dict:
+def extra_evidence(path, what: str, home: str) -> bytes:
+    """An optional evidence file (the decoder probe's summary, the full agreement report): a JSON object of at most 2 MB, read through safeio, with the
+    home directory replaced by `<home>`. The text is otherwise written as it was read. Refuses a file that is not a JSON object."""
+    data = _file_bytes(path, what)
+    try:
+        text = data.decode("utf-8")
+        safeio.parse_json_bytes(data, max_bytes=MAX_JSON_BYTES)
+    except (UnicodeDecodeError, safeio.SafeReadError):
+        raise AudioPackageError(f"the {what} is not a JSON file") from None
+    if not isinstance(json.loads(text), dict):
+        raise AudioPackageError(f"the {what} is not a JSON object")
+    return (text.replace(home.rstrip("/"), HOME_PLACEHOLDER) if home and home.rstrip("/") else text).encode("utf-8")
+
+
+def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, repo_root=None, out=None, result_path=None, probe_path=None,
+                  agreement_report_path=None, listening_note=None, home=None) -> dict:
     """Stage the package under the run's `stages/7/package/<name>/` and return the record that was written beside the files.
+
+    `result_path` names the audio result to use in place of `<run>/stages/2/audio_result.json` (a newer chip run, derived with
+    `orchard/audio_result_derive.py`); the run's own files are read and never edited. `probe_path` and `agreement_report_path` are optional evidence
+    files (JSON objects) copied to `evidence/decode-probe.json` and `evidence/audio-agreement-report.json` with `home` replaced by `<home>`.
+    `listening_note` is the operator's dated listening judgment, printed on the card under its own heading.
 
     Order of refusals: the package directory exists and holds anything (a weights file is named first); the run cannot back a package
     (`read_facts`); the license files are not the ones this builder quotes; a source file is missing or is a link; the page has changed so the
@@ -1135,7 +1282,14 @@ def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, r
         else:
             raise AudioPackageError(f"{pkg} exists and is not an empty directory")
     snap = Path(snapshot)
-    facts, result_bytes, bench_bytes = read_facts(run, bench_path, snapshot_name=snap.resolve().name)
+    facts, result_bytes, bench_bytes = read_facts(run, bench_path, snapshot_name=snap.resolve().name, result_path=result_path)
+    note = check_note(listening_note)
+    home = os.path.expanduser("~") if home is None else home
+    extras = {}
+    if probe_path:
+        extras[PROBE_EVIDENCE] = extra_evidence(probe_path, "decoder probe file (--probe)", home)
+    if agreement_report_path:
+        extras[REPORT_EVIDENCE] = extra_evidence(agreement_report_path, "agreement report file (--agreement-report)", home)
     license_bytes, _ = read_license_files(snap)
     demo = Path(demo_repo)
     sources = {rel: _copy_source(demo, rel, "the demo repository's") for rel, _ in DEMO_FILES}
@@ -1172,10 +1326,12 @@ def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, r
     files.append(_write(pkg, "demo/requirements.txt", requirement + "\n"))
     files.append(_write(pkg, "evidence/audio_result.json", result_bytes))
     files.append(_write(pkg, "evidence/bench-chip.json", bench_bytes))
-    files.append(_write(pkg, "README.md", render_card(facts, namespace=namespace, license_bytes=license_bytes)))
+    for rel, data in sorted(extras.items()):
+        files.append(_write(pkg, rel, data))
+    files.append(_write(pkg, "README.md", render_card(facts, namespace=namespace, license_bytes=license_bytes, listening_note=note)))
     record = {"schema": 1, "model": facts.model_id, "revision": facts.revision, "library_commit": facts.library_commit, "namespace": namespace,
               "license": {"name": LICENSE_NAME, "snapshot_revision": snap.resolve().name, "license_sha256": sha256_bytes(license_bytes)},
-              "copied_with_one_edit": edited, "files": sorted(files, key=lambda r: r["path"])}
+              "copied_with_one_edit": edited, "listening_note": note, "files": sorted(files, key=lambda r: r["path"])}
     _write(pkg, RECORD_FILE, json.dumps(record, indent=1, sort_keys=True) + "\n")
     return record
 
@@ -1191,7 +1347,9 @@ def main(args, *, out=None, hostname=None) -> int:
     def say(text=""):
         print(text, file=out, flush=True)
     run = Path(args.run_dir)
-    pkg = run / "stages" / "7" / "package" / PACKAGE_NAME
+    named_out = getattr(args, "out", None)
+    pkg = Path(named_out) if named_out else run / "stages" / "7" / "package" / PACKAGE_NAME
+    beside = pkg.parent if named_out else run / "stages" / "7"        # where AUDIO_PUBLISH_COMMANDS.txt goes: next to the package that was staged
     try:
         if not args.check:
             snapshot = args.snapshot or ledger_snapshot(run)
@@ -1199,7 +1357,10 @@ def main(args, *, out=None, hostname=None) -> int:
                 raise AudioPackageError("the run records no snapshot path; give --snapshot (the pinned model snapshot that holds LICENSE.md)")
             if not args.bench or not args.demo_repo:
                 raise AudioPackageError("staging needs --bench (the audio_bench.py sweep file) and --demo-repo (the separate demo repository)")
-            record = stage_package(run, bench_path=args.bench, demo_repo=args.demo_repo, snapshot=snapshot, namespace=args.namespace)
+            record = stage_package(run, bench_path=args.bench, demo_repo=args.demo_repo, snapshot=snapshot, namespace=args.namespace,
+                                   out=named_out or None, result_path=getattr(args, "result", None) or None, probe_path=getattr(args, "probe", None) or None,
+                                   agreement_report_path=getattr(args, "agreement_report", None) or None,
+                                   listening_note=getattr(args, "listening_note", None))
             say(f"staged {len(record['files'])} files in {pkg}")
         problems = package_problems(pkg, hostname=hostname, validate_manifest=kernel_manifest_problems)
     except AudioPackageError as exc:
@@ -1207,14 +1368,15 @@ def main(args, *, out=None, hostname=None) -> int:
         return 2
     text = publish_commands(PACKAGE_NAME, args.namespace)
     try:
-        safeio.atomic_write(run / "stages" / "7" / "AUDIO_PUBLISH_COMMANDS.txt", text, mode=0o644)
+        safeio.atomic_write(beside / "AUDIO_PUBLISH_COMMANDS.txt", text, mode=0o644)
     except OSError as exc:
-        say(f"could not write stages/7/AUDIO_PUBLISH_COMMANDS.txt ({type(exc).__name__}); the package was staged and is not affected")
+        say(f"could not write {'AUDIO_PUBLISH_COMMANDS.txt beside the package' if named_out else 'stages/7/AUDIO_PUBLISH_COMMANDS.txt'} "
+            f"({type(exc).__name__}); the package was staged and is not affected")
         return 1
     if problems:
         say("the package does not pass the gate:")
         for p in problems:
             say(f"  - {p}")
         return 1
-    say("the package passes the gate. Nothing was uploaded or published; the commands that would publish it are in stages/7/AUDIO_PUBLISH_COMMANDS.txt (text only).")
+    say(f"the package passes the gate. Nothing was uploaded or published; the commands that would publish it are in {beside / 'AUDIO_PUBLISH_COMMANDS.txt'} (text only).")
     return 0

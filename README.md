@@ -1849,7 +1849,16 @@ waveform comes from the weights. `--unmatched` allows runs that differ in those 
 ```
 tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR]   # stage the package and run the gate
 tt-orchard audio-package RUN_DIR --namespace ORG --check                                          # run the gate on the package already staged
+tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR --out DIR --result FILE \
+    --probe FILE --agreement-report FILE --listening-note "YYYY-MM-DD: ..."                         # stage a rebuild into a new directory
+python -m orchard.audio_result_derive RUN_DIR CHIP_RUN_DIR OUT_JSON                                 # make the --result file for a later chip run
 ```
+
+Rebuild for the decoder on the chip (2026-10-29, [run log](docs/run-logs/2026-10-29-audio-package-rebuild.md)): `--out` stages into a new directory and
+writes the commands text beside it. `--result` reads an audio result in place of the run's `stages/2/audio_result.json`; `audio_result_derive` makes
+that file from a later chip run and the run's own result without editing either. `--probe` and `--agreement-report` copy two optional JSON files into
+`evidence/`, and `--listening-note` prints the operator's dated listening judgment on the card. The packaged generate command runs the decoder's
+transformer on the chip by default; `AUDIO_HOST_DECODER=1` or `--host-decoder` keeps the decoder on the host.
 
 For a finished `stabilityai/stable-audio-3-small-music` run. It stages `stages/7/package/stable-audio-3-small-music-blackhole/` with a card
 (`README.md`), a copy of the model's license agreement (`LICENSE.md`), a `NOTICE` file, a draft v5.1 `tt-model.yaml` of kind `http-server`, `run.sh`,

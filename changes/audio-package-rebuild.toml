@@ -1,0 +1,3 @@
+target = "0.9.64"
+summary = "Audio package rebuild: decoder on the chip, default chip decoder with a host fallback, decoder and CPU rows, listening note, --result/--out and a derived result file."
+pr = 237
