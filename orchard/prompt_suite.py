@@ -23,7 +23,10 @@ import hashlib
 import json
 from pathlib import Path
 
+from orchard import safeio
 from orchard.defaults import SUITE_MIN_PROMPTS
+
+MAX_SUITE_BYTES = 4 * 1024 * 1024       # choice: the shipped suite is a few tens of kilobytes
 
 SUITE_FILE = Path(__file__).resolve().parent / "skills" / "weights-swap-templates" / "prompt_suite.json"
 ROLES = ("system", "user", "assistant")
@@ -98,9 +101,9 @@ def load_suite(path=None) -> dict:
     """The suite from `path` (the committed file by default). Raises SuiteError with every problem."""
     path = Path(path) if path else SUITE_FILE
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise SuiteError(f"cannot read the prompt suite {path}: {exc}") from exc
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_SUITE_BYTES)
+    except safeio.SafeReadError as exc:
+        raise SuiteError(f"cannot read the prompt suite {path}: {exc.reason}") from exc
     problems = check_suite(data)
     if problems:
         raise SuiteError(f"the prompt suite {path} has problems: " + "; ".join(problems))

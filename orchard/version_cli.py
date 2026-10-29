@@ -29,9 +29,11 @@ def repo_root() -> Path:
     return V.CHANGES_DIR.parent
 
 
-def atomic_write(path: Path, text: str, *, replace: bool = True) -> None:
+def atomic_write(path: Path, text: str, *, replace: bool = True, created: list | None = None) -> None:
     """Write `text` to `path` through a temporary file in the same directory, fsync, then os.replace.
-    With replace=False an existing file is never touched: the link step fails with FileExistsError."""
+    With replace=False an existing file is never touched: the link step fails with FileExistsError. With `created` (a list), one item is
+    appended the moment this call has created the file (right after the link succeeds, before the later fsync of the directory), so a
+    caller that rolls back knows the file is its own even when a later step raises."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -56,6 +58,8 @@ def atomic_write(path: Path, text: str, *, replace: bool = True) -> None:
             os.replace(tmp, path)
         else:
             os.link(tmp, path)                     # atomic, and fails when `path` exists
+            if created is not None:
+                created.append(path)
             os.unlink(tmp)
     except BaseException:
         try:
@@ -218,11 +222,17 @@ def apply_release(root: Path, init: Path, init_text: str, new_init: str, notes_p
     for f in frags:
         path = ch / f.name
         snapshot.append((path, path.read_text(encoding="utf-8"), stat.S_IMODE(path.stat().st_mode)))
+    # `atomic_write(..., replace=False)` creates the file by a link and then makes the directory entry durable. A failure in that second
+    # part raises with the file already in place, so the rollback cannot rely on the call having returned (issue 151). `created` is
+    # filled inside atomic_write at the link, so the notes file counts as ours only if this call made it.
     wrote_notes = False
     step = f"writing {notes_path.relative_to(root)}"
     try:
-        atomic_write(notes_path, notes, replace=False)
-        wrote_notes = True
+        created: list = []
+        try:
+            atomic_write(notes_path, notes, replace=False, created=created)
+        finally:
+            wrote_notes = bool(created)       # ours only if this call linked the file; a file another run made is never ours
         for path, _, _ in snapshot:
             step = f"deleting {path.relative_to(root)}"
             os.unlink(path)

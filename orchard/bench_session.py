@@ -38,7 +38,9 @@ import sys
 import time
 from pathlib import Path
 
-from . import bench_control, bench_proxy, bus, toolcall_bench
+from . import bench_control, bench_proxy, bus, safeio, toolcall_bench
+
+MAX_ITEMS_BYTES = 4 * 1024 * 1024      # choice: an items file is a short list of document ids per phase
 from .stallwatch import StallWatcher, run_watched
 
 EXIT_OFF_BUS = 7            # a chip the session holds is off the PCIe bus (orchard/bus.py); a person has to power-cycle the box
@@ -280,9 +282,9 @@ def stop_suspects(phases: list[dict]) -> dict:
 def load_items(path) -> dict:
     """The `--items` file: {phase: [document ids]}, each list non-empty, ids non-negative integers. Raises ValueError with the reason."""
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"cannot read {path}: {exc}")
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_ITEMS_BYTES)
+    except safeio.SafeReadError as exc:
+        raise ValueError(f"cannot read {path}: {exc.reason}") from exc
     if not isinstance(data, dict) or not data:
         raise ValueError("the items file must be a JSON object of phase -> list of document ids")
     for phase, ids in data.items():

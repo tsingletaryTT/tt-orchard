@@ -19,7 +19,7 @@ import os
 import socket
 from pathlib import Path
 
-from orchard import graft_trial, sampling_choice
+from orchard import graft_trial, safeio, sampling_choice
 from orchard.bringup_config import slug
 from orchard.nearest import read_installed
 
@@ -196,6 +196,7 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
 
 # ---- stage 4: one configuration per chip count --------------------------------------------------------
 
+MAX_INSTALLED_BYTES = 4 * 1024 * 1024   # choice: installed.json and a manifest are a few kilobytes each
 CONTAINER_KEYS = ("run_dir", "package", "profile", "chips", "nearest_model_id", "base_snapshot", "new_snapshot",
                   "new_model_id", "tt_cache", "hf_home", "operator_home", "port", "prompt_suite", "sampling_probe")
 TEST_DEADLINE_S = 3600
@@ -205,18 +206,18 @@ def installed_containers(operator_home) -> list[dict]:
     """tt-model's container packages (installed.json), each with the repo and chip count its manifest names."""
     path = Path(operator_home) / ".cache" / "tt-model" / "installed.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_INSTALLED_BYTES)
+    except safeio.SafeReadError:
         return []
     out = []
     for name, e in (data.items() if isinstance(data, dict) else ()):
         if not isinstance(e, dict) or not e.get("container") or not e.get("image"):
             continue
         try:
-            m = json.loads(Path(e["manifest"]).read_text(encoding="utf-8"))
+            m = safeio.read_json(safeio.resolved(e["manifest"]), max_bytes=MAX_INSTALLED_BYTES)
             out.append({"name": str(name), "repo": str(m["weights"]["repo_id"]),
                         "chips": int(m.get("device_count") or 0), "profile": e.get("profile")})
-        except (OSError, ValueError, KeyError, TypeError):
+        except (safeio.SafeReadError, ValueError, KeyError, TypeError):
             continue
     return out
 

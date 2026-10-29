@@ -837,3 +837,90 @@ def test_a_run_with_only_unreadable_logs_is_kept_and_marked_incomplete(root):
     assert "org--b" in rows and rows["org--b"]["complete"] is False and rows["org--b"]["turns"] == 0
     assert "files that could not be read" in rows["org--b"]["left_out"] and data["not_fully_read"] == 1
     assert rows["org--a"]["complete"] is True
+
+
+# ---- issue 149: failures that were not reported ---------------------------------------------------------------------------------
+
+def test_a_runs_folder_that_cannot_be_listed_is_a_cut_listing_not_an_empty_one(root, monkeypatch):
+    """Item 2: a listing that fails part way was an empty list and `cut` False, so the answer said nothing was left out."""
+    (root / "org--a").mkdir()
+    real = os.scandir
+
+    def failing(source):
+        raise PermissionError(13, "simulated")
+    monkeypatch.setattr(view.os, "scandir", failing)
+    pin = vs.open_pin(root)
+    try:
+        found, cut = view.discover(root, pin)
+    finally:
+        pin.close()
+        monkeypatch.setattr(view.os, "scandir", real)
+    assert found == [] and cut is True
+
+
+def test_a_kernel_probe_folder_that_cannot_be_opened_is_a_cut_listing(root, monkeypatch):
+    """Item 3: a probe folder that failed to open was skipped with no word, so its runs were missing from the answer without notice."""
+    write_log(root, "kprobe/p1/op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 5, 1)])
+    pin = vs.open_pin(root)
+    real_child = pin.child
+
+    def child(rel):
+        if rel == (view.PROBE_PARENT,):
+            raise PermissionError(13, "simulated")
+        return real_child(rel)
+    monkeypatch.setattr(pin, "child", child)
+    try:
+        found, cut = view.discover(root, pin)
+    finally:
+        pin.close()
+    assert [n for n, _ in found] == ["org--a"] and cut is True
+
+
+def test_a_failed_listing_inside_a_run_makes_that_scan_incomplete(root, monkeypatch):
+    """Item 2, in the scan: a folder whose listing failed was treated as empty and the scan still said complete."""
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 5, 1)])
+    real = os.scandir
+
+    def failing(source):
+        raise PermissionError(13, "simulated")
+    monkeypatch.setattr(vs.os, "scandir", failing)
+    try:
+        scanned = vs.scan(root / "org--a")
+    finally:
+        monkeypatch.setattr(vs.os, "scandir", real)
+    assert scanned["complete"] is False and scanned["skipped"]["unreadable_files"] >= 1
+
+
+def test_overlapping_first_requests_build_one_spender(root, monkeypatch):
+    """Item 4: the web app made its Spender on first use with no lock, so two requests could each build one (and each scan the folders)."""
+    import threading
+    import time as _time
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 5, 1)])
+    made, guard = [], threading.Lock()
+    real_init = view.Spender.__init__
+
+    def slow_init(self, *a, **k):
+        with guard:
+            made.append(1)
+        _time.sleep(0.2)
+        real_init(self, *a, **k)
+    monkeypatch.setattr(view.Spender, "__init__", slow_init)
+    app = app_with(root)
+    threads = [threading.Thread(target=app.virtual_spend) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(made) == 1
+
+
+def test_a_deeply_nested_record_in_the_helper_ledger_is_the_damaged_ledger_result(monkeypatch):
+    """Item 1: a record nested past the recursion limit must give the damaged-ledger answer and raise nothing out of the spend command."""
+    from orchard import spend_cmd
+    deep: list = []
+    for _ in range(100_000):
+        deep = [deep]
+    monkeypatch.setattr(tg, "_read_ledger_strict", lambda directory: [{"call_id": "c", "outcome": "ok", "x": deep}])
+    got = spend_cmd._real(Path("/nonexistent"))
+    assert "error" in got and "cannot be read" in got["error"]

@@ -434,7 +434,8 @@ def _tail_usage(tail: bytes):
 def _list_dir(source, budget: list) -> tuple[list, bool]:
     """([(name, is_link, is_dir, is_regular, link_to_dir)], cut): the entries of one folder (a path, or a directory descriptor), taken while
     streaming os.scandir. Every entry taken is counted against the shared budget; when it is spent the listing stops and `cut` is
-    True. An unreadable folder is empty."""
+    True. A folder that cannot be listed, or an entry that cannot be examined, gives what was read so far and appends one
+    "unreadable" item to `budget` (the caller counts and removes them; see `_walk`), so the scan is incomplete and says so (issue 149)."""
     out, cut = [], False
     try:
         with os.scandir(source) as listing:
@@ -449,9 +450,10 @@ def _list_dir(source, budget: list) -> tuple[list, bool]:
                                 (not link) and entry.is_file(follow_symlinks=False),
                                 link and entry.is_dir()))               # a link that points at a folder, decided here, not by path later
                 except OSError:
+                    budget.append("unreadable")
                     continue
     except OSError:
-        pass
+        budget.append("unreadable")
     return sorted(out), cut
 
 
@@ -492,6 +494,9 @@ def _walk(pin: "_Pin", skipped: dict):
             entries, cut = _list_dir(here.fd, budget)
         finally:
             here.close()
+        while len(budget) > 1:                                       # failures that _list_dir reported: each makes the scan incomplete
+            budget.pop()
+            skipped["unreadable_files"] += 1
         if cut:
             skipped["walk_cut"] += 1
         in_log = (rel[-1] if rel else pin.root.name) == "log"

@@ -247,6 +247,8 @@ def _walk(root: Path, top: str):
         for name in sorted(list(files) + links):
             if name.endswith(".pyc"):
                 continue
+            if name == ".git" and Path(base) == root / top and top == ".":
+                continue                # a linked worktree's metadata is a .git file at the root; git never tracks it (issue 202)
             if len(found) >= MAX_ENTRIES:
                 return found, errors, True
             absolute = Path(base) / name

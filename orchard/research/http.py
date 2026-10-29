@@ -21,6 +21,8 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from orchard import safeio
+
 ALLOWED_HOSTS = ("huggingface.co", "api.github.com", "raw.githubusercontent.com")
 ALLOWED_SUFFIXES = (".hf.co", ".huggingface.co")
 MAX_BODY = 8 * 1024 * 1024
@@ -197,7 +199,9 @@ class Fetcher:
             self._unreachable.add(host)
 
     def json(self, url: str, **kw):
+        body = self.get(url, **kw)
         try:
-            return json.loads(self.get(url, **kw).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+            # Strict parse: NaN, Infinity, 1e999, a repeated key, a lone surrogate, deep nesting and a long integer are refused (issues 135, 136).
+            return safeio.parse_json_bytes(body, max_bytes=max(len(body), 1))
+        except safeio.SafeReadError:
             raise FetchError("the answer is not JSON") from None
