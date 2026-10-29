@@ -93,7 +93,7 @@ def _skill_row(env, skill_dir) -> Row:
                "`tt-warp fastmodels sync` when upstream catches up")
 
 
-def _references_row(env, skill_dir, references) -> Row:
+def _references_row(env, skill_dir, references, reference_source="checkout") -> Row:
     want = checkout_spec_version(env.src_dir)
     if references is None:
         references, problems = ttlang_reference.assemble(env, skill_dir)
@@ -108,6 +108,9 @@ def _references_row(env, skill_dir, references) -> Row:
     unread = [r["name"] for r in own if not r.get("spec_version")]
     off = [f"{r['name']} documents {r['spec_version']}" for r in own
            if r.get("spec_version") and r["spec_version"] != want]
+    if off and reference_source == "skill":         # the operator asked for the older set, to measure it
+        return Row("references", MISMATCH, f"the checkout documents specification {want} but " + ", ".join(off) +
+                   " (the operator chose --reference-source skill)", "none: the choice is recorded in the report")
     if off:
         return Row("references", MISMATCH, f"the checkout documents specification {want} but " + ", ".join(off),
                    "build the reference files from the checkout (the probe does this when the skill is older)",
@@ -150,11 +153,12 @@ def _tree_row(env, tree: Path | None) -> Row:
                blocks=True)
 
 
-def check(env, skill_dir, *, tt_metal_dir=None, references: list[dict] | None = None) -> list[Row]:
+def check(env, skill_dir, *, tt_metal_dir=None, references: list[dict] | None = None,
+          reference_source: str = "checkout") -> list[Row]:
     """Every row. `references` are the files the probe already assembled (so the check judges what the coder gets);
     without them the check assembles them itself, in memory."""
     return [_checkout_row(env), _simulator_row(env), _files_row(env), _skill_row(env, skill_dir),
-            _references_row(env, skill_dir, references), _tree_row(env, tt_metal_dir)]
+            _references_row(env, skill_dir, references, reference_source), _tree_row(env, tt_metal_dir)]
 
 
 def blocking(rows: list[Row]) -> list[Row]:

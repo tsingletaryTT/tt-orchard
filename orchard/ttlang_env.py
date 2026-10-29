@@ -416,14 +416,14 @@ def _read_reference(path: Path, root: Path | None = None) -> tuple[bytes | None,
     return data, None
 
 
-def read_references(env: KEnv, skill_dir: Path) -> tuple[list[dict], list[str]]:
+def read_references(env: KEnv, skill_dir: Path, source: str = "checkout") -> tuple[list[dict], list[str]]:
     """Read every reference file once. (files, problems): each file is {"name", "source", "path", "sha256", "data",
     "spec_version", "generated"}; each problem is a sentence naming a file that is missing, a link, not a regular file or too large. The probe
     refuses to start while any problem remains, and writes these same bytes into every attempt. The assembly is in
     orchard/ttlang_reference.py: the skill's guide.md and examples.md are used only when the skill documents the same
     specification version as the checkout; otherwise they are generated from the checkout's docs."""
     from orchard import ttlang_reference
-    return ttlang_reference.assemble(env, skill_dir)
+    return ttlang_reference.assemble(env, skill_dir, source)
 
 
 def skills_status(env: KEnv, skill_dir: Path, *, write_cache: bool = True, preread: dict | None = None) -> list:

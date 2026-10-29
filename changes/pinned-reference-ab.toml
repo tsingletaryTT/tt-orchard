@@ -1,0 +1,3 @@
+target = "0.9.56"
+summary = "kernel-probe gains --reference-source checkout|skill; run log of the pinned-reference A/B on the local coder."
+pr = 217

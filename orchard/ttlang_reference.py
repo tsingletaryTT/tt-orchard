@@ -90,12 +90,22 @@ def _generate(name: str, docs: tuple[str, ...], env, skill_ver, src_ver, problem
             "generated_from": used}
 
 
-def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
+REFERENCE_SOURCES = ("checkout", "skill")
+
+
+def assemble(env, skill_dir, reference_source: str = "checkout") -> tuple[list[dict], list[str]]:
     """(files, problems), in the order of ttlang_env.REFERENCES. Each file is {"name", "source", "path", "sha256",
-    "data", "spec_version", "generated"} and, when generated, "generated_from"."""
+    "data", "spec_version", "generated"} and, when generated, "generated_from".
+
+    `reference_source` is "checkout" (the default: the pinned set described above) or "skill": the set as it was before the pin,
+    which is the installed skill's guide.md and examples.md whatever version they document, the checkout's specification
+    and the two fixed example kernels, and none of the extra example kernels. "skill" exists to measure whether the pinned
+    set helps the coder (docs/run-logs/2026-10-29-pinned-reference-ab.md)."""
+    if reference_source not in REFERENCE_SOURCES:
+        raise ValueError(f"unknown reference source {reference_source!r}; the sources are {', '.join(REFERENCE_SOURCES)}")
     skill_dir = Path(skill_dir)
     skill_ver, src_ver = skill_spec_version(skill_dir), checkout_spec_version(env.src_dir)
-    use_checkout = bool(skill_ver and src_ver and skill_ver != src_ver)
+    use_checkout = reference_source == "checkout" and bool(skill_ver and src_ver and skill_ver != src_ver)
     roots = {ttlang_env.SKILL_SOURCE: skill_dir, ttlang_env.CHECKOUT_SOURCE: Path(env.src_dir)}
     files, problems = [], []
     generated = {"guide.md": GUIDE_DOCS, "examples.md": EXAMPLES_DOCS}
@@ -115,7 +125,7 @@ def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
                       "generated": False})
     src = Path(env.src_dir)
     tracked, dirty = git_state(env)
-    extras, why = extra_examples(src, {n for n, _, _ in ttlang_env.REFERENCES}, tracked)
+    extras, why = extra_examples(src, {n for n, _, _ in ttlang_env.REFERENCES}, tracked) if reference_source == "checkout" else ([], None)
     if why:
         problems.append(why)
     for name in extras:

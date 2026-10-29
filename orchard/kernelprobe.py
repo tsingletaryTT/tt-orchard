@@ -2308,7 +2308,11 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse("the tt-lang simulator environment is not ready: run `tt-orchard kernel-env`")
     pin_overridden = [r for r in results if r.status != ttlang_env.OK]
     skill_dir = ttlang_env.skill_dir_from(args)
-    references, problems = ttlang_env.read_references(env, skill_dir)
+    reference_source = getattr(args, "reference_source", None) or "checkout"
+    if reference_source not in ttlang_reference.REFERENCE_SOURCES:
+        return refuse(f"unknown --reference-source {reference_source!r}; the sources are "
+                      f"{', '.join(ttlang_reference.REFERENCE_SOURCES)}")
+    references, problems = ttlang_env.read_references(env, skill_dir, reference_source)
     library_mode = getattr(args, "library", None) or "all"
     if library_mode not in LIBRARY_MODES:
         return refuse(f"unknown --library {library_mode!r}; the modes are {', '.join(LIBRARY_MODES)}")
@@ -2322,7 +2326,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     # One tt-lang for the simulator, the coder's reading and (later) the hardware build: every row of the consistency
     # check that blocks refuses the probe, unless overridden (orchard/ttlang_consistency.py).
     rows = ttlang_consistency.check(env, skill_dir, tt_metal_dir=ttlang_consistency.tt_metal_dir_from(args),
-                                    references=references)
+                                    references=references, reference_source=reference_source)
     for line in ttlang_consistency.render(rows):
         say(line)
     blocked_rows = ttlang_consistency.blocking(rows)
@@ -2465,6 +2469,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             header["references"] = reference_record
             header["ttlang_pin"] = ttlang_consistency.pin_record(env)
             header["ttlang_consistency"] = consistency_record
+            header["reference_source"] = reference_source
             header["library"] = {"mode": library_mode, "note": library_note(args.op, library_mode)}
             header["skills"] = skills_record
             header["agent_hw_policy"] = hw_policy.as_dict() | {"enabled": hw_policy.enabled}

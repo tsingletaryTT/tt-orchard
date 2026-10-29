@@ -3989,6 +3989,46 @@ def test_a_consistency_row_that_blocks_and_is_allowed_is_recorded_as_allowed(tmp
     assert data["header"]["ttlang_consistency"]["overridden"] is True
 
 
+# ---- --reference-source (the pinned-reference A/B) ------------------------------------------------
+
+def test_probe_reference_source_skill_runs_on_the_skills_guide_and_records_the_choice(tmp_path, fake_kenv, env_ready,
+                                                                                    ttlang_skill, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    (fake_kenv.src_dir / "docs" / "sphinx" / "specs" / "TTLangSpecification.md").write_text(_spec("0.20"))
+    (ttlang_skill / "TTLangSpecification.md").write_text(_spec("0.12"))
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint, reference_source="skill"),
+                       env=_pinned_env(fake_kenv), out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    refs = {r["name"]: r for r in data["header"]["references"]}
+    assert refs["reference/guide.md"]["source"] == "tt-lang skill" and refs["reference/guide.md"]["generated"] is False
+    assert data["header"]["reference_source"] == "skill"
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "The guide documents specification 0.12 and the specification documents 0.20" in md
+
+
+def test_probe_default_reference_source_is_the_checkout_and_is_recorded(tmp_path, fake_kenv, env_ready):
+    with FakeModel(lambda r: final("nothing")) as server:
+        kp.main(probe_args(tmp_path, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                probe=lambda e, m: True, run_watched_fn=no_run)
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["reference_source"] == "checkout"
+
+
+def test_probe_refuses_an_unknown_reference_source(tmp_path, fake_kenv, env_ready, capsys):
+    code = kp.main(probe_args(tmp_path, reference_source="elsewhere"), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and "--reference-source" in capsys.readouterr().err
+
+
+def test_the_command_line_has_the_reference_source_flag_with_its_default():
+    from orchard import cli
+    a = cli._parser().parse_args(["kernel-probe", "--op", "add"])
+    assert a.reference_source == "checkout"
+    b = cli._parser().parse_args(["kernel-probe", "--op", "add", "--reference-source", "skill"])
+    assert b.reference_source == "skill"
+
 # ---- the capability ladder and --wall-s (issue 175) -------------------------------------------------------------
 
 def test_wall_s_reaches_every_attempt_and_the_report_header(tmp_path, fake_kenv, env_ready, monkeypatch):
