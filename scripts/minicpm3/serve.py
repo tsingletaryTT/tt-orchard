@@ -84,7 +84,7 @@ class Handler(BaseHTTPRequestHandler):
             messages = req["messages"]
             if not isinstance(messages, list) or not all(isinstance(x, dict) and isinstance(x.get("content"), str) for x in messages):
                 return self._json(400, {"error": {"message": "messages must be a list of {role, content} with string content"}})
-            max_tokens = int(req.get("max_tokens") or 256)
+            max_tokens = min(max(int(req.get("max_tokens") or 256), 1), 4096)
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             return self._json(400, {"error": {"message": f"bad request: {exc}"}})
         stream = bool(req.get("stream"))
