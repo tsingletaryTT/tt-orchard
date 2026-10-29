@@ -392,7 +392,7 @@ def _parser() -> argparse.ArgumentParser:
     vp.add_argument("repo_id", help="the Hub repository (ORG/NAME). A private one is pulled with HF_TOKEN from the environment")
     vp.add_argument("--scratch", help="pull into this new or empty directory (default: a new temporary directory, left in place)")
     vp.add_argument("--staged", help="a local staged package directory: the pulled files and hashes must equal it")
-    vp.add_argument("--revision", help="pull this commit or branch instead of the default branch")
+    vp.add_argument("--revision", help="pull this commit or branch (default: main)")
     vp.add_argument("--plan", action="store_true", help="read the repository's file list and sizes and print them; pull nothing")
     vp.add_argument("--check", action="store_true", help="exit 1 when a check fails (without it the exit status is 0 after the report prints)")
     inv = sub.add_parser("inventory", parents=[common],

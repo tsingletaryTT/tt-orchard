@@ -1933,7 +1933,7 @@ the scrub finds no weights, caches, symbolic links, tokens, home paths or host n
 `package-record.json` or `SHA256SUMS` matches every file and lists every file; JSON manifests parse and `tt-model.yaml` names this repository; the weights
 revision in the card matches the package record, `tt-model.yaml` and the launchers, and the weights repository has that revision. `--staged DIR` also compares
 the pulled files and hashes with a local staged directory. `--plan` prints the commit, file count and the largest files and pulls nothing. `--revision` pulls a
-commit or branch other than the default. A private repository is pulled with `HF_TOKEN` from the environment, which is never printed. A failing check
+commit or branch other than main. A private repository is pulled with `HF_TOKEN` from the environment, which is never printed. A failing check
 makes the exit status 1 only with `--check`; a Hub that cannot be read is a refusal (exit 2).
 
 The last lines are the boot command as text: `gozer run --chips N --who "claude:verify-package" ... -- bash run.sh`, with `bash install.sh` first when the

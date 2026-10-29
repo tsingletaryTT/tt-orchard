@@ -268,7 +268,7 @@ def check_manifests(root: Path, repo: str) -> Finding:
         text = y.read_text(encoding="utf-8", errors="replace")
         named = _yaml_scalar(text, r"^repo:\s*(\S+)")
         if named is not None and named != repo:
-            problems.append(f"tt-model.yaml names repo {named}, not {repo}")
+            problems.append(f"tt-model.yaml names repo {named}; the package is {repo}")
         rev = _yaml_scalar(text, r"^  revision:\s*(\S+)")
         if rev is not None and not HEX40.match(rev):
             problems.append(f"tt-model.yaml's weights revision {rev!r} is not a 40-character commit")
@@ -364,7 +364,7 @@ def verify(repo: str, scratch: Path, hub: Hub, *, staged: Path | None = None, re
     say(f"{repo}: commit {info.sha}, {'private' if info.private else 'public'}, {len(info.files)} files, "
         f"{sum(f.size for f in info.files)} bytes")
     hub.download(repo, info.sha, scratch, [f.path for f in info.files])
-    shutil.rmtree(scratch / ".cache", ignore_errors=True)      # huggingface_hub's own bookkeeping, not package content
+    shutil.rmtree(scratch / ".cache", ignore_errors=True)      # huggingface_hub writes this directory itself; it holds no package content
     card = _text(scratch / "README.md")
     record = _read_record(scratch)
     findings = [check_hub_hashes(scratch, info), check_scrub(scratch, hostname, home), check_license(scratch, card),
@@ -416,7 +416,7 @@ def main(args, *, out=None, hub: Hub | None = None, hostname=None, home=None) ->
         scratch.mkdir(parents=True, exist_ok=True)
         findings, boot = verify(repo, scratch, hub, staged=staged, revision=getattr(args, "revision", None),
                                 hostname=hostname, home=home, say=say)
-    except Exception as exc:                      # a Hub or network failure is a refusal to judge, not a pass
+    except Exception as exc:                      # a Hub or network failure is a refusal to judge and never counts as a pass
         print(f"refused: could not read {repo} from the Hub: {type(exc).__name__}: {str(exc)[:200].replace(token, '<token>') if token else str(exc)[:200]}",
               file=sys.stderr)
         return EXIT_REFUSED
