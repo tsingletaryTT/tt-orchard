@@ -779,3 +779,15 @@ def test_the_summary_does_not_say_no_rung_had_zero_passes_when_a_stopped_rung_ha
     text = (tmp_path / "ladder-report.md").read_text()
     assert "No rung that ran had zero passes." not in text and "No rung that ran to its end had zero passes." in text
     assert "mul (interrupted)" in text
+
+
+def test_report_aggregation_survives_wrongly_typed_top_p_attempt_numbers_and_stopped_fields(tmp_path):
+    d = tmp_path / "add"
+    d.mkdir()
+    header = {"probe_id": 5, "coder_model": ["x"], "budget": {"wall_s": "long", "max_turns": "many"},
+              "sampling": {"top_p": "high", "seed_base": "s", "temperatures": "hot"}, "stopped": {"a": 1}}
+    recs = [{"op": "add", "attempt": "two", "passed_sim": True}, {"op": "add", "attempt": 1, "passed_sim": False,
+                                                                    "agent_wall_s": None}]
+    (d / "kernel-probe-report.json").write_text(json.dumps({"header": header, "attempts": recs}))
+    data = kl.write_ladder_report(tmp_path, ["add"])
+    assert data["rungs"][0]["attempts"] == 2 and (tmp_path / "ladder-report.md").is_file()

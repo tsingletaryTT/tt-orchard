@@ -182,7 +182,7 @@ def rung_row(op: str, attempts: list[dict], header: dict | None = None) -> dict:
     pass_walls = [a["agent_wall_s"] for a in attempts if a.get("passed_sim") is True
                   and isinstance(a.get("agent_wall_s"), (int, float))]
     all_walls = [a["agent_wall_s"] for a in attempts if isinstance(a.get("agent_wall_s"), (int, float))]
-    seeds = [(_d(a.get("sampling")).get("seed")) for a in sorted(attempts, key=lambda a: a.get("attempt", 0))]
+    seeds = [(_d(a.get("sampling")).get("seed")) for a in sorted(attempts, key=lambda a: _num(a.get("attempt")))]
     budget = _d(header.get("budget"))
     return {"op": op, "attempts": len(attempts), "passed": passes,
             "classes": {c: n for c, n in classes.items() if n},
@@ -195,7 +195,8 @@ def rung_row(op: str, attempts: list[dict], header: dict | None = None) -> dict:
             "sim_version": _d(header.get("tt_lang")).get("sim_version"),
             "source_sha": _d(header.get("tt_lang")).get("source_sha"),
             "seed_base": _d(header.get("sampling")).get("seed_base"),
-            "top_p": _d(header.get("sampling")).get("top_p"),
+            "top_p": (lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None)(
+                _d(header.get("sampling")).get("top_p")),
             "stopped": header.get("stopped")}
 
 
@@ -211,7 +212,8 @@ def first_zero_rung(rows: list[dict]) -> str | None:
 
 def _agreed(values: list):
     """The one value the rungs share, or the sorted list of the distinct values when they differ (None when none has one)."""
-    distinct = sorted({v for v in values if v is not None}, key=str)
+    by_text = {json.dumps(v, sort_keys=True, default=str): v for v in values if v is not None}     # any type, even a list
+    distinct = [by_text[k] for k in sorted(by_text)]
     return distinct[0] if len(distinct) == 1 else (distinct or None)
 
 
