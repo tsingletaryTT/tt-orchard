@@ -676,3 +676,19 @@ def test_a_rung_report_that_is_a_fifo_a_link_too_large_or_not_an_object_is_not_r
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
+
+
+def test_report_only_refuses_while_a_probe_holds_one_of_the_selected_rungs_and_locks_them_while_reading(tmp_path, capsys):
+    from orchard import kernelprobe as kp
+    write_rung(tmp_path, "add", [attempt(True)])
+    write_rung(tmp_path, "mul", [attempt(True)])
+    other = kp.acquire_lock(tmp_path / "mul")
+    try:
+        code = kl.run(Args(out=str(tmp_path), report_only=True, rungs="add,mul"), fake_main([]), default_wall_s=1800.0,
+                      say=lambda l: None)
+    finally:
+        kp.release_lock(other)
+    assert code == 2 and "mul" in capsys.readouterr().err and not (tmp_path / "ladder-report.md").exists()
+    assert kl.run(Args(out=str(tmp_path), report_only=True, rungs="add,mul"), fake_main([]), default_wall_s=1800.0,
+                  say=lambda l: None) == 0
+    kp.release_lock(kp.acquire_lock(tmp_path / "add"))                      # all locks released afterwards

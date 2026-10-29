@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import statistics
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -392,7 +393,6 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
         else:
             default_wall = float(default_wall_s)
     except LadderRefused as exc:
-        import sys
         print(f"refused: {exc}", file=sys.stderr)
         return 2
     attempts = int(getattr(args, "attempts", 5) or 0)
@@ -406,13 +406,20 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
     try:
         lock = kp.acquire_lock(out_dir)          # held from here to the report: a second ladder cannot mix its rungs in
     except kp._Refused as exc:
-        import sys
         print(f"refused: {exc}", file=sys.stderr)
         return 2
     try:
         started = clock()
         stopped, code, held = None, 0, []
         if getattr(args, "report_only", False):
+            # Lock every selected rung's directory while its report is read, so a probe that is writing one is not read
+            # half done (and is refused if it starts meanwhile).
+            for op in rungs:
+                try:
+                    held.append(kp.acquire_lock(out_dir / op))
+                except kp._Refused as exc:
+                    print(f"refused: rung {op}: {exc}", file=sys.stderr)
+                    return 2
             write_ladder_report(out_dir, rungs)
             say(f"ladder report: {out_dir / (REPORT_NAME + '.md')}")
             return 0
