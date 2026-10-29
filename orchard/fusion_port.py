@@ -558,7 +558,7 @@ def render_table(report: dict) -> str:
     lines.append("")
     lines.append("; ".join(f"{c[s]} {s}" for s in STATUSES))
     for g in report["gaps"]:
-        lines.append(f"gap (needs new code, not attempted): {g['op']}")
+        lines.append(f"gap (needs new code; not attempted): {g['op']}")
     if report["hazards"]:
         lines.append("hazards: " + ", ".join(h["name"] for h in report["hazards"]))
     for n in report["notes"]:

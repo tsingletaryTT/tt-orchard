@@ -35,7 +35,7 @@ Run: `tt-orchard fusion-candidates tests/fixtures/model-configs/qwen3.5-35b-a3b.
 | gdn_decode | mixer (gated delta net) | `QWEN35_GDN_FUSED_DECODE` (0) | applies as is | linear heads per die, per-head widths, projection width | All seven checks pass. |
 | attn_decode | mixer (gated attention) | `QWEN35_ATTN_DECODE_OPS` (0) | applies as is | heads and KV heads per die, head dim, rotary dim | All checks pass (rotary dim 64 = two tiles). |
 | sampler_rows_topk | sampler | `QWEN35_ROWS_TOPK` (0) | applies with a changed constant | vocabulary per die | All checks pass (width 124160 is under 1,048,576 and takes the 32-bit index path). `GRID` (10, 10 scan cores) was sized for the bundle's 75,968 columns per die; this model has 124,160. |
-| fabric_boundary | layer boundary | `QWEN35_FABRIC_BOUNDARY` (0) | needs new code | hidden, dies | The bundle's card says it runs on four dies only. On the p300 profile (two dies) it is a gap. Recorded, not attempted. |
+| fabric_boundary | layer boundary | `QWEN35_FABRIC_BOUNDARY` (0) | needs new code | hidden, dies | The bundle's card says it runs on four dies only. On the p300 profile (two dies) it is a gap. Recorded as a gap and not attempted. |
 | addnorm | layer boundary | `QWEN35_ADDNORM_DECODE` (0) | applies as is | hidden | The one check reads a core count the interpreter cannot evaluate (a `len` of a list built in the function), so it is listed as not evaluated. |
 
 Counts: 4 apply as is, 2 apply with a changed constant, 1 needs new code. Hazards from `orchard/hazards.py` for this pair:
