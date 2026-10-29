@@ -175,3 +175,65 @@ Settings, fixed now:
   (`2026-10-28-staged-construction-similarity.py`: comments and blank lines removed, difflib ratio over lines, flag at 0.80, a
   near-copy). The files of the passing kernels are kept in the run directory.
 - No claims beyond the counts. Five attempts per target cannot show a small difference.
+
+### Agent-loop capability check: results (run 2026-10-29)
+
+As pre-registered: Sonnet 5.5 through Telegraph, one Telegraph call per turn, the probe's write tool running the check after each
+write, at most 6 turns per attempt (the config's cap of 6 calls per problem, not raised; one problem per attempt),
+`--library none`, the shipped check as the verdict. The harness used an exported copy of the PR 199 code at commit 3f028f4 (its
+check and write tool are the whole-kernel probe's).
+
+| target | attempts | passed | failure classes | turns used (per attempt) |
+| --- | --- | --- | --- | --- |
+| center | 5 | 5 | none | 1, 1, 1, 1, 1 |
+| linear_scan | 5 | 0 | sim_gap 3, no_kernel 2 | 6, 6, 0, 0, 6 |
+
+Each `center` attempt passed on its first kernel (the in-loop check printed PASS) and the unedited check agreed.
+
+`linear_scan`, per attempt:
+
+| attempt | turns | how it ended | final check |
+| --- | --- | --- | --- |
+| 1 | 6 | call cap 6 of 6 reached | sim_gap: the simulator has no `ttl.raw_element_read` |
+| 2 | 6 | call cap 6 of 6 reached | sim_gap: the simulator has no `ttl.raw_element_write` |
+| 3 | 0 | first answer empty: finish_reason `length` after 8000 output tokens | no_kernel |
+| 4 | 0 | first answer empty: finish_reason `length` after 8000 output tokens | no_kernel |
+| 5 | 6 | call cap 6 of 6 reached | sim_gap: the simulator has no `ttl.raw_element_read` |
+
+A `sim_gap` verdict means the kernel uses a documented function the simulator lacks, so it can be judged only on hardware; the
+probe's check counts it as not passed in the simulator. Hardware was not used. Whether those three kernels would pass on a chip
+was not determined (the 2026-10-27 note says data movement kernels cannot compute on the values they read).
+
+Cost (from the helper's per-call usage and prices of $2 per million tokens in and $10 per million out):
+
+| part | calls | cost USD |
+| --- | --- | --- |
+| center, 5 attempts | 5 | 0.579 (0.116, 0.114, 0.114, 0.118, 0.116) |
+| linear_scan, answered calls | 18 | 2.790 (0.922, 0.935, 0.933 for attempts 1, 2, 5) |
+| linear_scan, the two empty answers (8000 output tokens each, 49303 in) | 2 | 0.357 |
+| total of this check | 25 | 3.726 |
+
+The harness's own running total showed $3.369 because the two empty answers carry no cost in the helper's record. The figure above
+adds their token counts at the stated prices (49,303 x $2 per million + 8,000 x $10 per million = $0.1786 each). With the first
+check ($0.961) the two capability checks cost $4.69, under the $6 limit. A request is about 49,000 tokens in at turn 1 and grows to
+about 56,000 by turn 6.
+
+Similarity of the five passing `center` kernels to the orchard library kernels and the checkout's examples
+(`2026-10-28-staged-construction-similarity.py`, flag at 0.80):
+
+| attempt | best library match | best checkout-example match | flag |
+| --- | --- | --- | --- |
+| 1 | 0.34 (center.py) | 0.18 | ok |
+| 2 | 0.35 (center.py) | 0.18 | ok |
+| 3 | 0.24 (center.py) | 0.18 | ok |
+| 4 | 0.34 (center.py) | 0.18 | ok |
+| 5 | 0.34 (center.py) | 0.18 | ok |
+
+No kernel was flagged as a near-copy. The score is a line-level ratio, so a copy with renamed identifiers would score low.
+
+Deviations: `reference/guide.md` and `reference/examples.md` were left out of the prompt (cost); the helper's system text and
+temperature 0 differ from the coder's; the helper has no tools, so the harness wrote the kernel and ran the check on its behalf.
+
+Not determined: whether the local coder passes `center` in this loop (it did not in the capability ladder, PR 177); what a
+hardware run of the three `sim_gap` kernels gives; whether the two empty answers on `linear_scan` would have been kernels with
+a larger output limit.
