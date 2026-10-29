@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchard import safeio
 from orchard.stages import inside
 
 # A number with a performance unit in prose. The card's Numbers table is the only place for one.
@@ -217,10 +218,8 @@ def tool_call_evidence(run_dir, identity: tuple[str, str | None] | None = None) 
         if path is None:
             continue
         try:
-            if path.stat().st_size > MAX_EVIDENCE_BYTES:
-                continue
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            data = safeio.read_json(path, max_bytes=MAX_EVIDENCE_BYTES)     # a larger file, a FIFO, a link or deep nesting is skipped
+        except safeio.SafeReadError:
             continue
         names: set[str] = set()
         for entry in _entries(data):

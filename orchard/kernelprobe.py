@@ -68,7 +68,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from orchard import defaults, hwtool, ttlang_consistency, ttlang_env, ttlang_pair, ttlang_reference
+from orchard import defaults, safeio, hwtool, ttlang_consistency, ttlang_env, ttlang_pair, ttlang_reference
 from orchard.agent import DEVICE_VARS, SECRET_NAME, TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
@@ -629,8 +629,8 @@ def _read_agent_check(path: Path):
     if raw is None or len(raw) > AGENT_CHECK_MAX_BYTES:
         return "unreadable"
     try:
-        data = json.loads(raw.decode("utf-8"))
-    except ValueError:
+        data = safeio.parse_json_bytes(raw, max_bytes=AGENT_CHECK_MAX_BYTES)     # NaN, a repeated key, a lone surrogate, deep nesting
+    except safeio.SafeReadError:
         return "unreadable"
     return data if isinstance(data, dict) else "unreadable"
 

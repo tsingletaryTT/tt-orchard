@@ -37,6 +37,10 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from orchard import safeio
+
+MAX_DATA_BYTES = 4 * 1024 * 1024        # choice: the shipped table is a few kilobytes
+
 DATA_FILE = Path(__file__).resolve().parent / "data" / "op_variants.json"
 WHY = ("normalised-equal", "synonym", "token-subset", "near", "affix")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
@@ -44,7 +48,10 @@ _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 @lru_cache(maxsize=1)
 def load_data(path=DATA_FILE) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    try:
+        return safeio.read_json(safeio.resolved(path), max_bytes=MAX_DATA_BYTES)
+    except safeio.SafeReadError as exc:
+        raise ValueError(f"{path}: {exc.reason}") from exc
 
 
 def tokens(text: str) -> list:

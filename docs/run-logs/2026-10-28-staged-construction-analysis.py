@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 OPS = ("center", "rmsnorm")
+REGISTERED_ATTEMPTS = 10          # attempts per arm per op in the pre-registration, numbered 1 to 10
 STAGE_COUNT = {"center": 4, "rmsnorm": 5}
 
 
@@ -41,6 +42,11 @@ def load(exp: Path):
         parts = d.name.split("-")
         if len(parts) != 3 or parts[0] not in ("W", "S") or parts[1] not in OPS or not parts[2].isdigit():
             continue
+        if not 1 <= int(parts[2]) <= REGISTERED_ATTEMPTS:
+            # The pre-registration names attempts 1 to 10. A record outside that range is left out, so records 2 to 11 can never
+            # count as a complete experiment and an extra attempt cannot change the fixed sample.
+            print(f"ignored {d.name}: attempt {parts[2]} is outside the registered 1 to {REGISTERED_ATTEMPTS}", file=sys.stderr)
+            continue
         path = d / parts[1] / "attempt-1" / "attempt.json"
         if not path.is_file():
             rows[(parts[0], parts[1], int(parts[2]))] = None
@@ -57,8 +63,6 @@ def median(values):
         return "-"
     return values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2
 
-
-REGISTERED_ATTEMPTS = 10          # attempts per arm per op in the pre-registration
 
 
 def verdict(w_recs, s_recs, w_passed, s_passed, reached_final):

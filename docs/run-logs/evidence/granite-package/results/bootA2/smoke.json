@@ -1,0 +1,103 @@
+{
+ "health": {
+  "status": "ok",
+  "model": "ibm-granite/granite-4.0-h-1b",
+  "context": 2048
+ },
+ "short": {
+  "text": "The capital of France is Paris.",
+  "finish_reason": "stop",
+  "usage": {
+   "prompt_tokens": 42,
+   "completion_tokens": 7,
+   "total_tokens": 49
+  },
+  "timings": {
+   "prompt_tokens": 42,
+   "completion_tokens": 7,
+   "prefill_s": 1.1383,
+   "first_token_s": 1.1394,
+   "decode_tok_s": 29.4151
+  },
+  "wall_s": 1.345271348953247
+ },
+ "decode_run": {
+  "usage": {
+   "prompt_tokens": 38,
+   "completion_tokens": 64,
+   "total_tokens": 102
+  },
+  "timings": {
+   "prompt_tokens": 38,
+   "completion_tokens": 64,
+   "prefill_s": 1.0303,
+   "first_token_s": 1.0304,
+   "decode_tok_s": 34.4123
+  },
+  "wall_s": 2.8622376918792725
+ },
+ "stream": {
+  "text": "Bonjour !",
+  "finish_reason": "stop",
+  "first_content_s": 0.634329080581665,
+  "wall_s": 0.6344442367553711
+ },
+ "long_prompt": {
+  "prompt_tokens": 1481,
+  "timings": {
+   "prompt_tokens": 1481,
+   "completion_tokens": 7,
+   "prefill_s": 39.5541,
+   "first_token_s": 39.5542,
+   "decode_tok_s": 29.1277
+  },
+  "wall_s": 39.762492179870605
+ },
+ "checks": [
+  {
+   "check": "short answer mentions Paris",
+   "ok": true,
+   "detail": "The capital of France is Paris."
+  },
+  {
+   "check": "short answer ended on the end-of-text token",
+   "ok": true,
+   "detail": "stop"
+  },
+  {
+   "check": "a 64-token completion runs to max_tokens",
+   "ok": true,
+   "detail": "{'prompt_tokens': 38, 'completion_tokens': 64, 'total_tokens': 102}"
+  },
+  {
+   "check": "max_tokens=5 gives finish_reason length and 5 tokens",
+   "ok": true,
+   "detail": "{'prompt_tokens': 38, 'completion_tokens': 5, 'total_tokens': 43}"
+  },
+  {
+   "check": "stop string cuts the text before it",
+   "ok": true,
+   "detail": "1, 2, 3, "
+  },
+  {
+   "check": "stream returns text and a finish reason",
+   "ok": true,
+   "detail": "{'text': 'Bonjour !', 'finish_reason': 'stop', 'first_content_s': 0.634329080581665}"
+  },
+  {
+   "check": "a prompt of about a thousand tokens is accepted",
+   "ok": true,
+   "detail": "{'prompt_tokens': 1481, 'completion_tokens': 7, 'total_tokens': 1488}"
+  },
+  {
+   "check": "a prompt longer than the context is refused with 400",
+   "ok": true,
+   "detail": "400"
+  },
+  {
+   "check": "an empty messages list is refused with 400",
+   "ok": true,
+   "detail": "400"
+  }
+ ]
+}

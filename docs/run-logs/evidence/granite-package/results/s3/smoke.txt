@@ -1,0 +1,9 @@
+PASS short answer mentions Paris The capital of France is Paris.
+PASS short answer ended on the end-of-text token stop
+PASS a 64-token completion runs to max_tokens {'prompt_tokens': 38, 'completion_tokens': 64, 'total_tokens': 102}
+PASS max_tokens=5 gives finish_reason length and 5 tokens {'prompt_tokens': 38, 'completion_tokens': 5, 'total_tokens': 43}
+PASS stop string cuts the text before it 1, 2, 3, 
+PASS stream returns text and a finish reason {'text': 'Bonjour !', 'finish_reason': 'stop', 'first_content_s': 0.5597310066223145}
+PASS a prompt of about a thousand tokens is accepted {'prompt_tokens': 1481, 'completion_tokens': 7, 'total_tokens': 1488}
+PASS a prompt longer than the context is refused with 400 400
+PASS an empty messages list is refused with 400 400

@@ -741,6 +741,7 @@ its reason; a `warn` is information.
 | cpu | the CPU tier's server (ollama) does not answer, or does not list the tier's model. Stage 4's 4-chip test parks the coder behind it, so a run without it would stop hours in | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
 | bus | a chip the configuration needs is not on the PCIe bus, is not awake (`power_state` other than D0, for example D3cold, the state both chips of one board fell into on 2026-10-22), has no readable serial (gozer refuses every lease while one cannot be read), has no driver or no `/dev/tenstorrent/N` node, finds `/dev/tenstorrent` itself missing or unlistable, or is listed by gozer but missing from the bus. The configuration needs the coder's chips plus a test board, or the whole box when the coder holds four chips (a lab run needs only the coder's chips here). Extra device nodes, a power state the kernel does not report, a gozer that lists fewer chips than the bus shows and a board listing fewer chips than another are warnings. The row reads files only (sysfs and `/dev/tenstorrent`): no lease, no device open, no reset. A board that has left the bus needs a power cycle or reboot. After the run starts, a failed test, coder boot or benchmark phase gets the same check on the chips it holds (section 5.5a) | `hardware-unhealthy` |
+| boards | the tools that list the boards disagree with the configuration. `gozer topology` lists fewer chips than the configuration needs (two chips make a board), or `tt-smi -s` cannot see a chip gozer lists. The message says that a board is missing and names the board serial and the PCI addresses of its chips when a tool can still name them. A board that one tool lists and another does not, or a `gozer status` that lacks a topology board, is a warning. The row reads `gozer topology` and `gozer status`. It runs `tt-smi -s` only when `ORCHARD_TT_SMI` names the binary, because `tt-smi -s` opens every device on the box. It never resets or leases (`orchard/boards_seen.py`) | `hardware-unhealthy` |
 | base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. An audio model needs no bundle (see "Audio models in the preflight" below). A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | sfpi | the box's SFPI compiler (`dpkg-query -W sfpi`) is older than the version the chosen bundle pins in its ttnn wheel (`ttnn/tt_metal/sfpi-version`). Kernel compiles then fail with `'vLut8si' is not a member of 'sfpi'` (7.67.0 against a pin of 7.73.0, 2026-10-13). tt-orchard does not install system packages; the row names the release to install. A version it cannot read is a warning | `hardware-unhealthy` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
@@ -1921,6 +1922,27 @@ The gate (`package_problems`) reads the directory as it is on disk and refuses a
 What the gate does not decide: whether prose is true, whether naming the model identifies it or crosses the license's trademark clause, and whether Tenstorrent may
 publish under a Community License at all. Those are the operator's questions (see the run log). Details of one dry run:
 [docs/run-logs/2026-10-28-audio-package-dry-run.md](docs/run-logs/2026-10-28-audio-package-dry-run.md).
+
+### 5.9fc Verify a published package (pull it from the Hub and check it)
+
+```
+tt-orchard verify-package REPO_ID [--scratch DIR] [--staged DIR] [--revision SHA] [--plan] [--check]
+```
+
+`verify-package` checks what a reader gets: the repository as the Hub serves it. It reads the commit and file list, pulls that commit into a new
+scratch directory (`--scratch`, or a temporary one that stays in place), and runs these checks: the pulled bytes match the Hub's sha256 for the large files;
+the scrub finds no weights, caches, symbolic links, tokens, home paths or host names; a license file or a `license:` line is present; the package's own
+`package-record.json` or `SHA256SUMS` matches every file and lists every file; JSON manifests parse and `tt-model.yaml` names this repository; the weights
+revision in the card matches the package record, `tt-model.yaml` and the launchers, and the weights repository has that revision. `--staged DIR` also compares
+the pulled files and hashes with a local staged directory. `--plan` prints the commit, file count and the largest files and pulls nothing. `--revision` pulls a
+commit or branch other than main. A private repository is pulled with `HF_TOKEN` from the environment, which is never printed. A failing check
+makes the exit status 1 only with `--check`; a Hub that cannot be read is a refusal (exit 2).
+
+The last lines are the boot command as text: `gozer run --chips N --who "claude:verify-package" ... -- bash run.sh`, with `bash install.sh` first when the
+package ships one and N from the package's `mesh_device` or card tag. The command never boots the package, opens a device or takes a lease. A hardware agent runs the printed
+command.
+On 2026-10-29 it ran read-only on `episod/granite-4.0-h-1b-blackhole`, `episod/qwen3.8-27b-cjk-trim-p300` and the private
+`episod/stable-audio-3-small-music-blackhole`: every check passed, except that the Qwen package ships no sha256 record (a warning).
 
 ### 5.9f The demo environment
 

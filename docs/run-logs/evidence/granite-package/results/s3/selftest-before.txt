@@ -1,0 +1,10 @@
+ok    python: 3.12.12 (tested with 3.12)
+ok    python packages: all present
+ok    import ttnn: works (this does not open the device)
+ok    chip visibility: 5 device node(s) in /dev/tenstorrent; TT_VISIBLE_DEVICES=0000:03:00.0,0000:04:00.0
+warn  pinned weights: revision d18cca4c is not in the cache yet; the first start downloads about 3 GB into <pkg-run-dir>/fresh/hf-home
+ok    free disk: 277 GB free where the cache lives
+ok    port: 127.0.0.1:20110 is free
+ok    tt-metal: v0.80.0 (tested with v0.80.0)
+ok    open device: skipped (add --open-device to test it; needs a free chip)
+self-test: 0 failed, 1 warning(s)

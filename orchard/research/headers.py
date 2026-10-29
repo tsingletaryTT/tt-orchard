@@ -14,6 +14,7 @@ import re
 import struct
 from concurrent.futures import ThreadPoolExecutor
 
+from orchard import safeio
 from orchard.research import triage_rules
 from orchard.research.http import MAX_BODY, FetchError
 from orchard.research.types import Result, Unavailable, clean, valid_id
@@ -45,7 +46,10 @@ def shard_header(fetch, repo: str, name: str) -> dict:
     blob = fetch.get(url, byte_range=(8, 8 + n - 1), max_bytes=n)
     if len(blob) != n:
         raise ValueError(f"header is cut short ({len(blob)} of {n} bytes)")
-    header = json.loads(blob.decode("utf-8"))
+    try:
+        header = safeio.parse_json_bytes(blob.decode("utf-8"), max_bytes=max(len(blob), 1))     # a UnicodeDecodeError is a ValueError, as before
+    except safeio.SafeReadError as exc:
+        raise ValueError(f"header is not strict JSON: {exc.reason}") from None
     if not isinstance(header, dict):
         raise ValueError("header is not a JSON object")
     return {k: {"dtype": v.get("dtype"), "shape": v.get("shape")}

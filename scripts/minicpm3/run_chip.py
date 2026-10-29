@@ -24,6 +24,15 @@ from make_reference import PROMPT, make_recorder, prompt_ids  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 
+def build_model(a, dev):
+    """Construct the chip model the flags ask for. `--layers N` (debug) truncates the stack, so it goes to both constructors (0 = all layers)."""
+    if a.tp == 2:
+        from chip_model_tp import ChipMiniCPM3TP
+        return ChipMiniCPM3TP(dev, a.model_dir, a.weights, max_len=a.max_len, n_layers=a.layers, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
+    return ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard,
+                        n_layers=a.layers, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["agree", "bench"])
@@ -61,12 +70,7 @@ def main():
         dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
     try:
         t0 = time.time()
-        if a.tp == 2:
-            from chip_model_tp import ChipMiniCPM3TP
-            m = ChipMiniCPM3TP(dev, a.model_dir, a.weights, max_len=a.max_len, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
-        else:
-            m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard,
-                             mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
+        m = build_model(a, dev)
         m.skip = set(x for x in a.skip.split(",") if x)
         print(f"model loaded on chip in {time.time() - t0:.1f}s", flush=True)
         if a.mode == "agree":
@@ -160,12 +164,13 @@ def bench(a, m, ids, n, tok):
         if not rec["warmup"]:
             timings.append({k: v for k, v in rec.items() if isinstance(v, (int, float)) and not isinstance(v, bool) and k not in ("repeat",)})
     summary = resident.summarise_runs(timings, warmup=resident.WARMUP_RUNS)
-    cfg = mc.read_model_config(a.model_dir + "/config.json")
+    cfg = dict(mc.read_model_config(a.model_dir + "/config.json"))
+    cfg["num_hidden_layers"] = m.L                 # the floor counts the layers the model ran (--layers truncates the stack)
     policy = {"default": "bf16", "dense_mlp": a.mlp_dtype}        # the weights the run actually reads
     floor = df.floor_for_board(cfg, policy, "p300", dies=a.tp)
     med = summary["parts"]["decode_tok_s"]["median"]
     record = {"label": summary["label"], "model": "openbmb/MiniCPM3-4B", "config": {"attn": a.attn, "opt": a.opt, "shard": a.shard, "trace": a.trace, "upd": a.upd,
-              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": a.tp, "prompt_tokens": n, "steps": a.steps, "batched_prefill": a.batched_prefill},
+              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": a.tp, "prompt_tokens": n, "steps": a.steps, "batched_prefill": a.batched_prefill, "layers": m.L},
               "runs": results, "summary": summary, "floor": floor.as_dict(), "share_of_floor_median": df.share_of_floor(med, floor),
               "share_text": df.share_text(med, floor), "text": tok.decode(out)}
     print(record["share_text"], flush=True)
