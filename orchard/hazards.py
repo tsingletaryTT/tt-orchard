@@ -81,6 +81,11 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
     TableEntry("vocab_not_whole_tiles", "vocabulary a whole number of 32-wide tiles",
                "the vocabulary is not a multiple of 32, so the LM head and the sampler pad it", "tile layout: every tensor on the chip is stored in 32 by 32 tiles",
                "run the LM head and the sampler on logits whose maximum sits in the padded columns"),
+    TableEntry("mla_flash_decode_needs_core_grid", "multi-latent attention decode with an explicit core grid of at most 64 cores",
+               "flash_multi_latent_attention_decode with one latent key-value head at batch 1 spreads over all 110 Blackhole cores and fails with 'Tree reduction max 6 "
+               "rounds (64 cores/head)'; an SDPAProgramConfig with an 8 by 8 grid works", "issue 213 (MiniCPM3-4B port on one Blackhole chip, overnight 2026-10-28)",
+               "run the flash multi-latent decode op alone at the model's head count, latent rank and rope width at batch 1, first with no program config and then "
+               "with an 8 by 8 SDPAProgramConfig, and compare with the CPU result"),
     TableEntry("hidden_size_tile_count_rejected", "hidden size not 3 tiles (96)",
                "a boundary kernel rejected a hidden size of 3 tiles", _ISSUE,
                "run the layer-boundary kernel alone at the model's hidden size"),
@@ -218,6 +223,8 @@ def _hits(d: mc.ModelDims, dies: int, limits: dict, tile_multiples: dict) -> dic
             hits[f"{dim}_tiles_not_multiple_of_{tile_multiples[dim]}"] = (
                 value // TILE, f"a multiple of {tile_multiples[dim]} tiles",
                 f"{dim} is {value // TILE} tiles, and the caller says the fused kernels accept only multiples of {tile_multiples[dim]}")
+    if d.mla:
+        hits["mla_flash_decode_needs_core_grid"] = (d.mla["kv_lora_rank"] + d.mla["qk_rope_head_dim"], "an explicit program config on at most 64 cores", None)
     if d.hidden % TILE == 0 and d.hidden // TILE in REJECTED_HIDDEN_TILES:
         hits["hidden_size_tile_count_rejected"] = (d.hidden // TILE, f"not {d.hidden // TILE} tiles", None)
     if "router_top_k_max" in limits and d.top_k > limits["router_top_k_max"]:
