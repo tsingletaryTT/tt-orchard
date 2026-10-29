@@ -290,14 +290,15 @@ def test_a_migrate_only_option_is_never_put_on_a_status_or_restore_command(tmp_p
     assert code == 2 and commands and all("--scope team" in c and "--accept-malformed" not in c for c in commands)
 
 
-@pytest.mark.parametrize("change", ["orphan sidecar", "sidecar changed", "cache entry added", "cache entry changed"])
+@pytest.mark.parametrize("change", ["orphan sidecar", "sidecar changed", "cache entry added", "cache entry changed",
+                                    "cache entry changed beside a sidecar"])
 def test_an_input_other_than_the_ledger_that_changes_while_the_question_is_open_stops_the_migration(tmp_path, spy, change):
     d = make(tmp_path)
     (d / "cache").mkdir()
     entry = d / "cache" / ("a" * 64 + ".json")
     entry.write_text(json.dumps({"text": "t", "reply_file": "replies/x.txt"}))
     sidecar = d / "telegraph.jsonl.torn-1"
-    if change == "sidecar changed":
+    if change in ("sidecar changed", "cache entry changed beside a sidecar"):
         sidecar.write_text("half a line")
 
     def alter():
@@ -350,3 +351,26 @@ def test_a_directory_chosen_by_the_environment_is_named_in_the_commands(tmp_path
     args = cli._parser().parse_args(["db", "migrate", "telegraph", "--dry-run-first"])
     code = db_cmd.main(args, out=out, environ={"ORCHARD_TELEGRAPH_DIR": str(d)}, home=tmp_path, ask=Asker(True))
     assert code == 2 and f"tt-orchard db migrate telegraph --dir {d}" in out.getvalue()
+
+
+@pytest.mark.parametrize("edit", ["cache entry edited", "cache entry added", "cache entry removed", "second sidecar added", "sidecar edited"])
+def test_the_fingerprint_sees_each_input_kind_when_a_sidecar_and_a_cache_are_both_present(tmp_path, edit):
+    """A sidecar sorts after `cache` by name. The fingerprint must not depend on the position of an entry in a mixed list."""
+    d = make(tmp_path)
+    (d / "cache").mkdir()
+    entry = d / "cache" / ("a" * 64 + ".json")
+    entry.write_text(json.dumps({"text": "t", "reply_file": "replies/x.txt"}))
+    sidecar = d / "telegraph.jsonl.torn-1"
+    sidecar.write_text("half")
+    before = mig.input_fingerprint(d)
+    if edit == "cache entry edited":
+        entry.write_text(json.dumps({"text": "t2 longer", "reply_file": "replies/x.txt"}))
+    elif edit == "cache entry added":
+        (d / "cache" / ("b" * 64 + ".json")).write_text("{}")
+    elif edit == "cache entry removed":
+        entry.unlink()
+    elif edit == "second sidecar added":
+        (d / "telegraph.jsonl.torn-2").write_text("x")
+    else:
+        sidecar.write_text("half, edited")
+    assert mig.input_fingerprint(d) != before

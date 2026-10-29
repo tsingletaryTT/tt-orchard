@@ -364,20 +364,22 @@ def input_fingerprint(directory):
         st = os.lstat(path)
         return (name, stat.S_IFMT(st.st_mode), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
+    # Each kind of input is read by its own name and kind, then the three parts are joined in a fixed order. Nothing depends on where
+    # an entry sorts among the others.
     try:
         ledger = one(os.path.join(root, ts.LEDGER), ts.LEDGER)
         if not stat.S_ISREG(ledger[1]):
             return None
-        items = [ledger]
         with os.scandir(root) as it:
-            names = sorted(e.name for e in it if e.name.startswith(SIDECAR_PREFIX) or e.name == "cache")
-        for name in names:
-            items.append(one(os.path.join(root, name), name))
-        if "cache" in names and stat.S_ISDIR(items[-1][1]):
+            top = sorted(e.name for e in it)
+        sidecars = tuple(one(os.path.join(root, n), n) for n in top if n.startswith(SIDECAR_PREFIX))
+        cache_dir = one(os.path.join(root, "cache"), "cache") if "cache" in top else None
+        cache_entries = ()
+        if cache_dir is not None and stat.S_ISDIR(cache_dir[1]):
             with os.scandir(os.path.join(root, "cache")) as it:
                 inner = sorted(e.name for e in it)
-            items += [one(os.path.join(root, "cache", n), "cache/" + n) for n in inner]
-        return tuple(items)
+            cache_entries = tuple(one(os.path.join(root, "cache", n), "cache/" + n) for n in inner)
+        return (("ledger", ledger), ("sidecars", sidecars), ("cache", cache_dir, cache_entries))
     except OSError:
         return None
 
