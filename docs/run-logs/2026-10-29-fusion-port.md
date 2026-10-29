@@ -90,3 +90,27 @@ Nothing was leased and no chip was touched. The blocker is filed as a GitHub iss
 What would unblock it: about 150 GB free disk (or the checkpoint on another volume), then a copy of the bundle code with the model id changed,
 a baseline run with the benchmark rules of `docs/benchmark-rules.md`, and one ablation each for route-k (expected: no change at one row)
 and the sampler `GRID`.
+
+## Phase 2 progress (hardware), first session
+
+Status when this section was written: the model loads and serves on two dies; the speed measurements are not done yet and are added below
+when they exist.
+
+What worked:
+- Weights. The bundle's loader (`weights.py`) knows the Qwen3-Next checkpoint layout. A 35-line patch (`scripts/fusion_port/weights_qwen35_moe.patch`)
+  adds the Qwen3.5-MoE layout (`model.language_model.` prefix, split GDN projections, fused experts). It applies to a copy of the bundle's
+  autoport directory that is bind-mounted over the image's; the image, the published bundle and the coder's container were not changed.
+- Download. `hf download` ran at 4 to 6 MB/s. Range reads of only the needed tensors from the Hub (`scripts/fusion_port/slice.py`) took
+  8.76 GB (embeddings, head and layers 0 to 3 of the 35B model) in about 6 minutes. This is a 4-layer slice of the 35B model, not the model.
+- Serving. The 4-layer slice served through vLLM in the bundle's image on chips 2 and 3 (mesh P300, precision policy
+  `coder_next_routed_bfp4_mixers_bfp8`, one sequence, 4096 context) and answered `/v1/models` about 5 minutes after the container started, with the
+  coder's kernel cache copied read-only as the starting cache.
+
+Per-op check on the two ops with changed constants (`scripts/fusion_port/ops_check.py`, one session on the 2-die mesh, CPU `torch.topk` as reference):
+- Sampler `RowsTopK` at 124,160 columns per die: top-k values equal the reference for scan grids (10,10), (8,8), (10,5), (9,10) and (10,8); the top-1
+  index is equal. Index sets differ from the reference only at ties on the 32nd value. Untraced timings were 93 to 120 microseconds and are dominated
+  by host dispatch, so they do not show the grid's device-time effect.
+- A grid wider than 10 columns fails: `TT_FATAL: !check_kernel_logical_cores.contains(coreCoord)` (program.cpp:559). The merge core is at (10,0), so
+  the scan grid must stay at 10 columns or fewer. That is a limit on the `GRID` constant.
+- Router `RouterTopK` check is INVALID. It disagreed with the reference in 40 of 40 trials, including at the bundle's own 512 experts and top-k 10,
+  so the harness is wrong (the input layout is the suspect), not the op. No router claim comes from this check.

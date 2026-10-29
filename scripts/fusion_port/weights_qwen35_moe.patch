@@ -1,0 +1,41 @@
+--- /dev/fd/63	2026-10-29 09:31:43.560325850 -0700
++++ qwen_qwen3_coder_next/tt/weights.py	2026-10-29 09:16:14.875937390 -0700
+@@ -45,6 +45,7 @@
+ 
+ HF_MODEL_ID = "Qwen/Qwen3-Coder-Next"
+ _LM_PREFIX = "model."
++_LM35_PREFIX = "model.language_model."
+ _VISUAL_PREFIX = "model.visual."
+ 
+ 
+@@ -129,6 +130,30 @@
+             if hf_key == "lm_head.weight":
+                 self._entries["output.weight"] = _Entry(shard, hf_key)
+                 continue
++            if hf_key.startswith(_LM35_PREFIX):
++                # Qwen3.5-MoE checkpoint layout (fusion port, issue 184): language model under model.language_model.,
++                # GDN in_proj_qkv / in_proj_z / in_proj_a / in_proj_b already split, experts already fused
++                # (gate_up_proj [E, 2I, H], down_proj [E, H, I]). Only qkv_proj and the conv1d split are renamed.
++                key = hf_key[len(_LM35_PREFIX) :]
++                if key == "embed_tokens.weight":
++                    self._entries["tok_embeddings.weight"] = _Entry(shard, hf_key)
++                elif key == "norm.weight":
++                    self._entries["norm.weight"] = _Entry(shard, hf_key)
++                elif key.startswith("layers."):
++                    layer_idx = int(key.split(".")[1])
++                    sub = key.split(".", 2)[2]
++                    prefix = f"layers.{layer_idx}."
++                    if sub == "linear_attn.in_proj_qkv.weight":
++                        self._add(prefix + "linear_attn.qkv_proj.weight", _Entry(shard, hf_key), layer_idx)
++                    elif sub == "linear_attn.conv1d.weight":
++                        self._add(prefix + "linear_attn.q_conv.weight", _Entry(shard, hf_key, lambda t: t[:q]), layer_idx)
++                        self._add(prefix + "linear_attn.k_conv.weight", _Entry(shard, hf_key, lambda t: t[q : q + k]), layer_idx)
++                        self._add(prefix + "linear_attn.v_conv.weight", _Entry(shard, hf_key, lambda t: t[q + k :]), layer_idx)
++                    else:
++                        self._add(key, _Entry(shard, hf_key), layer_idx)
++                else:
++                    raise KeyError(f"unexpected language-model key {hf_key!r}")
++                continue
+             if not hf_key.startswith(_LM_PREFIX):
+                 raise KeyError(f"unexpected checkpoint key {hf_key!r}")
+             key = hf_key[len(_LM_PREFIX) :]
