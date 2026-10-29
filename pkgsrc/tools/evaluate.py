@@ -83,6 +83,11 @@ try:
                     fn()
                     times.append(time.time() - t0)
                 rec[label] = {"tok_s_runs": [n / t for t in times], "median_tok_s": n / statistics.median(times)}
+            m.reset()
+            la = m.prefill(ids)
+            m.reset()
+            lb = [m.step(t) for t in ids][-1]
+            rec["prefill_vs_stepwise_last_logits"] = {"max_abs_diff": float((la - lb).abs().max()), "same_argmax": bool(la.argmax() == lb.argmax())}
             res["prefill"].append(rec)
     else:
         ref = np.load(Path(a.ref) / "arrays.npz")
