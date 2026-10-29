@@ -249,7 +249,7 @@ projection and per-head matmuls, `ttnn.fill_cache` to write the 288-wide latent 
 attention. The prompt is padded to a multiple of 128 tokens (the pad rows sit after the real ones, so the causal attention ignores them, and decode overwrites them before it ever reads them). The weights
 that are stored DRAM-sharded for decode (`o_proj`, gate, up, down) get ordinary interleaved copies for prefill, loaded on the first call (about 6 GB more on the chip).
 
-Checked against the recorded float32 reference (`prefill_check.py`): the last prompt token's logits PCC 0.9991 (40-token prompt) and 0.9969 (922-token prompt), the same as the one-token-per-step prefill
+Checked against the recorded float32 reference (`prefill_check.py`): the last prompt token's logits PCC 0.9991 (40-token prompt) and 0.9969 (922-token prompt), the same as the per-token prefill
 (0.9991 and 0.9968); the next-token choice matches; 16 teacher-forced decode steps from the filled cache have 0 flips and logits PCC 0.998 to 0.999. Speed:
 
 | prompt tokens | prefill by decode steps | batched prefill (second and later calls) |
