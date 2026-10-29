@@ -1,0 +1,290 @@
+[
+ {
+  "name": "smoke_eltwise_add",
+  "file": "smoke_eltwise_add.py",
+  "fn": "eltwise_add",
+  "kind": "add",
+  "shapes": [
+   [
+    256,
+    256
+   ]
+  ]
+ },
+ {
+  "name": "readout_r1_a6",
+  "file": "readout_r1_a6.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_r1_a7",
+  "file": "readout_r1_a7.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_r1_a9",
+  "file": "readout_r1_a9.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_r1_a10",
+  "file": "readout_r1_a10.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_hw1_a1",
+  "file": "readout_hw1_a1.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_hw1_a2",
+  "file": "readout_hw1_a2.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_hw1_a3",
+  "file": "readout_hw1_a3.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_hw2_a1",
+  "file": "readout_hw2_a1.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_hw2_a2",
+  "file": "readout_hw2_a2.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_hw2_a3",
+  "file": "readout_hw2_a3.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "readout_hw2_a4",
+  "file": "readout_hw2_a4.py",
+  "fn": "ssd_readout",
+  "kind": "readout",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "library_rmsnorm",
+  "file": "library_rmsnorm.py",
+  "fn": "rmsnorm",
+  "kind": "rmsnorm",
+  "shapes": [
+   [
+    64,
+    128
+   ],
+   [
+    3072,
+    128
+   ]
+  ]
+ },
+ {
+  "name": "gs_compute",
+  "file": "gs_compute.py",
+  "fn": "gs_compute",
+  "kind": "add",
+  "shapes": [
+   [
+    256,
+    256
+   ]
+  ]
+ },
+ {
+  "name": "gs_datamovement",
+  "file": "gs_datamovement.py",
+  "fn": "gs_datamovement",
+  "kind": "add",
+  "shapes": [
+   [
+    256,
+    256
+   ]
+  ]
+ },
+ {
+  "name": "gs_threads_only",
+  "file": "gs_threads_only.py",
+  "fn": "gs_threads_only",
+  "kind": "add",
+  "shapes": [
+   [
+    256,
+    256
+   ]
+  ]
+ },
+ {
+  "name": "gs_call_compute",
+  "file": "gs_call_compute.py",
+  "fn": "gs_call_compute",
+  "kind": "add",
+  "shapes": [
+   [
+    256,
+    256
+   ]
+  ]
+ },
+ {
+  "name": "gs_call_datamovement",
+  "file": "gs_call_datamovement.py",
+  "fn": "gs_call_datamovement",
+  "kind": "add",
+  "shapes": [
+   [
+    256,
+    256
+   ]
+  ]
+ },
+ {
+  "name": "gs_use_compute",
+  "file": "gs_use_compute.py",
+  "fn": "gs_use_compute",
+  "kind": "add",
+  "shapes": [
+   [
+    256,
+    256
+   ]
+  ]
+ },
+ {
+  "name": "gs_use_datamovement",
+  "file": "gs_use_datamovement.py",
+  "fn": "gs_use_datamovement",
+  "kind": "add",
+  "shapes": [
+   [
+    256,
+    256
+   ]
+  ]
+ }
+]

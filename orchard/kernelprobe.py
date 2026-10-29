@@ -1025,7 +1025,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
 
 def _gozer(reason: str, shared_python: str, *args: str) -> list[str]:
     """A one-chip gozer lease around a command run by the shared venv's python. The lease's release resets the chip."""
-    return ["gozer", "run", "--chips", "1", "--exact", "1", "--who", GOZER_WHO, "--reason", reason, "--",
+    return ["gozer", "run", "--chips", "1", "--exact", hwtool.probe_chip(), "--who", GOZER_WHO, "--reason", reason, "--",
             shared_python, *args]
 
 

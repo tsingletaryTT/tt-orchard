@@ -1,0 +1,3 @@
+target = "0.9.56"
+summary = "model_config reads the value head width of MiniCPM3 from the hidden size and head count; MiniCPM3-4B bring-up scripts and run log"
+pr = 210

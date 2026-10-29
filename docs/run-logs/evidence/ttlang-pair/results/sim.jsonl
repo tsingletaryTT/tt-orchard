@@ -1,0 +1,16 @@
+RESULT {"name": "gs_compute", "results": [{"shape": [256, 256], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "gs_datamovement", "results": [{"shape": [256, 256], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "gs_threads_only", "results": [{"shape": [256, 256], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "library_rmsnorm", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_hw1_a1", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_hw1_a2", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_hw1_a3", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_hw2_a1", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_hw2_a2", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_hw2_a3", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_hw2_a4", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_r1_a10", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_r1_a6", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_r1_a7", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "readout_r1_a9", "results": [{"shape": [64, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}, {"shape": [3072, 128], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}
+RESULT {"name": "smoke_eltwise_add", "results": [{"shape": [256, 256], "pcc": 1.0, "rel_l2": 0.0, "ok": true}]}

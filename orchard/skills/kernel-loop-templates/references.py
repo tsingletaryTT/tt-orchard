@@ -76,6 +76,19 @@ def tile_scan(x):
     return out.reshape(rows, cols)
 
 
+def ssd_state_update(x):
+    # The Mamba-2 state update, state' = state * exp(dt * A) + dt * x * B, with the decay (exp(dt * A)), dt * x and B each
+    # already expanded to the full shape of the state: a deliberate simplification, as in rmsnorm's w.
+    return x["decay"] * x["s"] + x["dtx"] * x["b"]
+
+
+def ssd_readout(x):
+    # The Mamba-2 readout, y = state . C: the sum of c * s over the last axis, written to every column of its row
+    # (the reduction and then the broadcast, as in rmsnorm), with C already expanded to the full shape of the state.
+    return (x["c"] * x["s"]).sum(-1, keepdim=True).expand_as(x["s"]).contiguous()
+
+
 REFERENCES = {"add": add, "mul": mul, "scale_shift": scale_shift, "add_row": add_row, "rsqrt": rsqrt,
               "row_sum": row_sum, "silu_mul": silu_mul, "rmsnorm": rmsnorm, "linear_scan": linear_scan, "center": center,
-              "softmax": softmax, "tile_scan": tile_scan}
+              "softmax": softmax, "tile_scan": tile_scan, "ssd_state_update": ssd_state_update,
+              "ssd_readout": ssd_readout}

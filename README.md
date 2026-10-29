@@ -59,11 +59,48 @@ details and the limits of each one. The evidence for each row is in `docs/run-lo
 Not brought up, and why: `perplexity-ai/pplx-decider-v1.2` is a `restricted-head` model, so the run stops after stage 0 and a
 person can ask for the parity report (14 of 14 answers agree); `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB` stopped at the
 preflight (no installed bundle serves its base); `Plurato123/OctLLM` needs CUDA decoders. No model that needs new model code
-(the `full-port` path, stages 3, 5 and 6) has ever run. Issue 61 tracks a first pilot.
+has gone through the harness's `full-port` stages (3, 5 and 6) unattended. Issue 61 tracks a first pilot. Three models that need new code
+were brought up by hand on 2026-10-28 and 2026-10-29; they are listed in the next section.
 
 Those runs were not all hands-off. The early ones blocked, and each cause was a bug in tt-orchard, fixed before the same
 command was run again. The later ones needed a person for disk space and for a restart after a power event, and each of those
 is now a preflight check or a block message. The harness has never run end to end with nobody touching the machine.
+
+### Since 2026-10-27
+
+Short list of what landed on `main`. Each item links to its run log, which holds the numbers, the settings and the limits.
+
+- **New default coder.** `raahemnabeel/qwen3-coder-next` (fused decode step) replaced the earlier package on 2026-10-28. The kernel probe's
+  speed check had a median of 79.3 tok/s over 28 samples, against 38.5 tok/s recorded for the earlier package, which was not measured
+  in the same hour. `scripts/setup.sh --coder coder-next-v1` selects the earlier package.
+  [Run log](docs/run-logs/2026-10-28-coder-fused-decode.md).
+- **Telegraph ledger in SQLite.** The ledger moved from `telegraph.jsonl` to a table in `project.db`. A notice tells a person with an
+  old ledger what to do, and `tt-orchard db migrate telegraph --dry-run-first` runs the dry run, asks once, then migrates
+  (see "The ledger database" under section 5.9g).
+- **Stable Audio 3 on the chip.** The autoencoder decoder runs on the chip for `small-music`, `small-sfx` and `medium`, and the medium
+  diffusion transformer runs there too. A 10 s clip takes 0.82 s with `small-music` (CPU 3.9 to 8.0 s) and 3.8 s with `medium` (CPU 38.0 s, one
+  sample). A resident runtime keeps the model loaded between clips, and `tt-orchard audio-package` stages a package behind a license gate.
+  Nobody listened to the clips; agreement is measured against a CPU reference. [Run log](docs/run-logs/2026-10-29-overnight-stable-audio-decoder.md).
+- **MiniCPM3-4B (multi-latent attention) on one chip.** Decode 33.7 tok/s in bfloat16 (54 percent of the DRAM floor) and 39.9 tok/s with an
+  8-bit MLP, on the existing flash multi-latent attention op with no new kernel. 16 of 16 teacher-forced tokens match the CPU reference.
+  [Run log](docs/run-logs/2026-10-29-overnight-minicpm3-4b.md).
+- **Granite-4.0-H-1B (Mamba-2 hybrid) with kernels written by the local coder.** The model runs on one chip at the bf16 floor of agreement
+  (22.6 tok/s with the Mamba-2 state update from stock ops). The coder's state-update kernel runs on the chip and in the model, but is slower
+  (16.7 and 18.0 tok/s). Its readout kernels pass the simulator and none compiles on the chip, because the pinned simulator and the chip's tt-lang
+  disagree on `reduce_sum`. The run stopped there. The run log is in PR 215 and is not on `main` yet.
+- **One pinned tt-lang, a capability ladder and staged construction.** `tt-orchard ttlang-consistency` checks that the simulator, the coder's
+  reference files and the hardware build agree. The kernel probe's ladder on the new coder passed `row_sum` 6 of 9, `center` 1 of 6 and
+  `rmsnorm` 0 of 3 before the operator stopped it. The staged-construction experiment was not run; the log records two capability checks of an outside helper.
+  [Ladder](docs/run-logs/2026-10-28-kernel-probe-ladder.md),
+  [staged construction](docs/run-logs/2026-10-28-staged-construction.md),
+  [pin](docs/run-logs/2026-10-28-ttlang-pin-consistency.md).
+- **Pure analysis modules.** `orchard/decode_floor.py` (share of the memory-bandwidth floor), `orchard/hazards.py` (model dimensions that trip known op
+  limits), `orchard/first_divergence.py` (the first layer that leaves the noise) and `orchard/noise_floor.py` (bars from measured CPU floors and a known-bad control).
+  None of them touches a device. [Floor and hazards](docs/run-logs/2026-10-28-decode-floor-break-even-hazards.md),
+  [divergence and noise floor](docs/run-logs/2026-10-28-first-divergence-and-noise-floor.md).
+
+Limits that apply to all of it: single prompts for most agreement and speed checks, a shared host, and speed numbers that vary with its load.
+Nothing from the three new-code models is published.
 
 ## Contents
 

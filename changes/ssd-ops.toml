@@ -1,0 +1,4 @@
+target = "0.9.57"
+summary = "Kernel probe ops for the Mamba-2 state update and readout (ssd_state_update, ssd_readout), with references held to the model's decode step."
+pr = 208
+kind = "feature"

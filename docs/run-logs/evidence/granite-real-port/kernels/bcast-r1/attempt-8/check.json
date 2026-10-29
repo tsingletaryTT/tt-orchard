@@ -1,0 +1,259 @@
+{
+  "schema": 1,
+  "op": "ssd_state_update_bcast",
+  "phase": "sim",
+  "passed": true,
+  "category": null,
+  "first_line": "",
+  "sets": [
+    {
+      "name": "seed0",
+      "seed": 0,
+      "heavy_tail": false,
+      "pcc": 1.0,
+      "max_abs_err": 0.0,
+      "finite": true,
+      "rel_l2": 0.0,
+      "slope": 1.0,
+      "exp_abs_max": 9.2337646484375,
+      "worst": [
+        {
+          "at": [
+            0,
+            0
+          ],
+          "expected": 0.7536715269088745,
+          "got": 0.7536715269088745
+        },
+        {
+          "at": [
+            0,
+            1
+          ],
+          "expected": 0.5647752285003662,
+          "got": 0.5647752285003662
+        },
+        {
+          "at": [
+            0,
+            2
+          ],
+          "expected": -0.35742127895355225,
+          "got": -0.35742127895355225
+        }
+      ]
+    },
+    {
+      "name": "seed0-tail",
+      "seed": 0,
+      "heavy_tail": true,
+      "pcc": 1.0,
+      "max_abs_err": 0.0,
+      "finite": true,
+      "rel_l2": 0.0,
+      "slope": 1.0,
+      "exp_abs_max": 556.9149780273438,
+      "worst": [
+        {
+          "at": [
+            0,
+            0
+          ],
+          "expected": -2.1848843097686768,
+          "got": -2.1848843097686768
+        },
+        {
+          "at": [
+            0,
+            1
+          ],
+          "expected": -0.9565126299858093,
+          "got": -0.9565126299858093
+        },
+        {
+          "at": [
+            0,
+            2
+          ],
+          "expected": 2.1365036964416504,
+          "got": 2.1365036964416504
+        }
+      ]
+    },
+    {
+      "name": "seed1",
+      "seed": 1,
+      "heavy_tail": false,
+      "pcc": 1.0,
+      "max_abs_err": 0.0,
+      "finite": true,
+      "rel_l2": 0.0,
+      "slope": 1.0,
+      "exp_abs_max": 8.28919792175293,
+      "worst": [
+        {
+          "at": [
+            0,
+            0
+          ],
+          "expected": -1.0172882080078125,
+          "got": -1.0172882080078125
+        },
+        {
+          "at": [
+            0,
+            1
+          ],
+          "expected": 0.019117772579193115,
+          "got": 0.019117772579193115
+        },
+        {
+          "at": [
+            0,
+            2
+          ],
+          "expected": 0.053337663412094116,
+          "got": 0.053337663412094116
+        }
+      ]
+    },
+    {
+      "name": "seed1-tail",
+      "seed": 1,
+      "heavy_tail": true,
+      "pcc": 0.9999999403953552,
+      "max_abs_err": 0.0,
+      "finite": true,
+      "rel_l2": 0.0,
+      "slope": 1.0,
+      "exp_abs_max": 46.91944122314453,
+      "worst": [
+        {
+          "at": [
+            0,
+            0
+          ],
+          "expected": -0.5062931776046753,
+          "got": -0.5062931776046753
+        },
+        {
+          "at": [
+            0,
+            1
+          ],
+          "expected": -0.12669581174850464,
+          "got": -0.12669581174850464
+        },
+        {
+          "at": [
+            0,
+            2
+          ],
+          "expected": -0.35847729444503784,
+          "got": -0.35847729444503784
+        }
+      ]
+    },
+    {
+      "name": "seed2",
+      "seed": 2,
+      "heavy_tail": false,
+      "pcc": 1.0,
+      "max_abs_err": 0.0,
+      "finite": true,
+      "rel_l2": 0.0,
+      "slope": 1.0,
+      "exp_abs_max": 10.33568286895752,
+      "worst": [
+        {
+          "at": [
+            0,
+            0
+          ],
+          "expected": -3.760416030883789,
+          "got": -3.760416030883789
+        },
+        {
+          "at": [
+            0,
+            1
+          ],
+          "expected": -1.4935747385025024,
+          "got": -1.4935747385025024
+        },
+        {
+          "at": [
+            0,
+            2
+          ],
+          "expected": -2.739002227783203,
+          "got": -2.739002227783203
+        }
+      ]
+    },
+    {
+      "name": "seed2-tail",
+      "seed": 2,
+      "heavy_tail": true,
+      "pcc": 0.9999999403953552,
+      "max_abs_err": 0.0,
+      "finite": true,
+      "rel_l2": 0.0,
+      "slope": 1.0,
+      "exp_abs_max": 535.1871337890625,
+      "worst": [
+        {
+          "at": [
+            0,
+            0
+          ],
+          "expected": 0.2573149800300598,
+          "got": 0.2573149800300598
+        },
+        {
+          "at": [
+            0,
+            1
+          ],
+          "expected": 1.2313532829284668,
+          "got": 1.2313532829284668
+        },
+        {
+          "at": [
+            0,
+            2
+          ],
+          "expected": -0.26378482580184937,
+          "got": -0.26378482580184937
+        }
+      ]
+    }
+  ],
+  "pcc_bar": 0.999,
+  "bars": {
+    "pcc": 0.999,
+    "rel_l2": 0.01,
+    "slope": [
+      0.98,
+      1.02
+    ],
+    "max_abs_atol": 0.01,
+    "max_abs_rtol": 0.01
+  },
+  "violations": [],
+  "provisional": true,
+  "elapsed_s": 1.08,
+  "tt_lang": {
+    "sim_version": "1.1.10+gfec38c6",
+    "source_sha": "fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0",
+    "diagnostics_patched": true,
+    "patch_sha256": "e3964f222cc5dc253157f97645a914f8751ab613f0fa82eb334e97046da8f84f"
+  },
+  "sha256": {
+    "kernel.py": "20c48b96a2d1f2fed3f5242aae50480dd034c79a9930e009a249d65b33a70dcc",
+    "kernel_harness.py": "64f100a7ca16627f3c65c2dc0941709cda9de5d8b099939d257728540b56aab0",
+    "references.py": "d7e6192f05e62de81936c0185b3af873fc968cbe66ed6507a9dffd889d564aa6",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "6c7658b117237ba67f52c76570f75da2a66823b439a7313db3358fe233bb1f95"
+  }
+}

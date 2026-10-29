@@ -80,6 +80,8 @@ operator. Plan 2 is merged to `main` in tt-gozer. Plan 3 (adapters, server contr
 thin package, its boot check, card and publish commands as text) is implemented on branch
 `stage7-wiring` (modules merged to main earlier); its hardware run has not been done.
 
+Overnight 2 (2026-10-28, PR 210): MiniCPM3-4B (multi-latent attention) runs on one Blackhole chip through scripts in `scripts/minicpm3` (not through the supervisor): 33.7 tok/s decode, batched prefill, a chat server; log in `docs/run-logs/2026-10-29-overnight-minicpm3-4b.md`.
+
 ## Open decision for the operator
 No adversarial search for bypasses of the command runner has been done. Decide before plan 4 ships:
 sanction an adversarial review, or accept best effort plus the outer layers (spec sections 10 and 14).

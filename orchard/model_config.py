@@ -20,6 +20,9 @@ MAX_CONFIG_BYTES = 1 << 20          # a config.json is a few kilobytes; a megaby
 # Model types whose full-attention query projection is always twice as wide (an output gate) with no config key saying so.
 # Found by summing the Qwen3-Coder-Next shard headers: q_proj holds 2 x heads x head_dim rows and its config has no attn_output_gate.
 GATED_BY_TYPE = ("qwen3_next",)
+# Granite MoE families: every layer has a `shared_mlp` of `shared_intermediate_size`; `intermediate_size` is the routed expert width
+# (or unused, when the expert count is 0).
+SHARED_MLP_TYPES = ("granitemoehybrid", "granitemoeshared")
 # Model types whose MLP has two projections (up and down) and no gate. Every other type is counted with three (gate, up, down).
 # The list is by model_type because the config has no key for it; a two-projection family that is missing here is overcounted by a third.
 TWO_PROJECTION_MLP_TYPES = ("gpt_neox", "gpt2", "gptj", "gpt_bigcode", "opt", "bloom", "falcon", "bert", "roberta", "phi", "mpt", "codegen")
@@ -78,6 +81,7 @@ class ModelDims:
     shared_intermediate: int = 0            # total width of the shared expert or experts (0 when none)
     attn_output_gate: bool = False
     linear: dict = field(default_factory=dict)   # linear_attention shapes: key_heads, value_heads, key_dim, value_dim, conv_kernel
+    mamba: dict = field(default_factory=dict)    # Mamba-2 mixer shapes (heads, head_dim, state, groups, conv_kernel), empty when the model has none
     mla: dict = field(default_factory=dict)      # multi-latent attention shapes, empty when the model has none
     mlp_projections: int = 3                # matrices per MLP or expert: 3 for a gated MLP, 2 for the families in TWO_PROJECTION_MLP_TYPES
     keys: frozenset = frozenset()           # every key of the flat config whose value is not null, for detecting mixers that have no layer-type name
@@ -116,16 +120,18 @@ def dims(config) -> ModelDims:
     head_dim = _num(cfg, "head_dim", default=(mla["qk_nope_head_dim"] + mla["qk_rope_head_dim"]) if mla else max(1, hidden // heads))
 
     expert_key = _first(cfg, ("num_experts", "n_routed_experts", "num_local_experts"))
-    experts = _num(cfg, expert_key) if expert_key else 0
+    experts = _num(cfg, expert_key, lo=0) if expert_key else 0      # a count of 0 (Granite-4.0-H dense sizes) says there are none
     top_key = _first(cfg, ("num_experts_per_tok", "num_experts_per_token", "top_k_experts"))
-    top_k = _num(cfg, top_key) if (experts and top_key) else 0
+    top_k = _num(cfg, top_key, lo=0) if (experts and top_key) else 0
     if experts and not top_k:
         raise ModelConfigError("model config has routed experts but no num_experts_per_tok")
     if top_k > experts:
         raise ModelConfigError("model config num_experts_per_tok is above the number of experts")
 
     moe_width = _num(cfg, "moe_intermediate_size", default=0, lo=1) if "moe_intermediate_size" in cfg else 0
-    if "intermediate_size" in cfg:
+    if cfg.get("model_type") in SHARED_MLP_TYPES and not experts and cfg.get("shared_intermediate_size") is not None:
+        intermediate = _num(cfg, "shared_intermediate_size")        # the dense Granite hybrid's only MLP is its shared_mlp
+    elif "intermediate_size" in cfg:
         intermediate = _num(cfg, "intermediate_size")
     elif experts and moe_width:
         intermediate = moe_width
@@ -137,6 +143,8 @@ def dims(config) -> ModelDims:
     shared = 0
     if "shared_expert_intermediate_size" in cfg and cfg["shared_expert_intermediate_size"] is not None:
         shared = _num(cfg, "shared_expert_intermediate_size", lo=0)
+    elif cfg.get("model_type") in SHARED_MLP_TYPES and cfg.get("shared_intermediate_size") is not None:
+        shared = _num(cfg, "shared_intermediate_size", lo=0)        # Granite MoE: a shared MLP of this total width beside the experts
     elif "n_shared_experts" in cfg and cfg["n_shared_experts"] is not None and experts:
         shared = _num(cfg, "n_shared_experts", lo=0) * moe_width      # a count of experts, each the expert width
 
@@ -150,11 +158,16 @@ def dims(config) -> ModelDims:
         linear = {"key_heads": lk, "value_heads": lv, "key_dim": lk * lkd, "value_dim": lv * lvd,
                   "conv_kernel": _num(cfg, "linear_conv_kernel_dim", default=4)}
 
+    mamba: dict = {}
+    if any(t == "mamba" for t in layer_types):
+        mamba = {"heads": _num(cfg, "mamba_n_heads"), "head_dim": _num(cfg, "mamba_d_head"), "state": _num(cfg, "mamba_d_state"),
+                 "groups": _num(cfg, "mamba_n_groups", default=1), "conv_kernel": _num(cfg, "mamba_d_conv", default=4)}
+
     return ModelDims(
         hidden=hidden, intermediate=intermediate, layers=layers, heads=heads, kv_heads=kv_heads, head_dim=head_dim, vocab=vocab,
         tied_embeddings=cfg.get("tie_word_embeddings") is True, layer_types=layer_types, moe_layers=moe_layers,
         routed_experts=experts, top_k=top_k, moe_intermediate=moe_width if experts else 0, shared_intermediate=shared if experts else 0,
-        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k, v in cfg.items() if v is not None))
+        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mamba=mamba, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k, v in cfg.items() if v is not None))
 
 
 KV_HEAD_KEYS = ("num_key_value_heads", "num_kv_heads", "n_head_kv", "multi_query_group_num")   # a family's spelling of the KV-head count
@@ -169,10 +182,18 @@ def _kv_heads(cfg: dict, heads: int) -> int:
     return 1 if cfg.get("multi_query") is True else heads
 
 
+# Model types whose code sets the value head width from the hidden size and the head count, so their config has no `v_head_dim`
+# (MiniCPM3: `self.v_head_dim = config.hidden_size // config.num_attention_heads` in modeling_minicpm.py; its kv_b_proj is
+# kv_lora_rank by heads * (qk_nope_head_dim + v_head_dim), which confirms 64 for openbmb/MiniCPM3-4B).
+V_HEAD_FROM_HIDDEN_TYPES = ("minicpm3",)
+
+
 def _mla(cfg: dict) -> dict:
     """Multi-latent attention shapes, or an empty dict for a model without `kv_lora_rank`."""
     if cfg.get("kv_lora_rank") is None:
         return {}
+    if cfg.get("v_head_dim") is None and cfg.get("model_type") in V_HEAD_FROM_HIDDEN_TYPES:
+        cfg = dict(cfg, v_head_dim=_num(cfg, "hidden_size") // _num(cfg, "num_attention_heads"))
     return {"kv_lora_rank": _num(cfg, "kv_lora_rank"), "q_lora_rank": _num(cfg, "q_lora_rank", default=0, lo=0),
             "qk_nope_head_dim": _num(cfg, "qk_nope_head_dim"), "qk_rope_head_dim": _num(cfg, "qk_rope_head_dim"),
             "v_head_dim": _num(cfg, "v_head_dim")}
