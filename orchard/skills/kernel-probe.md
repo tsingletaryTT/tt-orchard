@@ -17,8 +17,7 @@ Reference files:
 
 `reference/library_*.py` are worked kernels that pass the simulator. Read the one nearest your op first and adapt it.
 Read first, by kind of op:
-- Elementwise (`add`, `mul`, `scale_shift`, `add_row`, `rsqrt`, `silu_mul`, `ssd_state_update`): eltwise_add.py, then the specification's row for each function you need
-  (`grep -n "ttl.math.silu" reference/TTLangSpecification.md`).
+- Elementwise (`add`, `mul`, `scale_shift`, `add_row`, `rsqrt`, `silu_mul`, `ssd_state_update`): eltwise_add.py, then the specification's row for each function you need (`grep -n "ttl.math.silu" reference/TTLangSpecification.md`).
 - A reduction (`row_sum`, `rmsnorm`, `center`, `softmax`, `ssd_readout`): eltwise_broadcast_reduce.py, then the rows for `ttl.math.reduce_sum`, `ttl.block.broadcast`, `ttl.block.fill`.
 - A recurrence (`linear_scan`, `tile_scan`): both .py files, then the specification's "Block" section. A block expression kept in a Python variable carries a value between loop iterations (`z += ...` in eltwise_broadcast_reduce.py).
 Rules from the specification and the examples:
@@ -38,6 +37,7 @@ Rules from the specification and the examples:
 - `ttl.make_dataflow_buffer_like(tensor, shape=(R, C), block_count=2)`; the shape counts tiles. The guide's `buffer_factor` is the old name.
 - `ttl.math.reduce_sum(expr, dims=[...], shape=(...))`, and `ttl.math.reduce_max` the same way: `shape` is the result's shape, 1 in
   each reduced dimension. There is no scaler argument; the guide's `reduce_sum(x, s, dims=...)` is the old form.
+- `ttl.grid_size(dims=2)` in a thread is symbolic: write a ceiling division as `(x + g - 1) // g`; `-(-x // g)` fails to compile on the chip (`UnaryMinusOp`).
 - `ttl.block.broadcast(expr, dims=[...], shape=(...))` and `ttl.block.fill(value, shape=(...))`. There is no `ttl.zeros`:
   `ttl.block.fill(0.0, shape=(...))` is a block of zeros. The guide's `ttl.math.broadcast` and `ttl.math.fill` moved to `ttl.block`.
 - A Python number cannot be an operand of a block expression (`total * 0.5` fails with "Both operands must be blocks"): make a

@@ -3203,3 +3203,11 @@ Prompt (operator): "pick a model that would require a new kernel and try to brin
 - Kernel files unchanged: readout attempt 6 (hash in the run log) and the state-update kernel. No glue was needed: the port's `kernel_mod.py` already wired both. Only the interpreter changed (pair venv, `safetensors` made importable from the shared venv through `PYTHONPATH` without changing the venv).
 - One lease on board 1, about 4 minutes of runs. Same-session decode: composed 26.9 and 26.2 tok/s (before and after), state kernel + composed readout 13.9, state kernel + readout kernel 8.45 (4.8% of the floor). Agreement against the CPU reference matches the composed modes (1.2 to 2.0 times the bf16 floor).
 - Verdict: the kernel readout is slower than composed. Absolute numbers moved against the 2026-10-28 run because the toolchain changed; only same-session comparisons are used.
+
+## 2026-10-29: switch the tt-lang environment to the verified pair (PR 228)
+
+- Operator instruction: use the pair PR 223 verified on the chip. `orchard/ttlang_pin.py` now sets `TT_METAL_REF` to `0e9d200db976120c129ab0deb13aa3f6d972b723` and records the wheel `tt-lang-light 1.1.10.dev20261026` with its two sha256 values. `TTLANG_PIN` was already `fec38c6de`.
+- The `hardware tree` consistency row takes `ttl.build_info()` as injected data (`build_info=` on `check`) and never imports `ttl`. Without it the row is a todo that says it needs a leased run. It blocks, naming both commits, when tt-lang or tt-metal differs; the 1.1.6 values are the test case. The host tree is named in the detail and is no longer compared with the ref, because the compiler's tt-metal commit differs from the host runtime's.
+- Issue 226 fixed: `check(..., reference_source="skill")` now forwards the source to the fallback assembly. Mutations run: removing the forward, the tt-lang comparison and the todo branch each turned tests red.
+- README section 5.9a gives the pair venv steps and limits; `-(-x // g)` after a thread's `grid_size` is one rule in `orchard/skills/kernel-probe.md` (file stays at 100 lines). README and site link the Granite run log and state the pair result.
+- Left open: the shared hardware venv still holds 1.1.6, and the probe's `--shared-python` default is unchanged. Nobody calls `ttl.build_info()` under a lease to feed the row yet. Issues 95 and 205 stay open.
