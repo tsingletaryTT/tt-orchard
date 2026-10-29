@@ -364,3 +364,14 @@ def test_a_launcher_that_lets_a_forwarded_argument_override_the_checked_director
             f["sha256"] = tp.sha((staged.pkg / "run.sh").read_bytes())
     rec_path.write_text(json.dumps(rec))
     assert any("after the forwarded arguments" in p for p in gate(staged))
+
+
+def test_the_card_shows_the_host_load_the_benchmark_ran_under(staged):
+    card = (staged.pkg / "README.md").read_text()
+    row = next(l for l in card.splitlines() if l.startswith("| decode speed, bf16"))
+    assert "host load average 1.0 to 1.0 while it ran" in row
+    bench = json.loads((staged.pkg / "evidence" / "text_bench.json").read_text())
+    for v in bench["variants"].values():
+        v["summary"].pop("host_loadavg_1m", None)
+    res = json.loads((staged.pkg / "evidence" / "text_result.json").read_text())
+    assert "host load not recorded" in next(r[1] for r in tp.number_rows(res, bench, None) if r[0] == "decode speed, bf16")

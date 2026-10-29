@@ -75,7 +75,9 @@ def number_rows(res: dict, bench: dict, context: dict | None) -> list[tuple[str,
     rows = []
     for name, v in sorted((bench.get("variants") or {}).items()):
         s = v["decode_tok_s"]
-        rows.append((f"decode speed, {name}", f"{fmt(s['median'], 4)} tok/s (min {fmt(s['min'], 4)}, max {fmt(s['max'], 4)})", v["label"], "evidence/text_bench.json"))
+        load = [x for x in (v.get("summary") or {}).get("host_loadavg_1m", []) if isinstance(x, (int, float))]
+        load_text = f"; host load average {min(load):.1f} to {max(load):.1f} while it ran" if load else "; host load not recorded"
+        rows.append((f"decode speed, {name}", f"{fmt(s['median'], 4)} tok/s (min {fmt(s['min'], 4)}, max {fmt(s['max'], 4)}){load_text}", v["label"], "evidence/text_bench.json"))
         rows.append((f"share of the decode floor, {name}", f"{v['share_of_floor_median'] * 100:.1f} percent of {v['floor']['floor_tok_s']:.1f} tok/s", "estimate",
                      "evidence/text_bench.json"))
     for name, v in sorted((res.get("variants") or {}).items()):
