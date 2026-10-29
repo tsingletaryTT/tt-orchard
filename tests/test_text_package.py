@@ -15,7 +15,7 @@ from test_text_stages import done  # noqa: F401  (the fixture: a finished fake r
 from test_supervisor_text_runtime import trig  # noqa: F401
 
 M = rt.get("minicpm3")
-REV = "d" * 40
+REV = "a" * 40            # the fake run's snapshot directory is named for this revision
 TERMS = "The card says weights follow the MiniCPM Model License; the link was not reachable when this was staged."
 
 
@@ -155,7 +155,9 @@ def test_a_card_that_does_not_name_the_revision_is_refused(staged):
 
 def test_a_run_whose_default_variant_missed_the_bar_is_not_packaged(done, tmp_path):
     p = done.run_dir / "stages" / "2" / "text_result.json"
+    old = tp.sha(p.read_bytes())
     edit(p, lambda t: t.replace('"ok": true', '"ok": false'))
+    edit(done.run_dir / "ledger.jsonl", lambda t: t.replace(old, tp.sha(p.read_bytes())))      # as if the gate had accepted this file
     lic = tmp_path / "L"
     lic.write_text("Apache License\nVersion 2.0\n")
     with pytest.raises(tp.TextPackageError, match="default variant did not meet"):
@@ -265,3 +267,100 @@ def test_the_card_says_when_a_variant_missed_the_bar(done, tmp_path):
     res["variants"]["mlp8"]["ok"] = False
     card = tp.render_card(M, res, bench, None, revision=REV, namespace="o", license_name="x", weights_terms="t")
     assert "The `mlp8` variant did not meet the numeric bar" in card and "`bf16` variant did not" not in card
+
+
+# ---- the Copilot review of PR 247 ------------------------------------------------------------------------------------------------
+
+def stage(done, tmp_path, name="out", **kw):
+    lic = tmp_path / "L"
+    lic.write_text("Apache License\nVersion 2.0\n")
+    args = dict(rtm=M, namespace="o", revision=REV, license_file=lic, out=tmp_path / name, weights_terms=TERMS)
+    args.update(kw)
+    (tmp_path / name).mkdir(exist_ok=True)
+    return tp.stage_package(done.run_dir, **args)
+
+
+def test_the_launcher_loads_the_directory_it_checked_even_when_given_another(staged, tmp_path):
+    import subprocess
+    fake = tmp_path / "fakepython"
+    fake.write_text("#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done\n")
+    fake.chmod(0o755)
+    checked = tmp_path / "checked"
+    checked.mkdir()
+    shutil.copy(staged.run / "stages" / "1" / "text_config.json", tmp_path / "unused")
+    (checked / "config.json").write_text(json.dumps({"x": 1}))
+    rec = json.loads((staged.pkg / tp.RECORD_FILE).read_text())
+    # the pinned hash is the fake run's; use a directory whose config has that hash
+    snap = json.loads((staged.run / "stages" / "1" / "text_config.json").read_text())["model_dir"]
+    env = {**__import__("os").environ, "MINICPM3_DIR": snap, "MINICPM3_WEIGHTS": "/w.safetensors", "ORCHARD_TEXT_PYTHON": str(fake)}
+    out = subprocess.run(["bash", str(staged.pkg / "run.sh"), "--model-dir", "/elsewhere", "--weights", "/other"], env=env, capture_output=True, text=True)
+    args = out.stdout.split()
+    assert out.returncode == 0, out.stderr
+    assert args[len(args) - 1 - args[::-1].index("--model-dir") + 1] == snap and args[len(args) - 1 - args[::-1].index("--weights") + 1] == "/w.safetensors"
+
+
+def test_a_revision_that_is_not_the_runs_snapshot_is_refused(done, tmp_path):
+    with pytest.raises(tp.TextPackageError, match="snapshot"):
+        stage(done, tmp_path, revision="b" * 40)
+
+
+def triage_without_snapshot(done):
+    p = done.run_dir / "stages" / "0" / "evidence" / "triage.json"
+    edit(p, lambda t: json.dumps({k: v for k, v in json.loads(t).items() if k != "snapshot"}))
+
+
+def test_a_run_with_no_snapshot_revision_needs_the_hub_hash_of_its_configuration(done, tmp_path):
+    triage_without_snapshot(done)
+    with pytest.raises(tp.TextPackageError, match="cannot be verified"):
+        stage(done, tmp_path)
+    with pytest.raises(tp.TextPackageError, match="not the configuration"):
+        stage(done, tmp_path, name="o2", config_sha256_at_revision="0" * 64)
+    ref = json.loads((done.run_dir / "stages" / "1" / "text_reference.json").read_text())
+    rec = stage(done, tmp_path, name="o3", config_sha256_at_revision=ref["config_sha256"])
+    assert rec["revision_verified_by"] == "the hash of the configuration at that revision"
+
+
+def test_a_context_record_for_two_chips_or_with_no_chip_count_is_refused(tmp_path):
+    for body in ({"tp": 2, "windows": [{"start_position": 1, "steps": 1, "tok_s": 1.0}]}, {"windows": [{"start_position": 1, "steps": 1, "tok_s": 1.0}]}):
+        f = tmp_path / "c.json"
+        f.write_text(json.dumps(body))
+        with pytest.raises(tp.TextPackageError, match="one-chip"):
+            tp.read_context(f)
+
+
+def test_results_edited_after_their_gate_passed_are_not_packaged(done, tmp_path):
+    edit(done.run_dir / "stages" / "6" / "text_bench.json", lambda t: t.replace('"label": "benchmark"', '"label": "benchmark "', 1))
+    with pytest.raises(tp.TextPackageError, match="text_bench.json"):
+        stage(done, tmp_path)
+
+
+def test_scripts_that_changed_since_the_run_are_not_packaged_but_the_server_may_differ(done, tmp_path):
+    scripts = tmp_path / "scripts"
+    shutil.copytree(M.scripts_dir, scripts)
+
+    class Copy(type(M)):
+        scripts_dir = scripts
+    rtm = Copy()
+    (scripts / "serve.py").write_text((scripts / "serve.py").read_text() + "\n# newer\n")
+    stage(done, tmp_path, name="ok", rtm=rtm)                                    # serve.py is not run by the stages
+    (scripts / "chip_model.py").write_text((scripts / "chip_model.py").read_text() + "\n# newer\n")
+    with pytest.raises(tp.TextPackageError, match="chip_model.py"):
+        stage(done, tmp_path, name="bad", rtm=rtm)
+
+
+def test_the_card_gives_the_floor_in_tokens_per_second(staged):
+    assert "% of" not in (staged.pkg / "README.md").read_text()
+    row = next(l for l in (staged.pkg / "README.md").read_text().splitlines() if l.startswith("| share of the decode floor, bf16"))
+    floor = json.loads((staged.pkg / "evidence" / "text_bench.json").read_text())["variants"]["bf16"]["floor"]["floor_tok_s"]
+    assert "percent of" in row and f"{floor:.1f} tok/s" in row
+
+
+def test_a_launcher_that_lets_a_forwarded_argument_override_the_checked_directory_is_refused(staged):
+    edit(staged.pkg / "run.sh", lambda t: t.replace(' --model-dir "$MINICPM3_DIR" --weights "$MINICPM3_WEIGHTS"', ''))
+    rec_path = staged.pkg / tp.RECORD_FILE
+    rec = json.loads(rec_path.read_text())
+    for f in rec["files"]:
+        if f["path"] == "run.sh":
+            f["sha256"] = tp.sha((staged.pkg / "run.sh").read_bytes())
+    rec_path.write_text(json.dumps(rec))
+    assert any("after the forwarded arguments" in p for p in gate(staged))

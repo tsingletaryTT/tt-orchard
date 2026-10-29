@@ -393,6 +393,7 @@ def _parser() -> argparse.ArgumentParser:
     tp.add_argument("--namespace", required=True, help="the Hugging Face user or organisation the package would be published under (used in text only)")
     tp.add_argument("--revision", required=True, help="the 40-character commit hash of the model repository the run used")
     tp.add_argument("--license-file", required=True, help="the license text the model repository's card names (Apache License 2.0 for MiniCPM3-4B)")
+    tp.add_argument("--config-sha256-at-revision", help="needed when the run's snapshot directory is not named for a revision: the sha256 of the model repository's config.json at --revision")
     tp.add_argument("--weights-terms", default="", help="one sentence on the weights' terms as the model's card states them, quoted into the card and NOTICE")
     tp.add_argument("--context", help="an earlier context-length record (JSON) the card cites")
     tp.add_argument("--out", required=True, help="a new directory to stage into; the package goes in <out>/<package name> and the commands text beside it")

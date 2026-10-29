@@ -76,8 +76,8 @@ def number_rows(res: dict, bench: dict, context: dict | None) -> list[tuple[str,
     for name, v in sorted((bench.get("variants") or {}).items()):
         s = v["decode_tok_s"]
         rows.append((f"decode speed, {name}", f"{fmt(s['median'], 4)} tok/s (min {fmt(s['min'], 4)}, max {fmt(s['max'], 4)})", v["label"], "evidence/text_bench.json"))
-        rows.append((f"share of the decode floor, {name}", f"{v['share_of_floor_median'] * 100:.1f} percent of {v['floor']['tokens_per_s']:.1f} tok/s"
-                     if "tokens_per_s" in v["floor"] else f"{v['share_of_floor_median'] * 100:.1f} percent", "estimate", "evidence/text_bench.json"))
+        rows.append((f"share of the decode floor, {name}", f"{v['share_of_floor_median'] * 100:.1f} percent of {v['floor']['floor_tok_s']:.1f} tok/s", "estimate",
+                     "evidence/text_bench.json"))
     for name, v in sorted((res.get("variants") or {}).items()):
         a = v["numeric"]["agreement"]
         label = "measured (provisional bar met)" if v.get("ok") else "measured (the stage 2 bar was not met)"
@@ -100,6 +100,8 @@ def read_context(path) -> dict | None:
     if not path:
         return None
     data = _json(path, "the context-length record")
+    if data.get("tp") != 1:
+        raise TextPackageError(f"the context-length record is for tp={data.get('tp')!r}; this package is for one chip, so only a one-chip (tp 1) record can be cited")
     wins = [w for w in data.get("windows") or [] if isinstance(w, dict) and all(isinstance(w.get(k), (int, float)) for k in ("start_position", "steps", "tok_s"))]
     if not wins:
         raise TextPackageError("the context-length record has no window with a start position, steps and speed")
@@ -190,17 +192,18 @@ def run_script(rtm, config_sha256: str, revision: str) -> str:
 # Take a chip lease first (gozer run --chips 1 ... -- ./run.sh). The server binds 127.0.0.1 only.
 set -euo pipefail
 HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-: "${{MINICPM3_DIR:?set MINICPM3_DIR to a download of {rtm.model_ids[0]} at revision {revision} (config.json and the tokenizer files)}}"
-: "${{MINICPM3_WEIGHTS:?set MINICPM3_WEIGHTS to the weights as one safetensors file (runtime/scripts/{d}/convert_weights.py makes it)}}"
+: "${{{rtm.model_dir_env}:?set {rtm.model_dir_env} to a download of {rtm.model_ids[0]} at revision {revision} (config.json and the tokenizer files)}}"
+: "${{{rtm.weights_env}:?set {rtm.weights_env} to the weights as one safetensors file (runtime/scripts/{d}/convert_weights.py makes it)}}"
 PYTHON="${{ORCHARD_TEXT_PYTHON:-python3}}"
 PINNED_CONFIG_SHA256="{config_sha256}"
-GOT="$(sha256sum "$MINICPM3_DIR/config.json" | cut -d' ' -f1)"
+GOT="$(sha256sum "${rtm.model_dir_env}/config.json" | cut -d' ' -f1)"
 if [ "$GOT" != "$PINNED_CONFIG_SHA256" ]; then
-  echo "run.sh: $MINICPM3_DIR/config.json is not the pinned configuration (revision {revision}); stopping" >&2
+  echo "run.sh: ${rtm.model_dir_env}/config.json is not the pinned configuration (revision {revision}); stopping" >&2
   exit 3
 fi
 PORT="${{PORT:-8210}}"
-exec "$PYTHON" "$HERE/runtime/scripts/{d}/serve.py" --port "$PORT" "$@"
+# The checked directory and weights come last, so an argument forwarded in "$@" cannot point the server at files that were not checked.
+exec "$PYTHON" "$HERE/runtime/scripts/{d}/serve.py" --port "$PORT" "$@" {rtm.model_dir_flag} "${rtm.model_dir_env}" {rtm.weights_flag} "${rtm.weights_env}"
 """
 
 
@@ -254,7 +257,57 @@ def orchard_closure(sources: dict[str, str], root: Path) -> list[str]:
 
 # ---- staging ------------------------------------------------------------------------------------------------------------------------
 
-def stage_package(run_dir, *, rtm, namespace: str, revision: str, license_file, context_file=None, out, repo_root=None, weights_terms: str) -> dict:
+def _recorded_scripts(run: Path) -> dict:
+    """The script hashes the run's `text runtime selected` decision recorded at stage 0."""
+    try:
+        for line in (run / "ledger.jsonl").read_text(encoding="utf-8").splitlines():
+            if rt.TEXT_RUNTIME_SELECTED in line:
+                e = json.loads(line)
+                if e.get("data", {}).get("decision") == rt.TEXT_RUNTIME_SELECTED and isinstance(e["data"].get("scripts"), dict):
+                    return e["data"]["scripts"]
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def ledger_stage_ends(run: Path) -> tuple[dict, dict]:
+    """(result by stage, evidence list of the last passing stage_end by stage) from the run's ledger."""
+    ends, evidence = {}, {}
+    try:
+        for line in (run / "ledger.jsonl").read_text(encoding="utf-8").splitlines():
+            e = json.loads(line)
+            if e.get("event") == "stage_end":
+                ends[e["stage"]] = e["data"].get("result")
+                if e["data"].get("result") == "pass":
+                    evidence[e["stage"]] = e["data"].get("evidence") or []
+    except (OSError, ValueError) as exc:
+        raise TextPackageError(f"the run's ledger cannot be read: {exc}") from exc
+    return ends, evidence
+
+
+def verify_revision(run: Path, revision: str, run_config_sha256: str, hub_config_sha256: str | None) -> str:
+    """How the supplied revision is tied to the weights the run measured. The run's snapshot directory name (stage 0 records it) is a Hugging Face revision when it is 40 hex
+    digits, and then it must be the supplied one. A run from another directory has no revision of its own: the supplied revision is accepted only with the sha256 of the model
+    repository's config.json at that revision (`hub_config_sha256`), which must be the configuration the run used."""
+    try:
+        snapshot = _json(run / "stages" / "0" / "evidence" / "triage.json", "stage 0's triage evidence").get("snapshot")
+    except TextPackageError:
+        snapshot = None
+    if isinstance(snapshot, str) and REVISION.fullmatch(snapshot):
+        if snapshot != revision:
+            raise TextPackageError(f"--revision {revision[:12]} is not the revision of the snapshot the run used ({snapshot[:12]}); the card and the download instructions would name "
+                                   "other weights than the measured ones")
+        return "the run's snapshot directory name"
+    if not hub_config_sha256:
+        raise TextPackageError("the run's snapshot directory is not named for a revision, so --revision cannot be verified; give --config-sha256-at-revision (the sha256 of the model "
+                               "repository's config.json at that revision)")
+    if hub_config_sha256 != run_config_sha256:
+        raise TextPackageError("the configuration at the supplied revision is not the configuration the run used (the sha256 values differ)")
+    return "the hash of the configuration at that revision"
+
+
+def stage_package(run_dir, *, rtm, namespace: str, revision: str, license_file, context_file=None, out, repo_root=None, weights_terms: str,
+                  config_sha256_at_revision: str | None = None) -> dict:
     """Stage the package in `out/<package name>/`. Order of refusals: the directory exists and is not empty; the revision is not a commit hash; the run has not passed
     stages 1, 2 and 6; the license file is not readable. Nothing is written before every input has been read."""
     run = Path(run_dir)
@@ -268,17 +321,19 @@ def stage_package(run_dir, *, rtm, namespace: str, revision: str, license_file, 
         if not pkg.is_dir() or pkg.is_symlink() or any(pkg.iterdir()):
             raise TextPackageError(f"{pkg} exists and is not an empty directory; a package is never overwritten in place")
     ref, res, bench = (_json(run / "stages" / str(n) / name, name) for n, name in ((1, rt.REFERENCE_FILE), (2, rt.RESULT_FILE), (6, rt.BENCH_FILE)))
-    ends = {}
-    try:
-        for line in (run / "ledger.jsonl").read_text(encoding="utf-8").splitlines():
-            e = json.loads(line)
-            if e.get("event") == "stage_end":
-                ends[e["stage"]] = e["data"].get("result")
-    except (OSError, ValueError) as exc:
-        raise TextPackageError(f"the run's ledger cannot be read: {exc}") from exc
-    for n in (1, 2, 6):
+    ends, evidence = ledger_stage_ends(run)
+    for n, name in ((1, rt.REFERENCE_FILE), (2, rt.RESULT_FILE), (6, rt.BENCH_FILE)):
         if ends.get(n) != "pass":
             raise TextPackageError(f"stage {n} of the run did not pass (its ledger result is {ends.get(n)!r}); nothing is packaged from a run that has not passed")
+        recorded = {e.get("path"): e.get("sha256") for e in evidence.get(n, []) if isinstance(e, dict)}
+        rel = f"stages/{n}/{name}"
+        if recorded.get(rel) != sha((run / rel).read_bytes()):
+            raise TextPackageError(f"{rel} is not the file stage {n}'s gate accepted (its sha256 differs from the one in the ledger's passing stage_end); it was changed after the gate passed")
+    recorded_scripts = _recorded_scripts(run)
+    for name in rtm.staged_scripts():
+        if recorded_scripts.get(name) != sha((rtm.scripts_dir / name).read_bytes()):
+            raise TextPackageError(f"{name} is not the script the run used (its sha256 differs from the one in the run's text runtime selection); a package must carry the code that was measured")
+    verified_by = verify_revision(run, revision, ref["config_sha256"], config_sha256_at_revision)
     if res.get("runtime") != rtm.name or bench.get("runtime") != rtm.name or ref.get("runtime") != rtm.name:
         raise TextPackageError("the run's result files are for another runtime")
     default = res["variants"][res["default_variant"]]
@@ -312,7 +367,7 @@ def stage_package(run_dir, *, rtm, namespace: str, revision: str, license_file, 
     if context:
         w(CONTEXT_EVIDENCE, Path(context_file).read_bytes())
     w("README.md", render_card(rtm, res, bench, context, revision=revision, namespace=namespace, license_name="Apache License 2.0", weights_terms=weights_terms))
-    record = {"schema": SCHEMA, "model": rtm.model_ids[0], "revision": revision, "runtime": rtm.name, "namespace": namespace, "config_sha256": ref["config_sha256"],
+    record = {"schema": SCHEMA, "model": rtm.model_ids[0], "revision": revision, "revision_verified_by": verified_by, "runtime": rtm.name, "namespace": namespace, "config_sha256": ref["config_sha256"],
               "license": {"id": rtm.license_id, "sha256": sha(license_bytes)}, "weights_terms": weights_terms, "files": sorted(files, key=lambda r: r["path"])}
     ap._write(pkg, RECORD_FILE, json.dumps(record, indent=1, sort_keys=True) + "\n")
     return record
@@ -394,6 +449,8 @@ def package_problems(pkg, *, rtm, hostname: str | None = None, home: str | None 
         return problems + [f"the package has no {RECORD_FILE}"]
     if f'PINNED_CONFIG_SHA256="{rec.get("config_sha256")}"' not in run or "sha256sum" not in run:
         problems.append("run.sh must carry the recorded configuration sha256 and check it before it starts the server")
+    if f'{rtm.model_dir_flag} "${rtm.model_dir_env}" {rtm.weights_flag} "${rtm.weights_env}"' not in run.split('"$@"')[-1] or '"$@"' not in run:
+        problems.append("run.sh must pass the checked model directory and weights after the forwarded arguments, so they cannot be overridden")
     if f'revision: "{rec.get("revision")}"' not in (ap._text(pkg / "tt-model.yaml") or ""):
         problems.append("tt-model.yaml must pin the recorded model revision")
     if f"`{rec.get('revision')}`" not in card:
@@ -434,7 +491,8 @@ def main(args, *, out=None, hostname=None) -> int:
     try:
         if not args.check:
             record = stage_package(run, rtm=rtm, namespace=args.namespace, revision=args.revision, license_file=args.license_file, context_file=args.context,
-                                   out=args.out, weights_terms=args.weights_terms)
+                                   out=args.out, weights_terms=args.weights_terms,
+                                   config_sha256_at_revision=getattr(args, "config_sha256_at_revision", None))
             say(f"staged {len(record['files'])} files in {pkg}")
         problems = package_problems(pkg, rtm=rtm, hostname=hostname, validate_manifest=ap.kernel_manifest_problems)
     except (TextPackageError, KeyError, OSError) as exc:
