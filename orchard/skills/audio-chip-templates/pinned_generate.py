@@ -7,8 +7,13 @@
 The serving script starts this file once for each clip. chip_generate.py records the revision it loaded but does not compare it with anything, and the
 library resolves the checkpoint through the Hugging Face cache, so a cache that changed would load other weights without a word. This wrapper resolves the
 checkpoint the same way the library does, requires its snapshot name to equal AUDIO_PIN_REVISION, and only then runs chip_generate.py (from the same
-directory) with the same arguments. Exit 2: no pin was given, or the library or the model was not found. Exit 3: the resolved revision is not the pin.
+directory) with the same arguments. Exit 2: no pin was given, the library or the model was not found, or both decoder flags were given. Exit 3: the resolved revision is not the pin.
 Nothing is opened on a device before the check.
+
+The decoder. The package's numbers were measured with the autoencoder decoder's transformer layers on the chip, so this wrapper adds `--chip-decoder` to
+the arguments it passes on. `--host-decoder` (given here, or `AUDIO_HOST_DECODER=1` in the environment, which is how a server that cannot pass the flag
+selects it) keeps the whole decoder on the host instead. chip_generate.py does not know `--host-decoder`; this wrapper removes it. Giving
+`--chip-decoder` and `--host-decoder` together is refused (exit 2).
 """
 import os
 import runpy
@@ -28,7 +33,25 @@ def model_name(argv) -> str:
     return "small-music"
 
 
+def decoder_args(argv, env) -> list:
+    """The arguments for chip_generate.py: `--chip-decoder` added unless the host decoder was asked for (`--host-decoder`, or AUDIO_HOST_DECODER=1), and
+    `--host-decoder` itself removed. Raises ValueError when both flags are given."""
+    argv = list(argv)
+    host = "--host-decoder" in argv or env.get("AUDIO_HOST_DECODER") == "1"
+    if "--host-decoder" in argv and "--chip-decoder" in argv:
+        raise ValueError("--chip-decoder and --host-decoder were both given; they ask for opposite things")
+    argv = [a for a in argv if a != "--host-decoder"]
+    if not host and "--chip-decoder" not in argv:
+        argv.append("--chip-decoder")
+    return argv
+
+
 def main(argv) -> int:
+    try:
+        argv = decoder_args(argv, os.environ)
+    except ValueError as exc:
+        print(f"pinned_generate: {exc}. Not generating.", file=sys.stderr)
+        return 2
     pin = os.environ.get("AUDIO_PIN_REVISION", "")
     if len(pin) != 40:
         print("pinned_generate: AUDIO_PIN_REVISION is not set to a 40-character revision. Start the server with run.sh. Not generating.", file=sys.stderr)

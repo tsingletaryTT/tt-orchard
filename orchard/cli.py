@@ -19,7 +19,7 @@
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
-    tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]
+    tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--out DIR] [--result FILE] [--check]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -366,7 +366,12 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--bench", help="the audio_bench.py sweep file the card's timings come from (one warm-up, 3 or more measured runs)")
     ap.add_argument("--demo-repo", help="the separate demo repository checkout whose server, client and page are copied into the package (read only)")
     ap.add_argument("--snapshot", help="the pinned model snapshot that holds LICENSE.md and NOTICE (default: the path the run recorded)")
-    ap.add_argument("--check", action="store_true", help="stage nothing; run the gate on the package already staged in the run")
+    ap.add_argument("--check", action="store_true", help="stage nothing; run the gate on the package already staged in the run (or in --out)")
+    ap.add_argument("--out", help="stage into this new package directory instead of the run's stages/7/package/<name>; the commands text goes beside it")
+    ap.add_argument("--result", help="an audio result file to use instead of the run's stages/2/audio_result.json (made with python -m orchard.audio_result_derive)")
+    ap.add_argument("--probe", help="a decoder probe summary (JSON) to copy into evidence/decode-probe.json, with the home directory replaced by <home>")
+    ap.add_argument("--agreement-report", help="the full agreement report (JSON) to copy into evidence/audio-agreement-report.json")
+    ap.add_argument("--listening-note", help="the operator's dated listening note (one line with YYYY-MM-DD) printed on the card; it is not a measured quality metric")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
                               "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease); "
