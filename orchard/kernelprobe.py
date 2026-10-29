@@ -50,6 +50,7 @@ stopped the run; 5 means a hardware run hung. With 3, 4 and 5 the report covers 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import errno
 import fcntl
 import hashlib
@@ -67,7 +68,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from orchard import defaults, hwtool, ttlang_env
+from orchard import defaults, hwtool, ttlang_consistency, ttlang_env, ttlang_reference
 from orchard.agent import DEVICE_VARS, SECRET_NAME, TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
@@ -1811,7 +1812,7 @@ def _skills_lines(header: dict) -> list[str]:
     lines = ["## Skill sources", ""]
     if sk.get("stale_allowed"):
         lines += [f"Stale skills allowed (--allow-stale-skills): {', '.join(str(x) for x in sk.get('stale') or [])}. "
-                  "The coder was given sources that are not the latest upstream has.", ""]
+                  "The coder was given sources or an environment that are not the latest upstream has or not the pinned tt-lang.", ""]
     for f in sk["freshness"]:
         if isinstance(f, dict):
             lines.append(f"- {f.get('source')} ({f.get('path')}): {f.get('state')}; local {f.get('local')}, "
@@ -1837,7 +1838,7 @@ def _reference_lines(header: dict) -> list[str]:
         lines += ["", f"Worked-kernel library mode: {lib.get('mode')}."]
         if lib.get("note"):
             lines.append(str(lib["note"]))
-    return lines + [""]
+    return lines + [""] + ttlang_reference.report_lines(header)
 
 
 def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
@@ -2271,9 +2272,14 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse("--staged gives the coder no hardware tool: pass --no-agent-hw")
     shared = getattr(args, "shared_python", None) or default_shared_python()
     env = env or default_env(args)
-    results = ttlang_env.ensure(env, check_only=True, say=say)
-    if not results or any(r.status != ttlang_env.OK for r in results):
+    allow_pin = bool(getattr(args, "allow_stale_skills", False))
+    results = ttlang_env.ensure(env, check_only=True, say=say, allow_pin_mismatch=allow_pin)
+    # A component that is missing or broken always refuses. A result that only says "not the pinned tt-lang" refuses
+    # too, unless --allow-stale-skills accepts it; the report then records it (pin_overridden below).
+    not_ready = [r for r in results if r.status != ttlang_env.OK and not (allow_pin and r.pin_mismatch)]
+    if not results or not_ready:
         return refuse("the tt-lang simulator environment is not ready: run `tt-orchard kernel-env`")
+    pin_overridden = [r for r in results if r.status != ttlang_env.OK]
     skill_dir = ttlang_env.skill_dir_from(args)
     references, problems = ttlang_env.read_references(env, skill_dir)
     library_mode = getattr(args, "library", None) or "all"
@@ -2285,8 +2291,18 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse("the coder's reference files are not ready: " + "; ".join(problems) + ". The tt-lang skill is "
                       "installed by `tt-warp fastmodels sync`; name another directory with --tt-lang-skill-dir or "
                       f"{ttlang_env.TTLANG_SKILL_ENV}")
-    reference_record = [{"name": f"reference/{r['name']}", "source": r["source"], "path": r["path"],
-                         "sha256": r["sha256"]} for r in references]
+    reference_record = [ttlang_reference.record(r) for r in references]
+    # One tt-lang for the simulator, the coder's reading and (later) the hardware build: every row of the consistency
+    # check that blocks refuses the probe, unless overridden (orchard/ttlang_consistency.py).
+    rows = ttlang_consistency.check(env, skill_dir, tt_metal_dir=ttlang_consistency.tt_metal_dir_from(args),
+                                    references=references)
+    for line in ttlang_consistency.render(rows):
+        say(line)
+    blocked_rows = ttlang_consistency.blocking(rows)
+    if blocked_rows and not getattr(args, "allow_stale_skills", False):
+        return refuse("the tt-lang environment does not match the pin: " + " ".join(
+            f"{r.name}: {r.detail}. Fix: {r.fix}." for r in blocked_rows) + " Pass --allow-stale-skills to run anyway; "
+            "the report then records it")
     # The operator's rule: the probe uses the latest tt-lang checkout and tt-lang skill upstream has. A stale source
     # (or one that could not be compared and has no recent current check) refuses the probe unless overridden.
     fresh = ttlang_env.skills_status(env, skill_dir, preread=ttlang_env.skill_bytes(references))
@@ -2298,10 +2314,14 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse("these sources are not the latest upstream has: " + " ".join(
             f"{f.source} ({f.path}): {f.detail} {f.update_text()}"
             for f in stale) + " Pass --allow-stale-skills to run anyway; the report then records it")
-    if stale:
-        say("stale skills allowed (--allow-stale-skills): " + ", ".join(f.source for f in stale))
-    skills_record = {"freshness": [f.to_dict() for f in fresh], "stale": [f.source for f in stale],
-                     "stale_allowed": bool(stale)}
+    # What --allow-stale-skills let through, all of it: stale upstream sources, simulator-environment results that are
+    # off the pin, and consistency rows that block. The report states each one.
+    allowed = [f.source for f in stale] + [f"{r.name} (environment: {r.detail})" for r in pin_overridden] + [
+        f"{r.name} (consistency: {r.detail})" for r in blocked_rows]
+    if allowed:
+        say("stale skills allowed (--allow-stale-skills): " + ", ".join(allowed))
+    skills_record = {"freshness": [f.to_dict() for f in fresh], "stale": allowed, "stale_allowed": bool(allowed)}
+    consistency_record = {"rows": [dataclasses.asdict(r) for r in rows], "overridden": bool(pin_overridden or blocked_rows)}
     try:
         endpoint, model = coder_endpoint(args, tier_config, probe)
     except _Refused as exc:
@@ -2410,6 +2430,8 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             header["sampling"] = sampling
             header["tt_lang_skill_dir"] = str(skill_dir)
             header["references"] = reference_record
+            header["ttlang_pin"] = ttlang_consistency.pin_record(env)
+            header["ttlang_consistency"] = consistency_record
             header["library"] = {"mode": library_mode, "note": library_note(args.op, library_mode)}
             header["skills"] = skills_record
             header["agent_hw_policy"] = hw_policy.as_dict() | {"enabled": hw_policy.enabled}
