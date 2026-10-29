@@ -143,3 +143,35 @@ Similarity of the five passing kernels to the orchard library kernels and to the
 
 Not determined: whether the same prompt in an agent loop with check feedback (the next entry) changes this; whether the
 local coder would pass with the specification text pasted whole into its prompt (it reads files in parts).
+
+---
+
+## Agent-loop capability check: pre-registration (written 2026-10-29, before the first call of this check)
+
+Operator decision: stop the W/S experiment; instead repeat the capability check with a loop that gives the helper the same
+simulator feedback the local coder gets.
+
+Settings, fixed now:
+- Targets: `center` (5 attempts) and `linear_scan` (5 attempts). Calls are interleaved (center 1, linear_scan 1, center 2, ...).
+- Model: `anthropic/claude-sonnet-5-5` only, through the Telegraph helper under its rules, temperature 0 (the helper's setting).
+  Prices from the config: $2.00 in and $10.00 out per million tokens. A line goes into the telegraph decisions file before the
+  first call.
+- Loop: each turn is one Telegraph `ask`, because the helper has no tools. The harness (`2026-10-28-staged-construction-agent-loop.py`)
+  writes the reply's first python code block to `kernel.py` with the probe's own write tool, which runs `python3 kernel_check.py`
+  and returns its output (the same text the coder sees after a write). The next request holds the prompt, the files, and every
+  earlier kernel with its check output. The helper's own system text differs from the coder's.
+- Turns: at most min(8, 40) = 8 per attempt. The config's cap of 6 calls per problem is not raised, and each attempt is its own
+  problem (`staged-176-agent-<op>-<k>`), so an attempt can use at most 6 turns. An attempt ends at the first `PASS`, at the turn
+  cap, at a refusal or when the spend reaches the budget.
+- Verdict: the final `kernel.py` is judged by the unedited authoritative check (`--library none`, the shipped check, same bars).
+- References: the skill text, `kernel_spec.json`, `reference/eltwise_add.py`, `reference/eltwise_broadcast_reduce.py` and
+  `reference/TTLangSpecification.md`. `reference/guide.md` and `reference/examples.md` (74 KB, written for an older tt-lang, and
+  the skill says so) are left out to hold the cost. That is a difference from the coder's directory. `--library none`: no worked
+  kernel is given.
+- Budget: about $6 in all. The run stops starting calls when its own spend reaches $5.50. Expected spend: under $2 (one request is
+  about 30,000 tokens in and 3,000 out, about $0.09).
+- Recorded per attempt: passed, failure class (the check's category), turns, calls, tokens, cost, how the loop ended.
+- Similarity: each passing kernel is compared with the orchard library kernels and the checkout's examples
+  (`2026-10-28-staged-construction-similarity.py`: comments and blank lines removed, difflib ratio over lines, flag at 0.80, a
+  near-copy). The files of the passing kernels are kept in the run directory.
+- No claims beyond the counts. Five attempts per target cannot show a small difference.
