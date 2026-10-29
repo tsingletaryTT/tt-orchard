@@ -17,9 +17,16 @@ Definitions (fixed before the run):
                   body (at least 5 of its numbered lines, or at least 3 of its six state names). A grep that prints 1 to 4
                   lines of the section is counted apart, as block_states_grep_hits.
   read_file_calls count of read_file calls on any file
+  measurements_complete  False when a call has no result in the transcript (it stores a result on the next model turn, so a stop on
+                  the wall budget or the turn limit leaves the last calls without one). Reads, section readings and the first check
+                  are then lower bounds; the table prints ">=" and "none seen".
+Limits: a shell command's unprefixed numbered output is credited only when the specification is its single file operand (see
+single_source); a command that reads two files or runs two commands gets credit only for lines prefixed with the specification's
+name. Tool arguments may be a JSON string or an already decoded object; anything that is not an object counts as no arguments.
 """
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -56,6 +63,25 @@ def calls_and_results(rows):
                 args = {}
             calls.append({"turn": r["turn"], "id": c["id"], "name": c["function"]["name"], "args": args})
     return calls, results
+
+
+def single_source(command):
+    """True when a shell command's output can only come from the specification: one command (no `;`, `&&`, `||`, `&`), with the
+    specification as its only file operand before any pipe. Output of a command with a second file or a second command could hold
+    numbered lines or state names from elsewhere, so unprefixed numbers in it are not credited as a reading of the specification.
+    A file operand is a word with a `.` or `/` that is not an option; a grep pattern with a dot is counted as one (a limit: it can
+    only make this check refuse, never credit)."""
+    try:
+        lexer = shlex.shlex(str(command), posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return False
+    if any(w in (";", "&&", "||", "&", "(", ")") for w in words):
+        return False
+    first_stage = words[:words.index("|")] if "|" in words else words
+    operands = [w for w in first_stage[1:] if not w.startswith("-") and ("." in w or "/" in w) and not re.fullmatch(r"[\d,$p]+", w)]
+    return len(operands) == 1 and operands[0].endswith(SPEC)
 
 
 def returned_range(result):
@@ -120,11 +146,17 @@ def analyse(attempt_dir):
         # another file are not a reading of "Block states"
         if SPEC not in str(c["args"].get("command", "")):
             continue
-        numbered = {int(n) for n in re.findall(r"(?m)^(?:[\w./-]*TTLangSpecification\.md[:-])?(\d+)[:-]", out)}
+        # A line prefixed with the specification's name is from it whatever else the command did. A bare number counts only when
+        # the command had no other source (single_source); `cat a.md TTLangSpecification.md` or `grep ... ; grep ... other.py`
+        # print numbers and state names that may be another file's.
+        prefixed = {int(n) for n in re.findall(r"(?m)^[\w./-]*TTLangSpecification\.md[:-](\d+)[:-]", out)}
+        alone = single_source(c["args"].get("command", ""))
+        bare = {int(n) for n in re.findall(r"(?m)^(\d+)[:-]", out)} if alone else set()
+        numbered = prefixed | bare
         inside = sorted(n for n in numbered if bs_first < n <= bs_last)
         names = ("Must be Written", "Must be Read", "Read-Write", "Read Only while Reading", "No Access while Writing",
                  "Out of Scope")
-        shown = [w for w in names if w in out]
+        shown = [w for w in names if w in out] if alone else []
         if inside or shown:
             bs_grep_touch += 1
             # a grep that prints one or two lines of the section is a hit, not a reading of it; a shell call prints the
@@ -146,6 +178,9 @@ def analyse(attempt_dir):
     # the transcript records a tool result on the next model turn, so a stop on the wall budget or the turn limit can
     # leave the last calls without a result. Their reads and checks are then not counted; the count is reported.
     calls_without_result = sum(1 for c in calls if c["id"] not in results)
+    # With any call left without a result, every measurement taken from results is a lower bound: a read, a check or a section
+    # reading in the last calls may have happened and cannot be seen. `measurements_complete` says so, and the table marks it.
+    complete = calls_without_result == 0
     shell_greps_ref = sum(1 for c in calls if c["name"] == "shell" and "reference" in str(c["args"].get("command", ""))
                           and "grep" in str(c["args"].get("command", "")))
     return {
@@ -153,7 +188,8 @@ def analyse(attempt_dir):
         "first_line": a.get("first_line"), "turns": a.get("turns"), "status": a.get("status"),
         "first_check_turn": first_check, "block_states_read": bs_read_file + bs_shell,
         "block_states_read_file": bs_read_file, "block_states_shell": bs_shell, "block_states_grep_hits": bs_grep_touch, "block_states_shell_detail": shell_detail,
-        "read_file_calls": len(reads), "calls_without_result": calls_without_result, "grep_calls_on_reference": shell_greps_ref,
+        "read_file_calls": len(reads), "calls_without_result": calls_without_result,
+        "measurements_complete": complete, "grep_calls_on_reference": shell_greps_ref,
         "spec_lines_read_file": {s: f"{len(covered[s])}/{spec[s][1] - spec[s][0] + 1}" for s in SECTIONS},
         "decode_tok_s": (a.get("coder_speed") or {}).get("tok_s"), "agent_wall_s": a.get("agent_wall_s"),
     }
@@ -169,8 +205,11 @@ def main(argv):
             print(json.dumps(r))
         print("attempt | passed | class | first_check_turn | block_states_read | read_file_calls | tok/s")
         for r in rs:
-            print(f"{r['attempt']} | {r['passed_sim']} | {r['failure_class']} | {r['first_check_turn']} | "
-                  f"{r['block_states_read']} | {r['read_file_calls']} | {r['decode_tok_s']}")
+            # ">=" marks a count taken with calls that have no result in the transcript: the true count may be higher
+            lb = "" if r["measurements_complete"] else ">="
+            first = r["first_check_turn"] if r["first_check_turn"] is not None or r["measurements_complete"] else "none seen"
+            print(f"{r['attempt']} | {r['passed_sim']} | {r['failure_class']} | {first} | "
+                  f"{lb}{r['block_states_read']} | {r['read_file_calls']} | {r['decode_tok_s']}")
 
 
 if __name__ == "__main__":
