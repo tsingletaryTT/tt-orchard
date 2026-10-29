@@ -3177,3 +3177,11 @@ Prompt (operator): stage the finished Stable Audio 3 small-music run as a local 
 - Site: one section, "Three new-code bring-ups", with a table of stage reached, speed and what stopped each. Existing classes only.
 - Granite's run log is in PR 215 and not yet on `main`, so the README names it without a link and the site links only the other two logs. Once PR 215 merges, both should link it.
 - Numbers come from the run logs: 79.3 against 38.5 tok/s (coder), MiniCPM3 final-state table (33.7 and 39.9 tok/s), Stable Audio 0.82 s and 3.8 s, Granite 22.6, 16.7 and 18.0 tok/s. The MiniCPM3 project-log entry says 33.8; the run log's final table says 33.7 and is used here.
+
+## 2026-10-29 (UTC): tt-lang pair chip check (branch `ttlang-pair`, PR 223)
+- Prompt (coordinator, from the operator): follow the compat matrix recommendation and find out on the chip whether the pinned simulator and a published S3 light compiler wheel agree.
+- New venv beside the shared one, `tt-lang-light 1.1.10.dev20261026` (wheel hashes in the run log) pointed at the host tt-metal v0.80.0 tree with `tt-lang-setup-external-tt-metal`. It imported against the host `ttnn` without the fallback wheel. `ttl.build_info()` reports the pinned tt-lang commit and tt-metal `0e9d200`.
+- One lease on board 1, under 15 minutes. 20 kernels: smoke, 11 simulator-passing `ssd_readout`, library `rmsnorm`, and `grid_size` placement variants. 17 compile and run on the chip at PCC 0.99999 or better; the 3 failures are `-(-x // grid_rows)` on a thread's `grid_size` value (`UnaryMinusOp` has no `type`), which the simulator accepts.
+- On 1.1.6 the reduction kernels fail on `shape` and `ttl.grid_size` is rejected in every thread, so issue 205's thread question is answered: 1.1.6 accepts it only in the operation body, the pair accepts it anywhere.
+- The light wheel's own simulator cannot find `atom_rules.py`; the pinned simulator venv was used.
+- Open: pin the hardware path (`TT_METAL_REF`, issue 95), add the `ttl.build_info()` consistency row, decide whether the probe's hardware phase moves to the new venv.
