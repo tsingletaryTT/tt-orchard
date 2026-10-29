@@ -414,7 +414,7 @@ def test_an_edited_agent_check_is_untrusted_when_the_final_stage_fails(tmp_path,
     assert attempt["staged"]["failed_stage"] == "center" and attempt["agent_check_untrusted"] is True
 
 
-def test_a_stage_that_spends_its_turns_but_passes_its_check_is_kept_and_the_next_stage_starts(tmp_path, fake_kenv):
+def test_a_stage_that_spends_its_turns_ends_the_attempt_even_if_its_check_passes(tmp_path, fake_kenv):
     def writes_then_loops(request):
         k, t = stage_number(request), turn(request)
         if t == 0:
@@ -422,7 +422,62 @@ def test_a_stage_that_spends_its_turns_but_passes_its_check_is_kept_and_the_next
         return call("read_file", path="kernel_spec.json", call_id=f"c{t}")
     with FakeModel(writes_then_loops) as server:
         attempt = run_staged(tmp_path, fake_kenv, server, op="center", stage_turns=3)
-    assert attempt["passed_sim"] is True and attempt["staged"]["stages_passed"] == 4
+    st = attempt["staged"]
+    assert attempt["passed_sim"] is False and st["failed_stage"] == "copy" and st["reached"] == 1 and st["stages_passed"] == 0
+    assert attempt["category"] == "stage_budget" and st["stages"][0]["passed"] is False
+    assert [stage_number(r) for r in server.requests if turn(r) == 0] == [1]
+
+
+# ---- review round 2 (PR 199) ------------------------------------------------------------------------------------
+
+def test_installing_a_stage_does_not_write_through_a_link_the_agent_left(tmp_path):
+    adir = tmp_path / "adir"
+    adir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep me")
+    for name in ("kernel_check.py", "references.py", "kernel_spec.json", "staged_references.py"):
+        (adir / name).symlink_to(outside)
+    stage = ks.STAGES["center"][1]
+    tdir = ks.write_stage_templates(tmp_path / "t", "center", stage)
+    ks._install_in_attempt(adir, tdir, "center")
+    assert outside.read_text() == "keep me"
+    assert not (adir / "kernel_check.py").is_symlink() and (adir / "kernel_spec.json").read_text().startswith("{")
+
+
+def test_a_relative_probe_directory_works(tmp_path, fake_kenv, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    calls: list = []
+    with FakeModel(writes_one_kernel_per_stage) as server:
+        attempt = run_staged(tmp_path, fake_kenv, server, op="center", probe_dir=Path("rel-probe"), calls=calls)
+    assert attempt["passed_sim"] is True
+    assert all(Path(c["argv"][1]).is_absolute() and Path(c["spec_path"]).is_absolute() for c in calls)
+
+
+def test_the_last_stage_gets_the_shipped_spec_byte_for_byte(tmp_path):
+    tdir = ks.write_stage_templates(tmp_path / "t", "rmsnorm", ks.STAGES["rmsnorm"][-1])
+    assert (tdir / "ops" / "rmsnorm.json").read_bytes() == (kp.TEMPLATES / "ops" / "rmsnorm.json").read_bytes()
+
+
+def test_an_unedited_agent_check_of_a_passing_attempt_is_trusted(tmp_path, fake_kenv):
+    shipped = {"kernel_check.py": kp._sha256(kp.TEMPLATES / "kernel_check.py"),
+               "kernel_harness.py": kp._sha256(kp.TEMPLATES / "kernel_harness.py"),
+               "references.py": kp._sha256(kp.TEMPLATES / "references.py"),
+               "spec": kp._sha256(kp.TEMPLATES / "ops" / "center.json")}
+
+    def script(request):
+        k, t = stage_number(request), turn(request)
+        if t == 0:
+            return call("write_file", path="kernel.py", content=f"# {k}\n")
+        if t == 1 and k == 4:
+            adir = tmp_path / "probe" / "center" / "attempt-1"
+            spec_hash = kp._sha256(adir / "kernel_spec.json")
+            refs_hash = kp._sha256(adir / "references.py")
+            return call("write_file", path="check.json", content=json.dumps(
+                {"passed": True, "category": None, "sha256": {**shipped, "spec": spec_hash, "references.py": refs_hash}}))
+        return final("done")
+    with FakeModel(script) as server:
+        attempt = run_staged(tmp_path, fake_kenv, server, op="center")
+    assert attempt["passed_sim"] is True and attempt["agent_check_untrusted"] is False
 
 
 # ---- the real simulator ------------------------------------------------------------------------------------------

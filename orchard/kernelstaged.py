@@ -19,9 +19,9 @@ order:
     references, so passing it is passing the whole-kernel probe's check.
   * The verified prefix is kept. When stage k passes, the exact bytes the authoritative check read become stage k+1's
     starting `kernel.py`. The coder edits that file; it does not start again.
-  * A stage whose check fails ends the attempt, and the record names the stage. A stage that spends its turns or wall clock is judged
-    by its check like any other: a kernel that passes is kept and the next stage starts, as the whole-kernel probe counts a pass
-    whatever its status. The status of each stage is in the record.
+  * A stage whose check fails ends the attempt, and the record names the stage. A stage that ends on its turn or wall-clock
+    budget also ends the attempt, even when its check says PASS: the stage is recorded as failed (category `stage_budget`), so a
+    kernel written on the last allowed turn cannot start later stages. The status of each stage is in the record.
   * Every attempt records the stage it reached (`staged.reached`, counting from 1: the last stage that was started), the
     stages it passed, the failed stage's name, and each stage's category, turns and time. The attempt's seed is sent with
     every stage's requests.
@@ -46,6 +46,9 @@ STAGED_NOTE = Path(__file__).resolve().parent / "skills" / "kernel-probe-staged.
 STAGED_DIR = ".staged"              # DIR/.staged/<op>-<n>-s<k>/: the files stage k's check runs against (outside the agent's reach)
 WHOLE_KERNEL_TURNS = kp.BUDGET["max_turns"]      # the whole-kernel probe's budget for one attempt: 40 turns
 WHOLE_KERNEL_WALL_S = kp.BUDGET["wall_s"]        # and 1800 s. The stages of an op share these, so both arms get the same totals.
+
+
+BUDGET_STATUSES = ("turns", "wall-clock")       # AgentStep / ProbeControl statuses for a spent turn or wall-clock budget
 
 
 @dataclass(frozen=True)
@@ -136,23 +139,27 @@ def write_stage_templates(tdir, op: str, stage: Stage) -> Path:
         refs += ("\n\n# Added by the staged probe (orchard/kernelstaged.py): the references of the intermediate stages.\n"
                  "from staged_references import STAGE_REFERENCES\nREFERENCES.update(STAGE_REFERENCES)\n")
     (tdir / "references.py").write_text(refs, encoding="utf-8")
-    (tdir / "ops" / f"{op}.json").write_text(json.dumps(stage_spec(op, stage), indent=2) + "\n", encoding="utf-8")
+    spec_path = tdir / "ops" / f"{op}.json"
+    if stage.reference is None and stage.inputs is None and stage.output is None:
+        # The unmodified op: the shipped bytes, so a check.json that records the spec's hash matches the shipped file's.
+        shutil.copyfile(kp.TEMPLATES / "ops" / f"{op}.json", spec_path)
+    else:
+        spec_path.write_text(json.dumps(stage_spec(op, stage), indent=2) + "\n", encoding="utf-8")
     return tdir
 
 
 def _install_in_attempt(adir: Path, tdir: Path, op: str) -> None:
     """Put the stage's spec, check and references where the coder's own `python3 kernel_check.py` reads them. A check.json
     from the previous stage is removed, so nothing of it is read for this stage."""
+    # The previous stage's agent could write here, so a destination may be a link to somewhere else: _write_new removes
+    # whatever is there and opens without following a link, and _remove unlinks a link without touching its target.
     for name in ("kernel_check.py", "kernel_harness.py", "references.py", "staged_references.py"):
-        target = adir / name
         if (tdir / name).is_file():
-            shutil.copy2(tdir / name, target)
-        elif target.exists() and name == "staged_references.py":
-            target.unlink()
-    shutil.copy2(tdir / "ops" / f"{op}.json", adir / "kernel_spec.json")
-    check = adir / "check.json"
-    if check.exists() or check.is_symlink():
-        check.unlink()
+            kp._write_new(adir / name, (tdir / name).read_bytes())
+        else:
+            kp._remove(adir / name)
+    kp._write_new(adir / "kernel_spec.json", (tdir / "ops" / f"{op}.json").read_bytes())
+    kp._remove(adir / "check.json")
 
 
 # ---- the attempt -----------------------------------------------------------------------------------------------------
@@ -189,7 +196,8 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         raise ValueError(f"no stage table for op {op!r}; the staged ops are {', '.join(STAGES)}")
     stages = STAGES[op]
     sampling = {"temperature": temperature, "top_p": top_p, "seed": seed}
-    adir = Path(probe_dir) / op / f"attempt-{n}"
+    probe_dir = Path(probe_dir).resolve()      # the checks run from another directory, so every path made from it is absolute
+    adir = probe_dir / op / f"attempt-{n}"
     facts = tt_lang if tt_lang is not None else kp.tt_lang_facts(env)
     copied = kp.prepare_attempt(adir, op=op, env=env, tt_lang=facts, references=references)
     ledger = Ledger(adir / "ledger.jsonl")
@@ -231,6 +239,10 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
                                                templates=None if final else tdir)
             finally:
                 swept_all += kp.sweep_strays(adir)
+            if check.get("passed") is True and outcome.status in BUDGET_STATUSES:
+                check = {**check, "passed": False, "category": "stage_budget",
+                         "first_line": f"stage {stage.name} ended on its {outcome.status} budget; its check said PASS, but a stage "
+                                       "that spends its budget ends the attempt"}
             records.append(_stage_record(index, stage, outcome, stage_wall, check))
             last_outcome, last_check = outcome, check
             last_detail = outcome.detail or control.detail or ""
