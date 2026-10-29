@@ -37,7 +37,7 @@ def groups(runs: list[dict]) -> list[list[dict]]:
             want = first if k == 0 else f"{first}-r{k}"
             if run["name"] != want:
                 raise SystemExit(f"run {run['name']!r} of {model} should be named {want!r}: repeats of one model are recorded as <name>-r<k>")
-        if len({tuple(run.get(key) for key in ("steps", "cfg_scale", "sampler")) for run in group}) != 1:
+        if len({tuple(run.get(key) for key in ("steps", "cfg_scale", "sampler", "prompt") if key != "prompt" or "prompt" in run) for run in group}) != 1:
             raise SystemExit(f"the runs of {model} do not share their settings, so one process cannot repeat them")
     return list(out.values())
 
@@ -47,10 +47,12 @@ def run_group(cfg: dict, group: list[dict], out_root: Path, log_dir: Path, timeo
     (orchard/resident.py). A crash or a hang takes down that model's runs only."""
     first = group[0]
     out = out_root / first["name"]
-    cmd = [sys.executable, str(HERE / "chip_generate.py"), "--model", first["model"], "--out", str(out), "--prompt", cfg["prompt"],
+    cmd = [sys.executable, str(HERE / "chip_generate.py"), "--model", first["model"], "--out", str(out), "--prompt", first.get("prompt", cfg["prompt"]),
            "--duration", str(cfg["duration"]), "--steps", str(first["steps"]), "--cfg-scale", str(first["cfg_scale"]), "--seed", str(cfg["seed"]),
            "--sampler", first["sampler"], "--sample-size", str(cfg["sample_size"]), "--repeats", str(len(group)),
            "--warmup", str(int(cfg.get("warmup", 0)))]
+    if cfg.get("chip_decoder"):
+        cmd.append("--chip-decoder")                # the autoencoder decoder's transformer on the chip too (chip_decoder.py)
     env = dict(os.environ)
     env["PYTHONPATH"] = cfg["src_dir"]
     env["HF_HOME"] = cfg["hf_home"]

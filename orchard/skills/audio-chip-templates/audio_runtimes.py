@@ -203,9 +203,12 @@ class ChipRuntime(LibraryRuntime):
     """The library's run with the diffusion transformer's stack on one chip."""
     device_label = "tt"
 
-    def __init__(self, model: str, *, device_id: int = 0, weights_dtype: str = "bfloat16", threads: int = 0, record_layers: bool = True):
+    def __init__(self, model: str, *, device_id: int = 0, weights_dtype: str = "bfloat16", threads: int = 0, record_layers: bool = True,
+                 chip_decoder: bool = False):
         super().__init__(model, threads=threads, record_layers=record_layers)
         self.device_id, self.dtype = device_id, weights_dtype
+        self.use_chip_decoder = chip_decoder           # also run the autoencoder decoder's six layers on the chip (chip_decoder.py)
+        self.chip_dec = None
         self.ttnn = self.device = self.chip = self.chip_dit = None
         self._last_forward = 0.0
         self._last_passes = 0
@@ -223,6 +226,16 @@ class ChipRuntime(LibraryRuntime):
         self.chip = self.chip_dit.ChipTransformer(ttnn, self.torch, self.device, dit.transformer, record=None, dtype=getattr(ttnn, self.dtype))
         self.chip_dit.install(dit, self.chip)
         self.load_timings["chip_weights_upload_s"] = self.chip.timings["upload_weights_s"]
+        if self.use_chip_decoder:
+            chip_decoder = load_sibling(HERE / "chip_decoder.py", "chip_decoder_runtime")
+            cfg = json.loads(Path(self.config_path).read_text(encoding="utf-8"))
+            dec_problems = chip_decoder.config_problems(cfg)
+            if dec_problems:
+                raise SystemExit("the chip decoder does not implement this model's configuration:\n  " + "\n  ".join(dec_problems))
+            autoencoder = self.model.model.pretransform.model
+            self.chip_dec = chip_decoder.ChipDecoder(ttnn, self.torch, self.device, autoencoder.decoder, dtype=getattr(ttnn, self.dtype))
+            chip_decoder.install(autoencoder, self.chip_dec)
+            self.load_timings["chip_decoder_upload_s"] = self.chip_dec.timings["upload_weights_s"]
 
     def _before_generate(self, record_layers: bool, recorder) -> None:
         chip, mk = self.chip, self.mk
@@ -230,12 +243,18 @@ class ChipRuntime(LibraryRuntime):
         chip.record_enabled = record_layers              # the first pass of each generation is recorded again
         chip._pending = {}
         chip.timings["forward_s"], chip.timings["passes"] = 0.0, 0
+        if self.chip_dec is not None:
+            self.chip_dec.timings.update({"forward_s": 0.0, "layers_s": 0.0, "calls": 0})
 
     def _after_generate(self, recorder) -> None:
         recorder.timings.update({"chip_transformer_call_s": round(self.chip.timings["forward_s"], 3), "chip_passes": self.chip.timings["passes"]})
+        if self.chip_dec is not None:
+            # the decoder call includes its host work (the first linear, the noise, the shift and the last convolution); layers_s is the chip part with its transfers
+            recorder.timings.update({"chip_decoder_call_s": round(self.chip_dec.timings["forward_s"], 3),
+                                     "chip_decoder_layers_s": round(self.chip_dec.timings["layers_s"], 3)})
 
     def device_description(self) -> str:
-        return "blackhole, one chip, device id %d" % self.device_id
+        return "blackhole, one chip, device id %d%s" % (self.device_id, ", decoder on the chip" if self.chip_dec is not None else "")
 
     def close(self) -> None:
         if self.ttnn is not None and self.device is not None and not self.closed:

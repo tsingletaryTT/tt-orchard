@@ -1,0 +1,87 @@
+{
+ "model": "small-music",
+ "latent_shape": [
+  1,
+  256,
+  174
+ ],
+ "seed": 42,
+ "weights_dtype": "bfloat16",
+ "cpu_decode_s": [
+  1.277,
+  1.377,
+  1.203
+ ],
+ "waveform_shape": [
+  1,
+  2,
+  712704
+ ],
+ "cpu_bfloat16_floor": {
+  "waveform": {
+   "pcc": 0.997352,
+   "rel_l2": 0.073199,
+   "slope": 1.003028,
+   "max_abs": 0.14121311902999878
+  },
+  "log_mel_l1": 0.47704
+ },
+ "layers": {
+  "layer_0": {
+   "pcc": 0.999392,
+   "rel_l2": 0.034847,
+   "slope": 0.99887,
+   "max_abs": 0.10507500171661377
+  },
+  "layer_1": {
+   "pcc": 0.999823,
+   "rel_l2": 0.026796,
+   "slope": 1.018725,
+   "max_abs": 0.14571774005889893
+  },
+  "layer_2": {
+   "pcc": 0.999966,
+   "rel_l2": 0.00829,
+   "slope": 1.000597,
+   "max_abs": 0.8046951293945312
+  },
+  "layer_3": {
+   "pcc": 0.999974,
+   "rel_l2": 0.007199,
+   "slope": 0.999972,
+   "max_abs": 1.0114116668701172
+  },
+  "layer_4": {
+   "pcc": 0.999975,
+   "rel_l2": 0.007061,
+   "slope": 0.999945,
+   "max_abs": 0.9980983734130859
+  },
+  "layer_5": {
+   "pcc": 0.999907,
+   "rel_l2": 0.013714,
+   "slope": 0.998765,
+   "max_abs": 3.0163955688476562
+  }
+ },
+ "chip_waveform": {
+  "vs_cpu_float32": {
+   "pcc": 0.99458,
+   "rel_l2": 0.104889,
+   "slope": 0.97542,
+   "max_abs": 0.1876598559319973
+  },
+  "log_mel_l1_vs_cpu_float32": 0.48436
+ },
+ "chip_decode_s": [
+  0.427,
+  0.422,
+  0.425
+ ],
+ "chip_timings": {
+  "upload_weights_s": 0.158,
+  "forward_s": 1.269,
+  "layers_s": 1.206,
+  "calls": 6
+ }
+}

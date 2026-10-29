@@ -41,6 +41,14 @@ def test_the_real_small_music_config_is_supported():
     assert cd.config_problems(REAL_CONFIG) == []
 
 
+def test_differential_attention_and_an_absent_logsnr_key_are_supported():
+    """The medium model: differential attention, no `timestep_features_logsnr` key (absent counts as false)."""
+    c = with_change(["model", "diffusion", "config", "attn_kwargs", "differential"], True)
+    assert cd.config_problems(c) == []
+    del c["model"]["diffusion"]["config"]["timestep_features_logsnr"]
+    assert cd.config_problems(c) == []
+
+
 def test_both_objectives_of_the_model_pair_are_supported():
     assert cd.config_problems(with_change(["model", "diffusion", "diffusion_objective"], "rectified_flow")) == []
 
@@ -49,7 +57,8 @@ def test_both_objectives_of_the_model_pair_are_supported():
     (["model", "diffusion", "type"], "dit_v2"),
     (["model", "diffusion", "diffusion_objective"], "v"),
     (["model", "diffusion", "config", "global_cond_type"], "prepend"),
-    (["model", "diffusion", "config", "attn_kwargs", "differential"], True),
+    (["model", "diffusion", "config", "attn_kwargs", "differential"], "yes"),
+    (["model", "diffusion", "config", "attn_kwargs", "feat_scale"], True),
     (["model", "diffusion", "config", "attn_kwargs", "qk_norm"], "l2"),
     (["model", "diffusion", "config", "norm_type"], "layer_norm"),
     (["model", "diffusion", "config", "num_memory_tokens"], 32),
@@ -77,12 +86,11 @@ def test_the_cached_small_music_configs_are_supported_when_present():
         assert cd.config_problems(json.loads(Path(h).read_text())) == [], h
 
 
-def test_a_head_count_other_than_16_is_refused_even_when_the_head_dimension_is_64():
-    """embed 512 with 8 heads has head dimension 64, so only the head-count rule can refuse it."""
-    c = with_change(["model", "diffusion", "config", "embed_dim"], 512)
-    c["model"]["diffusion"]["config"]["num_heads"] = 8
-    problems = cd.config_problems(c)
-    assert any("num_heads is 8" in p for p in problems) and not any("head dimension" in p for p in problems)
+def test_a_head_count_other_than_16_is_accepted_when_the_head_dimension_is_64():
+    """The medium model has 24 heads of 64 (embed 1536); the head count is read from the weights, the head dimension is fixed."""
+    c = with_change(["model", "diffusion", "config", "embed_dim"], 1536)
+    c["model"]["diffusion"]["config"]["num_heads"] = 24
+    assert cd.config_problems(c) == []
 
 
 def test_a_head_dimension_other_than_64_is_refused_even_when_the_head_count_is_16():

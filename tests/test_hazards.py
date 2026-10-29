@@ -266,6 +266,7 @@ def test_every_table_entry_can_be_hit_by_some_config():
              linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=32, linear_value_head_dim=32,
              kv_lora_rank=8, qk_nope_head_dim=8, qk_rope_head_dim=8, v_head_dim=8, index_topk=8, hc_mult=4), CLEAN,
          {"limits": {"router_top_k_max": 4, "kv_heads_max": 1, "sliding_window_layers_max": 1}, "tile_multiples": {"hidden_size": 8}}),
+        (cfg(num_hidden_layers=2, layer_types=["mamba", "attention"], mamba_n_heads=4, mamba_d_head=32, mamba_d_state=16), CLEAN, {}),
     ]
     for model, nearest, kw in probes:
         hit |= {h.name for h in hz.scan_model_hazards(model, nearest, **kw).hazards}
@@ -306,3 +307,15 @@ def test_command_line_prints_the_record_and_refuses_a_bad_file(capsys, tmp_path)
     assert rc == 0 and out["hazards"][0]["name"] == "routed_experts_above_256"
     assert hz.main([str(tmp_path / "missing.json")]) == 2
     assert "hazards:" in capsys.readouterr().out
+
+
+def test_mamba_the_nearest_bundle_lacks_is_a_hazard():
+    mamba = cfg(num_hidden_layers=2, layer_types=["mamba", "attention"], mamba_n_heads=4, mamba_d_head=32, mamba_d_state=16)
+    assert names(hz.scan_model_hazards(mamba, CLEAN)) == {"mixer_mamba_not_in_nearest"}
+    assert names(hz.scan_model_hazards(mamba, mamba)) == set()
+
+
+def test_the_real_granite_hybrid_is_scanned_and_its_mixer_named():
+    granite = mc.read_model_config(FIX / "granite-4.0-h-1b.json")
+    s = hz.scan_model_hazards(granite, CLEAN)
+    assert "mixer_mamba_not_in_nearest" in names(s) and s.facts["mixers"] == ["attention", "mamba"]
