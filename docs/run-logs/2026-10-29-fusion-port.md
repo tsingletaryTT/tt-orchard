@@ -93,8 +93,8 @@ and the sampler `GRID`.
 
 ## Phase 2 progress (hardware), first session
 
-Status when this section was written: the model loads and serves on two dies; the speed measurements are not done yet and are added below
-when they exist.
+Status: a 4-layer slice of the model loads and serves on two dies, and its decode speed was measured (next section). The full 40-layer
+model was not run.
 
 What worked:
 - Weights. The bundle's loader (`weights.py`) knows the Qwen3-Next checkpoint layout. A 35-line patch (`scripts/fusion_port/weights_qwen35_moe.patch`)
@@ -114,3 +114,45 @@ Per-op check on the two ops with changed constants (`scripts/fusion_port/ops_che
   the scan grid must stay at 10 columns or fewer. That is a limit on the `GRID` constant.
 - Router `RouterTopK` check is INVALID. It disagreed with the reference in 40 of 40 trials, including at the bundle's own 512 experts and top-k 10,
   so the harness is wrong (the input layout is the suspect), not the op. No router claim comes from this check.
+
+## Phase 2 measurements: 4-layer SLICE of Qwen3.5-35B-A3B (not the 40-layer model)
+
+Everything in this section is for a slice: the embeddings, the head and layers 0 to 3 (three gated-delta-net layers and one full-attention
+layer, all with 256 routed experts), served on one p300 board (chips 2 and 3, two dies, mesh P300) with the Coder-Next bundle's fused ops
+(`QWEN35_MOE_FUSED_DECODE`, `QWEN35_GDN_DECODE_OPS`, `QWEN35_ATTN_DECODE_OPS`, `QWEN35_ROWS_TOPK`, replicated decode residual), precision policy
+`coder_next_routed_bfp4_mixers_bfp8`, one sequence, 4096 context. A slice number is not a 40-layer number: the per-token work that does not
+depend on depth (the sampler, the head, host round trips) is a much larger share of a 4-layer step than of a 40-layer step.
+Output is gibberish by construction (the slice has no meaningful language ability); it measures speed only.
+
+Method (docs/benchmark-rules.md): one server process per configuration, 1 discarded warm-up run, 5 measured runs of 128 tokens at temperature 0,
+decode tok/s = (tokens - 1) / (last chunk time - first chunk time), host one-minute load average recorded with each run (3.7 to 5.1).
+Raw output: `docs/run-logs/2026-10-29-fusion-port-data/`.
+
+| Configuration | min | median | max | Share of the slice's floor (2,062 tok/s) |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline (bundle code as shipped, GRID 10 x 10, route-k 80) | 384.5 | 387.8 | 394.7 | 18.8% |
+| Sampler GRID 10 x 5 (`ORCHARD_SAMPLER_GRID`, patched copy of `decode_sampling/ops.py`) | 387.1 | 391.4 | 393.4 | 19.0% |
+| Route-k 72 (`QWEN35_ROUTER_TOPK_ROUTE_K`) | 385.2 | 392.4 | 399.3 | 19.0% |
+
+Floor: `orchard/decode_floor.py`, board p300 (2 dies, 512 GB/s each, datasheet peak), policy bfp8 attention and shared experts, bfp4 routed experts
+and head, bf16 router: 496.7 MB per token, 0.485 ms, 2,062 tok/s for the slice. For the full 40-layer model the same inputs give 2,392 MB, 2.34 ms,
+428 tok/s. Both are estimates.
+
+Reading of the numbers:
+- Both changes are within the spread of the baseline (ranges overlap; medians differ by 0.9 and 1.2 percent). Neither reaches the 3 percent
+  bar, so by the rule in issue 184 neither is kept. This is a null result at the slice, not proof of no effect at 40 layers.
+- Greedy check: the 16-token greedy output is identical across the three configurations. For these two changes the numerics should not
+  change (route-k only applies to the unfused router path, which one-row decode does not take; the scan grid only splits the same top-k work), so identical
+  output is the expected result and not a flag under the issue 15 rule.
+- Greedy check against the CPU reference is NOT a pass: the slice's first greedy token (12181) differs from the CPU reference's (74), and the 16 tokens
+  share nothing. The slice's logits are nearly flat (reference top-1 log-probability about -5.7), and the device runs bfp4 routed experts, so a flat
+  argmax can flip, but this run cannot tell that apart from a loader or layout error. The slice's speed numbers stand; its correctness against the
+  CPU reference is unresolved. A 40-layer model with real language ability would settle it.
+- Per-op: the sampler top-k values match the CPU reference for the grids tried (section above). The router per-op check stays marked invalid.
+- Two harness faults found on the way (fixed in the scripts): the vLLM API answers before the engine has compiled, so the benchmark client now
+  waits for a 1-token request to succeed; and the checkpoint's mrope settings make the plugin expect a rotary-delta return from prefill, which the
+  bundle's generator does not give, so the served config drops `mrope_section` (text-only decoding is unaffected).
+- Cold start: the container answered `/v1/models` 70 to 106 seconds after start with the kernel cache already warm (seeded with a read-only copy
+  of the coder's cache); the first start, with the cache partly cold, took about 5 minutes.
+
+What is not done: the 40-layer model was not downloaded or served, so there is no 40-layer tok/s or floor share. Disk was 232 GB free at the end.

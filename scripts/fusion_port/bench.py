@@ -15,9 +15,20 @@ def one():
             line = line.decode().strip()
             if not line.startswith("data:") or line.endswith("[DONE]"): continue
             ev = json.loads(line[5:]); now = time.perf_counter()
+            if "choices" not in ev: raise RuntimeError("server error event")
             if ev["choices"] and ev["choices"][0].get("text") is not None:
                 n += 1; first = first or now; last = now
     return {"tokens": n, "ttft_s": round(first - t0, 3), "decode_tok_s": round((n - 1) / (last - first), 2), "load1": os.getloadavg()[0]}
+# readiness: the API answers before the engine has compiled; retry a 1-token request until it succeeds (up to 25 minutes)
+t_ready = time.time()
+while True:
+    try:
+        with post({"model": model, "prompt": "hi", "max_tokens": 1, "temperature": 0}) as r: json.load(r)
+        break
+    except Exception:
+        if time.time() - t_ready > 1500: raise
+        time.sleep(10)
+print("READY after", round(time.time() - t_ready), "s", flush=True)
 one()   # warm-up, discarded
 res = [one() for _ in range(runs)]
 v = [r["decode_tok_s"] for r in res]
