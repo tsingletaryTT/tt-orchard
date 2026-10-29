@@ -29,6 +29,8 @@ ap.add_argument("--max-len", type=int, default=2048)
 ap.add_argument("--ssd", default="composed")
 ap.add_argument("--kernel-dir", default=str(Path(__file__).resolve().parent.parent / "runtime" / "kernels"))
 ap.add_argument("--no-trace", action="store_true")
+ap.add_argument("--no-fast-prefill", action="store_true")
+ap.add_argument("--skip-prompts", action="store_true", help="agree: only the long sequence")
 ap.add_argument("--ssd-precision", default="fp32")
 ap.add_argument("--ref")
 ap.add_argument("--long")
@@ -41,7 +43,7 @@ dev = ttnn.open_device(device_id=0, trace_region_size=400 * 1024 * 1024)
 res = {"cmd": a.cmd, "max_len": a.max_len, "ssd": a.ssd, "ssd_precision": a.ssd_precision, "traced": not a.no_trace}
 try:
     t0 = time.time()
-    m = GraniteChip(dev, a.model_dir, max_len=a.max_len, ssd=a.ssd, kernel_dir=a.kernel_dir, trace=not a.no_trace, ssd_precision=a.ssd_precision)
+    m = GraniteChip(dev, a.model_dir, max_len=a.max_len, ssd=a.ssd, kernel_dir=a.kernel_dir, trace=not a.no_trace, ssd_precision=a.ssd_precision, fast_prefill=not a.no_fast_prefill)
     res["load_s"] = round(time.time() - t0, 1)
     res["ssd_precision"] = "fp32" if m.f32 else "bf16"       # what the constructed model uses (kernel modes force bf16)
     if a.cmd == "bench":
@@ -86,7 +88,7 @@ try:
         ref = np.load(Path(a.ref) / "arrays.npz")
         rep = json.load(open(Path(a.ref) / "hf_vs_step_model.json"))
         res["prompts"] = []
-        for pi, p in enumerate(rep["prompts"]):
+        for pi, p in enumerate([] if a.skip_prompts else rep["prompts"]):
             seq = ref[f"p{pi}.tokens"].tolist()
             n = p["prompt_tokens"]
             hf = torch.from_numpy(ref[f"p{pi}.hf_logits"])
@@ -121,6 +123,12 @@ try:
                 top1 = (x.argmax(-1) == f32.argmax(-1)).float()
                 res["long"][name] = {"rel_l2_mean": float(rel.mean()), "rel_l2_max": float(rel.max()), "top1": float(top1.mean()),
                                      "top1_last_half": float(top1[len(top1) // 2:].mean()), "rel_l2_mean_last_half": float(rel[len(rel) // 2:].mean())}
+            if len(toks) - 1 > 1024:                  # the first 1,024 positions of a longer run (causal, so equal to a 1,024-token run)
+                first = {}
+                for name, x in (("chip_vs_fp32", mine), ("bf16_cpu_vs_fp32", b16)):
+                    rel = (x[:1024] - f32[:1024]).norm(dim=-1) / f32[:1024].norm(dim=-1)
+                    first[name] = {"rel_l2_mean": float(rel.mean()), "rel_l2_max": float(rel.max()), "top1": float((x[:1024].argmax(-1) == f32[:1024].argmax(-1)).float().mean())}
+                res["long"]["first_1024_positions"] = first
             relc = ((mine - f32).norm(dim=-1) / f32.norm(dim=-1)).tolist()
             relb = ((b16 - f32).norm(dim=-1) / f32.norm(dim=-1)).tolist()
             bins = range(0, len(relc), 128)

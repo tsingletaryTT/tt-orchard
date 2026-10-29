@@ -39,12 +39,12 @@ PACKAGE_NAME = "granite-4.0-h-1b-blackhole"
 PORT = 20110
 ROOT = Path(__file__).resolve().parent.parent
 SRC_FILES = (("pkgsrc/runtime/granite_chip.py", "runtime/granite_chip.py"), ("pkgsrc/server/serve.py", "server/serve.py"),
-             ("pkgsrc/tools/evaluate.py", "tools/evaluate.py"), ("pkgsrc/tools/smoke.py", "tools/smoke.py"))
+             ("pkgsrc/tools/evaluate.py", "tools/evaluate.py"), ("pkgsrc/tools/smoke.py", "tools/smoke.py"), ("pkgsrc/tools/selftest.py", "tools/selftest.py"))
 KERNEL_FILES = (("docs/run-logs/evidence/granite-readout-pair/kernels/state.py", "runtime/kernels/state.py"),
                 ("docs/run-logs/evidence/granite-readout-pair/kernels/readout.py", "runtime/kernels/readout.py"),
                 ("docs/run-logs/evidence/granite-repeat-trace/port2/bcast_kernel_attempt8.py", "runtime/kernels/bcast.py"))
 REQUIRED = ("README.md", "LICENSE", "NOTICE", "tt-model.yaml", "run.sh", "requirements.txt", "package-record.json", "evidence/summary.json",
-            "runtime/granite_chip.py", "server/serve.py", "tools/evaluate.py", "tools/smoke.py") + tuple(d for _, d in KERNEL_FILES)
+            "runtime/granite_chip.py", "server/serve.py", "tools/evaluate.py", "tools/smoke.py", "tools/selftest.py") + tuple(d for _, d in KERNEL_FILES)
 RECORDED = ("LICENSE", "NOTICE", "evidence/summary.json")
 FORBIDDEN_TEXT = (".tt_ai_key", "litellm", "HF_TOKEN=", "Authorization: Bearer", "TT_AI_KEY")
 CARD_SECTIONS = ("## Weights are not included", "## Try it", "## API", "## Numbers", "## Agreement with the CPU reference", "## Context and prefill",
@@ -204,6 +204,7 @@ if ! python -c "import ttnn" 2>/dev/null; then
   export PYTHONPATH="$TT_METAL_HOME/ttnn:$TT_METAL_HOME/tools${{PYTHONPATH:+:$PYTHONPATH}}"
   export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:$TT_METAL_HOME/build/tt_metal:$TT_METAL_HOME/build/ttnn:$TT_METAL_HOME/build/tt_stl:$TT_METAL_HOME/build/_deps/fmt-build:$TT_METAL_HOME/build/tt_metal/third_party/umd/device${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
 fi
+if [ "${{1:-}}" = "--self-test" ]; then shift; exec python tools/selftest.py "$@"; fi
 exec python server/serve.py --port "${{PORT:-{PORT}}}" "$@"
 """
 

@@ -142,3 +142,28 @@ def test_the_ready_line_and_the_card_report_the_effective_precision():
     assert "kept in float32" in card and eff("composed", "fp32") == "fp32"
     assert "run with a bf16 state whatever `--ssd-precision` says" in card and eff("state_full_ro", "fp32") == "bf16"
     assert 'res["ssd_precision"] = "fp32" if m.f32 else "bf16"' in (root / "pkgsrc" / "tools" / "evaluate.py").read_text()
+
+
+def test_self_test_prints_one_line_per_check_and_does_not_open_the_device(tmp_path):
+    import socket
+    import subprocess
+    import sys
+    held = socket.socket()
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    port = held.getsockname()[1]
+    r = subprocess.run([sys.executable, str(gp.ROOT / "pkgsrc" / "tools" / "selftest.py"), "--port", str(port)],
+                       env={**__import__("os").environ, "HF_HOME": str(tmp_path / "empty-cache"), "TT_METAL_HOME": ""}, capture_output=True, text=True, timeout=120)
+    held.close()
+    lines = [x for x in r.stdout.splitlines() if x[:4].strip() in ("ok", "warn", "FAIL")]
+    names = [x.split(":")[0].split(None, 1)[1] for x in lines]
+    assert names[:2] == ["python", "python packages"] and {"import ttnn", "chip visibility", "pinned weights", "free disk", "port", "open device"} <= set(names)
+    assert any(x.startswith("FAIL") and ": port" in x or x.startswith("FAIL") and "port:" in x for x in lines)      # the port is held
+    assert any(x.startswith("warn") and "pinned weights" in x and "downloads about 3 GB" in x for x in lines)     # an empty cache is a warning
+    assert any("open device" in x and "skipped" in x for x in lines) and r.returncode == 1
+    assert r.stdout.strip().splitlines()[-1].startswith("self-test:")
+
+
+def test_run_sh_dispatches_self_test_before_starting_the_server(staged):
+    text = (staged / "run.sh").read_text()
+    assert "--self-test" in text and text.index("--self-test") < text.index("exec python server/serve.py")

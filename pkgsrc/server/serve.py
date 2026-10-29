@@ -161,9 +161,13 @@ def parse_request(body):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _json(self, code, obj):
+    timeout = 30                      # seconds a connection may sit idle in a read before the server closes it
+
+    def _json(self, code, obj, headers=()):
         body = json.dumps(obj).encode()
         self.send_response(code)
+        for k, v in headers:
+            self.send_header(k, v)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -193,7 +197,9 @@ class Handler(BaseHTTPRequestHandler):
         args = dict(max_tokens=r["max_tokens"], stop_ids=STATE["stop_ids"], stop_strings=r["stop"], temperature=r["temperature"],
                     top_p=r["top_p"], seed=r["seed"], timings=timings)
         self._started = False                                 # set once response headers have gone out
-        with LOCK:
+        if not LOCK.acquire(blocking=False):                  # one request runs at a time; a second one is told so at once and never waits
+            return self._json(503, {"error": {"message": "the server is busy with another request; retry shortly"}}, [("Retry-After", "5")])
+        try:
             try:
                 if r["stream"]:
                     self._stream(cid, created, ids, args)
@@ -215,6 +221,10 @@ class Handler(BaseHTTPRequestHandler):
                 sys.stderr.write(f"serve: generation failed: {type(exc).__name__}: {exc}\n")
                 if not self._started:
                     self._json(500, {"error": {"message": f"generation failed: {type(exc).__name__}"}})
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            sys.stderr.write("serve: the client left before the response was complete\n")      # the slot is freed below
+        finally:
+            LOCK.release()
 
     def _stream(self, cid, created, ids, args):
         chunk = lambda delta, fin=None: ("data: " + json.dumps({"id": cid, "object": "chat.completion.chunk", "created": created, "model": MODEL_ID,  # noqa: E731
@@ -229,12 +239,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(chunk({"role": "assistant"}))
         self.wfile.flush()
         finish = "length"
-        for piece, fin in gen:                              # lazily: each piece is written and flushed as it is produced
-            if piece:
-                self.wfile.write(chunk({"content": piece}))
-                self.wfile.flush()
-            finish = fin or finish
-        self.wfile.write(chunk({}, finish) + b"data: [DONE]\n\n")
+        try:
+            for piece, fin in gen:                          # lazily: each piece is written and flushed as it is produced
+                if piece:
+                    self.wfile.write(chunk({"content": piece}))
+                    self.wfile.flush()
+                finish = fin or finish
+            self.wfile.write(chunk({}, finish) + b"data: [DONE]\n\n")
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            gen.close()                                     # a client that left ends the generation at the next write, and the slot is freed
+            raise
 
     def log_message(self, fmt, *args):
         sys.stderr.write("serve: " + fmt % args + "\n")
@@ -282,12 +296,12 @@ def main():
     ap.add_argument("--ssd", default=os.environ.get("GRANITE_SSD", "composed"))
     ap.add_argument("--ssd-precision", default=os.environ.get("GRANITE_SSD_PRECISION", "fp32"), choices=["fp32", "bf16"])
     ap.add_argument("--no-trace", action="store_true", help="run the step eagerly (slower); for comparison only")
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"), help="default 127.0.0.1 (this machine only). HOST=0.0.0.0 listens on every interface; the server has no sign-in")
     a = ap.parse_args()
     if a.port in (8000, 8011, 8012, 8780) or 8100 <= a.port <= 8103:
         sys.exit("refused: that port belongs to other work on this machine")
     if a.host != "127.0.0.1":
-        sys.exit("refused: this server has no sign-in and binds 127.0.0.1 only")
+        sys.stderr.write(f"serve: WARNING: listening on {a.host}. The server has no sign-in, so anyone who can reach this address can use the chip and read nothing but the model's answers.\n")
     if not a.model_dir:
         from huggingface_hub import snapshot_download
         a.model_dir = snapshot_download(MODEL_ID, revision=REVISION)        # downloads the weights into your Hugging Face cache on the first run

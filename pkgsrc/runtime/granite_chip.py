@@ -45,7 +45,7 @@ def _load_kernel(path, fn):
 
 
 class GraniteChip:
-    def __init__(self, dev, model_dir, max_len=2048, ssd="composed", kernel_dir=None, trace=True, ssd_precision="fp32"):
+    def __init__(self, dev, model_dir, max_len=2048, ssd="composed", kernel_dir=None, trace=True, ssd_precision="fp32", fast_prefill=True):
         from safetensors import safe_open  # imported here so the module can be read without the package
         if ssd not in SSD_MODES:
             raise ValueError(f"ssd must be one of {SSD_MODES}")
@@ -55,6 +55,7 @@ class GraniteChip:
             raise ValueError("ssd_precision must be fp32 or bf16")
         ssd_precision = self.effective_precision(ssd, ssd_precision)
         self.dev, self.L, self.ssd, self.use_trace, self.tid, self.out = dev, max_len, ssd, trace, None, None
+        self.fast_prefill, self.tid_nohead = fast_prefill, None
         self.f32 = ssd_precision == "fp32"                               # dt, decay and the state in float32
         model_dir = Path(model_dir)
         cfg = json.load(open(model_dir / "config.json"))
@@ -186,13 +187,14 @@ class GraniteChip:
         m[..., pos + 1:] = NEG
         ttnn.copy_host_to_device_tensor(self.host(m), self.mask)
 
-    def _run(self, read):
+    def _run(self, read, head=True):
         out = None
         if self.tid is not None:
-            ttnn.execute_trace(self.dev, self.tid, cq_id=0, blocking=read)
+            tid = self.tid if head or self.tid_nohead is None else self.tid_nohead
+            ttnn.execute_trace(self.dev, tid, cq_id=0, blocking=read)
             out = self.out
         else:
-            out = self.program()
+            out = self.program(head)
         self.pos += 1
         if not read:
             return None
@@ -207,7 +209,7 @@ class GraniteChip:
         """A loop of decode steps. The logits are read back only after the last prompt token."""
         for t in ids[:-1]:
             self._set_inputs(t)
-            self._run(False)
+            self._run(False, head=False)                    # a second trace that stops after the last layer: no final norm, no lm_head
         return self.step(ids[-1])
 
     def enable_trace(self):
@@ -221,15 +223,23 @@ class GraniteChip:
         ttnn.end_trace_capture(self.dev, tid, cq_id=0)
         ttnn.synchronize_device(self.dev)
         self.tid = tid
+        if self.fast_prefill:
+            self.program(head=False)                        # compile the shorter program (every op in it already exists, so this is quick)
+            ttnn.synchronize_device(self.dev)
+            self.tid_nohead = ttnn.begin_trace_capture(self.dev, cq_id=0)
+            self.program(head=False)
+            ttnn.end_trace_capture(self.dev, self.tid_nohead, cq_id=0)
+            ttnn.synchronize_device(self.dev)
         self.reset()
 
     def close(self):
-        if self.tid is not None:
-            ttnn.release_trace(self.dev, self.tid)
-            self.tid = None
+        for name in ("tid", "tid_nohead"):
+            if getattr(self, name) is not None:
+                ttnn.release_trace(self.dev, getattr(self, name))
+                setattr(self, name, None)
 
     # ---- the step program ---------------------------------------------------------------------------------------------------
-    def program(self):
+    def program(self, head=True):
         rm = self.cfg["residual_multiplier"]
         x = self.x_in
         for i in range(self.NL):
@@ -242,6 +252,8 @@ class GraniteChip:
             gate = ttnn.slice(a, [0, 0, 0, 0], [1, 1, 1, 4096])
             up = ttnn.slice(a, [0, 0, 0, 4096], [1, 1, 1, 8192])
             x = ttnn.add(x, ttnn.multiply(self._linear(ttnn.multiply(ttnn.silu(gate), up), L["mlp_out"]), rm))
+        if not head:
+            return x
         x = ttnn.rms_norm(x, weight=self.norm, epsilon=self.eps, compute_kernel_config=self.ck)
         return self._linear(x, self.embed_t)
 

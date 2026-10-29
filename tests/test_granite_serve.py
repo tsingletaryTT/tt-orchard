@@ -230,3 +230,119 @@ def test_streamed_response_arrives_piece_by_piece_not_after_the_whole_generation
         assert first is not None and first < 0.3 and total > 1.4, (first, total)
     finally:
         s.srv.shutdown()
+
+
+# ---- release behaviours -----------------------------------------------------------------------------------------------
+import socket  # noqa: E402
+import time  # noqa: E402
+import urllib.error  # noqa: E402
+
+
+class SlowEngine(FakeEngine):
+    def __init__(self, *a, delay=0.3, **k):
+        super().__init__(*a, **k)
+        self.delay = delay
+
+    def step(self, tok):
+        time.sleep(self.delay)
+        return super().step(tok)
+
+
+def _raw_post(s, body, stream=True):
+    host, port = s.base[7:].split(":")
+    sock = socket.create_connection((host, int(port)), timeout=10)
+    data = json.dumps(body).encode()
+    sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data)
+    return sock
+
+
+def test_a_second_request_while_one_runs_gets_503_with_retry_after_and_never_hangs():
+    s = _Srv(SlowEngine([0, 1, 2, 3, 4, 5, 6, 7, EOS]))
+    try:
+        first = _raw_post(s, {"messages": [{"role": "user", "content": "hi"}], "stream": True, "max_tokens": 8})
+        time.sleep(0.5)
+        t0 = time.time()
+        with pytest.raises(urllib.error.HTTPError) as e:
+            s.post({"messages": [{"role": "user", "content": "hi"}]})
+        assert e.value.code == 503 and e.value.headers["Retry-After"] and time.time() - t0 < 2
+        first.close()
+    finally:
+        s.srv.shutdown()
+
+
+def test_client_disconnect_mid_stream_frees_the_slot():
+    s = _Srv(SlowEngine([0] * 40 + [EOS], delay=0.1))
+    try:
+        sock = _raw_post(s, {"messages": [{"role": "user", "content": "hi"}], "stream": True, "max_tokens": 40})
+        sock.recv(200)
+        sock.close()
+        deadline, ok = time.time() + 6, False
+        while time.time() < deadline and not ok:
+            try:
+                r = json.load(s.post({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}))
+                ok = r["choices"][0]["finish_reason"] == "length"
+            except urllib.error.HTTPError as e:
+                assert e.code == 503
+                time.sleep(0.2)
+        assert ok, "the slot was not freed after the client left"
+    finally:
+        s.srv.shutdown()
+
+
+def test_body_over_the_limit_and_bad_bodies_get_400():
+    s = _Srv(FakeEngine([0, EOS]))
+    try:
+        rq = urllib.request.Request(s.base + "/v1/chat/completions", b"x" * (serve.MAX_BODY + 10), {"Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(rq)
+        assert e.value.code == 400
+        for raw in (b"{not json", b"[1, 2]", b'{"messages": "x"}', b'{"messages": [{"role": "user", "content": "x"}], "max_tokens": "many"}',
+                    b'{"messages": [{"role": "user", "content": "x"}], "tools": [{"type": "function"}]}',
+                    b'{"messages": [{"role": "user", "content": "x"}], "documents": [{"text": "d"}]}'):
+            rq = urllib.request.Request(s.base + "/v1/chat/completions", raw, {"Content-Type": "application/json"})
+            with pytest.raises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(rq)
+            assert e.value.code == 400, raw
+    finally:
+        s.srv.shutdown()
+
+
+def test_idle_connection_is_closed_after_the_read_timeout():
+    s = _Srv(FakeEngine([0, EOS]))
+    old = serve.Handler.timeout
+    try:
+        assert old and old <= 60
+        serve.Handler.timeout = 1
+        host, port = s.base[7:].split(":")
+        sock = socket.create_connection((host, int(port)), timeout=10)
+        sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n{")     # the rest never arrives
+        t0 = time.time()
+        assert sock.recv(100) == b""                                    # the server closed the idle connection
+        assert time.time() - t0 < 5
+        r = json.load(s.post({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2}))        # and the server still answers
+        assert r["choices"][0]["finish_reason"] in ("length", "stop")
+        sock.close()
+    finally:
+        serve.Handler.timeout = old
+        s.srv.shutdown()
+
+
+def test_multibyte_characters_are_never_split_across_stream_pieces():
+    class MB:
+        """token 13 = b'\\xc3', token 14 = b'\\xa9' (together 'é'), others letters; decode of a lone first byte gives the replacement character."""
+        def decode(self, ids):
+            raw = b"".join({13: b"\xc3", 14: b"\xa9"}.get(i, chr(97 + i).encode()) for i in ids)
+            return raw.decode("utf-8", errors="replace")
+    eng = FakeEngine([0, 13, 14, 1, EOS])
+    pieces = [p for p, _ in serve.generate(eng, MB(), [1], 10, {EOS}, ())]
+    assert all("�" not in p for p in pieces) and "".join(pieces) == "aéb"
+
+
+def test_same_seed_repeats_sampling_and_a_different_seed_differs():
+    class Flat(FakeEngine):
+        def _logits(self):
+            return torch.zeros(V - 1)                                  # all tokens equally likely, no end-of-text
+    def go(seed):
+        eng = Flat([0], max_len=64)
+        return "".join(p for p, _ in serve.generate(eng, FakeTok(), [1], 12, {EOS}, (), temperature=1.0, top_p=1.0, seed=seed))
+    assert go(7) == go(7) and go(7) != go(8)
