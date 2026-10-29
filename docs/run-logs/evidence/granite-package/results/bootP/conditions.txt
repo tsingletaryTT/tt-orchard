@@ -1,0 +1,4 @@
+start 2026-10-29T15:01:58-07:00 load 4.40 3.71 4.22 1/2415 1161813
+{"event": "ready", "model": "ibm-granite/granite-4.0-h-1b", "host": "127.0.0.1", "port": 20110, "context": 2048, "ssd": "composed", "traced": true, "ssd_precision": "fp32", "load_s": 2.5, "pid": 1161814}
+smoke rc=0 2026-10-29T15:02:52-07:00
+end 2026-10-29T15:02:53-07:00 load 3.45 3.56 4.13 1/2405 1165072
