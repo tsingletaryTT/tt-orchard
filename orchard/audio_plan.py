@@ -25,9 +25,18 @@ SAMPLE_RATE = 44100
 
 # Library registry names and the settings each is run with. The fine-tune is the post-trained 8-step model (ping-pong sampler, guidance scale 1);
 # its base is the control and needs the base's own settings (the audio design's section 5).
-LIBRARY_NAMES = {"stabilityai/stable-audio-3-small-music": "small-music", "stabilityai/stable-audio-3-small-music-base": "small-music-base"}
+SFX_PROMPT = "Futuristic laser blast, sharp energy pulse, stereo movement, arcade game"      # a sound-effects model gets a sound-effects prompt
+LIBRARY_NAMES = {"stabilityai/stable-audio-3-small-music": "small-music", "stabilityai/stable-audio-3-small-music-base": "small-music-base",
+                 "stabilityai/stable-audio-3-small-sfx": "small-sfx", "stabilityai/stable-audio-3-small-sfx-base": "small-sfx-base",
+                 "stabilityai/stable-audio-3-medium": "medium", "stabilityai/stable-audio-3-medium-base": "medium-base"}
+# Each model's cards give the same two recipes: the post-trained model 8 steps, ping-pong, scale 1; its base 50 steps, Euler, scale 7. `prompt` is optional
+# (the music prompt by default); a base is run with its model's prompt, because the control compares the two runs of one prompt.
 MODEL_SETTINGS = {"small-music": {"steps": 8, "cfg_scale": 1.0, "sampler": "pingpong"},
-                  "small-music-base": {"steps": 50, "cfg_scale": 7.0, "sampler": "euler"}}
+                  "small-music-base": {"steps": 50, "cfg_scale": 7.0, "sampler": "euler"},
+                  "small-sfx": {"steps": 8, "cfg_scale": 1.0, "sampler": "pingpong", "prompt": SFX_PROMPT},
+                  "small-sfx-base": {"steps": 50, "cfg_scale": 7.0, "sampler": "euler", "prompt": SFX_PROMPT},
+                  "medium": {"steps": 8, "cfg_scale": 1.0, "sampler": "pingpong"},
+                  "medium-base": {"steps": 50, "cfg_scale": 7.0, "sampler": "euler"}}
 
 ROLE_REFERENCE, ROLE_CONTROL_REFERENCE, ROLE_HOST = "reference", "control_reference", "host_same_env"
 ROLE_CHIP, ROLE_CONTROL_CHIP = "chip", "control_chip"
@@ -47,7 +56,7 @@ def library_name(repo) -> str | None:
 def settings_for(name: str) -> dict:
     """The recorded settings (audio_reference.MATCH_KEYS) of the run of library model `name`."""
     s = MODEL_SETTINGS[name]
-    return {"prompt": PROMPT, "duration": DURATION_S, "steps": s["steps"], "cfg_scale": s["cfg_scale"], "sampler": s["sampler"], "seed": SEED,
+    return {"prompt": s.get("prompt", PROMPT), "duration": DURATION_S, "steps": s["steps"], "cfg_scale": s["cfg_scale"], "sampler": s["sampler"], "seed": SEED,
             "sample_size": SAMPLE_SIZE}
 
 
@@ -148,15 +157,15 @@ REPEATS = resident.MIN_REPEATS          # measured runs of each model on the chi
 WARMUP = resident.WARMUP_RUNS           # discarded runs before them, in the same process, because the first call compiles kernels
 
 
-def write_chip_config(stage_dir, paths, hf_home: str, plan: list[dict], repeats: int = REPEATS, warmup: int = WARMUP) -> Path:
+def write_chip_config(stage_dir, paths, hf_home: str, plan: list[dict], repeats: int = REPEATS, warmup: int = WARMUP, chip_decoder: bool = False) -> Path:
     """`audio_chip_config.json`, the input of audio_chip_test.py: shared settings and one entry per run. Each model runs `repeats` times after `warmup`
     discarded runs, all in one process per model (audio_chip_test.py), with the same settings and seed, so the runs agree with one another and only
     their timings differ."""
-    runs = [{"name": repeat_name(item["name"], k), "model": item["name"],
+    runs = [{"name": repeat_name(item["name"], k), "model": item["name"], "prompt": settings_for(item["name"])["prompt"],
              **{key: MODEL_SETTINGS[item["name"]][key] for key in ("steps", "cfg_scale", "sampler")}}
             for item in plan for k in range(repeats)]
     cfg = {"prompt": PROMPT, "duration": DURATION_S, "seed": SEED, "sample_size": SAMPLE_SIZE, "src_dir": paths.src_dir, "hf_home": hf_home,
-           "out_dir": "chip", "repeats": repeats, "warmup": warmup, "runs": runs}
+           "out_dir": "chip", "repeats": repeats, "warmup": warmup, "chip_decoder": bool(chip_decoder), "runs": runs}
     path = Path(stage_dir) / CONFIG_FILE
     write_json(path, cfg)
     return path

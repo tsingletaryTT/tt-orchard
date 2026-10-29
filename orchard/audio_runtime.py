@@ -29,11 +29,13 @@ STAGE_DISK_GB = 3.0                          # free disk the audio stages need: 
 AUDIO_RUNTIME_SELECTED = "audio runtime selected"
 TEMPLATES = Path(__file__).with_name("skills") / "audio-chip-templates"
 CHIP_DIT = TEMPLATES / "chip_dit.py"
+CHIP_DECODER = TEMPLATES / "chip_decoder.py"
 CONFIG_MAX_BYTES = 1 << 20                  # the same bound the stage 0 detector uses for model_config.json
-SCRIPTS = ("chip_dit.py", "audio_runtimes.py", "chip_generate.py", "audio_chip_test.py")
+SCRIPTS = ("chip_dit.py", "chip_decoder.py", "audio_runtimes.py", "chip_generate.py", "audio_chip_test.py")
 REFERENCE_SCRIPT = Path(__file__).with_name("skills") / "audio-reference-templates" / "make_reference.py"
 
 _chip_dit = None
+_chip_decoder = None
 
 
 def chip_dit():
@@ -45,6 +47,28 @@ def chip_dit():
         spec.loader.exec_module(mod)
         _chip_dit = mod
     return _chip_dit
+
+
+def chip_decoder():
+    """The decoder template module (loaded by path, once). It imports nothing heavy at load time."""
+    global _chip_decoder
+    if _chip_decoder is None:
+        spec = importlib.util.spec_from_file_location("orchard_chip_decoder", CHIP_DECODER)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _chip_decoder = mod
+    return _chip_decoder
+
+
+def decoder_problems(model_dir) -> list[str]:
+    """Why the autoencoder decoder of the model in `model_dir` cannot run on the chip with the harness's decoder template, or [] when it can. The
+    decoder is optional: a model whose decoder is not supported still runs with the decoder on the host."""
+    path = (Path(model_dir) / "model_config.json").resolve()
+    try:
+        config = safeio.read_json(path, max_bytes=CONFIG_MAX_BYTES, expect=dict)
+    except (OSError, ValueError, safeio.SafeReadError) as exc:
+        return [f"model_config.json cannot be read: {exc}"]
+    return chip_decoder().config_problems(config)
 
 
 def runtime_problems(model_dir) -> list[str]:

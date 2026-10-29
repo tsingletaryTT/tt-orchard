@@ -212,6 +212,17 @@ def _sha256_of(path) -> str | None:
         return None
 
 
+def probe_chip(environ=None) -> str:
+    """The chip index the kernel probe's hardware phase leases (`gozer ... --chips 1 --exact N`): $ORCHARD_PROBE_CHIP, default 1.
+    Chip 1 is on board 0, where the coder container normally runs, so a probe beside the coder needs another chip. Raises ValueError for
+    anything but a plain number, so the value cannot become a gozer option. Standard library only: the wrapper runs as a script."""
+    env = os.environ if environ is None else environ
+    value = env.get("ORCHARD_PROBE_CHIP", "1")
+    if not (value.isascii() and value.isdigit()):
+        raise ValueError(f"ORCHARD_PROBE_CHIP must be a chip number such as 2, not {value!r}")
+    return value
+
+
 def run_wrapper(*, who: str, reason: str, wait_s: float, result_path, command: list[str], gozer: str = "gozer",
                 sh=None, spawn=None, now=time.time, out=None, pid: int | None = None,
                 expect_sha256: str | None = None, kernel_file: str | None = None,
@@ -234,7 +245,7 @@ def run_wrapper(*, who: str, reason: str, wait_s: float, result_path, command: l
     _write_atomic(result_path, rec)
     lease_id, ticket, status = None, None, 0
     try:
-        code, text, err = sh([gozer, "acquire", "--json", "--chips", "1", "--exact", "1", "--who", who, "--reason", reason,
+        code, text, err = sh([gozer, "acquire", "--json", "--chips", "1", "--exact", probe_chip(), "--who", who, "--reason", reason,
                               "--owner-pid", str(pid)], ACQUIRE_TIMEOUT_S)
         data = _json(text)
         grant = None

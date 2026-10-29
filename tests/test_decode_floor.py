@@ -311,3 +311,29 @@ def test_command_line_prints_a_floor_and_a_share_and_refuses_missing_bandwidth(c
     assert '"label": "estimate"' in out and "of an estimated floor" in out
     assert df.main([cfg, "--policy", "default=bf16"]) == 2          # no board and no bandwidth: refused
     assert df.main([cfg, "--board", "p300", "--policy", "default=int3"]) == 2
+
+
+def test_mamba_layers_are_priced_with_the_mamba_2_projections():
+    cfg = dict(DENSE, num_hidden_layers=2, layer_types=["mamba", "attention"], mamba_n_heads=4, mamba_d_head=16, mamba_d_state=8,
+               mamba_n_groups=1, mamba_d_conv=4)
+    # inner 4*16 = 64 ; conv channels 64 + 2*1*8 = 80 ; in_proj 64*(64 + 80 + 4) + conv 80*4 + out 64*64
+    mamba = 64 * (64 + 80 + 4) + 80 * 4 + 64 * 64
+    f = df.decode_floor(cfg, policy(), 1, 1.0)
+    assert f.by_group["attention"] == pytest.approx((mamba + 12288) * 2.0)
+
+
+def test_mamba_groups_widen_the_convolution_and_the_input_projection():
+    cfg = dict(DENSE, num_hidden_layers=1, layer_types=["mamba"], mamba_n_heads=4, mamba_d_head=16, mamba_d_state=8,
+               mamba_n_groups=2, mamba_d_conv=4)
+    # conv channels 64 + 2*2*8 = 96
+    mamba = 64 * (64 + 96 + 4) + 96 * 4 + 64 * 64
+    assert df.decode_floor(cfg, policy(), 1, 1.0).by_group["attention"] == pytest.approx(mamba * 2.0)
+
+
+def test_the_real_granite_hybrid_matches_the_checkpoints_parameter_count():
+    """Counted from the checkpoint's tensor shapes (466 tensors, 1,461,538,368 values): minus the norms (124,416) and the Mamba
+    A_log, D, dt_bias, norm and conv bias (36 * 6,544 = 235,584), which the floor leaves out as small, this is what one token reads
+    when the lm_head is the tied embedding. The floor has to land on it."""
+    f = df.decode_floor(mc.read_model_config(FIX / "granite-4.0-h-1b.json"), policy(), 1, 1.0)
+    assert f.active_params == 1_461_178_368
+    assert f.by_group["dense_mlp"] == pytest.approx(754_974_720 * 2.0)

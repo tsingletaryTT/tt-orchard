@@ -1611,7 +1611,10 @@ class Supervisor:
             else:
                 if not (resumed and (stage_dir / "test-result.json").is_file()):
                     plan = audio_plan.chip_plan(model_id, base_id)
-                    audio_plan.write_chip_config(stage_dir, paths, self.paths.hf_home, plan)
+                    # the decoder runs on the chip when the template implements this model's decoder; otherwise on the host, as before
+                    model_dir = self.inputs.get("model")
+                    on_chip = bool(model_dir) and not audio_runtime.decoder_problems(model_dir)
+                    audio_plan.write_chip_config(stage_dir, paths, self.paths.hf_home, plan, chip_decoder=on_chip)
                     command = audio_plan.chip_test_command(paths, stage_dir.resolve(), audio_runtime.TEMPLATES / "audio_chip_test.py")
                     try:
                         check_string(command, self.run_dir)

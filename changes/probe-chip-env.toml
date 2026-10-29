@@ -1,0 +1,4 @@
+target = "0.9.58"
+summary = "The kernel probe's hardware phase leases the chip named by ORCHARD_PROBE_CHIP (default 1), so it is not queued behind the coder."
+pr = 209
+kind = "fix"

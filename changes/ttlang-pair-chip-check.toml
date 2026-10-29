@@ -1,0 +1,3 @@
+target = "0.9.60"
+summary = "Chip check of the pinned simulator and the tt-lang light wheel pair: 17 of 20 kernels run on the chip"
+pr = 223

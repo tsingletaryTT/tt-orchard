@@ -199,7 +199,7 @@ def test_linear_attention_the_nearest_bundle_lacks_is_a_hazard():
 
 def test_mla_sparse_attention_and_hyper_connections_are_detected_from_config_keys():
     mla = cfg(kv_lora_rank=64, q_lora_rank=64, qk_nope_head_dim=32, qk_rope_head_dim=32, v_head_dim=32)
-    assert names(hz.scan_model_hazards(mla, CLEAN)) == {"mixer_multi_latent_attention_not_in_nearest"}
+    assert names(hz.scan_model_hazards(mla, CLEAN)) == {"mixer_multi_latent_attention_not_in_nearest", "mla_flash_decode_needs_core_grid"}
     sparse = cfg(index_topk=2048, index_n_heads=8, index_head_dim=128)
     assert names(hz.scan_model_hazards(sparse, CLEAN)) == {"mixer_sparse_attention_not_in_nearest"}
     hyper = cfg(hc_mult=4)
@@ -210,14 +210,26 @@ def test_a_null_mixer_key_does_not_count_as_that_mixer():
     """A nearest config with `kv_lora_rank: null` has no multi-latent attention and must not hide the hazard for a model that has it."""
     mla = cfg(kv_lora_rank=64, q_lora_rank=64, qk_nope_head_dim=32, qk_rope_head_dim=32, v_head_dim=32)
     null_nearest = cfg(kv_lora_rank=None, index_topk=None, hc_mult=None)
-    assert names(hz.scan_model_hazards(mla, null_nearest)) == {"mixer_multi_latent_attention_not_in_nearest"}
+    assert names(hz.scan_model_hazards(mla, null_nearest)) == {"mixer_multi_latent_attention_not_in_nearest", "mla_flash_decode_needs_core_grid"}
     assert hz.scan_model_hazards(null_nearest, null_nearest).facts["mixers"] == ["attention"]
 
 
 def test_each_mixer_hazard_names_its_detection_rule_and_a_check():
     mla = cfg(kv_lora_rank=64, q_lora_rank=64, qk_nope_head_dim=32, qk_rope_head_dim=32, v_head_dim=32)
-    (h,) = hz.scan_model_hazards(mla, CLEAN).hazards
+    (h,) = [x for x in hz.scan_model_hazards(mla, CLEAN).hazards if x.name.startswith("mixer_")]
     assert "kv_lora_rank" in h.why and h.stage2_check
+
+
+def test_multi_latent_attention_hits_the_flash_decode_core_grid_hazard_with_or_without_a_nearest_bundle():
+    """The flash multi-latent decode op fails at batch 1 with one latent head unless a program config limits the grid (issue 213). The hit needs no nearest bundle and
+    carries the latent width plus rope width and a check that tries the op with and without the config."""
+    mla = cfg(kv_lora_rank=64, q_lora_rank=64, qk_nope_head_dim=32, qk_rope_head_dim=32, v_head_dim=32)
+    for nearest in (None, CLEAN, mla):
+        got = {h.name: h for h in hz.scan_model_hazards(mla, nearest).hazards}
+        assert "mla_flash_decode_needs_core_grid" in got
+    h = got["mla_flash_decode_needs_core_grid"]
+    assert h.value == 96 and "SDPAProgramConfig" in h.stage2_check and "8 by 8" in h.stage2_check
+    assert "mla_flash_decode_needs_core_grid" not in names(hz.scan_model_hazards(CLEAN, None))
 
 
 def test_without_a_nearest_bundle_config_the_scan_says_so_and_skips_the_comparisons():
@@ -254,6 +266,7 @@ def test_every_table_entry_can_be_hit_by_some_config():
              linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=32, linear_value_head_dim=32,
              kv_lora_rank=8, qk_nope_head_dim=8, qk_rope_head_dim=8, v_head_dim=8, index_topk=8, hc_mult=4), CLEAN,
          {"limits": {"router_top_k_max": 4, "kv_heads_max": 1, "sliding_window_layers_max": 1}, "tile_multiples": {"hidden_size": 8}}),
+        (cfg(num_hidden_layers=2, layer_types=["mamba", "attention"], mamba_n_heads=4, mamba_d_head=32, mamba_d_state=16), CLEAN, {}),
     ]
     for model, nearest, kw in probes:
         hit |= {h.name for h in hz.scan_model_hazards(model, nearest, **kw).hazards}
@@ -294,3 +307,15 @@ def test_command_line_prints_the_record_and_refuses_a_bad_file(capsys, tmp_path)
     assert rc == 0 and out["hazards"][0]["name"] == "routed_experts_above_256"
     assert hz.main([str(tmp_path / "missing.json")]) == 2
     assert "hazards:" in capsys.readouterr().out
+
+
+def test_mamba_the_nearest_bundle_lacks_is_a_hazard():
+    mamba = cfg(num_hidden_layers=2, layer_types=["mamba", "attention"], mamba_n_heads=4, mamba_d_head=32, mamba_d_state=16)
+    assert names(hz.scan_model_hazards(mamba, CLEAN)) == {"mixer_mamba_not_in_nearest"}
+    assert names(hz.scan_model_hazards(mamba, mamba)) == set()
+
+
+def test_the_real_granite_hybrid_is_scanned_and_its_mixer_named():
+    granite = mc.read_model_config(FIX / "granite-4.0-h-1b.json")
+    s = hz.scan_model_hazards(granite, CLEAN)
+    assert "mixer_mamba_not_in_nearest" in names(s) and s.facts["mixers"] == ["attention", "mamba"]

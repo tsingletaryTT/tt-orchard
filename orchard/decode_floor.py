@@ -130,12 +130,24 @@ def _mlp_params(d: mc.ModelDims, width: int) -> int:
 PLAIN_MIXERS = ("full_attention", "sliding_attention", "attention")
 
 
+def _mamba_params(d: mc.ModelDims) -> int:
+    """Mamba-2 mixer (Granite-4.0-H): the input projection (gate, the x, B and C channels, one dt per head), the depthwise convolution
+    over the x, B and C channels, and the output projection. A_log, D, dt_bias, the gated norm and the conv bias are small and left out,
+    like the other norms and biases."""
+    m = d.mamba
+    inner = m["heads"] * m["head_dim"]
+    conv_dim = inner + 2 * m["groups"] * m["state"]
+    return d.hidden * (inner + conv_dim + m["heads"]) + conv_dim * m["conv_kernel"] + inner * d.hidden
+
+
 def _mixer_params(d: mc.ModelDims, kind: str) -> int:
     if kind == "linear_attention":
         return _linear_params(d)
+    if kind == "mamba":
+        return _mamba_params(d)
     if kind in PLAIN_MIXERS:
         return _mla_params(d) if d.mla else _attention_params(d)
-    raise FloorInputError(f"the layer type {kind!r} is not one the floor can count (known: linear_attention, {', '.join(PLAIN_MIXERS)})")
+    raise FloorInputError(f"the layer type {kind!r} is not one the floor can count (known: linear_attention, mamba, {', '.join(PLAIN_MIXERS)})")
 
 
 @dataclass(frozen=True)
@@ -216,7 +228,7 @@ def decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s, *, bo
                "tied_embeddings": d.tied_embeddings, "mlp_projections": d.mlp_projections, "attn_output_gate": d.attn_output_gate,
                "layer_types": kinds, "moe_layers": list(d.moe_layers), "routed_experts": d.routed_experts,
                "experts_per_token": d.top_k, "moe_intermediate_size": d.moe_intermediate,
-               "shared_intermediate_size": d.shared_intermediate, "linear_attention": dict(d.linear),
+               "shared_intermediate_size": d.shared_intermediate, "linear_attention": dict(d.linear), "mamba": dict(d.mamba),
                "multi_latent_attention": dict(d.mla)}
     return DecodeFloor(bytes_per_token=total, by_group=by_group, active_params=sum(active.values()), stored_params=stored,
                        floor_ms=floor_ms, floor_tok_s=1000.0 / floor_ms, dies=dies, per_die_bandwidth_gb_s=bw, dtype_policy=policy,
