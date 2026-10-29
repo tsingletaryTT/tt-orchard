@@ -39,12 +39,12 @@ PACKAGE_NAME = "granite-4.0-h-1b-blackhole"
 PORT = 20110
 ROOT = Path(__file__).resolve().parent.parent
 SRC_FILES = (("pkgsrc/runtime/granite_chip.py", "runtime/granite_chip.py"), ("pkgsrc/server/serve.py", "server/serve.py"),
-             ("pkgsrc/tools/evaluate.py", "tools/evaluate.py"))
+             ("pkgsrc/tools/evaluate.py", "tools/evaluate.py"), ("pkgsrc/tools/smoke.py", "tools/smoke.py"))
 KERNEL_FILES = (("docs/run-logs/evidence/granite-readout-pair/kernels/state.py", "runtime/kernels/state.py"),
                 ("docs/run-logs/evidence/granite-readout-pair/kernels/readout.py", "runtime/kernels/readout.py"),
                 ("docs/run-logs/evidence/granite-repeat-trace/port2/bcast_kernel_attempt8.py", "runtime/kernels/bcast.py"))
 REQUIRED = ("README.md", "LICENSE", "NOTICE", "tt-model.yaml", "run.sh", "requirements.txt", "package-record.json", "evidence/summary.json",
-            "runtime/granite_chip.py", "server/serve.py", "tools/evaluate.py") + tuple(d for _, d in KERNEL_FILES)
+            "runtime/granite_chip.py", "server/serve.py", "tools/evaluate.py", "tools/smoke.py") + tuple(d for _, d in KERNEL_FILES)
 RECORDED = ("LICENSE", "NOTICE", "evidence/summary.json")
 FORBIDDEN_TEXT = (".tt_ai_key", "litellm", "HF_TOKEN=", "Authorization: Bearer", "TT_AI_KEY")
 CARD_SECTIONS = ("## Weights are not included", "## Try it", "## API", "## Numbers", "## Agreement with the CPU reference", "## Context and prefill",
@@ -122,7 +122,7 @@ def render_card(s: dict, license_text: str) -> str:
              "```bash", f"curl -s http://127.0.0.1:{PORT}/v1/chat/completions -H 'Content-Type: application/json' \\",
              "  -d '{\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France?\"}],\"max_tokens\":32}'", "```", "",
              "## Numbers", "",
-             f"Measured on one chip of a Blackhole p300c board (chip 2 of the board) with the pinned weights, on a host shared with other jobs. {s['numbers_note']} "
+             f"Measured on one chip of a Blackhole p300c board with the pinned weights, on a host shared with other jobs. {s['numbers_note']} "
              "A label states how many runs are behind a number.", "",
              "| Number | Value | Label | Evidence |", "| --- | --- | --- | --- |", *number_rows(s), "",
              "## Agreement with the CPU reference", "",
@@ -132,7 +132,7 @@ def render_card(s: dict, license_text: str) -> str:
              "Columns list prompts 0 to 3.", "",
              "| Run | Relative L2, mean | Top-1 | First difference at token |", "| --- | --- | --- | --- |", *agreement_rows(s), "",
              f"{s['agreement_note']}", "",
-             "A 1,024-token natural-language sequence (the first 1,024 tokens of the model's own card), teacher forced, against fp32 on the CPU:", "",
+             f"One {s['long']['tokens']}-token natural-language sequence, teacher forced, against fp32 on the CPU:", "",
              "| Run | Relative L2, mean | Relative L2, max | Top-1 |", "| --- | --- | --- | --- |", *long_rows(s), "",
              f"{s['long_note']}", "",
              "## Context and prefill", "",
@@ -151,7 +151,7 @@ def render_card(s: dict, license_text: str) -> str:
              "The code in this package is Tenstorrent's, also under the Apache License 2.0. `LICENSE` is the Apache License 2.0 text and `NOTICE` names the parties.", "",
              "## Provenance", "",
              f"- Model: {MODEL_ID}, revision `{REVISION}`; weights are not part of this package.",
-             "- `runtime/granite_chip.py`, `server/serve.py` and `tools/evaluate.py` come from the tt-orchard repository (tsingletaryTT/tt-orchard).",
+             "- `runtime/granite_chip.py`, `server/serve.py`, `tools/evaluate.py` and `tools/smoke.py` come from the tt-orchard repository (tsingletaryTT/tt-orchard).",
              "- `runtime/kernels/` holds three tt-lang kernels written by a local coder model and used unchanged. Their hashes are in `package-record.json`.",
              "- `tt-model.yaml` is a draft v5.1 manifest of kind `http-server`. It has not been built into an image, and this package has not been listed in the tt-model catalog.",
              "- Every number on this card comes from `evidence/summary.json`, which is built from the raw result files beside it.", ""]
