@@ -204,3 +204,44 @@ def test_read_model_config_refuses_a_huge_file(tmp_path):
     (tmp_path / "big.json").write_bytes(b'{"a": "' + b"x" * (mc.MAX_CONFIG_BYTES + 10) + b'"}')
     with pytest.raises(mc.ModelConfigError):
         mc.read_model_config(tmp_path / "big.json")
+
+
+# ---- dense hybrids with a zero expert count, and Mamba-2 mixers (Granite-4.0-H) -----------------------------------
+
+MAMBA_KEYS = {"mamba_n_heads": 4, "mamba_d_head": 16, "mamba_d_state": 8, "mamba_n_groups": 1, "mamba_d_conv": 4}
+
+
+def test_a_zero_expert_count_means_a_dense_model():
+    """Granite-4.0-H writes `num_local_experts: 0` and `num_experts_per_tok: 0` for its dense sizes. That says there are no experts."""
+    d = mc.dims(dense(num_local_experts=0, num_experts_per_tok=0))
+    assert (d.routed_experts, d.top_k, d.moe_intermediate, d.moe_layers) == (0, 0, 0, (False, False))
+
+
+def test_a_dense_granite_hybrid_takes_its_mlp_width_from_shared_intermediate_size():
+    """Its only MLP is the `shared_mlp`, sized by `shared_intermediate_size`; the model does not read `intermediate_size`."""
+    d = mc.dims(dense(model_type="granitemoehybrid", intermediate_size=128, shared_intermediate_size=192, num_local_experts=0))
+    assert d.intermediate == 192
+
+
+def test_granite_moe_counts_its_shared_mlp_beside_the_routed_experts():
+    d = mc.dims(dense(model_type="granitemoehybrid", intermediate_size=32, shared_intermediate_size=96, num_local_experts=8,
+                      num_experts_per_tok=2))
+    assert (d.routed_experts, d.moe_intermediate, d.shared_intermediate) == (8, 32, 96)
+
+
+def test_mamba_layers_carry_their_shape():
+    d = mc.dims(dense(layer_types=["mamba", "attention"], **MAMBA_KEYS))
+    assert d.mamba == {"heads": 4, "head_dim": 16, "state": 8, "groups": 1, "conv_kernel": 4}
+    assert mc.dims(dense()).mamba == {}
+
+
+def test_mamba_layers_need_their_shape_keys():
+    with pytest.raises(mc.ModelConfigError, match="mamba_n_heads"):
+        mc.dims(dense(layer_types=["mamba", "attention"]))
+
+
+def test_the_real_granite_fixture_normalises():
+    d = mc.dims(mc.read_model_config(FIX / "granite-4.0-h-1b.json"))
+    assert (d.hidden, d.layers, d.vocab, d.routed_experts, d.intermediate) == (1536, 40, 100352, 0, 4096)
+    assert d.layer_types.count("mamba") == 36 and d.layer_types.count("attention") == 4
+    assert d.mamba == {"heads": 48, "head_dim": 64, "state": 128, "groups": 1, "conv_kernel": 4}
