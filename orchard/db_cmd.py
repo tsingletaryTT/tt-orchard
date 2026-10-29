@@ -272,29 +272,6 @@ def _terminal_ask(question):
     return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
 
 
-def _selection_flags(args, directory, scope, accept) -> str:
-    """The options that make a command act on the ledger that was checked: the directory (always, as resolved here), the config
-    selectors the caller passed, the scope, and the count of unreadable lines that was accepted."""
-    parts = [f"--dir {shlex.quote(str(directory))}"]
-    for flag, attr in (("--telegraph-config", "telegraph_config"), ("--config", "config")):
-        if getattr(args, attr, None):
-            parts.append(f"{flag} {shlex.quote(str(getattr(args, attr)))}")
-    if scope != ts.DEFAULT_SCOPE:
-        parts.append(f"--scope {shlex.quote(scope)}")
-    if accept is not None:
-        parts.append(f"--accept-malformed {accept}")
-    return " ".join(parts)
-
-
-def _ledger_identity(directory):
-    """What identifies the ledger file the dry run read: (device, inode, size, modification time), or None when it is not a plain file."""
-    try:
-        st = os.lstat(os.path.join(os.fspath(directory), ts.LEDGER))
-    except OSError:
-        return None
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) if stat.S_ISREG(st.st_mode) else None
-
-
 def _lock_text(directory) -> str:
     return (f"db migrate: another process holds {ts.LOCK} in {directory} (a tt-orchard process or an old writer is running); "
             "stop it and run this again. Nothing was changed.")
@@ -305,8 +282,11 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
     changed: a directory that is not an unmigrated one, a lock held by another process (before the question and again after it),
     a dry run that fails or has any check that is different, an answer that is not a yes, and no terminal to ask at."""
     ask = _terminal_ask if ask is None else ask
-    flags = _selection_flags(args, directory, scope, accept)
-    waiting = tn.state_of(directory, flags=tn.flags_from_args(args) or f"--dir {shlex.quote(str(directory))}")
+    # Every option that changes what a command does is carried: the directory as resolved here, the config selectors, the scope, and
+    # (for `db migrate` only) the accepted count.
+    flags = tn.with_dir(tn.flags_from_args(args), directory)
+    extra = tn.migrate_flags_from_args(args)
+    waiting = tn.state_of(directory, flags=flags, migrate_flags=extra)
     if waiting is None or waiting.kind != tn.UNMIGRATED:
         say("db migrate: " + (waiting.text() if waiting is not None else
                               f"there is no {ts.LEDGER} in {directory}, so there is nothing to move"))
@@ -314,7 +294,7 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
     if mig.lock_is_held(directory):
         say(_lock_text(directory))
         return EXIT_PROBLEM
-    checked = _ledger_identity(directory)
+    checked = mig.input_fingerprint(directory)
     code = _migrate_once(directory, scope, cfg, args, say, accept, dry_run=True)
     if code != EXIT_OK:                                       # a refusal, an unreadable ledger or a check that is different
         say("The migration was not started. Nothing was changed.")
@@ -324,7 +304,7 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
     answer = ask(question)
     if answer is None:
         say("db migrate: --dry-run-first asks for a yes and there is no terminal to ask at. Run "
-            f"`{tn.DRY_RUN} {flags}` and then `{tn.MIGRATE} {flags}` yourself. Nothing was changed.")
+            f"`{waiting.commands[0]}` and then `{waiting.commands[1]}` yourself. Nothing was changed.")
         return EXIT_PROBLEM
     if not answer:
         say("Not confirmed. Nothing was changed.")
@@ -332,10 +312,10 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
     if mig.lock_is_held(directory):                           # a process started while the question was open
         say(_lock_text(directory))
         return EXIT_PROBLEM
-    if checked is None or _ledger_identity(directory) != checked or (waiting := tn.state_of(directory)) is None or waiting.kind != tn.UNMIGRATED:
+    if checked is None or mig.input_fingerprint(directory) != checked or (waiting := tn.state_of(directory)) is None or waiting.kind != tn.UNMIGRATED:
         # The file the checks described is not the file that is there now (it was appended to, replaced or removed while the question
         # was open). The checks no longer describe what would be moved, so nothing runs; a new dry run is needed.
-        say(f"db migrate: {ts.LEDGER} in {directory} changed while the question was open, so the checks above no longer describe it. "
+        say(f"db migrate: {ts.LEDGER} in {directory} or one of its inputs (a sidecar or a cache entry) changed while the question was open, so the checks above no longer describe it. "
             "Run this again. Nothing was changed.")
         return EXIT_PROBLEM
 
@@ -345,7 +325,7 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
         # The migration holds telegraph.lock from here on. It would resume a half-finished migration without asking, so a marker that
         # appeared after the question is refused here too, as is a ledger file that is not the one the checks described.
         again = tn.state_of(directory)
-        if _ledger_identity(directory) != checked or again is None or again.kind != tn.UNMIGRATED:
+        if mig.input_fingerprint(directory) != checked or again is None or again.kind != tn.UNMIGRATED:
             raise mig.MigrationRefused(f"{ts.LEDGER} or the directory changed after the checks were made (seen under the lock), so they "
                                        "no longer describe it; run this again. Nothing was changed")
     return _migrate_once(directory, scope, cfg, args, say, accept, dry_run=False, hook=still_the_checked_file)

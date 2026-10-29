@@ -96,17 +96,21 @@ def _names(directory) -> dict:
     return out
 
 
-def state_of(directory, *, flags: str = "") -> Notice | None:
-    """The notice for a chosen directory, or None when it needs nothing. `flags` is text added to each command (for example
-    `--dir /path`) so the commands act on the directory the caller used."""
+def state_of(directory, *, flags: str = "", migrate_flags: str = "") -> Notice | None:
+    """The notice for a chosen directory, or None when it needs nothing.
+
+    `flags` is text added to every command of the notice (for example `--dir /path --config c.toml --scope team`): each option that
+    changes which ledger a command acts on or how. `migrate_flags` is added to the `db migrate` commands only (`--accept-malformed N`,
+    which the other `db` commands do not take)."""
     kind = _kind_of(_names(directory))
     if kind is None:
         return None
-    return _notice(kind, str(directory), (" " + flags.strip()) if flags.strip() else "")
+    pad = lambda text: (" " + text.strip()) if text.strip() else ""             # noqa: E731
+    return _notice(kind, str(directory), pad(flags), pad(migrate_flags))
 
 
-def _notice(kind: str, where: str, flags: str) -> Notice:
-    dry, run, guided = DRY_RUN + flags, MIGRATE + flags, GUIDED + flags
+def _notice(kind: str, where: str, flags: str, migrate_flags: str = "") -> Notice:
+    dry, run, guided = DRY_RUN + flags + migrate_flags, MIGRATE + flags + migrate_flags, GUIDED + flags + migrate_flags
     if kind == UNMIGRATED:
         return Notice(
             kind, where,
@@ -124,7 +128,7 @@ def _notice(kind: str, where: str, flags: str) -> Notice:
             (f"Directory: {where}",
              "Telegraph calls are refused until it finishes, and nothing is sent.",
              "The command resumes where it stopped. Stop any running tt-orchard process first. If the earlier run used a scope "
-             "other than default, add `--scope <that scope>`; the command names it when it is missing.",
+             "other than default, the command needs `--scope <that scope>`; it names the scope when it is missing.",
              "Nothing is deleted: the old file is kept as telegraph.jsonl.archived, and a backup of the new database is taken at the end."),
             (run,))
     if kind == LOST_DATABASE:
@@ -152,7 +156,8 @@ def _notice(kind: str, where: str, flags: str) -> Notice:
         (status,))
 
 
-def telegraph_state_notice(config, *, directory=None, environ=None, home=None, flags: str = "") -> Notice | None:
+def telegraph_state_notice(config, *, directory=None, environ=None, home=None, flags: str = "",
+                           migrate_flags: str = "") -> Notice | None:
     """The notice for the Telegraph state directory of `config` (a `telegraph.Config`), or None.
 
     The directory is chosen as `tt-orchard telegraph` chooses it: `directory` (the `--dir` flag), else `config.dir`, else
@@ -175,11 +180,13 @@ def telegraph_state_notice(config, *, directory=None, environ=None, home=None, f
         # A command pasted from the notice resolves its own directory (its config, its environment). When this one did not come from
         # the home default, the commands name it, so they act on the ledger the notice is about.
         flags = f"{flags} --dir {shlex.quote(str(chosen))}".strip()
-    return state_of(chosen, flags=flags)
+    return state_of(chosen, flags=flags, migrate_flags=migrate_flags)
 
 
 def flags_from_args(args) -> str:
-    """The flags of a command line that choose the directory or the config, as text to add to the commands of a notice.
+    """The options of a command line that choose the ledger, as text to add to every command of a notice: `--dir`,
+    `--telegraph-config`, `--config` and a `--scope` other than the default. (`--accept-malformed` is in `migrate_flags_from_args`:
+    only `db migrate` takes it.)
 
     Every selector the caller passed is carried. A config that was not named is found again by the pasted command in the same way
     (`$ORCHARD_BRINGUP_CONFIG`, the checkout, the home folder), and `telegraph_state_notice` adds `--dir` whenever the directory it
@@ -189,4 +196,26 @@ def flags_from_args(args) -> str:
         value = getattr(args, attr, None)
         if value:
             parts += [flag, shlex.quote(str(value))]
+    scope = getattr(args, "scope", None)
+    if scope and scope != ts.DEFAULT_SCOPE:
+        parts += ["--scope", shlex.quote(str(scope))]
     return " ".join(parts)
+
+
+def migrate_flags_from_args(args) -> str:
+    """The options only `db migrate` takes: the count of unreadable lines a person accepted."""
+    accept = getattr(args, "accept_malformed", None)
+    return f"--accept-malformed {int(accept)}" if accept is not None else ""
+
+
+def with_dir(flags: str, directory) -> str:
+    """`flags` with `--dir <directory>` added when it names no directory yet."""
+    if "--dir" in shlex.split(flags):
+        return flags
+    return f"{flags} --dir {shlex.quote(str(directory))}".strip()
+
+
+def display_quote(shown: str) -> str:
+    """A value for a command that is shown on a page after redaction: shell-quoted, except that a leading `~/` stays outside the
+    quotes so that a shell expands it."""
+    return "~/" + shlex.quote(shown[2:]) if shown.startswith("~/") else shlex.quote(shown)

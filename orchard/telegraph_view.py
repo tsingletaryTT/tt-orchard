@@ -416,7 +416,7 @@ def _meter(state: str, spend: str, calls: int, cap_text: str, reason: str | None
     if state == "off":
         text = "Helper: off"
     elif state == "problem" and error and migration and migration.get("kind") in ("unmigrated", "half-finished"):
-        text = "Helper: run `tt-orchard db migrate telegraph` · spend unknown"       # the full commands are in the title and the page
+        text = "Helper: ledger needs moving · spend unknown"       # the commands, with every option, are in the title and the page
     elif state == "problem" and error:
         text = "Helper: ledger unreadable · spend unknown"        # nothing was read, so no amount and no count is shown
     elif state == "problem":
@@ -479,6 +479,8 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
     else:
         cap_text = _cap_phrase(closest) if closest else ""
     migration = migration if not problem else None
+    if migration and error:
+        error = migration["summary"]         # the store's own message carries bare commands; the summary has the ones with every option
     meter = _meter(state, _spend_text(acct["cost"], acct["unknown_cost"]), acct["calls"], cap_text, reason, key, error, migration)
     if migration and state == "problem" and error:
         meter["title"] = f"{meter['text']}. {migration['summary']} Click for details."

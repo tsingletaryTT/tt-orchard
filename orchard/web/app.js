@@ -436,6 +436,14 @@ function tgRow(cells, tone) {
   return tr;
 }
 
+// What the "Spend" number says about a ledger that needs a person to act. The wording follows the state, so a ledger that was already
+// moved is never told to move first (orchard/telegraph_notice.py has the commands, shown in the banner above).
+function migrationNote(kind) {
+  if (kind === "unmigrated") return "the ledger has to be moved first";
+  if (kind === "half-finished") return "the move has to be finished first";
+  return "the ledger was not read; see the steps above";
+}
+
 function renderTelegraph() {
   const t = S.telegraph;
   if (!t) return;
@@ -468,7 +476,7 @@ function renderTelegraph() {
   const num = (k, v, note) => h("div", { class: "tg-num" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v), note ? h("span", { class: "muted small" }, note) : null);
   if (t.error) {
     // Nothing could be read, so no number is shown: a row of zeros would look like a spend of nothing.
-    clear($("tg-numbers")).append(num("Spend", "unknown", t.migration ? "the ledger has to be moved first" : t.error), num("Calls counted", "unknown", "the ledger was not read"));
+    clear($("tg-numbers")).append(num("Spend", "unknown", t.migration ? migrationNote(t.migration.kind) : t.error), num("Calls counted", "unknown", "the ledger was not read"));
   } else clear($("tg-numbers")).append(
     num("Spend", spendText(t.spend), t.spend.unknown_cost ? `${plural(t.spend.unknown_cost, "call")} with no known cost` : "known costs; reservations at their worst case"),
     num("Calls counted", String(t.spend.calls), `${s.calls} sent and recorded · ${s.ok} answered`),

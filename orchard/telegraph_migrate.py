@@ -353,6 +353,35 @@ def _take_old_lock(dir_fd: int, timeout_s: float = 30.0) -> int:
         raise
 
 
+def input_fingerprint(directory):
+    """What identifies every input of a migration, for a caller that checks once and migrates later: the ledger file, each
+    `telegraph.jsonl.torn-*` sidecar (an orphan one is counted as a torn call of unknown size) and every entry of `cache/` (each one is
+    imported as an answer). Each entry is (name, device, inode, size, modification time) from `lstat`, nothing is read or followed.
+    None when the ledger is not a plain file (there is nothing the checks could describe)."""
+    root = os.fspath(directory)
+
+    def one(path, name):
+        st = os.lstat(path)
+        return (name, stat.S_IFMT(st.st_mode), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+    try:
+        ledger = one(os.path.join(root, ts.LEDGER), ts.LEDGER)
+        if not stat.S_ISREG(ledger[1]):
+            return None
+        items = [ledger]
+        with os.scandir(root) as it:
+            names = sorted(e.name for e in it if e.name.startswith(SIDECAR_PREFIX) or e.name == "cache")
+        for name in names:
+            items.append(one(os.path.join(root, name), name))
+        if "cache" in names and stat.S_ISDIR(items[-1][1]):
+            with os.scandir(os.path.join(root, "cache")) as it:
+                inner = sorted(e.name for e in it)
+            items += [one(os.path.join(root, "cache", n), "cache/" + n) for n in inner]
+        return tuple(items)
+    except OSError:
+        return None
+
+
 def lock_is_held(directory) -> bool:
     """True when another process holds `telegraph.lock` (the lock the old writers take and the migration takes). It only looks: an
     absent lock file is not created, a link is not followed, and a lock that was free is released again at once."""

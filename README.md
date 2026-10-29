@@ -1916,7 +1916,7 @@ type, once, near the top of its output (see "The notice" below). `--dir` can be 
 `tt-orchard db migrate telegraph --dry-run-first` does both steps with one confirmation. It runs the dry run and prints the checks. It stops
 there, with nothing changed, when any check is different, when the ledger cannot be checked, when the directory is not an unmigrated one
 (already moved, half moved, or no `telegraph.jsonl`), or when another process holds `telegraph.lock`. When every check is equal it asks
-once, `[y/N]`, at a terminal. A no, no terminal, a lock taken while the question was open, or a `telegraph.jsonl` that was appended to, replaced, removed or joined by a migration marker while the question was open (the checks no longer describe it) also stops it with nothing changed. The file is compared once more under `telegraph.lock`, after the migration takes it. A yes runs the
+once, `[y/N]`, at a terminal. A no, no terminal, a lock taken while the question was open, or any migration input (`telegraph.jsonl`, a `telegraph.jsonl.torn-*` sidecar, an entry of `cache/`) or the directory state that changed while the question was open (including a new migration marker) (the checks no longer describe it) also stops it with nothing changed. The file is compared once more under `telegraph.lock`, after the migration takes it. A yes runs the
 real migration described below. `--accept-malformed N` is passed to both steps. `--dry-run` and `--dry-run-first` cannot be combined. The
 existing commands are unchanged.
 
@@ -1938,16 +1938,20 @@ used ledger leaves). Telegraph switched off still gets the notice when its direc
 `tt-orchard telegraph`. The commands act on the ledger the notice is about: in the terminal they carry `--dir` when the directory did not come from the
 home default or the caller passed it (the web page always carries `--dir`), and `--config` and `--telegraph-config` when the caller passed them. A config that was not named is found again by the pasted command in the same way, and the
 `--dir` rule above keeps the commands on the same ledger whichever config they find. The guided command's refusals and
-its no-terminal fallback also carry `--scope` and `--accept-malformed`. The web page shows the path redacted and leaves a leading `~`
-outside the quotes so that a shell expands it. The top-bar meter names `db migrate telegraph` only for the unmigrated and half-finished
-states.
+its no-terminal fallback also carry `--scope` and, on `db migrate` commands only, `--accept-malformed`. The web page also names the config it
+was started with (the path only, redacted and shell-quoted, never its contents), because recovery counts a torn record at that config's
+`max_output_tokens`. It shows the paths redacted and leaves a leading `~` outside the quotes so that a shell expands it. The top-bar meter says
+the ledger needs moving only for the unmigrated and half-finished states; for the other two its title carries the restore or reconcile steps.
+A table test (`tests/test_telegraph_notice_table.py`) checks every command of every state on every surface. Each option that changes what the
+command does is carried (`--dir`, `--config`, `--telegraph-config`, `--scope`, and `--accept-malformed` on `db migrate` only). A moved ledger is
+never told to migrate, and a half-finished migration is never told to start with a dry run.
 
 Where it is shown:
 
 - `tt-orchard bringup`, once before the preflight page (a dry run too). It warns and never stops a run; a helper question during the run is
   refused until the ledger is moved.
 - `tt-orchard ui`, in the startup log after the address, and in the Telegraph panel as a banner with the commands. The top-bar meter says
-  `Helper: run tt-orchard db migrate telegraph · spend unknown`. `GET /api/telegraph` carries a `migration` object (`kind`, `summary`, `lines`,
+  `Helper: ledger needs moving · spend unknown` for the first two states (the title and the banner carry the commands). `GET /api/telegraph` carries a `migration` object (`kind`, `summary`, `lines`,
   `commands`), or `null`, with the directory path redacted like the rest of the page.
 - `tt-orchard spend`, first in the text output. With `--json` the same object is `real_helper_spend.migration`; the two top-level keys are
   unchanged.

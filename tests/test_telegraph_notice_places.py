@@ -135,9 +135,11 @@ def test_the_panel_carries_the_notice_with_the_exact_commands_and_the_meter_says
     out = app_for(root, panel_cfg(d), environ={"TG_KEY": "k3y-VALUE-0123456789abcdef"}).telegraph()
     m = out["migration"]
     assert m["kind"] == "unmigrated"
-    assert m["commands"] == [f"tt-orchard db migrate telegraph --dry-run --dir {d}", f"tt-orchard db migrate telegraph --dir {d}"]
+    cfgp = app_for(root, panel_cfg(d)).config_path
+    assert m["commands"] == [f"tt-orchard db migrate telegraph --dry-run --dir {d} --config {cfgp}",
+                             f"tt-orchard db migrate telegraph --dir {d} --config {cfgp}"]
     assert m["summary"].startswith("Run `tt-orchard db migrate telegraph --dry-run --dir ") and any("Nothing is deleted" in line for line in m["lines"])
-    assert "db migrate telegraph" in out["meter"]["text"] and "spend unknown" in out["meter"]["text"]
+    assert out["meter"]["text"] == "Helper: ledger needs moving · spend unknown"
     assert "Run `tt-orchard db migrate telegraph --dry-run" in out["meter"]["title"]
     assert out["error"].startswith("Run `")                  # the first words of the old message now say what to do
     assert snapshot(d) == before
@@ -250,16 +252,16 @@ def test_the_panel_commands_name_the_directory_redacted_and_quoted_for_a_shell(r
     app.home = str(tmp_path)
     app.redact = lambda t: str(t).replace(str(tmp_path), "~")
     m = app.telegraph()["migration"]
-    assert m["commands"][0] == "tt-orchard db migrate telegraph --dry-run --dir ~/'my ledger'"
+    assert m["commands"][0] == "tt-orchard db migrate telegraph --dry-run --dir ~/'my ledger' --config ~/orchard-runs/bringup.toml"
 
 
 def test_the_panel_commands_name_the_directory_even_when_it_is_the_home_default(root, tmp_path):
     d = old_ledger(tmp_path / "home" / ".cache" / "tt-orchard" / "telegraph")
     app = app_for(root, tg.Config())                       # telegraph off, so the directory is the home default
     app.home = str(tmp_path / "home")
-    app.redact = lambda t: str(t).replace(str(tmp_path / "home"), "~")
+    app.redact = lambda t: str(t).replace(str(tmp_path / "home"), "~").replace(str(tmp_path), "<tmp>")
     m = app.telegraph()["migration"]
-    assert m["commands"][0] == "tt-orchard db migrate telegraph --dry-run --dir ~/.cache/tt-orchard/telegraph"
+    assert m["commands"][0] == "tt-orchard db migrate telegraph --dry-run --dir ~/.cache/tt-orchard/telegraph --config '<tmp>/orchard-runs/bringup.toml'"
     assert str(tmp_path) not in json.dumps(m)
 
 
@@ -270,3 +272,21 @@ def test_the_meter_does_not_tell_a_lost_database_or_an_old_writer_to_migrate(roo
     out = app_for(root, panel_cfg(d)).telegraph()
     assert out["migration"]["kind"] == "lost-database" and "db migrate" not in out["meter"]["text"]
     assert "db status" in out["meter"]["title"]
+
+
+def test_the_page_names_the_config_it_was_started_with_quoted_and_redacted_and_never_its_contents(root, tmp_path):
+    d = old_ledger(tmp_path / "ledger")
+    app = app_for(root, panel_cfg(d))
+    app.config_path = tmp_path / "my configs" / "custom.toml"
+    app.redact = lambda t: str(t).replace(str(tmp_path), "~")
+    blob = json.dumps(app.telegraph()["migration"])
+    assert "--config ~/'my configs/custom.toml'" in blob and str(tmp_path) not in blob
+
+
+def test_the_spend_number_says_what_the_state_needs_and_never_tells_a_moved_ledger_to_move_first():
+    js = (Path(__file__).resolve().parents[1] / "orchard" / "web" / "app.js").read_text()
+    body = js[js.index("function migrationNote(kind)"):js.index("function renderTelegraph")]
+    assert '"unmigrated"' in body and "has to be moved first" in body and '"half-finished"' in body
+    fallback = body[body.index('"half-finished"'):]
+    assert "moved first" not in fallback.split("return")[-1]                 # the line every other state reaches
+    assert "migrationNote(t.migration.kind)" in js and "has to be moved first\" : t.error" not in js

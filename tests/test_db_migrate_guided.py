@@ -270,3 +270,83 @@ def test_a_marker_written_just_before_the_migration_is_not_resumed_through_the_g
     code, text = guided(d, tmp_path, ask=Asker(True))
     assert code == 2 and "under the lock" in text
     assert (d / "telegraph.jsonl").is_file() and not (d / "telegraph.jsonl.archived").exists() and not (d / "project.db").exists()
+
+
+def test_the_half_finished_refusal_carries_the_scope_and_the_accepted_count_in_its_resume_command(tmp_path, spy):
+    d = make(tmp_path)
+    (d / "MIGRATING-TO-SQLITE").write_text(json.dumps({"scope": "team"}))
+    code, text = guided(d, tmp_path, "--scope", "team", "--accept-malformed", "2", ask=Asker(True))
+    command = text[text.index("Run `") + 5:].split("`")[0]
+    assert code == 2 and command.startswith("tt-orchard db migrate telegraph --dir ")
+    assert "--scope team" in command and "--accept-malformed 2" in command
+
+
+def test_a_migrate_only_option_is_never_put_on_a_status_or_restore_command(tmp_path, spy):
+    d = tmp_path / "state"
+    d.mkdir()
+    (d / "MIGRATED-TO-SQLITE").write_text("{}")                      # a lost database: its commands are db status and db restore
+    code, text = guided(d, tmp_path, "--scope", "team", "--accept-malformed", "2", ask=Asker(True))
+    commands = [c for c in text.split("`")[1::2] if c.startswith("tt-orchard db")]
+    assert code == 2 and commands and all("--scope team" in c and "--accept-malformed" not in c for c in commands)
+
+
+@pytest.mark.parametrize("change", ["orphan sidecar", "sidecar changed", "cache entry added", "cache entry changed"])
+def test_an_input_other_than_the_ledger_that_changes_while_the_question_is_open_stops_the_migration(tmp_path, spy, change):
+    d = make(tmp_path)
+    (d / "cache").mkdir()
+    entry = d / "cache" / ("a" * 64 + ".json")
+    entry.write_text(json.dumps({"text": "t", "reply_file": "replies/x.txt"}))
+    sidecar = d / "telegraph.jsonl.torn-1"
+    if change == "sidecar changed":
+        sidecar.write_text("half a line")
+
+    def alter():
+        if change == "orphan sidecar":
+            sidecar.write_text("half a line")
+        elif change == "sidecar changed":
+            sidecar.write_text("half a line, and more")
+        elif change == "cache entry added":
+            (d / "cache" / ("b" * 64 + ".json")).write_text(json.dumps({"text": "u", "reply_file": "replies/y.txt"}))
+        else:
+            entry.write_text(json.dumps({"text": "t2", "reply_file": "replies/x.txt"}))
+    code, text = guided(d, tmp_path, ask=Asker(True, during=alter))
+    assert code == 2 and spy == [True] and "changed while the question was open" in text
+    assert not (d / "project.db").exists() and not (d / "telegraph.jsonl.archived").exists()
+
+
+def test_an_input_that_changes_after_the_last_check_is_caught_under_the_lock(tmp_path, monkeypatch):
+    d = make(tmp_path)
+    real = mig.migrate
+
+    def late(directory, **kw):
+        if not kw.get("dry_run"):
+            (d / "telegraph.jsonl.torn-9").write_text("late")
+        return real(directory, **kw)
+    monkeypatch.setattr(mig, "migrate", late)
+    code, text = guided(d, tmp_path, ask=Asker(True))
+    assert code == 2 and "under the lock" in text and not (d / "telegraph.jsonl.archived").exists()
+
+
+def test_the_fingerprint_is_none_without_a_plain_ledger_and_changes_with_each_input(tmp_path):
+    d = tmp_path / "state"
+    d.mkdir()
+    assert mig.input_fingerprint(d) is None
+    d = make(tmp_path)
+    base = mig.input_fingerprint(d)
+    assert base == mig.input_fingerprint(d)
+    (d / "telegraph.jsonl.torn-1").write_text("x")
+    with_sidecar = mig.input_fingerprint(d)
+    assert with_sidecar != base
+    (d / "cache").mkdir()
+    with_cache_dir = mig.input_fingerprint(d)
+    (d / "cache" / "f.json").write_text("{}")
+    assert len({base, with_sidecar, with_cache_dir, mig.input_fingerprint(d)}) == 4
+
+
+def test_a_directory_chosen_by_the_environment_is_named_in_the_commands(tmp_path, spy):
+    d = make(tmp_path)
+    (d / "MIGRATING-TO-SQLITE").write_text("{}")
+    out = io.StringIO()
+    args = cli._parser().parse_args(["db", "migrate", "telegraph", "--dry-run-first"])
+    code = db_cmd.main(args, out=out, environ={"ORCHARD_TELEGRAPH_DIR": str(d)}, home=tmp_path, ask=Asker(True))
+    assert code == 2 and f"tt-orchard db migrate telegraph --dir {d}" in out.getvalue()

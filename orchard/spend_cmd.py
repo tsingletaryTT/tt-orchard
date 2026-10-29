@@ -181,6 +181,8 @@ def main(args, *, out, environ=None, home=None) -> int:
     waiting = telegraph_notice.state_of(ledger_dir, flags=telegraph_notice.flags_from_args(args))      # file names only; nothing is opened
     if waiting is not None:
         real["migration"] = waiting.as_dict()
+        if "error" in real:      # the store's own message carries bare commands; the notice above has the ones with every option
+            real["error"] = "the telegraph ledger cannot be used until the steps above are done; the helper spend is unknown"
     if args.json:
         say(json.dumps({"real_helper_spend": real,
                         "local_virtual_spend": {"label": vs.LABEL, "note": NOTE, "directories": rows, "listing_cut_short": listing_cut,

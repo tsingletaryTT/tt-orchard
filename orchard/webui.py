@@ -477,7 +477,6 @@ class WebApp:
         except _telegraph.ConfigError as exc:
             directory, problem = telegraph_view.default_dir(self.home), str(exc)
         label = self.redact(str(directory))
-        import shlex
         from orchard import telegraph_notice
         waiting = migration = None
         if not problem:
@@ -485,8 +484,9 @@ class WebApp:
             # pasted from the page acts on the ledger the page is about. The path is shown redacted, and a leading `~` stays
             # outside the quotes so that a shell expands it.
             shown = label
-            pin = "--dir " + ("~/" + shlex.quote(shown[2:]) if shown.startswith("~/") else shlex.quote(shown))      # always: the
-            # reader's shell may resolve another directory, since the page does not know which config or variables it has
+            # The page also names the config it was started with: recovery counts a torn record at that config's `max_output_tokens`.
+            # Only the path is shown (redacted), never what the file holds.
+            pin = f"--dir {telegraph_notice.display_quote(shown)} --config {telegraph_notice.display_quote(self.redact(str(self.config_path)))}"
             waiting = telegraph_notice.state_of(directory, flags=pin)
         if waiting is not None:                                                   # every string on the page is redacted
             migration = {**waiting.as_dict(), "directory": label, "summary": self.redact(waiting.summary),
