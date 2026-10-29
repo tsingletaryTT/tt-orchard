@@ -1,0 +1,219 @@
+{
+ "label": "benchmark",
+ "model": "openbmb/MiniCPM3-4B",
+ "config": {
+  "attn": "mla",
+  "opt": 1,
+  "shard": false,
+  "trace": true,
+  "upd": "int",
+  "fidelity": "default",
+  "weights": "bfloat16 (MLP bfp8, lofi)",
+  "chips": 2,
+  "prompt_tokens": 40,
+  "steps": 64,
+  "batched_prefill": false
+ },
+ "runs": [
+  {
+   "repeat": 0,
+   "warmup": true,
+   "steps": 64,
+   "decode_s": 1.4279117584228516,
+   "decode_tok_s": 44.820696813008176,
+   "prefill_tokens": 40,
+   "prefill_s": 0.9060282707214355,
+   "host_loadavg_1m": 6.279296875
+  },
+  {
+   "repeat": 1,
+   "warmup": false,
+   "steps": 64,
+   "decode_s": 1.4569497108459473,
+   "decode_tok_s": 43.927391263793,
+   "prefill_tokens": 40,
+   "prefill_s": 0.8989033699035645,
+   "host_loadavg_1m": 6.41748046875
+  },
+  {
+   "repeat": 2,
+   "warmup": false,
+   "steps": 64,
+   "decode_s": 1.4520704746246338,
+   "decode_tok_s": 44.074995751528014,
+   "prefill_tokens": 40,
+   "prefill_s": 0.9028985500335693,
+   "host_loadavg_1m": 6.41748046875
+  },
+  {
+   "repeat": 3,
+   "warmup": false,
+   "steps": 64,
+   "decode_s": 1.437978744506836,
+   "decode_tok_s": 44.50691656221192,
+   "prefill_tokens": 40,
+   "prefill_s": 0.8967931270599365,
+   "host_loadavg_1m": 6.54443359375
+  }
+ ],
+ "summary": {
+  "label": "benchmark",
+  "repeats": 3,
+  "parts": {
+   "decode_s": {
+    "n": 3,
+    "min": 1.437978744506836,
+    "median": 1.4520704746246338,
+    "max": 1.4569497108459473
+   },
+   "decode_tok_s": {
+    "n": 3,
+    "min": 43.927391263793,
+    "median": 44.074995751528014,
+    "max": 44.50691656221192
+   },
+   "prefill_s": {
+    "n": 3,
+    "min": 0.8967931270599365,
+    "median": 0.8989033699035645,
+    "max": 0.9028985500335693
+   },
+   "prefill_tokens": {
+    "n": 3,
+    "min": 40,
+    "median": 40,
+    "max": 40
+   },
+   "steps": {
+    "n": 3,
+    "min": 64,
+    "median": 64,
+    "max": 64
+   }
+  },
+  "incomplete_parts": [],
+  "load": {},
+  "host_loadavg_1m": [
+   6.41748046875,
+   6.41748046875,
+   6.54443359375
+  ]
+ },
+ "floor": {
+  "label": "estimate",
+  "bytes_per_token": 5290024960.0,
+  "floor_ms": 5.166040000000001,
+  "floor_tok_s": 193.57186549078207,
+  "bytes_by_group": {
+   "attention": 1676083200.0,
+   "dense_mlp": 3237888000.0,
+   "lm_head": 376053760.0
+  },
+  "active_params": 4073492480,
+  "stored_params": 4261519360,
+  "inputs": {
+   "dies": 2,
+   "per_die_bandwidth_gb_s": 512.0,
+   "dtype_policy": {
+    "default": "bf16",
+    "dense_mlp": "bfp8"
+   },
+   "board": "p300",
+   "model": {
+    "hidden_size": 2560,
+    "intermediate_size": 6400,
+    "num_hidden_layers": 62,
+    "num_attention_heads": 40,
+    "num_key_value_heads": 40,
+    "head_dim": 96,
+    "vocab_size": 73448,
+    "tied_embeddings": false,
+    "mlp_projections": 3,
+    "attn_output_gate": false,
+    "layer_types": {
+     "full_attention": 62
+    },
+    "moe_layers": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ],
+    "routed_experts": 0,
+    "experts_per_token": 0,
+    "moe_intermediate_size": 0,
+    "shared_intermediate_size": 0,
+    "linear_attention": {},
+    "multi_latent_attention": {
+     "kv_lora_rank": 256,
+     "q_lora_rank": 768,
+     "qk_nope_head_dim": 64,
+     "qk_rope_head_dim": 32,
+     "v_head_dim": 64
+    }
+   }
+  },
+  "assumptions": "batch of one, one token per pass (no speculative decoding); weights spread evenly over the dies so their bandwidth adds; datasheet peak bandwidth; the KV cache, recurrent state, norms, biases, rotary tables and the embedding lookup are not counted; the dtype policy is whatever the caller gives and is not read from the bundle."
+ },
+ "share_of_floor_median": 0.22769319105222383,
+ "share_text": "44.1 tok/s is 23% of an estimated floor of 193.6 tok/s (5.2 ms per token, 5.3 GB read per token over 2 dies at 512 GB/s each).",
+ "text": "On a stormy night, a lighthouse keeper's life is one of vigilance and purpose. As the tempest rages outside, the keeper tends to the lamp, ensuring it is burning brightly to guide ships to safety. The logbook, a testament to countless such nights, lies open"
+}

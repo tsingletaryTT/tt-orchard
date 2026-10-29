@@ -1,0 +1,50 @@
+[
+ {
+  "prompt": "What causes the seasons on Earth? Answer in three sentences.",
+  "chip_text": "The seasons on Earth are primarily caused by the tilt of the Earth's axis relative to its orbit around the Sun. This tilt, which is about 23.5 degrees, means that as Earth orbits the Sun, different parts of the planet receive varying amounts of sunlight at different times of the year. This results",
+  "ref_text": "The seasons on Earth are primarily caused by the tilt of the Earth's axis relative to its orbital plane around the Sun. This tilt, which is about 23.5 degrees, means that as Earth orbits the Sun, different parts of the planet receive varying amounts of sunlight at different times of the year. This",
+  "tokens": 64,
+  "first_difference": 19,
+  "seconds": 2.52
+ },
+ {
+  "prompt": "Write a Python function that returns the n-th Fibonacci number using iteration, with a docstring.",
+  "chip_text": "To calculate the n-th Fibonacci number using iteration, we can use a loop to iterate from 0 to n and calculate the Fibonacci numbers up to the n-th number. We can store the previous two Fibonacci numbers in variables and update them in each iteration.\n\nHere's how we can",
+  "ref_text": "To calculate the n-th Fibonacci number using iteration, we can use a loop to iterate from 0 to n and calculate each Fibonacci number based on the previous two numbers. The first two Fibonacci numbers are 0 and 1, and each subsequent number is the sum of the previous two.\n\n",
+  "tokens": 64,
+  "first_difference": 26,
+  "seconds": 2.77
+ },
+ {
+  "prompt": "A train leaves a station at 3 pm travelling at 60 km/h. A second train leaves the same station at 4 pm at 90 km/h on the same track. When does the second catch up? Show the steps.",
+  "chip_text": "Let $t$ be the time in hours after 3 pm when the second train catches up with the first train.\n\nThe distance traveled by the first train in $t$ hours is $60t$ km.\n\nThe distance traveled by the second train in $t-1$ hours is $",
+  "ref_text": "Let $t$ be the time in hours after 3 pm when the second train catches up with the first train.\n\nThe distance traveled by the first train in $t$ hours is $60t$ km.\n\nThe distance traveled by the second train in $t-1$ hours is $",
+  "tokens": 64,
+  "first_difference": null,
+  "seconds": 3.7
+ },
+ {
+  "prompt": "Translate into French: 'The library closes at eight, so please return your books before then.'",
+  "chip_text": "The translation of 'The library closes at eight, so please return your books before then.' into French is 'La bibliothèque ferme à huit heures, veuillez donc retourner vos livres avant ce moment.' Let's break down the translation: '",
+  "ref_text": "The translation of 'The library closes at eight, so please return your books before then.' into French is 'La bibliothèque ferme à huit heures, veuillez donc retourner vos livres avant ce moment.' Let's break down the translation: '",
+  "tokens": 64,
+  "first_difference": null,
+  "seconds": 2.78
+ },
+ {
+  "prompt": "Summarize in two sentences: Tidal power uses the rise and fall of the sea to turn turbines. Unlike wind and solar, it is predictable, because tides follow the moon. Its drawbacks are high construction cost and effects on local ecosystems, which is why few plants exist.",
+  "chip_text": "Tidal power harnesses the natural rise and fall of seawater to generate electricity by turning turbines, offering a predictable energy source due to tidal patterns being influenced by the moon. However, its implementation faces challenges such as high construction costs and potential ecological impacts on local environments, which have limited the number of tidal power",
+  "ref_text": "Tidal power harnesses the natural rise and fall of seawater to generate electricity by turning turbines, offering a predictable energy source due to tidal patterns being influenced by the moon. However, its implementation faces challenges such as high construction costs and potential ecological impacts on local environments, which have limited the number of tidal power",
+  "tokens": 64,
+  "first_difference": null,
+  "seconds": 3.93
+ },
+ {
+  "prompt": "Give me a short, vivid description of a market at dawn.",
+  "chip_text": "As the first light of dawn creeps over the horizon, the market awakens to the bustling energy of early risers. Stalls are arrayed with a kaleidoscope of fruits, vegetables, and flowers, their colors deepening in the soft morning light. The air is filled with the rich",
+  "ref_text": "As the first light of dawn creeps over the horizon, the market awakens to the bustling energy of early risers. Stalls are arrayed with a kaleidoscope of fruits, vegetables, and flowers, their colors deepening in the soft morning light. The air is filled with the rich",
+  "tokens": 64,
+  "first_difference": null,
+  "seconds": 2.61
+ }
+]
