@@ -44,11 +44,11 @@ def library_block_class():
 DIM, LOCAL = 128, 17
 
 
-def make_block(TransformerBlock, seed=0):
+def make_block(TransformerBlock, seed=0, differential=False):
     torch.manual_seed(seed)
     blk = TransformerBlock(DIM, dim_heads=64, cross_attend=True, dim_context=DIM, global_cond_dim=DIM, local_add_cond_dim=LOCAL,
                            zero_init_branch_outputs=False, add_rope=False, norm_type="rms_norm",
-                           attn_kwargs={"qk_norm": "rms", "differential": False}, norm_kwargs={"force_fp32": True}, ff_kwargs={"mult": 4.0})
+                           attn_kwargs={"qk_norm": "rms", "differential": differential}, norm_kwargs={"force_fp32": True}, ff_kwargs={"mult": 4.0})
     blk.eval()
     with torch.no_grad():                    # every gain and bias away from its initial value, so a wrong tensor changes the answer
         for p in blk.parameters():
@@ -122,6 +122,45 @@ def test_layer_matches_the_library_block(t_len, ctx_len, valid):
     want = library_forward(RotaryEmbedding, blk, x, ctx, gc, local, pmask)
     got = run_host(blk, x, ctx, gc, local, pmask)
     assert torch.allclose(got, want, atol=2e-4, rtol=1e-4), (got - want).abs().max()
+
+
+@pytest.mark.parametrize("t_len, ctx_len, valid", CASES)
+def test_differential_layer_matches_the_library_block(t_len, ctx_len, valid):
+    """The medium model's layers use differential attention in both the self and the cross section (five and three projections)."""
+    TransformerBlock, RotaryEmbedding = library_block_class()
+    blk = make_block(TransformerBlock, differential=True)
+    x, ctx, gc, local, pmask = case(t_len, ctx_len, valid)
+    want = library_forward(RotaryEmbedding, blk, x, ctx, gc, local, pmask)
+    got = run_host(blk, x, ctx, gc, local, pmask)
+    assert torch.allclose(got, want, atol=2e-4, rtol=1e-4), (got - want).abs().max()
+
+
+def test_the_differential_decomposition_is_not_the_plain_one():
+    """Mutation check: the plain-attention reading of the same tensors (first three projections only) must disagree with the library."""
+    TransformerBlock, RotaryEmbedding = library_block_class()
+    blk = make_block(TransformerBlock, differential=True)
+    x, ctx, gc, local, pmask = case(30, 257, 21)
+    want = library_forward(RotaryEmbedding, blk, x, ctx, gc, local, pmask)
+    p = params_of(blk)
+    p["self_attn.to_qkv.weight"] = p["self_attn.to_qkv.weight"][:3 * DIM]          # drop the difference branch
+    p["cross_attn.to_q.weight"] = p["cross_attn.to_q.weight"][:DIM]
+    p["cross_attn.to_kv.weight"] = p["cross_attn.to_kv.weight"][:2 * DIM]
+    n_real = x.shape[0]
+    n = cd.padded_length(n_real)
+    cp = cd.padded_length(ctx.shape[0])
+    xp = torch.zeros(n, DIM)
+    xp[:n_real] = x
+    cpad = torch.zeros(cp, DIM)
+    cpad[:ctx.shape[0]] = ctx
+    lrows = torch.zeros(n, LOCAL)
+    lrows[cd.MEMORY_TOKENS:n_real] = local
+    row = torch.zeros(n)
+    row[cd.MEMORY_TOKENS:n_real] = 1
+    cos, sin = cd.rotary_tables(torch, n_real, n)
+    mod = cd.modulation(torch, blk.to_scale_shift_gate.detach(), gc)
+    plain = cd.host_layer(torch, xp, p, mod, cpad, lrows, row, cd.value_mask(torch, pmask, n, cd.MEMORY_TOKENS), n_real, ctx.shape[0], cos, sin,
+                          cd.rotate_matrix(torch))[:n_real]
+    assert not torch.allclose(plain, want, atol=1e-3)
 
 
 def test_the_library_block_is_sensitive_to_every_part_the_decomposition_covers():
