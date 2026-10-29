@@ -262,7 +262,8 @@ print("REFERENCES OK")
     assert done.returncode == 0 and "REFERENCES OK" in done.stdout, done.stdout + done.stderr
 
 
-@pytest.mark.parametrize("op", ["silu_mul", "rmsnorm", "center", "softmax", "tile_scan"])
+@pytest.mark.parametrize("op", ["silu_mul", "rmsnorm", "center", "softmax", "tile_scan", "mul", "scale_shift", "add_row",
+                               "rsqrt", "row_sum"])
 @needs_sim
 def test_the_good_kernels_pass_on_the_simulator(tmp_path, op):
     tdir, adir = _attempt(tmp_path, f"{op}_good", op=op)
@@ -279,7 +280,8 @@ def test_the_op_specs_name_only_known_references():
     table = next(n for n in tree.body if isinstance(n, ast.Assign) and n.targets[0].id == "REFERENCES")
     known = {k.value for k in table.value.keys}
     specs = sorted((TEMPLATES / "ops").glob("*.json"))
-    assert {p.stem for p in specs} == {"add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax", "tile_scan"}
+    assert {p.stem for p in specs} == {"add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax", "tile_scan",
+                                  "mul", "scale_shift", "add_row", "rsqrt", "row_sum"}
     for p in specs:
         spec = json.loads(p.read_text())
         assert spec["op"] == p.stem and spec["reference"] in known
