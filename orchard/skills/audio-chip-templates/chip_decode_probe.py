@@ -79,6 +79,28 @@ def log_mel_l1(torch, wave_a, wave_b, sr=44100, n_fft=2048, hop=512, n_mels=96):
     return float((spec(a) - spec(b)).abs().mean())
 
 
+def first_divergence_summary(np, layer_ref, layer_bf, layer_chip, wave_ref, wave_bf, wave_chip) -> dict:
+    """The first-divergence probe of orchard/first_divergence.py on the decoder's six or twelve layers, the chip against the CPU float32 reference, with the CPU
+    decoder in bfloat16 as the floor (the error a bfloat16 decoder shows with no chip involved). Two tolerances are reported: 3 times that floor (the probe's
+    default margin) and 5 percent relative L2 (a stated bound)."""
+    sys.path.insert(0, str(REPO))
+    from orchard import first_divergence as fd
+
+    def run(layers, wave):
+        arrays = {("layer", f"layer_{i:02d}"): v.numpy() for i, v in layers.items()}
+        arrays[("waveform", "audio")] = wave.numpy()
+        return fd.MemoryRun(arrays)
+    ref, bf, chip = run(layer_ref, wave_ref), run(layer_bf, wave_bf), run(layer_chip, wave_chip)
+    out = {}
+    for label, tol in (("three_times_the_bfloat16_floor", fd.Tolerance()), ("rel_l2_0.05", fd.Tolerance(rel_l2=0.05))):
+        rep = fd.find_first_divergence(ref, chip, floor=(ref, bf), tolerance=tol, cross_precision=True)
+        out[label] = {"located": rep["located"], "first_block": None if rep["first_block"] is None else rep["first_block"]["name"],
+                      "other_arrays_leaving": rep["other_arrays_leaving"],
+                      "blocks": [{"name": b["name"], "rel_l2": round(float(b["rel_l2"]), 5), "floor_rel_l2": (None if b.get("floor") is None else round(float(b["floor"]["rel_l2"]), 5)),
+                                  "leaves": b["leaves"]} for b in rep["blocks"]]}
+    return out
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--model", required=True)
@@ -134,6 +156,9 @@ def main(argv=None) -> int:
     ae_bf = copy.deepcopy(ae.decoder).to(torch.bfloat16)
     orig_dec = ae.decoder
     ae.decoder = ae_bf
+    layer_bf = {}
+    bf_handles = [layer.register_forward_hook(lambda m, inp, out, i=i: layer_bf.__setitem__(i, out.detach().float().clone()))
+                  for i, layer in enumerate(ae_bf.layers[3].transformers)]
     try:
         class Cast(torch.nn.Module):
             def __init__(self, m):
@@ -148,6 +173,8 @@ def main(argv=None) -> int:
             wave_bf = pre.decode(latent).float()
     finally:
         ae.decoder = orig_dec
+        for h in bf_handles:
+            h.remove()
     result["cpu_bfloat16_floor"] = {"waveform": stats(np, wave_bf.numpy(), wave_ref.numpy()),
                                     "log_mel_l1": round(log_mel_l1(torch, wave_bf[0], wave_ref[0]), 5)}
 
@@ -162,12 +189,14 @@ def main(argv=None) -> int:
             with torch.inference_mode():
                 wave_chip = pre.decode(latent).float()
             result["layers"] = {}
+            chip_layers = dict(chip.probe)
             for i in sorted(chip.probe):
                 ref = layer_ref[i]
                 got = chip.probe[i]
                 # hooks see [(b nc), 34, D]; the probe is the same
                 result["layers"][f"layer_{i}"] = stats(np, got.numpy(), ref.numpy())
             chip.probe = None
+            result["first_divergence"] = first_divergence_summary(np, layer_ref, layer_bf, dict(chip_layers), wave_ref, wave_bf, wave_chip)
             result["chip_waveform"] = {"vs_cpu_float32": stats(np, wave_chip.numpy(), wave_ref.numpy()),
                                        "log_mel_l1_vs_cpu_float32": round(log_mel_l1(torch, wave_chip[0], wave_ref[0]), 5)}
             np.save(out_dir / "wave_chip.npy", wave_chip.numpy())
