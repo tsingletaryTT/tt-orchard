@@ -5,7 +5,9 @@
 
   status                     what is in the directory: database, schema version, events, backups, markers, migration phase
   migrate telegraph          import telegraph.jsonl and cache/*.json into the database and cut the old files over
-                             (--dry-run checks the import and writes nothing; --accept-malformed N accepts N unreadable lines)
+                             (--dry-run checks the import and writes nothing; --accept-malformed N accepts N unreadable lines;
+                             --dry-run-first runs the dry run, shows the checks and, when every check is equal and a person
+                             confirms once, runs the real migration)
   export telegraph           write the ledger as jsonl on standard output, the lines the old file held
                              (--from-archive reads the archive telegraph.jsonl.archived and leaves the database alone)
   backup                     an online backup into backups/
@@ -19,7 +21,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
+import sys
 import urllib.parse
 from pathlib import Path
 
@@ -28,6 +32,7 @@ from orchard import safeio
 from orchard import telegraph as tg
 from orchard import telegraph_cmd
 from orchard import telegraph_migrate as mig
+from orchard import telegraph_notice as tn
 from orchard import telegraph_store as ts
 
 EXIT_OK, EXIT_PROBLEM = 0, 2
@@ -121,7 +126,7 @@ def reply_ids(directory) -> list[str]:
     return reply_ids_by_scope(directory).get(ts.DEFAULT_SCOPE, [])
 
 
-def main(args, *, out, environ=None, home=None) -> int:
+def main(args, *, out, environ=None, home=None, ask=None) -> int:
     environ = os.environ if environ is None else environ
     home = Path.home() if home is None else Path(home)
 
@@ -156,7 +161,7 @@ def main(args, *, out, environ=None, home=None) -> int:
         if action == "status":
             return _status(directory, scope, say)
         if action == "migrate":
-            return _migrate(directory, scope, cfg, args, say)
+            return _migrate(directory, scope, cfg, args, say, ask)
         if action == "export":
             return _export(directory, scope, args, out, say)
         if action == "backup":
@@ -203,14 +208,40 @@ def _status(directory, scope, say) -> int:
     return EXIT_OK
 
 
-def _migrate(directory, scope, cfg, args, say) -> int:
+def _checks_text(result) -> str:
+    return ", ".join(f"{k} {'equal' if v else 'DIFFERENT'}" for k, v in result["checks"].items())
+
+
+def _show_dry_run(result, say) -> None:
+    totals = result.get("totals", {})
+    say("dry run: nothing was changed")
+    say(f"records {totals['records']}, answered calls {totals['calls']}, tokens in {totals['tokens_in']} out {totals['tokens_out']}, "
+        f"cost ${totals['cost_usd']}")
+    say(f"checks: {_checks_text(result)}")
+    if result["fragment_to_move"] or result["sidecars"]:
+        say(f"torn records: {result['sidecars']} sidecar file(s)" + ("; a cut-off last line would be moved to a sidecar" if result["fragment_to_move"] else ""))
+    say(f"cached answers to import: {result['cache_entries']} ({result['cache_skipped']} files skipped)")
+
+
+def _migrate(directory, scope, cfg, args, say, ask=None) -> int:
     if getattr(args, "what", None) != "telegraph":
         say("db migrate: say what to migrate: `tt-orchard db migrate telegraph`")
         return EXIT_PROBLEM
     accept = getattr(args, "accept_malformed", None)
+    guided = bool(getattr(args, "dry_run_first", False))
+    if guided and getattr(args, "dry_run", False):
+        say("db migrate: --dry-run and --dry-run-first cannot be used together; --dry-run only checks, --dry-run-first checks and then asks")
+        return EXIT_PROBLEM
+    if guided:
+        return _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept)
+    return _migrate_once(directory, scope, cfg, args, say, accept, dry_run=bool(getattr(args, "dry_run", False)))
+
+
+def _migrate_once(directory, scope, cfg, args, say, accept, *, dry_run, hook=None) -> int:
     try:
-        result = mig.migrate(directory, scope=scope, max_output_tokens=cfg.max_output_tokens, accept_malformed=accept,
-                             dry_run=bool(getattr(args, "dry_run", False)))
+        extra = {"hook": hook} if hook is not None else {}
+        result = mig.migrate(directory, scope=scope, max_output_tokens=cfg.max_output_tokens, accept_malformed=accept, dry_run=dry_run,
+                             **extra)
     except mig.MalformedLedger as exc:
         say(f"db migrate: {exc}")
         return EXIT_PROBLEM
@@ -222,22 +253,82 @@ def _migrate(directory, scope, cfg, args, say) -> int:
         return EXIT_PROBLEM
     totals = result.get("totals", {})
     if result["status"] == "dry-run":
-        say("dry run: nothing was changed")
-        say(f"records {totals['records']}, answered calls {totals['calls']}, tokens in {totals['tokens_in']} out {totals['tokens_out']}, "
-            f"cost ${totals['cost_usd']}")
-        say(f"checks: {', '.join(f'{k} {"equal" if v else "DIFFERENT"}' for k, v in result['checks'].items())}")
-        if result["fragment_to_move"] or result["sidecars"]:
-            say(f"torn records: {result['sidecars']} sidecar file(s)" + ("; a cut-off last line would be moved to a sidecar" if result["fragment_to_move"] else ""))
-        say(f"cached answers to import: {result['cache_entries']} ({result['cache_skipped']} files skipped)")
+        _show_dry_run(result, say)
         return EXIT_OK if result["equal"] else EXIT_PROBLEM
     say(f"migration {result['status']}" + (" (resumed from an interrupted run)" if result.get("resumed") else ""))
     if totals:
         say(f"records {totals['records']}, answered calls {totals['calls']}, tokens in {totals['tokens_in']} out {totals['tokens_out']}, "
             f"cost ${totals['cost_usd']}")
-        say(f"checks: {', '.join(f'{k} {"equal" if v else "DIFFERENT"}' for k, v in result['checks'].items())}")
+        say(f"checks: {_checks_text(result)}")
     if result.get("export_matches_archive") is not None:
         say(f"the export equals the archived ledger line by line: {'yes' if result['export_matches_archive'] else 'NO'}")
     return EXIT_OK if result.get("export_matches_archive") in (True, None) else EXIT_PROBLEM
+
+
+def _terminal_ask(question):
+    """The default confirmation: a yes typed at a terminal. None when there is no terminal (so nothing is ever assumed)."""
+    if not sys.stdin.isatty():
+        return None
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _lock_text(directory) -> str:
+    return (f"db migrate: another process holds {ts.LOCK} in {directory} (a tt-orchard process or an old writer is running); "
+            "stop it and run this again. Nothing was changed.")
+
+
+def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int:
+    """`--dry-run-first`: the dry run, its checks, one confirmation, then the real migration. Each of these stops it with nothing
+    changed: a directory that is not an unmigrated one, a lock held by another process (before the question and again after it),
+    a dry run that fails or has any check that is different, an answer that is not a yes, and no terminal to ask at."""
+    ask = _terminal_ask if ask is None else ask
+    # Every option that changes what a command does is carried: the directory as resolved here, the config selectors, the scope, and
+    # (for `db migrate` only) the accepted count.
+    flags = tn.with_dir(tn.flags_from_args(args), directory)
+    extra = tn.migrate_flags_from_args(args)
+    waiting = tn.state_of(directory, flags=flags, migrate_flags=extra)
+    if waiting is None or waiting.kind != tn.UNMIGRATED:
+        say("db migrate: " + (waiting.text() if waiting is not None else
+                              f"there is no {ts.LEDGER} in {directory}, so there is nothing to move"))
+        return EXIT_PROBLEM
+    if mig.lock_is_held(directory):
+        say(_lock_text(directory))
+        return EXIT_PROBLEM
+    checked = mig.input_fingerprint(directory)
+    code = _migrate_once(directory, scope, cfg, args, say, accept, dry_run=True)
+    if code != EXIT_OK:                                       # a refusal, an unreadable ledger or a check that is different
+        say("The migration was not started. Nothing was changed.")
+        return EXIT_PROBLEM
+    question = (f"Every check is equal. Move the ledger in {directory} into the database now? Nothing is deleted: the old file is "
+                "kept as telegraph.jsonl.archived, and a backup is taken.")
+    answer = ask(question)
+    if answer is None:
+        say("db migrate: --dry-run-first asks for a yes and there is no terminal to ask at. Run "
+            f"`{waiting.commands[0]}` and then `{waiting.commands[1]}` yourself. Nothing was changed.")
+        return EXIT_PROBLEM
+    if not answer:
+        say("Not confirmed. Nothing was changed.")
+        return EXIT_PROBLEM
+    if mig.lock_is_held(directory):                           # a process started while the question was open
+        say(_lock_text(directory))
+        return EXIT_PROBLEM
+    if checked is None or mig.input_fingerprint(directory) != checked or (waiting := tn.state_of(directory)) is None or waiting.kind != tn.UNMIGRATED:
+        # The file the checks described is not the file that is there now (it was appended to, replaced or removed while the question
+        # was open). The checks no longer describe what would be moved, so nothing runs; a new dry run is needed.
+        say(f"db migrate: {ts.LEDGER} in {directory} or one of its inputs (a sidecar or a cache entry) changed while the question was open, so the checks above no longer describe it. "
+            "Run this again. Nothing was changed.")
+        return EXIT_PROBLEM
+
+    def still_the_checked_file(step):
+        if step != "after:1":
+            return
+        # The migration holds telegraph.lock from here on. It would resume a half-finished migration without asking, so a marker that
+        # appeared after the question is refused here too, as is a ledger file that differs from the file the checks described.
+        again = tn.state_of(directory)
+        if mig.input_fingerprint(directory) != checked or again is None or again.kind != tn.UNMIGRATED:
+            raise mig.MigrationRefused(f"{ts.LEDGER} or the directory changed after the checks were made (seen under the lock), so they "
+                                       "no longer describe it; run this again. Nothing was changed")
+    return _migrate_once(directory, scope, cfg, args, say, accept, dry_run=False, hook=still_the_checked_file)
 
 
 def _export(directory, scope, args, out, say) -> int:

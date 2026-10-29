@@ -1,0 +1,159 @@
+{
+ "device": "cpu",
+ "model": "small-music",
+ "settings": {
+  "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+  "steps": 8,
+  "cfg_scale": 1.0,
+  "sampler": "pingpong",
+  "seed": 42,
+  "sample_size": 5292032
+ },
+ "warmup_runs": 1,
+ "repeats": 3,
+ "host_loadavg_1m_at_start": 6.02099609375,
+ "host_loadavg_1m_at_end": 13.79833984375,
+ "load": {
+  "model_load_s": 4.425
+ },
+ "sizes": [
+  {
+   "seconds": 10.0,
+   "label": "benchmark",
+   "warmup_runs": 1,
+   "repeats": 3,
+   "parts": {
+    "conditioning_s": {
+     "n": 3,
+     "min": 0.041,
+     "median": 0.042,
+     "max": 0.045
+    },
+    "generate_and_decode_s": {
+     "n": 3,
+     "min": 5.659,
+     "median": 6.136,
+     "max": 6.154
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.041,
+      "generate_and_decode_s": 6.136
+     },
+     "host_loadavg_1m": 7.01904296875,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.042,
+      "generate_and_decode_s": 6.154
+     },
+     "host_loadavg_1m": 7.498046875,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.045,
+      "generate_and_decode_s": 5.659
+     },
+     "host_loadavg_1m": 8.43115234375,
+     "output_sha256": null
+    }
+   ]
+  },
+  {
+   "seconds": 30.0,
+   "label": "benchmark",
+   "warmup_runs": 1,
+   "repeats": 3,
+   "parts": {
+    "conditioning_s": {
+     "n": 3,
+     "min": 0.038,
+     "median": 0.072,
+     "max": 0.073
+    },
+    "generate_and_decode_s": {
+     "n": 3,
+     "min": 9.509,
+     "median": 10.726,
+     "max": 11.156
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.038,
+      "generate_and_decode_s": 11.156
+     },
+     "host_loadavg_1m": 10.6318359375,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.072,
+      "generate_and_decode_s": 10.726
+     },
+     "host_loadavg_1m": 11.13720703125,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.073,
+      "generate_and_decode_s": 9.509
+     },
+     "host_loadavg_1m": 11.3369140625,
+     "output_sha256": null
+    }
+   ]
+  },
+  {
+   "seconds": 60.0,
+   "label": "benchmark",
+   "warmup_runs": 1,
+   "repeats": 3,
+   "parts": {
+    "conditioning_s": {
+     "n": 3,
+     "min": 0.038,
+     "median": 0.043,
+     "max": 0.046
+    },
+    "generate_and_decode_s": {
+     "n": 3,
+     "min": 17.58,
+     "median": 19.718,
+     "max": 19.883
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.046,
+      "generate_and_decode_s": 19.883
+     },
+     "host_loadavg_1m": 12.27880859375,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.043,
+      "generate_and_decode_s": 17.58
+     },
+     "host_loadavg_1m": 14.2705078125,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.038,
+      "generate_and_decode_s": 19.718
+     },
+     "host_loadavg_1m": 13.79833984375,
+     "output_sha256": null
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,3 @@
+target = "0.9.50"
+summary = "Kernel probe capability ladder: ops mul, scale_shift, add_row, rsqrt and row_sum, kernel-probe --ladder with a per-rung wall budget and a pass and failure-class table per rung (issue 175)"
+pr = 177

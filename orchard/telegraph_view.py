@@ -60,9 +60,9 @@ def _clean(text, redact, limit=REASON_MAX) -> str:
 
 _cache: dict = {}                     # directory -> (database change key, facts)
 
-_REFUSED_TEXT = {ts.NotMigrated: "the ledger is still a jsonl file; run `tt-orchard db migrate telegraph` to move it to the database",
+_REFUSED_TEXT = {ts.NotMigrated: "Run `tt-orchard db migrate telegraph --dry-run`, then `tt-orchard db migrate telegraph`: the ledger is still a jsonl file",
                  ts.LegacyLedgerPresent: "an old writer recreated telegraph.jsonl after the migration; stop it and reconcile",
-                 ts.MigrationIncomplete: "a migration of the ledger did not finish; run `tt-orchard db migrate telegraph` again"}
+                 ts.MigrationIncomplete: "Run `tt-orchard db migrate telegraph` again: a migration of the ledger did not finish"}
 
 
 def _ledger_facts(directory: Path) -> dict:
@@ -411,9 +411,12 @@ def _latest_refusal(records: list[dict]) -> dict | None:
     return None
 
 
-def _meter(state: str, spend: str, calls: int, cap_text: str, reason: str | None, key_state: dict, error: str | None) -> dict:
+def _meter(state: str, spend: str, calls: int, cap_text: str, reason: str | None, key_state: dict, error: str | None,
+           migration: dict | None = None) -> dict:
     if state == "off":
         text = "Helper: off"
+    elif state == "problem" and error and migration and migration.get("kind") in ("unmigrated", "half-finished"):
+        text = "Helper: ledger needs moving · spend unknown"       # the commands, with every option, are in the title and the page
     elif state == "problem" and error:
         text = "Helper: ledger unreadable · spend unknown"        # nothing was read, so no amount and no count is shown
     elif state == "problem":
@@ -443,7 +446,7 @@ def _spend_text(cost: float, unknown: int) -> str:
 
 
 def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: str = "", now: float = 0.0,
-          ledger_label: str = "", problem: str | None = None) -> dict:
+          ledger_label: str = "", problem: str | None = None, migration: dict | None = None) -> dict:
     """The telegraph page's facts. `directory` holds `telegraph.jsonl`; `ledger_label` is how to name it on screen."""
     facts = _unreadable("the ledger directory cannot be chosen") if problem else _ledger_facts(Path(directory))
     summary, records, error, acct = facts["summary"], facts["records"], facts["error"], facts["acct"]
@@ -475,7 +478,12 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
         cap_text = f"problem {_clean(hot['name'], redact, TEXT_MAX)} at {hot['percent']}% of its cap"
     else:
         cap_text = _cap_phrase(closest) if closest else ""
-    meter = _meter(state, _spend_text(acct["cost"], acct["unknown_cost"]), acct["calls"], cap_text, reason, key, error)
+    migration = migration if not problem else None
+    if migration and error:
+        error = migration["summary"]         # the store's own message carries bare commands; the summary has the ones with every option
+    meter = _meter(state, _spend_text(acct["cost"], acct["unknown_cost"]), acct["calls"], cap_text, reason, key, error, migration)
+    if migration and state == "problem" and error:
+        meter["title"] = f"{meter['text']}. {migration['summary']} Click for details."
     by_model = _model_rows(records, redact)
     config = {
         "endpoint_host": _host(cfg.endpoint, redact) if cfg.enabled else None, "api": cfg.api if cfg.enabled else None,
@@ -498,6 +506,7 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
                   "unknown_usage_calls": summary["unknown_usage_calls"]},
         "capped": {"reason": reason} if state == "capped" else None,
         "recent": _recent(records, verdict, redact), "error": error, "now": now,
+        "migration": migration,           # what to do about an old, half-moved or lost ledger (orchard/telegraph_notice.py), or None
     }
 
 
