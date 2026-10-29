@@ -3216,3 +3216,10 @@ Prompt (operator): "pick a model that would require a new kernel and try to brin
 - Issue 226 fixed: `check(..., reference_source="skill")` now forwards the source to the fallback assembly. Mutations run: removing the forward, the tt-lang comparison and the todo branch each turned tests red.
 - README section 5.9a gives the pair venv steps and limits; `-(-x // g)` after a thread's `grid_size` is one rule in `orchard/skills/kernel-probe.md` (file stays at 100 lines). README and site link the Granite run log and state the pair result.
 - Left open: the shared hardware venv still holds 1.1.6, and the probe's `--shared-python` default is unchanged. Nobody calls `ttl.build_info()` under a lease to feed the row yet. Issues 95 and 205 stay open.
+
+## 2026-10-29: fusion port candidates (issue 184, PR 235)
+- Prompt: operator approved issue 184; experimental, speed over polish, one Copilot request, no iteration rounds.
+- Built `orchard/fusion_port.py` and `tt-orchard fusion-candidates`. It reads the Qwen3-Coder-Next fused bundle's code (copied out of the local image, never run), evaluates each op's own asserts against a model config and sorts the ops into three classes. Pair: Qwen3.5-35B-A3B on two dies (4 as is, 2 changed constant, 1 new code). The 80B Qwen3-Next siblings have the same dimensions as the coder, so they have nothing to port.
+- The route-k constant only affects the unfused router path, so a change leaves one-row decode identical (expected, noted for issue 15).
+- Phase 2 (hardware) not run: 71.9 GB checkpoint against 81 GB free disk, and a bring-up of the new model on the bundle's code is needed first. Filed as issue 234. No chip was leased or touched.
+- Default taken: dies = 2 (one p300 board); "kernel-side" checks are a conservative table in the module.

@@ -88,6 +88,7 @@ Short list of what landed on `main`. Each item links to its run log, which holds
   (22.6 tok/s with the Mamba-2 state update from stock ops). The coder's state-update kernel runs on the chip and in the model, but is slower
   (16.7 and 18.0 tok/s). Its readout kernels pass the simulator and none compiled on tt-lang 1.1.6, because the pinned simulator and that
   compiler disagree on `reduce_sum`. [Run log](docs/run-logs/2026-10-28-granite-mamba2-real-port.md).
+- **Fusion port candidates.** `tt-orchard fusion-candidates MODEL_CONFIG BUNDLE_DIR` reads a fused decode bundle's Python code (read only, never run), lists its fused ops (router, MoE decode, mixers, layer boundary, sampler) with the model dimensions each depends on, and marks each one as applies as is, applies with a changed constant, or needs new code (a gap, never attempted). For Qwen3.5-35B-A3B against the Qwen3-Coder-Next bundle on two dies: 4 as is, 2 with a changed constant, 1 needs new code. No chip was used; the hardware port was not run. [Run log](docs/run-logs/2026-10-29-fusion-port.md).
 - **A tt-lang pair verified on the chip.** The pinned simulator and the compiler wheel `tt-lang-light 1.1.10.dev20261026` (from the Tenstorrent S3
   index) agree on the chip for 17 of 20 kernels, including every reduction kernel that failed on 1.1.6. One form does not compile: `-(-x // g)`
   after a thread's `grid_size`; `(x + g - 1) // g` does. The pair is pinned in `orchard/ttlang_pin.py` and section 5.9a shows how to make its venv.
