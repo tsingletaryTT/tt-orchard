@@ -101,7 +101,7 @@ What worked:
   adds the Qwen3.5-MoE layout (`model.language_model.` prefix, split GDN projections, fused experts). It applies to a copy of the bundle's
   autoport directory that is bind-mounted over the image's; the image, the published bundle and the coder's container were not changed.
 - Download. `hf download` ran at 4 to 6 MB/s. Range reads of only the needed tensors from the Hub (`scripts/fusion_port/slice.py`) took
-  8.76 GB (embeddings, head and layers 0 to 3 of the 35B model) in about 6 minutes. This is a 4-layer slice of the 35B model, not the model.
+  8.76 GB (embeddings, head and layers 0 to 3 of the 35B model) in about 6 minutes. This is a 4-layer slice and says nothing about the 40-layer model.
 - Serving. The 4-layer slice served through vLLM in the bundle's image on chips 2 and 3 (mesh P300, precision policy
   `coder_next_routed_bfp4_mixers_bfp8`, one sequence, 4096 context) and answered `/v1/models` about 5 minutes after the container started, with the
   coder's kernel cache copied read-only as the starting cache.
@@ -113,7 +113,7 @@ Per-op check on the two ops with changed constants (`scripts/fusion_port/ops_che
 - A grid wider than 10 columns fails: `TT_FATAL: !check_kernel_logical_cores.contains(coreCoord)` (program.cpp:559). The merge core is at (10,0), so
   the scan grid must stay at 10 columns or fewer. That is a limit on the `GRID` constant.
 - Router `RouterTopK` check is INVALID. It disagreed with the reference in 40 of 40 trials, including at the bundle's own 512 experts and top-k 10,
-  so the harness is wrong (the input layout is the suspect), not the op. No router claim comes from this check.
+  so the harness is wrong (the input layout is the suspect) and the op is probably fine. No router claim comes from this check.
 
 ## Phase 2 measurements: 4-layer SLICE of Qwen3.5-35B-A3B (not the 40-layer model)
 
@@ -140,7 +140,7 @@ and head, bf16 router: 496.7 MB per token, 0.485 ms, 2,062 tok/s for the slice. 
 
 Reading of the numbers:
 - Both changes are within the spread of the baseline (ranges overlap; medians differ by 0.9 and 1.2 percent). Neither reaches the 3 percent
-  bar, so by the rule in issue 184 neither is kept. This is a null result at the slice, not proof of no effect at 40 layers.
+  bar, so by the rule in issue 184 neither is kept. This is a null result at the slice; it does not rule out an effect at 40 layers.
 - Greedy check: the 16-token greedy output is identical across the three configurations. For these two changes the numerics should not
   change (route-k only applies to the unfused router path, which one-row decode does not take; the scan grid only splits the same top-k work), so identical
   output is the expected result and not a flag under the issue 15 rule.
@@ -184,7 +184,7 @@ host load 5.2 to 6.5. The bundle's code is as shipped except for the loader patc
   exactly; token 9 differs ("developed" against "invented"). In the reference's top 5 at that position "invented" has log-probability -1.13 and
   "developed" -1.26, a gap of 0.125 nats, and the device's own top 2 are the same two words in the other order (-0.95 and -1.45). That is a near tie flipped by
   the bfp4 routed experts. The two outputs agree again from token 11 on, with two differing tokens in 16. This is a first-8-tokens match plus a
-  near-tie flip, not an exact match. The slice's gibberish mismatch above is explained by the same prompt difference in the first CPU run
+  near-tie flip and is not an exact match. The slice's gibberish mismatch above is explained by the same prompt difference in the first CPU run
   (it kept the trailing newline); the full model's coherent output is the check that counts.
 - The three greedy outputs of the three configurations are identical, as expected: neither change should alter numerics, so identical output is the right result
   and not a flag under the issue 15 rule.
