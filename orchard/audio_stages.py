@@ -466,10 +466,20 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
               "control_difference": control, "control_discrimination": discrimination, "repeats": repeats,
               "limits": ["Nobody has listened to the clips; no check here says the music is good.",
                          "The agreement bars are provisional choices, not yet set from a measured noise floor.",
-                         "Only the diffusion transformer ran on the chip. The T5Gemma encoder, the sampler and the autoencoder decoder ran on the host.",
+                         ("The diffusion transformer and the autoencoder decoder's transformer ran on the chip. The T5Gemma encoder, the sampler, the decoder's first linear layer, "
+                          "its final convolution and the waveform unpatching ran on the host." if chip_decoder_configured(stage_dir) else
+                          "Only the diffusion transformer ran on the chip. The T5Gemma encoder, the sampler and the autoencoder decoder ran on the host."),
                          "Agreement is measured on one prompt, one duration and one seed."]}
     write_json(stage_dir / RESULT_FILE, result)
     return result
+
+
+def chip_decoder_configured(stage_dir) -> bool:
+    """True when the stage's config asked for the autoencoder decoder on the chip."""
+    try:
+        return load_json(Path(stage_dir) / CONFIG_FILE, CONFIG_FILE).get("chip_decoder") is True
+    except AudioStageError:
+        return False
 
 
 def configured_warmup(stage_dir) -> int:
