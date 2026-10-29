@@ -3248,3 +3248,9 @@ Prompt (operator): "pick a model that would require a new kernel and try to brin
 - New flags: `--result` (a result file in place of stage 2's), `--out`, `--probe`, `--agreement-report`, `--listening-note`. New module `orchard/audio_result_derive.py` writes the result file for a later chip run without editing run files. The run's own result is the PR 165 file.
 - Mutation table: 27 guards each turned a test red. The gate's check that a derived result's card says so was green in the first table and got its own test; the `repeats.chip` drop was found stale by reading the derived file and got a test and a mutation.
 - Left open: boot check on a chip (commands in the staging directory), the Hub upload (operator), the control with the decoder on the chip, agreement at lengths above 10 s. Details in `docs/run-logs/2026-10-29-audio-package-rebuild.md`.
+
+## 2026-10-29: Qwen3.5-35B-A3B recipe package (PR 246)
+- Prompt: package the 40-layer Qwen3.5-35B-A3B run; do not upload or publish; stage into a new directory, run the gate and scan, boot-check on chips 2 and 3, measure the cold compile once, run the skipped quality check.
+- Shape chosen: a recipe package (draft v5.1 manifest, `run.sh`, a 41-line loader patch mounted over the Coder-Next image's loader, `fetch_weights.py` at a pinned revision). Reason: a v5.1 build needs a tt-metal tree and a thin package cannot hold the fused-op image. tt-model-manager branches read (read only); none changes the fields used.
+- Measured through the package's scripts: 126.83 tok/s median (29.6 percent of the estimated floor), cold first boot 727 s, warm restart 308 s, 6-prompt agreement against the bf16 CPU reference (every first difference a near tie, at most 0.44 nats), chat and a 3,817-token prompt.
+- The lease was a detached one and was reaped before the last warm restart; use `--owner-pid` next time. Scratch weights deleted.
