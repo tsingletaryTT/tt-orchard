@@ -44,7 +44,7 @@ Fixed in every rung (the settings the report records):
 - Skill text: `orchard/skills/kernel-probe.md` at this branch's head. It differs from the text of earlier runs in one
   way: the "Read first, by kind of op" lines now name the new ops (`mul`, `scale_shift`, `add_row`, `rsqrt`, `row_sum`)
   next to the old ones. This is needed so the skill names every op; it adds no worked solution. The earlier rmsnorm
-  numbers were measured with the old text, so they are context, not a control.
+  numbers were measured with the old text, so they are context and no control.
 - Pilots and batches use different seed bases (pilot 2026110000, one attempt per rung), so no pilot attempt repeats a
   batch attempt. Pilot attempts are not counted in the batch table.
 
@@ -233,7 +233,7 @@ Failure classes seen, by name: deadlock, `not a valid next dataflow step`, a num
 Load and decode speed. The probe measured 106 to 107 tok/s before each pilot attempt (one client). With three clients the first
 attempt of each process measured 48.7 to 56.5 tok/s ("busy"). Every later attempt measured 8.5 to 12.4 tok/s before it started, with 2 or
 3 requests running. I did not find why the speed fell from about 49 to about 12; the coder's log shows prefill chunks of 8K to 9K tokens
-and a prefix state with all 16 slots used, and nothing that names a fault. The probe called every one of these samples "busy", not "slow",
+and a prefix state with all 16 slots used, and nothing that names a fault. The probe labelled every one of these samples "busy" and none "slow",
 because it compares with the load. So the batch attempts ran at about a quarter of the pilot's decode speed, and their pass counts and
 wall times must not be compared with the pilot's. That is the largest limit of this table.
 
