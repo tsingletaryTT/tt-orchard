@@ -1,0 +1,3 @@
+target = "0.9.56"
+summary = "Decode floor, hazard scan and model config accept dense Granite-4.0-H hybrids: a zero expert count, the shared MLP width and a Mamba-2 mixer."
+kind = "fix"
