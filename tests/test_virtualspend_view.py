@@ -916,7 +916,7 @@ def test_overlapping_first_requests_build_one_spender(root, monkeypatch):
 
 
 def test_a_deeply_nested_record_in_the_helper_ledger_is_the_damaged_ledger_result(monkeypatch):
-    """Item 1: a record nested past the recursion limit must give the damaged-ledger answer, not an exception out of the spend command."""
+    """Item 1: a record nested past the recursion limit must give the damaged-ledger answer and raise nothing out of the spend command."""
     from orchard import spend_cmd
     deep: list = []
     for _ in range(100_000):

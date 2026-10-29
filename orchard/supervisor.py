@@ -2251,7 +2251,7 @@ class Supervisor:
         if not leftovers:
             return
         # Never remove an archive that an earlier, interrupted call made: it can hold the only copy of the trial result (issue 196). Each call
-        # moves into an unused name (stale, stale-1, stale-2, ...), and `mkdir` without `exist_ok` fails rather than reuse a name.
+        # moves into an unused name (stale, stale-1, stale-2, ...), and `mkdir` without `exist_ok` raises when the name is taken.
         k, stale = 0, trial_dir / "stale"
         while True:
             try:

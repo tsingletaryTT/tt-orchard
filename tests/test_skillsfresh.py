@@ -785,7 +785,7 @@ def test_the_runner_does_not_pass_on_variables_that_point_git_at_another_reposit
 
 
 def test_a_clean_linked_git_worktree_is_not_dirty_and_a_real_change_still_is(tmp_path):
-    """Issue 202. A linked worktree (`git worktree add`) has a regular file named .git at its root, not a directory. The untracked-file walk
+    """Issue 202. A linked worktree (`git worktree add`) has a regular file named .git at its root, where an ordinary checkout has a directory. The untracked-file walk
     skipped a .git directory but listed that file, so a clean skills checkout reported uncommitted changes. Real git."""
     import subprocess
     plain = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}

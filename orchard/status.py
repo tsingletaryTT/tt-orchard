@@ -384,7 +384,7 @@ def collect(run_dir, *, now: float | None = None, pid_alive=_supervisor_alive, l
     control_word = None
     try:
         control_word = safeio.read_bytes(run_dir / "control", max_bytes=SMALL_FILE_BYTES).decode("utf-8").strip() or None
-    except (safeio.SafeReadError, ValueError):      # not readable, too large, not a regular file or not text: no pending command
+    except (safeio.SafeReadError, ValueError):      # unreadable, too large, a FIFO or device, or not text: no pending command
         pass
 
     home = Path(home) if home is not None else Path.home()
