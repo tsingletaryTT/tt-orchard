@@ -1,0 +1,4 @@
+target = "0.9.59"
+summary = "README and site: work since 2026-10-27 (coder, Telegraph SQLite, Stable Audio 3, MiniCPM3, Granite, pin, analysis modules)."
+pr = 221
+kind = "docs"
