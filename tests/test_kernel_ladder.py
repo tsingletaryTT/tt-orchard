@@ -770,3 +770,12 @@ def test_report_aggregation_survives_nested_metadata_of_the_wrong_type(tmp_path)
     (d / "kernel-probe-report.json").write_text(json.dumps({"header": header, "attempts": [rec]}))
     data = kl.write_ladder_report(tmp_path, ["add"])
     assert data["rungs"][0]["passed"] == 1
+
+
+def test_the_summary_does_not_say_no_rung_had_zero_passes_when_a_stopped_rung_had_none(tmp_path):
+    write_rung(tmp_path, "add", [attempt(True)])
+    write_rung(tmp_path, "mul", [attempt(category="numeric_mismatch", first="p")], stopped="interrupted")
+    kl.write_ladder_report(tmp_path, ["add", "mul"])
+    text = (tmp_path / "ladder-report.md").read_text()
+    assert "No rung that ran had zero passes." not in text and "No rung that ran to its end had zero passes." in text
+    assert "mul (interrupted)" in text

@@ -274,7 +274,7 @@ def ladder_lines(rows: list[dict], *, skipped: list[str], stopped: str | None, s
         lines += [f"The first rung where passes fall to zero: `{zero}` "
                   f"(rung {LADDER.index(zero) + 1} of {len(LADDER)}).", ""]
     elif rows:
-        lines += ["No rung that ran had zero passes.", ""]
+        lines += ["No rung that ran to its end had zero passes." if any(r.get("stopped") for r in rows) else "No rung that ran had zero passes.", ""]
     stopped_rungs = [r for r in rows if r.get("stopped")]
     if stopped_rungs:
         lines += ["Rungs stopped early, whose counts are partial and are not used for the first zero rung: "
