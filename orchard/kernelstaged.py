@@ -203,7 +203,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
     ledger = Ledger(adir / "ledger.jsonl")
     system = kp.SKILL.read_text(encoding="utf-8") + "\n\n" + STAGED_NOTE.read_text(encoding="utf-8")
     records: list[dict] = []
-    last_outcome, last_check, last_detail = None, {}, ""
+    last_outcome, last_check, last_sim_check, last_detail = None, {}, {}, ""
     verified: bytes | None = None
     swept_all: list = []
     try:
@@ -239,12 +239,13 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
                                                templates=None if final else tdir)
             finally:
                 swept_all += kp.sweep_strays(adir)
+            sim_check = check                    # the simulator's own verdict, kept for the trust comparison below
             if check.get("passed") is True and outcome.status in BUDGET_STATUSES:
                 check = {**check, "passed": False, "category": "stage_budget",
                          "first_line": f"stage {stage.name} ended on its {outcome.status} budget; its check said PASS, but a stage "
                                        "that spends its budget ends the attempt"}
             records.append(_stage_record(index, stage, outcome, stage_wall, check))
-            last_outcome, last_check = outcome, check
+            last_outcome, last_check, last_sim_check = outcome, check, sim_check
             last_detail = outcome.detail or control.detail or ""
             if check.get("passed") is not True:
                 break
@@ -273,7 +274,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         # The agent's own check.json is judged against the shipped hashes of the whole op's files, so it can be compared
         # only on the last stage. An earlier stage's file never counts as untrusted here.
-        "agent_check_untrusted": (kp.agent_check_untrusted(kp._read_agent_check(adir / "check.json"), check, op)
+        "agent_check_untrusted": (kp.agent_check_untrusted(kp._read_agent_check(adir / "check.json"), last_sim_check, op)
                                   if len(records) == len(stages) else False),
         "swept": swept_all, "sampling": dict(sampling), "coder_speed": coder_speed,
         "agent_hw": {"enabled": False}, "staged": staged,

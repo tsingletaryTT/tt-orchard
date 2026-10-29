@@ -2261,6 +2261,12 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         hw_policy = hw_policy_from_args(args)
     except _Refused as exc:
         return refuse(str(exc))
+    if staged:
+        turns, wall = getattr(args, "stage_turns", None), getattr(args, "stage_wall_s", None)
+        if turns is not None and turns < 1:
+            return refuse("--stage-turns must be at least 1")
+        if wall is not None and not (0 < wall < float("inf")):         # nan and inf compare false, so they are refused too
+            return refuse("--stage-wall-s must be a finite number of seconds above 0")
     if staged and hw_policy.enabled:
         return refuse("--staged gives the coder no hardware tool: pass --no-agent-hw")
     shared = getattr(args, "shared_python", None) or default_shared_python()

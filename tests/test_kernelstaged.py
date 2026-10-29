@@ -77,13 +77,13 @@ def test_the_table_holds_center_and_rmsnorm_and_other_ops_can_be_added_as_data()
 
 @pytest.mark.parametrize("op", sorted(ks.STAGES))
 def test_every_stage_names_a_reference_that_exists_and_only_the_last_uses_the_ops_own(op):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("staged_references", kp.TEMPLATES / "staged_references.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    import ast
+    tree = ast.parse((kp.TEMPLATES / "staged_references.py").read_text(encoding="utf-8"))
+    table = next(n.value for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "STAGE_REFERENCES" for t in n.targets))
+    keys = {k.value for k in table.keys}              # read without importing the file: it imports torch
     stages = ks.STAGES[op]
     for s in stages[:-1]:
-        assert s.reference in mod.STAGE_REFERENCES, s.name
+        assert s.reference in keys, s.name
     assert stages[-1].reference is None
 
 
@@ -126,6 +126,7 @@ def test_stage_templates_hold_the_stage_spec_and_references_that_know_the_stage(
     assert (tdir / "staged_references.py").is_file()
 
 
+@needs_sim
 def test_the_merged_references_answer_a_stage_key(tmp_path):
     import subprocess, sys
     stage = ks.STAGES["rmsnorm"][2]
@@ -134,7 +135,7 @@ def test_the_merged_references_answer_a_stage_key(tmp_path):
             f"y = r.REFERENCES[{stage.reference!r}]({{'x': x}}); assert y.shape == (64, 32);"
             "assert abs(float(y[3, 0]) - float((x[3] ** 2).sum())) < 1e-2 and float(y[:, 1:].abs().sum()) == 0;"
             "assert 'rmsnorm' in r.REFERENCES")
-    got = subprocess.run([sys.executable, "-c", code], cwd=tdir, capture_output=True, text=True)
+    got = subprocess.run([str(VENV / "bin" / "python"), "-c", code], cwd=tdir, capture_output=True, text=True)
     assert got.returncode == 0, got.stderr
 
 
@@ -478,6 +479,34 @@ def test_an_unedited_agent_check_of_a_passing_attempt_is_trusted(tmp_path, fake_
     with FakeModel(script) as server:
         attempt = run_staged(tmp_path, fake_kenv, server, op="center")
     assert attempt["passed_sim"] is True and attempt["agent_check_untrusted"] is False
+
+
+def test_the_probe_refuses_stage_budgets_that_are_not_finite_or_not_positive(tmp_path, fake_kenv, env_ready, capsys):
+    import io
+    for extra, words in (({"stage_wall_s": float("nan")}, "finite"), ({"stage_wall_s": float("inf")}, "finite"),
+                         ({"stage_wall_s": 0.0}, "finite"), ({"stage_turns": 0}, "at least 1"), ({"stage_turns": -3}, "at least 1")):
+        code = kp.main(probe_args(tmp_path, op="center", staged=True, no_agent_hw=True, **extra), env=fake_kenv, out=io.StringIO(),
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+        assert code == kp.EXIT_REFUSED and words in capsys.readouterr().err and not (tmp_path / "out").exists()
+
+
+def test_a_final_stage_that_spends_its_budget_with_a_matching_agent_check_is_still_trusted(tmp_path, fake_kenv):
+    shipped = {n: kp._sha256(kp.TEMPLATES / f) for n, f in (("kernel_check.py", "kernel_check.py"), ("kernel_harness.py", "kernel_harness.py"),
+                                                            ("references.py", "references.py"), ("spec", "ops/center.json"))}
+
+    def script(request):
+        k, t = stage_number(request), turn(request)
+        if k < 4:
+            return call("write_file", path="kernel.py", content=f"# {k}\n") if t == 0 else final("done")
+        if t == 0:
+            return call("write_file", path="kernel.py", content="# 4\n")
+        if t == 1:
+            return call("write_file", path="check.json", content=json.dumps({"passed": True, "category": None, "sha256": shipped}))
+        return call("read_file", path="kernel_spec.json", call_id=f"c{t}")
+    with FakeModel(script) as server:
+        attempt = run_staged(tmp_path, fake_kenv, server, op="center", stage_turns=4)
+    assert attempt["staged"]["failed_stage"] == "center" and attempt["category"] == "stage_budget"
+    assert attempt["agent_check_untrusted"] is False
 
 
 # ---- the real simulator ------------------------------------------------------------------------------------------
