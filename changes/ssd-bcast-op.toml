@@ -1,0 +1,4 @@
+target = "0.9.60"
+summary = "Kernel probe op ssd_state_update_bcast: the Mamba-2 state update with compact per-row and per-column inputs."
+pr = 216
+kind = "feature"
