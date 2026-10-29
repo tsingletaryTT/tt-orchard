@@ -280,6 +280,9 @@ def _parser() -> argparse.ArgumentParser:
     dm = _db("migrate", "import telegraph.jsonl and the cache into the database and cut the old files over")
     dm.add_argument("what", choices=["telegraph"])
     dm.add_argument("--dry-run", action="store_true", help="check that an import gives equal totals; change nothing")
+    dm.add_argument("--dry-run-first", action="store_true",
+                    help="run the dry run, show the checks and, when every check is equal and you confirm once, run the real "
+                         "migration (never without a yes, never while another process holds telegraph.lock)")
     dm.add_argument("--accept-malformed", type=int, default=None, metavar="N",
                     help="go on although the ledger has exactly N lines that are not records (they were never counted)")
     de = _db("export", "write a ledger as jsonl on standard output (the lines the old file held)")
@@ -803,6 +806,20 @@ def _lan_addresses() -> list[str]:
     return found
 
 
+def _print_telegraph_notice(cfg, env, home, out, style=None, args=None) -> None:
+    """Print the Telegraph state notice (orchard/telegraph_notice.py) when the state directory needs a person to act, and nothing
+    when it does not. It only looks at file names: nothing is opened or changed."""
+    from orchard import telegraph_notice
+    notice = telegraph_notice.telegraph_state_notice(getattr(cfg, "telegraph", None), environ=env, home=home,
+                                                     flags=telegraph_notice.flags_from_args(args) if args is not None else "")
+    if notice is None:
+        return
+    icon = style.icon("📋") if style is not None else ""
+    print(f"{icon}telegraph: {notice.summary}", file=out)
+    for line in notice.lines:
+        print(f"  {line}", file=out)
+
+
 def _ui(args, env, home, out) -> int:
     from orchard import tiers, webui
     host = _ui_host(args)
@@ -823,6 +840,7 @@ def _ui(args, env, home, out) -> int:
         return _refuse(f"cannot listen on {host}:{args.port}: {exc}")
     shown = f"[{host}]" if ":" in host else host
     print(f"tt-orchard ui {__version__}: http://{shown}:{args.port}/  (runs in {cfg.runs_root})", file=out)
+    _print_telegraph_notice(cfg, env, home, out, None, args)
     if args.lan:
         for addr in [app.hostname, *_lan_addresses()]:
             print(f"on the network: http://{addr}:{args.port}/", file=out)
@@ -1014,6 +1032,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     resuming = (run_dir / "ledger.jsonl").exists()
     print(f"{style.icon('🧭')}mode: " + (f"lab ({cfg.lab.host}): hardware tests run there; the coder stays here"
                                          if cfg.mode == "lab" else "local: everything runs on this box"), file=out)
+    _print_telegraph_notice(cfg, env, home, out, style, args)         # once, before the checks; it warns and never blocks the run
     from orchard.research import Options
     from orchard.research import types as research_types
     def status(text: str) -> None:

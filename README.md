@@ -1916,6 +1916,60 @@ tt-orchard db migrate telegraph --dir ~/.cache/tt-orchard/telegraph --dry-run   
 tt-orchard db migrate telegraph --dir ~/.cache/tt-orchard/telegraph
 ```
 
+After an update with an old `telegraph.jsonl` in place, you do not have to find this section. Each place that needs the ledger says what to
+type, once, near the top of its output (see "The notice" below). `--dir` can be left out when the directory comes from the config's
+`[telegraph] dir` or `$ORCHARD_TELEGRAPH_DIR`, or is the home default.
+
+`tt-orchard db migrate telegraph --dry-run-first` does both steps with one confirmation. It runs the dry run and prints the checks. It stops
+there, with nothing changed, when any check is different, when the ledger cannot be checked, when the directory is not an unmigrated one
+(already moved, half moved, or no `telegraph.jsonl`), or when another process holds `telegraph.lock`. When every check is equal it asks
+once, `[y/N]`, at a terminal. A no, no terminal, a lock taken while the question was open, or any migration input (`telegraph.jsonl`, a `telegraph.jsonl.torn-*` sidecar, an entry of `cache/`) or the directory state that changed while the question was open (including a new migration marker) (the checks no longer describe it) also stops it with nothing changed. The file is compared once more under `telegraph.lock`, after the migration takes it. A yes runs the
+real migration described below. `--accept-malformed N` is passed to both steps. `--dry-run` and `--dry-run-first` cannot be combined. The
+existing commands are unchanged.
+
+#### The notice
+
+`orchard/telegraph_notice.py` looks at the state directory and returns a short message with the exact next commands, or nothing. It checks
+only what each file name is (`lstat`): it opens no database, creates no file and follows no link, so it is safe on a page that refreshes and
+it cannot disturb a migration that is running. The states:
+
+| State | What the directory holds | What the message says |
+| --- | --- | --- |
+| unmigrated | `telegraph.jsonl` is a live file and no migration marker | run `tt-orchard db migrate telegraph --dry-run`, then `tt-orchard db migrate telegraph`; nothing is deleted (the file is kept as `telegraph.jsonl.archived`) and a backup is taken |
+| half-finished | `MIGRATING-TO-SQLITE` | run `tt-orchard db migrate telegraph` again; it resumes |
+| lost database | `MIGRATED-TO-SQLITE` or `INITIALIZED` and no `project.db` | `tt-orchard db status`, then `tt-orchard db restore` and `confirm-restore` |
+| old writer | `MIGRATED-TO-SQLITE` and a `telegraph.jsonl` file again | stop the old process, then `tt-orchard db status`; do not migrate again |
+
+A directory that needs nothing gives no notice, and so does a machine that never used Telegraph (every state above needs a file that only a
+used ledger leaves). Telegraph switched off still gets the notice when its directory holds an old ledger. The directory is chosen as for
+`tt-orchard telegraph`. The commands act on the ledger the notice is about: in the terminal they carry `--dir` when the directory did not come from the
+home default or the caller passed it (the web page always carries `--dir`), and `--config` and `--telegraph-config` when the caller passed them. A config that was not named is found again by the pasted command in the same way, and the
+`--dir` rule above keeps the commands on the same ledger whichever config they find. The guided command's refusals and
+its no-terminal fallback also carry `--scope` and, on `db migrate` commands only, `--accept-malformed`. The web page also names the config it
+was started with (the path only, redacted and shell-quoted, never its contents), because recovery counts a torn record at that config's
+`max_output_tokens`. It shows the paths redacted and leaves a leading `~` outside the quotes so that a shell expands it. The top-bar meter says
+the ledger needs moving only for the unmigrated and half-finished states; for the other two its title carries the restore or reconcile steps.
+A table test (`tests/test_telegraph_notice_table.py`) checks every command of every state on every surface. Each option that changes what the
+command does is carried (`--dir`, `--config`, `--telegraph-config`, `--scope`, and `--accept-malformed` on `db migrate` only). A moved ledger is
+never told to migrate, and a half-finished migration is never told to start with a dry run.
+
+Where it is shown:
+
+- `tt-orchard bringup`, once before the preflight page (a dry run too). It warns and never stops a run; a helper question during the run is
+  refused until the ledger is moved.
+- `tt-orchard ui`, in the startup log after the address, and in the Telegraph panel as a banner with the commands. The top-bar meter says
+  `Helper: ledger needs moving · spend unknown` for the first two states (the title and the banner carry the commands). `GET /api/telegraph` carries a `migration` object (`kind`, `summary`, `lines`,
+  `commands`), or `null`, with the directory path redacted like the rest of the page.
+- `tt-orchard spend`, first in the text output. With `--json` the same object is `real_helper_spend.migration`; the two top-level keys are
+  unchanged.
+- `tt-orchard telegraph ask`, `report` and `usage`. Each refuses before it opens the ledger, so it creates no `project.db` in a directory that
+  is not ready. `ask` sends nothing and spends nothing. The first line says what to do: `telegraph: Run` the dry run, then the real command,
+  `: the Telegraph ledger is still the old telegraph.jsonl file.` `Telegraph.ask` itself refuses too, so the supervisor and agent shells send
+  nothing either; its reason starts with the same sentence. Before this change `ask` also created `project.db` and helper files in the
+  unmigrated directory before it refused.
+- `scripts/setup.sh` (`tt-orchard setup`), as a `telegraph ledger` step with status `todo` and no action: setup never migrates for you. Setup
+  then exits 1 until the move is done.
+
 The dry run reads the ledger and the cache entries, imports them into a throw-away in-memory database and prints the totals and the checks.
 The real run takes the old `telegraph.lock` and holds it to the end, writes `MIGRATING-TO-SQLITE`, recovers the ledger (a cut-off last
 line moves to a `telegraph.jsonl.torn-*` sidecar file, and every sidecar that has no note gets one that counts as a call of the
