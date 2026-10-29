@@ -1,0 +1,3 @@
+target = "0.9.66"
+summary = "MiniCPM3 scripts: --layers reaches both constructors, the native model is built from the weights file, finish_reason follows the loop exit, summarize usage matches its arguments."
+pr = 242
