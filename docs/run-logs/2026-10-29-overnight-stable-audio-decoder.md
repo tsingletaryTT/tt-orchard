@@ -37,3 +37,29 @@ SiLU gated linear unit with inner width 2304 and biases.
 ## Log
 
 - 20:30 choice made, structure read. Next: host decomposition and a test against the library block, then chip.
+- 20:15 to 20:25 (first hardware sessions, one chip each, leases released after each):
+  - First chip decode of the 174-frame latent saved by the reference run of PR 165. The layers ran, but the waveform was wrong (PCC -0.02 against the CPU decode). Layer
+    by layer the stream agreed to PCC 0.92 to 0.996 with relative L2 errors of 10 to 44 percent, much worse than the bfloat16 floor.
+  - Section-by-section probe of layer 0 on the real input (same weights, same seed): every section up to and including the two attention outputs agreed (the two
+    outputs each had a relative error of 2.7 and 4.4 percent), and the section after their subtraction did not (relative error 47 percent). Cause: the two attention
+    outputs have norms near 290 and are nearly equal, and their difference has a norm near 22, so a bfloat16 error of a few percent in each is a large error in the difference.
+  - Fix (`precise_attention`): the query, key and value path stays in float32 (the `to_qkv` weights are also kept in float32), the attention is computed with
+    matrix multiplies and a float32 softmax, and the difference is taken on the probabilities, `(softmax(s1) - softmax(s2)) v`. The fused attention kernel takes bfloat16 only.
+    Layer 0 after the fix: relative L2 error 0.035 (was 0.43).
+  - Decoder alone (same latent, seed 42, noise identical on both sides), chip against the CPU float32 decode: layer relative L2 errors 0.035, 0.027, 0.008, 0.007, 0.007, 0.014
+    (PCC 0.9994 to 0.99997); waveform PCC 0.9946, relative L2 0.105, log-mel L1 0.484. The floor, the same CPU decode with the decoder weights cast to bfloat16 with no chip:
+    waveform PCC 0.9974, relative L2 0.073, log-mel L1 0.477. The chip is within about 1.4 times the floor on relative L2 and 1.5 percent of it on the log-mel distance.
+  - Decoder time for that latent: CPU float32 1.28, 1.38, 1.20 s (three repeats, host load average about 10); chip 0.427, 0.422, 0.425 s (three repeats after a first run).
+  - Whole clip, resident runtime from the merged benchmark rules (1 warm-up, 3 measured repeats on one process, diffusion transformer and decoder on the chip, small-music, 8 steps,
+    guidance 1.0, seed 42, 10 s): `generate_and_decode_s` 0.921, 0.956, 0.957 s (median 0.956). The same call with the decoder on the host, from the benchmark of PR 165: 1.755, 1.608, 1.578
+    s (median 1.608); CPU 3.9, 8.0, 6.0 s (median 6.0). Parts of the decoder-on-chip run: chip decoder call 0.438, 0.440, 0.483 s (the chip part with its transfers 0.403 to 0.405
+    s); transformer calls 0.291, 0.301, 0.349 s; encoder 0.040 to 0.041 s; host load average 9.8.
+  - `python -m orchard.audio_reference check --cross-precision` of that run against the CPU reference run of PR 165: all arrays ok with the provisional bars; final waveform PCC 0.976,
+    relative L2 0.219 (with the decoder on the host the same comparison gave PCC 0.981 and relative L2 0.198).
+  - Code: `orchard/skills/audio-chip-templates/chip_decoder.py` (new), `chip_decode_probe.py` (new), `--chip-decoder` in `chip_generate.py` and `ChipRuntime`; tests in
+    `tests/test_audio_chip_decoder.py` (the host decomposition against the library's own block with random weights, a mutation of the key mask, the config guard).
+- 20:30 other repositories in the family found while reading `model_configs.py`: `small-sfx` (sound effects; same architecture as small-music, only the conditioning text and
+  training settings differ), `medium` (DiT depth 24, width 1536, 24 heads with differential attention; decoder depth 12, width 256 channels, sliding windows, sinusoidal
+  feed-forward blocks) and the standalone autoencoders SAME-S and SAME-L. The account can open the gated small-sfx and medium repositories (config download returned 200).
+  Plan: small-sfx through the same path as a second checkpoint (CPU reference, chip, benchmark); then the medium model, which needs differential attention in the diffusion
+  transformer and a different decoder block, as a further real new-code step.
