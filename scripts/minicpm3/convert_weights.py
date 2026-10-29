@@ -5,11 +5,12 @@
     python convert_weights.py --model-dir DIR --out FILE
 
 The pickle is read with `torch.load(..., weights_only=True)`, so no code in the file runs. A model directory that already holds `model.safetensors` is
-linked, not converted. The output file is written under a temporary name and renamed when complete, so a stopped run leaves no half file.
+linked, not converted. The output is written under a temporary name of this run's own and published with a hard link that never replaces an existing file, so a stopped run leaves no half file and two runs for one snapshot do not collide.
 """
 import argparse
 import os
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -27,9 +28,18 @@ def main():
     from safetensors.torch import save_file
     state = torch.load(src, map_location="cpu", weights_only=True)
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    save_file({k: v.contiguous() for k, v in state.items()}, str(tmp))
-    os.replace(tmp, out)
+    # A temporary name of this run's own (two runs for the same snapshot never write one file), published with a hard link that fails when the output exists, so a
+    # file another run finished first is never replaced and never seen half written.
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        save_file({k: v.contiguous() for k, v in state.items()}, str(tmp))
+        try:
+            os.link(tmp, out)
+        except FileExistsError:
+            print(f"{out} was made by another run while this one converted; it was left as it is")
+            return
+    finally:
+        tmp.unlink(missing_ok=True)
     print(f"wrote {len(state)} tensors to {out}")
 
 

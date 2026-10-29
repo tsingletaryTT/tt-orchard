@@ -201,6 +201,7 @@ def reference_problems(stage_dir, run_dir) -> list[str]:
         if not agree(rec.get(key), fresh.get(key)):
             problems.append(f"the recorded {key} is not what the runs give now")
     ppl = fresh["ppl_reference"]
+    problems += tb.ppl_problems(load_json(stage_dir / PPL_REFERENCE_FILE, PPL_REFERENCE_FILE), "reference")
     expect_tokens = int(cfg.get("ppl_tokens", rt.PPL_TOKENS)) - 1
     p = ppl.get("perplexity")
     if ppl.get("tokens") != expect_tokens:
@@ -400,7 +401,7 @@ def finish_bench(stage_dir, run_dir, ref_stage_dir, runtime_name: str) -> dict:
     if rtm is None:
         raise TextStageError(f"no text runtime named {runtime_name!r}")
     cfg = stage_config(Path(ref_stage_dir))
-    model_config = mc.read_model_config(Path(cfg["model_dir"]) / "config.json")
+    model_config = mc.read_model_config((Path(cfg["model_dir"]) / "config.json").resolve())
     variants = {v.name: bench_entry(stage_dir, rtm, v, model_config) for v in rtm.variants}
     result = {"schema": SCHEMA, "runtime": runtime_name, "model_id": cfg["model_id"], "default_variant": rtm.default_variant().name, "variants": variants,
               "rules": "docs/benchmark-rules.md: one discarded warm-up run, then at least three measured runs, in one process; spread is min, median and max",
@@ -418,7 +419,7 @@ def bench_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
     try:
         res = load_json(stage_dir / BENCH_FILE, BENCH_FILE)
         cfg = stage_config(Path(ref_stage_dir))
-        model_config = mc.read_model_config(Path(cfg["model_dir"]) / "config.json")
+        model_config = mc.read_model_config((Path(cfg["model_dir"]) / "config.json").resolve())
     except (TextStageError, mc.ModelConfigError) as exc:
         return [str(exc)]
     rtm = rt.get(res.get("runtime"))
@@ -444,6 +445,9 @@ def bench_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
             problems.append(f"{v.name}: the runs report no decode speed")
             continue
         data = load_json(stage_dir / fresh["file"], fresh["file"])
+        layers = (data.get("config") or {}).get("layers") if isinstance(data.get("config"), dict) else None
+        if layers is not None and layers != rtm.n_layers(model_config):
+            problems.append(f"{v.name}: the benchmark ran {layers} layers; the model has {rtm.n_layers(model_config)}")
         for i, r in enumerate(data.get("runs", [])):
             if not isinstance(r, dict) or not all(isinstance(r.get(k), (int, float)) for k in ("steps", "decode_s", "decode_tok_s")) or r["decode_s"] <= 0:
                 problems.append(f"{v.name} run {i}: it has no steps, decode time and speed that are numbers")

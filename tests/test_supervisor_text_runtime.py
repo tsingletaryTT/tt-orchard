@@ -70,7 +70,7 @@ def trig(tmp_path, monkeypatch, request):
             write_run(out / "native", perturb(ref_arrays, 0.012, seed=4), dtype="bfloat16", model="openbmb/MiniCPM3-4B", prompt=rt.DEFAULT_PROMPT, config_dir=snap)
         elif script == "ppl_check.py":
             Path(arg("--out")).write_text(json.dumps({"mode": "ref", "tokens": rt.PPL_TOKENS - 1, "perplexity": 8.0, "mean_nll": float(np.log(8.0)),
-                                                      "logprobs": [-2.0] * 5}))
+                                                      "logprobs": [-float(np.log(8.0))] * (rt.PPL_TOKENS - 1)}))
         else:
             raise AssertionError(f"unexpected CPU command {argv_}")
         return 0
@@ -91,7 +91,7 @@ def trig(tmp_path, monkeypatch, request):
                 write_run(Path(arg("--out")), perturb(ref_arrays, r.chip_noise.get(Path(arg("--out")).name, 0.03), seed=3), dtype="bfloat16", model="openbmb/MiniCPM3-4B", prompt=rt.DEFAULT_PROMPT, config_dir=snap)
             elif script == "ppl_check.py":
                 Path(arg("--out")).write_text(json.dumps({"mode": "chip", "tokens": rt.PPL_TOKENS - 1, "perplexity": 7.95, "mean_nll": float(np.log(7.95)),
-                                                          "logprobs": [-2.0] * 5}))
+                                                          "logprobs": [-float(np.log(7.95))] * (rt.PPL_TOKENS - 1)}))
             elif mode == "bench":
                 Path(arg("--out")).write_text(json.dumps(bench_json(40.0 if "bfp8" in av else 33.0)))
             else:

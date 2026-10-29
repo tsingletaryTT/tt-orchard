@@ -193,7 +193,7 @@ class MiniCPM3(TextRuntime):
 
     def config_problems(self, model_dir) -> list[str]:
         try:
-            cfg = safeio.read_json(Path(model_dir).resolve() / "config.json", max_bytes=1 << 20, expect=dict)
+            cfg = safeio.read_json((Path(model_dir) / "config.json").resolve(), max_bytes=1 << 20, expect=dict)
         except (OSError, ValueError, safeio.SafeReadError) as exc:
             return [f"config.json cannot be read: {exc}"]
         out = []
@@ -322,7 +322,7 @@ def environment_problems(paths: TextPaths) -> list[str]:
 def card_license(model_dir) -> str | None:
     """The `license:` value in the front matter of the model directory's README.md (the Hub card), or None. Read with a size limit."""
     try:
-        text = safeio.read_bytes(Path(model_dir).resolve() / "README.md", max_bytes=2 << 20).decode("utf-8", "replace")
+        text = safeio.read_bytes((Path(model_dir) / "README.md").resolve(), max_bytes=2 << 20).decode("utf-8", "replace")
     except (OSError, ValueError, safeio.SafeReadError):
         return None
     if not text.startswith("---"):
@@ -338,9 +338,10 @@ def model_facts(model_dir, rtm: TextRuntime) -> dict:
     accepts the configuration."""
     import hashlib
     d = Path(model_dir).resolve()
-    cfg = safeio.read_json(d / "config.json", max_bytes=1 << 20, expect=dict)
+    cfg_file = (d / "config.json").resolve()          # a Hugging Face snapshot holds the file as a link into blobs/
+    cfg = safeio.read_json(cfg_file, max_bytes=1 << 20, expect=dict)
     weights = sorted(p.name for p in d.iterdir() if p.suffix in (".safetensors", ".bin") and p.is_file())
-    return {"config_sha256": hashlib.sha256(safeio.read_bytes(d / "config.json", max_bytes=1 << 20)).hexdigest(), "architectures": cfg.get("architectures"),
+    return {"config_sha256": hashlib.sha256(safeio.read_bytes(cfg_file, max_bytes=1 << 20)).hexdigest(), "architectures": cfg.get("architectures"),
             "model_type": cfg.get("model_type"), "n_layers": rtm.n_layers(cfg), "hidden_size": cfg.get("hidden_size"), "card_license": card_license(d),
             "weight_files": weights, "config_problems": rtm.config_problems(d)}
 

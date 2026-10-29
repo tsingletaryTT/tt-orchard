@@ -1167,17 +1167,32 @@ TEXT_FILES = ((1, "text_reference.json"), (2, "text_result.json"), (6, "text_ben
 TEXT_HEADING = "Text model on a chip"
 
 
+def as_dict(x) -> dict:
+    return x if isinstance(x, dict) else {}
+
+
+def as_list(x) -> list:
+    return x if isinstance(x, list) else []
+
+
+def variants_of(d) -> list[tuple[str, dict]]:
+    """The (name, record) pairs of a result's `variants`, with a record that is not an object read as empty and a `variants` that is not an object as none."""
+    v = as_dict(as_dict(d).get("variants"))
+    return [(str(k), as_dict(x)) for k, x in sorted(v.items(), key=lambda kv: str(kv[0]))]
+
+
 def text_variant_rows(run: Run, redact: Redactor) -> list[str]:
-    res, bench = run.text.get("text_result.json") or {}, run.text.get("text_bench.json") or {}
+    res, bench = as_dict(run.text.get("text_result.json")), as_dict(run.text.get("text_bench.json"))
     head = ["| Variant | Decode tok/s (median, min to max) | Timing label | Share of floor | Teacher-forced agreement | Worst block error over floor | "
             "Perplexity (chip, reference) | Stage 2 bar |", "|---|---|---|---|---|---|---|---|"]
     rows = []
-    for name, v in sorted((res.get("variants") or {}).items()) if isinstance(res.get("variants"), dict) else []:
-        b = dig(bench, "variants", name) or {}
-        spread = b.get("decode_tok_s") if isinstance(b.get("decode_tok_s"), dict) else {}
-        agree = dig(v, "numeric", "agreement") or {}
-        ratio = dig(v, "numeric", "worst_ratio_to_floor") or {}
-        ppl = v.get("perplexity") if isinstance(v.get("perplexity"), dict) else {}
+    bench_by_name = dict(variants_of(bench))
+    for name, v in variants_of(res):
+        b = bench_by_name.get(name, {})
+        spread = as_dict(b.get("decode_tok_s"))
+        agree = as_dict(dig(v, "numeric", "agreement"))
+        ratio = as_dict(dig(v, "numeric", "worst_ratio_to_floor"))
+        ppl = as_dict(v.get("perplexity"))
         share = b.get("share_of_floor_median")
         rows.append(f"| {txt(redact, name)} | {num(spread.get('median'), 3)} ({num(spread.get('min'), 3)} to {num(spread.get('max'), 3)}) | {txt(redact, b.get('label'))} | "
                     f"{num(share * 100, 3) + ' percent' if is_number(share) else NOT_RECORDED} | {num(agree.get('matches'))} of {num(agree.get('of'))} | "
@@ -1190,7 +1205,7 @@ def text_section(run: Run, redact: Redactor) -> list[str]:
     """The "Text model on a chip" section of RESULTS.md. No lines for a run without text_result.json."""
     if not run.text_run:
         return []
-    res, ref, bench = (run.text.get(n) or {} for n in ("text_result.json", "text_reference.json", "text_bench.json"))
+    res, ref, bench = (as_dict(run.text.get(n)) for n in ("text_result.json", "text_reference.json", "text_bench.json"))
     lines = ["", f"## {TEXT_HEADING}", "",
              f"Runtime: {txt(redact, res.get('runtime'))}. Evidence: `stages/1/text_reference.json`, `stages/2/text_result.json`, `stages/6/text_bench.json`. "
              "Each number below is recomputed by the stage gate from the recorded arrays and files.", "",
@@ -1198,10 +1213,10 @@ def text_section(run: Run, redact: Redactor) -> list[str]:
              "The chip runs follow the reference's token path (teacher forcing).", "",
              f"Rule: {txt(redact, res.get('rule'), 600)}", ""]
     lines += text_variant_rows(run, redact)
-    for name, e in sorted((bench.get("variants") or {}).items()) if isinstance(bench.get("variants"), dict) else []:
+    for name, e in variants_of(bench):
         lines += ["", f"Floor, {txt(redact, name)}: {txt(redact, e.get('share_text'), 400)}"]
     lines += ["", "### What these numbers do not show", ""]
-    lines += [f"- {txt(redact, x, 500)}" for x in (res.get("limits") or []) + (bench.get("limits") or [])] or ["- No limits are recorded."]
+    lines += [f"- {txt(redact, x, 500)}" for x in as_list(res.get("limits")) + as_list(bench.get("limits"))] or ["- No limits are recorded."]
     return lines
 
 
@@ -1209,12 +1224,12 @@ def text_risks(run: Run, redact: Redactor) -> list[str]:
     """The "Text run" section of RISKS.md: a stage 2 bar that was not met first, then the fixed limits. No lines without text_result.json."""
     if not run.text_run:
         return []
-    res = run.text.get("text_result.json") or {}
+    res = as_dict(run.text.get("text_result.json"))
     lines = ["## Text run", ""]
-    for name, v in sorted((res.get("variants") or {}).items()) if isinstance(res.get("variants"), dict) else []:
-        if isinstance(v, dict) and v.get("ok") is not True:
+    for name, v in variants_of(res):
+        if v.get("ok") is not True:
             lines.append(f"- Variant {txt(redact, name)} did not meet the stage 2 bar: "
-                         f"{txt(redact, '; '.join(map(str, (dig(v, 'numeric', 'reasons') or []) + (dig(v, 'perplexity', 'reasons') or []))), 400)}. "
+                         f"{txt(redact, '; '.join(map(str, as_list(dig(v, 'numeric', 'reasons')) + as_list(dig(v, 'perplexity', 'reasons')))), 400)}. "
                          "Evidence: `stages/2/text_result.json`.")
     lines += ["- The chip bar is a multiple of the CPU bfloat16 error and is provisional. Evidence: `stages/2/text_result.json`.",
               "- Agreement and perplexity cover one prompt and one text window. Evidence: `stages/2/text_result.json`.", ""]

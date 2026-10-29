@@ -164,12 +164,13 @@ def bench(a, m, ids, n, tok):
         if not rec["warmup"]:
             timings.append({k: v for k, v in rec.items() if isinstance(v, (int, float)) and not isinstance(v, bool) and k not in ("repeat",)})
     summary = resident.summarise_runs(timings, warmup=resident.WARMUP_RUNS)
-    cfg = mc.read_model_config(a.model_dir + "/config.json")
+    cfg = dict(mc.read_model_config(a.model_dir + "/config.json"))
+    cfg["num_hidden_layers"] = m.L                 # the floor counts the layers the model ran (--layers truncates the stack)
     policy = {"default": "bf16", "dense_mlp": a.mlp_dtype}        # the weights the run actually reads
     floor = df.floor_for_board(cfg, policy, "p300", dies=a.tp)
     med = summary["parts"]["decode_tok_s"]["median"]
     record = {"label": summary["label"], "model": "openbmb/MiniCPM3-4B", "config": {"attn": a.attn, "opt": a.opt, "shard": a.shard, "trace": a.trace, "upd": a.upd,
-              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": a.tp, "prompt_tokens": n, "steps": a.steps, "batched_prefill": a.batched_prefill},
+              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": a.tp, "prompt_tokens": n, "steps": a.steps, "batched_prefill": a.batched_prefill, "layers": m.L},
               "runs": results, "summary": summary, "floor": floor.as_dict(), "share_of_floor_median": df.share_of_floor(med, floor),
               "share_text": df.share_text(med, floor), "text": tok.decode(out)}
     print(record["share_text"], flush=True)
