@@ -3223,3 +3223,8 @@ Prompt (operator): "pick a model that would require a new kernel and try to brin
 - The route-k constant only affects the unfused router path, so a change leaves one-row decode identical (expected, noted for issue 15).
 - Phase 2 (hardware) not run: 71.9 GB checkpoint against 81 GB free disk, and a bring-up of the new model on the bundle's code is needed first. Filed as issue 234. No chip was leased or touched.
 - Default taken: dies = 2 (one p300 board); "kernel-side" checks are a conservative table in the module.
+
+## 2026-10-29: fusion port phase 2 (issue 184, PR 236)
+- Operator approved phase 2. A 35-line loader patch lets the Coder-Next bundle code read the Qwen3.5-MoE checkpoint layout; a 4-layer slice of the 35B model serves on two dies. Slice, not the model: the full 40-layer checkpoint is being fetched with tensor range reads (4 to 6 MB/s with `hf download`, much faster with ranges).
+- Per-op check: sampler top-k matches the CPU reference for five scan grids; a grid wider than 10 columns fails (merge core at column 10); the router check is invalid (harness disagrees at the bundle's own dimensions).
+- Speed measurements are added to the run log when taken.
