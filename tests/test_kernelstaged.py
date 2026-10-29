@@ -18,7 +18,7 @@ import pytest
 from fake_model import FakeModel, call, final, turn
 from orchard import kernelprobe as kp, kernelstaged as ks
 from test_kernelprobe import (FACTS, VENV, SRC, needs_sim, fake_kenv, kenv, env_ready, probe_args,  # noqa: F401
-                              ttlang_skill, skills_current, gozer_tripwire)
+                              ttlang_skill, skills_current, gozer_tripwire, consistency_ok)
 
 PASS = {"passed": True, "category": None, "first_line": "", "sets": []}
 
