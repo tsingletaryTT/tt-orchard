@@ -130,3 +130,25 @@ DRAM bandwidth probe (`exp_matmul.py`, one weight per call, 20 calls per trace):
 for the LM head, but only 253 GB/s for down (6400 by 2560) and 198 GB/s for `o_proj`. DRAM-sharded weights with a sharded input reach 479 and 374 GB/s on those two
 (down 130 to 68 microseconds, `o_proj` 66 to 35). bfloat8_b weights are not faster at HiFi2 (the matmul is not bandwidth bound there). The DRAM-sharded LM head failed
 with a dataflow-buffer error at 8 cores. Not applied yet.
+
+## Update 4 (about 21:15 Pacific): DRAM-sharded MLP and o_proj, a 922-token prompt, 24 tok/s
+
+DRAM-sharded weights (`--shard`) for the three MLP matrices and `o_proj`, with the activations width-sharded across 40 cores (5 by 8) and the gate and up outputs feeding the product and
+down projection without leaving the sharded layout. Per MLP layer in isolation (`exp_mlp_block.py`, norm to residual add): 350 microseconds interleaved, 283 sharded. In the model
+the traced step goes from 43.3 to 38.5 ms of device time. bfloat8_b weights gave no further gain at HiFi2 (278 microseconds), so weights stay bfloat16.
+
+Breakdown now (62 layers, ms per token of device time, same skip method as above): MLP 17.7, LM head 0.9, attention and the rest 19.8. Inside the attention: key path 4.4, flash MLA op 1.0, the two per-head
+matmuls 1.0, rotary on the query 0.7, cache write 0.25, everything else (norms, the query and output projections, reshapes, residual adds) 12.1.
+
+Agreement with the sharded config (first-divergence against float32; 3 times floor is not met by the chip, as before):
+
+| run | prompt tokens | layer 0 | layer 30 | layer 61 | last-position prefill logits PCC | decode logits PCC (step 0, step 15) | teacher-forced tokens |
+|---|---|---|---|---|---|---|---|
+| short | 40 | 0.0077 | 0.0063 | 0.0634 (floor 0.0196) | 0.9989 | 0.9983, 0.9982 | 16 of 16 |
+| long | 922 | 0.0118 | 0.0182 | 0.0764 (floor 0.0346) | 0.9968 | 0.9992, 0.9991 | 16 of 16 |
+
+The long prompt is 3.2 KB of one of this repository's own documents plus an instruction to summarize it; it checks the cache and the flash op over about a thousand positions
+(the cache was sized to 1,024). The prefill took 81 seconds (token by token, with a host read of the stream after every layer section, which is the recording cost).
+
+Decode speed from the same traced step: 22.4 to 23.1 tok/s over 48 steps after a 40-token prompt, and 24.2 to 24.6 tok/s after the 922-token prompt (3 measured repeats each, one warm-up each;
+the host was loaded by other work, load average about 15, which shows in the spread). The device time of the step is 38.5 ms (26 tok/s), so about 5 ms per token is host work around the trace.
