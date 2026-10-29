@@ -90,3 +90,20 @@ def no_real_gozer_leases(monkeypatch):
         calls.append(list(argv))
         pytest.fail(f"this test reached the real gozer through hwtool: {calls[:3]}", pytrace=False)
     monkeypatch.setattr(hwtool, "_sh", refused)
+
+
+@pytest.fixture(autouse=True)
+def no_updates_network(monkeypatch, tmp_path):
+    """No test may reach the real network or a real subprocess through `tt-orchard updates` (orchard/updates.py). The default
+    `get` and `run` fail the test; tests of the command hand `Tools` fakes."""
+    from orchard import updates
+    calls = []
+
+    def refused(*a, **k):
+        calls.append(a[:1])
+        return 0, b"", "the test suite makes no real call"
+    monkeypatch.setattr(updates, "_real_get", refused)
+    monkeypatch.setattr(updates, "_real_run", refused)
+    yield
+    if calls:
+        pytest.fail(f"this test reached the real network or runner of the updates check: {calls[:3]}", pytrace=False)

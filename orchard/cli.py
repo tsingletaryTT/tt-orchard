@@ -15,6 +15,7 @@
     tt-orchard reported show RUN_DIR
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR]
+    tt-orchard updates [--json] [--offline] [--refresh] [--tt-metal-dir DIR] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
@@ -305,6 +306,15 @@ def _parser() -> argparse.ArgumentParser:
     sp_.add_argument("--json", action="store_true", help="print the figures as JSON")
     sp_.add_argument("--dir", metavar="DIR", help="the telegraph ledger directory (default: the config's, else ~/.cache/tt-orchard/telegraph)")
     sp_.add_argument("--telegraph-config", metavar="FILE", help="a TOML file with the [telegraph] and [virtual_spend] tables (default: the bringup config's)")
+    up_ = sub.add_parser("updates", parents=[common],
+                         help="is each tool, the coder bundle and the tt-lang pin the newest upstream has? read only; "
+                              "prints upgrade commands as text and runs none")
+    up_.add_argument("--json", action="store_true", help="print the rows as JSON")
+    up_.add_argument("--offline", action="store_true", help="make no network call; show the last cached result")
+    up_.add_argument("--refresh", action="store_true", help="ignore the cache (default: reuse a result under 6 hours old)")
+    up_.add_argument("--tt-metal-dir", help="the host tt-metal tree, read only (default ~/tt-metal, or $ORCHARD_TT_METAL_DIR)")
+    up_.add_argument("--updates-config", metavar="FILE", help="TOML with family, coder_packages, authors, repos, cache_hours "
+                                                              "(default config/updates.toml when it exists)")
     k = sub.add_parser("kernel-env", parents=[common],
                        help="build or check the tt-lang simulator environment that kernel-probe uses")
     k.add_argument("--check", action="store_true",
@@ -1001,6 +1011,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "ttlang-consistency":
         from orchard import ttlang_consistency
         return ttlang_consistency.main(args, out=out)
+    if args.cmd == "updates":
+        from orchard import updates
+        try:       # the skills checkout comes from the bringup config; without one the skills row says so
+            args.skills_dirs = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)).skills_dirs
+        except Exception:
+            args.skills_dirs = None
+        return updates.main(args, out=out)
     if args.cmd == "kernel-env":
         from orchard import ttlang_env
         return ttlang_env.main(args, out=out)

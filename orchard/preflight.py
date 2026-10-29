@@ -761,6 +761,7 @@ class Signals:
     sfpi: Callable | None = None                # (bundle name) -> (installed SFPI version, version the bundle pins)
     lab_sfpi: Callable | None = None            # () -> the lab's installed SFPI version, or None (lab mode)
     skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
+    updates_hint: Callable | None = None        # () -> one line from the `tt-orchard updates` cache (no network), or None
     bus: Callable | None = None                 # () -> orchard.bus.Bus: the chips the kernel shows (sysfs and /dev; no lease)
     stock_params: Callable | None = None        # (name) -> Path of tt-transformers' model_params/<name> on this box, or None
     demo_env: Callable | None = None            # (python | None, tree | None) -> (orchard.demo_env results or None, the command that builds it)
@@ -1136,6 +1137,13 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             out.append(check_skills(list(s.skills_freshness())))
         except Exception as exc:                      # a warning, like the row itself: bringup is not blocked
             out.append(Check("skills", WARN, f"could not check the skills clone: {type(exc).__name__}: {exc}"))
+    if s.updates_hint is not None:
+        try:
+            line = s.updates_hint()
+        except Exception:                             # a hint is optional; it never changes the outcome
+            line = None
+        if line:
+            out.append(Check("updates", OK, line))    # informational: OK never blocks and never warns
     return out
 
 
@@ -1253,6 +1261,10 @@ def default_signals(cfg, research_options=None) -> Signals:
         return skillsfresh.check_skills_dirs(cfg.skills_dirs, reuse_s=SKILLS_REUSE_S, offline=offline,
                                              cache=skillsfresh.Cache(write=write))
 
+    def updates_hint():
+        from orchard import updates      # reads the cache file only; the network is touched by `tt-orchard updates` alone
+        return updates.hint_from_cache()
+
     def read_bus():
         from orchard import bus as bus_check
         return bus_check.read_bus()
@@ -1287,6 +1299,7 @@ def default_signals(cfg, research_options=None) -> Signals:
 
     return Signals(
         cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus,
+        updates_hint=updates_hint,
         installed_bundles=lambda: nearest.read_all_installed(models_root(), cfg.operator_home or supervisor.operator_home()),
         search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
