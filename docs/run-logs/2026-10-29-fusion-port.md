@@ -93,8 +93,8 @@ and the sampler `GRID`.
 
 ## Phase 2 progress (hardware), first session
 
-Status: a 4-layer slice of the model loads and serves on two dies, and its decode speed was measured (next section). The full 40-layer
-model was not run.
+Status: the full 40-layer Qwen3.5-35B-A3B loads and serves on two dies on the Coder-Next bundle's code, and its decode speed was measured
+(last section). A 4-layer slice was measured first (middle section).
 
 What worked:
 - Weights. The bundle's loader (`weights.py`) knows the Qwen3-Next checkpoint layout. A 35-line patch (`scripts/fusion_port/weights_qwen35_moe.patch`)
@@ -155,4 +155,43 @@ Reading of the numbers:
 - Cold start: the container answered `/v1/models` 70 to 106 seconds after start with the kernel cache already warm (seeded with a read-only copy
   of the coder's cache); the first start, with the cache partly cold, took about 5 minutes.
 
-What is not done: the 40-layer model was not downloaded or served, so there is no 40-layer tok/s or floor share. Disk was 232 GB free at the end.
+
+## Phase 2 measurements: the full 40-layer Qwen3.5-35B-A3B
+
+The full checkpoint (69.3 GB of text-model safetensors, 693 tensors; the vision tower and the MTP head were left out) was fetched by tensor range
+reads in about 40 minutes and served on chips 2 and 3 (two dies, mesh P300) with the same settings as the slice above: the bundle's fused ops, precision policy
+`coder_next_routed_bfp4_mixers_bfp8`, one sequence, 4096 context, 128-token greedy decode, 1 discarded warm-up and 5 measured runs per server,
+host load 5.2 to 6.5. The bundle's code is as shipped except for the loader patch; the ablations are the only other changes.
+
+| Configuration | min | median | max | Share of the floor (428.0 tok/s) |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline (GRID 10 x 10, route-k 80) | 126.68 | 126.78 | 126.91 | 29.6% |
+| Sampler GRID 10 x 5 | 126.40 | 126.84 | 126.88 | 29.6% |
+| Route-k 72 | 126.38 | 126.78 | 126.85 | 29.6% |
+
+- Baseline decode is 126.8 tok/s, 29.6 percent of the estimated floor (2.34 ms, 2,392 MB per token, bfp4 routed experts and head, bfp8 attention and
+  shared experts, 2 dies at the 512 GB/s datasheet peak). For comparison the fused Coder-Next bundle on the same two dies reached 107 tok/s
+  in this repository's earlier run (docs/run-logs/2026-10-28-coder-fused-decode.md) at about 23.5 percent of its estimated floor; the two figures
+  come from different models and methods and are not a like-for-like comparison.
+- Change 1, sampler scan grid (10 x 5 against 10 x 10): median +0.05 percent. Change 2, route-k 72 against 80: median 0.0 percent. Both are far
+  under the 3 percent bar and inside the baseline spread, so neither is kept. The ablations stop here: nothing else in the candidate list applies with
+  a changed constant (moe_decode, gdn_decode, attn_decode and addnorm apply as is, and the fabric boundary needs new code on two dies).
+- Route-k is expected to change nothing at one row: the fused one-row router is the default and the constant belongs to the unfused path. The result
+  agrees. The run does not show that the new route-k value is right for the unfused multi-row path.
+- Greedy check, fixed prompt (`docs/run-logs/2026-10-29-fusion-port-data/prompt.txt`), 16 tokens, against the CPU reference
+  (Hugging Face model in bfloat16, same checkpoint, same prompt): device text " Johannes Gutenberg, a German goldsmith, developed a movable type printing
+  press"; reference text " Johannes Gutenberg, a German goldsmith, invented the movable type printing press. This". The first 8 tokens match
+  exactly; token 9 differs ("developed" against "invented"). In the reference's top 5 at that position "invented" has log-probability -1.13 and
+  "developed" -1.26, a gap of 0.125 nats, and the device's own top 2 are the same two words in the other order (-0.95 and -1.45). That is a near tie flipped by
+  the bfp4 routed experts. The two outputs agree again from token 11 on, with two differing tokens in 16. This is a first-8-tokens match plus a
+  near-tie flip, not an exact match. The slice's gibberish mismatch above is explained by the same prompt difference in the first CPU run
+  (it kept the trailing newline); the full model's coherent output is the check that counts.
+- The three greedy outputs of the three configurations are identical, as expected: neither change should alter numerics, so identical output is the right result
+  and not a flag under the issue 15 rule.
+- Cold compile: the full model's container answered `/v1/models` 267 to 272 seconds after start in all three runs, with the kernel cache already warm
+  from the slice runs (the cache was first seeded from a read-only copy of the coder's). The first-ever start (cache partly cold, 4 layers) took about 5 minutes. No
+  fully cold full-model compile time was measured.
+- Nothing was published, and the coder's container, lease and ports were not touched.
+
+Ops ported: none kept. Ops with a changed constant tried: router route-k (80 to 72) and sampler scan grid (10 x 10 to 10 x 5), both measured and dropped. Ops needing
+new code: the fabric layer boundary (four dies only). Speed before and after: 126.8 and 126.8 to 126.8 tok/s. Floor share: 29.6 percent.
