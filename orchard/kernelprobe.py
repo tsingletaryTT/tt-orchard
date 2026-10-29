@@ -68,7 +68,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from orchard import defaults, hwtool, ttlang_consistency, ttlang_env, ttlang_reference
+from orchard import defaults, hwtool, ttlang_consistency, ttlang_env, ttlang_pair, ttlang_reference
 from orchard.agent import DEVICE_VARS, SECRET_NAME, TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
@@ -1026,7 +1026,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
 def _gozer(reason: str, shared_python: str, *args: str) -> list[str]:
     """A one-chip gozer lease around a command run by the shared venv's python. The lease's release resets the chip."""
     return ["gozer", "run", "--chips", "1", "--exact", hwtool.probe_chip(), "--who", GOZER_WHO, "--reason", reason, "--",
-            shared_python, *args]
+            *ttlang_pair.hw_command(shared_python), *args]
 
 
 def _new_text(path: Path, offset: int) -> str:
@@ -1262,7 +1262,7 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
                 "--wait-s", repr(float(wrapper["wait_s"])), "--result", str(lease_file),
                 "--sha256", str(wrapper["sha256"]), "--file", str(kernel),
                 "--call-timeout-s", repr(float(wrapper["call_timeout_s"])), "--",
-                _abs_executable(shared_python), *harness]
+                *ttlang_pair.hw_command(_abs_executable(shared_python)), *harness]
     try:
         got = run_watched(argv, cwd=Path(kernel).parent, env=env, log_path=log,
                           watcher=_hw_watcher(), backstop_s=backstop_s, term_grace_s=GOZER_TERM_GRACE_S)
@@ -2297,7 +2297,11 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             return refuse("--stage-wall-s must be a finite number of seconds above 0")
     if staged and hw_policy.enabled:
         return refuse("--staged gives the coder no hardware tool: pass --no-agent-hw")
-    shared = getattr(args, "shared_python", None) or default_shared_python()
+    # The hardware interpreter: --shared-python, else the managed pair venv, else the old shared venv with a warning.
+    choice = ttlang_pair.resolve_hardware_python(getattr(args, "shared_python", None), fallback=default_shared_python())
+    shared = choice.python
+    if choice.warning:
+        say(choice.warning)
     env = env or default_env(args)
     allow_pin = bool(getattr(args, "allow_stale_skills", False))
     results = ttlang_env.ensure(env, check_only=True, say=say, allow_pin_mismatch=allow_pin)

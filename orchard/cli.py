@@ -14,7 +14,8 @@
     tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
     tt-orchard reported show RUN_DIR
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
-    tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR]
+    tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
+    tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
@@ -319,6 +320,15 @@ def _parser() -> argparse.ArgumentParser:
     k.add_argument("--allow-stale-skills", action="store_true",
                    help="with --check: a tt-lang checkout or tt-lang skill that is not the latest upstream has does "
                         "not fail the check")
+    k.add_argument("--pair", action="store_true",
+                   help="work on the hardware pair venv instead of the simulator venv: print the commands that build it "
+                        "from orchard/ttlang_pin.py and say what the venv holds (with --check, only the second part)")
+    k.add_argument("--apply", action="store_true", help="with --pair: run the commands (download, check sha256, uv venv, install, record exports)")
+    k.add_argument("--pair-venv-dir", help="the pair venv (default $ORCHARD_PAIR_VENV, else $ORCHARD_CACHE_ROOT or "
+                                           "~/.cache/tt-orchard, then ttlang-pair/venv)")
+    k.add_argument("--pair-download-dir", help="where --apply puts the downloaded wheels (default next to the venv, in wheels/)")
+    k.add_argument("--tt-metal-dir", help="with --pair: the host tt-metal tree the venv is pointed at (default ~/tt-metal, or "
+                                          "$ORCHARD_TT_METAL_DIR)")
     tc_ = sub.add_parser("ttlang-consistency", parents=[common],
                          help="check the tt-lang pin against the checkout, the simulator, the skill, the reference files "
                               "and the tt-metal tree; read only")
@@ -328,6 +338,9 @@ def _parser() -> argparse.ArgumentParser:
                                                  "or $ORCHARD_TTLANG_SKILL)")
     tc_.add_argument("--tt-metal-dir", help="the host tt-metal tree, read only (default ~/tt-metal, or "
                                             "$ORCHARD_TT_METAL_DIR)")
+    tc_.add_argument("--build-info-file", metavar="FILE",
+                     help="the JSON that scripts/ttlang_build_info.py wrote under a lease (tt_lang_commit, tt_metal_commit, "
+                          "optionally version and tt_metal_tag); without it the hardware row is a todo")
     d = sub.add_parser("demo-env", parents=[common],
                        help="build or check the interpreter that runs tt-metal demos and tt-train (numpy below 2, cv2, datasets, "
                             "the host tree's ttnn and ttml)")
@@ -1002,6 +1015,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         from orchard import ttlang_consistency
         return ttlang_consistency.main(args, out=out)
     if args.cmd == "kernel-env":
+        if getattr(args, "pair", False):
+            from orchard import ttlang_pair
+            return ttlang_pair.main(args, out=out)
         from orchard import ttlang_env
         return ttlang_env.main(args, out=out)
     if args.cmd == "audio-reference-env":

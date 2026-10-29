@@ -23,6 +23,7 @@ and `tt_metal_tag`).
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -207,8 +208,21 @@ def tt_metal_dir_from(args, environ=None, home: Path | None = None) -> Path:
     return Path(flag or environ.get("ORCHARD_TT_METAL_DIR") or Path(home or Path.home()) / "tt-metal")
 
 
+def load_build_info(path) -> dict:
+    """The record `scripts/ttlang_build_info.py` wrote (tt_lang_commit, tt_metal_commit, optionally version and
+    tt_metal_tag). ValueError for a file that is missing, not JSON or not an object."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{path} cannot be read as JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} holds {type(data).__name__}, not a JSON object")
+    return data
+
+
 def main(args, *, env=None, out=None) -> int:
-    """`tt-orchard ttlang-consistency [--src-dir D] [--venv-dir D] [--tt-lang-skill-dir D] [--tt-metal-dir D]`.
+    """`tt-orchard ttlang-consistency [--src-dir D] [--venv-dir D] [--tt-lang-skill-dir D] [--tt-metal-dir D]
+    [--build-info-file F]`. `--build-info-file` is the JSON of scripts/ttlang_build_info.py; it turns the hardware row from todo into a comparison.
     Exit 0 when no row blocks, 2 otherwise. Changes nothing."""
     say = (lambda line: print(line, file=out)) if out is not None else print
     home = Path.home()
@@ -217,7 +231,14 @@ def main(args, *, env=None, out=None) -> int:
         venv_dir=Path(args.venv_dir or os.environ.get("ORCHARD_TTLANG_VENV") or home / "orchard-venvs" / "ttlang"),
         scratch_dir=Path(os.environ.get("ORCHARD_SCRATCH") or home / "orchard-src" / "scratch"),
         run=ttlang_env.real_run, environ=dict(os.environ))
-    rows = check(env, ttlang_env.skill_dir_from(args), tt_metal_dir=tt_metal_dir_from(args))
+    build_info = None
+    if getattr(args, "build_info_file", None):
+        try:
+            build_info = load_build_info(args.build_info_file)
+        except ValueError as exc:
+            say(f"refused: --build-info-file: {exc}")
+            return 2
+    rows = check(env, ttlang_env.skill_dir_from(args), tt_metal_dir=tt_metal_dir_from(args), build_info=build_info)
     say(f"tt-lang pin {ttlang_pin.SHA[:9]} (simulator {ttlang_pin.SIM_VERSION})")
     for line in render(rows):
         say(line)
