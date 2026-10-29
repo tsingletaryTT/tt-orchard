@@ -1103,3 +1103,15 @@ def test_kernel_probe_takes_the_ladder_options_without_an_op(monkeypatch, tmp_pa
              env={"HOME": str(tmp_path)}, stdout=io.StringIO())
     plain, _ = calls[1]
     assert plain.ladder is False and plain.wall_s is None and plain.report_only is False
+
+def test_bringup_passes_the_sampling_setting_to_the_supervisor_only_when_given(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--sampling" not in rec.argv
+    for value in ("auto", "needed", "not-needed"):
+        code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--sampling", value])
+        assert code == 0 and rec.argv[rec.argv.index("--sampling") + 1] == value
+
+
+def test_bringup_refuses_an_unknown_sampling_value(conf):
+    with pytest.raises(SystemExit):
+        run(conf, ["bringup", "Cloudflare/clef", "--sampling", "sometimes"])

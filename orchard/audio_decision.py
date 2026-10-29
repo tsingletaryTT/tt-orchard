@@ -3,17 +3,33 @@
 """The gate's check of the audio class decision that stage 0's template writes under `delta.json` `audio.decision`.
 
 The template decides (orchard/skills/delta-triage-templates/delta_triage.py, `decide_audio`); this module re-reads the record the way `gate_package` re-reads
-a package, so an agent that edited delta.json cannot pass a class its own evidence does not support. A delta.json with no decision (a text model, or a run
-from before the decision existed) has nothing to check.
+a package, so an agent that edited delta.json cannot pass a class its own evidence does not support. A delta.json with no decision that the current template
+did not write (a text model, or a run from before the decision existed) has nothing to check.
 
 What it requires:
+- a decision at all, when the delta carries the current template's stamp and is an audio result (`current_template`): deleting `audio.decision` and changing
+  `class` and `path` together is refused;
 - the fields: class, path, alternative_path, confidence, strict, differences, overrides, and the class and path equal to delta.json's;
-- each difference: a key, a category (serving, structural or unknown), `decided_by` (`allow-list` or `override`), and a non-empty `source` when an override decided it;
-- each override: a kind (category or path), a non-empty source, and the fields its kind needs;
-- consistency: a weights-only decision has only serving differences (none at all when strict), unless a path override with a source explains it, and has
-  no tensor-level reason. A class of unknown has path full-port and confidence low.
+- `strict` equal to the stage's `triage_config.json` `audio_strict` (when the caller gives it);
+- each difference: a key listed once, both values, a category (serving, structural or unknown), `decided_by` (`allow-list` or `override`), and a non-empty
+  `source` when an override decided it. An `allow-list` category has to be what the allow-list table gives for that key and those values (the table is
+  audio_config_categories.json next to the template; `category_rules`); an `override` category has to be recorded in `overrides`;
+- each override: a kind (category or path), a non-empty source and the fields its kind needs. A category override names a difference that says it was decided
+  by an override, with the same category and source, and its `from` is what the allow-list gave. At most one path override; its path is the decision's path;
+- the differences against the comparison evidence in `audio.config`: every key the evidence lists is in the decision with the same values, and the decision
+  names no key the evidence does not list (the evidence is cut at AUDIO_MAX_LISTED keys per section, and a cut section is not held to the second half);
+- consistency: a weights-only decision has only serving differences (none at all when strict), unless a weights-only path override with a source explains
+  them; and it has no tensor-level difference, no text-encoder difference and no read problem in the evidence, which no override can explain away. A class of
+  unknown has path full-port and confidence low.
 """
 from __future__ import annotations
+
+import functools
+import math
+import os
+from pathlib import Path
+
+from orchard import safeio
 
 CLASSES = ("weights-only", "full-port", "unknown")
 PATHS = ("weights-only", "full-port")
@@ -21,18 +37,95 @@ CONFIDENCES = ("high", "medium", "low")
 CATEGORIES = ("serving", "structural", "unknown")
 DECIDERS = ("allow-list", "override")
 FIELDS = ("class", "path", "alternative_path", "confidence", "strict", "differences", "overrides")
+ABSENT = "<absent>"                          # the template's text for a key a config does not have
+AUDIO_MAX_LISTED = 50                        # the template lists at most this many keys per section in `audio.config` (a test pins it to the template's)
+TABLE_FILE = Path(__file__).with_name("skills") / "delta-triage-templates" / "audio_config_categories.json"
+TABLE_MAX_BYTES = 1 << 20
 
 
 def _text(v) -> bool:
     return isinstance(v, str) and bool(v.strip())
 
 
-def decision_problems(delta) -> list[str]:
-    """The reasons the decision in `delta` (a parsed delta.json) is malformed or does not support its class. Empty when there is no decision."""
+# ---- the allow-list table (the template's own rule, re-run here) ----------------------------------------------------------------
+
+def load_category_rules(path=TABLE_FILE) -> list[dict]:
+    """The rules of the allow-list table at `path`. Raises safeio.SafeReadError for a file that cannot be read or is not an object with a list of
+    rules, each an object with a category and a key or a prefix."""
+    data = safeio.read_json(path, max_bytes=TABLE_MAX_BYTES, expect=dict)
+    rules = data.get("rules")
+    if not isinstance(rules, list):
+        raise safeio.WrongType("the table has no list of rules")
+    for r in rules:
+        if (not isinstance(r, dict) or r.get("category") not in CATEGORIES or not (isinstance(r.get("key"), str) or isinstance(r.get("prefix"), str))):
+            raise safeio.WrongType("a rule in the table has no category and key or prefix")
+    return rules
+
+
+@functools.lru_cache(maxsize=1)
+def category_rules() -> tuple | None:
+    """The shipped table as a tuple of rules, or None when it cannot be read (the check then says so and refuses an audio decision)."""
+    try:
+        return tuple(load_category_rules())
+    except (safeio.SafeReadError, OSError):
+        return None
+
+
+def _value_ok(constraint, base, model) -> bool:
+    """The template's `_audio_value_ok`: both values satisfy a serving rule's `values` constraint (a list of allowed texts, `positive-int`, `number` or `text`)."""
+    def one(v) -> bool:
+        if isinstance(constraint, list):
+            return isinstance(v, str) and v in constraint
+        if (isinstance(v, str) and v == ABSENT) or isinstance(v, bool):
+            return False
+        if constraint == "positive-int":
+            return isinstance(v, int) and v > 0
+        if constraint == "number":
+            # An integer is finite whatever its size; math.isfinite would raise OverflowError on one that does not fit a float.
+            return isinstance(v, int) or (isinstance(v, float) and math.isfinite(v))
+        if constraint == "text":
+            return isinstance(v, str) and bool(v.strip())
+        return False
+    return one(base) and one(model)
+
+
+def allow_list_category(key: str, base, model, rules) -> str:
+    """The category the allow-list gives a differing key: an exact `key` rule first, then the first matching `prefix` rule, else `unknown`. A serving rule applies
+    only when both values satisfy its constraint. This is the template's `audio_category`."""
+    rule = next((r for r in rules if r.get("key") == key), None) or next((r for r in rules if r.get("prefix") and key.startswith(r["prefix"])), None)
+    if rule is None:
+        return "unknown"
+    if rule["category"] == "serving" and not _value_ok(rule.get("values"), base, model):
+        return "unknown"
+    return rule["category"]
+
+
+def _same(a, b) -> bool:
+    """Equal in JSON terms: the same type and value (1, 1.0 and True differ)."""
+    return type(a) is type(b) and a == b
+
+
+# ---- the check ----------------------------------------------------------------------------------------------------------------------
+
+def _is_audio(delta: dict) -> bool:
+    """The delta carries an audio record. The `facts` modality is not counted: the agent can delete it with the record, and a delta that was not written by
+    the template's audio branch has none. What survives the agent's edits is the stage's own files (`audio_evidence` below)."""
+    return isinstance(delta.get("audio"), dict)
+
+
+def decision_problems(delta, *, current_template: bool = False, expected_strict: bool | None = None, audio_evidence: bool = False) -> list[str]:
+    """The reasons the decision in `delta` (a parsed delta.json) is malformed or does not support its class. Empty when there is no decision to check.
+    `current_template` says the delta carries the stamp of the shipped template, so a missing decision, and missing evidence records, are reasons.
+    `expected_strict` is the stage's `audio_strict` (None: not known, so the flag is not compared). `audio_evidence` says the stage's own files show an
+    audio comparison (the evidence file the audio branch writes, or an audio-layout snapshot in the triage configuration), so deleting `audio` and
+    `facts` from the delta does not hide the modality."""
     if not isinstance(delta, dict):
         return []
     audio = delta.get("audio")
     if not isinstance(audio, dict) or "decision" not in audio:
+        if current_template and (_is_audio(delta) or audio_evidence):
+            return ["delta.json is an audio result from the current stage 0 template and has no audio.decision, so its class and path are not backed by a "
+                    "recorded decision"]
         return []
     d = audio["decision"]
     if not isinstance(d, dict):
@@ -53,6 +146,9 @@ def decision_problems(delta) -> list[str]:
         out.append(f"audio.decision confidence must be one of {CONFIDENCES}")
     if not isinstance(d["strict"], bool):
         out.append("audio.decision strict must be true or false")
+    elif expected_strict is not None and d["strict"] != expected_strict:
+        out.append(f"audio.decision strict is {d['strict']} but the triage configuration's audio_strict is {expected_strict}, so the decision was made under "
+                   "a different rule from the configured one")
     if not isinstance(d["differences"], list):
         out.append("audio.decision differences must be a list")
     if not isinstance(d["overrides"], list):
@@ -63,7 +159,11 @@ def decision_problems(delta) -> list[str]:
         out.append(f"audio.decision class {d['class']!r} is not delta.json's class {delta.get('class')!r}")
     if delta.get("path") != d["path"]:
         out.append(f"audio.decision path {d['path']!r} is not delta.json's path {delta.get('path')!r}")
-    categories = []
+    rules = category_rules()
+    if rules is None:
+        out.append("the allow-list table (audio_config_categories.json) cannot be read, so the decision's categories cannot be checked")
+        rules = ()
+    categories, by_key = [], {}
     for i, x in enumerate(d["differences"]):
         if not isinstance(x, dict) or not _text(x.get("key")):
             out.append(f"audio.decision differences[{i}] needs a key")
@@ -76,8 +176,42 @@ def decision_problems(delta) -> list[str]:
             continue
         if x["decided_by"] == "override" and not _text(x.get("source")):
             out.append(f"audio.decision differences[{i}] was decided by an override and needs a source")
+        if x["key"] in by_key:
+            out.append(f"audio.decision lists the difference {x['key']!r} twice")
+            continue
+        by_key[x["key"]] = x
         categories.append(x["category"])
-    path_override = None
+        if "base" not in x or "model" not in x:
+            out.append(f"audio.decision differences[{i}] ({x['key']}) needs both values, base and model")
+            continue
+        if rules and x["decided_by"] == "allow-list":
+            given = allow_list_category(x["key"], x["base"], x["model"], rules)
+            if given != x["category"]:
+                out.append(f"audio.decision records {x['key']} as {x['category']} (decided by the allow-list), but the allow-list gives {given} for "
+                           f"{x['key']} with the recorded values; only an override can move a category")
+    out += _override_problems(d, by_key, rules, _chosen_path(d, by_key, audio, current_template))
+    out += _evidence_problems(audio, by_key, current_template)
+    path_override = next((o for o in d["overrides"] if isinstance(o, dict) and o.get("kind") == "path"), None)
+    if d["class"] == "unknown" and (d["path"] != "full-port" or d["confidence"] != "low"):
+        out.append("audio.decision class unknown needs path full-port and confidence low")
+    if d["class"] == "weights-only":
+        explained = path_override is not None and path_override.get("path") == "weights-only" and _text(path_override.get("source"))
+        if not explained:
+            wrong = [c for c in categories if c != "serving"]
+            if wrong:
+                out.append(f"audio.decision class weights-only has {len(wrong)} difference(s) that are not serving settings and no path override to "
+                           "weights-only explains them")
+            if d["strict"] and categories:
+                out.append("audio.decision class weights-only is strict but lists differences and no path override to weights-only explains them")
+        out += _hard_evidence_problems(d, audio, current_template)
+    return out
+
+
+def _override_problems(d: dict, by_key: dict, rules, chosen: str) -> list[str]:
+    """The overrides listed in the decision: their kinds and fields, one path override at most, to the decision's path and from the path the template's rule
+    gave (`chosen`, recomputed from the recorded categories and the evidence), and each category override matching the difference it says it moved (and each
+    difference that says an override moved it matching a record)."""
+    out, path_overrides, category_keys = [], 0, {}
     for i, o in enumerate(d["overrides"]):
         if not isinstance(o, dict) or o.get("kind") not in ("category", "path"):
             out.append(f"audio.decision overrides[{i}] needs a kind of category or path")
@@ -85,13 +219,203 @@ def decision_problems(delta) -> list[str]:
         if not _text(o.get("source")):
             out.append(f"audio.decision overrides[{i}] needs a source")
         if o["kind"] == "path":
-            path_override = o
-    if d["class"] == "unknown" and (d["path"] != "full-port" or d["confidence"] != "low"):
-        out.append("audio.decision class unknown needs path full-port and confidence low")
-    if d["class"] == "weights-only" and path_override is None:
-        wrong = [c for c in categories if c != "serving"]
-        if wrong:
-            out.append(f"audio.decision class weights-only has {len(wrong)} difference(s) that are not serving settings and no path override explains them")
-        if d["strict"] and categories:
-            out.append("audio.decision class weights-only is strict but lists differences and no path override explains them")
+            path_overrides += 1
+            if o.get("path") not in PATHS:
+                out.append(f"audio.decision overrides[{i}] needs a path of {PATHS}")
+            elif o["path"] != d["path"]:
+                out.append(f"audio.decision overrides[{i}] moves the path to {o['path']}, but the decision's path is {d['path']}, so the override does not "
+                           "explain the decision")
+            if o.get("from") not in PATHS:
+                out.append(f"audio.decision overrides[{i}] needs a from of {PATHS}")
+            elif d["class"] != "unknown" and o["from"] != chosen:
+                out.append(f"audio.decision overrides[{i}] says the path was {o['from']} before the override, but the recorded differences and evidence give "
+                           f"{chosen}")
+            continue
+        key = o.get("key")
+        if not _text(key):
+            out.append(f"audio.decision overrides[{i}] needs a key")
+            continue
+        if o.get("category") not in CATEGORIES:
+            out.append(f"audio.decision overrides[{i}] needs a category of {CATEGORIES}")
+            continue
+        if o.get("from") not in CATEGORIES:
+            out.append(f"audio.decision overrides[{i}] needs a from of {CATEGORIES}")
+        if key in category_keys:
+            out.append(f"audio.decision has two category overrides for {key!r}")
+            continue
+        category_keys[key] = o
+        x = by_key.get(key)
+        if x is None:
+            out.append(f"audio.decision overrides[{i}] names {key!r}, which is not among the differences")
+            continue
+        if x["decided_by"] != "override" or x["category"] != o["category"]:
+            out.append(f"audio.decision overrides[{i}] moves {key!r} to {o['category']}, but the difference is recorded as {x['category']} decided by "
+                       f"{x['decided_by']}")
+        if _text(x.get("source")) and x.get("source") != o.get("source"):
+            out.append(f"audio.decision overrides[{i}] source is not the source recorded on the difference {key!r}")
+        if rules and "base" in x and "model" in x and o.get("from") in CATEGORIES and o["from"] != allow_list_category(key, x["base"], x["model"], rules):
+            out.append(f"audio.decision overrides[{i}] has from {o['from']!r} for {key!r}, which is not what the allow-list gave before the override: it gives "
+                       f"{allow_list_category(key, x['base'], x['model'], rules)}")
+    if path_overrides > 1:
+        out.append("audio.decision has more than one path override; at most one path override is allowed")
+    for key, x in by_key.items():
+        if x["decided_by"] == "override" and key not in category_keys:
+            out.append(f"audio.decision records {key!r} as decided by an override, but no category override for it is recorded")
     return out
+
+
+def _evidence_problems(audio: dict, by_key: dict, current_template: bool) -> list[str]:
+    """The decision's differences against `audio.config`, the comparison evidence. Every listed key is in the decision with the same values; the decision names
+    no other key unless the evidence was cut at AUDIO_MAX_LISTED keys in a section."""
+    config = audio.get("config")
+    if not isinstance(config, dict):
+        return ["audio.config (the comparison evidence for the decision's differences) is missing"] if current_template else []
+    listed, cut = {}, False
+    for section in ("top_level_differences", "model_differences"):
+        part = config.get(section)
+        if not isinstance(part, dict):
+            return [f"audio.config {section} (the comparison evidence for the decision's differences) is missing"] if current_template else []
+        listed.update(part)
+        cut = cut or len(part) >= AUDIO_MAX_LISTED
+    out = []
+    for key, rec in listed.items():
+        x = by_key.get(key)
+        if x is None:
+            out.append(f"the comparison evidence lists the difference {key!r}, and audio.decision does not")
+        elif not isinstance(rec, dict) or "base" not in rec or "model" not in rec:
+            out.append(f"the comparison evidence for {key!r} is not an object with a base and a model value")
+        elif "base" in x and "model" in x and not (_same(rec["base"], x["base"]) and _same(rec["model"], x["model"])):
+            out.append(f"audio.decision records other values for {key!r} than the comparison evidence does")
+    if not cut:
+        out += [f"audio.decision names the difference {key!r}, which the comparison evidence does not list" for key in by_key if key not in listed]
+    return out
+
+
+FLOAT_DTYPES = ("BF16", "F16", "F32")        # the template's ITEMSIZE: the dtypes a tolerated difference can be between (a test pins both to the template)
+DTYPE_TOLERANCE_ELEMENTS = 1_048_576         # the template's size limit for a tolerated dtype difference
+
+
+def _whole(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def dtype_tolerated(x) -> bool:
+    """The template's `_dtype_difference_tolerated`, recomputed from what the record keeps: a float-to-float difference (BF16, F16 or F32 on both sides) on a
+    tensor of at most DTYPE_TOLERANCE_ELEMENTS elements. (The two shapes are equal for any recorded dtype difference.)"""
+    return (isinstance(x, dict) and x.get("model") in FLOAT_DTYPES and x.get("base") in FLOAT_DTYPES
+            and _whole(x.get("elements")) and x["elements"] <= DTYPE_TOLERANCE_ELEMENTS)
+
+
+def _cut_list_matches(listed, count) -> bool:
+    """A list the template cut at AUDIO_MAX_LISTED holds all `count` entries, or exactly AUDIO_MAX_LISTED of a larger number."""
+    return isinstance(listed, list) and _whole(count) and len(listed) == min(count, AUDIO_MAX_LISTED)
+
+
+def _tensor_findings(tensors: dict, current_template: bool = False) -> list[str]:
+    """The ways `audio.tensors` shows a tensor-level difference or no comparison at all. The lists are cut at AUDIO_MAX_LISTED by the template, which puts a
+    dtype difference it does not tolerate before the tolerated ones and also records the uncut counts, so a cut list shows one when there is one and cannot
+    be emptied unnoticed. A dtype difference counts as tolerated only when its recorded dtypes and size say so (`dtype_tolerated`), whatever its `tolerated`
+    flag says. The tensor counts must be equal and positive: zero tensors on every side means nothing was compared. The uncut counts are required when
+    `current_template` and checked whenever they are there."""
+    found = []
+    for name in ("only_in_model", "only_in_base", "shape_differences"):
+        if not isinstance(tensors.get(name), list) or tensors[name]:
+            found.append(name)
+    dtypes = tensors.get("dtype_differences")
+    if not isinstance(dtypes, list) or any(x.get("tolerated") is not True or not dtype_tolerated(x) if isinstance(x, dict) else True for x in dtypes):
+        found.append("dtype_differences")
+    counts = [tensors.get(k) for k in ("model_tensors", "base_tensors", "common")]
+    counts_ok = all(_whole(c) for c in counts) and counts[0] == counts[1] == counts[2] and counts[0] > 0
+    extra = ("shape_difference_count", "dtype_difference_count", "intolerable_dtype_count")
+    cut_ok = True
+    if any(k in tensors for k in extra) or current_template:
+        cut_ok = (all(_whole(tensors.get(k)) for k in extra)
+                  and _cut_list_matches(tensors.get("shape_differences"), tensors.get("shape_difference_count"))
+                  and _cut_list_matches(dtypes, tensors.get("dtype_difference_count"))
+                  and tensors.get("intolerable_dtype_count") == 0 and tensors["dtype_difference_count"] >= tensors["intolerable_dtype_count"])
+    if not counts_ok or not cut_ok:
+        found.append("tensor counts")
+    return found
+
+
+def _hard_findings(audio: dict, current_template: bool = False) -> list[str]:
+    """What the comparison evidence in `audio` shows that no override can explain away: a tensor-level difference, or a text encoder that differs or could not
+    be compared. An evidence record that is missing gives no finding here (`_hard_evidence_problems` reports a missing record for a current template)."""
+    out = []
+    tensors = audio.get("tensors")
+    if isinstance(tensors, dict):
+        found = _tensor_findings(tensors, current_template)
+        if found:
+            out.append("the tensor evidence shows a difference (" + ", ".join(found) + ")")
+    encoders = audio.get("text_encoders")
+    if isinstance(encoders, list) and any(not _encoder_clean(r) for r in encoders):
+        out.append("a text encoder differs or could not be compared")
+    return out
+
+
+def _encoder_clean(row) -> bool:
+    """One row of `audio.text_encoders` shows no difference and no read problem: both lists are there and empty, and a comparison that was made
+    (`compared` true) says `equal` true. A row the template skipped on purpose (`compared` false, a conditioner that loads from another repository) has
+    no comparison to be equal. A row with a list deleted, a `compared` that is not a boolean, or an `equal` of false is not clean."""
+    if not isinstance(row, dict) or not isinstance(row.get("compared"), bool):
+        return False
+    if not isinstance(row.get("problems"), list) or row["problems"] or not isinstance(row.get("differences"), list) or row["differences"]:
+        return False
+    return row.get("equal") is True if row["compared"] else row.get("equal") is None
+
+
+def _hard_evidence_problems(d: dict, audio: dict, current_template: bool) -> list[str]:
+    """A weights-only decision needs a comparison with no tensor-level difference, no text-encoder difference and no read problem. No override explains
+    these away: they are facts about the files. Each evidence record has to be present when the current template wrote the delta."""
+    out = []
+    if "problems" not in d:
+        if current_template:        # the template always writes the list; deleting it would hide a file that could not be read
+            out.append("audio.decision has no problems list, so a weights-only class cannot show that every file was read and compared")
+    elif not isinstance(d["problems"], list) or d["problems"]:
+        out.append("audio.decision class weights-only, but the decision lists problems (evidence that could not be read or compared)")
+    if current_template and not isinstance(audio.get("tensors"), dict):
+        out.append("audio.tensors (the tensor comparison) is missing, so a weights-only class has no tensor evidence")
+    if current_template and not isinstance(audio.get("text_encoders"), list):
+        out.append("audio.text_encoders (the text-encoder comparison) is missing, so a weights-only class has no text-encoder evidence")
+    out += [f"audio.decision class weights-only, but {x}; no override explains it" for x in _hard_findings(audio, current_template)]
+    return out
+
+
+def _chosen_path(d: dict, by_key: dict, audio: dict, current_template: bool = False) -> str:
+    """The path the template's own rule gives before a path override: weights-only when the evidence holds no hard difference and the differences are all
+    serving (none at all when strict), else full-port."""
+    clean = not _hard_findings(audio, current_template)
+    nothing_else = (not by_key) if d["strict"] else all(x["category"] == "serving" for x in by_key.values())
+    return "weights-only" if clean and nothing_else else "full-port"
+
+
+# ---- the gate's entry point ------------------------------------------------------------------------------------------------------------
+
+def stage_problems(delta, stage_dir, shipped_sha256) -> list[str]:
+    """`decision_problems` for a delta.json in `stage_dir`: the delta is from the current template when its `template_sha256` is `shipped_sha256`, and the strict
+    flag is compared with `triage_config.json` in the stage directory. A configuration that cannot be read is a reason only for a current-template audio result;
+    a flag that is not a boolean means relaxed, as the template records it."""
+    if not isinstance(delta, dict):
+        return []
+    current = isinstance(shipped_sha256, str) and delta.get("template_sha256") == shipped_sha256
+    expected, extra, evidence = None, [], False
+    if current:
+        stage = Path(stage_dir)
+        # The stage's own files say whether this was an audio comparison, whatever the delta still claims: the evidence file only the audio branch
+        # writes, and a snapshot in the audio layout (model_config.json and no config.json) named by the triage configuration.
+        evidence = os.path.lexists(stage / "evidence" / "audio-compare.json")
+        cfg = None
+        try:
+            cfg = safeio.read_json(stage / "triage_config.json", max_bytes=TABLE_MAX_BYTES, expect=dict)
+        except (safeio.SafeReadError, OSError):
+            pass
+        snap = cfg.get("model_snapshot") if isinstance(cfg, dict) else None
+        if isinstance(snap, str) and snap:
+            evidence = evidence or (os.path.lexists(Path(snap) / "model_config.json") and not os.path.lexists(Path(snap) / "config.json"))
+        if evidence or _is_audio(delta):
+            if cfg is None:
+                extra = ["triage_config.json cannot be read, so the decision's strict flag cannot be checked against the configuration"]
+            else:
+                flag = cfg.get("audio_strict", False)
+                expected = flag if isinstance(flag, bool) else False
+    return extra + decision_problems(delta, current_template=current, expected_strict=expected, audio_evidence=evidence)
