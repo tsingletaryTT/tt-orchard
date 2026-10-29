@@ -1,0 +1,57 @@
+{
+ "mode": "composed",
+ "prompts": [
+  {
+   "prompt_index": 0,
+   "prompt_tokens": 5,
+   "teacher_forced_rel_l2_mean": 0.007405657321214676,
+   "teacher_forced_rel_l2_max": 0.00791449286043644,
+   "top1_agree": 1.0,
+   "top5_overlap": 1.0,
+   "free_run_match_prefix": 3,
+   "free_run_len": 3,
+   "decode_tok_s": 26.664954401401175,
+   "prefill_tok_s": 25.97906217056242,
+   "teacher_forced_s": 0.5420691967010498
+  },
+  {
+   "prompt_index": 1,
+   "prompt_tokens": 16,
+   "teacher_forced_rel_l2_mean": 0.018218642100691795,
+   "teacher_forced_rel_l2_max": 0.058262795209884644,
+   "top1_agree": 1.0,
+   "top5_overlap": 0.975,
+   "free_run_match_prefix": 24,
+   "free_run_len": 24,
+   "decode_tok_s": 26.111514954662336,
+   "prefill_tok_s": 26.400097875957957,
+   "teacher_forced_s": 1.6288182735443115
+  },
+  {
+   "prompt_index": 2,
+   "prompt_tokens": 7,
+   "teacher_forced_rel_l2_mean": 0.0073002236895263195,
+   "teacher_forced_rel_l2_max": 0.025755275040864944,
+   "top1_agree": 0.9166666865348816,
+   "top5_overlap": 0.9583333333333334,
+   "free_run_match_prefix": 14,
+   "free_run_len": 24,
+   "decode_tok_s": 25.78609161682649,
+   "prefill_tok_s": 26.250330139378274,
+   "teacher_forced_s": 1.177076816558838
+  },
+  {
+   "prompt_index": 3,
+   "prompt_tokens": 12,
+   "teacher_forced_rel_l2_mean": 0.013769290409982204,
+   "teacher_forced_rel_l2_max": 0.027856582775712013,
+   "top1_agree": 0.9583333134651184,
+   "top5_overlap": 0.9499999999999998,
+   "free_run_match_prefix": 11,
+   "free_run_len": 24,
+   "decode_tok_s": 25.11191200040192,
+   "prefill_tok_s": 26.703250283444156,
+   "teacher_forced_s": 1.3425183296203613
+  }
+ ]
+}

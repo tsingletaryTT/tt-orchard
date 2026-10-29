@@ -1,0 +1,3 @@
+target = "0.9.61"
+summary = "Granite readout kernel on the tt-lang pair: compiles in the model, slower than composed"
+pr = 224
