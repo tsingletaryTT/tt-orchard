@@ -3,6 +3,22 @@
 Started 2026-10-28 20:15 Pacific by overnight lead 2. Operator's target: three models that could not be brought up the day before.
 My class: an open-weights text model whose blocker is the attention side. This log is updated hourly.
 
+## Final state (read this first; the sections below are the chronological record)
+
+The whole model runs on one Blackhole chip, with the attention on the existing flash multi-latent attention op (no new kernel, no Telegraph use, no local coder use), and on the two chips of a board.
+
+| configuration | decode tok/s (median of 3 after 1 warm-up) | share of the DRAM floor | prefill |
+|---|---|---|---|
+| one chip, bfloat16 | 33.7 | 54 percent of 62.8 | 40 tokens 0.088 s; 922 tokens 0.37 s |
+| one chip, MLP bfloat8_b with LoFi | 39.9 | 41 percent of 96.8 | same |
+| two chips, bfloat16 | 39.2 | 31 percent of 125.7 | one token per step |
+| two chips, MLP bfloat8_b with LoFi | 44.1 | 23 percent of 193.6 | one token per step |
+
+Agreement with the CPU reference: 16 of 16 teacher-forced tokens in every configuration; perplexity on 767 WikiText-2 tokens 8.007 (one chip), 8.047 (8-bit MLP), 8.090 (two chips) against 8.057 for float32;
+four of six free-running 64-token texts identical to the reference, the other two diverge at tokens 19 and 26 and stay on topic. Where the first-divergence probe found a real defect (layer 14, the default `rms_norm`) and
+what fixed it: update 2. The stage-b host-attention run, the noise-floor tool's refusal, the hazard row and the filed issues (213, 214): updates 2, 5, 9 and the final report in PR 210.
+Scripts and how to run them: `scripts/minicpm3/README.md`. Not done: the supervisor and full-port stages were not used; the two-chip path has no batched prefill.
+
 ## Choice (first hour)
 
 Model: `openbmb/MiniCPM3-4B`. Licence Apache-2.0, open download with no gate, 62 layers, hidden 2560, 40 heads, about 4B parameters (8 GB in bfloat16).
