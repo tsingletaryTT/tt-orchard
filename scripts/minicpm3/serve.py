@@ -42,9 +42,11 @@ def generate(messages, max_tokens):
         for p, t in enumerate(ids):                   # the two-chip model prefills one token per step
             logits = m.traced_step(t, p)
     out, shown = [], ""
+    finish = "length"                                 # the loop ends on the token budget unless an end-of-sequence token ends it first
     for k in range(min(max_tokens, room)):
         nxt = int(logits.argmax())
         if nxt in EOS:
+            finish = "stop"
             break
         out.append(nxt)
         text = tok.decode(out)
@@ -55,7 +57,7 @@ def generate(messages, max_tokens):
             shown = text[: len(shown) - len(piece)]
         logits = m.traced_step(nxt, len(ids) + k)
     STATE["last_counts"] = (len(ids), len(out))
-    STATE["finish"] = "stop" if (logits is not None and int(logits.argmax()) in EOS) else "length"
+    STATE["finish"] = finish
 
 
 class Handler(BaseHTTPRequestHandler):

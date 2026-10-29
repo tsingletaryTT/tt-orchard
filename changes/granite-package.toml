@@ -1,0 +1,3 @@
+target = "0.9.66"
+summary = "Granite-4.0-H-1B package: chat server, fp32 state, 2048 context, gate, private Hub upload"
+pr = 244
