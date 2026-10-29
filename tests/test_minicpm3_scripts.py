@@ -156,3 +156,46 @@ def test_native_model_is_built_from_the_weights_file(tmp_path, monkeypatch):
 def test_make_reference_has_no_sibling_directory_path():
     src = (SCRIPTS / "make_reference.py").read_text()
     assert '"_w"' not in src and "'_w'" not in src
+
+
+# ---- bench with --layers (review of PR 242) ---------------------------------------------------------------------------------------------------
+
+BENCH_CONFIG = {"architectures": ["MiniCPM3ForCausalLM"], "model_type": "minicpm3", "hidden_size": 2560, "num_hidden_layers": 62, "intermediate_size": 6400,
+                "max_position_embeddings": 32768, "num_attention_heads": 40, "num_key_value_heads": 40, "qk_nope_head_dim": 64, "qk_rope_head_dim": 32,
+                "q_lora_rank": 768, "kv_lora_rank": 256, "rms_norm_eps": 1e-05, "vocab_size": 73448, "scale_emb": 12, "dim_model_base": 256, "scale_depth": 1.4}
+
+
+class BenchModel:
+    def __init__(self, layers):
+        self.L = layers
+
+    def reset(self):
+        pass
+
+    def prefill(self, ids):
+        return torch.zeros(5)
+
+    def run(self, t, p, tap=None):
+        return torch.zeros(5)
+
+    traced_step = lambda self, t, p: torch.zeros(5)      # noqa: E731
+
+
+def bench_record(monkeypatch, tmp_path, layers):
+    chip = types.ModuleType("chip_model")
+    chip.ChipMiniCPM3 = Recorder
+    run_chip = load_script(monkeypatch, "run_chip", {"ttnn": fake_ttnn(), "chip_model": chip})
+    (tmp_path / "config.json").write_text(json.dumps(BENCH_CONFIG))
+    out = tmp_path / "rec.json"
+    a = types.SimpleNamespace(model_dir=str(tmp_path), trace=False, batched_prefill=True, repeats=1, steps=4, tp=1, mlp_dtype="bf16", mlp_fidelity="hifi2", attn="mla", opt=3,
+                              shard=False, upd="paged", fidelity="default", out=str(out))
+    tok = types.SimpleNamespace(decode=lambda ids: "x")
+    run_chip.bench(a, BenchModel(layers), [1, 2, 3], 3, tok)
+    return json.loads(out.read_text())
+
+
+def test_bench_floor_uses_the_layers_the_model_ran_and_the_record_says_how_many(monkeypatch, tmp_path):
+    full = bench_record(monkeypatch, tmp_path, 62)
+    short = bench_record(monkeypatch, tmp_path, 3)
+    assert full["config"]["layers"] == 62 and short["config"]["layers"] == 3
+    assert short["floor"]["floor_tok_s"] > 5 * full["floor"]["floor_tok_s"]
