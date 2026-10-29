@@ -82,6 +82,12 @@ def ssd_state_update(x):
     return x["decay"] * x["s"] + x["dtx"] * x["b"]
 
 
+def ssd_state_update_bcast(x):
+    # The same update with the per-row scalars and the per-column vector kept compact: decay and dtx [rows, 32] are read in
+    # column 0 only, b [32, cols] in row 0 only. Reading any other entry gives a wrong answer, because the inputs are random.
+    return x["decay"][:, :1] * x["s"] + x["dtx"][:, :1] * x["b"][:1, :]
+
+
 def ssd_readout(x):
     # The Mamba-2 readout, y = state . C: the sum of c * s over the last axis, written to every column of its row
     # (the reduction and then the broadcast, as in rmsnorm), with C already expanded to the full shape of the state.
@@ -91,4 +97,5 @@ def ssd_readout(x):
 REFERENCES = {"add": add, "mul": mul, "scale_shift": scale_shift, "add_row": add_row, "rsqrt": rsqrt,
               "row_sum": row_sum, "silu_mul": silu_mul, "rmsnorm": rmsnorm, "linear_scan": linear_scan, "center": center,
               "softmax": softmax, "tile_scan": tile_scan, "ssd_state_update": ssd_state_update,
-              "ssd_readout": ssd_readout}
+              "ssd_readout": ssd_readout,
+              "ssd_state_update_bcast": ssd_state_update_bcast}

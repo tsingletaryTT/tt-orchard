@@ -281,7 +281,7 @@ def test_the_op_specs_name_only_known_references():
     known = {k.value for k in table.value.keys}
     specs = sorted((TEMPLATES / "ops").glob("*.json"))
     assert {p.stem for p in specs} == {"add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax", "tile_scan",
-                                  "mul", "scale_shift", "add_row", "rsqrt", "row_sum", "ssd_state_update", "ssd_readout"}
+                                  "mul", "scale_shift", "add_row", "rsqrt", "row_sum", "ssd_state_update", "ssd_readout", "ssd_state_update_bcast"}
     for p in specs:
         spec = json.loads(p.read_text())
         assert spec["op"] == p.stem and spec["reference"] in known

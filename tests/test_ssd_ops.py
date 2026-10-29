@@ -56,6 +56,15 @@ got_y = R["ssd_readout"]({"c": c2, "s": got_state})
 assert got_y.shape == (rows, N), got_y.shape
 assert torch.allclose(got_y, y.reshape(rows, 1).expand(rows, N), atol=1e-4), "ssd_readout differs from the model's readout"
 assert all(torch.equal(got_y[:, 0], got_y[:, j]) for j in range(N)), "the readout must repeat the row sum in every column"
+# the compact form: per-row scalars in column 0 of a [rows, 32] tensor, B in row 0 of a [32, N] tensor, other entries are noise
+dec_c = torch.randn(rows, 32, generator=g); dec_c[:, 0] = torch.exp(dt * A).repeat_interleave(P)
+dtx_c = torch.randn(rows, 32, generator=g); dtx_c[:, 0] = (dt[:, None] * x).reshape(rows)
+b_c = torch.randn(32, N, generator=g); b_c[0] = B
+got_c = R["ssd_state_update_bcast"]({"s": s2, "decay": dec_c, "dtx": dtx_c, "b": b_c})
+assert torch.allclose(got_c, new.reshape(rows, N), atol=1e-5), "the compact update differs from the model's state update"
+dec_c2, dtx_c2, b_c2 = dec_c.clone(), dtx_c.clone(), b_c.clone()
+dec_c2[:, 1:], dtx_c2[:, 1:], b_c2[1:] = 99.0, 99.0, 99.0     # entries the op must not read
+assert torch.equal(R["ssd_state_update_bcast"]({"s": s2, "decay": dec_c2, "dtx": dtx_c2, "b": b_c2}), got_c), "the compact update read an entry outside column 0 or row 0"
 print("SSD REFERENCES OK")
 '''
 

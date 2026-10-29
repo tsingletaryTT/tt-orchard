@@ -17,7 +17,7 @@ Reference files:
 
 `reference/library_*.py` are worked kernels that pass the simulator. Read the one nearest your op first and adapt it.
 Read first, by kind of op:
-- Elementwise (`add`, `mul`, `scale_shift`, `add_row`, `rsqrt`, `silu_mul`, `ssd_state_update`): eltwise_add.py, then the specification's row for each function you need
+- Elementwise (`add`, `mul`, `scale_shift`, `add_row`, `rsqrt`, `silu_mul`, `ssd_state_update`, `ssd_state_update_bcast`): eltwise_add.py, then the specification's row for each function you need
   (`grep -n "ttl.math.silu" reference/TTLangSpecification.md`).
 - A reduction (`row_sum`, `rmsnorm`, `center`, `softmax`, `ssd_readout`): eltwise_broadcast_reduce.py, then the rows for `ttl.math.reduce_sum`, `ttl.block.broadcast`, `ttl.block.fill`.
 - A recurrence (`linear_scan`, `tile_scan`): both .py files, then the specification's "Block" section. A block expression kept in a Python variable carries a value between loop iterations (`z += ...` in eltwise_broadcast_reduce.py).
