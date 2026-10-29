@@ -524,6 +524,7 @@ def test_the_page_and_its_assets_are_served_with_a_strict_policy(root):
 
 
 @pytest.mark.parametrize("path,ctype", [
+    ("/static/format.js", "text/javascript"),
     ("/static/scene.js", "text/javascript"),
     ("/static/mode.js", "text/javascript"),
     ("/static/vendor/xterm/xterm.js", "text/javascript"),

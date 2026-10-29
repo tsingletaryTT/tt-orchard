@@ -92,6 +92,7 @@ JS, CSS, WOFF2 = "text/javascript; charset=utf-8", "text/css; charset=utf-8", "f
 # Every file the page loads, by URL. Nothing else under orchard/web is served (not the vendored licences or maps).
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/static/app.js": ("app.js", JS),
+          "/static/format.js": ("format.js", JS),
           "/static/scene.js": ("scene.js", JS),
           "/static/mode.js": ("mode.js", JS),
           "/static/app.css": ("app.css", CSS),
