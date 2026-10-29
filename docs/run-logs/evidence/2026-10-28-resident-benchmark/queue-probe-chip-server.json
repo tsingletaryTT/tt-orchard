@@ -1,0 +1,267 @@
+{
+ "settings": {
+  "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+  "duration": 10.0,
+  "steps": 8,
+  "cfg_scale": 1.0,
+  "seed": 42
+ },
+ "poll_s": 0.25,
+ "timeout_s": 900.0,
+ "health_before": {
+  "status": "ok",
+  "model": "stable-audio-3 small-music, diffusion transformer on one Blackhole chip",
+  "device_name": "one Blackhole chip",
+  "queue_depth": 0,
+  "queue_max": 2,
+  "busy": false,
+  "limits": {
+   "min_seconds": 1,
+   "max_seconds": 120,
+   "max_steps": 100,
+   "min_cfg_scale": 1.0,
+   "max_cfg_scale": 20.0
+  },
+  "defaults": {
+   "duration": 10,
+   "steps": 8,
+   "cfg_scale": 1.0
+  }
+ },
+ "health_after": {
+  "status": "ok",
+  "model": "stable-audio-3 small-music, diffusion transformer on one Blackhole chip",
+  "device_name": "one Blackhole chip",
+  "queue_depth": 0,
+  "queue_max": 2,
+  "busy": false,
+  "limits": {
+   "min_seconds": 1,
+   "max_seconds": 120,
+   "max_steps": 100,
+   "min_cfg_scale": 1.0,
+   "max_cfg_scale": 20.0
+  },
+  "defaults": {
+   "duration": 10,
+   "steps": 8,
+   "cfg_scale": 1.0
+  }
+ },
+ "levels": [
+  {
+   "concurrency": 1,
+   "requests": [
+    {
+     "index": 0,
+     "sent_at_s": 0.0002,
+     "replied_at_s": 0.0009,
+     "http_status": 202,
+     "job_id": "4325b9822a8946b8a797774d060e2bec"
+    }
+   ],
+   "accepted": 1,
+   "rejected": {},
+   "jobs": [
+    {
+     "id": "4325b9822a8946b8a797774d060e2bec",
+     "accepted_at_s": 0.0009,
+     "positions": [
+      0
+     ],
+     "first_position": 0,
+     "first_running_s": 0.0017,
+     "done_s": 14.8919,
+     "final_status": "done",
+     "server_total_s": 14.872,
+     "audio_s": 10.0,
+     "error": "",
+     "start_s": 0.0199,
+     "wait_s": 0.019,
+     "end_to_end_s": 14.891
+    }
+   ],
+   "max_queue_position": 0,
+   "ran_one_at_a_time": null,
+   "first_in_first_out": null,
+   "makespan_s": 14.8917,
+   "timed_out": false,
+   "problems": [],
+   "host_loadavg_1m_at_start": 22.07568359375,
+   "host_loadavg_1m_at_end": 18.8095703125
+  },
+  {
+   "concurrency": 2,
+   "requests": [
+    {
+     "index": 0,
+     "sent_at_s": 0.0003,
+     "replied_at_s": 0.0012,
+     "http_status": 202,
+     "job_id": "a999d0244ae14e5ebd4514d2010447b5"
+    },
+    {
+     "index": 1,
+     "sent_at_s": 0.0002,
+     "replied_at_s": 0.0009,
+     "http_status": 202,
+     "job_id": "4387eff450e445eeab2dd1712ed74204"
+    }
+   ],
+   "accepted": 2,
+   "rejected": {},
+   "jobs": [
+    {
+     "id": "a999d0244ae14e5ebd4514d2010447b5",
+     "accepted_at_s": 0.0012,
+     "positions": [
+      1,
+      0
+     ],
+     "first_position": 1,
+     "first_running_s": 17.3426,
+     "done_s": 32.5092,
+     "final_status": "done",
+     "server_total_s": 15.152,
+     "audio_s": 10.0,
+     "error": "",
+     "start_s": 17.3572,
+     "wait_s": 17.356,
+     "end_to_end_s": 32.508
+    },
+    {
+     "id": "4387eff450e445eeab2dd1712ed74204",
+     "accepted_at_s": 0.0009,
+     "positions": [
+      0
+     ],
+     "first_position": 0,
+     "first_running_s": 0.0019,
+     "done_s": 17.3419,
+     "final_status": "done",
+     "server_total_s": 17.141,
+     "audio_s": 10.0,
+     "error": "",
+     "start_s": 0.2009,
+     "wait_s": 0.2,
+     "end_to_end_s": 17.341
+    }
+   ],
+   "max_queue_position": 1,
+   "ran_one_at_a_time": true,
+   "first_in_first_out": true,
+   "makespan_s": 32.509,
+   "timed_out": false,
+   "problems": [],
+   "host_loadavg_1m_at_start": 18.8095703125,
+   "host_loadavg_1m_at_end": 17.267578125
+  },
+  {
+   "concurrency": 4,
+   "requests": [
+    {
+     "index": 0,
+     "sent_at_s": 0.0004,
+     "replied_at_s": 0.0023,
+     "http_status": 429,
+     "job_id": null
+    },
+    {
+     "index": 1,
+     "sent_at_s": 0.0005,
+     "replied_at_s": 0.0017,
+     "http_status": 202,
+     "job_id": "18ac481d23b940f9bb05b2a3e5557d79"
+    },
+    {
+     "index": 2,
+     "sent_at_s": 0.0006,
+     "replied_at_s": 0.0022,
+     "http_status": 202,
+     "job_id": "6dc950e000d5490dabf40991039784ac"
+    },
+    {
+     "index": 3,
+     "sent_at_s": 0.0002,
+     "replied_at_s": 0.0016,
+     "http_status": 202,
+     "job_id": "b33bd913ec0d451f9e2cb34f77bce391"
+    }
+   ],
+   "accepted": 3,
+   "rejected": {
+    "429": 1
+   },
+   "jobs": [
+    {
+     "id": "18ac481d23b940f9bb05b2a3e5557d79",
+     "accepted_at_s": 0.0017,
+     "positions": [
+      1,
+      0
+     ],
+     "first_position": 1,
+     "first_running_s": 14.5073,
+     "done_s": 29.4329,
+     "final_status": "done",
+     "server_total_s": 14.726,
+     "audio_s": 10.0,
+     "error": "",
+     "start_s": 14.7069,
+     "wait_s": 14.7052,
+     "end_to_end_s": 29.4312
+    },
+    {
+     "id": "6dc950e000d5490dabf40991039784ac",
+     "accepted_at_s": 0.0022,
+     "positions": [
+      2,
+      1,
+      0
+     ],
+     "first_position": 2,
+     "first_running_s": 29.4348,
+     "done_s": 43.2961,
+     "final_status": "done",
+     "server_total_s": 14.006,
+     "audio_s": 10.0,
+     "error": "",
+     "start_s": 29.2901,
+     "wait_s": 29.2879,
+     "end_to_end_s": 43.2939
+    },
+    {
+     "id": "b33bd913ec0d451f9e2cb34f77bce391",
+     "accepted_at_s": 0.0016,
+     "positions": [
+      0
+     ],
+     "first_position": 0,
+     "first_running_s": 0.0039,
+     "done_s": 14.5088,
+     "final_status": "done",
+     "server_total_s": 14.476,
+     "audio_s": 10.0,
+     "error": "",
+     "start_s": 0.0328,
+     "wait_s": 0.0312,
+     "end_to_end_s": 14.5072
+    }
+   ],
+   "max_queue_position": 2,
+   "ran_one_at_a_time": true,
+   "first_in_first_out": true,
+   "makespan_s": 43.2959,
+   "timed_out": false,
+   "problems": [],
+   "host_loadavg_1m_at_start": 17.267578125,
+   "host_loadavg_1m_at_end": 16.6884765625
+  }
+ ],
+ "limits": [
+  "Times are seen by polling every 0.25 s, so they have a resolution of about that.",
+  "The service time of a job is the server's own total_s. Whether jobs ran one at a time is judged from those service intervals.",
+  "One clip length, one prompt and one seed are used at every level.",
+  "The host is shared; its one-minute load average is recorded at the start and end of each level."
+ ]
+}

@@ -30,7 +30,7 @@ AUDIO_RUNTIME_SELECTED = "audio runtime selected"
 TEMPLATES = Path(__file__).with_name("skills") / "audio-chip-templates"
 CHIP_DIT = TEMPLATES / "chip_dit.py"
 CONFIG_MAX_BYTES = 1 << 20                  # the same bound the stage 0 detector uses for model_config.json
-SCRIPTS = ("chip_dit.py", "chip_generate.py", "audio_chip_test.py")
+SCRIPTS = ("chip_dit.py", "audio_runtimes.py", "chip_generate.py", "audio_chip_test.py")
 REFERENCE_SCRIPT = Path(__file__).with_name("skills") / "audio-reference-templates" / "make_reference.py"
 
 _chip_dit = None
