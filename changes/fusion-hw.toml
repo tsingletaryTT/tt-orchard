@@ -1,0 +1,3 @@
+target = "0.9.64"
+summary = "Fusion port phase 2: scripts and results for serving a Qwen3.5-35B-A3B slice on the Coder-Next bundle code (issue 184)"
+pr = 236
