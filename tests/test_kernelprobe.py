@@ -3872,6 +3872,21 @@ def test_an_older_skill_runs_on_a_guide_built_from_the_checkout_and_the_report_s
 
 # ---- Copilot review of PR 198: the override reaches the environment gate, and the report records it ---------------
 
+def _fake_ls_tree(src):
+    """The tree listing of a clean checkout: every file under examples/ and docs/ with its real blob id, plus the programs
+    verify runs (absent from the fake checkout, so they count as deleted, which does not block)."""
+    entries = {}
+    for top in ("examples", "docs"):
+        for path in sorted((src / top).rglob("*")) if (src / top).is_dir() else []:
+            if path.is_file():
+                data = path.read_bytes()
+                entries[path.relative_to(src).as_posix()] = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    for rel in [f"examples/{r}" for r, _ in ttlang_env.defaults.TTLANG_NEGATIVE_EXAMPLES] + [
+            f"examples/{n}" for n in ttlang_env.VERIFY_SUPPORT_FILES]:
+        entries.setdefault(rel, "0" * 40)
+    return "".join(f"100644 blob {sha}\t{p}\0" for p, sha in entries.items())
+
+
 def _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, *, checkout_at=None, sim=None, venv_python=True):
     """A KEnv for the REAL ttlang_env.ensure: every step's command is faked, so a made-up checkout and venv pass each
     step. `checkout_at` and `sim` choose the commit and wheel version the fake commands report."""
@@ -3879,6 +3894,10 @@ def _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, *, checkout_at=None, sim
     diag = src / "python" / "ttl" / "diagnostics.py"
     diag.parent.mkdir(parents=True)
     diag.write_text("# diagnostics\n")
+    for rel in [f"examples/{r}" for r, _ in ttlang_env.defaults.TTLANG_NEGATIVE_EXAMPLES] + [
+            f"examples/{n}" for n in ttlang_env.VERIFY_SUPPORT_FILES]:        # the programs verify runs, committed
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text("print('program')\n")
     monkeypatch.setattr(ttlang_env.defaults, "TTLANG_DIAGNOSTICS_SHA256", hashlib.sha256(diag.read_bytes()).hexdigest())
     lib = tmp_path / "purelib"
     (lib / "ttl" / "ttl").mkdir(parents=True, exist_ok=True)
@@ -3888,10 +3907,10 @@ def _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, *, checkout_at=None, sim
 
     def run(argv, timeout, env=None, cwd=None):
         text = " ".join(str(a) for a in argv)
-        if argv[0] == "git" and "show" in argv:             # the programs verify runs, as the pinned commit has them
+        if argv[0] == "git" and "cat-file" in argv:         # the programs verify runs, as the pinned commit has them
             return 0, "print('program')\n", ""
-        if argv[0] == "git" and ("ls-tree" in argv or "status" in argv):      # clean checkout
-            return 0, "", ""
+        if argv[0] == "git" and "ls-tree" in argv:          # the pinned commit has what the checkout has, and the programs
+            return 0, _fake_ls_tree(src), ""
         if argv[-1] == "--version":
             return 0, f"tt-lang-sim {sim or _pin.SIM_VERSION}\n", ""
         if "rev-parse" in argv:

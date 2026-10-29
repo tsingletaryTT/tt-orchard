@@ -74,7 +74,7 @@ def _files_row(env) -> Row:
         shown = ", ".join(f"{p} ({w})" for p, w in sorted(dirty.items())[:5])
         return Row("checkout files", MISMATCH, f"{len(dirty)} file(s) under examples/ or docs/ of {env.src_dir} are "
                    f"not as the pinned commit has them: {shown}",
-                   f"run `git -C {env.src_dir} status` and restore or move the files aside", blocks=True)
+                   "restore the listed files from the pinned commit or move them aside", blocks=True)
     return Row("checkout files", OK, "every file under examples/ and docs/ is as the pinned commit has it")
 
 

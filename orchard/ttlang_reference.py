@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
 
 from orchard import ttlang_env, ttlang_pin
@@ -133,31 +134,113 @@ def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
     return files, problems
 
 
+# Every git call we make on the checkout is one that reads objects and nothing else: `ls-tree` and `cat-file blob`. Neither
+# applies a clean or smudge filter, a textconv or diff driver, or the index's file-system monitor, and neither runs a hook.
+# `git status` and `git diff` do (they hash the working tree through the checkout's own attributes and config), so they are
+# never used: modified and untracked files are found in Python (git_state). The settings below are a second layer, for the
+# day someone adds a call; a test fails on any argument list that lacks them or names status, diff or show.
+GIT_SAFE_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null")
+WORKTREE_DIRS = ("examples", "docs")
+IGNORED_DIRS = ("__pycache__",)         # what running an example leaves behind; a file in one is never offered
+
+
 def git_env(env) -> dict:
+    """The environment of a git call on the checkout: the allow-listed one, no system or user config, no system
+    attributes, and no index refresh."""
     out = ttlang_env.minimal_env(env)
-    out["GIT_OPTIONAL_LOCKS"] = "0"         # `git status` must not rewrite the checkout's index
+    out.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_ATTR_NOSYSTEM": "1"})
     return out
 
 
-def git_state(env) -> tuple[set[str] | None, dict[str, str] | None]:
-    """(tracked, dirty) for the checkout's examples/ and docs/, read only. `tracked` is the set of paths the pinned
-    commit has there; `dirty` maps each modified or untracked path to a word saying which. Either is None when git
-    cannot answer (no git, the pinned commit is not in the checkout): the caller then does not trust the checkout's
-    extra files, and the consistency check says it could not tell."""
-    src = str(env.src_dir)
-    # `-c core.fsmonitor=false`: a checkout's own config can name a program for git to run on `status`; it is not run.
-    rc, out, _ = env.run(["git", "-C", src, "ls-tree", "-r", "--name-only", ttlang_pin.SHA, "--", "examples", "docs"],
-                         60, git_env(env))
-    tracked = {line for line in out.splitlines() if line} if rc == 0 else None
-    rc, out, _ = env.run(["git", "-C", src, "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=all", "--", "examples", "docs"],
-                         60, git_env(env))
-    dirty = None
-    if rc == 0:
-        dirty = {}
-        for line in out.splitlines():
-            if len(line) > 3:
-                dirty[line[3:].split(" -> ")[-1].strip('"')] = "untracked" if line.startswith("??") else "modified"
-    return tracked, dirty
+def git_argv(env, *args: str) -> list[str]:
+    """`git -C <checkout> <safe settings> <args>`."""
+    return ["git", "-C", str(env.src_dir), *GIT_SAFE_CONFIG, *args]
+
+
+def _blob_id(path: Path) -> str | None:
+    """The git blob id of a file or link in the working tree, computed here with no git and no filter. None when the
+    entry cannot be read (or is neither a file nor a link); a file that changes while it is read gives a different id."""
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode):
+            data = os.fsencode(os.readlink(path))
+        elif stat.S_ISREG(st.st_mode):
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as f:
+                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    return None
+                data = f.read()
+        else:
+            return None
+    except OSError:
+        return None
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _walk(root: Path, top: str):
+    """(relative path, absolute path) of every file and link under root/top, and a list of the directories that
+    could not be listed. Links to directories are entries, never entered."""
+    found, errors = [], []
+
+    def onerror(exc):
+        if not isinstance(exc, FileNotFoundError):          # an absent directory has no files; anything else is reported
+            errors.append(f"{top}: {exc.strerror or exc}")
+    for base, dirs, files in os.walk(root / top, followlinks=False, onerror=onerror):
+        dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIRS and not os.path.islink(os.path.join(base, d)))
+        entries = list(files) + [d for d in os.listdir(base) if os.path.islink(os.path.join(base, d))
+                                 and os.path.isdir(os.path.join(base, d))]
+        for name in entries:
+            if name.endswith(".pyc"):
+                continue
+            absolute = Path(base) / name
+            found.append((absolute.relative_to(root).as_posix(), absolute))
+    return found, errors
+
+
+def _state(env, allow_head: bool = False):
+    """(rev, {path: blob id} at that commit, {path: "modified"|"untracked"|"deleted"} in the working tree), each None
+    when it cannot be known. The commit is the pinned one; with `allow_head` and no pinned commit in the checkout, HEAD."""
+    tracked, rev = None, ttlang_pin.SHA
+    for candidate in [ttlang_pin.SHA] + (["HEAD"] if allow_head else []):
+        rc, out, _ = env.run(git_argv(env, "ls-tree", "-r", "-z", candidate, "--", *WORKTREE_DIRS), 60, git_env(env))
+        if rc == 0:
+            tracked, rev = {}, candidate
+            for record in out.split("\0"):
+                meta, _, path = record.partition("\t")
+                parts = meta.split()
+                if path and len(parts) == 3 and parts[1] == "blob":      # a submodule entry is not a file
+                    tracked[path] = parts[2]
+            break
+    if tracked is None:
+        return rev, None, None
+    dirty, root = {}, Path(env.src_dir)
+    seen = set()
+    for top in WORKTREE_DIRS:
+        files, errors = _walk(root, top)
+        for rel, absolute in files:
+            seen.add(rel)
+            if rel not in tracked:
+                dirty[rel] = "untracked"
+            elif _blob_id(absolute) != tracked[rel]:
+                dirty[rel] = "modified"
+        for why in errors:
+            dirty[why] = "unreadable"
+    for rel in tracked:
+        if rel not in seen:
+            dirty[rel] = "deleted"
+    return rev, tracked, dirty
+
+
+def git_state(env, allow_head: bool = False) -> tuple[set[str] | None, dict[str, str] | None]:
+    """(tracked, dirty) for the checkout's examples/ and docs/, read only and with no filter run. `tracked` is the set of
+    paths the pinned commit has there; `dirty` maps each path whose working-tree bytes differ from the commit's
+    ("modified"), that the commit does not have ("untracked") or that is missing ("deleted"), and each directory that could
+    not be listed ("unreadable"). Both are None when git cannot answer (no git, the pinned commit is not in the
+    checkout): the caller then does not trust the checkout's extra files, and the consistency check says it could not
+    tell. File modes are not compared."""
+    _, tracked, dirty = _state(env, allow_head)
+    return (set(tracked) if tracked is not None else None), dirty
 
 
 # The checkout's own example programs that show the patterns the failing kernels need (element-wise work, broadcast and

@@ -254,10 +254,11 @@ def minimal_env(env: KEnv) -> dict:
 VERIFY_SUPPORT_FILES = ("compiler_only_add.hpp",)
 
 
-def _show(env: KEnv, rev: str, path: str) -> tuple[str | None, str]:
-    """(text, why): the file as commit `rev` has it, read with `git show` and nothing else."""
+def _blob(env: KEnv, rev: str, path: str) -> tuple[str | None, str]:
+    """(text, why): the file as commit `rev` has it, read with `git cat-file blob`, which applies no filter and no
+    textconv."""
     from orchard import ttlang_reference
-    rc, out, err = env.run(["git", "-C", str(env.src_dir), "show", f"{rev}:{path}"], 60,
+    rc, out, err = env.run(ttlang_reference.git_argv(env, "cat-file", "blob", f"{rev}:{path}"), 60,
                            ttlang_reference.git_env(env))
     return (out, "") if rc == 0 else (None, (err.strip().splitlines() or ["no answer"])[-1][:200])
 
@@ -266,32 +267,30 @@ def verify(env: KEnv, *, allow_pin_mismatch: bool = False) -> Result:
     """Run the negative examples and require upstream's own diagnostic text. See the module docstring.
 
     The examples are code from the checkout, so before any of them runs:
-      1. the programs and the files they need must be unmodified and tracked in the checkout (git status, read only);
-         one that is modified or untracked blocks verify, with or without the operator's override;
-      2. the programs are copied from the pinned commit (`git show <pin>:path`) into a directory made for this call, and
-         the copies run, never the working tree's version. With `allow_pin_mismatch` and no pinned commit in the checkout,
-         the checkout's HEAD is used instead;
+      1. the programs and the files they need must be tracked at the pinned commit, and the working tree's copy of each
+         must be the same bytes (compared in Python; no git call that could run the checkout's filters). One that is
+         modified or untracked blocks verify, with or without the operator's override;
+      2. the programs are copied from the pinned commit (`git cat-file blob <pin>:path`) into a directory made for this
+         call, and the copies run, never the working tree's version. With `allow_pin_mismatch` and no pinned commit in the
+         checkout, the checkout's HEAD is used instead;
       3. they run in that directory, in minimal_env, and the directory is removed afterwards."""
-    from orchard import ttlang_pin, ttlang_reference
+    from orchard import ttlang_reference
     needed = [f"examples/{rel}" for rel, _ in defaults.TTLANG_NEGATIVE_EXAMPLES]
     needed += [f"examples/{name}" for name in VERIFY_SUPPORT_FILES]
-    _, dirty = ttlang_reference.git_state(env)
+    rev, tracked, dirty = ttlang_reference._state(env, allow_pin_mismatch)
     if dirty is None:
         return Result("verify", FAIL, f"git could not say whether the files verify runs are as the pinned commit has "
                                       f"them in {env.src_dir}, so none of them is run")
-    bad = [f"{p} ({dirty[p]})" for p in needed if p in dirty]
+    bad = [f"{p} ({dirty[p]})" for p in needed if dirty.get(p) in ("modified", "untracked", "unreadable")]
+    bad += [f"{p} (not in the commit)" for p in needed if p not in tracked]
     if bad:
         return Result("verify", FAIL, f"{', '.join(bad)} in {env.src_dir} is not as the pinned commit has it; nothing "
                                       "from it is run. Restore the file or move the checkout aside")
-    revs = [ttlang_pin.SHA] + (["HEAD"] if allow_pin_mismatch else [])
     work = tempfile.mkdtemp(prefix="orchard-verify-")
     try:
-        for rev in revs:
-            texts = {p: _show(env, rev, p) for p in needed}
-            if all(t is not None for t, _ in texts.values()):
-                break
-        else:
-            first = next((f"{p}: {why}" for p, (t, why) in texts.items() if t is None), "")
+        texts = {p: _blob(env, rev, p) for p in needed}
+        if any(t is None for t, _ in texts.values()):
+            first = next(f"{p}: {why}" for p, (t, why) in texts.items() if t is None)
             return Result("verify", FAIL, f"the files verify runs could not be read from the pinned commit in "
                                           f"{env.src_dir} ({first})")
         for p, (text, _) in texts.items():

@@ -35,6 +35,10 @@ def make_checkout(root: Path, version: str = "0.20") -> Path:
         p = src / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"# {rel}\nbody of {rel}\n")
+    for rel in [f"examples/{r}" for r, _ in defaults.TTLANG_NEGATIVE_EXAMPLES] + [
+            f"examples/{n}" for n in ttlang_env.VERIFY_SUPPORT_FILES]:     # the programs verify runs
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text(f"# {rel}\n")
     (src / ".git").mkdir()
     return src
 
@@ -64,20 +68,32 @@ class Fake:
         return sorted(p.relative_to(self.src).as_posix() for d in ("examples", "docs")
                       for p in (self.src / d).rglob("*") if p.is_file())
 
+    def _tracked(self):
+        """Paths the fake pinned commit has: what is on disk except `untracked`, and the negative examples verify runs
+        (absent from the fake checkout, so they count as deleted, which does not block verify)."""
+        needed = [f"examples/{rel}" for rel, _ in defaults.TTLANG_NEGATIVE_EXAMPLES]
+        needed += [f"examples/{n}" for n in ttlang_env.VERIFY_SUPPORT_FILES]
+        return sorted({p for p in self._tree() if p not in self.untracked} | set(needed))
+
+    def _blob(self, rel):
+        """The blob id the fake commit holds for `rel`: the disk content's, or another one for a `modified` path."""
+        path = self.src / rel
+        data = path.read_bytes() if path.is_file() else b"absent"
+        if rel in self.modified:
+            data = b"original:" + data
+        return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
     def run(self, argv, timeout, env=None, cwd=None):
         self.calls.append(list(argv))
         self.envs.append(env)
-        if "ls-tree" in argv:                               # the files the pinned commit has: all but the untracked
+        if "ls-tree" in argv:               # what the pinned commit has: the files on disk, less the untracked ones
             if not self.git_works:
                 return 128, "", "fatal: not a valid object name"
-            return 0, "".join(f"{p}\n" for p in self._tree() if p not in self.untracked), ""
-        if "status" in argv:
-            if not self.git_works:
-                return 128, "", "fatal"
-            return 0, "".join([f"?? {p}\n" for p in sorted(self.untracked)] +
-                              [f" M {p}\n" for p in sorted(self.modified)]), ""
-        if "show" in argv and self.git_works:               # a file as the pinned commit has it
+            return 0, "".join(f"100644 blob {self._blob(p)}\t{p}\0" for p in self._tracked()), ""
+        if "cat-file" in argv and self.git_works:           # a file as the pinned commit has it
             return 0, "# the pinned commit's program\n", ""
+        if "cat-file" in argv:
+            return 128, "", "fatal"
         if argv[-1] == "--version":
             return 0, self.sim, ""
         if "rev-parse" in argv:
@@ -429,10 +445,8 @@ def test_git_is_only_asked_to_read_and_never_to_refresh_the_index(tmp_path):
     f = Fake(tmp_path)
     tr.git_state(f.env)
     git = [a for a in f.calls if a[0] == "git"]
-    assert {w for a in git for w in a if w in ("ls-tree", "status")} == {"ls-tree", "status"}
+    assert {w for a in git for w in a if w in ("ls-tree", "status")} == {"ls-tree"}
     assert all("fetch" not in a and "checkout" not in a and "reset" not in a for a in git)
-    status = next(a for a in git if "status" in a)
-    assert "core.fsmonitor=false" in status          # a checkout's own config must not name a program git runs
     assert all(e and e["GIT_OPTIONAL_LOCKS"] == "0" for e in f.envs)
     assert all("HF_TOKEN" not in e for e in f.envs)
 
@@ -441,11 +455,12 @@ def test_the_checkout_files_row_reports_untracked_and_modified_files(tmp_path):
     f = Fake(tmp_path)
     skill = make_skill(tmp_path, "0.20")
     assert rows_by_name(check(f, skill))["checkout files"].status == tc.OK
+    (f.src / "examples" / "eltwise_scratch.py").write_text("x = 1\n")
     f.untracked = {"examples/eltwise_scratch.py"}
     f.modified = {"docs/sphinx/overview.md"}
     r = rows_by_name(check(f, skill))["checkout files"]
     assert r.status == tc.MISMATCH and r.blocks and "eltwise_scratch.py (untracked)" in r.detail
-    assert "overview.md (modified)" in r.detail and "git -C" in r.fix
+    assert "overview.md (modified)" in r.detail and "restore" in r.fix
     f.git_works = False
     u = rows_by_name(check(f, skill))["checkout files"]
     assert u.status == tc.UNKNOWN and not u.blocks
@@ -617,7 +632,7 @@ def test_the_integrity_check_runs_before_any_program_in_ensure(tmp_path, monkeyp
     results = ttlang_env.ensure(f.env, check_only=True, say=lambda s: None)
     assert ran == [] and results[-1].name == "verify" and results[-1].status == ttlang_env.FAIL
     order = [a for a in f.calls if a[0] == "git"]
-    assert any("status" in a for a in order)
+    assert any("ls-tree" in a for a in order)
 
 
 def test_kernel_env_check_runs_verify_through_the_same_guards(tmp_path, monkeypatch, capsys):
@@ -675,3 +690,83 @@ def test_minimal_environment_paths_do_not_depend_on_the_callers_directory(tmp_pa
     out = ttlang_env.minimal_env(env)
     assert all(os.path.isabs(out[k]) for k in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "HF_TOKEN_PATH"))
     assert all(os.path.isabs(p) for p in out["PATH"].split(os.pathsep))
+
+
+# ---- inspecting a checkout must never run a program the checkout names (filters, fsmonitor, hooks) ---------------------
+
+def make_hostile_repo(root: Path):
+    """make_repo plus a clean filter, a textconv driver, an fsmonitor program and hooks in the checkout's own config
+    and attributes, each of which would write a marker file if git ran it. The working tree has a modified example."""
+    env, sha, marker = make_repo(root)
+    src = env.src_dir
+    mark = root / "FILTER-RAN"
+    writer = root / "write_marker.sh"
+    writer.write_text(f"#!/bin/sh\necho ran >> {mark}\ncat\n")
+    writer.chmod(0o755)
+    git = ["git", "-C", str(src)]
+    for key, value in (("filter.evil.clean", str(writer)), ("filter.evil.smudge", str(writer)),
+                       ("diff.evil.textconv", str(writer)), ("core.fsmonitor", str(writer)),
+                       ("core.hooksPath", str(root / "hooks"))):
+        subprocess.run(git + ["config", key, value], check=True, capture_output=True)
+    (src / ".gitattributes").write_text("* filter=evil diff=evil\n")
+    (src / ".git" / "info").mkdir(exist_ok=True)
+    (src / ".git" / "info" / "attributes").write_text("* filter=evil diff=evil\n")
+    # change a tracked example and its size, so any git command that hashes the working tree must run the clean filter
+    (src / "examples" / "compiler_only_external_call.py").write_text("print('edited, and longer than before')\n")
+    return env, sha, marker, mark, src
+
+
+def test_the_control_git_status_really_runs_the_checkouts_filter_here(tmp_path):
+    """The instrument check: in this repository `git status` does write the marker, so a marker that never appears
+    under our code means something."""
+    env, sha, marker, mark, src = make_hostile_repo(tmp_path)
+    subprocess.run(["git", "-C", str(src), "status", "--porcelain"], capture_output=True)
+    assert mark.exists()
+
+
+def test_no_git_call_we_make_runs_a_filter_a_textconv_a_fsmonitor_or_a_hook(tmp_path, monkeypatch):
+    env, sha, marker, mark, src = make_hostile_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    tracked, dirty = tr.git_state(env)
+    assert dirty["examples/compiler_only_external_call.py"] == "modified"
+    tr.assemble(env, make_skill(tmp_path, "0.20"))
+    tc.check(env, make_skill(tmp_path, "0.20", "skill2"))
+    ttlang_env.verify(env)
+    ttlang_env.verify(env, allow_pin_mismatch=True)
+    assert not mark.exists()
+
+
+def test_every_git_call_is_made_with_the_safe_settings(tmp_path):
+    f = Fake(tmp_path)
+    tr.git_state(f.env)
+    ttlang_env.verify(f.env)
+    git = [(a, e) for a, e in zip(f.calls, f.envs) if a[0] == "git" and a[3:5] != ["rev-parse", "HEAD"]]
+    assert git
+    for argv, env in git:
+        joined = " ".join(argv)
+        assert "core.fsmonitor=false" in joined and "core.hooksPath=/dev/null" in joined
+        assert "core.attributesFile=/dev/null" in joined
+        assert not {"status", "diff", "add", "checkout", "reset", "fetch", "show"} & set(argv)
+        assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+        assert env["GIT_ATTR_NOSYSTEM"] == "1" and env["GIT_OPTIONAL_LOCKS"] == "0"
+        assert "HF_TOKEN" not in env
+
+
+def test_the_working_tree_is_compared_with_the_pinned_blobs_in_python(tmp_path, monkeypatch):
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    src = env.src_dir
+    assert tr.git_state(env)[1] == {}
+    (src / "examples" / "compiler_only_add.hpp").write_text("// changed\n")
+    (src / "examples" / "new_scratch.py").write_text("x = 1\n")
+    (src / "docs").mkdir(exist_ok=True)
+    (src / "docs" / "note.md").write_text("untracked doc\n")
+    (src / "examples" / "__pycache__").mkdir()
+    (src / "examples" / "__pycache__" / "x.pyc").write_bytes(b"\0")
+    (src / "examples" / "__pycache__" / "cache.bin").write_bytes(b"\0")
+    (src / "examples" / "compiler_only_external_call.py").unlink()
+    (src / "examples" / "link.py").symlink_to("compiler_only_add.hpp")
+    dirty = tr.git_state(env)[1]
+    assert dirty == {"examples/compiler_only_add.hpp": "modified", "examples/new_scratch.py": "untracked",
+                     "docs/note.md": "untracked", "examples/compiler_only_external_call.py": "deleted",
+                     "examples/link.py": "untracked"}

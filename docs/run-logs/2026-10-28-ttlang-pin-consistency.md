@@ -206,3 +206,31 @@ the no-fallback rule (1), the unanswered-git rule (1), the `examples/` guard (1)
 
 - The comment on the verification fake in `tests/test_kernelprobe.py` was stale. At b12c7f9 the fake answers `git show`, `ls-tree` and `status`, and the three tests it named (two override-success tests and the clean-run report test) pass when run alone and in the full suite on that head.
 - A relative `--venv-dir` (or `ORCHARD_TTLANG_VENV`) gave a relative simulator path, and the programs now run in a temporary working directory, so the executable was looked up under that directory and `verify` failed although the version check had passed. The class: every path that crosses into the temporary-directory run. The simulator and the program are named by absolute paths, a relative `PATH` entry is made absolute, and `HOME`, the config and cache directories and the token path are absolute. A test runs `verify` from a relative checkout, venv, scratch and `PATH`. Each guard was removed once and a test went red (the simulator path, the `PATH` entries, `HOME`, the program path).
+
+## Review round 5 (Copilot, PR 198, head d02f80e: `git status` can run the checkout's own filters)
+
+`git status` hashes modified files through the checkout's own attributes and config, so a clean filter, a textconv driver, an
+fsmonitor program or a hook named in the checkout could write to the operator's tree before any check of ours rejected the file.
+The class: every way we inspect the checkout must use only operations that cannot run what the checkout names.
+
+- `git status` is gone, and so is every `git show` and `git diff`. The only git calls on the checkout read objects: `git ls-tree -r -z`
+  at the pinned commit (the files and blob ids the commit has) and `git cat-file blob <pin>:path` (a file's bytes). Neither applies a
+  clean or smudge filter, a textconv or diff driver, or the file-system monitor, and neither runs a hook.
+- Modified, untracked and deleted files are found in Python. Each tracked file's working-tree bytes are hashed as a git blob
+  (`sha1("blob <size>\0" + bytes)`, a link by its target) and compared with the commit's id. Untracked files come from a walk of
+  `examples/` and `docs/` with `lstat`, no links entered, `__pycache__` directories skipped. A directory that cannot be listed is
+  reported as unreadable. File modes are not compared.
+- Every git call also carries `-c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null` and the
+  environment `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 GIT_OPTIONAL_LOCKS=0`, on top of the allow-listed
+  environment. `.git/info/attributes` cannot be switched off, so it is not relied on: with only object-reading calls it has nothing to
+  act on. A test fails on any call that lacks the settings or names `status`, `diff` or `show`.
+- The regression test builds a repository whose own config names a clean filter, a smudge filter, a textconv driver, an fsmonitor
+  program and a hooks directory, and whose `.gitattributes` and `info/attributes` apply them, each writing a marker file. A control test
+  shows that `git status` in that repository does write the marker. The marker never appears when the code inspects the checkout
+  (`git_state`, `assemble`, the consistency check and `verify`, with and without the override).
+- `verify` also takes the commit's file list from `ls-tree`, so a program that the commit does not have is refused, and the
+  consistency check's `checkout files` row reports deleted files as well. On this machine the check is clean and takes under a second.
+
+Each guard was removed once and a test went red: reintroducing a `git status` call (3 tests, including the marker), the hooks setting,
+the global-config setting, `cat-file` replaced by `show`, the content comparison, the untracked rule, the deleted rule, and the
+`__pycache__` skip.

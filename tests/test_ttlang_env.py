@@ -28,8 +28,12 @@ class FakeRun:
     def __call__(self, argv, timeout, env=None, cwd=None):
         self.calls.append((list(argv), dict(env or {})))
         self.cwds = getattr(self, "cwds", []) + [cwd]
-        if self.git_ok and argv[:1] == ["git"] and any(w in argv for w in ("ls-tree", "status", "show")):
-            return 0, ("# program text\n" if "show" in argv else ""), ""
+        if self.git_ok and argv[:1] == ["git"] and any(w in argv for w in ("ls-tree", "cat-file")):
+            if "cat-file" in argv:
+                return 0, "# program text\n", ""
+            needed = [f"examples/{rel}" for rel, _ in defaults.TTLANG_NEGATIVE_EXAMPLES]
+            needed += [f"examples/{n}" for n in ke.VERIFY_SUPPORT_FILES]
+            return 0, "".join(f"100644 blob {'0' * 40}\t{p}\0" for p in needed), ""
         for prefix, result, effect in self.rules:
             if tuple(argv[:len(prefix)]) == prefix:
                 if effect:
