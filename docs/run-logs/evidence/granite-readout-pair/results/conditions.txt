@@ -1,0 +1,10 @@
+session start 2026-10-29T08:03:52-07:00 load: 1.07 0.92 1.12 1/2195 3329777
+build_info {'version': '1.1.10.dev20261026+light', 'ttlang': 'fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0', 'tt_metal_tag': 'v0.79.0-dev20260917', 'tt_metal': '0e9d200db976120c129ab0deb13aa3f6d972b723'}
+bench composed-a rc=0 2026-10-29T08:04:16-07:00 load 1.92 1.15 1.19 2/2184 3331255
+bench state-composed rc=0 2026-10-29T08:04:55-07:00 load 1.87 1.23 1.21 2/2204 3333035
+bench state-readout rc=0 2026-10-29T08:05:56-07:00 load 2.38 1.50 1.31 1/2237 3336025
+bench composed-b rc=0 2026-10-29T08:06:20-07:00 load 2.61 1.60 1.35 1/2187 3337479
+agree composed rc=0 2026-10-29T08:06:35-07:00 load 2.56 1.64 1.36 1/2184 3338190
+agree state-composed rc=0 2026-10-29T08:06:58-07:00 load 3.11 1.85 1.44 2/2203 3339219
+agree state-readout rc=0 2026-10-29T08:07:31-07:00 load 2.61 1.86 1.46 1/2186 3341025
+session end 2026-10-29T08:07:31-07:00 load: 2.61 1.86 1.46 1/2186 3341029
