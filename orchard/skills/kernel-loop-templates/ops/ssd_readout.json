@@ -1,0 +1,6 @@
+{"op": "ssd_readout", "description": "out[r, :] = sum over the last axis of c[r, :] * s[r, :], written to every column of row r: the Mamba-2 readout y = state . C, with C given at the full size of the state",
+ "inputs": {"c": [64, 128], "s": [64, 128]}, "output": [64, 128],
+ "dtype": "bfloat16", "reference": "ssd_readout", "pcc_bar_sim": 0.999, "pcc_bar_hw": 0.99,
+ "rel_l2_bar_sim": 1e-2, "rel_l2_bar_hw": 5e-2, "slope_band_sim": [0.98, 1.02], "slope_band_hw": [0.95, 1.05],
+ "max_abs_atol_sim": 1e-2, "max_abs_rtol_sim": 1e-2, "max_abs_atol_hw": 1e-1, "max_abs_rtol_hw": 5e-2, "seeds": [0, 1, 2], "heavy_tail": true,
+ "provisional": true}
