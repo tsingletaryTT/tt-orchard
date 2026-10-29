@@ -28,7 +28,7 @@ import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from orchard import classes
+from orchard import classes, safeio
 from orchard.research import headers, triage_rules
 from orchard.research.http import FetchError
 from orchard.research.types import valid_id
@@ -53,15 +53,18 @@ class CorpusError(ValueError):
     """The corpus or a labels file is not what the bench reads."""
 
 
+MAX_CORPUS_BYTES = 8 * 1024 * 1024        # choice: a corpus is a list of model ids with short notes
+
+
 def slug(model_id: str) -> str:
     return model_id.replace("/", "--")
 
 
 def load_corpus(path) -> list[dict]:
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise CorpusError(f"cannot read {path}: {exc}") from exc
+        data = safeio.read_json(path, max_bytes=MAX_CORPUS_BYTES)
+    except safeio.SafeReadError as exc:
+        raise CorpusError(f"cannot read {path}: {exc.reason}") from exc
     if not isinstance(data, list) or not data:
         raise CorpusError("the corpus must be a non-empty list of {id, stratum?, truth?, note?}")
     seen = set()

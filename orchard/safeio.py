@@ -46,7 +46,7 @@ from typing import Callable, Iterator, Sequence
 __all__ = [
     "SafeReadError", "ReadFailed", "PathRefused", "NotRegular", "TooLarge", "ChangedWhileReading", "NotText", "NotJson",
     "WrongType", "BadValue", "BadHeader", "IncompleteScan", "AppendBroken",
-    "read_bytes", "read_json", "parse_json_bytes", "open_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
+    "read_bytes", "read_json", "read_jsonl", "parse_json_bytes", "open_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
     "ScanResult", "atomic_write", "append_line", "finite_number", "whole_number", "bounded_str", "safetensors_header",
     "SafetensorsHeader", "TensorEntry", "DTYPE_BITS",
 ]
@@ -515,6 +515,28 @@ def read_json(path, *, max_bytes: int, anchor: int | None = None, max_depth: int
     does not hold the file's content."""
     return parse_json_bytes(read_bytes(path, max_bytes=max_bytes, anchor=anchor), max_bytes=max_bytes,
                             max_depth=max_depth, max_int_digits=max_int_digits, expect=expect)
+
+
+def read_jsonl(path, *, max_bytes: int, anchor: int | None = None, max_depth: int = MAX_JSON_DEPTH,
+               max_int_digits: int = MAX_INT_DIGITS, expect=None) -> list:
+    """The JSON values on the lines of the regular file at `path`, in order. Blank lines are skipped.
+
+    The file is read with `read_bytes` (so a FIFO, a link, a device and a file over `max_bytes` are refused before anything is
+    parsed) and split on the byte `\\n` only (`str.splitlines` also cuts at U+2028, U+2029 and U+0085, which a writer leaves
+    raw inside a JSON string). Each line is parsed with `parse_json_bytes`, so every guard of `read_json` applies to every
+    line, and `expect` is the type each line's value must have. The first bad line fails the whole read with a SafeReadError
+    whose reason names the line number and never holds its content."""
+    data = read_bytes(path, max_bytes=max_bytes, anchor=anchor)
+    rows = []
+    for number, line in enumerate(data.split(b"\n"), start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(parse_json_bytes(line, max_bytes=max_bytes, max_depth=max_depth, max_int_digits=max_int_digits,
+                                         expect=expect))
+        except SafeReadError as exc:
+            raise type(exc)(f"line {number}: {exc.reason}") from None
+    return rows
 
 
 # ------------------------------------------------------------------------------------------------------ directory scan

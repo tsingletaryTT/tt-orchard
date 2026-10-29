@@ -368,6 +368,7 @@ class WebApp:
         self.config_path = Path(config_path)
         self.cfg = cfg
         self._spender = None
+        self._spender_lock = threading.Lock()      # two first requests must not each build the Spender (issue 149)
         self.token = token or secrets.token_urlsafe(24)
         self._gozer_fn = gozer_status or status._gozer_status
         self.clock = clock
@@ -498,10 +499,12 @@ class WebApp:
     def virtual_spend(self, run=None) -> dict:
         """The virtual local spend (orchard/virtualspend_view.py): the token use of the local models in the run folders, priced
         at the reference models. `run` is the name of a listed row; it is never used to build a path. Read only."""
-        if self._spender is None:
-            vcfg = getattr(self.cfg, "virtual_spend", None) or _virtualspend.Config()
-            self._spender = virtualspend_view.Spender(self.runs_root, vcfg, redact=self.redact, clock=self.clock)
-        return self._spender.build(run)
+        with self._spender_lock:
+            if self._spender is None:
+                vcfg = getattr(self.cfg, "virtual_spend", None) or _virtualspend.Config()
+                self._spender = virtualspend_view.Spender(self.runs_root, vcfg, redact=self.redact, clock=self.clock)
+            spender = self._spender
+        return spender.build(run)
 
     def _lab_group(self) -> dict:
         """The lab's chips from its `gozer status` (over ssh), asked at most every LAB_TTL_S seconds."""

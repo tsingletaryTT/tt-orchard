@@ -782,3 +782,26 @@ def test_the_runner_does_not_pass_on_variables_that_point_git_at_another_reposit
                                environ={name: "/elsewhere" for name in sf.REDIRECTING_GIT_VARS} | {"PATH": "/usr/bin"})
     runner(["git", "-C", "/x", "rev-parse", "HEAD"], network=False)
     assert seen[0]["PATH"] == "/usr/bin" and not set(sf.REDIRECTING_GIT_VARS) & set(seen[0])
+
+
+def test_a_clean_linked_git_worktree_is_not_dirty_and_a_real_change_still_is(tmp_path):
+    """Issue 202. A linked worktree (`git worktree add`) has a regular file named .git at its root, not a directory. The untracked-file walk
+    skipped a .git directory but listed that file, so a clean skills checkout reported uncommitted changes. Real git."""
+    import subprocess
+    plain = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    main = tmp_path / "main"
+    main.mkdir()
+    git = ["git", "-C", str(main), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True, env=plain, capture_output=True, timeout=30)
+    (main / "skill.md").write_text("one\n")
+    for argv in (["add", "-A"], ["commit", "-q", "-m", "x"], ["worktree", "add", "-q", "-b", "linked", str(tmp_path / "linked")]):
+        subprocess.run(git + argv, check=True, env=plain, capture_output=True, timeout=30)
+    linked = tmp_path / "linked"
+    assert (linked / ".git").is_file(), "a linked worktree has a .git file; otherwise this test proves nothing"
+    runner = sf.ReadOnlyRunner(REAL_RAW_RUN, environ=plain)
+    assert sf._dirty(runner, str(linked), True) is False
+    (linked / "new-skill.md").write_text("untracked\n")
+    assert sf._dirty(runner, str(linked), True) is True
+    (linked / "new-skill.md").unlink()
+    (linked / "skill.md").write_text("two\n")
+    assert sf._dirty(runner, str(linked), True) is True

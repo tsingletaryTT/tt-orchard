@@ -53,12 +53,14 @@ from pathlib import Path
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
 from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, accept_rate, read_decision
-from orchard import sampling_choice, sampling_probe
+from orchard import safeio, sampling_choice, sampling_probe
 from orchard.card_use import read_use_facts
 from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
 from orchard.scrub import HOME_PATH, scrub_package
 from orchard.stages import delta_model_has_mtp, gate_weights_swap
+
+MAX_RECORD_BYTES = 4 * 1024 * 1024    # choice: a stage record, package.json or the reported scores is a few kilobytes (issue 137)
 
 TEMPLATES = Path(__file__).with_name("package_templates")
 SWAP_TEMPLATES = Path(__file__).with_name("skills") / "weights-swap-templates"
@@ -216,10 +218,10 @@ def stage_2_vocab(run_dir) -> tuple[int, int] | None:
     `vocab` record, written by prepare_swap.py; issue 56), else None. Anything that is not whole numbers with the model's smaller and
     `trimmed` true is no record."""
     try:
-        rec = json.loads((Path(run_dir) / "stages/2/model-dir-sources.json").read_text(encoding="utf-8"))
+        rec = safeio.read_json(Path(run_dir) / "stages/2/model-dir-sources.json", max_bytes=MAX_RECORD_BYTES)
         v = rec["vocab"]
         m, b = v["model"], v["base"]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (safeio.SafeReadError, ValueError, KeyError, TypeError):
         return None
     if v.get("trimmed") is not True or any(isinstance(x, bool) or not isinstance(x, int) for x in (m, b)) or not 0 < m < b:
         return None
@@ -229,8 +231,8 @@ def stage_2_vocab(run_dir) -> tuple[int, int] | None:
 def _stage_2_grafted(run: Path) -> bool:
     """Did stage 2's swap graft the nearest model's mtp.* tensors? (model-dir-sources.json's mtp_graft record)"""
     try:
-        rec = json.loads((run / "stages/2/model-dir-sources.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        rec = safeio.read_json(run / "stages/2/model-dir-sources.json", max_bytes=MAX_RECORD_BYTES)
+    except safeio.SafeReadError:
         return False
     return isinstance(rec, dict) and isinstance(rec.get("mtp_graft"), dict)
 
@@ -238,16 +240,16 @@ def _stage_2_grafted(run: Path) -> bool:
 def _package_grafted(run: Path) -> bool:
     """Did stage 7 stage a grafted package? (package.json's mtp_graft record; finish and the gate read it)"""
     try:
-        rec = json.loads((run / "stages/7/package.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        rec = safeio.read_json(run / "stages/7/package.json", max_bytes=MAX_RECORD_BYTES)
+    except safeio.SafeReadError:
         return False
     return isinstance(rec, dict) and isinstance(rec.get("mtp_graft"), dict)
 
 
 def _stage_2_graft_record(run: Path) -> dict | None:
     try:
-        rec = json.loads((run / "stages/2/model-dir-sources.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        rec = safeio.read_json(run / "stages/2/model-dir-sources.json", max_bytes=MAX_RECORD_BYTES)
+    except safeio.SafeReadError:
         return None
     rec = rec.get("mtp_graft") if isinstance(rec, dict) else None
     return rec if isinstance(rec, dict) else None
@@ -448,9 +450,9 @@ def weights_wiring_problems(text: str, *, nearest_model: str) -> list[str]:
 
 def _json(path: Path, what: str) -> dict:
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise PackageError(f"{what} ({path}) is missing or not JSON: {exc}") from None
+        data = safeio.read_json(path, max_bytes=MAX_RECORD_BYTES)
+    except safeio.SafeReadError as exc:
+        raise PackageError(f"{what} ({path}) is missing or not usable JSON: {exc.reason}") from None
     if not isinstance(data, dict):
         raise PackageError(f"{what} ({path}) is not a JSON object")
     return data

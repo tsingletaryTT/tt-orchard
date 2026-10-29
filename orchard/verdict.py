@@ -22,6 +22,7 @@ import re
 import statistics
 from pathlib import Path
 
+from orchard import safeio
 from orchard.defaults import SWAP_MIN_TOKENS, SWAP_TOP1_MIN
 
 TONES = ("bad", "warn", "good", "info")      # the order the page lists them: worst news first
@@ -67,10 +68,10 @@ def _read_json(run: Path, rel: str):
     """A small JSON file inside the run. A link that leads outside the run, a file over the cap or bad JSON reads as absent."""
     path = run / rel
     try:
-        if not path.is_file() or not path.resolve().is_relative_to(run.resolve()) or path.stat().st_size > MAX_FILE_BYTES:
+        if not path.resolve().is_relative_to(run.resolve()):
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return safeio.read_json(path, max_bytes=MAX_FILE_BYTES)       # NaN, Infinity, a repeated key and deep nesting are refused
+    except (safeio.SafeReadError, OSError, RuntimeError):             # RuntimeError: a link loop in resolve()
         return None
 
 

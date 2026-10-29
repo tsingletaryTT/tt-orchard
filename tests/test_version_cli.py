@@ -741,3 +741,38 @@ def test_an_error_after_release_was_already_replaced_puts_the_old_text_back(repo
     code, _, err = run(repo, "release")
     assert code == 1
     assert_untouched_and_rerunnable(repo, before, monkeypatch)
+
+
+def test_a_failure_after_the_notes_file_was_created_removes_it_and_a_rerun_succeeds(repo, monkeypatch):
+    """Issue 151. The notes file is created by a link; the directory fsync that follows can fail. The write then raises with the file already
+    in place, and the rollback must still remove it, or a rerun refuses because the notes exist."""
+    setup_release(repo)
+    before = tree(repo)
+    real = C.atomic_write
+
+    def write(path, text, **k):
+        real(path, text, **k)
+        if Path(path).parent.name == "releases":
+            raise OSError(5, "simulated: fsync of the directory failed")
+    monkeypatch.setattr(C, "atomic_write", write)
+    code, _, err = run(repo, "release")
+    assert code == 1
+    assert_untouched_and_rerunnable(repo, before, monkeypatch)
+
+
+def test_a_notes_file_that_someone_else_created_is_not_removed_by_the_rollback(repo, monkeypatch):
+    """The rollback removes only a notes file this run created. If the link step failed because the file already exists, it belongs to someone else."""
+    setup_release(repo)
+    real = C.atomic_write
+    theirs = {}
+
+    def write(path, text, **k):
+        if Path(path).parent.name == "releases":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("someone else's notes\n", encoding="utf-8")
+            theirs["path"] = Path(path)
+        return real(path, text, **k)                              # replace=False: raises FileExistsError
+    monkeypatch.setattr(C, "atomic_write", write)
+    code, _, err = run(repo, "release")
+    assert code == 1
+    assert theirs["path"].read_text(encoding="utf-8") == "someone else's notes\n"

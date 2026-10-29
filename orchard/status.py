@@ -64,13 +64,14 @@ import sys
 import time
 from pathlib import Path
 
-from orchard import orchard_view, ui
+from orchard import orchard_view, safeio, ui
 from orchard.defaults import TEST_DISK_GB
 from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.stages import STAGES, ledger_ts, run_progress
 
 EXIT_OK, EXIT_BAD = 0, 2
 LAST_EVENTS = 5
+SMALL_FILE_BYTES = 4096     # the pid file and the control file hold one word or one number (issue 137)
 SUMMARY_CHARS = 100         # one event summary, so the whole block stays short
 QUIET_STUCK_S = 5 * 3600.0  # choice: longer than the longest stage budget (4 h) plus margin
 DISK_STOP_GB = TEST_DISK_GB  # the same 40 GB the supervisor wants before a hardware test
@@ -109,8 +110,8 @@ def _supervisor_alive(pid: int) -> bool:
 
 def _read_pid_file(run_dir) -> int | None:
     try:
-        return int((Path(run_dir) / "supervisor.pid").read_text().strip())
-    except (OSError, ValueError):
+        return int(safeio.read_bytes(Path(run_dir) / "supervisor.pid", max_bytes=SMALL_FILE_BYTES).decode("ascii").strip())
+    except (safeio.SafeReadError, ValueError):
         return None
 
 
@@ -382,8 +383,8 @@ def collect(run_dir, *, now: float | None = None, pid_alive=_supervisor_alive, l
 
     control_word = None
     try:
-        control_word = (run_dir / "control").read_text().strip() or None
-    except OSError:
+        control_word = safeio.read_bytes(run_dir / "control", max_bytes=SMALL_FILE_BYTES).decode("utf-8").strip() or None
+    except (safeio.SafeReadError, ValueError):      # not readable, too large, not a regular file or not text: no pending command
         pass
 
     home = Path(home) if home is not None else Path.home()

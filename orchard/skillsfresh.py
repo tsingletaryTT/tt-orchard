@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 
+from orchard import safeio
+
 CURRENT, BEHIND, AHEAD, DIFFERS, UNKNOWN = "current", "behind", "ahead", "differs", "unknown"
 SOURCE_SKILLS = "tenstorrent/skills"
 SOURCE_TTLANG = "tt-lang source"
@@ -213,11 +215,8 @@ class Cache:
 
     def _load(self) -> dict:
         try:
-            st = os.lstat(self.path)
-            if not stat.S_ISREG(st.st_mode) or st.st_size > FILE_MAX_BYTES:
-                return {}
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):      # RecursionError: a deeply nested file
+            data = safeio.read_json(self.path, max_bytes=FILE_MAX_BYTES)       # strict: no NaN, no repeated key, bounded nesting
+        except safeio.SafeReadError:
             return {}
         return data if isinstance(data, dict) else {}
 

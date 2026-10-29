@@ -218,10 +218,19 @@ def apply_release(root: Path, init: Path, init_text: str, new_init: str, notes_p
     for f in frags:
         path = ch / f.name
         snapshot.append((path, path.read_text(encoding="utf-8"), stat.S_IMODE(path.stat().st_mode)))
+    # `atomic_write(..., replace=False)` creates the file by a link and then makes the directory entry durable. A failure in that second
+    # part raises with the file already in place, so the rollback cannot rely on the call having returned (issue 151). The notes
+    # file counts as ours unless the create itself failed because the file already exists (it then belongs to someone else).
     wrote_notes = False
     step = f"writing {notes_path.relative_to(root)}"
     try:
-        atomic_write(notes_path, notes, replace=False)
+        try:
+            atomic_write(notes_path, notes, replace=False)
+        except FileExistsError:
+            raise
+        except BaseException:
+            wrote_notes = os.path.lexists(notes_path)
+            raise
         wrote_notes = True
         for path, _, _ in snapshot:
             step = f"deleting {path.relative_to(root)}"

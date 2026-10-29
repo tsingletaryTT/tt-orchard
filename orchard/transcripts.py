@@ -25,7 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from orchard import safeio
 from orchard.watchdog import Event
+
+MAX_SIGNATURE_BYTES = 32 * 1024 * 1024   # choice: a signature is one short line per event; a larger file is not read
 
 
 def parse_ts(s: str) -> float:
@@ -118,4 +121,8 @@ def write_signature(events, path) -> int:
 
 
 def load_signature(path) -> list[Event]:
-    return [Event(**json.loads(line)) for line in Path(path).read_text().splitlines() if line.strip()]
+    try:
+        rows = safeio.read_jsonl(path, max_bytes=MAX_SIGNATURE_BYTES, expect=dict)
+    except safeio.SafeReadError as exc:
+        raise ValueError(f"cannot read the signature {Path(path).name}: {exc.reason}") from exc
+    return [Event(**row) for row in rows]

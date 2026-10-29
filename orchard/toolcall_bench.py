@@ -30,6 +30,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from orchard import safeio
+
+MAX_ROWS_BYTES = 32 * 1024 * 1024       # choice: the question and answer files are a few megabytes at most
+
 TYPE_WORDS = {"dict": "object", "float": "number", "tuple": "array", "any": "string"}
 STRING_DROP = re.compile(r"[ ,./\-_*^]")
 
@@ -37,8 +41,12 @@ STRING_DROP = re.compile(r"[ ,./\-_*^]")
 # ---- loading ----------------------------------------------------------------------------------------------------------------------
 
 def _rows(path) -> list[dict]:
-    # "\n" only: str.splitlines() would also cut a record at a U+2028 left raw inside a JSON string.
-    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").split("\n") if line.strip()]
+    """The JSON values on the lines of `path` ("\n" only: str.splitlines() would also cut a record at a U+2028 left raw inside a JSON
+    string). A file that cannot be read, is too large or holds a bad line is a ValueError (issues 135 to 139)."""
+    try:
+        return safeio.read_jsonl(path, max_bytes=MAX_ROWS_BYTES)
+    except safeio.SafeReadError as exc:
+        raise ValueError(f"cannot read {Path(path).name}: {exc.reason}") from exc
 
 
 def load_items(questions_path, answers_path) -> list[dict]:
