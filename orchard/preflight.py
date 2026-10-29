@@ -763,6 +763,7 @@ class Signals:
     skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
     updates_hint: Callable | None = None        # () -> one line from the `tt-orchard updates` cache (no network), or None
     bus: Callable | None = None                 # () -> orchard.bus.Bus: the chips the kernel shows (sysfs and /dev; no lease)
+    boards: Callable | None = None              # () -> orchard.boards_seen.Sources: gozer topology and status, and tt-smi -s when configured
     stock_params: Callable | None = None        # (name) -> Path of tt-transformers' model_params/<name> on this box, or None
     demo_env: Callable | None = None            # (python | None, tree | None) -> (orchard.demo_env results or None, the command that builds it)
 
@@ -1088,6 +1089,12 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                 text = ""
             return bus_check.check_bus(s.bus(), text, bus_check.needed_chips(cfg))
         guarded("bus", "hardware-unhealthy", bus_row)
+    if s.boards is not None:
+        def boards_row() -> Check:
+            from orchard import boards_seen
+            src = s.boards()
+            return boards_seen.check_boards(src.topology, src.smi, src.status, bus_check_needed(cfg))
+        guarded("boards", "hardware-unhealthy", boards_row)
     if in_lab and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
     out.append(base_check)
@@ -1145,6 +1152,11 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         if line:
             out.append(Check("updates", OK, line))    # informational: OK never blocks and never warns
     return out
+
+
+def bus_check_needed(cfg) -> int:
+    from orchard import bus as bus_check
+    return bus_check.needed_chips(cfg)
 
 
 def blocked(checks: list[Check]) -> list[Check]:
@@ -1297,8 +1309,17 @@ def default_signals(cfg, research_options=None) -> Signals:
                                environ=os.environ, home=home)
         return (de.ensure(env, check_only=True) if venv else None), de.fix_command(env)
 
+    def boards_sources():
+        # Read only. tt-smi -s opens every device, so it runs only when the operator names the binary in ORCHARD_TT_SMI.
+        from orchard import boards_seen
+
+        def run(argv, timeout):
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            return done.returncode, done.stdout, done.stderr
+        return boards_seen.read_sources(cfg.gozer, os.environ.get("ORCHARD_TT_SMI") or None, run)
+
     return Signals(
-        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus,
+        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus, boards=boards_sources,
         updates_hint=updates_hint,
         installed_bundles=lambda: nearest.read_all_installed(models_root(), cfg.operator_home or supervisor.operator_home()),
         search_bundles=nearest.search,

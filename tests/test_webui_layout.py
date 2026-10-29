@@ -88,7 +88,8 @@ def order(tree, *ids):
     return seen
 
 
-JS = lambda: (WEB / "app.js").read_text(encoding="utf-8")
+# The page script is app.js plus format.js (the pure helpers), which share one page scope.
+JS = lambda: (WEB / "app.js").read_text(encoding="utf-8") + "\n" + (WEB / "format.js").read_text(encoding="utf-8")
 CSS = lambda: (WEB / "app.css").read_text(encoding="utf-8")
 
 
@@ -244,10 +245,10 @@ def test_nothing_follows_the_save_button_in_the_models_view():
 def test_the_view_hashes_are_machine_and_models_and_the_old_ones_still_open_them():
     js = JS()
     assert 'replaceState(null, "", "#machine")' in js and 'replaceState(null, "", "#models")' in js
-    boot = js[js.index('location.hash === "#machine"'):] if 'location.hash === "#machine"' in js else ""
-    assert boot, "the start-up code reads #machine"
-    for old in ('"#hardware"', '"#settings"', '"#models"'):
-        assert old in js, old
+    fmt = (WEB / "format.js").read_text(encoding="utf-8")        # routeOf lives there; tests/test_web_js_pure.py runs it
+    assert "routeOf(location.hash)" in js, "the start-up code routes through routeOf"
+    for name in ('"#machine"', '"#hardware"', '"#settings"', '"#models"'):
+        assert name in fmt, name
     assert 'href="#machine"' in (WEB / "index.html").read_text(encoding="utf-8")
 
 
