@@ -169,10 +169,18 @@ def _kv_heads(cfg: dict, heads: int) -> int:
     return 1 if cfg.get("multi_query") is True else heads
 
 
+# Model types whose code sets the value head width from the hidden size and the head count, so their config has no `v_head_dim`
+# (MiniCPM3: `self.v_head_dim = config.hidden_size // config.num_attention_heads` in modeling_minicpm.py; its kv_b_proj is
+# kv_lora_rank by heads * (qk_nope_head_dim + v_head_dim), which confirms 64 for openbmb/MiniCPM3-4B).
+V_HEAD_FROM_HIDDEN_TYPES = ("minicpm3",)
+
+
 def _mla(cfg: dict) -> dict:
     """Multi-latent attention shapes, or an empty dict for a model without `kv_lora_rank`."""
     if cfg.get("kv_lora_rank") is None:
         return {}
+    if cfg.get("v_head_dim") is None and cfg.get("model_type") in V_HEAD_FROM_HIDDEN_TYPES:
+        cfg = dict(cfg, v_head_dim=_num(cfg, "hidden_size") // _num(cfg, "num_attention_heads"))
     return {"kv_lora_rank": _num(cfg, "kv_lora_rank"), "q_lora_rank": _num(cfg, "q_lora_rank", default=0, lo=0),
             "qk_nope_head_dim": _num(cfg, "qk_nope_head_dim"), "qk_rope_head_dim": _num(cfg, "qk_rope_head_dim"),
             "v_head_dim": _num(cfg, "v_head_dim")}

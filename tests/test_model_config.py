@@ -204,3 +204,11 @@ def test_read_model_config_refuses_a_huge_file(tmp_path):
     (tmp_path / "big.json").write_bytes(b'{"a": "' + b"x" * (mc.MAX_CONFIG_BYTES + 10) + b'"}')
     with pytest.raises(mc.ModelConfigError):
         mc.read_model_config(tmp_path / "big.json")
+
+
+def test_minicpm3_value_head_width_comes_from_the_hidden_size():
+    cfg = dense(model_type="minicpm3", hidden_size=2560, num_attention_heads=40, kv_lora_rank=256, q_lora_rank=768, qk_nope_head_dim=64,
+                qk_rope_head_dim=32)
+    assert mc.dims(cfg).mla["v_head_dim"] == 64
+    with pytest.raises(mc.ModelConfigError, match="v_head_dim"):      # another model type without the key is still refused
+        mc.dims(dict(cfg, model_type="other_mla"))
