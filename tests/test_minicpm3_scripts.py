@@ -146,6 +146,11 @@ def test_native_model_is_built_from_the_weights_file(tmp_path, monkeypatch):
     with torch.no_grad():
         assert torch.allclose(got_model(ids).logits, want_model(ids).logits, atol=1e-5)
     assert not (tmp_path / "m_w").exists()
+    # a weights file with a missing tensor is refused
+    state.pop(next(k for k in state if "layers.1." in k))
+    save_file(state, str(tmp_path / "short.safetensors"))
+    with pytest.raises(ValueError, match="do not match"):
+        native.build_native_model(str(model_dir), str(tmp_path / "short.safetensors"), dtype=torch.float32)
 
 
 def test_make_reference_has_no_sibling_directory_path():
