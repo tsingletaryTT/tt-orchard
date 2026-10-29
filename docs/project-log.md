@@ -3185,3 +3185,9 @@ Prompt (operator): stage the finished Stable Audio 3 small-music run as a local 
 - On 1.1.6 the reduction kernels fail on `shape` and `ttl.grid_size` is rejected in every thread, so issue 205's thread question is answered: 1.1.6 accepts it only in the operation body, the pair accepts it anywhere.
 - The light wheel's own simulator cannot find `atom_rules.py`; the pinned simulator venv was used.
 - Open: pin the hardware path (`TT_METAL_REF`, issue 95), add the `ttl.build_info()` consistency row, decide whether the probe's hardware phase moves to the new venv.
+
+## 2026-10-29 (UTC): Granite readout kernel on the tt-lang pair (branch `granite-readout`, PR 224)
+- Prompt (coordinator, from the operator): rerun the coder's `ssd_readout` kernel inside the Granite-4.0-H-1B port on the chip with the pair venv from PR 223 and measure it. No new kernels, no Telegraph.
+- Kernel files unchanged: readout attempt 6 (hash in the run log) and the state-update kernel. No glue was needed: the port's `kernel_mod.py` already wired both. Only the interpreter changed (pair venv, `safetensors` made importable from the shared venv through `PYTHONPATH` without changing the venv).
+- One lease on board 1, about 4 minutes of runs. Same-session decode: composed 26.9 and 26.2 tok/s (before and after), state kernel + composed readout 13.9, state kernel + readout kernel 8.45 (4.8% of the floor). Agreement against the CPU reference matches the composed modes (1.2 to 2.0 times the bf16 floor).
+- Verdict: the kernel readout is slower than composed. Absolute numbers moved against the 2026-10-28 run because the toolchain changed; only same-session comparisons are used.
