@@ -10,8 +10,9 @@ scripts and the kernel files are in `evidence/granite-readout-pair/`.
 
 The kernel readout is slower than the composed readout, and slower than the composed model as a whole.
 
-- It compiles and runs on the chip inside the model, and the model's agreement with the CPU reference stays at the level of the
-  composed modes (about 1.2 to 2.0 times the bf16 CPU floor in relative L2, the same top-1 agreement).
+- It compiles and runs on the chip inside the model, and the model's relative L2 against the CPU reference stays within about 1.2 to
+  2.0 times the bf16 CPU floor, as for the composed mode. Top-1 and free-run prefix differ between the modes on prompts 2 and 3
+  (see the agreement section).
 - Decode speed, same session, batch 1, no trace: composed 26.9 and 26.2 tok/s (two runs, before and after), coder state-update kernel with
   composed readout 13.9 tok/s, coder state-update kernel with coder readout kernel 8.45 tok/s. The kernel readout makes the state-update-kernel mode 39% slower, and
   the whole kernel path runs at 32% of the composed speed.
@@ -79,10 +80,19 @@ free-run prefix 3, 24, 8, 24.
 | state kernel + composed readout | 0.0061, 0.0202, 0.0088, 0.0153 | 1.3, 1.7, 2.0, 1.4 | 1.0, 1.0, 0.875, 0.958 | 1.0, 0.983, 0.958, 0.975 | 3, 24, 8, 15 |
 | state kernel + readout kernel | 0.0075, 0.0160, 0.0067, 0.0172 | 1.6, 1.3, 1.6, 1.5 | 1.0, 1.0, 0.875, 0.958 | 1.0, 0.992, 0.967, 0.95 | 3, 24, 8, 11 |
 
-The composed row matches the earlier run's composed row to the digit (0.0074, 0.0182, 0.0073, 0.0138). The readout kernel changes the
-model's logits by amounts inside that spread. The free-run prefixes that differ (prompts 2 and 3) are positions where the bf16 CPU run
-also diverges or sits near a tie; the three modes disagree with each other there, in the same way the earlier run's modes did. The
-kernel readout does not lower agreement below the other two modes in any column.
+The composed row matches the earlier run's composed row to the digit (0.0074, 0.0182, 0.0073, 0.0138). The three modes do not agree
+with the reference in the same way, and the differences are recorded here:
+
+- Top-1, prompt 2: composed 0.917, both kernel modes 0.875 (the bf16 CPU floor is 0.875). Prompt 3: composed and both kernel modes 0.958
+  (the floor is 1.0).
+- Relative L2, per prompt: the kernel readout mode is lower than composed on prompts 1 and 2 (0.0160 against 0.0182, 0.0067 against
+  0.0073) and higher on prompt 3 (0.0172 against 0.0138); it equals composed on prompt 0 (0.0075 against 0.0074). The state kernel with
+  composed readout is higher than composed on prompts 1, 2 and 3 (0.0202, 0.0088, 0.0153) and lower on prompt 0 (0.0061).
+- Free-run prefix, prompt 2: composed 14, both kernel modes 8 (the floor is 8). Prompt 3: composed 11, state kernel with composed
+  readout 15, state kernel with readout kernel 11 (the floor is 24). The modes diverge from the fp32 tokens at different positions.
+- All of these are within about 2.0 times the bf16 CPU floor in relative L2, and none of the three modes is better or worse than the
+  others on every prompt. With 4 prompts and one run each, this run cannot say that the kernels change agreement or leave it unchanged.
+  It shows that the model with the kernel readout runs and stays at the same size of error as the composed model.
 
 ## Limits
 
