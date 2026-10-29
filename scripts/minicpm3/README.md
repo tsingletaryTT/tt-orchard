@@ -17,6 +17,9 @@ Environment variables used by the scripts (no machine paths are in the code):
 | `chip_model.py` | the chip port: absorbed multi-latent attention with `flash_multi_latent_attention_decode`, trace, sharded options | yes |
 | `run_chip.py` | `agree` records a teacher-forced chip run; `bench` times decode (warm-up plus repeats) and writes a record with the floor share | yes |
 | `summarize.py` | one line per recorded chip run against the reference | no |
+| `chip_model_tp.py` | the same model over the two chips of a board (`run_chip.py --tp 2`) | yes |
+| `qual_check.py`, `ppl_check.py`, `ctx_bench.py` | free-running text against the reference, teacher-forced perplexity, speed against context length | yes (the `ref` modes no) |
+| `serve.py` | a small OpenAI-compatible chat server on 127.0.0.1 (greedy only) | yes |
 | `exp_*.py`, `time_trace.py`, `prof_step.py` | the single-op and timing probes behind the numbers in the run log | yes |
 
 Typical use, under a gozer lease: `python run_chip.py agree --opt 3 --upd paged --ref REF/float32 --out RUN` then `python run_chip.py bench --opt 3 --upd paged --trace --out record.json`.

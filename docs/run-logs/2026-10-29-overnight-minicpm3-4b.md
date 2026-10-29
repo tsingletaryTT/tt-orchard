@@ -213,3 +213,31 @@ WikiText-2 test split (raw), same window for all runs (`ppl_check.py`; the chip 
 | chip, two chips, bfloat16 | 8.090 | 0.047 | 0.77 |
 
 All three chip runs are within 0.6 percent of the reference perplexity (one window, one text; not a benchmark of model quality).
+
+## Update 7 (about 22:50 Pacific): decode speed against context length, a chat server, the orchard dry run
+
+Decode speed against position (`ctx_bench.py`: one traced loop over 4,096 positions of a real text, the time of a 32-step window at each listed position, bfloat16 weights, opt 3, KV cache
+of 288 values per token):
+
+| window starts at position | one chip tok/s | two chips tok/s |
+|---|---|---|
+| 32 | 33.8 | 37.5 |
+| 512 | 32.4 | 37.1 |
+| 1,024 | 31.9 | 37.3 |
+| 2,048 | 29.9 | 35.4 |
+| 4,000 | 30.8 | 36.1 |
+
+The flash MLA op reads every cached row up to the position, and the cost stays small because the cache is 288 values per token for one head: about 9 percent slower at 4,000 tokens on one
+chip, 4 percent on two. (Single windows, host load about 8; the two windows at 2,048 and 4,000 differ from the trend by the noise of the shared machine.) Agreement at a 922-token prompt is in update 4.
+The chip model sizes the cache to the longest context asked for (a multiple of 128: the flash op needs that); 4,096 was run.
+
+A chat server (`serve.py`, standard library only, 127.0.0.1, port 8210 by default, refuses the ports that belong to other work). `GET /v1/models`, `POST /v1/chat/completions` with
+`messages`, `max_tokens` and `stream` (server-sent events); greedy decoding only; one request at a time. Smoke test on one chip: 99 tokens (19 in the prompt, 80 generated) answered in
+2.96 s end to end; the streamed reply arrived as pieces; a malformed body got a 400. The first version failed on the tokenizer's return type (`apply_chat_template` returns a batch
+object in transformers 5, not a tensor); the failure was returned as an empty reply, so the handler now turns any exception into a logged 500. The server holds the chips while it runs, so it was
+stopped (by its pid) and the lease released after the test.
+
+The orchard preflight on this model (`bringup openbmb/MiniCPM3-4B --dry-run`, read only): hub ok (Apache-2.0, 8.2 GB, ships code that the harness would fetch and not run outside the agent sandbox),
+disk ok, `base` warn (the model card names no base model, so stage 0 has nothing to compare it with), `port` BLOCK only because another agent's coder holds port 8011. Nothing in the preflight
+or in `orchard.hazards` knows about the two things the port had to handle (the flash MLA grid limit and the norm accumulation). `orchard.hazards.scan_model_hazards` reports one hazard for
+this config: the vocabulary 73,448 is not a whole number of tiles (it matters for the LM head and the sampler; the port pads to 73,472 and slices before the argmax).
