@@ -15,7 +15,7 @@ Three recorded files go in (JSON written by `scripts/acestep/acestep_run.py`):
 The bar of step k is `margin` times the floor of step k (never below `MIN_FLOOR`). The decoder has one bar by the same rule. The bars are usable when the
 chip passes at every step and the decoder, and the wrong-step control fails at every step. The noise control is not a condition: it reports, per step, whether
 noise of the stated size gets under the bar. The bar itself is the largest relative error that can hide at that step (the detection limit), so the result
-lists it. A bar that the wrong-step control passes is refused, not widened.
+lists it. A bar that the wrong-step control passes is refused. It is never widened to fit.
 
 The floor is measured with the encoders and the sampler in float32 and only the transformer and the decoder in bfloat16, the same split as the chip.
 It does not contain the chip's own arithmetic (different kernels, different accumulation order); the margin leaves room for that, and the chip result

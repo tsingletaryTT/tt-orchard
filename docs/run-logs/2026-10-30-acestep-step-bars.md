@@ -27,7 +27,7 @@ Two prompts, seed 42 (lo-fi, instrumental) and seed 7 (folk with lyrics), 30 s, 
 Findings:
 - The 0.10 bar was too tight for the first two steps: the bfloat16 CPU floor itself is 0.17 and 0.13 at step 0 and 0.13 and 0.10 at step 1. It was also loose for steps 5 to 7 (floor 0.017 to 0.023).
 - The chip is below the bfloat16 CPU floor on steps 0 to 4 (0.4 to 0.6 of it) and at 1.0 to 1.3 times it on steps 5 to 7. The chip's decoder is 1.88 times (lo-fi) and 1.58 times (folk) the CPU decoder floor.
-  So the margin has to be about 2 to hold the chip's decoder; at 1.5 the lo-fi decoder fails (0.0141 against 0.0113). The margin was chosen after seeing that ratio, from two prompts; it is a stated choice with this evidence behind it, not a derived constant.
+  So the margin has to be about 2 to hold the chip's decoder; at 1.5 the lo-fi decoder fails (0.0141 against 0.0113). The margin was chosen after seeing that ratio, from two prompts; it is a stated choice with this evidence behind it, and no derivation gives 2.
 - The wrong-step control (the neighbouring step's velocity) fails the bar at every step on both prompts. Noise at 25 percent relative size gets under the bar at step 0 (and step 1 for lo-fi): the bar is the largest error that can hide,
   and for steps 0 and 1 it is 0.25 to 0.34. A fault smaller than that at those two steps is invisible to this check. The tool reports the bars as detection limits and refuses only when the wrong-step control passes.
 - One floor run per prompt, one chip call per step, one seed each. The floor is not a distribution.

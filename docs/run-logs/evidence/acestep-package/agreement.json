@@ -1,0 +1,16 @@
+{
+ "passed": 17,
+ "arrays": 21,
+ "failed": [
+  "step_denoised/v4",
+  "step_denoised/v5",
+  "step_denoised/v6",
+  "step_denoised/v7"
+ ],
+ "latent_pcc": 0.9818356319357189,
+ "latent_rel_l2": 0.18895912340541263,
+ "waveform_pcc": 0.9388736883704815,
+ "waveform_rel_l2": 0.3457507744611135,
+ "bars": "provisional: audio_reference.DEFAULT_BARS",
+ "reference": "float32 CPU run, same prompt and seed"
+}

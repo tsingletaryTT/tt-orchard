@@ -131,3 +131,155 @@ def test_vae_tap_teacher_forcing_decodes_the_recorded_latent():
     vt = run.VaeTap(lambda z, *a, **k: (seen.append(z.clone()), z.sum(dim=1, keepdim=True).repeat(1, 2, 1))[1], force=torch.full((64, 6), 2.0))
     vt(torch.zeros(1, 64, 6))
     assert float(seen[0].mean()) == 2.0 and float(vt.latent.mean()) == 2.0
+
+
+# ---- the server (scripts/acestep/acestep_serve.py) with a stand-in session ----------------------------------------
+serve = _load("acestep_serve")
+
+
+class FakeSession:
+    def __init__(self, wav, gate=None):
+        import threading
+        self.wav, self.gate, self.calls, self.entered = wav, gate, [], threading.Event()
+
+    def one(self, save_dir, duration, prompt, lyrics, seed):
+        self.calls.append((duration, prompt, lyrics, seed))
+        self.entered.set()
+        if self.gate:
+            self.gate.wait(5)
+        return self.wav, {"generate_and_decode_s": 0.1}
+
+
+@pytest.fixture
+def server(tmp_path):
+    import threading
+    wav = tmp_path / "x.wav"
+    wav.write_bytes(b"RIFFfake")
+    sess = FakeSession(wav)
+    srv = serve.make_server(sess, "127.0.0.1", 0, tmp_path)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield srv, sess, tmp_path
+    srv.shutdown()
+    srv.server_close()
+
+
+def _post(srv, body, raw=None):
+    import urllib.request, urllib.error
+    data = raw if raw is not None else json.dumps(body).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/v1/music", data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+
+
+def test_serve_returns_the_wav_with_timings_and_removes_the_clip_directory(server):
+    srv, sess, tmp = server
+    code, body, headers = _post(srv, {"prompt": "lofi", "duration": 10, "seed": 3})
+    assert code == 200 and body == b"RIFFfake" and headers["X-Sample-Rate"] == "48000"
+    assert json.loads(headers["X-Timings"])["generate_and_decode_s"] == 0.1
+    assert sess.calls == [(10.0, "lofi", "", 3)]
+    assert not list(tmp.glob("clip-*")), "the directory a request used is removed"
+
+
+@pytest.mark.parametrize("body", [{}, {"prompt": ""}, {"prompt": "x", "duration": 1}, {"prompt": "x", "duration": 9999}, {"prompt": "x", "duration": True},
+                                  {"prompt": "x", "seed": -1}, {"prompt": "x", "seed": 1.5}, {"prompt": "x", "extra": 1}, {"prompt": "x" * 2001},
+                                  {"prompt": "x", "lyrics": 5}, [1]])
+def test_serve_refuses_bad_input_with_400(server, body):
+    srv, sess, _ = server
+    code, _, _ = _post(srv, body)
+    assert code == 400 and sess.calls == []
+
+
+def test_serve_refuses_malformed_and_oversized_bodies(server):
+    srv, _, _ = server
+    assert _post(srv, None, raw=b"{not json")[0] == 400
+    assert _post(srv, None, raw=b" " * (serve.MAX_BODY + 1))[0] == 400
+
+
+def test_serve_second_request_while_busy_gets_503(tmp_path):
+    import threading
+    gate = threading.Event()
+    wav = tmp_path / "x.wav"
+    wav.write_bytes(b"RIFFfake")
+    sess = FakeSession(wav, gate)
+    srv = serve.make_server(sess, "127.0.0.1", 0, tmp_path)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    first = {}
+    t = threading.Thread(target=lambda: first.update(r=_post(srv, {"prompt": "a"})))
+    t.start()
+    assert sess.entered.wait(5), "the first request reached the session"
+    code, _, headers = _post(srv, {"prompt": "b"})
+    gate.set()
+    t.join(5)
+    srv.shutdown()
+    srv.server_close()
+    assert code == 503 and headers["Retry-After"] == "5" and first["r"][0] == 200
+
+
+def test_serve_a_failed_generate_is_a_500_that_leaks_no_text(tmp_path):
+    import threading
+    class Bad:
+        def one(self, *a):
+            raise RuntimeError("secret path /x/y")
+    srv = serve.make_server(Bad(), "127.0.0.1", 0, tmp_path)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    code, body, _ = _post(srv, {"prompt": "a"})
+    srv.shutdown()
+    srv.server_close()
+    assert code == 500 and b"secret" not in body and b"RuntimeError" in body
+
+
+# ---- pkgsrc/acestep/tools/check_bundle.py ---------------------------------------------------------------------------
+def _check_bundle():
+    spec = importlib.util.spec_from_file_location("check_bundle", SCRIPTS.parents[1] / "pkgsrc" / "acestep" / "tools" / "check_bundle.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _tree(tmp_path):
+    code = tmp_path / "code"
+    (code / "acestep").mkdir(parents=True)
+    (code / "acestep" / "a.py").write_text("x = 1\n")
+    (code / "tt_acestep").mkdir()
+    (code / "tt_acestep" / "b.py").write_text("y = 2\n")
+    snap = tmp_path / ("a" * 40)
+    (snap / "m").mkdir(parents=True)
+    (snap / "m" / "w.safetensors").write_bytes(b"12345")
+    cb = _check_bundle()
+    h, n = cb.tree_hash(code)
+    pins = {"bundle_tree_sha256": h, "bundle_files": n, "bundle_revision": "r", "model_revision": "a" * 40,
+            "weights": {"m/w.safetensors": {"size": 5, "sha256": cb.sha256_file(snap / "m" / "w.safetensors")}}}
+    return cb, code, snap, pins
+
+
+def test_check_bundle_passes_on_the_pinned_tree_and_ignores_pycache(tmp_path):
+    cb, code, snap, pins = _tree(tmp_path)
+    (code / "acestep" / "__pycache__").mkdir()
+    (code / "acestep" / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"x")
+    assert cb.problems(code, snap, pins, hash_weights=True) == []
+
+
+def test_check_bundle_names_a_changed_file_a_wrong_revision_and_a_changed_weight(tmp_path):
+    cb, code, snap, pins = _tree(tmp_path)
+    (code / "acestep" / "a.py").write_text("x = 2\n")
+    assert any("not the pinned revision" in x for x in cb.problems(code, snap, pins))
+    cb, code, snap, pins = _tree(tmp_path / "b")
+    snap.rename(snap.with_name("b" * 40))
+    assert any("pinned revision" in x for x in cb.problems(code, snap.with_name("b" * 40), pins))
+    cb, code, snap, pins = _tree(tmp_path / "c")
+    (snap / "m" / "w.safetensors").write_bytes(b"12346")
+    assert any("sha256 differs" in x for x in cb.problems(code, snap, pins, hash_weights=True))
+    (snap / "m" / "w.safetensors").write_bytes(b"1234")
+    assert any("size 4" in x for x in cb.problems(code, snap, pins))
+
+
+def test_check_bundle_refuses_a_code_directory_of_links(tmp_path):
+    cb, code, snap, pins = _tree(tmp_path)
+    real = tmp_path / "blob.py"
+    real.write_text("y = 2\n")
+    (code / "tt_acestep" / "b.py").unlink()
+    (code / "tt_acestep" / "b.py").symlink_to(real)
+    assert any("link" in x for x in cb.problems(code, snap, pins))
