@@ -324,3 +324,14 @@ def test_run_chip_and_ppl_check_refuse_an_unsupported_two_chip_option_before_ope
     with pytest.raises(SystemExit) as exc:
         mod.main()
     assert exc.value.code == 2 and "two-chip" in capsys.readouterr().err        # the refusal, not an argument error or the mesh
+
+
+def test_ppl_check_reference_mode_does_not_import_the_two_chip_module(monkeypatch, tmp_path):
+    chip = types.ModuleType("chip_model")
+    tp = types.ModuleType("chip_model_tp")                 # no refuse_unsupported_tp_args: importing it from here would fail
+    ppl = load_script(monkeypatch, "ppl_check", {"ttnn": lenient_ttnn(), "chip_model_tp": tp, "chip_model": chip})
+    monkeypatch.setattr(sys, "argv", ["ppl_check.py", "ref", "--parquet", "p", "--out", str(tmp_path / "o"), "--tp", "2", "--mlp-dtype", "bfp4",
+                                      "--model-dir", str(tmp_path), "--weights", "w"])
+    with pytest.raises(Exception) as exc:
+        ppl.main()                                          # it goes on to load the tokenizer from an empty directory, which fails there
+    assert "refuse_unsupported_tp_args" not in str(exc.value) and not isinstance(exc.value, SystemExit)

@@ -1602,7 +1602,11 @@ class Supervisor:
             pass
         if saved and all(isinstance(saved.get(k), int) for k in ("decode_tokens", "ppl_tokens", "max_len")):
             decode, ppl_tokens, max_len = saved["decode_tokens"], saved["ppl_tokens"], saved["max_len"]
-            if isinstance(saved.get("ppl_parquet"), str) and isinstance(saved.get("ppl_parquet_sha256"), str):
+            if not (isinstance(saved.get("ppl_parquet"), str) and isinstance(saved.get("ppl_parquet_sha256"), str)):
+                # stage 1 of an earlier version recorded only the file name: the window the reference used cannot be checked, so a later stage must not pick one
+                raise text_runtime.TextStageError("stage 1's saved settings do not record the perplexity dataset (path and sha256), so the window its reference used cannot be "
+                                                  "verified; start a new run")
+            else:
                 # the perplexity window is cut from this file: the reference was made from it, so later stages use it and refuse a changed copy
                 parquet = saved["ppl_parquet"]
                 try:

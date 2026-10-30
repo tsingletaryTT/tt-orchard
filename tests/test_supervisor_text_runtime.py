@@ -353,3 +353,17 @@ def test_an_unreadable_perplexity_file_fails_stage_1_with_a_perplexity_message(t
         parquet.chmod(0o644)
     end = trig.ends(1)[0]
     assert end["result"] == "fail" and "perplexity" in " ".join(end["reasons"])
+
+
+def test_stage_settings_from_before_the_dataset_hash_was_recorded_are_refused_on_resume(trig):
+    make_environment(trig)
+    with pytest.raises(Crash):
+        trig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 1)
+    cfg_path = trig.run_dir / "stages" / "1" / rt.STAGE_CONFIG_FILE
+    cfg = json.loads(cfg_path.read_text())
+    del cfg["ppl_parquet"], cfg["ppl_parquet_sha256"]                    # what an earlier version wrote
+    cfg_path.write_text(json.dumps(cfg))
+    with pytest.raises(Stop):
+        trig.run()
+    end = trig.ends(2)[0]
+    assert end["result"] == "fail" and "new run" in " ".join(end["reasons"]) and "perplexity" in " ".join(end["reasons"])
