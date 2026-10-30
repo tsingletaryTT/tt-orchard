@@ -121,6 +121,8 @@ def summarize(prompt_tokens: int, seconds: list[float]) -> dict:
 def greedy_tokens(first_logits, step, n: int) -> list[int]:
     """`n` greedy tokens, the first from `first_logits`. `step(token)` returns the logits after one more token. It is called n-1 times:
     a step after the last token is never needed, and it could pass the context limit (issue 293)."""
+    if n < 1:
+        raise ValueError(f"greedy_tokens needs at least 1 token, got {n}")
     out = [int(first_logits.argmax())]
     while len(out) < n:
         out.append(int(step(out[-1]).argmax()))

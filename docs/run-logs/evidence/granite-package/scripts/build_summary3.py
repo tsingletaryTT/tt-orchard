@@ -1,5 +1,7 @@
 """Build evidence/summary.json (version 0.3.0) from the raw result files. Adds session 4 (chunked prefill, s4/) to the three sessions of 0.2.0.
 usage: python build_summary3.py OUT.json S3_DIR S4_DIR
+Run it from the package run directory (a copy of this file sits beside f1/, f2/, s1/, s3/, s4/, kb/ and final/; the raw results of sessions 1 to 3 are not
+all in the repository, `results/` holds the ones that are). The CPU reference is read from `../ibm-granite--granite-4.0-h-1b/reference/`.
 Each session is reported on its own; nothing is averaged across sessions. S3_DIR (optional) holds bench-fast.json, bench-untraced.json, smoke.json."""
 import json
 import sys
@@ -51,8 +53,9 @@ l4, t4 = load_at_start(f"{d4}/conditions.txt")
 step4 = J(f"{d4}/bench-step.json")
 sessions.append({"name": "session 4", "when": f"{t4} Pacific, host load {l4:.1f} (0.3.0 chunked prefill)", "load": l4, "prompt_tokens": 12,
                  "decode": dec(J(f"{d4}/bench-fast.json")), "decode_untraced": None,
-                 "ttft_s": J(f"{d4}/bench-fast.json")["first_token_s_12_token_prompt"]["median"], "prefill": pf(J(f"{d4}/bench-fast.json")), "server": None,
-                 "evidence": "`evidence/s4-bench-fast.json`", "server_evidence": ""})
+                 "ttft_s": J(f"{d4}/bench-fast.json")["first_token_s_12_token_prompt"]["median"], "prefill": pf(J(f"{d4}/bench-fast.json")),
+                 "server": srv(J(f"{d4}/smoke.json")) if (R / d4 / "smoke.json").exists() else None,
+                 "evidence": "`evidence/s4-bench-fast.json`", "server_evidence": "`evidence/s4-server-smoke.json`"})
 floor = J("../ibm-granite--granite-4.0-h-1b/reference/bf16_cpu_control.json")
 prose = J("s1/agree-prose.json")
 long_ = []
@@ -133,7 +136,8 @@ try:
     k["agreement_prose_2048"] = {"state_full_ro_bf16": ka["chip_vs_fp32"], "composed_bf16": kb["chip_vs_fp32"]}
 except FileNotFoundError:
     pass
-s["not_tested"].append("The HTTP server running the chunked prefill: the library path (`evaluate.py bench`, session 4) and the benchmark harness were run on the chip, but the server smoke run after the last change could not start because the shared tt-metal checkout changed under it. Run `bash run.sh --self-test` and `tools/smoke.py` before relying on it.")
+if sessions[3]["server"] is None:
+    s["not_tested"].append("The HTTP server running the chunked prefill (no server smoke run in session 4).")
 s["kernel_modes"] = {**k, "text": kt}
 old = [
     "Server: a stop string as long as the output so far no longer leaks part of itself (a negative slice).",
@@ -147,11 +151,11 @@ old = [
     "Package: `tt-model.yaml` checks (non-mapping root, ready marker), `SHA256SUMS`, `SECURITY.md`, this changelog, machine-readable `measured` rows, a Limits section, two or more measurement sessions, agreement on three kinds of text.",
 ]
 s["changelog"] = [
-    "Runtime: prompts of 33 or more tokens are prefilled in blocks of up to 128 tokens (a chunked scan for the Mamba-2 layers). 112, 380 and 645 tok/s at 128, 512 and 1,024 tokens against 39 tok/s for the step loop.",
-    "Runtime: the decode traces are released before the blocks run and captured again after them, so no device buffer is allocated while a trace is alive (a trace-on run that did allocate left a chip unreadable). A second request does the same.",
+    f"Runtime: prompts of 33 or more tokens are prefilled in blocks of up to 128 tokens (a chunked scan for the Mamba-2 layers). {pf_best[128]:.0f}, {pf_best[512]:.0f} and {pf_best[1024]:.0f} tok/s at 128, 512 and 1,024 tokens against {ctl[512]:.0f} tok/s for the step loop (session 4).",
+    "Runtime: the decode trace is released before the blocks run and captured again after them, so no device buffer is allocated while a trace is alive (a trace-on run that did allocate left a chip unreadable). A second request does the same. With the chunked prefill on, only the full decode trace is captured (the 0.2.0 no-head trace is captured only with `--no-chunked-prefill`), so no capture starts while another trace exists.",
     "Server: `--no-chunked-prefill` or `GRANITE_CHUNKED_PREFILL=0` keeps the step-loop prefill. The ready line reports `chunked_prefill`.",
     "New file `runtime/granite_trace.py`, which `runtime/granite_chip.py` imports. `tools/evaluate.py` gains `--no-chunked-prefill` and `--skip-read-every-step`.",
-    "Decode is unchanged: 34.4 tok/s traced in session 4 (34.3 to 34.4 over 5 runs).",
+    f"Decode is unchanged: {h['decode']['mean']:.1f} tok/s traced in session 4 ({h['decode']['min']:.1f} to {h['decode']['max']:.1f} over 5 runs).",
 ]
 s["changelog_older"] = [{"version": "0.2.0", "items": old}]
 json.dump(s, open(sys.argv[1], "w"), indent=1)

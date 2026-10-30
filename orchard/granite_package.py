@@ -15,7 +15,8 @@ The card's numbers come from `evidence/summary.json`, which `stage` copies into 
   * the required files exist, every Python file compiles and `run.sh` passes `bash -n`;
   * `LICENSE` is the Apache License 2.0 and has the sha256 recorded at staging, and the card's front matter names the license, the base
     model and the pipeline;
-  * every number row of the card is the row that `summary.json` produces, and the card has its required sections;
+  * every number row of the card is the row that `summary.json` produces, the card has its required sections, and every `evidence/` file it
+    cites is in the package;
   * `tt-model.yaml` is a v5.1 manifest of kind `http-server` whose command, ready line and source paths exist in the package.
 It does not judge whether prose is true and does not run the server. Nothing here publishes: `publish_commands` returns text.
 """
@@ -487,6 +488,9 @@ def _card_problems(pkg: Path) -> list[str]:
             out.append(f"card: missing section {sec!r}")
     if f"`{REVISION}`" not in card:
         out.append("card: does not name the pinned revision")
+    for name in sorted(set(re.findall(r"`evidence/([A-Za-z0-9_.\-]+)`", card))):       # every raw file the card cites must be in the package
+        if not (pkg / "evidence" / name).is_file():
+            out.append(f"card: cites evidence/{name}, which the package does not contain")
     for pat in OVERCLAIMS:
         m = re.search(pat, card, re.I)
         if m:

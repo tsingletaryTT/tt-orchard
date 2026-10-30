@@ -185,3 +185,10 @@ def test_greedy_tokens_steps_only_when_another_token_is_needed():
     assert len(out) == 4 and out[0] == 1
     assert len(calls) == 3                            # three steps give tokens 2 to 4; no step after the fourth
     assert pb.greedy_tokens(first, step, 1) == [1] and len(calls) == 3
+
+
+def test_greedy_tokens_refuses_a_nonpositive_count():
+    import torch
+    for n in (0, -3):
+        with pytest.raises(ValueError, match="at least 1"):
+            pb.greedy_tokens(torch.tensor([0.0, 1.0]), lambda t: torch.tensor([1.0, 0.0]), n)

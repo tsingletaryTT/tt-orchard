@@ -1,11 +1,11 @@
-{"chunk": 128, "event": "start", "max_len": 2048, "mode": "agree", "path": "step", "runs": 3, "t": 1793379177.032, "tokens": 512, "trace": true, "warmups": 1}
-{"event": "prompt", "sha256": "555e89efd449c0f37d628c8ceb4bd68d74116538cff5c6f546176bba44f76dfb", "t": 1793379177.371, "tokens": 512}
-{"event": "before", "iteration": 0, "label": "construct", "phase": "setup", "t": 1793379178.887, "timeout_s": 240}
-{"event": "after", "iteration": 0, "label": "construct", "phase": "setup", "seconds": 3.6547, "t": 1793379182.544}
-{"event": "before", "iteration": 1, "label": "step", "phase": "agree", "t": 1793379182.563, "timeout_s": 180}
-{"event": "after", "iteration": 1, "label": "step", "phase": "agree", "seconds": 13.3688, "t": 1793379195.957}
-{"event": "before", "iteration": 1, "label": "chunked", "phase": "agree", "t": 1793379195.964, "timeout_s": 180}
-{"event": "after", "iteration": 1, "label": "chunked", "phase": "agree", "seconds": 1.7354, "t": 1793379197.7}
-{"event": "result", "t": 1793379197.725, "tokens": 512}
-{"event": "before", "iteration": 0, "label": "close", "phase": "setup", "t": 1793379197.726, "timeout_s": 60}
-{"event": "after", "iteration": 0, "label": "close", "phase": "setup", "seconds": 0.0177, "t": 1793379197.744}
+{"chunk": 128, "event": "start", "max_len": 2048, "mode": "agree", "path": "step", "runs": 3, "t": 1793381456.777, "tokens": 512, "trace": true, "warmups": 1}
+{"event": "prompt", "sha256": "555e89efd449c0f37d628c8ceb4bd68d74116538cff5c6f546176bba44f76dfb", "t": 1793381457.174, "tokens": 512}
+{"event": "before", "iteration": 0, "label": "construct", "phase": "setup", "t": 1793381458.33, "timeout_s": 240}
+{"event": "after", "iteration": 0, "label": "construct", "phase": "setup", "seconds": 3.7252, "t": 1793381462.065}
+{"event": "before", "iteration": 1, "label": "step", "phase": "agree", "t": 1793381462.094, "timeout_s": 180}
+{"event": "after", "iteration": 1, "label": "step", "phase": "agree", "seconds": 14.5888, "t": 1793381476.683}
+{"event": "before", "iteration": 1, "label": "chunked", "phase": "agree", "t": 1793381476.69, "timeout_s": 180}
+{"event": "after", "iteration": 1, "label": "chunked", "phase": "agree", "seconds": 4.9362, "t": 1793381481.632}
+{"event": "result", "t": 1793381482.578, "tokens": 512}
+{"event": "before", "iteration": 0, "label": "close", "phase": "setup", "t": 1793381482.732, "timeout_s": 60}
+{"event": "after", "iteration": 0, "label": "close", "phase": "setup", "seconds": 0.0163, "t": 1793381482.749}

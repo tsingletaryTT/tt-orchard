@@ -176,3 +176,43 @@ def test_the_tail_runs_on_the_recaptured_trace():
     assert kinds.index("capture") < kinds.index("tail")
     assert [e for e in chip.events if e[0] == "tail"] == [("tail", "traced")] * 11
     assert chip.events[-1] == ("step", "traced")
+
+
+# ---- review of PR 296 -----------------------------------------------------------------------------------------------------------
+def test_a_chunked_chip_captures_one_trace_so_no_capture_happens_while_another_trace_is_alive():
+    """Capturing the second (no-head) trace allocates while the first trace exists. With chunked prefill on, the tail of a prompt is at most 31
+    tokens, so the second trace is not worth that risk: the chunked configuration captures the full trace only."""
+    assert gt.trace_names(chunked=True, fast_prefill=True) == ("full",)
+    assert gt.trace_names(chunked=False, fast_prefill=True) == ("full", "nohead")
+    assert gt.trace_names(chunked=False, fast_prefill=False) == ("full",)
+    assert gt.trace_names(chunked=True, fast_prefill=False) == ("full",)
+
+
+def test_the_chunk_failure_is_reported_before_the_recapture_is_attempted():
+    chip = FakeChip(traced=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+    order = []
+    real_capture = chip.capture_traces
+    chip.capture_traces = lambda: (order.append("capture-attempt"), real_capture())[1]
+    with pytest.raises(RuntimeError, match="block failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128, report=lambda exc: order.append(f"report:{exc}"))
+    assert order == ["report:block failed", "capture-attempt"]
+
+
+def test_the_original_failure_survives_a_failed_recapture():
+    chip = FakeChip(traced=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+
+    def bad_capture():
+        raise OSError("recapture failed")
+    chip.capture_traces = bad_capture
+    with pytest.raises(RuntimeError, match="block failed") as info:
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert isinstance(info.value.__context__, RuntimeError) or isinstance(info.value.__cause__, OSError)
+    assert "recapture failed" in str(info.value.__cause__)
+
+
+def test_the_requested_chunk_size_reaches_the_server_flow():
+    chip = FakeChip(traced=False)
+    gt.prefill(chip, list(range(300)), chunked=True, chunk=64)
+    assert [e[1] for e in chip.events if e[0] == "alloc" and e[1].startswith("chunk")] == ["chunk64"] * 4 + ["chunk32"]

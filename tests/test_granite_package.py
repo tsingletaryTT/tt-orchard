@@ -34,7 +34,8 @@ def staged(tmp_path):
     summary.write_text(json.dumps(SUMMARY))
     ev = tmp_path / "ev"
     ev.mkdir()
-    (ev / "bench.json").write_text('{"x": 1}')
+    for name in ("bench.json", "smoke.json", "bench-L512.json", "agree-prose-2048.json"):          # every file the fixture summary cites
+        (ev / name).write_text('{"x": 1}')
     out = tmp_path / "pkg"
     gp.stage(summary, ev, out)
     return out
@@ -243,3 +244,10 @@ def test_a_named_headline_session_leads_the_machine_readable_rows():
     assert "25.0 tok/s" in row
     with pytest.raises(StopIteration):
         gp.headline({**SUMMARY, "headline": "session 9"})
+
+
+def test_a_card_that_cites_an_evidence_file_the_package_lacks_fails_the_gate(staged):
+    """Review of PR 296: a package staged without the raw file behind a cited number used to pass."""
+    (staged / "evidence" / "bench.json").unlink()
+    out = problems(staged)
+    assert any("cites evidence/bench.json" in x for x in out), out

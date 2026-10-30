@@ -86,7 +86,7 @@ def main():
                 def request(prompt=prompt):
                     m.reset()
                     t0 = time.perf_counter()
-                    lg = m.prefill(prompt)
+                    lg = m.prefill(prompt, chunk=a.chunk)
                     t_pre = time.perf_counter() - t0
                     t1 = time.perf_counter()
                     toks = pb.greedy_tokens(lg, m.step, a.decode_tokens)
@@ -103,7 +103,7 @@ def main():
                 if a.path == "step":
                     m.run_step_prefill(ids)
                 elif a.path == "flow":
-                    m.prefill(ids)
+                    m.prefill(ids, chunk=a.chunk)
                 else:
                     m.prefill_chunked(ids, chunk=a.chunk)
                 ttnn.synchronize_device(dev)
@@ -123,7 +123,7 @@ def main():
 
             def cand():
                 m.reset()
-                lg = m.prefill(ids)                             # the server's flow: release traces, chunked blocks, capture again
+                lg = m.prefill(ids, chunk=a.chunk)             # the server's flow: release traces, chunked blocks, capture again
                 return lg, states(), greedy(lg)
 
             (lg_r, st_r, nx_r), s_step = pb.run_iteration(log, wd, "step", 1, a.warmup_timeout, ref, phase="agree")

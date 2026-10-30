@@ -13,12 +13,13 @@ The decode step is a fixed-shape program that is captured once as a ttnn trace a
 Prefill has two paths. The step loop runs one decode step per prompt token. The chunked prefill (`prefill_chunked`, composed mode only) is the
 default for a prompt with a full block of 32 tokens before its last token (`chunked_prefill=False` keeps the step loop). Its algebra is checked on
 the CPU (tests/test_granite_scan.py). It agrees with the step loop at 33 to 1,024 tokens (logits cosine above 0.99997, same top-1 token, same next
-four greedy tokens), with the decode trace on or off, and runs at 112, 380 and 645 tok/s at 128, 512 and 1,024 tokens against 39 for the traced step
-loop (evidence/granite-chunked-trace-safe).
+four greedy tokens), with the decode trace on or off, and runs at about 120, 400 and 660 tok/s at 128, 512 and 1,024 tokens with the trace on (benchmark harness, quiet
+host) against 39 for the traced step loop (evidence/granite-chunked-trace-safe).
 
 The blocks allocate device buffers, and ttnn warns that a buffer allocated while a trace is alive may be corrupted. A trace-on run that did allocate
 left a chip unreadable (issues 252 and 290). The flow in granite_trace.py therefore releases both decode traces before the blocks, captures them
-again after, and only then runs the left-over tokens and decode. No buffer is allocated between a capture and the next release
+again after, and only then runs the left-over tokens and decode. With the chunked prefill on, only the full decode trace is captured: the
+second, shorter trace (no final norm or lm_head) would be captured while the first exists, which allocates device tensors. No buffer is allocated between a capture and the next release
 (tests/test_granite_trace.py holds that rule with a fake chip).
 
 `ssd` picks how the Mamba-2 state update and readout are computed:
@@ -224,10 +225,10 @@ class GraniteChip:
         self._set_inputs(token)
         return self._run(True)
 
-    def prefill(self, ids):
+    def prefill(self, ids, chunk=128):
         """The prefill the server calls. In composed mode with `chunked_prefill` on (the default) a prompt with a full block of 32 tokens
         before its last token goes through `prefill_chunked`; every other prompt, and every kernel mode, uses the step loop."""
-        return granite_trace.prefill(self, ids, chunked=self.chunked_prefill)
+        return granite_trace.prefill(self, ids, chunked=self.chunked_prefill, chunk=chunk)
 
     def run_step_prefill(self, ids):
         """A loop of decode steps. The logits are read back only after the last prompt token."""
@@ -253,7 +254,12 @@ class GraniteChip:
         No decode trace is alive while the blocks run (granite_trace.prefill_chunked releases the traces first and captures them again
         after), because the blocks allocate device buffers.
         """
-        return granite_trace.prefill_chunked(self, ids, chunk=chunk)
+        return granite_trace.prefill_chunked(self, ids, chunk=chunk, report=self._report_chunk_failure)
+
+    @staticmethod
+    def _report_chunk_failure(exc):
+        """Put a failed block on record before the traces are captured again (the capture could hang)."""
+        print(f"granite_chip: chunked prefill block failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
     def run_chunk(self, toks):
         self._run_chunk(toks)
@@ -379,11 +385,15 @@ class GraniteChip:
         self.tid = None
         self._set_inputs(0)
         self.program()
-        if self.fast_prefill:
+        if "nohead" in self.trace_names():
             self.program(head=False)                        # compile the shorter program (every op in it already exists, so this is quick)
         ttnn.synchronize_device(self.dev)
         self.capture_traces()
         self.reset()
+
+    def trace_names(self):
+        """The traces this chip captures: `full` only when the chunked prefill is on (the second capture would allocate while `full` exists)."""
+        return granite_trace.trace_names(self.chunked_prefill, self.fast_prefill)
 
     def capture_traces(self):
         """Capture the decode trace (and the shorter one without the final norm and lm_head). Capture records the program and runs
@@ -396,7 +406,7 @@ class GraniteChip:
         ttnn.end_trace_capture(self.dev, tid, cq_id=0)
         ttnn.synchronize_device(self.dev)
         self.tid = tid
-        if self.fast_prefill:
+        if "nohead" in self.trace_names():
             self.tid_nohead = ttnn.begin_trace_capture(self.dev, cq_id=0)
             self.program(head=False)
             ttnn.end_trace_capture(self.dev, self.tid_nohead, cq_id=0)

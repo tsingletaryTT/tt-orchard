@@ -1,13 +1,13 @@
-{"chunk": 128, "event": "start", "max_len": 2048, "mode": "seq", "path": "step", "runs": 3, "t": 1793379147.918, "tokens": 512, "trace": true, "warmups": 1}
-{"event": "prompt", "sha256": "555e89efd449c0f37d628c8ceb4bd68d74116538cff5c6f546176bba44f76dfb", "t": 1793379148.242, "tokens": 512}
-{"event": "before", "iteration": 0, "label": "construct", "phase": "setup", "t": 1793379149.601, "timeout_s": 240}
-{"event": "after", "iteration": 0, "label": "construct", "phase": "setup", "seconds": 3.4248, "t": 1793379153.026}
-{"event": "before", "iteration": 1, "label": "request", "phase": "seq", "t": 1793379153.045, "timeout_s": 180}
-{"event": "after", "iteration": 1, "label": "request", "phase": "seq", "seconds": 3.483, "t": 1793379156.529}
-{"decode_tok_s": 33.92, "event": "request", "n": 1, "prefill_s": 1.617, "prompt_tokens": 512, "t": 1793379156.53, "traces_alive_after": true}
-{"event": "before", "iteration": 2, "label": "request", "phase": "seq", "t": 1793379156.53, "timeout_s": 180}
-{"event": "after", "iteration": 2, "label": "request", "phase": "seq", "seconds": 3.2174, "t": 1793379159.748}
-{"decode_tok_s": 33.86, "event": "request", "n": 2, "prefill_s": 1.348, "prompt_tokens": 512, "t": 1793379159.749, "traces_alive_after": true}
-{"event": "result", "t": 1793379159.749, "tokens": 512}
-{"event": "before", "iteration": 0, "label": "close", "phase": "setup", "t": 1793379159.75, "timeout_s": 60}
-{"event": "after", "iteration": 0, "label": "close", "phase": "setup", "seconds": 0.0184, "t": 1793379159.768}
+{"chunk": 128, "event": "start", "max_len": 2048, "mode": "seq", "path": "step", "runs": 3, "t": 1793381431.111, "tokens": 512, "trace": true, "warmups": 1}
+{"event": "prompt", "sha256": "555e89efd449c0f37d628c8ceb4bd68d74116538cff5c6f546176bba44f76dfb", "t": 1793381431.458, "tokens": 512}
+{"event": "before", "iteration": 0, "label": "construct", "phase": "setup", "t": 1793381432.483, "timeout_s": 240}
+{"event": "after", "iteration": 0, "label": "construct", "phase": "setup", "seconds": 3.4292, "t": 1793381435.92}
+{"event": "before", "iteration": 1, "label": "request", "phase": "seq", "t": 1793381435.952, "timeout_s": 180}
+{"event": "after", "iteration": 1, "label": "request", "phase": "seq", "seconds": 3.827, "t": 1793381439.781}
+{"decode_tok_s": 33.68, "event": "request", "n": 1, "prefill_s": 1.949, "prompt_tokens": 512, "t": 1793381439.799, "traces_alive_after": true}
+{"event": "before", "iteration": 2, "label": "request", "phase": "seq", "t": 1793381439.801, "timeout_s": 180}
+{"event": "after", "iteration": 2, "label": "request", "phase": "seq", "seconds": 3.1295, "t": 1793381442.931}
+{"decode_tok_s": 34.02, "event": "request", "n": 2, "prefill_s": 1.27, "prompt_tokens": 512, "t": 1793381442.933, "traces_alive_after": true}
+{"event": "result", "t": 1793381442.933, "tokens": 512}
+{"event": "before", "iteration": 0, "label": "close", "phase": "setup", "t": 1793381442.933, "timeout_s": 60}
+{"event": "after", "iteration": 0, "label": "close", "phase": "setup", "seconds": 0.0156, "t": 1793381442.95}
