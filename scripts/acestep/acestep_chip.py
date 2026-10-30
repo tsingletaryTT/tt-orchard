@@ -79,6 +79,20 @@ def pad_to(n: int, bucket: int) -> int:
     return (n + bucket - 1) // bucket * bucket
 
 
+def encoder_masks(s_pad: int, valid: int, causal: bool, window, neg: float):
+    """The additive attention masks [s_pad, s_pad] of an encoder stack: (full, sliding). Keys at or beyond `valid` (the zero padding) are blocked; `causal` also blocks the future;
+    `window` (or None) keeps only keys within that many positions of the query, on both sides, or on the past side only when causal. Without a window the sliding mask is the full mask."""
+    import torch
+    i = torch.arange(s_pad)[:, None]
+    j = torch.arange(s_pad)[None, :]
+    ok = (j < valid).expand(s_pad, s_pad)
+    if causal:
+        ok = ok & (j <= i)
+    full = torch.where(ok, 0.0, neg)
+    sliding = torch.where(ok & ((i - j).abs() <= window), 0.0, neg) if window else full
+    return full, sliding
+
+
 class ChipEncoderStack:
     """A Qwen3-style transformer stack (RMS norm, grouped-query attention with per-head q/k norm and rotary embedding, SwiGLU) on the chip, prefill only, batch 1.
 
@@ -131,13 +145,7 @@ class ChipEncoderStack:
             torch, dd, host = self.torch, self.dd, self.host
             cfg = type("C", (), {"head_dim": self.head_dim, "rope_theta": self.rope_theta})
             cos, sin = host.rope_tables(s_pad, cfg)
-            i = torch.arange(s_pad)[:, None]
-            j = torch.arange(s_pad)[None, :]
-            ok = (j < valid).expand(s_pad, s_pad)
-            if self.causal:
-                ok = ok & (j <= i)
-            full = torch.where(ok, 0.0, host.NEG)
-            sliding = torch.where(ok & ((i - j).abs() <= (self.sliding_window or 0)), 0.0, host.NEG) if self.sliding_window else full
+            full, sliding = encoder_masks(s_pad, valid, self.causal, self.sliding_window, host.NEG)
             f = lambda m: dd._dev(self.dit.dev, m.to(torch.bfloat16)[None, None])
             if len(self._tables) >= 8:
                 for old in list(self._tables.values())[0]:
