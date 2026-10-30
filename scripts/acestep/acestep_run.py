@@ -59,6 +59,11 @@ def parse(argv=None):
                    "calls on the single loaded process. Writes <out>.sweep.json (timings and host load only; no arrays are recorded). Needs --device chip or cpu.")
     p.add_argument("--stepcheck", default=None, help="chip: a recorded CPU run directory. Feeds its recorded inputs of every step to the chip's "
                    "transformer (so errors do not compound) and its final latent to the chip's VAE; writes <out>.stepcheck.json")
+    p.add_argument("--teacher-forced", default=None, help="cpu: a recorded CPU float32 run directory. Runs one generate call in which every transformer "
+                   "call receives that run's recorded input of the same step (and the VAE its recorded final latent), in the dtype given by --cpu-dtype, "
+                   "and writes <out>.teacher.json with the per-step errors against the recorded float32 velocities. With --cpu-dtype bfloat16 this "
+                   "is the precision floor of the chip's per-step check (issue 262): the same comparison as --stepcheck with the chip replaced by "
+                   "a bfloat16 CPU run.")
     p.add_argument("--no-vae-warm", action="store_true", help="chip: skip the VAE warm-up at load (a first decode then compiles)")
     return p.parse_args(argv)
 
@@ -71,10 +76,11 @@ class Tap(torch.nn.Module):
     """Wraps the decoder (the diffusion transformer, local or on the chip) and records each call's input and output. It is a module because the
     handler assigns it to `model.decoder`. Attribute reads it does not have (`seconds`, `reset`, config) go to the wrapped object."""
 
-    def __init__(self, inner, cast=None):
+    def __init__(self, inner, cast=None, force=None):
         super().__init__()
         self.inner = inner
         self.cast = cast          # a dtype: the inner module is in that dtype, so inputs are cast to it and the velocity back to float32
+        self.force = force        # teacher forcing: a list of [T, 64] float32 tensors; call k runs on force[k] instead of the sampler's own input
         self.reset_taps()
 
     def reset_taps(self):
@@ -89,6 +95,8 @@ class Tap(torch.nn.Module):
 
     def forward(self, hidden_states, timestep, timestep_r, attention_mask=None, encoder_hidden_states=None, encoder_attention_mask=None,
                 context_latents=None, use_cache=None, past_key_values=None, **kw):
+        if self.force is not None:
+            hidden_states = self.force[len(self.calls)][None].to(hidden_states.dtype)
         if self.cast is not None:
             c = lambda t: t.to(self.cast) if torch.is_tensor(t) and t.is_floating_point() else t
             out = self.inner(hidden_states=c(hidden_states), timestep=c(timestep), timestep_r=c(timestep_r), attention_mask=attention_mask,
@@ -109,9 +117,10 @@ class Tap(torch.nn.Module):
 class VaeTap:
     """Wraps the VAE decode (`handler.tiled_decode`) and records the latent in and the waveform out."""
 
-    def __init__(self, inner, cast=None):
+    def __init__(self, inner, cast=None, force=None):
         self.inner = inner
         self.cast = cast
+        self.force = force        # teacher forcing: a [64, T] float32 latent that replaces the sampler's own final latent
         self.latent = self.wave = None
         self.seconds = []
 
@@ -119,6 +128,8 @@ class VaeTap:
         return getattr(self.inner, name)
 
     def __call__(self, latents, *a, **kw):
+        if self.force is not None:
+            latents = self.force[None].to(latents.dtype)
         t0 = time.perf_counter()
         wave = self.inner(latents.to(self.cast) if self.cast is not None else latents, *a, **kw)
         wave = wave.float()
@@ -159,6 +170,25 @@ def stepcheck(worker, ref_dir: Path, out_json: Path) -> None:
     print("stepcheck:", json.dumps(steps), flush=True)
     print("stepcheck vae:", {k: mw[k] for k in ("pcc", "rel_l2", "slope")}, flush=True)
     run.close()
+
+
+def teacher_forced(tap, vtap, run, out_json: Path, dtype_name: str) -> None:
+    """Compares the taps of a teacher-forced generate call with the recorded float32 run: the per-step velocity errors and the decoder's waveform
+    error, each with equal inputs. This is the file `orchard.step_bars` reads as the floor."""
+    import numpy as np
+    from orchard import audio_reference as ar
+    steps = []
+    for k, (x, v) in enumerate(tap.calls):
+        v_ref = np.asarray(run.array("step_denoised", f"v{k}"))
+        m = ar.metrics(v_ref, v.T.numpy())
+        steps.append({"step": k, **{key: m[key] for key in ("pcc", "rel_l2", "slope", "max_abs_error")}})
+    ref_wave = np.asarray(run.array("waveform", "audio"))
+    mw = ar.metrics(ref_wave, vtap.wave.numpy())
+    out_json.write_text(json.dumps({"ref_run": run.root.name, "dtype": dtype_name, "dit_steps": steps,
+                                    "vae_on_cpu_final_latent": {**{k: mw[k] for k in ("pcc", "rel_l2", "slope", "max_abs_error")},
+                                                                "log_spectrum_distance": ar.log_spectrum_distance(ref_wave, vtap.wave.numpy())}}, indent=1) + "\n")
+    print("teacher-forced:", json.dumps(steps), flush=True)
+    print("teacher-forced vae:", {k: mw[k] for k in ("pcc", "rel_l2", "slope")}, flush=True)
 
 
 def sweep(one, tmp: Path, durations, args, out_json: Path, load: dict) -> None:
@@ -261,9 +291,16 @@ def main(argv=None) -> int:
         # Only the two stages that run on the chip change precision: the transformer and the VAE decoder. The encoders and the sampler stay float32.
         handler.model.decoder.to(torch.bfloat16)
         handler.vae.to(torch.bfloat16)
-    tap = Tap(handler.model.decoder, cast=torch.bfloat16 if bf16 else None)
+    force_x = force_z = teacher_run = None
+    if args.teacher_forced:
+        if args.device != "cpu":
+            raise SystemExit("--teacher-forced is a CPU mode; use --stepcheck for the chip")
+        teacher_run = ar.load_run(Path(args.teacher_forced))
+        force_x = [torch.from_numpy(np.asarray(teacher_run.array("step_latent", f"x{k}")).T.copy()).float() for k in range(8)]
+        force_z = torch.from_numpy(np.asarray(teacher_run.array("latent", "final"))).float()
+    tap = Tap(handler.model.decoder, cast=torch.bfloat16 if bf16 else None, force=force_x)
     handler.model.decoder = tap
-    vtap = VaeTap(handler.tiled_decode, cast=torch.bfloat16 if bf16 else None)
+    vtap = VaeTap(handler.tiled_decode, cast=torch.bfloat16 if bf16 else None, force=force_z)
     handler.tiled_decode = vtap
     llm = LLMHandler()
     load["total_load_s"] = round(time.perf_counter() - t_start, 2)
@@ -297,6 +334,11 @@ def main(argv=None) -> int:
 
     tmp = Path(args.root) / "gen"
     tmp.mkdir(parents=True, exist_ok=True)
+    if args.teacher_forced:
+        one(tmp / "teacher")
+        teacher_forced(tap, vtap, teacher_run, Path(str(out) + ".teacher.json"), args.cpu_dtype)
+        teacher_run.close()
+        return 0
     if args.stepcheck:
         stepcheck(worker, Path(args.stepcheck), Path(str(out) + ".stepcheck.json"))
     if args.sweep:

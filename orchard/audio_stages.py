@@ -92,10 +92,12 @@ def write_clip(run_dir, sample_rate: int = SAMPLE_RATE) -> Path:
     return clip
 
 
-def clip_matches_waveform(run_dir, wave, sample_rate: int = SAMPLE_RATE) -> list[str]:
+def clip_matches_waveform(run_dir, wave, sample_rate: int = SAMPLE_RATE, clip_name: str = "audio.flac", exact: bool = True) -> list[str]:
     """Reasons the clip file is not the recorded waveform: unreadable, or another length, rate or channel count. The FLAC is lossless on 16-bit
-    samples, so the decoded values are compared with the waveform to within one 16-bit step."""
-    clip = Path(run_dir) / "clips" / "audio.flac"
+    samples, so the decoded values are compared with the waveform to within one 16-bit step. With `exact` false (a model whose pipeline normalises
+    the loudness of the clip after the waveform is recorded, see `audio_profile.AudioProfile.clip_equals_waveform`) only the file, its rate and its
+    shape are checked."""
+    clip = Path(run_dir) / "clips" / clip_name
     try:
         import soundfile
         data, rate = soundfile.read(str(clip), always_2d=True, dtype="float64")
@@ -104,7 +106,7 @@ def clip_matches_waveform(run_dir, wave, sample_rate: int = SAMPLE_RATE) -> list
     w = np.asarray(wave, dtype=np.float64)
     if rate != sample_rate or data.shape != w.T.shape:
         return [f"the clip is {data.shape[1]} channels, {data.shape[0]} samples at {rate} Hz; the waveform is {w.shape[0]} channels, {w.shape[1]} samples"]
-    if float(np.abs(data - w.T).max()) > 2.0 / 32768:
+    if exact and float(np.abs(data - w.T).max()) > 2.0 / 32768:
         return ["the clip's samples differ from the recorded waveform by more than one 16-bit step"]
     return []
 
@@ -215,10 +217,12 @@ def identity_problems(facts: dict, expected: dict | None, library_commit: str | 
 
 
 def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, problems: list, *, expected: dict | None = None,
-                  library_commit: str | None = None) -> dict | None:
+                  library_commit: str | None = None, profile=None) -> dict | None:
     """Verify one recorded run named by a result entry: it is inside the run directory, its arrays match their hashes, its manifest hash is the
     recorded one, its settings are the expected ones and its waveform passes the sound checks (and the clip is that waveform). Returns the
-    sound-check record, or None after adding to `problems`."""
+    sound-check record, or None after adding to `problems`. `profile` (an `orchard.audio_profile.AudioProfile`) sets the sample rate, the clip file and
+    whether the clip must equal the waveform; without one the Stable Audio values apply. The profile's recorded layout is checked as well."""
+    rate, clip_name, exact = (SAMPLE_RATE, "audio.flac", True) if profile is None else (profile.sample_rate, profile.clip_name, profile.clip_equals_waveform)
     rel = entry.get("dir") if isinstance(entry, dict) else None
     p = inside(run_dir, rel)
     if p is None or not p.is_dir():
@@ -237,16 +241,20 @@ def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, 
     for key in ("model", "revision", "config_sha256", "library_commit", "settings", "timings"):     # copies in the record must be the manifest's
         if entry.get(key) != facts[key]:
             problems.append(f"{label}: its recorded {key} is not what its manifest says")
-    if entry.get("clip") != f"{rel}/clips/audio.flac":
-        problems.append(f"{label}: its clip path is {entry.get('clip')!r}; the expected path is {rel}/clips/audio.flac")
+    if entry.get("clip") != f"{rel}/clips/{clip_name}":
+        problems.append(f"{label}: its clip path is {entry.get('clip')!r}; the expected path is {rel}/clips/{clip_name}")
+    if profile is not None:
+        from orchard import audio_profile
+        with ar.load_run(p) as run:
+            problems += [f"{label}: {x}" for x in audio_profile.layout_problems(run.manifest, profile)]
     if want_settings is not None:
         got = {k: facts["settings"].get(k) for k in want_settings}
         if got != want_settings:
             problems.append(f"{label}: its settings are {got}; the expected settings are {want_settings}")
-    checks = sound_checks(wave, SAMPLE_RATE, float(facts["settings"].get("duration", 0)))
+    checks = sound_checks(wave, rate, float(facts["settings"].get("duration", 0)))
     if not checks["ok"]:
         problems.append(f"{label}: the clip fails the sound checks: {'; '.join(checks['reasons'])}")
-    problems += [f"{label}: {x}" for x in clip_matches_waveform(p, wave)]
+    problems += [f"{label}: {x}" for x in clip_matches_waveform(p, wave, rate, clip_name, exact)]
     return checks
 
 

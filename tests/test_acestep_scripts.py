@@ -114,3 +114,20 @@ def test_sound_checks_use_48khz(tmp_path, capsys):
     assert report.sound([str(tmp_path / "r")]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] and out["duration_s"] == 2.0 and out["sample_rate"] == 48000
+
+
+def test_tap_teacher_forcing_replaces_the_samplers_input_and_records_the_forced_one():
+    forced = [torch.full((4, 64), 5.0), torch.full((4, 64), 7.0)]
+    inner = FakeDecoder()
+    tap = run.Tap(inner, force=forced)
+    _call(tap)
+    _call(tap)
+    assert [float(v.mean()) for _, v in tap.calls] == [10.0, 14.0], "the inner module ran on the forced inputs"
+    assert [float(x.mean()) for x, _ in tap.calls] == [5.0, 7.0], "the recorded input is the forced one"
+
+
+def test_vae_tap_teacher_forcing_decodes_the_recorded_latent():
+    seen = []
+    vt = run.VaeTap(lambda z, *a, **k: (seen.append(z.clone()), z.sum(dim=1, keepdim=True).repeat(1, 2, 1))[1], force=torch.full((64, 6), 2.0))
+    vt(torch.zeros(1, 64, 6))
+    assert float(seen[0].mean()) == 2.0 and float(vt.latent.mean()) == 2.0
