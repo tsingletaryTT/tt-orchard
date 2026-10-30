@@ -3412,3 +3412,9 @@ Prompt (operator, relayed): rebuild the local package with the faster path, rega
 - Not done: upload (nothing is published), a second boot of a pulled copy, the planner and the XL transformer.
 - Log: `docs/run-logs/2026-10-30-acestep-package-fast.md`; evidence in `docs/run-logs/evidence/acestep-package-fast/`.
 - Review of PR 279 (Copilot; one Low, fixed test first): the card and the summary's limits called the "Other" time CPU time; it is the median total minus the transformer and the VAE and also holds the chip-side encoders and key/value projection. The package was restaged and booted a third time (ready in 18 s, identical clips).
+
+## 2026-10-30 ACE-Step 1.5 turbo package 0.2.0 published
+
+The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uploaded private, checked with `tt-orchard verify-package`, made public (a personal namespace, outside the Tenstorrent organisation and the catalog), and checked again without a token. The package gate was clean on main.
+- The first verify pass failed the revision check: the card pins two repositories (the weights and the code bundle) and the check looked up both commits in the weights repository. `verify-package` now looks up each commit in the repository named beside it on the card, and falls back to the base model. A test failed first.
+- The package carries the card's caveats: nobody has judged the music, and end-to-end agreement with the float32 run is lower after the encoders moved to the chip.

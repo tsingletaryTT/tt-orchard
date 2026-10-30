@@ -330,3 +330,16 @@ def test_record_with_a_path_to_sha256_map_is_read(tmp_path):
     name, listed, rev = vp._read_record(tmp_path)
     assert listed == {"a.txt": hashlib.sha256(b"x").hexdigest()} and rev == "r"
     assert vp.check_record(tmp_path, (name, listed, rev)).status == vp.OK
+
+
+def test_a_revision_named_next_to_another_repository_is_checked_against_that_repository(tmp_path):
+    """A card can pin the weights and a second repository (a code bundle): each commit is looked up in the repository named just before it."""
+    files = good_files()
+    other = "b" * 40
+    files["README.md"] = (CARD + f"\nCode: [org/bundle](https://huggingface.co/org/bundle), revision `{other}`.\n").encode()
+    rec = json.loads(files["package-record.json"])
+    rec["files"] = [{"path": p, "sha256": h(b)} for p, b in sorted(files.items()) if p != "package-record.json"]
+    files["package-record.json"] = json.dumps(rec).encode()
+    hub = FakeHub(files)
+    run(hub, tmp_path, check=True)
+    assert ("exists", "org/bundle", other) in hub.calls and ("exists", "ibm/thing", other) not in hub.calls
