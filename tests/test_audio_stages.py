@@ -1019,3 +1019,41 @@ def test_a_part_that_one_repeat_lacks_is_left_out_of_the_spread_and_named(tmp_pa
     run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=3, timings=missing)
     t = res["timing"]["roles"]["chip"]
     assert "conditioning_s" not in t["parts"] and "conditioning_s" in t["incomplete_parts"]
+
+
+# ---- issue 274: a non-exact clip must be finite and loud enough to hear -----------------------------------------------------
+
+def _wave_of(run):
+    with ar.load_run(run) as r:
+        return np.asarray(r.array("waveform", "audio"))
+
+
+def test_a_non_exact_clip_with_a_non_finite_sample_is_refused(tmp_path):
+    import soundfile
+    run = make_run(tmp_path / "r")
+    wave = _wave_of(run)
+    bad = (wave.T / np.abs(wave).max() * 0.5).astype(np.float64)
+    bad[10, 0] = np.nan
+    (run / "clips").mkdir()
+    soundfile.write(str(run / "clips" / "audio.wav"), bad, SR, subtype="DOUBLE")
+    reasons = st.clip_matches_waveform(run, wave, clip_name="audio.wav", exact=False)
+    assert reasons and "finite" in reasons[0]
+
+
+def test_a_non_exact_clip_that_is_far_too_quiet_is_refused(tmp_path):
+    import soundfile
+    run = make_run(tmp_path / "r")
+    wave = _wave_of(run)
+    (run / "clips").mkdir()
+    soundfile.write(str(run / "clips" / "audio.wav"), (wave.T / np.abs(wave).max() * 1e-4), SR, subtype="DOUBLE")
+    reasons = st.clip_matches_waveform(run, wave, clip_name="audio.wav", exact=False)
+    assert reasons and "quiet" in reasons[0]
+
+
+def test_a_non_exact_clip_that_is_a_scaled_copy_at_a_normal_level_is_accepted(tmp_path):
+    import soundfile
+    run = make_run(tmp_path / "r")
+    wave = _wave_of(run)
+    (run / "clips").mkdir()
+    soundfile.write(str(run / "clips" / "audio.wav"), (wave.T / np.abs(wave).max() * 0.5), SR, subtype="DOUBLE")
+    assert st.clip_matches_waveform(run, wave, clip_name="audio.wav", exact=False) == []

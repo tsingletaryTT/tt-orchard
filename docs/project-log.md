@@ -3418,3 +3418,8 @@ Prompt (operator, relayed): rebuild the local package with the faster path, rega
 The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uploaded private, checked with `tt-orchard verify-package`, made public (a personal namespace, outside the Tenstorrent organisation and the catalog), and checked again without a token. The package gate was clean on main.
 - The first verify pass failed the revision check: the card pins two repositories (the weights and the code bundle) and the check looked up both commits in the weights repository. `verify-package` now looks up each commit in the repository named beside it on the card, and falls back to the base model. A test failed first.
 - The package carries the card's caveats: nobody has judged the music, and end-to-end agreement with the float32 run is lower after the encoders moved to the chip.
+
+## 2026-10-30 Validation gaps from the third review of PR 267 (issue 274)
+
+- `orchard.step_bars` main now reads the recorded run. It refuses a run whose `dtype` is not float32 or whose `device` is not cpu, a run whose step count differs from the reports, a run that lacks a recorded velocity for a step, and a chip file whose step count differs from the floor's. Four tests failed first.
+- `audio_stages.clip_matches_waveform` refuses a clip with non-finite samples in both modes (a NaN made the exact comparison and the correlation test return False, which accepted the clip). With `exact` false it also refuses a peak below `MIN_CLIP_PEAK` (0.01), because correlation ignores level. Both tests failed first.
