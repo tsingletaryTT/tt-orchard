@@ -354,6 +354,12 @@ NO_TARGET = re.compile(r"ValueError: (Could not find centralized accuracy target
 ONLY_ONE_FAILED = re.compile(r"^=+ 1 failed(?:, \d+ (?:deselected|warnings?))* in [0-9.]+s(?: \([0-9:]+\))? =+$", re.M)
 
 
+def target_message(acc_text: str) -> str | None:
+    """The message of tt-transformers' missing-target error when the log has it (whether or not that was the only failure), else None."""
+    found = NO_TARGET.findall(acc_text)
+    return found[-1] if found else None
+
+
 def missing_target(acc_text: str, accuracy, rc: int) -> str | None:
     """tt-transformers' own test looks up a published accuracy target for the model and board after it prints the accuracy, and fails when the table has
     no row. The 2-chip run of Llama-3.1-8B on P300 (2026-10-29) did exactly that. The message when that was the only failure: pytest exited 1 (a test failed,
@@ -361,7 +367,7 @@ def missing_target(acc_text: str, accuracy, rc: int) -> str | None:
     it. Any other nonzero exit is still a failure (Copilot, PR 275)."""
     if rc != 1 or accuracy is None:
         return None
-    found = NO_TARGET.findall(acc_text)
+    found = [target_message(acc_text)] if target_message(acc_text) else []
     if not found:
         return None
     last = [ln for ln in acc_text.splitlines() if ln.startswith("=") and " in " in ln][-1:]
@@ -411,7 +417,8 @@ def run() -> None:
     rc = pytest_run(cfg, scratch, model_dir, ACCURACY_TEST, acc_log, deadline)
     acc_text = acc_log.read_text(errors="replace")
     accuracy = parse_accuracy(acc_text)
-    no_target = missing_target(acc_text, accuracy, rc)
+    no_target = missing_target(acc_text, accuracy, rc)         # a message only when that was the sole failure: the run then passes
+    target_msg = target_message(acc_text)                       # the message whenever the log has it: the record says so even when the run fails
     if rc != 0 and accuracy is None:
         fail(3, f"the token-accuracy run exited {rc} and printed no accuracy; see log/token-accuracy.log")
     free_log = HERE / "log" / "free-run.log"
@@ -426,7 +433,7 @@ def run() -> None:
                            "top5": accuracy[1] if accuracy else None},
         "free_run": {k: free[k] for k in ("prompt", "text", "new_tokens", "finish")},
         "speed": {"decode_tokens_per_s": free["decode_tokens_per_s"], "ttft_s": free["ttft_s"]}, "hub_fetch": fetched,
-        "reference": reference, "tt_transformers_target": {"found": no_target is None, "message": no_target},
+        "reference": reference, "tt_transformers_target": {"found": target_msg is None, "message": target_msg},
         "scratch_patch": scratch_patch(cfg, evidence), "exit_codes": {"token_accuracy": rc, "free_run": rc2},
         "seconds": round(time.time() - started, 1)}
     (evidence / "stock-check.json").write_text(json.dumps(result, indent=2) + "\n")

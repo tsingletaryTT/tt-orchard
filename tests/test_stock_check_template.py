@@ -544,3 +544,12 @@ def test_a_long_scratch_patch_is_cut_inside_the_byte_limit_with_a_notice(rig):
     data = (rig.stage / "evidence/scratch.patch").read_bytes()
     mod = _template_module()
     assert len(data) <= mod.PATCH_LIMIT and data.endswith(b"[cut: the patch is longer than the evidence limit]\n")
+
+
+def test_the_target_message_is_recorded_whether_or_not_the_run_qualifies_for_the_exemption():
+    """Copilot, PR 275 (round 3): a log with the missing-target error and a teardown error kept the run failing, and the record then said the target was found."""
+    mod = _template_module()
+    mixed = MISSING + "=========== 1 failed, 1 error, 45 deselected in 51.90s ===========\n"
+    assert mod.missing_target(mixed, (0.9, 1.0), 1) is None            # still a failure
+    assert mod.target_message(mixed) is not None and "P300" in mod.target_message(mixed)
+    assert mod.target_message("everything fine\n") is None

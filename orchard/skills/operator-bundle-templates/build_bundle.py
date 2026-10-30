@@ -329,7 +329,7 @@ class Run:
             if not self.publish.strip():
                 raise Missing("stages/7/PUBLISH_COMMANDS.txt is empty")
         # A stock-runtime run (orchard/stock_runtime.py) has the template's stock-check.json in stage 2's evidence (issue 93).
-        self.stock = read_json(run_dir / STOCK_FILE, "", required=False)
+        self.stock = read_stock_json(run_dir)
         self.text = {name: read_json(run_dir / "stages" / str(n) / name, "", required=False) for n, name in TEXT_FILES}   # a text run's three result files
         self.audio = load_audio(run_dir)    # stage 2's audio_result.json: None for a run without one (see "audio runs")
         self.audio_clips: list[dict] = []   # set by build() once the clips are copied
@@ -1247,34 +1247,50 @@ STOCK_FILE = "stages/2/evidence/stock-check.json"
 STOCK_HEADING = "Stock runtime on a chip"
 
 
+STOCK_JSON_MAX_BYTES = 4 << 20          # a larger stock-check.json is not read
 STOCK_PATCH_MAX_BYTES = 2_000_000       # the template cuts its patch at this size (PATCH_LIMIT in stock_check.py); a larger file is not read
 STOCK_PATCH_NAME = re.compile(r"evidence/[A-Za-z0-9._-]+")
 
 
-def read_stock_patch(run: Run, name) -> list[str] | None:
-    """The lines of the patch file `name` in stage 2, or None. The name comes from the evidence file, which is untrusted: it has to be `evidence/<one file name>`,
-    the file has to be a regular file that is not a link (it is opened with O_NOFOLLOW, so a link in the last place is refused, and the directory is checked
-    to be real), and it is read through a size limit. A path such as /dev/zero, a path with `..` or a link out of the stage gives None (Copilot, PR 275)."""
-    if not isinstance(name, str) or not STOCK_PATCH_NAME.fullmatch(name) or name in ("evidence/.", "evidence/.."):
-        return None
-    stage = run.dir / "stages" / "2"
-    folder = stage / "evidence"
-    if folder.is_symlink() or not folder.is_dir():
-        return None
+def read_regular_file(path: Path, max_bytes: int) -> bytes | None:
+    """The bytes of a regular file under `max_bytes`, or None. The last path part is opened with O_NOFOLLOW and O_NONBLOCK, so a link or a FIFO neither follows
+    nor blocks, and the type is checked on the open descriptor; a device, a link, a directory or a larger file gives None (Copilot, PR 275)."""
     try:
-        fd = os.open(folder / name.split("/", 1)[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
         with os.fdopen(fd, "rb", closefd=False) as f:
-            data = f.read(STOCK_PATCH_MAX_BYTES + 1)
+            data = f.read(max_bytes + 1)
     except OSError:
         return None
     finally:
         os.close(fd)
-    return None if len(data) > STOCK_PATCH_MAX_BYTES else data.decode("utf-8", errors="replace").splitlines()
+    return None if len(data) > max_bytes else data
+
+
+def read_stock_json(run_dir: Path) -> dict | None:
+    """stock-check.json as an object, or None when it is absent, not a regular file, too large or not a JSON object."""
+    raw = read_regular_file(run_dir / STOCK_FILE, STOCK_JSON_MAX_BYTES)
+    try:
+        data = json.loads(raw.decode("utf-8")) if raw is not None else None
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def read_stock_patch(run: Run, name) -> list[str] | None:
+    """The lines of the patch file `name` in stage 2, or None. The name comes from the evidence file, which is untrusted: it has to be `evidence/<one file name>`
+    (no `..`, no absolute path), the evidence directory has to be a real directory, and the file goes through read_regular_file."""
+    if not isinstance(name, str) or not STOCK_PATCH_NAME.fullmatch(name) or name in ("evidence/.", "evidence/.."):
+        return None
+    folder = run.dir / "stages" / "2" / "evidence"
+    if folder.is_symlink() or not folder.is_dir():
+        return None
+    data = read_regular_file(folder / name.split("/", 1)[1], STOCK_PATCH_MAX_BYTES)
+    return None if data is None else data.decode("utf-8", errors="replace").splitlines()
 
 
 def patch_summary(run: Run) -> str:

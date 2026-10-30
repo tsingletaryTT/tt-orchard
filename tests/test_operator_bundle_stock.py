@@ -105,3 +105,22 @@ def test_a_cut_patch_is_summarised_and_labelled_partial(tmp_path):
     text, risks = results(stock_run(tmp_path, patch=patch))
     assert "10 lines added, 0 removed (partial: the patch was cut)" in section(text, HEADING)
     assert "scratch patch changed the stock code" in section(risks, "## Stock runtime run")
+
+
+def test_a_stock_check_that_is_a_fifo_or_a_link_to_a_device_is_not_read(tmp_path):
+    """Copilot, PR 275 (round 3): read_json used an unbounded Path.read_text, so a FIFO blocked the build and a link to /dev/zero read without end."""
+    import os
+    for i, kind in enumerate(("fifo", "zero", "big")):
+        run = make_run(tmp_path / kind)
+        target = run / RESULT
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "fifo":
+            os.mkfifo(target)
+        elif kind == "zero":
+            target.symlink_to("/dev/zero")
+        else:
+            target.write_text('{"x": "' + "a" * 5_000_000 + '"}')
+        r = build(run)                                           # build() has a timeout: a blocked read fails the test
+        assert r.returncode == 0, r.stderr + r.stdout
+        text = (bundle_of(run) / "RESULTS.md").read_text()
+        assert HEADING not in text, kind
