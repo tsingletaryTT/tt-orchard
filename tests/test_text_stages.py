@@ -275,3 +275,14 @@ def test_stage_0_refuses_a_model_that_is_not_text(done):
 def test_stage_0_refuses_a_configuration_the_runtime_refused(done):
     edit(done.run_dir / "stages" / "0" / "delta.json", lambda d: d["text_runtime"].update(config_problems=["no kv_lora_rank"]))
     assert any("kv_lora_rank" in r for r in triage_gate(done).reasons)
+
+
+def test_a_token_path_shorter_than_the_claimed_decode_steps_is_refused_even_when_every_run_shares_it(done):
+    s1, _, _, d = dirs(done)
+    short = [3, 7]                                            # two tokens for four claimed decode steps
+    for sub, dtype in (("float32", "float32"), ("bfloat16", "bfloat16"), ("native", "bfloat16")):
+        arrays = base_arrays() if sub == "float32" else perturb(base_arrays(), 0.01, seed=2)
+        arrays[("other", tr.TOKENS)] = __import__("numpy").array(short, dtype="float32")
+        shutil.rmtree(s1 / "reference" / sub)
+        write_run(s1 / "reference" / sub, arrays, dtype=dtype, model="openbmb/MiniCPM3-4B", prompt=rt.DEFAULT_PROMPT, config_dir=done.snap)
+    assert any("token path has 2 entries" in p for p in gates(done)[0])

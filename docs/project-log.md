@@ -3419,6 +3419,20 @@ The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uplo
 - The first verify pass failed the revision check: the card pins two repositories (the weights and the code bundle) and the check looked up both commits in the weights repository. `verify-package` now looks up each commit in the repository named beside it on the card, and falls back to the base model. A test failed first.
 - The package carries the card's caveats: nobody has judged the music, and end-to-end agreement with the float32 run is lower after the encoders moved to the chip.
 
+## 2026-10-30 Medium findings of PR 245 and PR 247 (issues 258 and 259)
+
+Fixed, test first (each new test failed before its fix):
+- A resume refuses a `--input text_runtime=` that differs from the run's recorded one, including adding one to a run that had none. Leaving it out keeps the recorded route.
+- Stage 1 records the perplexity dataset path and its sha256. Later stages use that path, and stage 2 fails with a message that names the perplexity window when the file changed or cannot be read.
+- `text_stages.run_problems` refuses a token path whose length is not the claimed decode length, even when every run shares it.
+- `chip_max_len` refuses a decode length below 2 (`MIN_DECODE_TOKENS`).
+- `RefModel.forward` raises a named error when a position is past the rope table. `make_reference` builds the model with a table for the prompt plus the decode length.
+- The two-chip model and `serve.py --tp 2` refuse bfp4 and HiFi4 before any device or fabric is opened (`check_tp_options`).
+- `text-package`: the publish commands shell-quote the repository name and the package path. The gate refuses a package record whose `license` entry is not an object with a sha256 string (it raised AttributeError).
+Already done before this change, with tests: the latest runtime selection decides the script hashes, a malformed file list in the record is a failed gate, the card does not say which check a variant failed. The hostile-input backlog already lists the three modules named in the issue.
+Still open: the wording of block failures for ambiguous stage-2 errors. `qual_check.py` keeps the 2048-position rope table, which now raises a named error past it.
+- Review of PR 282 (Copilot, two Medium, fixed test first): an unreadable perplexity file at stage 1 now fails the stage with a perplexity message (it raised PermissionError past the stage handler). `run_chip.py` and `ppl_check.py` refuse unsupported two-chip options before the fabric is configured, as `serve.py` does, through `refuse_unsupported_tp_args`.
+- Second review of PR 282 (Copilot, one High, one Medium, fixed test first): stage 1 settings written before the dataset hash was recorded are refused on resume with a message to start a new run, since the window the reference used cannot be verified. `ppl_check.py ref` no longer imports the two-chip module (it needs ttnn); the guard runs in chip mode only.
 ## 2026-10-30 Audio profile in the plan layer (part of issue 269)
 
 - `audio_plan.reference_plan` and `chip_plan` accept a model that has an `audio_profile` and no Stable Audio library name (ACE-Step 1.5 turbo). Its plan item carries `profile` (the profile key) and uses the key as its name. Stable Audio plans have no `profile` key and are unchanged. A model with neither is still refused.

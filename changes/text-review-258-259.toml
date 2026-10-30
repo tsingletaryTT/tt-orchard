@@ -1,0 +1,4 @@
+target = "0.9.77"
+summary = "A text-route resume keeps its route and perplexity window; token path, decode length, rope table and two-chip option checks; quoted publish commands."
+pr = 282
+kind = "fix"

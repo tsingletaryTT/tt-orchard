@@ -73,3 +73,16 @@ def test_the_reference_tests_are_not_vacuous_a_wrong_scale_is_caught(tmp_path):
         want = model(ids).logits[0]
     assert ((ref.forward(ids)[0] - want).norm() / want.norm()).item() > 1e-3
     assert math.isfinite(want.sum().item())
+
+
+def test_a_position_past_the_rope_table_is_a_named_error_not_an_index_error(tmp_path):
+    from safetensors.torch import save_file
+    model = native_model()
+    state = {k: v.detach().clone().contiguous() for k, v in model.state_dict().items() if k.startswith("model.") and "rotary" not in k}
+    save_file(state, str(tmp_path / "w.safetensors"))
+    cfg = dict(DIMS, rope_scaling={"type": "longrope", "short_factor": FACTORS, "long_factor": FACTORS, "original_max_position_embeddings": 256})
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    ref = ref_model.RefModel(str(tmp_path), str(tmp_path / "w.safetensors"), dtype=torch.float32, max_len=8)
+    ref.forward(torch.tensor([[1, 5, 9, 33, 70, 2, 8, 40]]))                      # positions 0..7 fit
+    with pytest.raises(ValueError, match="rope table"):
+        ref.forward(torch.tensor([[1]]), start=8)

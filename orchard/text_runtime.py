@@ -55,6 +55,7 @@ BENCH_DEADLINE_S = 2400.0
 REFERENCE_TIMEOUT_S = 7200.0
 DECODE_TOKENS = 16
 PROMPT_ALLOWANCE = 128                    # tokens the chip cache keeps for the prompt, beyond the decode length (the fixed prompt is about 40)
+MIN_DECODE_TOKENS = 2                     # the agreement check counts the next-token match of steps 1 and up, and the short-path checks need two tokens
 MAX_DECODE_TOKENS = 2048
 PPL_TOKENS = 768
 BENCH_STEPS = 64
@@ -393,10 +394,10 @@ def model_facts(model_dir, rtm: TextRuntime) -> dict:
 
 
 def chip_max_len(decode_tokens) -> int:
-    """The chip cache length (a multiple of 128, at least 256) that holds the prompt and `decode_tokens` decode steps. A decode length that is not a whole number from 1 to
+    """The chip cache length (a multiple of 128, at least 256) that holds the prompt and `decode_tokens` decode steps. A decode length that is not a whole number from MIN_DECODE_TOKENS to
     MAX_DECODE_TOKENS is refused here, before any reference run is made."""
-    if isinstance(decode_tokens, bool) or not isinstance(decode_tokens, int) or not 1 <= decode_tokens <= MAX_DECODE_TOKENS:
-        raise TextStageError(f"the decode length must be a whole number from 1 to {MAX_DECODE_TOKENS}, got {decode_tokens!r}")
+    if isinstance(decode_tokens, bool) or not isinstance(decode_tokens, int) or not MIN_DECODE_TOKENS <= decode_tokens <= MAX_DECODE_TOKENS:
+        raise TextStageError(f"the decode length must be a whole number from {MIN_DECODE_TOKENS} to {MAX_DECODE_TOKENS}, got {decode_tokens!r}")
     return max(256, -(-(decode_tokens + PROMPT_ALLOWANCE) // 128) * 128)
 
 
