@@ -124,6 +124,22 @@ class TextRuntime:
     context_limit = 0               # the context length the package states: the server's default cache length
     limits: tuple[str, ...] = ()
     min_layers = 1
+    stage_scripts: tuple[str, ...] | None = None      # the shipped scripts the stages ran (default: all of `shipped_files`); a package must carry exactly these as the run used them
+    model_dir_env = "MODEL_DIR"                       # the environment variables and flags the package's launcher uses for the model directory and the weights file
+    weights_env = "MODEL_WEIGHTS"
+    model_dir_flag = "--model-dir"
+    weights_flag = "--weights"
+
+    def staged_scripts(self) -> tuple[str, ...]:
+        return self.stage_scripts if self.stage_scripts is not None else self.shipped_files
+    stage_scripts: tuple[str, ...] | None = None      # the shipped scripts the stages ran (default: all of `shipped_files`); a package must carry exactly these as the run used them
+    model_dir_env = "MODEL_DIR"                       # the environment variables and flags the package's launcher uses for the model directory and the weights file
+    weights_env = "MODEL_WEIGHTS"
+    model_dir_flag = "--model-dir"
+    weights_flag = "--weights"
+
+    def staged_scripts(self) -> tuple[str, ...]:
+        return self.stage_scripts if self.stage_scripts is not None else self.shipped_files
 
     # -- facts
     def config_problems(self, model_dir) -> list[str]:
@@ -185,13 +201,21 @@ class MiniCPM3(TextRuntime):
     scripts_dir = REPO / "scripts" / "minicpm3"
     shipped_files = ("chip_model.py", "ref_model.py", "native_model.py", "make_reference.py", "run_chip.py", "ppl_check.py", "qual_check.py", "ctx_bench.py",
                      "serve.py", "summarize.py", "convert_weights.py")
+    # serve.py and convert_weights.py are shipped and were not part of a stage's measurement: the server is boot-checked by the package builder's operator, and the conversion
+    # only makes the weights file the measured scripts read.
+    stage_scripts = ("chip_model.py", "ref_model.py", "native_model.py", "make_reference.py", "run_chip.py", "ppl_check.py")
+    model_dir_env, weights_env = "MINICPM3_DIR", "MINICPM3_WEIGHTS"
+    # serve.py and convert_weights.py are shipped and were not part of a stage's measurement: the server is boot-checked by whoever builds the package, and the conversion
+    # only makes the weights file the measured scripts read.
+    stage_scripts = ("chip_model.py", "ref_model.py", "native_model.py", "make_reference.py", "run_chip.py", "ppl_check.py")
+    model_dir_env, weights_env = "MINICPM3_DIR", "MINICPM3_WEIGHTS"
     variants = (Variant("bf16", ("--opt", "3", "--upd", "paged"), "all weights bfloat16, HiFi2 for the MLP"),
                 Variant("mlp8", ("--opt", "3", "--upd", "paged", "--mlp-dtype", "bfp8", "--mlp-fidelity", "lofi"),
                         "MLP weights 8-bit block floating point with LoFi, everything else bfloat16"))
     context_limit = 2048           # the server's default cache length (serve.py --max-len); the model's own limit is 32768
     limits = ("One chip only on this route. The two-chip tensor-parallel version (chip_model_tp.py) is in the scripts and was not run by the stages.",
               "Decoding is greedy only; the server ignores temperature and top_p.",
-              "Prefill of the server's prompt is one token per step; a batched prefill exists in the single-chip model and is used by the benchmark.")
+              "The server feeds the prompt one token per decode step, so a long prompt starts slowly. The batched prefill is used by the benchmark only: in the server it hung the chip on the second request after a trace (found by the package's boot check).")
 
     def config_problems(self, model_dir) -> list[str]:
         try:

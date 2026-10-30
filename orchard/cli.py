@@ -20,6 +20,7 @@
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
+    tt-orchard text-package RUN_DIR --namespace ORG --revision SHA --license-file FILE --out DIR [--context FILE] [--check]
     tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--out DIR] [--result FILE] [--check]
     tt-orchard verify-package REPO_ID [--scratch DIR] [--staged DIR] [--revision SHA] [--plan] [--check]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
@@ -386,6 +387,18 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--probe", help="a decoder probe summary (JSON) to copy into evidence/decode-probe.json, with the home directory replaced by <home>")
     ap.add_argument("--agreement-report", help="the full agreement report (JSON) to copy into evidence/audio-agreement-report.json")
     ap.add_argument("--listening-note", help="the operator's dated listening note (one line with YYYY-MM-DD) printed on the card; it is not a measured quality metric")
+    tp = sub.add_parser("text-package", parents=[common],
+                        help="stage a local, weights-free package from a finished text-runtime run, render its card from the run's numbers and check it. "
+                             "Uploads and publishes nothing")
+    tp.add_argument("run_dir", help="the run directory (holds ledger.jsonl and the text stages' result files)")
+    tp.add_argument("--namespace", required=True, help="the Hugging Face user or organisation the package would be published under (used in text only)")
+    tp.add_argument("--revision", required=True, help="the 40-character commit hash of the model repository the run used")
+    tp.add_argument("--license-file", required=True, help="the license text the model repository's card names (Apache License 2.0 for MiniCPM3-4B)")
+    tp.add_argument("--config-sha256-at-revision", help="needed when the run's snapshot directory is not named for a revision: the sha256 of the model repository's config.json at --revision")
+    tp.add_argument("--weights-terms", default="", help="one sentence on the weights' terms as the model's card states them, quoted into the card and NOTICE")
+    tp.add_argument("--context", help="an earlier context-length record (JSON) the card cites")
+    tp.add_argument("--out", required=True, help="a new directory to stage into; the package goes in <out>/<package name> and the commands text beside it")
+    tp.add_argument("--check", action="store_true", help="stage nothing; run the gate on the package already staged in --out")
     vp = sub.add_parser("verify-package", parents=[common],
                         help="pull a published package from the Hub into a scratch directory, run its checks and print the boot command as "
                              "text. Opens no device and publishes nothing")
@@ -1061,6 +1074,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "audio-reference-env":
         from orchard import audio_reference_env
         return audio_reference_env.main(args, env=audio_reference_env.env_from_args(args, environ=env, home=home), out=out)
+    if args.cmd == "text-package":
+        from orchard import text_package
+        return text_package.main(args, out=out)
     if args.cmd == "audio-package":
         from orchard import audio_package
         return audio_package.main(args, out=out)

@@ -70,28 +70,34 @@ class FakeTok:
 
 
 class ScriptedModel:
-    """Predicts the scripted tokens in order; every logits vector is one-hot on the next scripted token."""
-    def __init__(self, script):
-        self.script, self.i = script, 0
+    """Predicts the scripted tokens in order after the 3-token prompt; every logits vector is one-hot on the next scripted token. It counts its prefill calls."""
+    PROMPT = 3
 
-    def _next(self):
+    def __init__(self, script):
+        self.script, self.prefills, self.steps = script, 0, []
+
+    def _at(self, i):
         v = torch.zeros(10)
-        v[self.script[min(self.i, len(self.script) - 1)]] = 1.0
-        self.i += 1
+        v[self.script[min(i, len(self.script) - 1)]] = 1.0
         return v
 
     def prefill(self, ids):
-        return self._next()
+        self.prefills += 1
+        return self._at(0)
 
     def traced_step(self, t, p):
-        return self._next()
+        self.steps.append((t, p))
+        return self._at(max(p - (self.PROMPT - 1), 0))
 
 
-def run_generate(monkeypatch, script, max_tokens):
+def run_generate(monkeypatch, script, max_tokens, batched=False):
     serve = load_script(monkeypatch, "serve", {"ttnn": fake_ttnn()})
     monkeypatch.setattr(serve, "EOS", (9,))
-    serve.STATE.update(tok=FakeTok(), model=ScriptedModel(script), max_len=128)
+    model = ScriptedModel(script)
+    serve.STATE.clear()
+    serve.STATE.update(tok=FakeTok(), model=model, max_len=128, batched_prefill=batched)
     text = "".join(serve.generate([{"role": "user", "content": "hi"}], max_tokens))
+    run_generate.model = model
     return text, serve.STATE["finish"], serve.STATE["last_counts"]
 
 
@@ -99,6 +105,14 @@ def test_finish_is_length_when_max_tokens_ends_the_loop_even_if_eos_is_next(monk
     text, finish, counts = run_generate(monkeypatch, [4, 5, 9], max_tokens=2)
     assert text == "ef" and counts == (3, 2)
     assert finish == "length"
+
+
+def test_the_prompt_goes_through_traced_steps_unless_batched_prefill_is_asked_for(monkeypatch):
+    """The batched prefill allocates device buffers while the decode trace is live and hung the chip on the second request (found by the package's boot check)."""
+    run_generate(monkeypatch, [4, 5, 9], max_tokens=10)
+    assert run_generate.model.prefills == 0 and [p for _, p in run_generate.model.steps][:3] == [0, 1, 2]
+    run_generate(monkeypatch, [4, 5, 9], max_tokens=10, batched=True)
+    assert run_generate.model.prefills == 1 and [p for _, p in run_generate.model.steps][0] == 3
 
 
 def test_finish_is_stop_when_eos_ends_the_loop(monkeypatch):

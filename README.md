@@ -1880,6 +1880,7 @@ waveform comes from the weights. `--unmatched` allows runs that differ in those 
 ```
 tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR]   # stage the package and run the gate
 tt-orchard audio-package RUN_DIR --namespace ORG --check                                          # run the gate on the package already staged
+tt-orchard text-package RUN_DIR --namespace ORG --revision SHA --license-file FILE --out DIR [--config-sha256-at-revision HEX] [--weights-terms TEXT] [--context FILE]   # stage a text-runtime run's package and run the gate (see docs/text-runtime.md)
 tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR --out DIR --result FILE \
     --probe FILE --agreement-report FILE --listening-note "YYYY-MM-DD: ..."                         # stage a rebuild into a new directory
 python -m orchard.audio_result_derive RUN_DIR CHIP_RUN_DIR OUT_JSON                                 # make the --result file for a later chip run

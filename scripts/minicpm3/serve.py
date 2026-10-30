@@ -7,7 +7,7 @@ chip while it runs.
 
 Endpoints: GET /v1/models, POST /v1/chat/completions (messages, max_tokens, stream). One request runs at a time (a lock); sampling is greedy only (temperature and top_p
 are accepted and ignored: the traced step returns logits to the host, and a sampler on the host is a few lines, but greedy is what was checked). The prompt is processed one token
-per step (about 30 ms each), then tokens stream at decode speed. The server binds to 127.0.0.1 only. Do not use ports 8000, 8100 to 8103, 8780 or 8011.
+per step (about 30 ms each; `--batched-prefill` is off by default, see its help), then tokens stream at decode speed. The server binds to 127.0.0.1 only. Do not use ports 8000, 8100 to 8103, 8780 or 8011.
 """
 import argparse
 import json
@@ -35,11 +35,11 @@ def generate(messages, max_tokens):
     room = STATE["max_len"] - len(ids) - 1
     if room < 1:
         raise ValueError(f"the prompt is {len(ids)} tokens; the server's context is {STATE['max_len']}")
-    if hasattr(m, "prefill"):
-        logits = m.prefill(ids)                       # all prompt rows at once (single-chip model)
+    if STATE.get("batched_prefill") and hasattr(m, "prefill"):
+        logits = m.prefill(ids)                       # all prompt rows at once; off by default (see --batched-prefill)
     else:
         logits = None
-        for p, t in enumerate(ids):                   # the two-chip model prefills one token per step
+        for p, t in enumerate(ids):                   # one traced step per prompt token (about 30 ms each)
             logits = m.traced_step(t, p)
     out, shown = [], ""
     finish = "length"                                 # the loop ends on the token budget unless an end-of-sequence token ends it first
@@ -127,6 +127,10 @@ def main():
     ap.add_argument("--port", type=int, default=8210)
     ap.add_argument("--tp", type=int, default=1, choices=[1, 2])
     ap.add_argument("--max-len", type=int, default=2048)
+    ap.add_argument("--batched-prefill", action="store_true", help="process the prompt with the model's batched prefill. Off by default: it allocates device buffers while the decode "
+                    "trace is live, and on 2026-10-29 the second request after it hung the chip (MMIO timeout). The benchmark uses it before any trace exists")
+    ap.add_argument("--mlp-dtype", default="bf16", choices=["bf16", "bfp8", "bfp4"], help="MLP weight dtype (single-chip model); bfp8 with --mlp-fidelity lofi is the faster variant")
+    ap.add_argument("--mlp-fidelity", default="hifi2", choices=["hifi2", "lofi", "hifi4"])
     ap.add_argument("--model-dir", default=os.environ.get("MINICPM3_DIR"), required="MINICPM3_DIR" not in os.environ)
     ap.add_argument("--weights", default=os.environ.get("MINICPM3_WEIGHTS"), required="MINICPM3_WEIGHTS" not in os.environ)
     a = ap.parse_args()
@@ -135,6 +139,7 @@ def main():
     from transformers import AutoTokenizer
     STATE["tok"] = AutoTokenizer.from_pretrained(a.model_dir)
     STATE["max_len"] = -(-a.max_len // 128) * 128
+    STATE["batched_prefill"] = a.batched_prefill
     if a.tp == 2:
         from chip_model_tp import ChipMiniCPM3TP
         ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
@@ -143,8 +148,8 @@ def main():
         from chip_model import ChipMiniCPM3
         dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
     try:
-        STATE["model"] = ChipMiniCPM3TP(dev, a.model_dir, a.weights, max_len=a.max_len) if a.tp == 2 else ChipMiniCPM3(
-            dev, a.model_dir, a.weights, attn="mla", max_len=a.max_len, upd="paged", opt=3)
+        STATE["model"] = ChipMiniCPM3TP(dev, a.model_dir, a.weights, max_len=a.max_len, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity) if a.tp == 2 else ChipMiniCPM3(
+            dev, a.model_dir, a.weights, attn="mla", max_len=a.max_len, upd="paged", opt=3, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
         STATE["model"].enable_trace()
         srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
         print(f"serving {MODEL_ID} on 127.0.0.1:{a.port} (pid {os.getpid()})", flush=True)

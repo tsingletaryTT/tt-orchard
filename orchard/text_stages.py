@@ -402,15 +402,30 @@ def bench_entry(stage_dir, rtm, variant, model_config: dict) -> dict:
             "recorded_config": data.get("config")}
 
 
+def config_problem(cfg: dict) -> str | None:
+    """Why the model configuration on disk is not the one stage 1's reference was made with: the sha256 of the file now (links followed) against the one stage 1 recorded.
+    A benchmark of a changed configuration must not be packaged with the original reference."""
+    try:
+        now = sha256_file(safeio.resolved(Path(cfg["model_dir"]) / "config.json"))
+    except OSError as exc:
+        return f"the model configuration cannot be read: {exc}"
+    if now != cfg["config_sha256"]:
+        return "the model configuration on disk is not the configuration stage 1 used (the sha256 values differ), so these timings are not of the referenced model"
+    return None
+
+
 def finish_bench(stage_dir, run_dir, ref_stage_dir, runtime_name: str) -> dict:
     stage_dir = Path(stage_dir)
     rtm = rt.get(runtime_name)
     if rtm is None:
         raise TextStageError(f"no text runtime named {runtime_name!r}")
     cfg = stage_config(Path(ref_stage_dir))
+    why = config_problem(cfg)
+    if why:
+        raise TextStageError(why)
     model_config = mc.read_model_config(safeio.resolved(Path(cfg["model_dir"]) / "config.json"))
     variants = {v.name: bench_entry(stage_dir, rtm, v, model_config) for v in rtm.variants}
-    result = {"schema": SCHEMA, "runtime": runtime_name, "model_id": cfg["model_id"], "default_variant": rtm.default_variant().name, "variants": variants,
+    result = {"schema": SCHEMA, "runtime": runtime_name, "model_id": cfg["model_id"], "default_variant": rtm.default_variant().name, "config_sha256": cfg["config_sha256"], "variants": variants,
               "rules": "docs/benchmark-rules.md: one discarded warm-up run, then at least three measured runs, in one process; spread is min, median and max",
               "limits": ["Decode speed is free-running greedy decode of a fixed number of tokens after one prompt, batch size one, one chip.",
                          "The floor is the weight-read time at the datasheet DRAM bandwidth (orchard/decode_floor.py); it ignores the KV cache and activations.",
@@ -436,6 +451,11 @@ def bench_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
     if not isinstance(variants, dict) or set(variants) != {v.name for v in rtm.variants}:
         return [f"the result needs one entry for each variant of the runtime ({', '.join(v.name for v in rtm.variants)})"]
     problems = []
+    why = config_problem(cfg)
+    if why:
+        problems.append(why)
+    if res.get("config_sha256") != cfg["config_sha256"]:
+        problems.append("the benchmark result does not record stage 1's configuration hash")
     for v in rtm.variants:
         try:
             fresh = bench_entry(stage_dir, rtm, v, model_config)

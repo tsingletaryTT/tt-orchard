@@ -1,0 +1,3 @@
+target = "0.9.68"
+summary = "tt-orchard text-package: stages and checks a weights-free package from a text-runtime run, with the card's numbers recomputed from the run's result files."
+pr = 247
