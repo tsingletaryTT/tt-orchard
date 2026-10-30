@@ -178,7 +178,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/models":
             self._json(200, {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "ibm-granite"}]})
         elif path == "/health":
-            self._json(200, {"status": "ok", "model": MODEL_ID, "context": STATE["engine"].max_len})
+            bad = getattr(STATE["engine"], "unusable", None)
+            if bad:                                         # a failed trace capture: health checks must see it so the instance is restarted
+                self._json(503, {"status": "unusable", "reason": bad, "model": MODEL_ID})
+            else:
+                self._json(200, {"status": "ok", "model": MODEL_ID, "context": STATE["engine"].max_len})
         else:
             self._json(404, {"error": {"message": "not found"}})
 
@@ -193,12 +197,19 @@ class Handler(BaseHTTPRequestHandler):
             ids = encode_prompt(STATE["tok"], STATE["template"], r["messages"])
         except (RequestError, ValueError, json.JSONDecodeError, jinja2.TemplateError) as exc:
             return self._json(400, {"error": {"message": f"bad request: {exc}"}})
+        bad = getattr(STATE["engine"], "unusable", None)
+        if bad:
+            return self._json(503, {"error": {"message": f"the chip is unusable until the server is restarted: {bad}"}})
         cid, created, timings = f"chatcmpl-{int(time.time() * 1000)}", int(time.time()), {}
         args = dict(max_tokens=r["max_tokens"], stop_ids=STATE["stop_ids"], stop_strings=r["stop"], temperature=r["temperature"],
                     top_p=r["top_p"], seed=r["seed"], timings=timings)
         self._started = False                                 # set once response headers have gone out
         if not LOCK.acquire(blocking=False):                  # one request runs at a time; a second one is told so at once and never waits
             return self._json(503, {"error": {"message": "the server is busy with another request; retry shortly"}}, [("Retry-After", "5")])
+        bad = getattr(STATE["engine"], "unusable", None)       # look again under the lock: the request that held it may have failed a recapture
+        if bad:
+            LOCK.release()
+            return self._json(503, {"error": {"message": f"the chip is unusable until the server is restarted: {bad}"}})
         try:
             try:
                 if r["stream"]:
@@ -260,13 +271,25 @@ class ChipEngine:
     def __init__(self, model):
         self.m, self.max_len = model, model.L
 
+    @property
+    def unusable(self):
+        """Why the chip cannot serve (a failed trace capture), or None. Read by /health and by every request."""
+        return getattr(self.m, "unusable", None)
+
+    def _check(self):
+        if self.unusable:
+            raise RuntimeError(f"the chip is unusable until the server is restarted: {self.unusable}")
+
     def reset(self):
+        self._check()
         self.m.reset()
 
     def prefill(self, ids):
+        self._check()
         return self.m.prefill(ids)
 
     def step(self, tok):
+        self._check()
         return self.m.step(tok)
 
 
@@ -284,7 +307,7 @@ def stop_token_ids(model_dir, tokenizer):
 def ready_event(model, a, load_s):
     """The ready line. It reports what the constructed model does (`model.f32`), not what was requested."""
     return {"event": "ready", "model": MODEL_ID, "host": a.host, "port": a.port, "context": model.L, "ssd": a.ssd,
-            "traced": not a.no_trace, "ssd_precision": "fp32" if model.f32 else "bf16", "load_s": round(load_s, 1), "pid": os.getpid()}
+            "traced": not a.no_trace, "chunked_prefill": bool(getattr(model, "chunked_prefill", False)), "ssd_precision": "fp32" if model.f32 else "bf16", "load_s": round(load_s, 1), "pid": os.getpid()}
 
 
 def main():
@@ -296,6 +319,8 @@ def main():
     ap.add_argument("--ssd", default=os.environ.get("GRANITE_SSD", "composed"))
     ap.add_argument("--ssd-precision", default=os.environ.get("GRANITE_SSD_PRECISION", "fp32"), choices=["fp32", "bf16"])
     ap.add_argument("--no-trace", action="store_true", help="run the step eagerly (slower); for comparison only")
+    ap.add_argument("--no-chunked-prefill", action="store_true", default=os.environ.get("GRANITE_CHUNKED_PREFILL") == "0",
+                    help="prefill with one decode step per token (the older path). Default: chunked prefill in composed mode (env GRANITE_CHUNKED_PREFILL=0 turns it off)")
     ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"), help="default 127.0.0.1 (this machine only). HOST=0.0.0.0 listens on every interface; the server has no sign-in")
     a = ap.parse_args()
     if a.port in (8000, 8011, 8012, 8780) or 8100 <= a.port <= 8103:
@@ -316,7 +341,7 @@ def main():
     try:
         t0 = time.time()
         model = GraniteChip(dev, a.model_dir, max_len=a.max_len, ssd=a.ssd, kernel_dir=Path(__file__).resolve().parent.parent / "runtime" / "kernels",
-                            trace=not a.no_trace, ssd_precision=a.ssd_precision)
+                            trace=not a.no_trace, ssd_precision=a.ssd_precision, chunked_prefill=not a.no_chunked_prefill)
         STATE["engine"] = ChipEngine(model)
         srv = ThreadingHTTPServer((a.host, a.port), Handler)
         print(json.dumps(ready_event(model, a, time.time() - t0)), flush=True)

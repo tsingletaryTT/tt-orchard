@@ -1,0 +1,24 @@
+{
+ "chunk": 128,
+ "max_len": 2048,
+ "mode": "time",
+ "n": 3,
+ "path": "flow",
+ "prompt_sha256": "cb7f69cb4491e8e80644267aa9a1e477b8b346660d9e8ae7dfbee92988bb94ba",
+ "prompt_tokens": 1024,
+ "seconds": [
+  1.5448,
+  1.5678,
+  1.5441
+ ],
+ "tok_s": [
+  662.87,
+  653.13,
+  663.17
+ ],
+ "tok_s_max": 663.17,
+ "tok_s_median": 662.87,
+ "tok_s_min": 653.13,
+ "tokens": 1024,
+ "trace": true
+}

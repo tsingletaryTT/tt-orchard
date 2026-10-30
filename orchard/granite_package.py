@@ -15,7 +15,8 @@ The card's numbers come from `evidence/summary.json`, which `stage` copies into 
   * the required files exist, every Python file compiles and `run.sh` passes `bash -n`;
   * `LICENSE` is the Apache License 2.0 and has the sha256 recorded at staging, and the card's front matter names the license, the base
     model and the pipeline;
-  * every number row of the card is the row that `summary.json` produces, and the card has its required sections;
+  * every number row of the card is the row that `summary.json` produces, the card has its required sections, and every `evidence/` file it
+    cites is in the package;
   * `tt-model.yaml` is a v5.1 manifest of kind `http-server` whose command, ready line and source paths exist in the package.
 It does not judge whether prose is true and does not run the server. Nothing here publishes: `publish_commands` returns text.
 """
@@ -37,16 +38,17 @@ REVISION = "d18cca4c121edb87d022116d281ce212c9136f57"
 NAMESPACE = "episod"
 PACKAGE_NAME = "granite-4.0-h-1b-blackhole"
 PORT = 20110
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 TT_METAL_TAG = "v0.80.0"
 ROOT = Path(__file__).resolve().parent.parent
-SRC_FILES = (("pkgsrc/runtime/granite_chip.py", "runtime/granite_chip.py"), ("pkgsrc/server/serve.py", "server/serve.py"),
+SRC_FILES = (("pkgsrc/runtime/granite_chip.py", "runtime/granite_chip.py"), ("pkgsrc/runtime/granite_trace.py", "runtime/granite_trace.py"),
+             ("pkgsrc/server/serve.py", "server/serve.py"),
              ("pkgsrc/tools/evaluate.py", "tools/evaluate.py"), ("pkgsrc/tools/smoke.py", "tools/smoke.py"), ("pkgsrc/tools/selftest.py", "tools/selftest.py"))
 KERNEL_FILES = (("docs/run-logs/evidence/granite-readout-pair/kernels/state.py", "runtime/kernels/state.py"),
                 ("docs/run-logs/evidence/granite-readout-pair/kernels/readout.py", "runtime/kernels/readout.py"),
                 ("docs/run-logs/evidence/granite-repeat-trace/port2/bcast_kernel_attempt8.py", "runtime/kernels/bcast.py"))
 REQUIRED = ("README.md", "LICENSE", "NOTICE", "SECURITY.md", "CHANGELOG.md", "SHA256SUMS", "tt-model.yaml", "run.sh", "requirements.txt", "package-record.json", "evidence/summary.json",
-            "runtime/granite_chip.py", "server/serve.py", "tools/evaluate.py", "tools/smoke.py", "tools/selftest.py") + tuple(d for _, d in KERNEL_FILES)
+            "runtime/granite_chip.py", "runtime/granite_trace.py", "server/serve.py", "tools/evaluate.py", "tools/smoke.py", "tools/selftest.py") + tuple(d for _, d in KERNEL_FILES)
 RECORDED = ("LICENSE", "NOTICE", "evidence/summary.json")
 FORBIDDEN_TEXT = (".tt_ai_key", "litellm", "HF_TOKEN=", "Authorization: Bearer", "TT_AI_KEY")
 CARD_SECTIONS = ("## Weights are not included", "## Try it", "## API", "## Numbers", "## Agreement with the CPU reference", "## Context and prefill",
@@ -61,7 +63,13 @@ def _f(x, nd=1):
 
 
 def headline(s: dict) -> dict:
-    """The session whose numbers go in the machine-readable rows: the one recorded with the lowest host load."""
+    """The session whose numbers go in the machine-readable rows: the session named in the summary's `headline`, else the session recorded
+    with the lowest host load. A summary that names a session the list does not hold is an error."""
+    if s.get("headline"):
+        for x in s["sessions"]:
+            if x["name"] == s["headline"]:
+                return x
+        raise ValueError(f"headline names {s['headline']!r}, which is not a session in the summary")
     return min(s["sessions"], key=lambda x: x["load"])
 
 
@@ -123,7 +131,12 @@ def long_rows(s: dict) -> list[str]:
 # ---- the card and the other files ---------------------------------------------------------------------------------------------
 def render_changelog(s: dict) -> str:
     items = s.get("changelog", [])
-    return "\n".join(["# Changelog", "", f"## {VERSION}", "", "Changes from 0.1.0, the first upload:", "", *[f"- {x}" for x in items], "",
+    older = s.get("changelog_older", [])                 # [{"version": "0.2.0", "items": [...]}], newest first
+    prev = older[0]["version"] if older else "0.1.0"
+    parts = []
+    for o in older:
+        parts += [f"## {o['version']}", "", *[f"- {x}" for x in o["items"]], ""]
+    return "\n".join(["# Changelog", "", f"## {VERSION}", "", f"Changes from {prev}:", "", *[f"- {x}" for x in items], "", *parts,
                       "## 0.1.0", "", "First upload: the traced composed Granite-4.0-H-1B runtime with a float32 Mamba-2 state, a 2,048-token default context, an OpenAI-compatible chat server, "
                       "the card and the gate.", ""])
 
@@ -196,7 +209,7 @@ def render_card(s: dict, license_text: str) -> str:
              "## Provenance", "",
              f"- Model: {MODEL_ID}, revision `{REVISION}`; weights are not part of this package.",
              f"- Tested with tt-metal {TT_METAL_TAG}, Python 3.12 and the package versions in `requirements.txt`. `SHA256SUMS` lists the hash of every file.",
-             "- `runtime/granite_chip.py`, `server/serve.py`, `tools/evaluate.py`, `tools/smoke.py` and `tools/selftest.py` come from the tt-orchard repository (tsingletaryTT/tt-orchard).",
+             "- `runtime/granite_chip.py`, `runtime/granite_trace.py`, `server/serve.py`, `tools/evaluate.py`, `tools/smoke.py` and `tools/selftest.py` come from the tt-orchard repository (tsingletaryTT/tt-orchard).",
              "- `runtime/kernels/` holds three tt-lang kernels written by a local coder model and used unchanged. Their hashes are in `package-record.json`.",
              "- `tt-model.yaml` is a draft v5.1 manifest of kind `http-server`. It has not been built into an image, and this package has not been listed in the tt-model catalog.",
              "- Every number on this card comes from `evidence/summary.json`, which is built from the raw result files beside it.", ""]
@@ -478,6 +491,9 @@ def _card_problems(pkg: Path) -> list[str]:
             out.append(f"card: missing section {sec!r}")
     if f"`{REVISION}`" not in card:
         out.append("card: does not name the pinned revision")
+    for name in sorted(set(re.findall(r"`evidence/([A-Za-z0-9_.\-]+)`", card))):       # every raw file the card cites must be in the package
+        if not (pkg / "evidence" / name).is_file():
+            out.append(f"card: cites evidence/{name}, which the package does not contain")
     for pat in OVERCLAIMS:
         m = re.search(pat, card, re.I)
         if m:

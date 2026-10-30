@@ -10,13 +10,17 @@ The decode step is a fixed-shape program that is captured once as a ttnn trace a
   * each step the host writes four small tensors (the embedding, the one-hot position, its complement, the mask) into persistent
     device buffers and replays the trace.
 
-Prefill is a loop of these decode steps (one token per step). `prefill_chunked` is a chunked-scan prefill (composed mode only, not used by
-the server). Its algebra is checked on the CPU (tests/test_granite_scan.py). With trace capture off it agrees with the step path at 33 to 1,024
-tokens (logits cosine above 0.99997, same top-1 token, same next four greedy tokens) and is 3 to 30 times faster than the eager step loop
-(128 tokens 88 against 28 tok/s, 1,024 tokens 552 against 17 to 24 tok/s; evidence/granite-chunked-bench). With trace capture on, the single
-timed run (512 tokens, after a finished warm-up) did not finish and left a chip unreadable. The chunked path allocates and frees device
-buffers while a decode trace is alive, and ttnn warns that this is unsafe. The path therefore stays off by default and the server does
-not call it.
+Prefill has two paths. The step loop runs one decode step per prompt token. The chunked prefill (`prefill_chunked`, composed mode only) is the
+default for a prompt with a full block of 32 tokens before its last token (`chunked_prefill=False` keeps the step loop). Its algebra is checked on
+the CPU (tests/test_granite_scan.py). It agrees with the step loop at 33 to 1,024 tokens (logits cosine above 0.99997, same top-1 token, same next
+four greedy tokens), with the decode trace on or off, and runs at about 120, 400 and 660 tok/s at 128, 512 and 1,024 tokens with the trace on (benchmark harness, quiet
+host) against 39 for the traced step loop (evidence/granite-chunked-trace-safe).
+
+The blocks allocate device buffers, and ttnn warns that a buffer allocated while a trace is alive may be corrupted. A trace-on run that did allocate
+left a chip unreadable (issues 252 and 290). The flow in granite_trace.py therefore releases both decode traces before the blocks, captures them
+again after, and only then runs the left-over tokens and decode. With the chunked prefill on, only the full decode trace is captured: the
+second, shorter trace (no final norm or lm_head) would be captured while the first exists, which allocates device tensors. No buffer is allocated between a capture and the next release
+(tests/test_granite_trace.py holds that rule with a fake chip).
 
 `ssd` picks how the Mamba-2 state update and readout are computed:
   composed (default)  stock ttnn ops. The readout is one batched matmul with C broadcast over the heads.
@@ -31,11 +35,16 @@ Everything the model needs from the weights directory is `config.json` and `mode
 """
 import importlib.util
 import json
+import sys
 import time
 from pathlib import Path
 
 import torch
 import ttnn
+
+if str(Path(__file__).resolve().parent) not in sys.path:      # granite_trace.py sits beside this file; load it whatever imported us
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import granite_trace  # noqa: E402
 
 TILE = ttnn.TILE_LAYOUT
 DRAM = ttnn.DRAM_MEMORY_CONFIG
@@ -51,7 +60,7 @@ def _load_kernel(path, fn):
 
 
 class GraniteChip:
-    def __init__(self, dev, model_dir, max_len=2048, ssd="composed", kernel_dir=None, trace=True, ssd_precision="fp32", fast_prefill=True):
+    def __init__(self, dev, model_dir, max_len=2048, ssd="composed", kernel_dir=None, trace=True, ssd_precision="fp32", fast_prefill=True, chunked_prefill=True):
         from safetensors import safe_open  # imported here so the module can be read without the package
         if ssd not in SSD_MODES:
             raise ValueError(f"ssd must be one of {SSD_MODES}")
@@ -62,6 +71,8 @@ class GraniteChip:
         ssd_precision = self.effective_precision(ssd, ssd_precision)
         self.dev, self.L, self.ssd, self.use_trace, self.tid, self.out = dev, max_len, ssd, trace, None, None
         self.fast_prefill, self.tid_nohead = fast_prefill, None
+        self.unusable = None                                              # set by mark_unusable when a trace capture failed
+        self.chunked_prefill = chunked_prefill and ssd == "composed"      # the server's prefill; False keeps the step loop
         self.f32 = ssd_precision == "fp32"                               # dt, decay and the state in float32
         model_dir = Path(model_dir)
         cfg = json.load(open(model_dir / "config.json"))
@@ -174,6 +185,7 @@ class GraniteChip:
     def reset(self):
         """Start a new sequence. The recurrent state is zeroed. The key/value caches are not: positions that are not written yet are
         masked, and a stale value that is masked contributes exactly zero."""
+        granite_trace.check_usable(self)
         self.pos = 0
         z = lambda *s: self.host(torch.zeros(*s))  # noqa: E731
         for i in self.cs:
@@ -212,18 +224,29 @@ class GraniteChip:
 
     def step(self, token):
         """One token in, the logits of the next token out (a float tensor of the vocabulary size)."""
+        granite_trace.check_usable(self)
         self._set_inputs(token)
         return self._run(True)
 
-    def prefill(self, ids):
+    def prefill(self, ids, chunk=128):
+        """The prefill the server calls. In composed mode with `chunked_prefill` on (the default) a prompt with a full block of 32 tokens
+        before its last token goes through `prefill_chunked`; every other prompt, and every kernel mode, uses the step loop."""
+        return granite_trace.prefill(self, ids, chunked=self.chunked_prefill, chunk=chunk, report=self._report_chunk_failure)
+
+    def run_step_prefill(self, ids):
         """A loop of decode steps. The logits are read back only after the last prompt token."""
         for t in ids[:-1]:
-            self._set_inputs(t)
-            self._run(False, head=False)                    # a second trace that stops after the last layer: no final norm, no lm_head
+            self.run_tail_token(t)
         return self.step(ids[-1])
 
-    # ---- chunked prefill (candidate) ------------------------------------------------------------------------------------------
-    CHUNKS = (128, 64, 32)
+    def run_tail_token(self, t):
+        """One prompt token through the decode step, with no read-back."""
+        granite_trace.check_usable(self)
+        self._set_inputs(t)
+        self._run(False, head=False)                    # a second trace that stops after the last layer: no final norm, no lm_head
+
+    # ---- chunked prefill ----------------------------------------------------------------------------------------------------
+    CHUNKS = granite_trace.CHUNKS
 
     def prefill_chunked(self, ids, chunk=128):
         """Prefill with blocks of tokens instead of one token per step. Needs the composed mode.
@@ -231,21 +254,32 @@ class GraniteChip:
         Blocks are multiples of 32 (the tile size), at most `chunk` tokens, largest first. The last token and the tokens that do not fill a
         block of 32 go through the decode step, so the logits come from the same path as before. The recurrent state, the conv state
         and the key/value caches are the buffers the decode trace uses, so decode continues from them unchanged.
+
+        No decode trace is alive while the blocks run (granite_trace.prefill_chunked releases the traces first and captures them again
+        after), because the blocks allocate device buffers.
         """
-        if self.ssd != "composed":
-            raise ValueError("prefill_chunked needs ssd='composed'")
-        sizes = [c for c in self.CHUNKS if c <= chunk] or [32]
-        body, i = ids[:-1], 0
-        while len(body) - i >= sizes[-1]:
-            T = next(c for c in sizes if c <= len(body) - i)
-            if self.pos + T > self.L:
-                raise ValueError(f"position {self.pos + T} is past the context limit {self.L}")
-            self._run_chunk(body[i:i + T])
-            i += T
-        for t in body[i:]:
-            self._set_inputs(t)
-            self._run(False, head=False)
-        return self.step(ids[-1])
+        return granite_trace.prefill_chunked(self, ids, chunk=chunk, report=self._report_chunk_failure)
+
+    @staticmethod
+    def _report_chunk_failure(exc):
+        """Put a failed block on record before the traces are captured again (the capture could hang)."""
+        print(f"granite_chip: chunked prefill block failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    def mark_unusable(self, exc):
+        """The traces could not be captured again. A capture that failed part way may have left a trace the chip does not track, so later
+        requests would allocate while it exists. Every later prefill and step is refused until the server is restarted."""
+        self.unusable = f"{type(exc).__name__}: {exc}"
+        try:
+            print(f"granite_chip: trace capture failed, the chip is unusable until restart: {self.unusable}", file=sys.stderr, flush=True)
+        except Exception:                                   # a closed or full stderr must not hide the capture error
+            pass
+
+    def run_chunk(self, toks):
+        granite_trace.check_usable(self)
+        self._run_chunk(toks)
+
+    def traces_alive(self):
+        return self.tid is not None or self.tid_nohead is not None
 
     def _rm(self, t):
         return ttnn.to_layout(t, ttnn.ROW_MAJOR_LAYOUT)
@@ -361,24 +395,45 @@ class GraniteChip:
         return self._linear(z, Ly["out_proj"])
 
     def enable_trace(self):
-        """Run the program once eagerly (this compiles every op), then capture it."""
+        """Run the program eagerly once (this compiles every op), then capture the decode traces."""
         self.tid = None
         self._set_inputs(0)
         self.program()
+        if "nohead" in self.trace_names():
+            self.program(head=False)                        # compile the shorter program (every op in it already exists, so this is quick)
         ttnn.synchronize_device(self.dev)
+        self.capture_traces()
+        self.reset()
+
+    def trace_names(self):
+        """The traces this chip captures: `full` only when the chunked prefill is on (the second capture would allocate while `full` exists)."""
+        return granite_trace.trace_names(self.chunked_prefill, self.fast_prefill)
+
+    def capture_traces(self):
+        """Capture the decode trace (and the shorter one without the final norm and lm_head). Capture records the program and runs
+        nothing, so the state buffers are untouched. Every op is already compiled, so the programs come from the cache. Call it only when
+        no trace is alive (`release_traces` first)."""
+        if self.traces_alive():
+            raise RuntimeError("capture_traces with a trace already alive; release_traces first")
         tid = ttnn.begin_trace_capture(self.dev, cq_id=0)
+        self.tid = tid                                      # tracked from the start, so `close` releases it if the capture fails
         self.out = self.program()
         ttnn.end_trace_capture(self.dev, tid, cq_id=0)
         ttnn.synchronize_device(self.dev)
-        self.tid = tid
-        if self.fast_prefill:
-            self.program(head=False)                        # compile the shorter program (every op in it already exists, so this is quick)
-            ttnn.synchronize_device(self.dev)
-            self.tid_nohead = ttnn.begin_trace_capture(self.dev, cq_id=0)
+        if "nohead" in self.trace_names():
+            self.tid_nohead = ttnn.begin_trace_capture(self.dev, cq_id=0)       # tracked from the start, as above
             self.program(head=False)
             ttnn.end_trace_capture(self.dev, self.tid_nohead, cq_id=0)
             ttnn.synchronize_device(self.dev)
-        self.reset()
+
+    def release_traces(self):
+        """Release both traces and free the logits buffer the first one wrote into. After this no trace is alive, so device buffers can
+        be allocated safely."""
+        ttnn.synchronize_device(self.dev)
+        self.close()
+        if self.out is not None:
+            ttnn.deallocate(self.out)
+            self.out = None
 
     def close(self):
         for name in ("tid", "tid_nohead"):

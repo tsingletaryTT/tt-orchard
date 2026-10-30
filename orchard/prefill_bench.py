@@ -58,8 +58,10 @@ class Watchdog:
 
     def arm(self, label: str, iteration: int, timeout_s: float, phase: str) -> threading.Timer:
         def fire():
-            self.log.line("hang", label=label, iteration=iteration, phase=phase, timeout_s=timeout_s)
-            self.kill(HANG_EXIT)
+            try:
+                self.log.line("hang", label=label, iteration=iteration, phase=phase, timeout_s=timeout_s)
+            finally:
+                self.kill(HANG_EXIT)                    # a log that cannot be written must not leave the hung process running
         timer = threading.Timer(timeout_s, fire)
         timer.daemon = True
         timer.start()
@@ -73,6 +75,13 @@ def run_iteration(log: BenchLog, wd: Watchdog, label: str, iteration: int, timeo
     t0 = time.perf_counter()
     try:
         value = fn()
+    except BaseException as exc:
+        # The caller's cleanup may itself hang and end the process, which would lose this exception (issue 293). Write it first.
+        try:
+            log.line("error", label=label, iteration=iteration, phase=phase, type=type(exc).__name__, message=str(exc)[:2000])
+        except Exception:
+            pass                                        # an unwritable log must not replace the original exception
+        raise
     finally:
         timer.cancel()
     seconds = time.perf_counter() - t0
@@ -107,3 +116,14 @@ def summarize(prompt_tokens: int, seconds: list[float]) -> dict:
     tok = [round(prompt_tokens / s, 2) for s in seconds]
     return {"n": len(seconds), "prompt_tokens": prompt_tokens, "seconds": [round(s, 4) for s in seconds], "tok_s": tok,
             "tok_s_median": statistics.median(tok), "tok_s_min": min(tok), "tok_s_max": max(tok)}
+
+
+def greedy_tokens(first_logits, step, n: int) -> list[int]:
+    """`n` greedy tokens, the first from `first_logits`. `step(token)` returns the logits after one more token. It is called n-1 times:
+    a step after the last token is never needed, and it could pass the context limit (issue 293)."""
+    if n < 1:
+        raise ValueError(f"greedy_tokens needs at least 1 token, got {n}")
+    out = [int(first_logits.argmax())]
+    while len(out) < n:
+        out.append(int(step(out[-1]).argmax()))
+    return out

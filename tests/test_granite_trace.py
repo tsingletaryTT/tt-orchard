@@ -1,0 +1,338 @@
+"""The trace-safe prefill flow (pkgsrc/runtime/granite_trace.py). CPU only: a fake chip records what happens to its traces and buffers.
+
+ttnn warns that device buffers allocated while a trace is alive may be corrupted, and one trace-on chunked prefill left a chip unreadable
+(issues 252 and 290). The rule these tests hold: no buffer is allocated between a trace capture and its release. The fake chip's `alloc`
+records a violation when a trace is alive; the chunked path in the fake allocates the way the real one does (a block of buffers per chunk)."""
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("granite_trace", ROOT / "pkgsrc" / "runtime" / "granite_trace.py")
+gt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gt)
+
+
+class FakeChip:
+    """Stands in for GraniteChip. Records events. A violation is an allocation while a trace is alive."""
+
+    CHUNKS = (128, 64, 32)
+
+    def __init__(self, traced=True, ssd="composed", fail_in_chunk=False):
+        self.ssd, self.use_trace, self.events, self.violations = ssd, traced, [], []
+        self.tid = self.tid_nohead = None
+        self.pos, self.fail_in_chunk, self.L = 0, fail_in_chunk, 2048
+        if traced:
+            self.capture_traces()
+
+    # -- what the real chip does to its traces
+    def traces_alive(self):
+        return self.tid is not None or self.tid_nohead is not None
+
+    def alloc(self, what):
+        self.events.append(("alloc", what))
+        if self.traces_alive():
+            self.violations.append(what)
+
+    def release_traces(self):
+        self.events.append(("release",))
+        self.tid = self.tid_nohead = None
+
+    def capture_traces(self):
+        self.events.append(("capture",))
+        self.tid, self.tid_nohead = "head", "nohead"
+
+    # -- the work
+    def run_chunk(self, toks):
+        self.alloc(f"chunk{len(toks)}")
+        self.pos += len(toks)
+
+    def run_tail_token(self, t):
+        """One prompt token through the decode step, no read-back. Traced when traces are alive (a replay allocates nothing)."""
+        self.events.append(("tail", "traced" if self.traces_alive() else "eager"))
+        if not self.traces_alive():
+            self.alloc("eager-tail")           # an eager step allocates its temporaries
+        self.pos += 1
+
+    def step(self, t):
+        self.events.append(("step", "traced" if self.traces_alive() else "eager"))
+        if not self.traces_alive():
+            self.alloc("eager-step")
+        self.pos += 1
+        return "logits"
+
+    def reset(self):
+        self.pos = 0
+
+
+def test_chunked_prefill_allocates_nothing_while_a_trace_is_alive():
+    chip = FakeChip(traced=True)
+    gt.prefill_chunked(chip, list(range(300)), chunk=128)
+    assert chip.violations == []
+    assert any(e[0] == "alloc" for e in chip.events), "the fake must really allocate, or this test proves nothing"
+
+
+def test_traces_are_back_after_the_prefill_so_decode_is_traced():
+    chip = FakeChip(traced=True)
+    gt.prefill_chunked(chip, list(range(300)), chunk=128)
+    assert chip.traces_alive()
+    chip.step(5)
+    assert chip.events[-1] == ("step", "traced")
+
+
+def test_events_are_release_then_allocations_then_capture():
+    chip = FakeChip(traced=True)
+    chip.events.clear()
+    gt.prefill_chunked(chip, list(range(70)), chunk=128)
+    kinds = [e[0] for e in chip.events]
+    assert kinds[0] == "release"
+    assert kinds.index("capture") > max(i for i, k in enumerate(kinds) if k == "alloc")   # every allocation is before the capture
+    assert kinds.count("release") == 1 and kinds.count("capture") == 1
+
+
+def test_a_second_request_releases_and_recaptures_again():
+    chip = FakeChip(traced=True)
+    for _ in range(3):
+        chip.reset()
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+        chip.step(1)
+        chip.step(2)
+    assert chip.violations == []
+    assert [e[0] for e in chip.events].count("release") == 3
+    assert chip.traces_alive()
+
+
+def test_traces_come_back_even_when_the_prefill_raises():
+    chip = FakeChip(traced=True, fail_in_chunk=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("boom"))
+    with pytest.raises(RuntimeError, match="boom"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert chip.traces_alive()
+
+
+def test_an_untraced_chip_never_releases_or_captures():
+    chip = FakeChip(traced=False)
+    gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert [e for e in chip.events if e[0] in ("release", "capture")] == []
+
+
+def test_the_default_prefill_is_chunked_for_a_long_prompt_in_composed_mode():
+    chip = FakeChip(traced=True)
+    gt.prefill(chip, list(range(300)), chunked=True)
+    assert any(e == ("alloc", "chunk128") for e in chip.events)
+    assert chip.violations == []
+
+
+def test_a_short_prompt_stays_on_the_traced_step_path():
+    """Fewer than 33 tokens leaves no block of 32 for the chunked path, so nothing is released and no trace is rebuilt."""
+    chip = FakeChip(traced=True)
+    chip.events.clear()
+    chip.run_step_prefill = lambda ids: chip.step(ids[-1])
+    gt.prefill(chip, list(range(20)), chunked=True)
+    assert [e for e in chip.events if e[0] in ("release", "capture")] == []
+
+
+def test_the_disable_flag_keeps_the_step_loop():
+    chip = FakeChip(traced=True)
+    chip.events.clear()
+    chip.run_step_prefill = lambda ids: chip.step(ids[-1])
+    gt.prefill(chip, list(range(300)), chunked=False)
+    assert not any(e[0] in ("release", "capture") or e == ("alloc", "chunk128") for e in chip.events)
+
+
+def test_a_kernel_mode_chip_uses_the_step_loop_even_when_chunked_is_on():
+    chip = FakeChip(traced=True, ssd="state_full")
+    chip.events.clear()
+    chip.run_step_prefill = lambda ids: chip.step(ids[-1])
+    gt.prefill(chip, list(range(300)), chunked=True)
+    assert not any(e[0] == "release" for e in chip.events)
+
+
+def test_chunk_sizes_and_tail_match_the_chip_rules():
+    """300 tokens: body 299 = 128 + 128 + 32 + 11 left over for the decode-step tail, then the last token."""
+    chip = FakeChip(traced=False)
+    gt.prefill_chunked(chip, list(range(300)), chunk=128)
+    assert [e[1] for e in chip.events if e[0] == "alloc" and e[1].startswith("chunk")] == ["chunk128", "chunk128", "chunk32"]
+    assert len([e for e in chip.events if e[0] == "tail"]) == 11
+    assert chip.pos == 300
+
+
+def test_context_limit_is_checked_before_any_trace_is_released():
+    chip = FakeChip(traced=True)
+    chip.L = 100
+    chip.events.clear()
+    with pytest.raises(ValueError, match="context limit"):
+        gt.prefill_chunked(chip, list(range(300)), chunk=128)
+    assert [e for e in chip.events if e[0] == "release"] == []
+
+
+def test_the_tail_runs_on_the_recaptured_trace():
+    """The 11 left-over tokens and the last one replay the new trace: capture comes before them."""
+    chip = FakeChip(traced=True)
+    chip.events.clear()
+    gt.prefill_chunked(chip, list(range(300)), chunk=128)
+    kinds = [e[0] for e in chip.events]
+    assert kinds.index("capture") < kinds.index("tail")
+    assert [e for e in chip.events if e[0] == "tail"] == [("tail", "traced")] * 11
+    assert chip.events[-1] == ("step", "traced")
+
+
+# ---- review of PR 296 -----------------------------------------------------------------------------------------------------------
+def test_a_chunked_chip_captures_one_trace_so_no_capture_happens_while_another_trace_is_alive():
+    """Capturing the second (no-head) trace allocates while the first trace exists. With chunked prefill on, the tail of a prompt is at most 31
+    tokens, so the second trace is not worth that risk: the chunked configuration captures the full trace only."""
+    assert gt.trace_names(chunked=True, fast_prefill=True) == ("full",)
+    assert gt.trace_names(chunked=False, fast_prefill=True) == ("full", "nohead")
+    assert gt.trace_names(chunked=False, fast_prefill=False) == ("full",)
+    assert gt.trace_names(chunked=True, fast_prefill=False) == ("full",)
+
+
+def test_the_chunk_failure_is_reported_before_the_recapture_is_attempted():
+    chip = FakeChip(traced=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+    order = []
+    real_capture = chip.capture_traces
+    chip.capture_traces = lambda: (order.append("capture-attempt"), real_capture())[1]
+    with pytest.raises(RuntimeError, match="block failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128, report=lambda exc: order.append(f"report:{exc}"))
+    assert order == ["report:block failed", "capture-attempt"]
+
+
+def test_the_original_failure_survives_a_failed_recapture():
+    chip = FakeChip(traced=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+
+    def bad_capture():
+        raise OSError("recapture failed")
+    chip.capture_traces = bad_capture
+    with pytest.raises(RuntimeError, match="block failed") as info:
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert isinstance(info.value.__context__, RuntimeError) or isinstance(info.value.__cause__, OSError)
+    assert "recapture failed" in str(info.value.__cause__)
+
+
+def test_the_requested_chunk_size_reaches_the_server_flow():
+    chip = FakeChip(traced=False)
+    gt.prefill(chip, list(range(300)), chunked=True, chunk=64)
+    assert [e[1] for e in chip.events if e[0] == "alloc" and e[1].startswith("chunk")] == ["chunk64"] * 4 + ["chunk32"]
+
+
+# ---- review of PR 296, round 2 ----------------------------------------------------------------------------------------------------
+def test_a_failed_recapture_marks_the_chip_unusable_and_the_next_request_is_refused():
+    chip = FakeChip(traced=True)
+    marked = []
+    chip.mark_unusable = lambda exc: (marked.append(str(exc)), setattr(chip, "unusable", str(exc)))
+
+    def bad_capture():
+        raise OSError("capture failed")
+    chip.capture_traces = bad_capture
+    with pytest.raises(OSError, match="capture failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert marked == ["capture failed"]
+    with pytest.raises(RuntimeError, match="unusable"):
+        gt.prefill(chip, list(range(200)), chunked=True)
+    with pytest.raises(RuntimeError, match="unusable"):
+        gt.prefill(chip, list(range(5)), chunked=True)
+
+
+def test_a_reporter_that_raises_does_not_stop_the_recapture_or_replace_the_failure():
+    chip = FakeChip(traced=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+
+    def bad_report(exc):
+        raise OSError("stderr closed")
+    with pytest.raises(RuntimeError, match="block failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128, report=bad_report)
+    assert chip.traces_alive()
+
+
+def test_the_server_flow_passes_the_reporter_to_the_chunked_path():
+    chip = FakeChip(traced=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+    seen = []
+    with pytest.raises(RuntimeError):
+        gt.prefill(chip, list(range(200)), chunked=True, report=lambda exc: seen.append(str(exc)))
+    assert seen == ["block failed"]
+
+
+# ---- review of PR 296, round 3: an unusable chip refuses every entry point ------------------------------------------------------
+class BrokenChip(FakeChip):
+    """A chip whose recapture failed once: it has marked itself unusable."""
+    def __init__(self):
+        super().__init__(traced=True)
+        self.unusable = None
+
+    def mark_unusable(self, exc):
+        self.unusable = f"{type(exc).__name__}: {exc}"
+
+
+def broken_after_failed_recapture():
+    chip = BrokenChip()
+
+    def bad_capture():
+        raise OSError("capture failed")
+    real = chip.capture_traces
+    chip.capture_traces = bad_capture
+    with pytest.raises(OSError):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    chip.capture_traces = real
+    return chip
+
+
+def test_prefill_chunked_itself_refuses_an_unusable_chip_before_touching_anything():
+    chip = broken_after_failed_recapture()
+    chip.events.clear()
+    with pytest.raises(RuntimeError, match="unusable until the server is restarted"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert chip.events == []                      # no release, no block, no capture
+
+
+def test_every_entry_point_checks_usable():
+    chip = broken_after_failed_recapture()
+    for call in (lambda: gt.prefill(chip, list(range(200))), lambda: gt.prefill(chip, list(range(5))),
+                 lambda: gt.prefill_chunked(chip, list(range(200))), lambda: gt.check_usable(chip)):
+        with pytest.raises(RuntimeError, match="capture failed"):
+            call()
+
+
+def test_a_diagnostic_that_cannot_be_written_does_not_replace_the_capture_error():
+    """mark_unusable on the real chip prints; the flow must survive a mark_unusable that raises."""
+    chip = FakeChip(traced=True)
+
+    def bad_mark(exc):
+        raise OSError("stderr closed")
+    chip.mark_unusable = bad_mark
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+
+    def bad_capture():
+        raise OSError("capture failed")
+    chip.capture_traces = bad_capture
+    with pytest.raises(RuntimeError, match="block failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+
+
+# ---- review of PR 296, round 4 ------------------------------------------------------------------------------------------------
+def test_a_failed_trace_release_marks_the_chip_unusable_and_the_original_error_propagates():
+    chip = BrokenChip()
+
+    def bad_release():
+        raise RuntimeError("release failed")
+    chip.release_traces = bad_release
+    with pytest.raises(RuntimeError, match="release failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert chip.unusable and "release failed" in chip.unusable
+    with pytest.raises(RuntimeError, match="unusable"):
+        gt.prefill(chip, list(range(200)))
+
+
+def test_prefill_chunked_refuses_a_chip_that_would_capture_the_no_head_trace():
+    """chunked_prefill=False with fast_prefill captures two traces; recapturing them after the blocks would capture the second while the first is alive."""
+    chip = FakeChip(traced=True)
+    chip.trace_names = lambda: ("full", "nohead")
+    chip.events.clear()
+    with pytest.raises(ValueError, match="chunked_prefill=True"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert chip.events == []
+    chip.trace_names = lambda: ("full",)
+    gt.prefill_chunked(chip, list(range(200)), chunk=128)

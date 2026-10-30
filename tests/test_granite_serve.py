@@ -346,3 +346,81 @@ def test_same_seed_repeats_sampling_and_a_different_seed_differs():
         eng = Flat([0], max_len=64)
         return "".join(p for p, _ in serve.generate(eng, FakeTok(), [1], 12, {EOS}, (), temperature=1.0, top_p=1.0, seed=seed))
     assert go(7) == go(7) and go(7) != go(8)
+
+
+class UnusableEngine(FakeEngine):
+    """An engine whose chip marked itself unusable after a failed trace recapture."""
+    unusable = "OSError: capture failed"
+
+
+def _serve_with(engine):
+    class T:
+        def encode(self, text, add_special_tokens=False):
+            return type("E", (), {"ids": [1, 2, 3]})()
+    tpl = serve.make_template(ROOT / "tests" / "fixtures" / "granite_tiny_template.jinja")
+    serve.STATE.update(tok=T(), template=tpl, stop_ids={EOS}, engine=engine)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def test_health_reports_an_unusable_chip_with_503_and_a_usable_one_with_200():
+    import urllib.error
+    srv, base = _serve_with(FakeEngine([0, 1]))
+    try:
+        assert json.load(urllib.request.urlopen(base + "/health"))["status"] == "ok"
+    finally:
+        srv.shutdown()
+    srv, base = _serve_with(UnusableEngine([0, 1]))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(base + "/health")
+        body = json.load(e.value)
+        assert e.value.code == 503 and body["status"] == "unusable" and "capture failed" in body["reason"]
+    finally:
+        srv.shutdown()
+
+
+def test_chat_requests_are_refused_with_503_while_the_chip_is_unusable():
+    import urllib.error
+    srv, base = _serve_with(UnusableEngine([0, 1]))
+    try:
+        rq = urllib.request.Request(base + "/v1/chat/completions", json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                    {"Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(rq)
+        assert e.value.code == 503 and "restart" in json.load(e.value)["error"]["message"]
+    finally:
+        srv.shutdown()
+
+
+def test_the_chip_engine_exposes_the_models_unusable_state_and_refuses_reset_prefill_and_step():
+    class M:
+        L, unusable = 64, "OSError: capture failed"
+    eng = serve.ChipEngine(M())
+    assert eng.unusable == "OSError: capture failed"
+    for call in (eng.reset, lambda: eng.prefill([1, 2]), lambda: eng.step(1)):
+        with pytest.raises(RuntimeError, match="unusable"):
+            call()
+
+
+def test_a_request_that_loses_the_race_to_a_failed_recapture_gets_503_before_any_header():
+    """The chip becomes unusable after the first check and before the lock: the second check, under the lock, must still answer 503."""
+    import urllib.error
+
+    class Flaky(FakeEngine):
+        calls = 0
+
+        @property
+        def unusable(self):
+            Flaky.calls += 1
+            return None if Flaky.calls == 1 else "OSError: capture failed"      # healthy at the first look, broken afterwards
+    srv, base = _serve_with(Flaky([0, 1]))
+    try:
+        rq = urllib.request.Request(base + "/v1/chat/completions", json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                    {"Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(rq)
+        assert e.value.code == 503
+    finally:
+        srv.shutdown()

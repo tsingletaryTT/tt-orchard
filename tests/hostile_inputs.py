@@ -875,6 +875,7 @@ assert all(name in BY_NAME for readers in KNOWN_DEFECTS.values() for name in rea
 UNREGISTERED_MODULES = (
     'prefill_bench.py',
     'acestep_package.py',
+    'prefill_bench.py',
     'step_bars.py',
     '_proofs/telegraph_sqlite.py',
     'adapters/gozer.py',

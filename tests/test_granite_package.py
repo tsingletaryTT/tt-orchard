@@ -17,14 +17,14 @@ def _sess(name, load, mean):
 _L = {"rel_l2_mean": 0.0165, "rel_l2_max": 0.256, "top1": 0.984}
 _F = {"rel_l2_mean": 0.0104, "rel_l2_max": 0.138, "top1": 0.978}
 SUMMARY = {
-    "version": "0.2.0", "floor_tok_s": 175.2, "context": 2048, "sessions": [_sess("session 1", 3.0, 34.0), _sess("session 2", 20.0, 25.0)],
+    "version": "0.3.0", "floor_tok_s": 175.2, "context": 2048, "sessions": [_sess("session 1", 3.0, 34.0), _sess("session 2", 20.0, 25.0)],
     "numbers_note": "Test note.", "sessions_note": "Sessions differ.",
     "agreement_short": {"floor": {"rel_l2": [0.0047, 0.0121, 0.0043, 0.0111], "top1": [1.0, 1.0, 0.875, 1.0], "prefix": [3, 24, 8, 24]},
                         "chip": {"rel_l2": [0.0066, 0.018, 0.0076, 0.0184], "top1": [1.0, 1.0, 0.917, 1.0], "prefix": [3, 24, 13, 24]}},
     "agreement_note": "Four prompts only.", "agreement_long": [{"kind": "prose", "tokens": 2048, "chip": _L, "floor": _F, "first_1024": {"chip_vs_fp32": _L, "bf16_cpu_vs_fp32": _F}}],
     "long_note": "One sequence of each kind.", "prefill_note": "Prefill is a loop of decode steps.", "context_sweep": [{"max_len": 512, "mean": 35.0}],
     "limits": ["Limit one.", "Limit two."], "not_tested": ["Not tested one."], "kernel_modes": {"text": "Optional kernel modes exist; see the run log."},
-    "changelog": ["A change."],
+    "changelog": ["A change."], "changelog_older": [{"version": "0.2.0", "items": ["An older change."]}],
 }
 
 
@@ -34,7 +34,8 @@ def staged(tmp_path):
     summary.write_text(json.dumps(SUMMARY))
     ev = tmp_path / "ev"
     ev.mkdir()
-    (ev / "bench.json").write_text('{"x": 1}')
+    for name in ("bench.json", "smoke.json", "bench-L512.json", "agree-prose-2048.json"):          # every file the fixture summary cites
+        (ev / name).write_text('{"x": 1}')
     out = tmp_path / "pkg"
     gp.stage(summary, ev, out)
     return out
@@ -71,6 +72,7 @@ def test_refuses_to_stage_into_a_used_directory(tmp_path, staged):
     ("bad python", lambda p: (p / "runtime" / "granite_chip.py").write_text("def ("), "does not compile"),
     ("bad shell", lambda p: (p / "run.sh").write_text("if then\n"), "bash -n"),
     ("missing file", lambda p: (p / "NOTICE").unlink(), "NOTICE"),
+    ("trace module missing", lambda p: (p / "runtime" / "granite_trace.py").unlink(), "granite_trace.py"),
     ("kernel changed", lambda p: (p / "runtime" / "kernels" / "state.py").write_text("# changed\n"), "changed after"),
 ])
 def test_gate_catches(staged, name, mutate, fragment):
@@ -185,10 +187,10 @@ def test_sha256sums_catches_a_changed_unrecorded_file_and_an_extra_file(staged):
 
 
 def test_version_must_be_in_card_record_and_changelog(staged):
-    (staged / "README.md").write_text((staged / "README.md").read_text().replace("Version 0.2.0", "Version 0.1.0"))
+    (staged / "README.md").write_text((staged / "README.md").read_text().replace(f"Version {gp.VERSION}", "Version 0.1.0"))
     (staged / "CHANGELOG.md").write_text("# Changelog\n")
     out = problems(staged)
-    assert any("Version 0.2.0" in x for x in out) and any("CHANGELOG.md" in x for x in out)
+    assert any(f"Version {gp.VERSION}" in x for x in out) and any("CHANGELOG.md" in x for x in out)
 
 
 def test_card_has_the_machine_readable_measured_rows():
@@ -217,3 +219,43 @@ def test_self_test_treats_a_port_in_time_wait_as_free(tmp_path):
     r = subprocess.run([sys.executable, str(gp.ROOT / "pkgsrc" / "tools" / "selftest.py"), "--port", str(port)],
                        env={**__import__("os").environ, "HF_HOME": str(tmp_path), "TT_METAL_HOME": ""}, capture_output=True, text=True, timeout=120)
     assert any(x.startswith("ok") and "port:" in x for x in r.stdout.splitlines()), r.stdout
+
+
+def test_the_runtime_ships_the_trace_module_beside_the_chip_module(staged):
+    """granite_chip.py imports granite_trace from its own directory, so a package without it cannot start the server."""
+    assert (staged / "runtime" / "granite_trace.py").is_file()
+    assert "import granite_trace" in (staged / "runtime" / "granite_chip.py").read_text()
+
+
+def test_the_changelog_keeps_the_older_section(staged):
+    text = (staged / "CHANGELOG.md").read_text()
+    assert f"## {gp.VERSION}" in text and "Changes from 0.2.0:" in text and "## 0.2.0" in text and "An older change." in text and "## 0.1.0" in text
+
+
+def test_the_server_flag_that_turns_chunked_prefill_off_exists():
+    src = (gp.ROOT / "pkgsrc" / "server" / "serve.py").read_text()
+    assert "--no-chunked-prefill" in src and "GRANITE_CHUNKED_PREFILL" in src and "chunked_prefill=not a.no_chunked_prefill" in src
+
+
+def test_a_named_headline_session_leads_the_machine_readable_rows():
+    s = {**SUMMARY, "headline": "session 2"}
+    assert gp.headline(s)["name"] == "session 2" and gp.headline(SUMMARY)["name"] == "session 1"      # without the key: the lowest load
+    row = [x for x in gp.number_rows(s) if x.startswith("| Decode speed, `chat` prompt")][0]
+    assert "25.0 tok/s" in row
+    with pytest.raises(ValueError, match="session 9"):
+        gp.headline({**SUMMARY, "headline": "session 9"})
+
+
+def test_a_card_that_cites_an_evidence_file_the_package_lacks_fails_the_gate(staged):
+    """Review of PR 296: a package staged without the raw file behind a cited number used to pass."""
+    (staged / "evidence" / "bench.json").unlink()
+    out = problems(staged)
+    assert any("cites evidence/bench.json" in x for x in out), out
+
+
+def test_a_summary_with_an_unknown_headline_is_a_gate_finding_and_not_a_crash(staged):
+    summary = json.loads((staged / "evidence" / "summary.json").read_text())
+    summary["headline"] = "session 9"
+    (staged / "evidence" / "summary.json").write_text(json.dumps(summary))
+    out = problems(staged)
+    assert any("cannot be used to check the card" in x for x in out), out

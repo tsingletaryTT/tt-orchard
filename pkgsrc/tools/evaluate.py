@@ -30,6 +30,8 @@ ap.add_argument("--ssd", default="composed")
 ap.add_argument("--kernel-dir", default=str(Path(__file__).resolve().parent.parent / "runtime" / "kernels"))
 ap.add_argument("--no-trace", action="store_true")
 ap.add_argument("--no-fast-prefill", action="store_true")
+ap.add_argument("--skip-read-every-step", action="store_true", help="bench: leave out the slow prefill row that reads the logits after every token")
+ap.add_argument("--no-chunked-prefill", action="store_true", help="prefill with one decode step per token (the older path)")
 ap.add_argument("--skip-prompts", action="store_true", help="agree: only the long sequence")
 ap.add_argument("--ssd-precision", default="fp32")
 ap.add_argument("--ref")
@@ -43,8 +45,9 @@ dev = ttnn.open_device(device_id=0, trace_region_size=400 * 1024 * 1024)
 res = {"cmd": a.cmd, "max_len": a.max_len, "ssd": a.ssd, "ssd_precision": a.ssd_precision, "traced": not a.no_trace}
 try:
     t0 = time.time()
-    m = GraniteChip(dev, a.model_dir, max_len=a.max_len, ssd=a.ssd, kernel_dir=a.kernel_dir, trace=not a.no_trace, ssd_precision=a.ssd_precision, fast_prefill=not a.no_fast_prefill)
+    m = GraniteChip(dev, a.model_dir, max_len=a.max_len, ssd=a.ssd, kernel_dir=a.kernel_dir, trace=not a.no_trace, ssd_precision=a.ssd_precision, fast_prefill=not a.no_fast_prefill, chunked_prefill=not a.no_chunked_prefill)
     res["load_s"] = round(time.time() - t0, 1)
+    res["chunked_prefill"] = bool(m.chunked_prefill)         # what the constructed model uses for prompts of 33 or more tokens
     res["ssd_precision"] = "fp32" if m.f32 else "bf16"       # what the constructed model uses (kernel modes force bf16)
     if a.cmd == "bench":
         prompt = [48, 25, 3639, 374, 220, 1114, 3115, 220, 1419, 5380, 32, 25]
@@ -75,7 +78,8 @@ try:
         for n in [int(x) for x in a.prefill_sizes.split(',') if x and int(x) < a.max_len]:
             ids = ids_all[:n]
             rec = {"n": n}
-            for label, fn in (("loop_read_last", lambda: m.prefill(ids)), ("loop_read_every_step", lambda: [m.step(t) for t in ids])):
+            rows = (("loop_read_last", lambda: m.prefill(ids)),) + (() if a.skip_read_every_step else (("loop_read_every_step", lambda: [m.step(t) for t in ids]),))
+            for label, fn in rows:
                 times = []
                 for rep in range(3):
                     m.reset()
