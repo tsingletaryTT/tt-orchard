@@ -936,6 +936,7 @@ UNREGISTERED_MODULES = (
     'telegraph_cmd.py',
     'text_cli.py',
     'text_remote.py',
+    'text_stages.py',
     'text_runtime.py',
     'ttnn_dump.py',
     'verify_package.py',
