@@ -894,6 +894,8 @@ assert all(name in BY_NAME for readers in KNOWN_DEFECTS.values() for name in rea
 
 # Modules that parse JSON and have no reader in READERS yet: the backlog. tests/test_hostile_readers.py keeps this list exact.
 UNREGISTERED_MODULES = (
+    'acestep_package.py',
+    'step_bars.py',
     '_proofs/telegraph_sqlite.py',
     'adapters/gozer.py',
     'agent.py',
