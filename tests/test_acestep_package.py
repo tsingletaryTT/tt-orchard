@@ -20,6 +20,11 @@ def _sweep():
             "rows": [{"duration_s": d, "warmup": 1, "runs": [run(d / 9), run(d / 8.5), run(d / 8)]} for d in (30.0, 60.0)]}
 
 
+def _base_sweep():
+    run = lambda t: {"generate_and_decode_s": t, "vae_s": t / 8, "dit_s": t / 9, "dit_calls": 8}
+    return {"device": "chip", "seed": 42, "load": {}, "rows": [{"duration_s": d, "warmup": 1, "runs": [run(d / 3), run(d / 3.1), run(d / 3.2)]} for d in (30.0, 60.0)]}
+
+
 def _evidence(tmp_path):
     ev = tmp_path / "ev"
     ev.mkdir()
@@ -30,7 +35,11 @@ def _evidence(tmp_path):
     boot = {"ok": True, "ready_s": 16.0, "request_s": 3.3, "duration_s": 30.0, "sample_rate": 48000, "channels": 2, "clip_duration_s": 30.0, "identical_to_recorded_clip": True}
     (ev / "agreement.json").write_text(json.dumps(agreement))
     (ev / "boot.json").write_text(json.dumps(boot))
-    summary = pk.make_summary(_sweep(), [json.loads((ev / "bars-lofi.json").read_text()), json.loads((ev / "bars-folk.json").read_text())], agreement, boot)
+    base = _base_sweep()
+    (ev / "sweep-base.json").write_text(json.dumps(base))
+    (ev / "profile.json").write_text(json.dumps({"runs": []}))
+    (ev / "agreement-end-to-end.json").write_text(json.dumps({"end_to_end_vs_float32_cpu": {}}))
+    summary = pk.make_summary(_sweep(), [json.loads((ev / "bars-lofi.json").read_text()), json.loads((ev / "bars-folk.json").read_text())], agreement, boot, base=base)
     (ev / "summary.json").write_text(json.dumps(summary))
     return ev
 
@@ -143,7 +152,7 @@ def test_the_checked_in_evidence_directory_can_stage_a_package(tmp_path):
     for rel in pk.WEIGHT_FILES:
         (snap / rel).parent.mkdir(parents=True, exist_ok=True)
         (snap / rel).write_bytes(b"w")
-    out = pk.stage(REPO / "docs" / "run-logs" / "evidence" / "acestep-package", code, snap, tmp_path / "pkg")
+    out = pk.stage(REPO / "docs" / "run-logs" / "evidence" / "acestep-package-fast", code, snap, tmp_path / "pkg")
     assert pk.package_problems(out) == []
 
 
@@ -167,3 +176,58 @@ def test_the_manifest_command_names_the_paths_the_server_requires(staged):
 
 def test_run_sh_honours_xdg_cache_home(staged):
     assert "XDG_CACHE_HOME" in (staged / "run.sh").read_text()
+
+
+# ---- the chip-path version (0.2.0): where each piece runs, the new runtime files, the other-time column, the before column ----------------
+def test_the_runtime_has_the_chip_path_files_and_the_gate_requires_them(staged):
+    assert (staged / "runtime" / "acestep_fast.py").is_file() and (staged / "runtime" / "acestep_chip.py").is_file()
+    (staged / "runtime" / "acestep_chip.py").unlink()
+    assert any("runtime/acestep_chip.py" in x for x in pk.package_problems(staged))
+
+
+def test_the_card_says_which_pieces_run_on_the_chip_and_which_on_the_cpu(staged):
+    card = (staged / "README.md").read_text()
+    assert "## What runs on the chip" in card
+    for piece in ("text encoder", "lyric encoder", "cross-attention keys and values", "tokeniser", "WAV write"):
+        assert piece in card, piece
+    assert "Only the diffusion transformer and the VAE decoder run on the chip" not in card
+    assert "they are most of each request" not in card
+    (staged / "README.md").write_text(card.replace("## What runs on the chip", "## Chip"))
+    assert any("What runs on the chip" in x for x in pk.package_problems(staged))
+
+
+def test_the_numbers_table_has_an_other_column_and_the_time_before_the_chip_steps(staged):
+    card = (staged / "README.md").read_text()
+    assert "Other (median total minus the two chip stages)" in card and "Median before the chip steps" in card
+    s = json.loads((staged / "evidence" / "summary.json").read_text())
+    row = s["sweep"]["rows"][0]
+    assert abs(row["other_median"] - (row["median"] - row["dit_median"] - row["vae_median"])) < 1e-9
+    assert row["base_median"] is not None
+
+
+def test_a_missing_base_sweep_leaves_the_before_column_empty_and_a_length_it_lacks_is_n_a():
+    base = _base_sweep()
+    base["rows"] = base["rows"][:1]
+    s = pk.make_summary(_sweep(), [json.loads((BARS / "lofi-bars.json").read_text())], {"passed": 1, "arrays": 1, "failed": [], "latent_pcc": 1.0, "waveform_pcc": 1.0}, {"ok": True}, base=base)
+    assert s["sweep"]["rows"][0]["base_median"] is not None and s["sweep"]["rows"][1]["base_median"] is None
+    s = pk.make_summary(_sweep(), [json.loads((BARS / "lofi-bars.json").read_text())], {"passed": 1, "arrays": 1, "failed": [], "latent_pcc": 1.0, "waveform_pcc": 1.0}, {"ok": True})
+    assert all(r["base_median"] is None for r in s["sweep"]["rows"])
+
+
+def test_run_sh_passes_the_fast_setting_to_the_server(staged):
+    text = (staged / "run.sh").read_text()
+    assert "ACESTEP_FAST" in text and '--fast "${ACESTEP_FAST:-all}"' in text
+
+
+def test_the_version_is_the_chip_path_version(staged):
+    assert pk.VERSION == "0.2.0"
+    assert "## 0.2.0" in (staged / "CHANGELOG.md").read_text()
+
+
+def test_the_boot_line_states_the_second_request_when_the_record_has_one():
+    b = {"ok": True, "ready_s": 18.0, "request_s": 1.57, "second_request_s": 0.97, "duration_s": 30.0, "sample_rate": 48000, "channels": 2, "clip_duration_s": 30.0,
+         "identical_to_recorded_clip": True}
+    s = {"boot": b}
+    assert "0.97" in pk.boot_line(s) and "second" in pk.boot_line(s)
+    del b["second_request_s"]
+    assert "second" not in pk.boot_line(s)

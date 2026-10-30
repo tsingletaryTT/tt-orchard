@@ -3396,3 +3396,11 @@ Prompt (operator, relayed): the ACE-Step 1.5 turbo package is not ready; put mor
 - A higher matmul fidelity was not always better: the text encoder gained (0.0228 to 0.0187), the lyric encoder lost (0.0125 to 0.0316). Each stack has its own setting.
 - Not done: the planner (272), the XL transformer (273), sampler and wavelet correction on the device (under 0.2 s at 480 s).
 - Log: `docs/run-logs/2026-10-30-acestep-chip-path.md`; evidence in `docs/run-logs/evidence/acestep-chip-path/`. Clips: `orchard-audio/acestep-2026-10-30-chip-path/` (before and after, same prompt and seed).
+
+## 2026-10-30 ACE-Step package 0.2.0: the faster path packaged, regated, boot-checked (issue 254 step 3; branch `acestep-package-fast`, stacked on `acestep-chip-path`)
+Prompt (operator, relayed): rebuild the local package with the faster path, regate, boot check on a chip, update its numbers from fresh measurements (1 warm-up, 3 timed runs at 30, 60, 120, 240, 480 s).
+- Package 0.2.0 adds `runtime/acestep_fast.py` and `runtime/acestep_chip.py`; the server takes `--fast` (default `all`, `ACESTEP_FAST` in `run.sh`). The card has a "What runs on the chip" section, an "Other" column and a column with the 0.1.0 path measured in the same hour. Gate: 0 problems. Seven new package tests and one serve test, each gate change mutated red.
+- Numbers: 30 s 0.93 s, 60 s 1.63 s, 120 s 2.95 s, 240 s 5.67 s, 480 s 12.26 s (medians; 0.1.0 path 3.00, 3.76, 5.06, 7.69, 14.57 in the same hour). The request is now bound by the chip's VAE and transformer.
+- Boot on a chip: `run.sh fetch`, `--self-test`, ready line after 18 s, first 30 s request 1.57 s and a second 0.97 s with identical samples to the CLI clip, a 60 s request with a 207-token lyric 1.91 s, a 120 s request 3.31 s. The staged files equal the booted copy byte for byte.
+- Not done: upload (nothing is published), a second boot of a pulled copy, the planner and the XL transformer.
+- Log: `docs/run-logs/2026-10-30-acestep-package-fast.md`; evidence in `docs/run-logs/evidence/acestep-package-fast/`.

@@ -340,3 +340,10 @@ def test_stepcheck_conditioning_is_the_recorded_one_unless_own_is_asked_for():
 def test_own_conditioning_flag_is_parsed():
     a = run.parse(["--device", "chip", "--bundle-code", "b", "--snapshot", "s", "--root", "r", "--out", "o", "--prompt", "p", "--own-conditioning"])
     assert a.own_conditioning is True
+
+
+def test_server_options_default_to_every_fast_step_and_accept_none():
+    p = serve.build_parser()
+    a = p.parse_args(["--bundle-code", "b", "--snapshot", "s", "--root", "r"])
+    assert a.fast == "all"
+    assert p.parse_args(["--bundle-code", "b", "--snapshot", "s", "--root", "r", "--fast", "none"]).fast == "none"
