@@ -145,7 +145,7 @@ With every step on (`profile-fast-30-120-480.json`, quiet host):
 | 480 s | 12.036 | 6.445 | 4.646 | 0.194 | 0.157 | 0.085 | 0.5 |
 
 What is left on the CPU is the tokeniser and masks, the host-side mask and rotary tables of `prepare` (a [S, S] float tensor per song), the sampler update and wavelet correction (0.007 s at 30 s, 0.05 s at 480 s),
-the peak normalisation and the WAV write. Together they are 7 percent of a 30 s request and 4 percent of a 480 s one. They were not moved: the largest is 0.19 s at 480 s.
+the peak normalisation and the WAV write. Together with the chip-side encoders (about 0.03 s) they are the time outside the two chip stages: 9 percent of a 30 s request (0.08 s of 0.93 s) and 8 percent of a 480 s one (0.95 s of 12.04 s). They were not moved: the largest is 0.19 s at 480 s.
 
 ## Length sweep (1 warm-up, 3 timed calls per length, same host, same hour)
 
