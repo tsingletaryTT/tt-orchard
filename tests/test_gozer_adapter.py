@@ -124,6 +124,14 @@ def test_release_whose_reset_failed_raises():
         a.release(LEASE)
 
 
+def test_release_exit_19_is_a_failed_reset_and_names_the_recovery():
+    """gozer 0.3.7: a release whose reset failed exits 19 (it was 0); the lease is gone and the units are not marked clean."""
+    a, _ = make({"release": [(19, {"status": "reset-failed", "units": ["0000:03:00.0"],
+                                   "recovery": "gozer reset-all --who W"}, "")]})
+    with pytest.raises(ResetFailed, match="reset-all"):
+        a.release(LEASE)
+
+
 def test_release_of_a_gone_lease_is_quiet():
     a, _ = make({"release": [(13, {"released": False, "message": "lease fb9995 not found"}, "")]})
     a.release(LEASE)
