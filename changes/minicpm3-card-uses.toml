@@ -1,2 +1,3 @@
 target = "0.9.74"
 summary = "MiniCPM3 package card says what the model is for and where it is not a fit"
+pr = 277
