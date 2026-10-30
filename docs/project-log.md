@@ -3303,3 +3303,10 @@ Prompt: fix what is left of issues 201 and 164, wire the noise floor into audio 
 - Hugging Face cache snapshots hold config.json and the weight index as links into the blobs directory. `safeio.resolved` follows the link before the bounded read in `stock_runtime` (config and index), `nearest` and `swap_draft` (manifests), `package` and `verdict` (run files), and the operator-named files of `bench_session`, `classify_bench`, `prompt_suite`, `opinventory`, `opvariants`, `transcripts` and `toolcall_bench`. A link to a device or a loop is still refused. Test: a cache-shaped snapshot with linked config and sharded index.
 - Release rollback: `atomic_write(created=...)` records the creation at the link, so the rollback removes the notes file only when this call made it. Test: another invocation creates the file and this one fails before the link.
 - `audio_bars.py`, `boards_seen.py` and `verify_package.py` (new on main) joined the hostile-reader backlog list.
+
+## 2026-10-29 Next-round plan (PR 257)
+Prompt (operator): "look for more issues on our list that will unlock another round of models." Research only: no hardware, downloads or publishing.
+- `docs/run-logs/2026-10-29-next-round-plan.md` ranks the open issues by the models each would let tt-orchard bring up, with named models, effort estimates (marked as estimates) and a sequence: #93 with #62, #60 with #73, #183, #184, #63.
+- Findings: the preflight already routes a tt-transformers model (Llama-3.1-8B dry-run), so #62's title is older than the code. `Qwen/Qwen3.6-27B` and `sensenova/SenseNova-6.8-Code2Video` classify weights-only against the 27B bundle and need a run, not an issue.
+- Instrument faults found and recorded: the classification bench with the Qwen3.5-35B-A3B snapshot as base returned `unknown` for every candidate including the base itself, and a self-control against the 27B snapshot failed on connection resets. Neither reading was used.
+- Dry-runs read the Hub, `gozer status` and `gozer topology` only; all verdicts show `coder-unusable` because the coder holds its port.

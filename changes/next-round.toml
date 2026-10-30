@@ -1,0 +1,4 @@
+target = "0.9.68"
+summary = "Research note ranking open issues by the models each would unlock, with a recommended sequence."
+pr = 257
+kind = "docs"
