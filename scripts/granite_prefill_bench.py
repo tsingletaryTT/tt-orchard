@@ -5,6 +5,11 @@
 
     timeout 570 python3 scripts/granite_prefill_bench.py time  --model-dir DIR --tokens 512 --path step --trace off --log L.jsonl --out R.json
     timeout 570 python3 scripts/granite_prefill_bench.py agree --model-dir DIR --tokens 512 --trace off --log L.jsonl --out R.json
+    timeout 570 python3 scripts/granite_prefill_bench.py seq   --model-dir DIR --tokens 512 --trace on  --log L.jsonl --out R.json
+
+`--path flow` times the server's prefill (`GraniteChip.prefill`, which releases the decode traces, runs chunked blocks and captures them again).
+`seq` runs two requests in a row (prefill, then decode with the traced step, then a second prefill and decode), which exercises the release and
+the re-capture, and records the decode tokens per second of each request.
 
 Run it under a gozer lease (it opens device 0 of the leased chips). Every iteration, the model construction included, logs a line before and
 after and has its own time limit; a hang writes a `hang` line and ends the process with status 97. The prompt is the first N tokens of a text
@@ -14,6 +19,7 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,13 +41,15 @@ def prompt_ids(model_dir, text_file, n):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["time", "agree"])
+    ap.add_argument("mode", choices=["time", "agree", "seq"])
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--tokens", type=int, required=True)
-    ap.add_argument("--path", choices=["step", "chunked"], default="step", help="time mode: which prefill")
+    ap.add_argument("--path", choices=["step", "chunked", "flow"], default="step", help="time mode: which prefill (flow: the server's)")
     ap.add_argument("--trace", choices=["on", "off"], default="off", help="on: the model captures the decode trace (the server's setting)")
     ap.add_argument("--warmups", type=int, default=1)
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--decode-tokens", type=int, default=64, help="seq mode: greedy tokens decoded after each prefill")
+    ap.add_argument("--tokens2", type=int, default=0, help="seq mode: prompt length of the second request (default: the same prompt)")
     ap.add_argument("--chunk", type=int, default=128)
     ap.add_argument("--max-len", type=int, default=2048)
     ap.add_argument("--text", default=str(ROOT / "docs" / "project-log.md"))
@@ -71,10 +79,30 @@ def main():
     (dev, m), _ = pb.run_iteration(log, wd, "construct", 0, a.construct_timeout, open_and_build, phase="setup")
     result = {"mode": a.mode, "tokens": a.tokens, "trace": trace, "max_len": a.max_len, "prompt_sha256": sha, "chunk": a.chunk}
     try:
-        if a.mode == "time":
+        if a.mode == "seq":
+            ids2 = prompt_ids(a.model_dir, a.text, a.tokens2)[0] if a.tokens2 else ids
+            reqs = []
+            for n, prompt in enumerate((ids, ids2), 1):
+                def request(prompt=prompt):
+                    m.reset()
+                    t0 = time.perf_counter()
+                    lg = m.prefill(prompt)
+                    t_pre = time.perf_counter() - t0
+                    t1 = time.perf_counter()
+                    toks = pb.greedy_tokens(lg, m.step, a.decode_tokens)
+                    t_dec = time.perf_counter() - t1
+                    return {"prompt_tokens": len(prompt), "prefill_s": round(t_pre, 3), "tokens": toks,
+                            "decode_tok_s": round((a.decode_tokens - 1) / t_dec, 2), "traces_alive_after": m.traces_alive()}
+                rec, _ = pb.run_iteration(log, wd, "request", n, a.warmup_timeout, request, phase="seq")
+                reqs.append(rec)
+                log.line("request", n=n, **{k: v for k, v in rec.items() if k != "tokens"})
+            result.update(requests=reqs, same_prompt=ids2 == ids, tokens_equal=reqs[0]["tokens"] == reqs[1]["tokens"] if ids2 == ids else None)
+        elif a.mode == "time":
             def once():
                 m.reset()
                 if a.path == "step":
+                    m.run_step_prefill(ids)
+                elif a.path == "flow":
                     m.prefill(ids)
                 else:
                     m.prefill_chunked(ids, chunk=a.chunk)
@@ -83,23 +111,19 @@ def main():
             result.update(path=a.path, **pb.summarize(a.tokens, secs))
         else:
             def greedy(lg):
-                out, t = [], int(lg.argmax())
-                for _ in range(4):
-                    out.append(t)
-                    t = int(m.step(t).argmax())
-                return out
+                return pb.greedy_tokens(lg, m.step, 4)          # steps only when another token is needed (issue 293)
 
             def states():
                 return [ttnn.to_torch(m.ss[i]).float().clone() for i in m.ss]
 
             def ref():
                 m.reset()
-                lg = m.prefill(ids)
+                lg = m.run_step_prefill(ids)                    # the step loop, with the decode trace if the model has one
                 return lg, states(), greedy(lg)
 
             def cand():
                 m.reset()
-                lg = m.prefill_chunked(ids, chunk=a.chunk)
+                lg = m.prefill(ids)                             # the server's flow: release traces, chunked blocks, capture again
                 return lg, states(), greedy(lg)
 
             (lg_r, st_r, nx_r), s_step = pb.run_iteration(log, wd, "step", 1, a.warmup_timeout, ref, phase="agree")

@@ -120,3 +120,68 @@ def test_summary_labels_n_and_reports_every_run():
 def test_total_budget_is_under_ten_minutes():
     # the whole process runs under `timeout`; the plan must fit inside it
     assert pb.PROCESS_TIMEOUT_S < 600
+
+
+# ---- issue 293 ----------------------------------------------------------------------------------------------------------------
+def test_the_kill_runs_even_when_the_hang_line_cannot_be_written(tmp_path):
+    """Issue 293 item 1: if writing the hang line raises OSError the timer thread used to end without calling kill."""
+    class BrokenLog(pb.BenchLog):
+        def line(self, event, **fields):
+            if event == "hang":
+                raise OSError("disk full")
+            super().line(event, **fields)
+
+    log = BrokenLog(tmp_path / "b.log")
+    fired = []
+    wd = pb.Watchdog(log, kill=lambda code: fired.append(code))
+    wd.arm("chunked", 2, 0.05, "timed")
+    time.sleep(0.5)
+    assert fired == [pb.HANG_EXIT]
+
+
+def test_a_failing_iteration_logs_the_exception_text_before_it_propagates(tmp_path):
+    """Issue 293 item 2: the trace-on wedge ended by an exception whose text was lost when the cleanup hung."""
+    log = pb.BenchLog(tmp_path / "b.log")
+    seen_at_raise = []
+
+    def fn():
+        raise RuntimeError("device buffer corrupted")
+
+    with pytest.raises(RuntimeError, match="device buffer corrupted"):
+        try:
+            pb.run_iteration(log, pb.Watchdog(log, kill=lambda c: None), "chunked", 4, 60, fn)
+        finally:
+            # the caller's cleanup would run here: the error line must already be on disk
+            seen_at_raise.append([e["event"] for e in events(tmp_path / "b.log")])
+    assert seen_at_raise == [["before", "error"]]
+    err = events(tmp_path / "b.log")[-1]
+    assert err["iteration"] == 4 and err["label"] == "chunked" and err["phase"] == "timed"
+    assert err["type"] == "RuntimeError" and "device buffer corrupted" in err["message"]
+
+
+def test_an_unwritable_error_line_does_not_replace_the_original_exception(tmp_path):
+    class BrokenLog(pb.BenchLog):
+        def line(self, event, **fields):
+            if event == "error":
+                raise OSError("disk full")
+            super().line(event, **fields)
+
+    log = BrokenLog(tmp_path / "b.log")
+    with pytest.raises(ValueError, match="original"):
+        pb.run_iteration(log, pb.Watchdog(log, kill=lambda c: None), "x", 1, 60, lambda: (_ for _ in ()).throw(ValueError("original")))
+
+
+def test_greedy_tokens_steps_only_when_another_token_is_needed():
+    """Issue 293 item 3: the loop called step after the last token and threw the result away, which could pass the context limit."""
+    import torch
+    calls = []
+
+    def step(t):
+        calls.append(t)
+        return torch.tensor([0.0, 0.0, float(t + 2)])
+
+    first = torch.tensor([0.0, 1.0, 0.0])             # argmax 1
+    out = pb.greedy_tokens(first, step, 4)
+    assert len(out) == 4 and out[0] == 1
+    assert len(calls) == 3                            # three steps give tokens 2 to 4; no step after the fourth
+    assert pb.greedy_tokens(first, step, 1) == [1] and len(calls) == 3

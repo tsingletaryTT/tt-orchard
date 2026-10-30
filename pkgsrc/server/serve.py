@@ -284,7 +284,7 @@ def stop_token_ids(model_dir, tokenizer):
 def ready_event(model, a, load_s):
     """The ready line. It reports what the constructed model does (`model.f32`), not what was requested."""
     return {"event": "ready", "model": MODEL_ID, "host": a.host, "port": a.port, "context": model.L, "ssd": a.ssd,
-            "traced": not a.no_trace, "ssd_precision": "fp32" if model.f32 else "bf16", "load_s": round(load_s, 1), "pid": os.getpid()}
+            "traced": not a.no_trace, "chunked_prefill": bool(getattr(model, "chunked_prefill", False)), "ssd_precision": "fp32" if model.f32 else "bf16", "load_s": round(load_s, 1), "pid": os.getpid()}
 
 
 def main():
@@ -296,6 +296,8 @@ def main():
     ap.add_argument("--ssd", default=os.environ.get("GRANITE_SSD", "composed"))
     ap.add_argument("--ssd-precision", default=os.environ.get("GRANITE_SSD_PRECISION", "fp32"), choices=["fp32", "bf16"])
     ap.add_argument("--no-trace", action="store_true", help="run the step eagerly (slower); for comparison only")
+    ap.add_argument("--no-chunked-prefill", action="store_true", default=os.environ.get("GRANITE_CHUNKED_PREFILL") == "0",
+                    help="prefill with one decode step per token (the older path). Default: chunked prefill in composed mode (env GRANITE_CHUNKED_PREFILL=0 turns it off)")
     ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"), help="default 127.0.0.1 (this machine only). HOST=0.0.0.0 listens on every interface; the server has no sign-in")
     a = ap.parse_args()
     if a.port in (8000, 8011, 8012, 8780) or 8100 <= a.port <= 8103:
@@ -316,7 +318,7 @@ def main():
     try:
         t0 = time.time()
         model = GraniteChip(dev, a.model_dir, max_len=a.max_len, ssd=a.ssd, kernel_dir=Path(__file__).resolve().parent.parent / "runtime" / "kernels",
-                            trace=not a.no_trace, ssd_precision=a.ssd_precision)
+                            trace=not a.no_trace, ssd_precision=a.ssd_precision, chunked_prefill=not a.no_chunked_prefill)
         STATE["engine"] = ChipEngine(model)
         srv = ThreadingHTTPServer((a.host, a.port), Handler)
         print(json.dumps(ready_event(model, a, time.time() - t0)), flush=True)
