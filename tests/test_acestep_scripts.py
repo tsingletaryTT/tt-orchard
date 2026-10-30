@@ -321,3 +321,22 @@ def test_smoke_rejects_non_finite_samples():
     assert not r["ok"] and "finite" in r["reasons"][0]
     x[5] = 0.1
     assert smoke.sound_checks(hdr + x.tobytes(), 1.0)["ok"]
+
+
+def test_stepcheck_conditioning_is_the_recorded_one_unless_own_is_asked_for():
+    rec_enc, rec_ctx = torch.zeros(3, 8), torch.zeros(4, 128)
+    tap = run.Tap(FakeDecoder())
+    _call(tap)                                  # records enc [3, 8] and ctx [4, 128] of this process's own conditioning
+    tap.enc, tap.ctx = torch.ones(3, 8), torch.ones(4, 128)
+    enc, ctx = run.stepcheck_conditioning(rec_enc, rec_ctx, tap, own=False)
+    assert enc is rec_enc and ctx is rec_ctx
+    enc, ctx = run.stepcheck_conditioning(rec_enc, rec_ctx, tap, own=True)
+    assert float(enc.sum()) == 24.0 and float(ctx.sum()) == 512.0
+    tap.reset_taps()
+    with pytest.raises(SystemExit, match="no conditioning of its own"):
+        run.stepcheck_conditioning(rec_enc, rec_ctx, tap, own=True)
+
+
+def test_own_conditioning_flag_is_parsed():
+    a = run.parse(["--device", "chip", "--bundle-code", "b", "--snapshot", "s", "--root", "r", "--out", "o", "--prompt", "p", "--own-conditioning"])
+    assert a.own_conditioning is True
