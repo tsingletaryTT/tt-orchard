@@ -47,3 +47,7 @@ Module lookup of `orchard/` works from the repository and from the package.
 - `tt-model.yaml` is a draft; no container build was tried.
 - No second chip, no listening judgment, no XL transformer or planner (step 4).
 - The sound checks measure length and level. Clips to listen to (48 kHz stereo WAV, made through the package server): `orchard-audio/acestep-2026-10-30/package-server-lofi-30s-seed42.wav` and `package-server-folk-60s-seed7.wav` under the home directory of the machine that ran this.
+
+## After the boot check
+
+The staged package was restaged after PR 267's review fixes. The only change to `runtime/acestep_run.py` since the boot is in the teacher-forcing and step-check functions (conditioning check, reference digest); `Session`, `acestep_serve.py` and `run.sh` are the booted ones (checked by comparing the text of the Session class). The restaged copy was gated again (0 problems) and was not booted a second time.
