@@ -1,3 +1,4 @@
 target = "0.9.75"
 summary = "ACE-Step 1.5 turbo package 0.2.0: the chip-path runtime, a card section for where each piece runs, fresh numbers with the 0.1.0 path beside them, regated and boot-checked."
+pr = 279
 kind = "feature"
