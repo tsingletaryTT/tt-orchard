@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, stage0_scan
+from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, served_chat, stage0_scan
 from orchard import text_runtime
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -1913,6 +1913,44 @@ class Supervisor:
         log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
         return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
+    def _served_chat_records(self, n: int, stage_dir: Path) -> None:
+        """Issue 17. When stage 2 or stage 4 passes, check what each swap test served: the chat template, special tokens and stop ids of its
+        model-dir against the new model's snapshot, and the chat replies its prompt suite recorded (orchard/served_chat.py). One
+        served-chat.json per swap test: stage 2's directory, the graft and sampling trials' variant directories when they served (stage 2 may
+        ship a variant), and each stage 4 configuration. A stage with no swap_config.json (the stock, text and audio stages) or whose new
+        snapshot is not a directory gets none. The check never stops a run: a failure to write is a ledger decision, and the bundle then leaves
+        the chat template hazard unverified."""
+        if n == 2:
+            tests = [(stage_dir, stage_dir)]
+            for trial in ("graft-trial", "sampling-trial"):
+                v = stage_dir / trial / "variant"
+                if (v / "model-dir").is_dir() and (v / "evidence" / "swap-check.json").is_file():
+                    tests.append((v, stage_dir))
+        else:
+            configs = stage_dir / "configs"
+            try:
+                tests = [(p, p) for p in sorted((p for p in configs.iterdir() if p.name.isdigit() and p.is_dir()), key=lambda p: int(p.name))]
+            except OSError:
+                tests = []
+        for d, config_dir in tests:
+            try:
+                cfg = safeio.read_json(config_dir / "swap_config.json", max_bytes=1 << 20, expect=dict)
+            except safeio.SafeReadError:
+                continue
+            new = cfg.get("new_snapshot")
+            if not isinstance(new, str) or not new:
+                continue
+            new = str(self.run_dir / new) if not os.path.isabs(new) else new        # the sampling trial resolves a relative path against the run directory
+            if not Path(new).is_dir() or not (d / "model-dir").is_dir() or not (d / "evidence" / "swap-check.json").is_file():
+                continue
+            try:
+                rec = served_chat.write_record(d, d / "model-dir", new, d / "evidence" / "swap-check.json")
+                self.ledger.append("evidence", n, what="served chat check", ok=rec["ok"], problems=[p["name"] for p in rec["problems"]],
+                                   incomplete=len(rec["incomplete"]), **evidence_record(self.run_dir, d / served_chat.FILE))
+            except (OSError, ValueError) as exc:
+                self.ledger.append("decision", n, decision="served chat check not written", path=os.path.relpath(d / served_chat.FILE, self.run_dir),
+                                   reason=f"{type(exc).__name__}: {exc}"[:200])
+
     def _decode_floor_record(self, n: int, stage_dir: Path) -> None:
         """Issue 181. Stage 0 writes stages/0/decode-floor.json (the DRAM-bandwidth floor for 1, 2 and 4 dies); stages 2 and 4 write
         decode-share.json (each decode speed they measured as a share of that floor). Both are estimates and say so. A model the floor
@@ -1963,6 +2001,8 @@ class Supervisor:
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
             ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
+            if n in (2, 4):
+                self._served_chat_records(n, stage_dir)
             if n == 6 and spec.gate_file == "result.json":
                 self._record_numbers(stage_dir)
             if n in (0, 2, 4):

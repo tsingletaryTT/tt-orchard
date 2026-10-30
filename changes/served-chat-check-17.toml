@@ -1,0 +1,4 @@
+target = "0.9.79"
+summary = "The served chat template, special tokens and stop ids are checked against the new model, and the bundle reads the result."
+pr = 294
+kind = "feature"
