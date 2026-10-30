@@ -1,0 +1,89 @@
+# The can for ibm-granite/granite-4.0-h-1b on one Blackhole chip (orchard/can.py). Run from the repository root:
+#   tt-orchard can stage config/can.granite.toml --out <new directory>/granite-4.0-h-1b-blackhole
+# Paths are relative to the directory the command runs in (or --base).
+
+[can]
+name = "granite-4.0-h-1b-blackhole"
+kind = "tt-dit-server"                 # the server is not a vLLM model; run.sh serves the ASGI app below with uvicorn
+app = "granite_asgi:app"
+model_py = "pkgsrc/can/granite_model.py"             # the runner file at the bundle root (re-exports the app; see that file)
+readme = "pkgsrc/can/granite-README.md"
+arch = "blackhole"
+mesh = "P150"
+device_count = 1
+python = "3.12"
+port = 20110
+# Exact pins. ttnn 0.80.0 is the PyPI wheel; it needs numpy below 2. The CPU wheel of torch comes from the PyTorch index (the
+# default PyPI wheel pulls the CUDA libraries, several gigabytes the host does not use).
+requirements = [
+  "ttnn==0.80.0",
+  "numpy==1.26.4",
+  "torch==2.7.0",
+  "safetensors==0.8.0",
+  "tokenizers==0.23.2",
+  "jinja2==3.1.6",
+  "huggingface_hub==1.33.0",
+  "fastapi==0.136.3",
+  "uvicorn==0.45.0",
+  "pydantic==2.12.5",
+  "pillow==10.4.0",
+  "loguru==0.7.3",
+  "networkx==3.6.1",
+  "graphviz==0.21",
+  "pyyaml==6.0.2",
+  "click==8.5.0",
+  "pandas==2.3.3",
+  "seaborn==0.13.2",
+  "ml_dtypes==0.5.4",
+]
+# run at the end of install.sh; a failure fails the install. Neither line opens a device.
+verify = [
+  "import importlib.metadata as m; assert m.version('ttnn') == '0.80.0', m.version('ttnn')",
+  "import granite_asgi",
+]
+
+[weights]
+repo = "ibm-granite/granite-4.0-h-1b"
+revision = "d18cca4c121edb87d022116d281ce212c9136f57"
+
+# the code the server runs, copied to extra_code/ (which run.sh puts on PYTHONPATH)
+[[extra_code]]
+src = "pkgsrc/server/granite_asgi.py"
+dst = "granite_asgi.py"
+[[extra_code]]
+src = "pkgsrc/server/serve.py"
+dst = "granite_serve.py"
+[[extra_code]]
+src = "pkgsrc/runtime/granite_chip.py"
+dst = "granite_chip.py"
+[[extra_code]]
+src = "pkgsrc/runtime/granite_trace.py"
+dst = "granite_trace.py"
+[[extra_code]]
+src = "docs/run-logs/evidence/granite-readout-pair/kernels/state.py"
+dst = "kernels/state.py"
+[[extra_code]]
+src = "docs/run-logs/evidence/granite-readout-pair/kernels/readout.py"
+dst = "kernels/readout.py"
+[[extra_code]]
+src = "docs/run-logs/evidence/granite-repeat-trace/port2/bcast_kernel_attempt8.py"
+dst = "kernels/bcast.py"
+
+[[bundle_file]]
+src = "LICENSE"
+dst = "LICENSE"
+[[bundle_file]]
+src = "pkgsrc/can/granite-NOTICE"
+dst = "NOTICE"
+[[bundle_file]]
+src = "pkgsrc/tools/smoke.py"
+dst = "tools/smoke.py"
+
+# what the boot check asks of the served bundle
+[check]
+prompt = "What is the capital of France? Answer in one word."
+expect = "Paris"
+max_tokens = 64
+stream = true
+min_decode_tok_s = 30.0
+ready_contains = ['"chunked_prefill": true', '"traced": true']

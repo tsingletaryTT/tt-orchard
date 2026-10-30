@@ -1,0 +1,4 @@
+target = "0.9.84"
+summary = "A canning step builds a v6 thin bundle that tt-model can install and serve from a per-model spec; Granite is the first can."
+kind = "feature"
+pr = 303

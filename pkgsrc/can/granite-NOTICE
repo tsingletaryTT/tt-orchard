@@ -1,0 +1,10 @@
+granite-4.0-h-1b-blackhole
+
+Model: ibm-granite/granite-4.0-h-1b (revision d18cca4c121edb87d022116d281ce212c9136f57), Copyright IBM Corp., licensed under the Apache License, Version 2.0.
+The model weights are not part of this package.
+
+Runtime, server and tools in this package: Copyright 2026 Tenstorrent USA, Inc., licensed under the Apache License, Version 2.0 (see LICENSE).
+The three kernels in extra_code/kernels/ are covered by the SPDX header in each file (Apache-2.0).
+
+Licensed under the Apache License, Version 2.0; you may not use this package except in compliance with the License. Unless required by applicable
+law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.

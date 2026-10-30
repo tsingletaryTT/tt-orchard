@@ -3,6 +3,7 @@
 | Page | What it is |
 |---|---|
 | [releases.md](releases.md) | How the version number is computed from `changes/` fragments, how a release is cut, and how to move an open pull request to fragments |
+| [canning.md](canning.md) | The canning step: how a brought-up model becomes a v6 thin bundle that `tt-model` can install and serve (spec, adapter, gate, boot check) |
 | [proofs.md](proofs.md) | Each claim in the README, the evidence for it and what has not been shown |
 | [run-logs/](run-logs/) | Write-ups of real runs, benchmarks and publishing (one file per event) |
 | [runbooks/hardware-validation.md](runbooks/hardware-validation.md) | How the hardware checks, the park check and the first run were done |
