@@ -117,7 +117,7 @@ def tf(**kw):
     (tf(top5=0.94), "top5"),
     (tf(top1="0.9"), "top1"),
     (tf(top1=True), "top1"),
-    (tf(top1=float("nan")), "top1"),
+    (tf(top1=float("nan")), "not readable JSON"),   # NaN is refused when the file is read (orchard.safeio), before any bar is checked
     (tf(top5=1.5), "top5"),
     (tf(tokens=127), "tokens"),
     (tf(tokens=True), "tokens"),

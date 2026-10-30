@@ -3436,6 +3436,14 @@ Copilot's second review found that a package record naming the code bundle's com
 associations first, and a record revision outside that set fails the revision check. The inline mapping is parsed. Whole-line comments
 in launchers are skipped, and quotes around a front-matter `base_model` are removed. Live `verify-package --check` of the four published
 episod packages (ACE-Step, Qwen3.5, MiniCPM3, Granite) still passes 6 of 6 each.
+## 2026-10-30 Stage gates read their JSON through safeio (issues 135 to 139; branch `safeio-stages`)
+Prompt (operator, relayed): keep resolving open issues; move the remaining JSON readers onto `orchard/safeio.py`.
+- Every other reader on the hostile-input list had already moved. Only `orchard/stages.py` was left: `_load`, `_evidence_json`, `_read_json`, `_suite_reasons_in`, `hw_record_problem`, `gate_delta` and the delta, swap-check, bundle-record and kernel-manifest reads now go through `stages._safe_json` (a 16 MiB cap, 2 MiB for evidence files).
+- `_evidence_json` follows a link that stays inside the stage directory once, with `safeio.resolved`, which does not raise on a link loop, and then reads the target with the safe reader.
+- The strict xfail pairs for these readers were the failing tests; they now pass and their entries are removed from `KNOWN_DEFECTS`, which is empty. One stock-runtime test that expected a NaN `top1` to be named as a bar failure now expects the file to be refused as unreadable JSON.
+- Left: the 55 modules in `UNREGISTERED_MODULES` still have no registered reader.
+
+Review of PR 283 (Copilot; one High, fixed test first): `_suite_reasons_in` returned no reasons when the safe reader refused a swap-check.json, so a report that held a failing record (a non-empty hub_fetch) could pass both stage 2 swap gates if it also held an unrelated NaN, passed the size cap, or was a link. A refused file now fails the gate with "swap-check.json is not readable JSON: <reason>"; a missing file still has no reason. The stage 2 test that expected an unparseable swap-check.json to change nothing now expects a failure.
 ## 2026-10-30 Medium findings of PR 245 and PR 247 (issues 258 and 259)
 
 Fixed, test first (each new test failed before its fix):
@@ -3460,3 +3468,6 @@ Still open: the wording of block failures for ambiguous stage-2 errors. `qual_ch
 
 - `orchard.step_bars` main now reads the recorded run. It refuses a run whose `dtype` is not float32 or whose `device` is not cpu, a run whose step count differs from the reports, a run that lacks a recorded velocity for a step, and a chip file whose step count differs from the floor's. Four tests failed first.
 - `audio_stages.clip_matches_waveform` refuses a clip with non-finite samples in both modes (a NaN made the exact comparison and the correlation test return False, which accepted the clip). With `exact` false it also refuses a peak below `MIN_CLIP_PEAK` (0.01), because correlation ignores level. Both tests failed first.
+
+## 2026-10-30 PR 283, second Copilot review
+A model-dir-sources.json that the safe reader refuses (for example an unrelated NaN) was read as "no record", so a grafted head that stage 2 did not choose passed the stage 4 gate. `_graft_reasons` now gives a reason for a refused sources record whatever stage 2 chose. The same gap was in the vocabulary-trim check: a refused stage 0 delta.json made `_trim_vocab` answer None ("not a trim"). Stage 2's trim check and stage 4 now report a refused delta.json. Tests: tests/test_stage4_graft_gate.py and tests/test_stage4_trim_gate.py. Not changed: sampling_choice.py and graft_trial.py have their own `_read_json` helpers that return None for a refused file.
