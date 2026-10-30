@@ -148,3 +148,25 @@ def test_the_suite_record_holds_the_digests_of_the_served_tokenizer_and_stop_fil
     got = record["served_files"]
     assert got["generation_config.json"] == hashlib.sha256(b'{"eos_token_id": 7}').hexdigest()
     assert got["tokenizer.json"] is None and set(got) == {"tokenizer.json", "tokenizer_config.json", "generation_config.json", "config.json", "chat_template.jinja"}
+
+
+def test_served_files_never_blocks_on_a_fifo_or_reads_a_device_or_an_oversized_file(tmp_path, monkeypatch):
+    """Round 3 of the review of PR 294: the digest read ran inside the hardware test, which holds a board lease."""
+    import os
+    import threading
+    tpl = load_swap_template()
+    os.mkfifo(tmp_path / "tokenizer.json")
+    os.symlink("/dev/zero", tmp_path / "config.json")
+    (tmp_path / "generation_config.json").write_text("x" * 100)
+    (tmp_path / "chat_template.jinja").write_text("ok")
+    monkeypatch.setattr(tpl, "SERVED_INPUT_MAX_BYTES", 50)
+    box = {}
+    t = threading.Thread(target=lambda: box.update(got=tpl.served_files(tmp_path)), daemon=True)
+    t.start()
+    t.join(20)
+    assert "got" in box, "served_files blocked"
+    got = box["got"]
+    assert got["tokenizer.json"] is None and got["config.json"] is None      # a FIFO and a device are not regular files
+    assert got["generation_config.json"] is None                             # over the cap
+    import hashlib
+    assert got["chat_template.jinja"] == hashlib.sha256(b"ok").hexdigest()   # a small regular file still hashes

@@ -75,6 +75,7 @@ import os
 import re
 import signal
 import subprocess
+import stat
 import sys
 import time
 import urllib.error
@@ -363,21 +364,47 @@ def chat_template_info(model_dir: Path) -> dict:
 SERVED_INPUT_FILES = ("tokenizer.json", "tokenizer_config.json", "generation_config.json", "config.json", "chat_template.jinja")
 
 
+SERVED_INPUT_MAX_BYTES = 256 << 20      # a tokenizer.json is tens of megabytes; nothing served is larger than this
+
+
+def _hash_regular_file(path: Path):
+    """sha256 of the bytes of the regular file `path` (a link is followed once, by resolving it first), or None when it is absent, is not a
+    regular file (a FIFO or a device), is larger than SERVED_INPUT_MAX_BYTES, or changes size while it is read. The file is opened
+    non-blocking and without following a link, and the opened descriptor is the one that is checked, so nothing here can block while the
+    hardware test holds its board lease. This script imports nothing from orchard, so it carries the guards of orchard/safeio.py `read_bytes`."""
+    try:
+        fd = os.open(os.path.realpath(path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError):
+        return None
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > SERVED_INPUT_MAX_BYTES:
+            return None
+        h, total = hashlib.sha256(), 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > SERVED_INPUT_MAX_BYTES:
+                return None
+            h.update(chunk)
+        after = os.fstat(fd)
+        if total != before.st_size or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            return None
+        return h.hexdigest()
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def served_files(model_dir: Path) -> dict:
-    """{file name: sha256 of its bytes, or None when absent} for the tokenizer, stop-id and template files of the served directory, read through
-    links. orchard/served_chat.py compares these digests with the files as they are when stage 2 or 4 ends, so a file changed after this test
-    (the replies below were made with the old one) is caught."""
-    out = {}
-    for name in SERVED_INPUT_FILES:
-        try:
-            h = hashlib.sha256()
-            with open(model_dir / name, "rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    h.update(chunk)
-            out[name] = h.hexdigest()
-        except OSError:
-            out[name] = None
-    return out
+    """{file name: sha256 of its bytes, or None when absent or refused} for the tokenizer, stop-id and template files of the served directory,
+    read through links with `_hash_regular_file`. orchard/served_chat.py compares these digests with the files as they are when stage 2 or 4
+    ends, so a file changed after this test (the replies below were made with the old one) is caught. A refused file is None, which that
+    check treats as a changed or missing input."""
+    return {name: _hash_regular_file(Path(model_dir) / name) for name in SERVED_INPUT_FILES}
 
 
 def special_tokens(model_dir: Path) -> list[str]:
