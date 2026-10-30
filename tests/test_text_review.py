@@ -302,3 +302,41 @@ def test_a_configuration_with_no_layer_count_fails_stage_0_with_a_reason(trig):
     assert end["result"] == "fail" and "num_hidden_layers" in " ".join(end["reasons"])
     facts = rt.model_facts(trig.snap, M)
     assert facts["n_layers"] is None and any("num_hidden_layers" in p for p in facts["config_problems"])
+
+
+# ---- the third review of PR 247: two High findings ------------------------------------------------------------------------------------------------------
+
+@pytest.fixture
+def real_interpreter_named(tmp_path, monkeypatch):
+    """ORCHARD_TEXT_PYTHON names a file that stands for a real interpreter; a test must never write to it."""
+    real = tmp_path / "real-python"
+    real.write_text("REAL INTERPRETER\n")
+    monkeypatch.setenv("ORCHARD_TEXT_PYTHON", str(real))
+    return real
+
+
+def test_the_fixture_environment_never_writes_to_an_interpreter_the_environment_names(real_interpreter_named, trig):
+    make_environment(trig)
+    assert real_interpreter_named.read_text() == "REAL INTERPRETER\n"
+    assert rt.text_paths(trig.home).python.startswith(str(trig.home))
+
+
+def test_a_benchmark_whose_configuration_is_not_the_one_stage_1_used_is_refused(done, tmp_path):
+    s1, _, s6, d = dirs(done)
+    snap = json.loads((s1 / rt.STAGE_CONFIG_FILE).read_text())["model_dir"]
+    original = (Path(snap) / "config.json").read_text()
+    try:
+        (Path(snap) / "config.json").write_text(json.dumps(dict(CONFIG, rms_norm_eps=1e-6)))
+        assert any("configuration" in p for p in st.bench_problems(s6, d, s1))
+        with pytest.raises(rt.TextStageError, match="configuration"):
+            st.finish_bench(s6, d, s1, "minicpm3")
+    finally:
+        (Path(snap) / "config.json").write_text(original)
+    assert st.bench_problems(s6, d, s1) == []
+    assert st.finish_bench(s6, d, s1, "minicpm3")["config_sha256"] == json.loads((s1 / rt.REFERENCE_FILE).read_text())["config_sha256"]
+
+
+def test_a_benchmark_result_that_names_another_configuration_hash_is_refused(done):
+    s1, _, s6, d = dirs(done)
+    edit(s6 / rt.BENCH_FILE, lambda r: r.update(config_sha256="0" * 64))
+    assert any("configuration hash" in p for p in st.bench_problems(s6, d, s1))

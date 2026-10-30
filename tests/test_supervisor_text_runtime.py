@@ -36,6 +36,7 @@ def bench_json(tok_s):
 
 @pytest.fixture
 def trig(tmp_path, monkeypatch, request):
+    monkeypatch.delenv("ORCHARD_TEXT_PYTHON", raising=False)       # the tests write their own fake interpreter under tmp_path, never over a real one
     r = Rig(tmp_path)
     r.on_sleep = lambda: (_ for _ in ()).throw(Stop("the run waited for the operator"))
     snap = tmp_path / "hub" / "snapshots" / ("a" * 40)
@@ -122,6 +123,7 @@ def trig(tmp_path, monkeypatch, request):
 
 def make_environment(rig):
     paths = rt.text_paths(rig.home)
+    assert Path(paths.python).resolve().is_relative_to(Path(rig.home).resolve()), "the fake interpreter must be written under the test's own home"
     Path(paths.python).parent.mkdir(parents=True, exist_ok=True)
     Path(paths.python).write_text("#!/bin/sh\n")
     os.chmod(paths.python, os.stat(paths.python).st_mode | stat.S_IXUSR)
