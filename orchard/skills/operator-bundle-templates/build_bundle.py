@@ -634,6 +634,46 @@ SAMPLING_FLAG_RISKS = {
 }
 
 
+FLOOR_HEADING = "Decode against the DRAM floor"
+
+
+def floor_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Decode against the DRAM floor" section (issue 181): each decode speed the run measured, as a share of the estimated floor for
+    the dies it ran on, with the inputs, what each speed includes and, for a low share, the likely causes in order (text only).
+    The shares are recomputed here from the raw measurement files (orchard/floor_report.py), so a summary written into a file is not read.
+    No lines when the run has no stage 0 floor record or no speed with a floor, so a run from before gets the same RESULTS.md as before."""
+    from orchard import floor_report
+    rows = floor_report.share_rows(run.dir)
+    if not rows:
+        return []
+    rec = floor_report.read_floor(run.dir)
+    policy = rec.get("dtype_policy") if isinstance(rec.get("dtype_policy"), dict) else {}
+    bw = max((f.get("inputs", {}).get("per_die_bandwidth_gb_s") for f in rec["floors"].values() if isinstance(f, dict)
+              and isinstance(f.get("inputs"), dict)), default=None)
+    lines = ["", f"## {FLOOR_HEADING}", "",
+             "Decode on this hardware is limited by DRAM bandwidth: each token reads the active weights once, so time per token cannot be below "
+             "the active weight bytes divided by the bandwidth of the dies. Every figure below is an ESTIMATE. The floor is computed from the "
+             f"model's config with the weight dtype {redact(', '.join(f'{k} {v}' for k, v in sorted(policy.items())))} "
+             f"({redact(str(rec.get('dtype_policy_source')))}) and {fmt(bw)} GB/s per die "
+             f"({redact(one_line(str(rec.get('bandwidth_source'))))}). Evidence: `stages/0/decode-floor.json`.", "",
+             "| Speed | Dies | tok/s | Estimated floor tok/s | Share of the estimated floor | What the speed is | Label | Evidence |",
+             "|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {redact(r['source'])} | {r['dies']} | {fmt(round(r['tok_s'], 2))} | {fmt(round(r['floor_tok_s'], 1))} | "
+                     f"{fmt(round(r['share'] * 100, 1))} percent | {redact(one_line(r['basis']))} | measured speed, estimated floor | `{r['evidence']}` |")
+    lines.append("")
+    for r in rows:
+        if r.get("note"):
+            lines.append(f"- {redact(r['source'])}: {redact(r['note'])}.")
+    for note in floor_report.share_notes(run.dir):
+        lines.append(f"- {redact(one_line(note))}")
+    hints = [r for r in rows if r.get("hint")]
+    if hints:
+        lines += ["", redact(one_line(hints[0]["hint"])) + " This is text only; it does not block a run."]
+    lines += ["", f"What the floor leaves out: {redact(one_line(rec.get('assumptions') or ''))}"]
+    return lines
+
+
 def sampling_choice_section(run: Run, redact: Redactor) -> list[str]:
     """The "The sampling choice" section, from stage 2's `sampling-decision.json` (orchard/sampling_choice.py): which configuration the run ships,
     why, and the numbers it used. No lines when the run has no decision file, so a run from before the choice gets the same RESULTS.md as before.
@@ -1694,6 +1734,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += graft_section(run, redact)
     lines += sampling_section(run, redact)
     lines += sampling_choice_section(run, redact)
+    lines += floor_section(run, redact)
     lines += reported_section(run, redact)
     lines += audio_section(run, redact)
     lines += text_section(run, redact)
