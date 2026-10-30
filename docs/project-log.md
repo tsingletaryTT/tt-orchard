@@ -3418,3 +3418,12 @@ Prompt (operator, relayed): rebuild the local package with the faster path, rega
 The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uploaded private, checked with `tt-orchard verify-package`, made public (a personal namespace, outside the Tenstorrent organisation and the catalog), and checked again without a token. The package gate was clean on main.
 - The first verify pass failed the revision check: the card pins two repositories (the weights and the code bundle) and the check looked up both commits in the weights repository. `verify-package` now looks up each commit in the repository named beside it on the card, and falls back to the base model. A test failed first.
 - The package carries the card's caveats: nobody has judged the music, and end-to-end agreement with the float32 run is lower after the encoders moved to the chip.
+
+## 2026-10-30 verify-package: weights pins, graft pins, quoted scratch path, cache directory (issue 251; branch `verify-pins`)
+Prompt (operator, relayed): continue resolving issues; 251 after the safeio readers.
+- `tt_kernel_manifest.json` is checked as a pin: `weights.repo_id` must be a repository id and match the package's base model, `weights.revision` must be a 40-character commit that the card names, and a manifest with no weights pin fails. A tt-model.yaml weights revision that the card does not name fails.
+- A launcher (`run.sh`, `install.sh`) line that sets `WEIGHTS_REVISION` or `MODEL_REVISION` to a commit the card does not name is a problem. Other revisions in a launcher (a code bundle, a drafter head) stay notes.
+- The card's pin for the graft head is looked up in the repository that `graft.json` names.
+- The printed boot instructions use `cd -- <quoted path>`, so a scratch path with spaces works.
+- The pull removes only the download library's bookkeeping under `.cache/huggingface`, and keeps the files the repository lists. A file a package publishes under `.cache` now reaches the scrub, which fails it.
+- The launcher rule picks the pin by variable name. A launcher that pins the weights some other way is still only a note.
