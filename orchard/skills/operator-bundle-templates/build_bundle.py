@@ -254,7 +254,10 @@ class Run:
         self.package_format = stages_mod.package_format(entries)
         # An audio run (the harness's own audio runtime) wrote stage 2's audio_result.json and has the audio stage table.
         self.audio_run = (run_dir / "stages" / "2" / "audio_result.json").is_file()
-        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls, audio_runtime=self.audio_run) for n in range(9)}
+        # A text-runtime run (orchard/text_runtime.py) wrote stage 2's text_result.json and has the text stage table.
+        self.text_run = (run_dir / "stages" / "2" / "text_result.json").is_file()
+        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls, audio_runtime=self.audio_run, text_runtime=self.text_run)
+                      for n in range(9)}
         self.outcome = {}          # stage -> the data of its last stage_end
         self.attempts = {}         # stage -> stage_start entries that were not a skip
         for e in entries:
@@ -266,11 +269,11 @@ class Run:
         s = run_dir / "stages"
         self.delta = read_json(s / "0" / "delta.json", "stages/0/delta.json", required=True)
         # An audio run has no reference.json: stage 1 wrote audio_reference.json, which the audio section reads through stage 2's result.
-        self.reference = {} if self.audio_run else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
+        self.reference = {} if (self.audio_run or self.text_run) else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
             spec = self.specs[n]
-            if spec.skip or not spec.gate_file or (self.audio_run and n == 2):
+            if spec.skip or not spec.gate_file or (self.audio_run and n == 2) or self.text_run:
                 continue            # an audio run's stage 2 file is the audio result, which the audio section reads
             rel = f"stages/{n}/{spec.gate_file}"
             self.results[n] = read_json(run_dir / rel, rel, required=self.result(n) == "pass")
@@ -324,6 +327,7 @@ class Run:
                               "write it before stage 8 can build the bundle") from None
             if not self.publish.strip():
                 raise Missing("stages/7/PUBLISH_COMMANDS.txt is empty")
+        self.text = {name: read_json(run_dir / "stages" / str(n) / name, "", required=False) for n, name in TEXT_FILES}   # a text run's three result files
         self.audio = load_audio(run_dir)    # stage 2's audio_result.json: None for a run without one (see "audio runs")
         self.audio_clips: list[dict] = []   # set by build() once the clips are copied
         self.cards = {}             # profile name -> (run-relative card path, text)
@@ -851,6 +855,10 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
                    "Evidence: `stages/2/audio_result.json`."]
         body[1] = ["The CPU reference runs (the model, its base as the control, and one run in the chip's interpreter) are listed in the section "
                    "Audio clip on a chip.", "", "Evidence: `stages/1/audio_reference.json`."]
+    if run.text_run:
+        body[1] = [f"The CPU reference runs are described in the section {TEXT_HEADING}.", "", "Evidence: `stages/1/text_reference.json`."]
+        body[2] = [f"The chip comparison is in the section {TEXT_HEADING}.", "", "Evidence: `stages/2/text_result.json`."]
+        body[6] = [f"The benchmark is in the section {TEXT_HEADING}.", "", "Evidence: `stages/6/text_bench.json`."]
 
     for n in (2, 3, 5, 6):
         res = run.results.get(n)
@@ -1149,6 +1157,83 @@ def txt(redact: Redactor, value, limit: int = 300) -> str:
     if len(line) > limit:
         line = line[:limit] + "..."
     return reported_cell(redact, line)
+
+
+# ---- text-runtime runs (stage 1, 2 and 6 result files) ----------------------------------------------------------------
+# A run whose model the harness's own text runtime serves (orchard/text_runtime.py) has stages/1/text_reference.json, stages/2/text_result.json and
+# stages/6/text_bench.json. Only then does RESULTS.md get the "Text model on a chip" section and RISKS.md the "Text run" section. The files come from other
+# stages and are untrusted: a missing or wrongly typed field prints "not recorded".
+TEXT_FILES = ((1, "text_reference.json"), (2, "text_result.json"), (6, "text_bench.json"))
+TEXT_HEADING = "Text model on a chip"
+
+
+def as_dict(x) -> dict:
+    return x if isinstance(x, dict) else {}
+
+
+def as_list(x) -> list:
+    return x if isinstance(x, list) else []
+
+
+def variants_of(d) -> list[tuple[str, dict]]:
+    """The (name, record) pairs of a result's `variants`, with a record that is not an object read as empty and a `variants` that is not an object as none."""
+    v = as_dict(as_dict(d).get("variants"))
+    return [(str(k), as_dict(x)) for k, x in sorted(v.items(), key=lambda kv: str(kv[0]))]
+
+
+def text_variant_rows(run: Run, redact: Redactor) -> list[str]:
+    res, bench = as_dict(run.text.get("text_result.json")), as_dict(run.text.get("text_bench.json"))
+    head = ["| Variant | Decode tok/s (median, min to max) | Timing label | Share of floor | Teacher-forced agreement | Worst block error over floor | "
+            "Perplexity (chip, reference) | Stage 2 bar |", "|---|---|---|---|---|---|---|---|"]
+    rows = []
+    bench_by_name = dict(variants_of(bench))
+    for name, v in variants_of(res):
+        b = bench_by_name.get(name, {})
+        spread = as_dict(b.get("decode_tok_s"))
+        agree = as_dict(dig(v, "numeric", "agreement"))
+        ratio = as_dict(dig(v, "numeric", "worst_ratio_to_floor"))
+        ppl = as_dict(v.get("perplexity"))
+        share = b.get("share_of_floor_median")
+        rows.append(f"| {txt(redact, name)} | {num(spread.get('median'), 3)} ({num(spread.get('min'), 3)} to {num(spread.get('max'), 3)}) | {txt(redact, b.get('label'))} | "
+                    f"{num(share * 100, 3) + ' percent' if is_number(share) else NOT_RECORDED} | {num(agree.get('matches'))} of {num(agree.get('of'))} | "
+                    f"{num(ratio.get('ratio'), 3)} at {txt(redact, ratio.get('name'))} | {num(ppl.get('chip_ppl'), 5)}, {num(ppl.get('reference_ppl'), 5)} | "
+                    f"{'met' if v.get('ok') is True else 'not met'} |")
+    return head + rows if rows else ["No variant is recorded in `stages/2/text_result.json`."]
+
+
+def text_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Text model on a chip" section of RESULTS.md. No lines for a run without text_result.json."""
+    if not run.text_run:
+        return []
+    res, ref, bench = (as_dict(run.text.get(n)) for n in ("text_result.json", "text_reference.json", "text_bench.json"))
+    lines = ["", f"## {TEXT_HEADING}", "",
+             f"Runtime: {txt(redact, res.get('runtime'))}. Evidence: `stages/1/text_reference.json`, `stages/2/text_result.json`, `stages/6/text_bench.json`. "
+             "Each number below is recomputed by the stage gate from the recorded arrays and files.", "",
+             f"The reference is a float32 CPU run of {num(ref.get('decode_tokens'))} greedy tokens after a {num(ref.get('prompt_tokens'))}-token prompt. "
+             "The chip runs follow the reference's token path (teacher forcing).", "",
+             f"Rule: {txt(redact, res.get('rule'), 600)}", ""]
+    lines += text_variant_rows(run, redact)
+    for name, e in variants_of(bench):
+        lines += ["", f"Floor, {txt(redact, name)}: {txt(redact, e.get('share_text'), 400)}"]
+    lines += ["", "### What these numbers do not show", ""]
+    lines += [f"- {txt(redact, x, 500)}" for x in as_list(res.get("limits")) + as_list(bench.get("limits"))] or ["- No limits are recorded."]
+    return lines
+
+
+def text_risks(run: Run, redact: Redactor) -> list[str]:
+    """The "Text run" section of RISKS.md: a stage 2 bar that was not met first, then the fixed limits. No lines without text_result.json."""
+    if not run.text_run:
+        return []
+    res = as_dict(run.text.get("text_result.json"))
+    lines = ["## Text run", ""]
+    for name, v in variants_of(res):
+        if v.get("ok") is not True:
+            lines.append(f"- Variant {txt(redact, name)} did not meet the stage 2 bar: "
+                         f"{txt(redact, '; '.join(map(str, as_list(dig(v, 'numeric', 'reasons')) + as_list(dig(v, 'perplexity', 'reasons')))), 400)}. "
+                         "Evidence: `stages/2/text_result.json`.")
+    lines += ["- The chip bar is a multiple of the CPU bfloat16 error and is provisional. Evidence: `stages/2/text_result.json`.",
+              "- Agreement and perplexity cover one prompt and one text window. Evidence: `stages/2/text_result.json`.", ""]
+    return lines
 
 
 def load_audio(run_dir: Path):
@@ -1491,6 +1576,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += sampling_choice_section(run, redact)
     lines += reported_section(run, redact)
     lines += audio_section(run, redact)
+    lines += text_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
         spec = run.specs[n]
@@ -1763,6 +1849,7 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
     lines = [f"# Risks: {repo}", "",
              "Every item names its evidence, relative to the run directory.", ""]
     lines += audio_risks(run, redact)
+    lines += text_risks(run, redact)
     lines += ["## TODO numbers", ""]
     lines += [f"- {t}" for t in todo] or ["- None found in the run's files."]
     lines += ["", "## Stage 0 hazards", "",

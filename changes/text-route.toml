@@ -1,0 +1,3 @@
+target = "0.9.67"
+summary = "A text-model runtime route: stages 0 to 2, 6 and 8 for a text full port run as supervisor code without the coder, with a stated chip bar set from CPU floors."
+pr = 245

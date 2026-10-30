@@ -1,0 +1,9 @@
+--- refusal: DEVICES outside the lease
+run.sh: DEVICES (0 1 ) is not the leased set (2 3 ); drop DEVICES or take a lease for those chips
+exit 2
+--- launch from the lease
+_______的emastraughteen-aged
+ANSWERED after 471 s
+q35-pkg2
+[{"PathOnHost":"/dev/tenstorrent/2","PathInContainer":"/dev/tenstorrent/2","CgroupPermissions":"rwm"},{"PathOnHost":"/dev/tenstorrent/3","PathInContainer":"/dev/tenstorrent/3","CgroupPermissions":"rwm"}]
+ALLDONE

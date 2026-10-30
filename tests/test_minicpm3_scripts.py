@@ -158,6 +158,38 @@ def test_make_reference_has_no_sibling_directory_path():
     assert '"_w"' not in src and "'_w'" not in src
 
 
+# ---- the recorder and the weight conversion used by the text route ---------------------------------------------------------------------
+
+def test_make_reference_records_text_settings_through_the_shared_recorder(tmp_path, monkeypatch):
+    make_reference = load_script(monkeypatch, "make_reference", {})
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{}")
+    (tmp_path / "w").write_bytes(b"abc")
+    make_reference.PROMPT = "hello"
+    rec = make_reference.make_recorder(tmp_path / "run", "plain", "bfloat16", 7, 4, str(cfg), tmp_path / "w")
+    rec.finish()
+    from orchard import audio_reference as ar
+    run = ar.load_run(tmp_path / "run")
+    assert (run.settings["prompt"], run.settings["duration"], run.settings["steps"], run.settings["dtype"], run.settings["sampler"]) == ("hello", 7, 4, "bfloat16", "greedy")
+    assert run.manifest["model"]["name"] == "openbmb/MiniCPM3-4B"
+
+
+def test_convert_weights_writes_safetensors_from_the_pickle_and_refuses_to_overwrite(tmp_path, monkeypatch):
+    pytest.importorskip("safetensors")
+    d = tmp_path / "m"
+    d.mkdir()
+    torch.save({"model.embed.weight": torch.arange(6.0).reshape(2, 3)}, d / "pytorch_model.bin")
+    convert = load_script(monkeypatch, "convert_weights", {})
+    out = tmp_path / "cache" / "w.safetensors"
+    monkeypatch.setattr(sys, "argv", ["convert_weights.py", "--model-dir", str(d), "--out", str(out)])
+    convert.main()
+    from safetensors.torch import load_file
+    assert torch.equal(load_file(str(out))["model.embed.weight"], torch.arange(6.0).reshape(2, 3)) and not list(out.parent.glob("*.tmp"))
+    with pytest.raises(SystemExit, match="never overwritten"):
+        convert.main()
+    monkeypatch.setattr(sys, "argv", ["convert_weights.py", "--model-dir", str(tmp_path), "--out", str(tmp_path / "x.safetensors")])
+    with pytest.raises(SystemExit, match="is not a file"):
+        convert.main()
 # ---- bench with --layers (review of PR 242) ---------------------------------------------------------------------------------------------------
 
 BENCH_CONFIG = {"architectures": ["MiniCPM3ForCausalLM"], "model_type": "minicpm3", "hidden_size": 2560, "num_hidden_layers": 62, "intermediate_size": 6400,
@@ -199,3 +231,20 @@ def test_bench_floor_uses_the_layers_the_model_ran_and_the_record_says_how_many(
     short = bench_record(monkeypatch, tmp_path, 3)
     assert full["config"]["layers"] == 62 and short["config"]["layers"] == 3
     assert short["floor"]["floor_tok_s"] > 5 * full["floor"]["floor_tok_s"]
+
+
+def test_bench_reads_a_configuration_that_is_a_link_into_a_cache(monkeypatch, tmp_path):
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "c").write_text(json.dumps(BENCH_CONFIG))
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").symlink_to(blobs / "c")
+    chip = types.ModuleType("chip_model")
+    chip.ChipMiniCPM3 = Recorder
+    run_chip = load_script(monkeypatch, "run_chip", {"ttnn": fake_ttnn(), "chip_model": chip})
+    out = tmp_path / "rec.json"
+    a = types.SimpleNamespace(model_dir=str(snap), trace=False, batched_prefill=True, repeats=1, steps=4, tp=1, mlp_dtype="bf16", mlp_fidelity="hifi2", attn="mla", opt=3,
+                              shard=False, upd="paged", fidelity="default", out=str(out))
+    run_chip.bench(a, BenchModel(62), [1, 2, 3], 3, types.SimpleNamespace(decode=lambda ids: "x"))
+    assert json.loads(out.read_text())["config"]["layers"] == 62

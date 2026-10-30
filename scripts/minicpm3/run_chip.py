@@ -130,7 +130,7 @@ def bench(a, m, ids, n, tok):
     docs/benchmark-rules.md). Writes a record with spread, label, host load and the share of the DRAM-bandwidth floor."""
     import os
     from orchard import decode_floor as df, resident
-    from orchard import model_config as mc
+    from orchard import model_config as mc, safeio
     results, timings = [], []
     step = m.run
     if a.trace:
@@ -164,7 +164,7 @@ def bench(a, m, ids, n, tok):
         if not rec["warmup"]:
             timings.append({k: v for k, v in rec.items() if isinstance(v, (int, float)) and not isinstance(v, bool) and k not in ("repeat",)})
     summary = resident.summarise_runs(timings, warmup=resident.WARMUP_RUNS)
-    cfg = dict(mc.read_model_config(a.model_dir + "/config.json"))
+    cfg = dict(mc.read_model_config(safeio.resolved(a.model_dir + "/config.json")))        # a cache snapshot holds the file as a link
     cfg["num_hidden_layers"] = m.L                 # the floor counts the layers the model ran (--layers truncates the stack)
     policy = {"default": "bf16", "dense_mlp": a.mlp_dtype}        # the weights the run actually reads
     floor = df.floor_for_board(cfg, policy, "p300", dies=a.tp)
