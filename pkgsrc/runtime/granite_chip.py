@@ -10,11 +10,13 @@ The decode step is a fixed-shape program that is captured once as a ttnn trace a
   * each step the host writes four small tensors (the embedding, the one-hot position, its complement, the mask) into persistent
     device buffers and replays the trace.
 
-Prefill is a loop of these decode steps (one token per step). `prefill_chunked` is a candidate chunked-scan prefill (composed mode only, not used by
-the server). Its algebra is checked on the CPU (tests/test_granite_scan.py). On a chip it agreed with the step path in four short runs (33,
-65, 128 and 129 tokens; logits cosine above 0.99997, the same top-1 token and the same next four greedy tokens). A later timing run of the
-same code hung and left a chip unreadable, and the first run (128 tokens) also did not finish. The cause of either hang is not known, so the
-path stays off by default.
+Prefill is a loop of these decode steps (one token per step). `prefill_chunked` is a chunked-scan prefill (composed mode only, not used by
+the server). Its algebra is checked on the CPU (tests/test_granite_scan.py). With trace capture off it agrees with the step path at 33 to 1,024
+tokens (logits cosine above 0.99997, same top-1 token, same next four greedy tokens) and is 3 to 30 times faster than the eager step loop
+(128 tokens 88 against 28 tok/s, 1,024 tokens 552 against 17 to 24 tok/s; evidence/granite-chunked-bench). With trace capture on, the single
+timed run (512 tokens, after a finished warm-up) did not finish and left a chip unreadable. The chunked path allocates and frees device
+buffers while a decode trace is alive, and ttnn warns that this is unsafe. The path therefore stays off by default and the server does
+not call it.
 
 `ssd` picks how the Mamba-2 state update and readout are computed:
   composed (default)  stock ttnn ops. The readout is one batched matmul with C broadcast over the heads.
