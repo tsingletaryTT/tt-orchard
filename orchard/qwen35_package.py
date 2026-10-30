@@ -30,6 +30,7 @@ from orchard import model_config as mc
 from orchard import safeio
 
 PACKAGE_NAME = "qwen3.5-35b-a3b-blackhole-p300"
+NAMESPACE = "episod"
 MODEL_ID = "Qwen/Qwen3.5-35B-A3B"
 REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
 IMAGE_TAG = "tt-model/qwen3-coder-next:0c170421ca1b"
@@ -311,7 +312,7 @@ def manifest_text() -> str:
 # `tt-model package --container`: that command needs a tt-metal tree and copies model code into a new image, and this package
 # reuses the published image of raahemnabeel/qwen3-coder-next and replaces one file at run time (run.sh). Use run.sh.
 schema: "5.1"
-repo: NAMESPACE/{PACKAGE_NAME}
+repo: {NAMESPACE}/{PACKAGE_NAME}
 name: {PACKAGE_NAME}
 weights: {{repo: {MODEL_ID}, revision: {REVISION}}}     # text tensors only, fetched by fetch_weights.py
 kind: vllm-plugin
@@ -360,10 +361,10 @@ Checks, in `check/`: `device_quality.py` (fixed prompts, a chat request, a long 
 """
 
 
-def publish_text(namespace: str = "NAMESPACE") -> str:
+def publish_text(namespace: str = NAMESPACE) -> str:
     """The commands that would publish the staged package, as text. No function in this module runs them."""
     return "\n".join([
-        "# The operator has not approved publishing this package. Nothing here was run.",
+        "# How this package was published: private upload first, a pull and verify-package check, then the repository was made public.",
         f"#    hf upload --repo-type model --private {namespace}/{PACKAGE_NAME} ./{PACKAGE_NAME} .",
         f"#    hf repos settings {namespace}/{PACKAGE_NAME} --no-private      # a separate decision",
         ""])

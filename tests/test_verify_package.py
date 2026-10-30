@@ -318,3 +318,15 @@ def test_the_download_librarys_bookkeeping_directory_is_not_judged_as_package_co
             (Path(dest) / ".cache" / "huggingface" / "x.metadata").write_text("etag")
     code, text = run(Bookkeeping(good_files()), tmp_path, check=True)
     assert code == 0 and line(text, "scrub").strip().startswith("ok") and not (tmp_path / "s" / ".cache").exists()
+
+
+def test_record_with_a_path_to_sha256_map_is_read(tmp_path):
+    """The Qwen3.5 recipe package writes `files` as {path: sha256}; every file in it must count as recorded."""
+    import hashlib
+    from orchard import verify_package as vp
+    (tmp_path / "a.txt").write_text("x")
+    (tmp_path / "package-record.json").write_text(json.dumps(
+        {"files": {"a.txt": hashlib.sha256(b"x").hexdigest()}, "revision": "r"}))
+    name, listed, rev = vp._read_record(tmp_path)
+    assert listed == {"a.txt": hashlib.sha256(b"x").hexdigest()} and rev == "r"
+    assert vp.check_record(tmp_path, (name, listed, rev)).status == vp.OK
