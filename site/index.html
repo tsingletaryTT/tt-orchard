@@ -365,7 +365,7 @@
       <div class="rows">
         <div><b>What stopped it</b><p>No block. The question was which ops of the Coder-Next fused bundle apply to this model. <code>tt-orchard fusion-candidates</code> reads the bundle's code without running it. Four ops apply as they are, two apply with a changed constant (router top-k and the sampler scan grid), and one needs new code (the layer boundary, which runs only on four dies). The bundle's loader did not know this checkpoint layout.</p></div>
         <div><b>What we built or changed</b><p>A 35-line patch for the loader (a prefix, split projections and fused experts), applied to a copy bind-mounted over the bundle's code. The image and the coder were not changed. Weights came by range reads of only the needed tensors: 69.3 GB in about 40 minutes, where <code>hf download</code> ran at 4 to 6 MB/s. No kernel was written.</p></div>
-        <div><b>Result</b><p>The full 40-layer model served on two dies: 126.8 tok/s median over 5 runs, 29.6 percent of the estimated floor (428 tok/s). The first 8 tokens match the CPU, then a near tie flips (the routed experts are 4-bit). Both changed constants moved decode by 0.1 percent or less, so neither was kept. One prompt, on a shared host. Not published.</p></div>
+        <div><b>Result</b><p>The full 40-layer model served on two dies: 126.8 tok/s median over 5 runs, 29.6 percent of the estimated floor (428 tok/s). The first 8 tokens match the CPU, then a near tie flips (the routed experts are 4-bit). Both changed constants moved decode by 0.1 percent or less, so neither was kept. One prompt, on a shared host. The weights-free recipe package is on the Hub as <a href="https://huggingface.co/episod/qwen3.5-35b-a3b-blackhole-p300">episod/qwen3.5-35b-a3b-blackhole-p300</a>.</p></div>
         <div><b>What the next model got</b><p>The classification named the op that needs new code before the first boot, and the two changed constants were tested and dropped.</p></div>
       </div>
       <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-fusion-port.md">Fusion port</a></p>
@@ -410,7 +410,7 @@
     <li>MiniCPM3-4B and Granite-4.0-H-1B were driven by hand and did not go through the supervisor. MiniCPM3 has no batched prefill on two chips.</li>
     <li>Stable Audio 3 has its text encoder on the host, and nobody listened to the clips. Agreement is measured against a CPU reference on a single prompt or a small set.</li>
     <li>The automatic graft trial has not run on hardware. The 4-chip fabric timeout seen in three runs was cleared by a reset each time, and its cause was never isolated.</li>
-    <li>Speeds are medians on a shared host. Packages for Granite, MiniCPM3 and Qwen3.5-35B-A3B are in progress and have no numbers here.</li>
+    <li>Speeds are medians on a shared host. The Granite, MiniCPM3 and Qwen3.5-35B-A3B packages are published; their numbers are in their cards.</li>
   </ul>
   <p class="sub" style="margin-top:1rem">Each claim and its evidence are in <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/proofs.md">docs/proofs.md</a>.</p>
 </section>

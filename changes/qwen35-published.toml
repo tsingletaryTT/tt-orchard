@@ -1,0 +1,2 @@
+target = "0.9.71"
+summary = "Qwen3.5-35B-A3B package published; verify-package reads path-to-hash records; manifest names its namespace"

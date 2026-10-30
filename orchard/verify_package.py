@@ -208,8 +208,12 @@ def _read_record(root: Path) -> tuple[str, dict[str, str], str | None] | None:
     if rec.is_file():
         try:
             doc = json.loads(rec.read_text(encoding="utf-8"))
-            listed = {e["path"]: e["sha256"] for e in doc.get("files", []) if isinstance(e, dict)
-                      and isinstance(e.get("path"), str) and isinstance(e.get("sha256"), str)}
+            files = doc.get("files", [])
+            if isinstance(files, dict):            # {path: sha256}, the form the Qwen3.5 recipe package writes
+                listed = {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)}
+            else:
+                listed = {e["path"]: e["sha256"] for e in files if isinstance(e, dict)
+                          and isinstance(e.get("path"), str) and isinstance(e.get("sha256"), str)}
             rev = doc.get("revision")
             return "package-record.json", listed, rev if isinstance(rev, str) else None
         except (ValueError, AttributeError) as exc:

@@ -209,7 +209,7 @@ def test_a_raw_quality_edit_fails(pkg):
 
 def test_publish_text_is_text_with_the_operator_caveat():
     t = qp.publish_text("ns")
-    assert "has not approved" in t and "hf upload" in t and t.startswith("#")
+    assert "verify-package" in t and "hf upload" in t and t.startswith("#")
 
 
 def test_fetch_script_pins_the_revision():
@@ -561,3 +561,9 @@ def test_generated_files_must_equal_their_generator_output_even_when_the_record_
 
 def test_source_files_are_compared_with_the_record_not_regenerated(pkg):
     assert not any("generates" in x for x in gate(pkg))
+
+
+def test_manifest_and_publish_text_name_the_real_namespace():
+    from orchard import qwen35_package as q
+    assert f"repo: episod/{q.PACKAGE_NAME}" in q.manifest_text()
+    assert "NAMESPACE/" not in q.manifest_text() and "NAMESPACE/" not in q.publish_text()

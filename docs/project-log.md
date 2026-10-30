@@ -3353,3 +3353,10 @@ Prompt (operator): "go ahead with ACE-Step bring-up"; run `sunandbean/acestep-1.
 - Hazard: ACE-Step's handler copies its own model files into the checkpoint directory. Pointed at a link into the Hugging Face cache, it rewrote two cached blobs. I restored them by downloading again. `scripts/acestep/acestep_run.py` builds a private checkpoint tree (copies of small files, links for weights).
 - New: `scripts/acestep/acestep_run.py` (CPU, chip, step check, sweep, recorded in the `audio_reference` layout), `scripts/acestep/acestep_report.py`, `tests/test_acestep_scripts.py` (6 tests, 3 mutations red), run log `docs/run-logs/2026-10-29-acestep-bringup.md`, evidence under `docs/run-logs/evidence/acestep-2026-10-29/`.
 - Not done: the planner language model on the chip, the XL transformer, stage supervisor wiring (48 kHz and the runtime layout are Stable Audio specific), a package, and any listening judgment. Clips are in the operator's `orchard-audio/acestep-2026-10-29/` directory.
+
+## 2026-10-30 Qwen3.5-35B-A3B package published
+
+The operator approved publishing. `episod/qwen3.5-35b-a3b-blackhole-p300` was uploaded private, checked with `tt-orchard verify-package`, and made public (a personal namespace; it is outside the Tenstorrent organisation and the catalog).
+- First verify-package pass failed 2 of 7: it did not read a record whose `files` is a path-to-sha256 map, and the manifest still said `NAMESPACE`. Both are fixed in the builder with tests that failed first. The manifest and the publish text name `episod`.
+- The restaged package was gated (`package_problems` empty) and booted cold on board 1 in 471 s (PR 265). Only the manifest, record and publish text changed after that boot, so `run.sh` is the booted one.
+- After the fixes: private upload, 7 of 7; public, 7 of 7 without a token.
