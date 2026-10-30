@@ -30,7 +30,8 @@ def test_a_two_chip_stage_drafts_the_whole_config(tmp_path):
         "run_dir": str(tmp_path / "run"), "model_id": "unsloth/Llama-3.1-8B-Instruct@abc", "model_name": "Llama-3.1-8B-Instruct",
         "model_snapshot": "/hf/snap", "tt_metal_dir": "/host/tt-metal", "scratch_dir": str(tmp_path / "run" / "tt-metal-scratch"),
         "mesh_device": "P300", "chips": 2, "optimizations": "accuracy",
-        "tt_cache": str(tmp_path / "cache" / "stock" / "llama-3.1-8b-instruct" / "P300"), "deadline_s": sr.STOCK_DEADLINE_S}
+        "tt_cache": str(tmp_path / "cache" / "stock" / "llama-3.1-8b-instruct" / "P300"), "deadline_s": sr.STOCK_DEADLINE_S,
+        "disable_tensor_cache": True}
 
 
 def test_one_chip_is_p150(tmp_path):
@@ -81,3 +82,10 @@ def test_the_config_holds_no_token_and_every_path_is_absolute(tmp_path):
     for key in ("run_dir", "model_snapshot", "tt_metal_dir", "scratch_dir", "tt_cache"):
         assert Path(cfg[key]).is_absolute()
     assert not [k for k in cfg if "token" in k or "secret" in k or "key" in k]
+
+
+def test_the_draft_turns_the_tensor_cache_off(tmp_path):
+    """ttnn 0.80.0 on this box never returns from load_tensor_flatbuffer for a cached tensor of about 35 MB or more (found 2026-10-29, Llama-3.1-8B), and
+    tt-transformers reaches it on the second KV-cache as_tensor. The draft says to run with no cache files."""
+    cfg, _ = draft(tmp_path, chips=1)
+    assert cfg["disable_tensor_cache"] is True

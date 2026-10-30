@@ -111,7 +111,7 @@ class World:
                     return 0, "", ""
             if code == de.VERSIONS_CODE:
                 have = {r.split("==")[0]: r.split("==")[1] for r in de.REQUIREMENTS}
-                have.update({"torch": "2.7.0+cpu", "ttnn": "0.80.0", "numpy": self.numpy})
+                have.update({"torch": "2.7.0+cpu", "torchvision": "0.22.0+cpu", "ttnn": "0.80.0", "numpy": self.numpy})
                 for gone in self.missing:
                     have.pop(gone, None)
                 have.update(self.other_versions)
@@ -165,7 +165,7 @@ def test_the_requirement_names_are_the_reviewed_set():
     got = {r.split("==")[0].lower() for r in de.REQUIREMENTS}
     assert got == {"numpy", "huggingface_hub", "datasets", "pyarrow", "transformers", "tokenizers", "safetensors", "pytest", "requests", "loguru",
                    "networkx", "graphviz", "pyyaml", "click", "pandas", "seaborn", "ml_dtypes", "pillow", "termcolor", "tqdm",
-                   "pydantic", "opencv-python-headless"}
+                   "pydantic", "opencv-python-headless", "accelerate", "pytz"}
 
 
 def test_numpy_is_below_two_and_the_headless_opencv_is_the_one_asked_for():
@@ -749,3 +749,16 @@ def test_a_venv_that_reaches_the_host_tree_through_a_link_is_refused(world):
 def test_the_fix_command_names_the_venv_and_the_tree(world):
     cmd = de.fix_command(world.env())
     assert cmd == f"tt-orchard demo-env --venv-dir {world.venv} --tt-metal-dir {world.tree}"
+
+
+def test_torchvision_is_installed_with_torch_from_the_cpu_index_and_checked():
+    """The root conftest.py of the host tree imports torchvision, and the benchmarking helper imports pytz: both were missing in the first real
+    stock-runtime run (2026-10-29). torchvision has to come from the same CPU index as torch so that the two builds match."""
+    assert de.TORCHVISION.startswith("torchvision==") and "torchvision" in de.TORCH_CODE
+    before = de.requirements_sha256()
+    de.TORCHVISION, saved = "torchvision==0.0.1", de.TORCHVISION
+    try:
+        assert de.requirements_sha256() != before        # the record's hash covers it
+    finally:
+        de.TORCHVISION = saved
+    assert any(r.startswith("pytz==") for r in de.REQUIREMENTS)

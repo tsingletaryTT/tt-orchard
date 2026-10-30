@@ -1365,8 +1365,9 @@ STOCK_STAGE_2 = dataclasses.replace(
     STAGES[2], name="serve through tt-transformers on one board", skill="stock-runtime-check", refs=("tt-device-usage",),
     gate=gate_stock_runtime, gate_file="evidence/stock-check.json", draft="stock_config")
 SKIP_STOCK_3 = "stock-runtime path: stage 2 served the full model through tt-transformers and compared it with the CPU reference"
-SKIP_STOCK_4 = ("stock-runtime path: the 2-chip and 4-chip checks are not built yet (issue 61 pilot); stage 2 measured one board only, "
-                "and the n_kv_heads of the model divide 1, 2 and 4 chips only as a read of the config")
+SKIP_STOCK_4 = ("stock-runtime path: the 2-chip and 4-chip checks are not wired into the supervisor yet (issue 93). stock_check.py ran by hand with "
+                "a 2-chip config (P300) gives a record of the same shape (Llama-3.1-8B-Instruct, 2026-10-29); a 4-chip run needs both boards. "
+                "The n_kv_heads of the model divide 1, 2 and 4 chips only as a read of the config")
 SKIP_STOCK_5 = "stock-runtime path: stage 2 booted the runtime, compared its tokens with the CPU reference and judged a free run"
 SKIP_STOCK_6 = ("stock-runtime path: the qualitative check and benchmark are deferred, as on the weights-only path; stage 2's teacher-forced "
                 "agreement and free run are the only quality evidence")

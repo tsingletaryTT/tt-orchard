@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,10 @@ def test_demo_text(opt, case):
         for i in range(500):
             print(f"Iteration {i}: 25ms @ 40.0 tok/s/user (40.0 tok/s throughput)")
         print(" Top1 Accuracy: 91.20%, Top5 Accuracy: 98.40%")
+        if pathlib.Path("fake-no-target").exists():
+            raise ValueError("Could not find centralized accuracy targets for Llama-3.1-8B on P300 (batch_size=1, seq_len=512)")
+        if pathlib.Path("fake-late-fail").exists():
+            raise ValueError("something else went wrong after the accuracy line")
     else:
         for i in range(200):
             print(f"2026-10-26 10:00:00.000 | INFO     | demo:run:1 - Iteration {i}: 25ms @ 40.0 tok/s/user (40.0 tok/s throughput)")
@@ -63,6 +68,8 @@ class Rig:
         (self.host / "tests/scripts").mkdir(parents=True)
         (self.host / "tests/__init__.py").write_text("")
         (self.host / "tests/scripts/common.py").write_text("X = 1\n")
+        (self.host / "tests/tests_common").mkdir(parents=True)
+        (self.host / "tests/tests_common/cache_entries_counter.py").write_text("Y = 2\n")
         (self.host / "conftest.py").write_text("")
         (self.host / "pytest.ini").write_text("[pytest]\n")
         (self.host / "models/__pycache__").mkdir()
@@ -125,6 +132,13 @@ def test_prepare_also_copies_the_package_the_root_conftest_imports(rig):
     rig.go("prepare")
     sc = rig.run_dir / "tt-metal-scratch"
     assert (sc / "tests/__init__.py").is_file() and (sc / "tests/scripts/common.py").read_text() == "X = 1\n"
+
+
+def test_prepare_copies_tests_common_which_the_mesh_fixture_imports_after_the_device_opens(rig):
+    """The first real run (2026-10-29) opened the board and then failed in conftest.py's mesh_device fixture on
+    `from tests.tests_common.cache_entries_counter import ...`, a package the first copy list did not have."""
+    rig.go("prepare")
+    assert (rig.run_dir / "tt-metal-scratch/tests/tests_common/cache_entries_counter.py").read_text() == "Y = 2\n"
 
 
 def test_prepare_refuses_an_interpreter_that_cannot_import_a_named_module_before_anything_else(rig):
@@ -400,3 +414,155 @@ def test_the_free_run_parser_handles_a_log_with_no_output_block():
     m = load_module()
     got = m.parse_free_run("nothing here")
     assert got["text"] == "" and got["prompt"] is None and got["decode_tokens_per_s"] is None and got["ttft_s"] is None
+
+
+def test_the_default_import_check_names_accelerate():
+    """The first real prepare (2026-10-29) loaded an 8B model on the CPU before it failed on a missing `accelerate`, which transformers needs for
+    device_map="auto" in tt-transformers' reference script. The default check names it, so the failure comes in seconds, before any model loads."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "orchard" / "skills" / "stock-runtime-templates"))
+    import importlib
+    mod = importlib.import_module("stock_check")
+    assert "accelerate" in mod.OPTIONAL_KEYS["import_check"]
+
+
+def test_a_missing_tt_transformers_target_after_the_accuracy_is_printed_is_recorded_and_does_not_fail_the_run(rig):
+    """The 2-chip run of 2026-10-29 (Llama-3.1-8B on P300) printed 96.6 percent and 100 percent, then tt-transformers' own check found no published
+    target for that board and failed the test. The numbers are the measurement; orchard's gate judges them against its own bars. The record says the
+    upstream check could not run."""
+    rig.go("prepare")
+    (rig.run_dir / "tt-metal-scratch" / "fake-no-target").write_text("x")
+    done = rig.go("run")
+    assert done.returncode == 0, done.stderr
+    ev = rig.evidence()
+    assert ev["teacher_forced"]["top1"] == 0.912 and ev["exit_codes"]["token_accuracy"] != 0
+    assert ev["tt_transformers_target"]["found"] is False and "P300" in ev["tt_transformers_target"]["message"]
+
+
+def test_any_other_failure_after_the_accuracy_line_still_fails_the_run(rig):
+    rig.go("prepare")
+    (rig.run_dir / "tt-metal-scratch" / "fake-late-fail").write_text("x")
+    done = rig.go("run")
+    assert done.returncode == 3 and "token accuracy 1" in done.stderr
+
+
+def test_a_run_with_the_target_present_records_that_it_was_found(rig):
+    rig.go("prepare")
+    rig.go("run")
+    assert rig.evidence()["tt_transformers_target"] == {"found": True, "message": None}
+
+
+def test_disable_tensor_cache_appends_the_patch_to_the_scratch_conftest_once(rig):
+    rig.cfg["disable_tensor_cache"] = True
+    rig.write_cfg()
+    assert rig.go("prepare").returncode == 0 and rig.go("prepare").returncode == 0
+    text = (rig.run_dir / "tt-metal-scratch" / "conftest.py").read_text()
+    assert text.count("orchard scratch patch (issue 93)") == 1 and 'kwargs["cache_file_name"] = None' in text
+    # the patched conftest imports ttnn when the child pytest collects it: a scratch-local stub keeps this test off any real device
+    (rig.run_dir / "tt-metal-scratch" / "ttnn.py").write_text("def as_tensor(*a, **k):\n    return k\n")
+    done = rig.go("run")
+    assert done.returncode == 0, done.stderr
+    patch = (rig.stage / "evidence/scratch.patch").read_text()
+    assert "cache_file_name" in patch                      # the change is in the evidence, like any other scratch change
+
+
+def test_without_disable_tensor_cache_the_scratch_conftest_is_a_plain_copy(rig):
+    rig.go("prepare")
+    assert (rig.run_dir / "tt-metal-scratch" / "conftest.py").read_text() == (rig.host / "conftest.py").read_text()
+
+
+def test_disable_tensor_cache_must_be_true_or_false(rig):
+    rig.cfg["disable_tensor_cache"] = "yes"
+    rig.write_cfg()
+    done = rig.go("prepare")
+    assert done.returncode == 2 and "disable_tensor_cache" in done.stderr
+
+
+def test_a_scratch_copy_made_by_an_older_template_gets_the_paths_added_since(rig):
+    """A marked scratch copy used to be kept as it was, so a template that needed a new path (tests/tests_common) never got it."""
+    rig.go("prepare")
+    sc = rig.run_dir / "tt-metal-scratch"
+    shutil.rmtree(sc / "tests" / "tests_common")
+    (sc / "models" / "edited.txt").write_text("a stage edit")
+    assert rig.go("prepare").returncode == 0
+    assert (sc / "tests/tests_common/cache_entries_counter.py").read_text() == "Y = 2\n"
+    assert (sc / "models" / "edited.txt").read_text() == "a stage edit"
+    assert "tests/tests_common" in json.loads((sc / ".orchard-scratch.json").read_text())["copied"]
+
+
+def test_turning_disable_tensor_cache_off_removes_the_patch_and_keeps_other_edits(rig):
+    rig.cfg["disable_tensor_cache"] = True
+    rig.write_cfg()
+    rig.go("prepare")
+    conftest = rig.run_dir / "tt-metal-scratch" / "conftest.py"
+    conftest.write_text("# a stage edit\n" + conftest.read_text())
+    rig.cfg["disable_tensor_cache"] = False
+    rig.write_cfg()
+    assert rig.go("prepare").returncode == 0
+    text = conftest.read_text()
+    assert "orchard scratch patch" not in text and text.startswith("# a stage edit\n")
+
+
+def test_a_patch_someone_edited_is_not_removed_silently(rig):
+    rig.cfg["disable_tensor_cache"] = True
+    rig.write_cfg()
+    rig.go("prepare")
+    conftest = rig.run_dir / "tt-metal-scratch" / "conftest.py"
+    conftest.write_text(conftest.read_text().replace('kwargs["cache_file_name"] = None', 'kwargs["cache_file_name"] = None  # edited'))
+    rig.cfg["disable_tensor_cache"] = False
+    rig.write_cfg()
+    done = rig.go("prepare")
+    assert done.returncode == 2 and "disable_tensor_cache" in done.stderr
+
+
+def _template_module():
+    sys.path.insert(0, str(TEMPLATE.parent))
+    import importlib
+    return importlib.import_module("stock_check")
+
+
+MISSING = "ValueError: Could not find centralized accuracy targets for Llama-3.1-8B on P300 (batch_size=1, seq_len=512)\n"
+
+
+@pytest.mark.parametrize("log,rc,expected", [
+    (MISSING + "=========== 1 failed, 45 deselected, 1 warning in 51.90s ===========\n", 1, True),
+    (MISSING + "=========== 1 failed, 1 error, 45 deselected in 51.90s ===========\n", 1, False),     # a teardown error beside it
+    (MISSING + "=========== 1 failed, 1 passed in 51.90s ===========\n", 1, False),
+    (MISSING, 1, False),                                                                              # no summary line: the run did not finish
+    (MISSING + "=========== 1 failed, 45 deselected in 51.90s ===========\n", 124, False),             # a timeout
+    (MISSING + "=========== 1 failed, 45 deselected in 51.90s ===========\n", -11, False),            # a crash
+    (MISSING + "=========== 1 failed, 45 deselected in 51.90s ===========\n", 0, False)])
+def test_the_missing_target_exemption_needs_it_to_be_the_only_failure(log, rc, expected):
+    mod = _template_module()
+    assert (mod.missing_target(log, (0.9, 1.0), rc) is not None) is expected
+
+
+def test_a_long_scratch_patch_is_cut_inside_the_byte_limit_with_a_notice(rig):
+    """Copilot, PR 275: the cut text plus its notice went over the limit the bundle reads, so stage 8 dropped the whole patch. UTF-8 text counts in bytes."""
+    rig.go("prepare")
+    (rig.run_dir / "tt-metal-scratch" / "models" / "big.txt").write_text("\u00e9" * 3_000_000)
+    assert rig.go("run").returncode == 0
+    data = (rig.stage / "evidence/scratch.patch").read_bytes()
+    mod = _template_module()
+    assert len(data) <= mod.PATCH_LIMIT and data.endswith(b"[cut: the patch is longer than the evidence limit]\n")
+
+
+def test_the_target_message_is_recorded_whether_or_not_the_run_qualifies_for_the_exemption():
+    """Copilot, PR 275 (round 3): a log with the missing-target error and a teardown error kept the run failing, and the record then said the target was found."""
+    mod = _template_module()
+    mixed = MISSING + "=========== 1 failed, 1 error, 45 deselected in 51.90s ===========\n"
+    assert mod.missing_target(mixed, (0.9, 1.0), 1) is None            # still a failure
+    assert mod.target_message(mixed) is not None and "P300" in mod.target_message(mixed)
+    assert mod.target_message("everything fine\n") is None
+
+
+def test_a_chained_failure_beside_the_missing_target_is_not_exempted():
+    """Copilot, PR 275 (round 4): a RuntimeError chained to the missing-target ValueError (a cleanup failure) must keep the run failing."""
+    mod = _template_module()
+    summary = "=========== 1 failed, 45 deselected in 51.90s ===========\n"
+    chained = ("E   ValueError: Could not find centralized accuracy targets for X on P300\n\nDuring handling of the above exception, another exception occurred:\n"
+               "E   RuntimeError: device close failed\n" + MISSING + summary)
+    assert mod.missing_target(chained, (0.9, 1.0), 1) is None
+    other = "E   RuntimeError: device close failed\n" + MISSING + summary
+    assert mod.missing_target(other, (0.9, 1.0), 1) is None
+    only = "E   ValueError: Could not find centralized accuracy targets for X on P300\n" + MISSING + summary
+    assert mod.missing_target(only, (0.9, 1.0), 1) is not None

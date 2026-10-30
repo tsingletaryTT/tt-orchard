@@ -1,0 +1,43 @@
+{
+  "template_sha256": "7c471821fd6576e7cc8b78fc79dafeeb862095e9b9ad1845acd1ef9b8da879d0",
+  "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+  "chips": 2,
+  "device_name": "P300",
+  "optimizations": "accuracy",
+  "tt_metal": {
+    "tag": "v0.80.0",
+    "dirty": false
+  },
+  "teacher_forced": {
+    "tokens": 500,
+    "top1": 0.966,
+    "top5": 1.0
+  },
+  "free_run": {
+    "prompt": "What is your favorite condiment? There are so many condiments to choose from, each bringing its uniq\n<long prompt not printed in full>\nore exotic like sriracha or hoisin sauce? Share what your favorite condiment is and why you love it.",
+    "text": "I'm just a large language model, I don't have personal preferences or taste buds, but I can tell you about popular condiments and their uses.\n\nHowever, I can provide information on various condiments and their unique flavor profiles. \n\n- Ketchup is a classic condiment made from tomatoes, vinegar, sugar, and spices. It's a staple in many cuisines, particularly in Western and Asian cooking.\n- Mayonnaise is a creamy condiment made from egg yolks, oil, vinegar, and seasonings. It's commonly used in sandwiches, salads, and as a dip.\n- Mustard is a spicy condiment made from ground mustard seeds, vinegar, and spices. It's often used in hot dogs, sandwiches, and as a marinade.\n- Sriracha is a spicy condiment made from chili peppers, vinegar, garlic, and sugar. It's commonly used in Asian cuisine and adds a spicy kick to dishes.\n- Hoisin sauce is a sweet and savory cond",
+    "new_tokens": 200,
+    "finish": "length"
+  },
+  "speed": {
+    "decode_tokens_per_s": 55.86,
+    "ttft_s": 0.03701
+  },
+  "hub_fetch": [],
+  "reference": {
+    "source": "generated",
+    "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+    "snapshot": "0e9e39f249a16976918f6564b8830bc894c89659",
+    "sha256": "769d4054d4736749c95d292b249b39c53a94346a42db9ff1a8979c44f993af24"
+  },
+  "tt_transformers_target": {
+    "found": false,
+    "message": "Could not find centralized accuracy targets for Llama-3.1-8B on P300 (batch_size=1, seq_len=512)"
+  },
+  "scratch_patch": "evidence/scratch.patch",
+  "exit_codes": {
+    "token_accuracy": 1,
+    "free_run": 0
+  },
+  "seconds": 100.2
+}

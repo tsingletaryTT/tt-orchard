@@ -16,8 +16,8 @@ runtime is the host build's `ttnn`, found on the interpreter's path. The numbers
 lines; the gate (orchard/stages.py, gate_stock_runtime) judges them again against the bars in orchard/defaults.py.
 
 stock_config.json keys: run_dir, model_id, model_name, model_snapshot, tt_metal_dir, scratch_dir, mesh_device, chips, optimizations,
-tt_cache, deadline_s; optional python_path_extra (directories put after the scratch copy on PYTHONPATH) and import_check (modules `prepare`
-must be able to import, default numpy, cv2 and torch) and demo_python (the interpreter every child runs under, from `tt-orchard demo-env`;
+tt_cache, deadline_s; optional disable_tensor_cache (true runs the scratch copy with no tensor cache files), python_path_extra (directories put after the scratch copy on PYTHONPATH) and import_check (modules `prepare`
+must be able to import, default numpy, cv2, torch and accelerate) and demo_python (the interpreter every child runs under, from `tt-orchard demo-env`;
 default: the interpreter running this script). Exit codes: 0 done, 2 the config or an input does not fit (the message names it), 3 a run step failed (the log says
 which), 6 a model was fetched from the Hub."""
 from __future__ import annotations
@@ -35,9 +35,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 KEYS = ("run_dir", "model_id", "model_name", "model_snapshot", "tt_metal_dir", "scratch_dir", "mesh_device", "chips", "optimizations",
         "tt_cache", "deadline_s")
-# The root conftest.py imports `tests.scripts.common`, so the package that holds it is copied too (about 700 KB).
-COPIED = ("models", "conftest.py", "pytest.ini", "tests/__init__.py", "tests/scripts")
-OPTIONAL_KEYS = {"python_path_extra": [], "import_check": ["numpy", "cv2", "torch"]}
+# The root conftest.py imports `tests.scripts.common` at load and `tests.tests_common.cache_entries_counter` when the mesh fixture opens a device, so
+# the packages that hold them are copied too (about 700 KB).
+COPIED = ("models", "conftest.py", "pytest.ini", "tests/__init__.py", "tests/scripts", "tests/tests_common")
+OPTIONAL_KEYS = {"python_path_extra": [], "import_check": ["numpy", "cv2", "torch", "accelerate"]}
 # `demo_python` (optional): the interpreter every child runs under, built by `tt-orchard demo-env`. Without it the children use the
 # interpreter that runs this script, which is what the shared environment gave on 2026-10-26 (numpy 2 with ttnn needing numpy below 2).
 MARKER = ".orchard-scratch.json"
@@ -52,7 +53,7 @@ TTFT = re.compile(r"Average Time to First Token \(TTFT\): ([0-9.]+)ms")
 USER_PROMPT = re.compile(r"==USER 0 - PROMPT\n(.*?)\s*\n==USER 0 - OUTPUT\n", re.S)
 # The output ends at the next marker, at the next log record (loguru starts each with a date) or at the end of the log.
 USER_OUTPUT = re.compile(r"==USER 0 - OUTPUT\n(.*?)(?:\n==|\n\d{4}-\d\d-\d\d[ T]|\Z)", re.S)
-PATCH_LIMIT = 2_000_000
+PATCH_LIMIT = 2_000_000                 # bytes, notice included; stage 8 reads at most this many (STOCK_PATCH_MAX_BYTES in build_bundle.py)
 
 
 def fail(code: int, message: str) -> None:
@@ -89,6 +90,8 @@ def load_config() -> dict:
         fail(2, "python_path_extra must hold absolute paths")
     if any(not re.fullmatch(r"[A-Za-z0-9_]+", m) for m in cfg["import_check"]):
         fail(2, "import_check must hold module names")
+    if not isinstance(cfg.setdefault("disable_tensor_cache", False), bool):
+        fail(2, "disable_tensor_cache must be true or false")
     if "demo_python" in cfg:
         py = cfg["demo_python"]
         if not isinstance(py, str) or not Path(py).is_absolute():
@@ -136,28 +139,84 @@ def tree_facts(tt_metal_dir: str) -> dict:
 
 # ---- prepare ----------------------------------------------------------------------------------------------------
 
-def make_scratch(cfg: dict) -> Path:
-    scratch, host = Path(cfg["scratch_dir"]), Path(cfg["tt_metal_dir"])
-    marker = scratch / MARKER
-    if marker.is_file():
-        say(f"the scratch copy exists ({scratch.name}); keeping it, with any change a stage made")
-        return scratch
-    if scratch.exists() and any(scratch.iterdir()):
-        fail(2, f"{scratch} exists and has no {MARKER}; it is not a scratch copy this script made")
-    scratch.mkdir(parents=True, exist_ok=True)
-    for name in COPIED:
-        src = host / name
+def copy_paths(host: Path, scratch: Path, names, *, only_missing: bool) -> list[str]:
+    """Copy `names` from the host tree into the scratch copy. With `only_missing`, a path the copy already has is left as it is (a stage may have edited it)."""
+    copied = []
+    for name in names:
+        src, dst = host / name, scratch / name
         if not src.exists():
             fail(2, f"{src} does not exist: tt_metal_dir is not a tt-metal tree")
-        dst = scratch / name
+        if only_missing and dst.exists():
+            continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_dir():
             shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         else:
             shutil.copy2(src, dst)
+        copied.append(name)
+    return copied
+
+
+def make_scratch(cfg: dict) -> Path:
+    scratch, host = Path(cfg["scratch_dir"]), Path(cfg["tt_metal_dir"])
+    marker = scratch / MARKER
+    if marker.is_file():
+        # A copy made by an older template lacks the paths added to COPIED since (tests/tests_common, for one). Add those and leave every other file as a
+        # stage left it.
+        added = copy_paths(host, scratch, COPIED, only_missing=True)
+        if added:
+            record = json.loads(marker.read_text())
+            record["copied"] = list(COPIED)
+            marker.write_text(json.dumps(record, indent=2) + "\n")
+            say(f"the scratch copy exists ({scratch.name}); added {', '.join(added)} and kept every other file as it is")
+        else:
+            say(f"the scratch copy exists ({scratch.name}); keeping it, with any change a stage made")
+        return scratch
+    if scratch.exists() and any(scratch.iterdir()):
+        fail(2, f"{scratch} exists and has no {MARKER}; it is not a scratch copy this script made")
+    scratch.mkdir(parents=True, exist_ok=True)
+    copy_paths(host, scratch, COPIED, only_missing=False)
     marker.write_text(json.dumps({"copied": list(COPIED), "tt_metal": tree_facts(cfg["tt_metal_dir"])}, indent=2) + "\n")
     say(f"copied {', '.join(COPIED)} from the host tree into {scratch.name}")
     return scratch
+
+
+CACHE_PATCH_MARK = "orchard scratch patch (issue 93)"
+CACHE_PATCH = f"""
+
+# ---- {CACHE_PATCH_MARK} -------------------------------------------------------------------------------------------
+# On the box where this was found (ttnn 0.80.0, 2026-10-29) `ttnn._ttnn.tensor.load_tensor_flatbuffer(..., device=mesh)` spins in the kernel and never returns
+# for a cached tensor of about 35 MB or more (a 33 MB KV cache entry, a 1 GB embedding). tt-transformers reaches it on the second `ttnn.as_tensor` of the K and V
+# caches, which share one cache file name. Dropping the cache file name makes every as_tensor convert and upload from the in-memory tensor, which was fast in a
+# probe. The numbers are unchanged. The config key `disable_tensor_cache` turns this on; the change shows in evidence/scratch.patch.
+import ttnn as _orchard_ttnn
+_orchard_as_tensor = _orchard_ttnn.as_tensor
+
+
+def _orchard_as_tensor_no_cache(*args, **kwargs):
+    kwargs["cache_file_name"] = None
+    return _orchard_as_tensor(*args, **kwargs)
+
+
+_orchard_ttnn.as_tensor = _orchard_as_tensor_no_cache
+"""
+
+
+def apply_cache_patch(cfg: dict, scratch: Path) -> None:
+    """Make the scratch copy's root conftest.py match `disable_tensor_cache`: append CACHE_PATCH once when it is true; when it is false, remove CACHE_PATCH if
+    it is there as written, and stop (exit 2) when a patch with the marker is there but was edited, since it cannot be removed safely."""
+    conftest = scratch / "conftest.py"
+    text = conftest.read_text(encoding="utf-8")
+    if cfg["disable_tensor_cache"]:
+        if CACHE_PATCH_MARK not in text:
+            conftest.write_text(text + CACHE_PATCH, encoding="utf-8")
+            say("the scratch conftest.py runs with no tensor cache files (disable_tensor_cache)")
+    elif CACHE_PATCH_MARK in text:
+        if CACHE_PATCH not in text:
+            fail(2, "disable_tensor_cache is false but the scratch conftest.py has a patch that was edited, so it cannot be removed safely; "
+                    "remove it by hand or delete the scratch copy")
+        conftest.write_text(text.replace(CACHE_PATCH, "", 1), encoding="utf-8")
+        say("removed the tensor cache patch from the scratch conftest.py (disable_tensor_cache is false)")
 
 
 def make_model_dir(cfg: dict, scratch: Path) -> Path:
@@ -240,6 +299,7 @@ def prepare() -> None:
     cfg = load_config()
     check_imports(cfg, Path(cfg["scratch_dir"]))
     scratch = make_scratch(cfg)
+    apply_cache_patch(cfg, scratch)
     model_dir = make_model_dir(cfg, scratch)
     note = ensure_reference(cfg, scratch, model_dir)
     say(note)
@@ -289,23 +349,59 @@ def parse_free_run(text: str) -> dict:
             "decode_tokens_per_s": float(speed[-1]) if speed else None, "ttft_s": float(ttft[-1]) / 1000 if ttft else None}
 
 
+NO_TARGET = re.compile(r"ValueError: (Could not find centralized accuracy targets for [^\n]*)")
+# pytest's last line when exactly one test failed and nothing else happened: no error, no pass, no skip, no crash text
+ONLY_ONE_FAILED = re.compile(r"^=+ 1 failed(?:, \d+ (?:deselected|warnings?))* in [0-9.]+s(?: \([0-9:]+\))? =+$", re.M)
+
+
+def target_message(acc_text: str) -> str | None:
+    """The message of tt-transformers' missing-target error when the log has it (whether or not that was the only failure), else None."""
+    found = NO_TARGET.findall(acc_text)
+    return found[-1] if found else None
+
+
+def missing_target(acc_text: str, accuracy, rc: int) -> str | None:
+    """tt-transformers' own test looks up a published accuracy target for the model and board after it prints the accuracy, and fails when the table has
+    no row. The 2-chip run of Llama-3.1-8B on P300 (2026-10-29) did exactly that. The message when that was the only failure: pytest exited 1 (a test failed,
+    not a timeout, a crash or an interrupt), the accuracy line was printed first, and pytest's last line counts one failure with no error, pass or skip beside
+    it. Any other nonzero exit is still a failure (Copilot, PR 275)."""
+    if rc != 1 or accuracy is None:
+        return None
+    found = [target_message(acc_text)] if target_message(acc_text) else []
+    if not found:
+        return None
+    if "During handling of the above exception" in acc_text or "direct cause of the following exception" in acc_text:
+        return None                                  # a chained failure: something else went wrong beside the missing target
+    if any("Error" in ln and "Could not find centralized accuracy targets" not in ln for ln in acc_text.splitlines() if ln.startswith("E ")):
+        return None                                  # pytest's own failure lines name another error
+    last = [ln for ln in acc_text.splitlines() if ln.startswith("=") and " in " in ln][-1:]
+    return found[-1] if last and ONLY_ONE_FAILED.fullmatch(last[0]) else None
+
+
 def hub_fetches(model_dir: Path, log_text: str) -> list[str]:
     """Anything the run fetched from the Hub: the runs switch it off, so any fetch is a failure."""
     return sorted({m for m in re.findall(r"(?:Fetching \d+ files|snapshot_download)[^\n]*", log_text)})
 
 
 def scratch_patch(cfg: dict, evidence: Path) -> str:
-    """The change between the host tree's models/ and the scratch copy (what a stage changed), as a unified diff."""
-    host, scratch = Path(cfg["tt_metal_dir"]) / "models", Path(cfg["scratch_dir"]) / "models"
-    done = subprocess.run(["diff", "-ruN", "-x", "__pycache__", "-x", "*.pyc", "-x", "*.refpt", "-x", "*.refpt.orchard.json", str(host), str(scratch)],
-                          capture_output=True, text=True)
-    lines = [ln.split("\t", 1)[0] if ln.startswith(("--- ", "+++ ")) else ln for ln in done.stdout.splitlines()
+    """The change between the host tree and the scratch copy (what a stage or the config changed), as a unified diff over every path the copy holds
+    (`models/` and the root files and test packages in COPIED), with `a/` for the host tree and `b/` for the copy."""
+    host, scratch = Path(cfg["tt_metal_dir"]), Path(cfg["scratch_dir"])
+    out = []
+    for name in COPIED:
+        done = subprocess.run(["diff", "-ruN", "-x", "__pycache__", "-x", "*.pyc", "-x", "*.refpt", "-x", "*.refpt.orchard.json",
+                               str(host / name), str(scratch / name)], capture_output=True, text=True)
+        out.append(done.stdout)
+    lines = [ln.split("\t", 1)[0] if ln.startswith(("--- ", "+++ ")) else ln for ln in "".join(out).splitlines()
              if not ln.startswith("diff ")]                         # no command line, no timestamps, no machine path
-    text = "\n".join(lines).replace(str(host), "a/models").replace(str(scratch), "b/models")
+    text = "\n".join(lines).replace(str(host) + "/", "a/").replace(str(scratch) + "/", "b/")
     text = text + "\n" if text else ""
-    if len(text) > PATCH_LIMIT:
-        text = text[:PATCH_LIMIT] + "\n[cut: the patch is longer than the evidence limit]\n"
-    (evidence / "scratch.patch").write_text(text)
+    data = text.encode("utf-8")
+    if len(data) > PATCH_LIMIT:
+        # the limit is in bytes and covers the notice; the cut keeps whole characters
+        notice = b"\n[cut: the patch is longer than the evidence limit]\n"
+        text = data[:PATCH_LIMIT - len(notice)].decode("utf-8", errors="ignore") + notice.decode()
+    (evidence / "scratch.patch").write_text(text, encoding="utf-8")
     return "evidence/scratch.patch"
 
 
@@ -325,6 +421,8 @@ def run() -> None:
     rc = pytest_run(cfg, scratch, model_dir, ACCURACY_TEST, acc_log, deadline)
     acc_text = acc_log.read_text(errors="replace")
     accuracy = parse_accuracy(acc_text)
+    no_target = missing_target(acc_text, accuracy, rc)         # a message only when that was the sole failure: the run then passes
+    target_msg = target_message(acc_text)                       # the message whenever the log has it: the record says so even when the run fails
     if rc != 0 and accuracy is None:
         fail(3, f"the token-accuracy run exited {rc} and printed no accuracy; see log/token-accuracy.log")
     free_log = HERE / "log" / "free-run.log"
@@ -339,14 +437,14 @@ def run() -> None:
                            "top5": accuracy[1] if accuracy else None},
         "free_run": {k: free[k] for k in ("prompt", "text", "new_tokens", "finish")},
         "speed": {"decode_tokens_per_s": free["decode_tokens_per_s"], "ttft_s": free["ttft_s"]}, "hub_fetch": fetched,
-        "reference": reference,
+        "reference": reference, "tt_transformers_target": {"found": target_msg is None, "message": target_msg},
         "scratch_patch": scratch_patch(cfg, evidence), "exit_codes": {"token_accuracy": rc, "free_run": rc2},
         "seconds": round(time.time() - started, 1)}
     (evidence / "stock-check.json").write_text(json.dumps(result, indent=2) + "\n")
     say(f"wrote evidence/stock-check.json (top1 {result['teacher_forced']['top1']}, top5 {result['teacher_forced']['top5']})")
     if fetched:
         fail(6, "the run fetched from the Hub: " + "; ".join(fetched))
-    if rc != 0 or rc2 != 0:
+    if (rc != 0 and no_target is None) or rc2 != 0:
         fail(3, f"a run step exited non-zero (token accuracy {rc}, free run {rc2}); see log/")
 
 

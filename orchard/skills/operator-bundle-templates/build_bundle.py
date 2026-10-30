@@ -69,6 +69,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import sys
 import time
 from pathlib import Path
@@ -327,6 +328,8 @@ class Run:
                               "write it before stage 8 can build the bundle") from None
             if not self.publish.strip():
                 raise Missing("stages/7/PUBLISH_COMMANDS.txt is empty")
+        # A stock-runtime run (orchard/stock_runtime.py) has the template's stock-check.json in stage 2's evidence (issue 93).
+        self.stock = read_stock_json(run_dir)
         self.text = {name: read_json(run_dir / "stages" / str(n) / name, "", required=False) for n, name in TEXT_FILES}   # a text run's three result files
         self.audio = load_audio(run_dir)    # stage 2's audio_result.json: None for a run without one (see "audio runs")
         self.audio_clips: list[dict] = []   # set by build() once the clips are copied
@@ -1236,6 +1239,123 @@ def text_risks(run: Run, redact: Redactor) -> list[str]:
     return lines
 
 
+# ---- stock-runtime runs (stage 2's evidence/stock-check.json) ---------------------------------------------------------
+# A run that tt-transformers already supports has the stock_check.py template's stock-check.json. Only then does RESULTS.md get the "Stock runtime on a chip"
+# section and RISKS.md the "Stock runtime run" section. The file is written by a template and read again here as untrusted: a missing or wrongly typed field
+# prints "not recorded".
+STOCK_FILE = "stages/2/evidence/stock-check.json"
+STOCK_HEADING = "Stock runtime on a chip"
+
+
+STOCK_JSON_MAX_BYTES = 4 << 20          # a larger stock-check.json is not read
+STOCK_PATCH_MAX_BYTES = 2_000_000       # the template cuts its patch at this size (PATCH_LIMIT in stock_check.py); a larger file is not read
+STOCK_PATCH_NAME = re.compile(r"evidence/[A-Za-z0-9._-]+")
+
+
+def read_regular_file(path: Path, max_bytes: int) -> bytes | None:
+    """The bytes of a regular file under `max_bytes`, or None. The last path part is opened with O_NOFOLLOW and O_NONBLOCK, so a link or a FIFO neither follows
+    nor blocks, and the type is checked on the open descriptor; a device, a link, a directory or a larger file gives None (Copilot, PR 275)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(max_bytes + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return None if len(data) > max_bytes else data
+
+
+def read_stock_json(run_dir: Path) -> dict | None:
+    """stock-check.json as an object, or None when it is absent, not a regular file, too large or not a JSON object."""
+    raw = read_regular_file(run_dir / STOCK_FILE, STOCK_JSON_MAX_BYTES)
+    try:
+        data = json.loads(raw.decode("utf-8")) if raw is not None else None
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def read_stock_patch(run: Run, name) -> list[str] | None:
+    """The lines of the patch file `name` in stage 2, or None. The name comes from the evidence file, which is untrusted: it has to be `evidence/<one file name>`
+    (no `..`, no absolute path), the evidence directory has to be a real directory, and the file goes through read_regular_file."""
+    if not isinstance(name, str) or not STOCK_PATCH_NAME.fullmatch(name) or name in ("evidence/.", "evidence/.."):
+        return None
+    folder = run.dir / "stages" / "2" / "evidence"
+    if folder.is_symlink() or not folder.is_dir():
+        return None
+    data = read_regular_file(folder / name.split("/", 1)[1], STOCK_PATCH_MAX_BYTES)
+    return None if data is None else data.decode("utf-8", errors="replace").splitlines()
+
+
+def patch_summary(run: Run) -> str:
+    """Lines added and removed by the scratch patch of the host tree, counted from the patch file; "not recorded" when it cannot be read safely."""
+    lines = read_stock_patch(run, dig(run.stock, "scratch_patch"))
+    if lines is None:
+        return NOT_RECORDED
+    if not any(ln.strip() for ln in lines):
+        return "no change to the copied host tree paths"
+    added = sum(1 for ln in lines if ln.startswith("+") and not ln.startswith("+++"))
+    removed = sum(1 for ln in lines if ln.startswith("-") and not ln.startswith("---"))
+    partial = " (partial: the patch was cut)" if any(ln.startswith("[cut: the patch is longer") for ln in lines) else ""
+    return f"{added} lines added, {removed} removed{partial}"
+
+
+def stock_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Stock runtime on a chip" section of RESULTS.md. No lines for a run without stock-check.json."""
+    if run.stock is None:
+        return []
+    d = as_dict(run.stock)
+    t, sp, ref, tree = (as_dict(d.get(k)) for k in ("teacher_forced", "speed", "reference", "tt_metal"))
+    free = as_dict(d.get("free_run"))
+    dirty = tree.get("dirty")
+    rows = [("Board name the runtime saw", txt(redact, d.get("device_name"))), ("Chips", num(d.get("chips"))),
+            ("Optimization mode", txt(redact, d.get("optimizations"))),
+            ("Teacher-forced tokens compared", num(t.get("tokens"))), ("Top-1 agreement with the CPU reference", num(t.get("top1"), 5)),
+            ("Top-5 agreement with the CPU reference", num(t.get("top5"), 5)),
+            ("Decode speed (tokens per second per user, batch 1)", num(sp.get("decode_tokens_per_s"), 4)),
+            ("Time to first token (seconds)", num(sp.get("ttft_s"), 3)),
+            ("Free run", f"{num(free.get('new_tokens'))} new tokens, finish {txt(redact, free.get('finish'))}"),
+            ("Reference source", txt(redact, ref.get("source"))), ("Reference model", txt(redact, ref.get("model_id"))),
+            ("Reference snapshot", txt(redact, ref.get("snapshot"))), ("Reference file sha256", txt(redact, ref.get("sha256"))),
+            ("tt-metal tag", txt(redact, tree.get("tag"))),
+            ("tt-metal tree", "uncommitted changes" if dirty is True else "no uncommitted changes" if dirty is False else NOT_RECORDED),
+            ("Scratch patch", f"{txt(redact, d.get('scratch_patch'))}: {patch_summary(run)}"),
+            ("Fetched from the Hub during the run", f"{len(as_list(d.get('hub_fetch')))} fetches" if isinstance(d.get("hub_fetch"), list) else NOT_RECORDED),
+            ("Wall time of the hardware test (seconds)", num(d.get("seconds"), 5))]
+    lines = ["", f"## {STOCK_HEADING}", "",
+             "tt-transformers served the model as it is, from a scratch copy of the host tt-metal tree's `models` directory. Evidence: "
+             f"`{STOCK_FILE}`. The stage 2 gate judges the accuracy and speed fields again from this file.", "",
+             "| Field | Value |", "|---|---|"]
+    lines += [f"| {k} | {v} |" for k, v in rows]
+    lines += ["", "### What these numbers do not show", "",
+              "- Top-1 and top-5 are teacher-forced against a float CPU reference over one text; they are not a quality benchmark.",
+              "- The speed is one batch-1 demo run on the board named above. It is not a serving measurement.",
+              "- Only the board named above was measured. A run on a different chip count has its own record."]
+    return lines
+
+
+def stock_risks(run: Run, redact: Redactor) -> list[str]:
+    """The "Stock runtime run" section of RISKS.md. No lines for a run without stock-check.json."""
+    if run.stock is None:
+        return []
+    d = as_dict(run.stock)
+    lines = ["## Stock runtime run", ""]
+    if as_dict(d.get("tt_metal")).get("dirty") is True:
+        lines.append(f"- The host tt-metal tree has uncommitted changes, so the runtime is not a published build. Evidence: `{STOCK_FILE}`.")
+    patch = patch_summary(run)
+    if patch not in (NOT_RECORDED, "no change to the copied host tree paths"):
+        lines.append(f"- The scratch patch changed the stock code ({patch}). The measured model is not the stock code until the patch is upstream. "
+                     f"Evidence: `{STOCK_FILE}`.")
+    lines += ["- No package was built for this model. A package needs the base-bundle step of issue 62.", ""]
+    return lines
+
+
 def load_audio(run_dir: Path):
     """None when the run has no audio_result.json. Otherwise a dict: the file's content when it is a readable JSON object
     of a sane size, and {"_unreadable": <reason>} when it is not."""
@@ -1577,6 +1697,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += reported_section(run, redact)
     lines += audio_section(run, redact)
     lines += text_section(run, redact)
+    lines += stock_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
         spec = run.specs[n]
@@ -1850,6 +1971,7 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
              "Every item names its evidence, relative to the run directory.", ""]
     lines += audio_risks(run, redact)
     lines += text_risks(run, redact)
+    lines += stock_risks(run, redact)
     lines += ["## TODO numbers", ""]
     lines += [f"- {t}" for t in todo] or ["- None found in the run's files."]
     lines += ["", "## Stage 0 hazards", "",
