@@ -1865,10 +1865,49 @@ def sampling_defaults_dealt_with(run: Run) -> tuple[bool, list[str]]:
     return False, why
 
 
+SERVED_CHAT = "stages/2/served-chat.json"
+
+
+def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | None:
+    """What stage 2's served-chat.json (orchard/served_chat.py, issue 17) says, as (dealt with, why), or None when the run has no usable
+    record. The record is read as data: it counts only when `ok` is true, `problems` is a list, and its replies were checked. A stage 4
+    configuration with a problem makes it not shown too."""
+    rec = read_json(run.dir / SERVED_CHAT, "", required=False)
+    if not isinstance(rec, dict) or not isinstance(rec.get("problems"), list) or not isinstance(rec.get("replies"), dict):
+        return None
+    records = [(SERVED_CHAT, rec)]
+    configs = run.dir / "stages" / "4" / "configs"
+    for d in sorted(configs.glob("*/served-chat.json")) if configs.is_dir() else []:
+        other = read_json(d, "", required=False)
+        if isinstance(other, dict) and isinstance(other.get("problems"), list) and isinstance(other.get("replies"), dict):
+            records.append((str(d.relative_to(run.dir)), other))
+    names = sorted({str(p.get("name")) for _, r in records for p in r["problems"] if isinstance(p, dict)})
+    checked = all(r["replies"].get("checked") is True for _, r in records)
+    ok = all(r.get("ok") is True for _, r in records) and not names and checked
+    where = ", ".join(f"`{rel}`" for rel, _ in records)
+    if ok:
+        return True, [f"Stage 2's swap test sent chat requests, and {where} compares what it served with the new model's snapshot: the same chat "
+                      "template, special tokens and stop ids, no reply began with a role header or held an end token, and replies stopped on their "
+                      "own. It did not check the replies against the model card, and it did not compare answer quality with a model trained on "
+                      "another template."]
+    why = [f"{where}: " + ("problems found: " + ", ".join(redact(n) for n in names) + "." if names else
+                           "no chat reply was checked" + (f" ({redact(one_line(str(rec['replies'].get('why_not'))))})"
+                                                            if rec["replies"].get("why_not") else "") + ".")]
+    return False, why
+
+
 def chat_template_dealt_with(run: Run, redact: Redactor) -> tuple[bool, list[str]]:
-    """Never yes: no stage sends a chat request (the swap checks use /v1/completions, which applies no template)."""
+    """Dealt with only when stage 2's served-chat.json says the served template, special tokens and stop ids are the new model's and chat
+    replies were checked. Without that record no stage is known to have sent a chat request (the swap checks that predate the prompt suite
+    used /v1/completions, which applies no template)."""
+    verdict = served_chat_verdict(run, redact)
     why = ["No stage sent a chat request. The swap checks in stages 2 and 4 use /v1/completions, which applies no chat "
            "template."]
+    if verdict is not None:
+        ok, said = verdict
+        why = said
+        if ok:
+            return True, why
     rec = read_json(run.dir / "stages" / "2" / "model-dir-sources.json", "stages/2/model-dir-sources.json", required=False)
     text = lambda v: redact(one_line(v)) if isinstance(v, str) and v else None      # noqa: E731
     sentence = chat_template_sentence(rec, text) if isinstance(rec, dict) else None

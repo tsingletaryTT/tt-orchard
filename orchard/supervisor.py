@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, bus, nearest, safeio
+from orchard import audio_reference_env, audio_runtime, bus, nearest, safeio, served_chat
 from orchard import text_runtime
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -1913,6 +1913,31 @@ class Supervisor:
         log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
         return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
+    def _served_chat_records(self, n: int, stage_dir: Path) -> None:
+        """Issue 17. When stage 2 or stage 4 passes, check what each swap test served: the chat template, special tokens and stop ids of its
+        model-dir against the new model's snapshot, and the chat replies its prompt suite recorded (orchard/served_chat.py). One
+        served-chat.json per stage 2 directory and per stage 4 configuration. A stage with no swap_config.json (the stock, text and audio
+        stages) or whose new snapshot is not a directory gets none. The check never stops a run; the bundle reads the record."""
+        if n == 2:
+            dirs = [stage_dir]
+        else:
+            configs = stage_dir / "configs"
+            try:
+                dirs = sorted((p for p in configs.iterdir() if p.name.isdigit() and p.is_dir()), key=lambda p: int(p.name))
+            except OSError:
+                dirs = []
+        for d in dirs:
+            try:
+                cfg = safeio.read_json(d / "swap_config.json", max_bytes=1 << 20, expect=dict)
+            except safeio.SafeReadError:
+                continue
+            new = cfg.get("new_snapshot")
+            if not isinstance(new, str) or not new or not Path(new).is_dir() or not (d / "model-dir").is_dir():
+                continue
+            rec = served_chat.write_record(d, d / "model-dir", new, d / "evidence" / "swap-check.json")
+            self.ledger.append("evidence", n, what="served chat check", ok=rec["ok"], problems=[p["name"] for p in rec["problems"]],
+                               **evidence_record(self.run_dir, d / served_chat.FILE))
+
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
         The template decides form and modality from the files; `serving` is a property of this machine, so it comes from the
@@ -1933,6 +1958,8 @@ class Supervisor:
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
             ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
+            if n in (2, 4):
+                self._served_chat_records(n, stage_dir)
             if n == 6 and spec.gate_file == "result.json":
                 self._record_numbers(stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
