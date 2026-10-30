@@ -246,7 +246,7 @@
   <div class="label">What we brought up, in the order of what each model taught the tool</div>
   <h2>From a harness built around one model to a 35-line patch</h2>
   <p class="sub">The first models each needed a large piece of new harness work to get past a stop. The later ones needed small changes, because the earlier work was already there. Each story gives what stopped the model, what was built or changed, the measured result with its limits, and what the next model got because of it. Pull request sizes are added lines including tests. Every figure comes from the run log linked under each story.</p>
-  <nav class="prog" aria-label="The progression, from large changes to small ones"><a href="#m-hemmingway"><i>1</i><b>Hemmingway-1</b><span>the supervisor</span></a><a href="#m-clef"><i>2</i><b>Clef</b><span>a class</span></a><a href="#m-rag-gate"><i>3</i><b>RAG-Gate</b><span>environment checks</span></a><a href="#m-pi"><i>4</i><b>bytkim pi</b><span>a preflight bug</span></a><a href="#m-arex"><i>5</i><b>AREX-2</b><span>a measured trial</span></a><a href="#m-cjk"><i>6</i><b>CJK-Trim</b><span>a small class</span></a><a href="#m-coder"><i>7</i><b>Coder-Next</b><span>no supervisor change</span></a><a href="#m-audio"><i>8</i><b>Stable Audio 3</b><span>a new pipeline</span></a><a href="#m-granite"><i>9</i><b>Granite-4.0-H</b><span>coder-written kernels</span></a><a href="#m-minicpm"><i>10</i><b>MiniCPM3-4B</b><span>no new kernel</span></a><a href="#m-qwen35"><i>11</i><b>Qwen3.5-35B</b><span>a 35-line patch</span></a></nav>
+  <nav class="prog" aria-label="The progression, from large changes to small ones"><a href="#m-hemmingway"><i>1</i><b>Hemmingway-1</b><span>the supervisor</span></a><a href="#m-clef"><i>2</i><b>Clef</b><span>a class</span></a><a href="#m-rag-gate"><i>3</i><b>RAG-Gate</b><span>environment checks</span></a><a href="#m-pi"><i>4</i><b>bytkim pi</b><span>a preflight bug</span></a><a href="#m-arex"><i>5</i><b>AREX-2</b><span>a measured trial</span></a><a href="#m-cjk"><i>6</i><b>CJK-Trim</b><span>a small class</span></a><a href="#m-coder"><i>7</i><b>Coder-Next</b><span>no supervisor change</span></a><a href="#m-audio"><i>8</i><b>Stable Audio 3</b><span>a new pipeline</span></a><a href="#m-granite"><i>9</i><b>Granite-4.0-H</b><span>coder-written kernels</span></a><a href="#m-minicpm"><i>10</i><b>MiniCPM3-4B</b><span>no new kernel</span></a><a href="#m-qwen35"><i>11</i><b>Qwen3.5-35B</b><span>a 35-line patch</span></a><a href="#m-acestep"><i>12</i><b>ACE-Step 1.5</b><span>a second audio model</span></a></nav>
   <div class="stories">
     <article class="story" id="m-hemmingway">
       <div class="shead"><span class="num">1</span><h3><span class="m">Altworld/Hemmingway-1</span></h3><span class="tag">the supervisor itself</span></div>
@@ -370,6 +370,17 @@
       </div>
       <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-fusion-port.md">Fusion port</a></p>
     </article>
+    <article class="story" id="m-acestep">
+      <div class="shead"><span class="num">12</span><h3><span class="m">ACE-Step/Ace-Step1.5 (turbo)</span></h3><span class="tag">a second audio model</span></div>
+      <p class="what">A text-to-music model with a diffusion transformer and a VAE decoder. 29 and 30 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>Nothing on the chip. A community bundle already ran the transformer and the decoder on a Blackhole chip. The audio route, though, assumed Stable Audio 3: a 44.1 kHz sample rate, its runtime files, and one comparison at the end of the sampler loop. In a sampler loop each step feeds its error into the next, so an end-to-end comparison fails on late steps for a correct chip.</p></div>
+        <div><b>What we built or changed</b><p>A per-step check that gives every step the same input and compares it with a bfloat16 CPU run, with a bar of two times that floor and a wrong-step control. An audio profile per model (sample rate, files, arrays). A weights-free package with a small HTTP server. A profile showed that most of a request was on the CPU, so the text and lyric encoders and the cross-attention projection moved to the chip, and two cache and garbage-collection fixes removed repeated work. A cache of links to the model's files made the bundle run different code with no error; the runner and the package now refuse links.</p></div>
+        <div><b>Result</b><p>A 30 s clip takes 0.93 s and a 480 s clip 12.3 s on one chip (medians of three runs after a warm-up; the first version took 3.0 s and 14.6 s). The per-step check passes on two prompts. End-to-end agreement with the float32 CPU run is lower after the encoders moved, and the card says why. Nobody has judged the music beyond length and level checks. The package is on the Hub as <a href="https://huggingface.co/episod/ace-step-1.5-turbo-blackhole">episod/ace-step-1.5-turbo-blackhole</a>.</p></div>
+        <div><b>What the next model got</b><p>The per-step bars and the audio profile apply to any sampler-loop model. The planner language model and the XL transformer are not done.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-acestep-bringup.md">Bring-up</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-30-acestep-step-bars.md">Step bars</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-30-acestep-package-fast.md">Package 0.2.0</a></p>
+    </article>
   </div>
 </section>
 
@@ -410,7 +421,7 @@
     <li>MiniCPM3-4B and Granite-4.0-H-1B were driven by hand and did not go through the supervisor. MiniCPM3 has no batched prefill on two chips.</li>
     <li>Stable Audio 3 has its text encoder on the host, and nobody listened to the clips. Agreement is measured against a CPU reference on a single prompt or a small set.</li>
     <li>The automatic graft trial has not run on hardware. The 4-chip fabric timeout seen in three runs was cleared by a reset each time, and its cause was never isolated.</li>
-    <li>Speeds are medians on a shared host. The Granite, MiniCPM3 and Qwen3.5-35B-A3B packages are published; their numbers are in their cards.</li>
+    <li>Speeds are medians on a shared host. The Granite, MiniCPM3, Qwen3.5-35B-A3B and ACE-Step packages are published; their numbers are in their cards.</li>
   </ul>
   <p class="sub" style="margin-top:1rem">Each claim and its evidence are in <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/proofs.md">docs/proofs.md</a>.</p>
 </section>

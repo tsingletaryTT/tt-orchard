@@ -242,6 +242,16 @@ class Redactor:
 
 # ---- what the run produced --------------------------------------------------------------------------
 
+def read_capped_json(path: Path, *, max_bytes: int = 4 << 20) -> dict | None:
+    """The JSON object at `path` through orchard/safeio.py (size cap, no link followed, no FIFO read, strict JSON). None when the file is
+    absent, {} when it exists and cannot be read as an object."""
+    from orchard import safeio
+    try:
+        return safeio.read_json(path, max_bytes=max_bytes, expect=dict)
+    except safeio.SafeReadError as exc:
+        return None if "ENOENT" in str(exc.reason) else {}
+
+
 class Run:
     """Everything the bundle is built from, read once. Raises Missing for a required input."""
 
@@ -270,6 +280,9 @@ class Run:
         s = run_dir / "stages"
         self.delta = read_json(s / "0" / "delta.json", "stages/0/delta.json", required=True)
         # An audio run has no reference.json: stage 1 wrote audio_reference.json, which the audio section reads through stage 2's result.
+        # Stage 0's hazard scan (orchard/stage0_scan.py, issue 183): None when the run has none (an older run), {} when the file is unreadable.
+        self.scan_file = s / "0" / "hazard-scan.json"
+        self.scan = read_capped_json(self.scan_file)
         self.reference = {} if (self.audio_run or self.text_run) else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
@@ -634,6 +647,46 @@ SAMPLING_FLAG_RISKS = {
 }
 
 
+FLOOR_HEADING = "Decode against the DRAM floor"
+
+
+def floor_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Decode against the DRAM floor" section (issue 181): each decode speed the run measured, as a share of the estimated floor for
+    the dies it ran on, with the inputs, what each speed includes and, for a low share, the likely causes in order (text only).
+    The shares are recomputed here from the raw measurement files (orchard/floor_report.py), so a summary written into a file is not read.
+    No lines when the run has no stage 0 floor record or no speed with a floor, so a run from before gets the same RESULTS.md as before."""
+    from orchard import floor_report
+    rows = floor_report.share_rows(run.dir)
+    if not rows:
+        return []
+    rec = floor_report.read_floor(run.dir)
+    policy = rec.get("dtype_policy") if isinstance(rec.get("dtype_policy"), dict) else {}
+    bw = max((f.get("inputs", {}).get("per_die_bandwidth_gb_s") for f in rec["floors"].values() if isinstance(f, dict)
+              and isinstance(f.get("inputs"), dict)), default=None)
+    lines = ["", f"## {FLOOR_HEADING}", "",
+             "Decode on this hardware is limited by DRAM bandwidth: each token reads the active weights once, so time per token cannot be below "
+             "the active weight bytes divided by the bandwidth of the dies. Every figure below is an ESTIMATE. The floor is computed from the "
+             f"model's config with the weight dtype {redact(', '.join(f'{k} {v}' for k, v in sorted(policy.items())))} "
+             f"({redact(str(rec.get('dtype_policy_source')))}) and {fmt(bw)} GB/s per die "
+             f"({redact(one_line(str(rec.get('bandwidth_source'))))}). Evidence: `stages/0/decode-floor.json`.", "",
+             "| Speed | Dies | tok/s | Estimated floor tok/s | Share of the estimated floor | What the speed is | Label | Evidence |",
+             "|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {redact(r['source'])} | {r['dies']} | {fmt(round(r['tok_s'], 2))} | {fmt(round(r['floor_tok_s'], 1))} | "
+                     f"{fmt(round(r['share'] * 100, 1))} percent | {redact(one_line(r['basis']))} | measured speed, estimated floor | `{r['evidence']}` |")
+    lines.append("")
+    for r in rows:
+        if r.get("note"):
+            lines.append(f"- {redact(r['source'])}: {redact(r['note'])}.")
+    for note in floor_report.share_notes(run.dir):
+        lines.append(f"- {redact(one_line(note))}")
+    hints = [r for r in rows if r.get("hint")]
+    if hints:
+        lines += ["", redact(one_line(hints[0]["hint"])) + " This is text only; it does not block a run."]
+    lines += ["", f"What the floor leaves out: {redact(one_line(rec.get('assumptions') or ''))}"]
+    return lines
+
+
 def sampling_choice_section(run: Run, redact: Redactor) -> list[str]:
     """The "The sampling choice" section, from stage 2's `sampling-decision.json` (orchard/sampling_choice.py): which configuration the run ships,
     why, and the numbers it used. No lines when the run has no decision file, so a run from before the choice gets the same RESULTS.md as before.
@@ -837,7 +890,8 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
         if isinstance(x, dict):
             lines.append(f"- {x.get('area')}: {end(redact(x.get('finding', '')))} "
                          f"Evidence: {ev(x.get('evidence'))}.")
-    body[0] = lines + ["", "Evidence: `stages/0/delta.json`."]
+    scan_line = scan_results_line(run)
+    body[0] = lines + ([""] + [scan_line] if scan_line else []) + ["", "Evidence: `stages/0/delta.json`."]
 
     r = run.reference
     env = r.get("environment") if isinstance(r.get("environment"), dict) else {}
@@ -1694,6 +1748,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += graft_section(run, redact)
     lines += sampling_section(run, redact)
     lines += sampling_choice_section(run, redact)
+    lines += floor_section(run, redact)
     lines += reported_section(run, redact)
     lines += audio_section(run, redact)
     lines += text_section(run, redact)
@@ -1865,10 +1920,92 @@ def sampling_defaults_dealt_with(run: Run) -> tuple[bool, list[str]]:
     return False, why
 
 
+SERVED_CHAT = "stages/2/served-chat.json"
+
+
+def _served_chat_shape(rec) -> bool:
+    return (isinstance(rec, dict) and isinstance(rec.get("problems"), list) and isinstance(rec.get("incomplete"), list)
+            and isinstance(rec.get("replies"), dict))
+
+
+def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | None:
+    """What the served-chat.json records (orchard/served_chat.py, issue 17) say, as (dealt with, why), or None when stage 2 has no record and
+    the ledger names no failed write.
+
+    A record is believed only when the bytes read once from it (size capped, no link followed, regular files only) have a sha256 equal to the
+    latest `served chat check` evidence entry the supervisor wrote for that path; the same bytes are parsed. The hazard is dealt with only when
+    every required record is present, believed, has no problem, nothing incomplete, and checked chat replies. Required: stage 2's, every
+    record the ledger names (the trials' variants and each stage 4 configuration the supervisor checked) and each stage 4 configuration that
+    passed. A failed write the ledger names counts until a later evidence entry for the same path supersedes it."""
+    from orchard import safeio
+    latest, failed = {}, {}
+    for e in run.entries:
+        d = e.get("data") if isinstance(e.get("data"), dict) else {}
+        if e.get("event") == "evidence" and d.get("what") == "served chat check" and isinstance(d.get("path"), str):
+            latest[d["path"]] = d.get("sha256")
+            failed.pop(d["path"], None)
+        elif e.get("event") == "decision" and d.get("decision") == "served chat check not written":
+            failed[d.get("path") if isinstance(d.get("path"), str) else SERVED_CHAT] = d.get("reason")
+    if not (run.dir / SERVED_CHAT).exists() and not failed:
+        return None
+    required = {SERVED_CHAT, *latest}
+    required |= {f"stages/4/configs/{c.get('chips')}/served-chat.json" for c in run.configs() if c.get("pass") is True}
+    ok, why, problems = True, [], []
+    for rel in sorted(failed):
+        ok = False
+        why.append(f"The supervisor failed to write `{rel}` ({redact(one_line(str(failed[rel])))}).")
+    for rel in sorted(required):
+        if rel in failed:
+            continue
+        try:
+            data = safeio.read_bytes(run.dir / rel, max_bytes=8 << 20)
+            rec = safeio.parse_json_bytes(data, max_bytes=8 << 20)
+        except safeio.SafeReadError:
+            rec = data = None
+        if not _served_chat_shape(rec):
+            ok = False
+            why.append(f"`{rel}` is missing or unreadable.")
+            continue
+        if latest.get(rel) != hashlib.sha256(data).hexdigest():
+            ok = False
+            why.append(f"`{rel}` does not match the sha256 the ledger recorded for it" if rel in latest else
+                       f"`{rel}` has no ledger entry, so it cannot be tied to the supervisor's check.")
+            continue
+        names = sorted({str(p.get("name")) for p in rec["problems"] if isinstance(p, dict)})
+        if names:
+            ok = False
+            problems.append(f"`{rel}` found: " + ", ".join(redact(n) for n in names) + ".")
+        if rec["incomplete"]:
+            ok = False
+            why.append(f"`{rel}` is incomplete: " + redact(one_line("; ".join(str(i) for i in rec["incomplete"][:3]))) + ".")
+        if rec["replies"].get("checked") is not True:
+            ok = False
+            why.append(f"`{rel}` checked no chat reply" + (f" ({redact(one_line(str(rec['replies'].get('why_not'))))})"
+                                                           if rec["replies"].get("why_not") else "") + ".")
+        if rec.get("ok") is not True and not names and not rec["incomplete"] and rec["replies"].get("checked") is True:
+            ok = False
+            why.append(f"`{rel}` does not say ok.")
+    where = ", ".join(f"`{r}`" for r in sorted(required))
+    if ok:
+        return True, [f"The swap tests sent chat requests, and {where} compare what each served with the new model's snapshot: the same chat "
+                      "template, special tokens and stop ids, no reply began with a role header or held an end token, and replies stopped on their "
+                      "own. They did not check the replies against the model card, and did not compare answer quality with a model trained on "
+                      "another template."]
+    return False, problems + why
+
+
 def chat_template_dealt_with(run: Run, redact: Redactor) -> tuple[bool, list[str]]:
-    """Never yes: no stage sends a chat request (the swap checks use /v1/completions, which applies no template)."""
+    """Dealt with only when stage 2's served-chat.json says the served template, special tokens and stop ids are the new model's and chat
+    replies were checked. Without that record no stage is known to have sent a chat request (the swap checks that predate the prompt suite
+    used /v1/completions, which applies no template)."""
+    verdict = served_chat_verdict(run, redact)
     why = ["No stage sent a chat request. The swap checks in stages 2 and 4 use /v1/completions, which applies no chat "
            "template."]
+    if verdict is not None:
+        ok, said = verdict
+        why = said
+        if ok:
+            return True, why
     rec = read_json(run.dir / "stages" / "2" / "model-dir-sources.json", "stages/2/model-dir-sources.json", required=False)
     text = lambda v: redact(one_line(v)) if isinstance(v, str) and v else None      # noqa: E731
     sentence = chat_template_sentence(rec, text) if isinstance(rec, dict) else None
@@ -1965,6 +2102,60 @@ def thin_evidence(run: Run, redact: Redactor) -> list[str]:
     return items
 
 
+SCAN_FILE = "stages/0/hazard-scan.json"
+
+
+def scan_hits(run: Run) -> list[dict] | None:
+    """The hazards of stage 0's scan: a list of dicts, [] when it ran and found none or was skipped, None when the file is absent or
+    unreadable."""
+    scan = run.scan
+    if not scan or not isinstance(scan.get("hazards"), list) or not isinstance(scan.get("notes", []), list):
+        return None
+    if not all(isinstance(h, dict) and isinstance(h.get("name"), str) and h["name"] for h in scan["hazards"]):
+        return None            # an entry with no name is unusable evidence, and dropping it would report a clean scan
+    return list(scan["hazards"])
+
+
+def scan_results_line(run: Run) -> str:
+    """One line for stage 0's section of RESULTS.md, "" when the run has no scan file."""
+    if run.scan is None:
+        return ""           # a run from before the scan gets the same RESULTS.md as before
+    hits = scan_hits(run)
+    if hits is None:
+        return f"Hazard scan: `{SCAN_FILE}` could not be read."
+    if run.scan.get("scan") == "skipped":
+        return f"Hazard scan: skipped. Evidence: `{SCAN_FILE}`."
+    return f"Hazard scan: {len(hits)} kernel hazard(s) predicted from the config, listed in RISKS.md. Evidence: `{SCAN_FILE}`."
+
+
+def scan_risks(run: Run, redact: Redactor) -> list[str]:
+    """The "Stage 0 hazard scan" section of RISKS.md. A hit is a prediction from the model's config. No stage records that its check was
+    run, so each hit says `Not shown` for that."""
+    if run.scan is None:
+        return []           # a run from before the scan gets the same RISKS.md as before
+    lines = ["## Stage 0 hazard scan", "",
+             "A prediction from the model's config of dimensions that break known kernels. A hit does not stop a run. Each hit names the "
+             "check stage 2 should run first. `Not shown` means no file in the run records that the check was run.", ""]
+    hits = scan_hits(run)
+    if hits is None:
+        return lines + [f"The scan file `{SCAN_FILE}` could not be read.", ""]
+    if run.scan.get("scan") == "skipped":
+        return lines + [f"The scan was skipped: {redact(one_line(run.scan.get('reason', 'no reason recorded')))} Evidence: `{SCAN_FILE}`.", ""]
+    for note in run.scan.get("notes") or []:
+        if isinstance(note, str):
+            lines += [f"Note: {redact(one_line(note))}", ""]
+    if not hits:
+        return lines + [f"The scan found no hazards. Evidence: `{SCAN_FILE}`.", ""]
+    for h in hits:
+        also = " The nearest bundle also hits it, and that bundle is known to run." if h.get("also_on_nearest") is True else ""
+        lines += [f"### {redact(h['name'])}", "",
+                  f"{redact(one_line(h.get('why', '')))} The model has {redact(one_line(fmt(h.get('value'))))}; the limit is "
+                  f"{redact(one_line(fmt(h.get('limit'))))}. Source: {redact(one_line(h.get('source', '')))}.{also}", "",
+                  f"- Stage 2 check: {redact(one_line(h.get('stage2_check', '')))}.",
+                  f"- Check run: Not shown. Evidence: `{SCAN_FILE}`.", ""]
+    return lines
+
+
 def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
     repo, _ = run.model()
     lines = [f"# Risks: {repo}", "",
@@ -1982,6 +2173,7 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
                   f"- Dealt with: {'yes' if ok else 'Not shown'}. {' '.join(why)}", ""]
     if not hazards:
         lines += ["Stage 0 listed no hazards.", ""]
+    lines += scan_risks(run, redact)
     d = run.sampling_decision
     if d is not None and d.get("flag"):
         lines += ["## Sampling choice", "",
