@@ -3419,6 +3419,23 @@ The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uplo
 - The first verify pass failed the revision check: the card pins two repositories (the weights and the code bundle) and the check looked up both commits in the weights repository. `verify-package` now looks up each commit in the repository named beside it on the card, and falls back to the base model. A test failed first.
 - The package carries the card's caveats: nobody has judged the music, and end-to-end agreement with the float32 run is lower after the encoders moved to the chip.
 
+## 2026-10-30 verify-package: weights pins, graft pins, quoted scratch path, cache directory (issue 251; branch `verify-pins`)
+Prompt (operator, relayed): continue resolving issues; 251 after the safeio readers.
+- `tt_kernel_manifest.json` is checked as a pin: `weights.repo_id` must be a repository id and match the package's base model, `weights.revision` must be a 40-character commit that the card names, and a manifest with no weights pin fails. A tt-model.yaml weights revision that the card does not name fails.
+- A launcher (`run.sh`, `install.sh`) line that sets `WEIGHTS_REVISION` or `MODEL_REVISION` to a commit the card does not name is a problem. Other revisions in a launcher (a code bundle, a drafter head) stay notes.
+- The card's pin for the graft head is looked up in the repository that `graft.json` names.
+- The printed boot instructions use `cd -- <quoted path>`, so a scratch path with spaces works.
+- The pull removes only the download library's bookkeeping under `.cache/huggingface`, and keeps the files the repository lists. A file a package publishes under `.cache` now reaches the scrub, which fails it.
+- The launcher rule picks the pin by variable name. A launcher that pins the weights some other way is still only a note.
+
+Review of PR 284 (Copilot; two High, fixed test first): a weights pin at the code bundle's commit passed because every commit the card names counted, and the generated launcher's `TT_MODEL_WEIGHTS_REVISION="${TT_MODEL_WEIGHTS_REVISION:-<commit>}"` default was not matched. The manifest, tt-model.yaml and launcher pins are now held to the card's primary weights pin (the package record's revision, else the card's commits that are not the graft head's and not named beside another repository), and the launcher pattern reads the default form. A mutation that falls back to every card commit turns the new test red.
+
+## 2026-10-30 verify-package second review round (PR 284)
+Copilot's second review found that a package record naming the code bundle's commit was taken as the primary weights pin, and that
+`tt-model.yaml`'s inline form `weights: {repo: ..., revision: ...}` was not read. The primary pin now comes from the card's repository
+associations first, and a record revision outside that set fails the revision check. The inline mapping is parsed. Whole-line comments
+in launchers are skipped, and quotes around a front-matter `base_model` are removed. Live `verify-package --check` of the four published
+episod packages (ACE-Step, Qwen3.5, MiniCPM3, Granite) still passes 6 of 6 each.
 ## 2026-10-30 Stage gates read their JSON through safeio (issues 135 to 139; branch `safeio-stages`)
 Prompt (operator, relayed): keep resolving open issues; move the remaining JSON readers onto `orchard/safeio.py`.
 - Every other reader on the hostile-input list had already moved. Only `orchard/stages.py` was left: `_load`, `_evidence_json`, `_read_json`, `_suite_reasons_in`, `hw_record_problem`, `gate_delta` and the delta, swap-check, bundle-record and kernel-manifest reads now go through `stages._safe_json` (a 16 MiB cap, 2 MiB for evidence files).

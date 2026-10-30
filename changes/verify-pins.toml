@@ -1,0 +1,3 @@
+target = "0.9.78"
+summary = "verify-package checks the weights pins in the kernel manifest, tt-model.yaml and launchers against the card, checks a graft pin against the graft repository, quotes scratch paths, and keeps files a package publishes under .cache."
+kind = "fix"

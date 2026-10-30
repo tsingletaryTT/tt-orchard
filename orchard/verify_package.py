@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -255,17 +256,72 @@ def _yaml_scalar(text: str, pattern: str) -> str | None:
     return m.group(1).strip().strip("'\"") if m else None
 
 
-def check_manifests(root: Path, repo: str) -> Finding:
+def _model_of(root: Path, card: str | None) -> str | None:
+    """The base model the package serves: the record's `model`, else the card's `base_model`."""
+    model = None
+    rec = root / "package-record.json"
+    if rec.is_file():
+        try:
+            model = json.loads(rec.read_text(encoding="utf-8")).get("model")
+        except (ValueError, AttributeError):
+            model = None
+    model = model if isinstance(model, str) else _front_matter(card).get("base_model")
+    model = model.strip().strip("'\"") if isinstance(model, str) else model       # YAML quotes are not part of the id
+    return model if isinstance(model, str) and "/" in model else None
+
+
+def primary_revisions(root: Path, card: str | None, model: str | None) -> set[str]:
+    """The commits the card pins for the primary weights: the card's commits other than the graft head's, and other than one the
+    card names beside a different repository (a code bundle). The package record's revision does not choose among them; a record
+    that names a commit outside this set conflicts with the card (check_revision reports it). When the card's associations leave
+    none, the record's revision if the card names it, else every commit the card names."""
+    named = card_revisions(card)
+    _, graft_rev = _graft_pin(root)
+    out = {rev for rev in named if rev != graft_rev and _repo_named_before(card, rev) in (None, model)}
+    if out:
+        return out
+    record = _read_record(root)
+    if record and isinstance(record[2], str) and record[2].lower() in named:
+        return {record[2].lower()}
+    return named
+
+
+def _manifest_pin_problems(doc, rel: str, card: str | None, model: str | None, primary: set[str]) -> list[str]:
+    """tt_kernel_manifest.json's weights.repo_id and weights.revision select the weights that are downloaded, so they are
+    checked as pins: a repository id, a 40-character commit, and the commit and repository the card names."""
+    weights = doc.get("weights") if isinstance(doc, dict) else None
+    if not isinstance(weights, dict) or not weights:
+        return [f"{rel} has no weights pin (a `weights` object with repo_id and revision)"]
+    out = []
+    repo_id, rev = weights.get("repo_id"), weights.get("revision")
+    if not isinstance(repo_id, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo_id):
+        out.append(f"{rel}'s weights.repo_id {repo_id!r} is not a repository id (ORG/NAME)")
+    elif model and repo_id != model:
+        out.append(f"{rel}'s weights.repo_id is {repo_id}; the package serves {model}")
+    if not isinstance(rev, str) or not HEX40.match(rev):
+        out.append(f"{rel}'s weights.revision {rev!r} is not a 40-character commit")
+    else:
+        if primary and rev.lower() not in primary:
+            out.append(f"{rel}'s weights.revision {rev} is not the card's primary weights pin ({', '.join(sorted(primary))})")
+    return out
+
+
+def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
     problems, seen = [], []
+    model = _model_of(root, card)
+    primary = primary_revisions(root, card, model)
     for p in sorted(root.rglob("*.json")):
         rel = p.relative_to(root).as_posix()
         if rel.startswith(".cache/") or "manifest" not in p.name and p.name != "vllm_metadata.json":
             continue
         seen.append(rel)
         try:
-            json.loads(p.read_text(encoding="utf-8"))
+            doc = json.loads(p.read_text(encoding="utf-8"))
         except ValueError as exc:
             problems.append(f"{rel} is not JSON ({exc})")
+            continue
+        if p.name == "tt_kernel_manifest.json":
+            problems += _manifest_pin_problems(doc, rel, card, model, primary)
     y = root / "tt-model.yaml"
     if y.is_file():
         seen.append("tt-model.yaml")
@@ -274,8 +330,13 @@ def check_manifests(root: Path, repo: str) -> Finding:
         if named is not None and named != repo:
             problems.append(f"tt-model.yaml names repo {named}; the package is {repo}")
         rev = _yaml_scalar(text, r"^  revision:\s*(\S+)")
+        if rev is None:                          # the inline form: weights: {repo: ORG/NAME, revision: <commit>}
+            rev = _yaml_scalar(text, r"^weights:\s*\{[^}\n]*\brevision:\s*[\"']?([^\s,}\"']+)")
         if rev is not None and not HEX40.match(rev):
             problems.append(f"tt-model.yaml's weights revision {rev!r} is not a 40-character commit")
+        elif rev is not None and primary and rev.lower() not in primary:
+            problems.append(f"tt-model.yaml's weights revision {rev} is not the card's primary weights pin "
+                            f"({', '.join(sorted(primary))})")
     if problems:
         return Finding("manifests", FAIL, "; ".join(problems))
     return Finding("manifests", OK, ("checked " + ", ".join(seen)) if seen else "the package ships no manifest to check")
@@ -299,29 +360,50 @@ def _repo_named_before(card: str | None, rev: str) -> str | None:
     return None
 
 
+# A launcher line that sets the primary weights pin (WEIGHTS_REVISION=<commit>, MODEL_REVISION=<commit>). Other pins in a launcher
+# (a code bundle, a drafter head) stay notes, because the card names them only when it chooses to.
+# It also reads the generated launchers' default form: TT_MODEL_WEIGHTS_REVISION="${TT_MODEL_WEIGHTS_REVISION:-<commit>}".
+LAUNCHER_WEIGHTS_PIN = re.compile(r"\b(?:\w+_)?(?:WEIGHTS|MODEL)_REV(?:ISION)?\s*[=:]\s*[\"']?(?:\$\{\w+:?-)?([0-9a-f]{40})\b", re.IGNORECASE)
+
+
+def _graft_pin(root: Path) -> tuple[str | None, str | None]:
+    """(repo, revision) of the nearest model's head that graft.json names, or (None, None). The card's pin for that head is
+    checked against this repository and not against the primary one."""
+    try:
+        g = json.loads((root / "graft.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(g, dict):
+        return None, None
+    repo, rev = g.get("repo"), g.get("revision")
+    return (repo if isinstance(repo, str) and "/" in repo else None,
+            rev.lower() if isinstance(rev, str) and HEX40.match(rev.lower()) else None)
+
+
 def check_revision(root: Path, card: str | None, record, hub: Hub | None) -> Finding:
     named = card_revisions(card)
     if not named:
         return Finding("revision", WARN, "the card names no pinned weights revision (a 40-character commit after the word revision)")
     problems, notes = [], []
-    rrev = record[2] if record else None
+    rrev = record[2].lower() if record and record[2] else None
+    model = _model_of(root, card)
+    want = primary_revisions(root, card, model)
     if rrev and rrev not in named:
         problems.append(f"package record revision {rrev} is not the card's ({', '.join(sorted(named))})")
+    elif rrev and rrev not in want:
+        problems.append(f"package record revision {rrev} is not the card's primary weights pin ({', '.join(sorted(want))})")
     for fname in ("tt-model.yaml", "run.sh", "install.sh"):
-        t = _text(root / fname)
-        for rev in sorted({m.lower() for m in REVISION_NEAR.findall(t or "")} - named):
+        t = _text(root / fname) or ""
+        for rev in sorted({m.lower() for m in REVISION_NEAR.findall(t)} - named):
             notes.append(f"{fname} names revision {rev}, which the card does not")
-    model = None
-    rec = root / "package-record.json"
-    if rec.is_file():
-        try:
-            model = json.loads(rec.read_text(encoding="utf-8")).get("model")
-        except (ValueError, AttributeError):
-            model = None
-    model = model if isinstance(model, str) else _front_matter(card).get("base_model")
-    if hub is not None and model and "/" in model:
+    for fname in ("run.sh", "install.sh"):
+        active = "\n".join(l for l in (_text(root / fname) or "").splitlines() if not l.lstrip().startswith("#"))
+        for rev in sorted({m.lower() for m in LAUNCHER_WEIGHTS_PIN.findall(active)} - want):
+            problems.append(f"{fname} pins the weights at {rev}; the card's primary weights pin is {', '.join(sorted(want))}")
+    graft_repo, graft_rev = _graft_pin(root)
+    if hub is not None and model:
         for rev in sorted(named):
-            repo = _repo_named_before(card, rev) or model
+            repo = (graft_repo if rev == graft_rev else None) or _repo_named_before(card, rev) or model
             found = hub.revision_exists(repo, rev)
             if found is False:
                 problems.append(f"{repo} has no revision {rev} on the Hub")
@@ -365,7 +447,7 @@ def boot_text(root: Path, repo: str, sha: str, card: str | None) -> list[str]:
              f"The package names {chips} chip{'s' if chips != 1 else ''} ({why}).", ""]
     if not (root / "run.sh").is_file():
         return lines + ["The package ships no run.sh, so there is no boot command to print. Read its card."]
-    lines.append(f"cd {root}")
+    lines.append(f"cd -- {shlex.quote(str(root))}")
     if (root / "install.sh").is_file():
         lines.append("bash install.sh        # builds the package's venv; opens no device")
     lines.append(f'gozer run --chips {chips} --who "{WHO}" --reason "boot check of {repo}@{sha[:12]}" -- bash run.sh')
@@ -376,6 +458,28 @@ def boot_text(root: Path, repo: str, sha: str, card: str | None) -> list[str]:
 
 # ---- the whole command -------------------------------------------------------------------------------------
 
+def _remove_download_bookkeeping(scratch: Path, listed: set[str]) -> None:
+    """huggingface_hub writes `.cache/huggingface` under the pull directory. Remove those files, except any the repository itself
+    lists, then the directories that are left empty. A file the package publishes under `.cache` stays, so the scrub and the record
+    check see it."""
+    book = scratch / ".cache" / "huggingface"
+    if not book.is_dir() or book.is_symlink():
+        return
+    for dirpath, _, names in os.walk(book, topdown=False):
+        for n in names:
+            f = Path(dirpath) / n
+            if f.relative_to(scratch).as_posix() not in listed:
+                f.unlink(missing_ok=True)
+        try:
+            Path(dirpath).rmdir()
+        except OSError:
+            pass
+    try:
+        (scratch / ".cache").rmdir()
+    except OSError:
+        pass
+
+
 def verify(repo: str, scratch: Path, hub: Hub, *, staged: Path | None = None, revision: str | None = None,
            hostname: str | None = None, home: str | None = None, say=print) -> tuple[list[Finding], list[str]]:
     """Pull and check. Returns the findings and the boot text."""
@@ -383,11 +487,11 @@ def verify(repo: str, scratch: Path, hub: Hub, *, staged: Path | None = None, re
     say(f"{repo}: commit {info.sha}, {'private' if info.private else 'public'}, {len(info.files)} files, "
         f"{sum(f.size for f in info.files)} bytes")
     hub.download(repo, info.sha, scratch, [f.path for f in info.files])
-    shutil.rmtree(scratch / ".cache", ignore_errors=True)      # huggingface_hub writes this directory itself; it holds no package content
+    _remove_download_bookkeeping(scratch, {f.path for f in info.files})
     card = _text(scratch / "README.md")
     record = _read_record(scratch)
     findings = [check_hub_hashes(scratch, info), check_scrub(scratch, hostname, home), check_license(scratch, card),
-                check_record(scratch, record), check_manifests(scratch, repo), check_revision(scratch, card, record, hub)]
+                check_record(scratch, record), check_manifests(scratch, repo, card), check_revision(scratch, card, record, hub)]
     if staged is not None:
         findings.append(compare_staged(scratch, staged))
     return findings, boot_text(scratch, repo, info.sha, card)
