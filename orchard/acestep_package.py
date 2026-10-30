@@ -3,7 +3,7 @@
 """Stage and check the ACE-Step 1.5 turbo package: a local, weights-free package that runs the model on one Blackhole chip behind a small HTTP server.
 
     python -m orchard.acestep_package stage --evidence DIR --bundle-code CODE_DIR --snapshot WEIGHTS_DIR --out PKG_DIR
-    python -m orchard.acestep_package summary --sweep SWEEP.json --bars BARS.json [--bars BARS2.json] --agreement AGREE.json --boot BOOT.json --out summary.json
+    python -m orchard.acestep_package summary --sweep SWEEP.json [--base BASE_SWEEP.json] --bars BARS.json [--bars BARS2.json] --agreement AGREE.json --boot BOOT.json --out summary.json
     python -m orchard.acestep_package gate PKG_DIR
 
 It follows `orchard/granite_package.py`: `stage` copies the runtime and the tools, copies the evidence, and writes the card, `LICENSE`, `NOTICE`, `SECURITY.md`,
@@ -41,7 +41,7 @@ BUNDLE_REVISION = "dabe15cd44f9fb14e948e111fb671d7ab89fda17"
 NAMESPACE = "episod"
 PACKAGE_NAME = "ace-step-1.5-turbo-blackhole"
 PORT = 20120
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 TT_METAL_TAG = "v0.80.0"
 ROOT = Path(__file__).resolve().parent.parent
 SRC_FILES = (("scripts/acestep/acestep_run.py", "runtime/acestep_run.py"), ("scripts/acestep/acestep_serve.py", "runtime/acestep_serve.py"),
@@ -50,12 +50,12 @@ SRC_FILES = (("scripts/acestep/acestep_run.py", "runtime/acestep_run.py"), ("scr
              ("pkgsrc/acestep/tools/check_bundle.py", "tools/check_bundle.py"), ("pkgsrc/acestep/tools/smoke.py", "tools/smoke.py"))
 RUNTIME_INIT = '"""A stand-in package so the copied runtime files import `orchard.audio_reference` from this directory."""\n'
 WEIGHT_FILES = ("acestep-v15-turbo/model.safetensors", "vae/diffusion_pytorch_model.safetensors", "Qwen3-Embedding-0.6B/model.safetensors")
-EVIDENCE_FILES = ("sweep.json", "bars-lofi.json", "bars-folk.json", "agreement.json", "boot.json")
+EVIDENCE_FILES = ("sweep.json", "sweep-base.json", "bars-lofi.json", "bars-folk.json", "agreement.json", "agreement-end-to-end.json", "profile.json", "boot.json")
 REQUIRED = ("README.md", "LICENSE", "NOTICE", "SECURITY.md", "CHANGELOG.md", "SHA256SUMS", "tt-model.yaml", "run.sh", "requirements.txt", "pins.json", "package-record.json",
             "evidence/summary.json", "runtime/orchard/__init__.py") + tuple(d for _, d in SRC_FILES) + tuple(f"evidence/{n}" for n in EVIDENCE_FILES)
 RECORDED = ("LICENSE", "NOTICE", "evidence/summary.json", "pins.json")
 FORBIDDEN_TEXT = (".tt_ai_key", "litellm", "HF_TOKEN=", "Authorization: Bearer", "TT_AI_KEY")
-CARD_SECTIONS = ("## Weights and bundle code are not included", "## Try it", "## API", "## Numbers", "## Agreement with the CPU reference", "## Limits", "## Not tested",
+CARD_SECTIONS = ("## Weights and bundle code are not included", "## What runs on the chip", "## Try it", "## API", "## Numbers", "## Agreement with the CPU reference", "## Limits", "## Not tested",
                  "## Security", "## License", "## Provenance")
 OVERCLAIMS = (r"\bproduction[- ]ready\b", r"\bstate[- ]of[- ]the[- ]art\b", r"\b(?:official|officially|endorsed|certified|verified)\b",
               r"\bfaster than (?:a )?gpu\b", r"\bbest\b", r"\bcommercial[- ]grade\b")
@@ -71,37 +71,56 @@ def _read(path):
     return json.loads(Path(path).read_text())
 
 
-def make_summary(sweep, bars, agreement, boot) -> dict:
+def make_summary(sweep, bars, agreement, boot, base=None) -> dict:
     """The one file the card's numbers come from, built from the raw result files. `sweep` is a sweep JSON of `acestep_run.py --sweep`; `bars` a list of
     `orchard.step_bars` results (one per prompt); `agreement` the output of `acestep_report.py agree`; `boot` the boot-check record (`tools/smoke.py` output
-    plus the ready time and the comparison with a recorded clip)."""
+    plus the ready time and the comparison with a recorded clip). `base` is the same kind of sweep for the bundle path before the chip steps (optional); its median total
+    for the same length goes in the `base_median` column."""
+    base_median = {}
+    for r in (base or {}).get("rows", []):
+        base_median[r["duration_s"]] = resident.spread([x["generate_and_decode_s"] for x in r["runs"]])["median"]
     rows = []
     for r in sweep["rows"]:
         runs = r["runs"]
         tot = resident.spread([x["generate_and_decode_s"] for x in runs])
+        dit = resident.spread([x["dit_s"] for x in runs])["median"]
+        vae = resident.spread([x["vae_s"] for x in runs])["median"]
         rows.append({"duration_s": r["duration_s"], "n": len(runs), "warmup": r["warmup"], "min": tot["min"], "median": tot["median"], "max": tot["max"],
-                     "dit_median": resident.spread([x["dit_s"] for x in runs])["median"], "vae_median": resident.spread([x["vae_s"] for x in runs])["median"],
+                     "dit_median": dit, "vae_median": vae, "other_median": tot["median"] - dit - vae, "base_median": base_median.get(r["duration_s"]),
                      "label": resident.label_for(len(runs), r["warmup"])})
     prompts = []
     for b in bars:
         prompts.append({"margin": b["margin"], "usable": b["usable"], "chip": [c["chip"] for c in b["chip"]], "floor": [c["floor"] for c in b["chip"]],
                         "bar": list(b["detection_limit_rel_l2"]), "vae": b["vae"], "wrong_step": b["controls"]["wrong_step"]["rel_l2"]})
+    first, last = rows[0], rows[-1]
     return {"sweep": {"rows": rows, "load": sweep.get("load", {}), "seed": sweep.get("seed")}, "step_bars": prompts, "agreement": agreement, "boot": boot,
             "limits": ["The planner language model is not loaded, so there is no thinking mode and no audio-code conditioning; the clip follows the caption and lyrics only.",
-                       "Only the diffusion transformer and the VAE decoder run on the chip. The text and lyric encoders, the sampler and the post-processing run on the CPU, and they are most of each request.",
+                       "Outside the transformer and the VAE decoder a request spends "
+                       f"{_f(first['other_median'])} s of {first['duration_s']:g} s and {_f(last['other_median'])} s of {last['duration_s']:g} s (the median total minus those two stages). That time holds the chip-side "
+                       "encoders and key/value projection as well as the CPU pieces: the tokeniser, the host-side mask and rotary tables of each clip, the sampler update and wavelet correction, "
+                       "the peak normalisation and the WAV write.",
+                       "The text encoder, the lyric encoder and the cross-attention projection run on the chip in bfloat16. They are ports in `runtime/acestep_chip.py` that replace methods of the bundle at run time; "
+                       "the bundle's files are not edited. They add a conditioning error of the size of a bfloat16 run (relative L2 about 0.02 for the text encoder). A request with several items or a padded lyric mask "
+                       "uses the CPU path for the lyric encoder.",
+                       "Text and lyric sequences are padded to a multiple of 128 tokens. A prompt or lyric that needs a new length compiles that shape on first use and takes several seconds longer.",
                        "One request runs at a time. The first request at a new duration compiles kernels and takes several seconds longer.",
                        "Seeds do not reproduce across backends: a chip clip and a CPU clip of the same seed are different music of the same kind.",
                        "The longest clip measured is 480 s."],
             "not_tested": ["Whether the music is good, or whether sung words are intelligible. The checks measure length and level only.",
-                           "Languages other than English, lyrics longer than two sections, and styles other than the prompts listed in the evidence.",
+                           "Languages other than English and styles other than the prompts listed in the evidence. A lyric of 207 tokens was timed and its lyric-encoder output was compared with the CPU's "
+                           "(relative L2 0.0125), but there is no per-step check with a lyric longer than two lines.",
                            "Any machine other than one Blackhole p300c board, and more than one chip.",
                            "The XL transformer and the 1.7B planner."],
-            "changelog": ["First version: the server, the runtime copied from tt-orchard, the bundle and weight pins, the evidence and the card."]}
+            "changelog": ["The text encoder, the lyric encoder and the cross-attention keys and values run on the chip (`runtime/acestep_chip.py`); the timbre encoding of the silence reference, the repeated condition-encoder call "
+                          "and the garbage collector no longer cost time per request (`runtime/acestep_fast.py`). `ACESTEP_FAST=none` runs the bundle path as in 0.1.0.",
+                          "Numbers re-measured: one warm-up and three timed calls at 30, 60, 120, 240 and 480 s, with the 0.1.0 path measured in the same hour for comparison.",
+                          "First version (0.1.0): the server, the runtime copied from tt-orchard, the bundle and weight pins, the evidence and the card."]}
 
 
 def speed_rows(s: dict) -> list[str]:
-    return [f"| {r['duration_s']:g} s clip | {_f(r['min'])} / {_f(r['median'])} / {_f(r['max'])} s | {_f(r['dit_median'])} s | {_f(r['vae_median'])} s | "
-            f"{_f(r['duration_s'] / r['median'], 1)} | {r['label']} (n={r['n']}, warm-up {r['warmup']}) | `evidence/sweep.json` |" for r in s["sweep"]["rows"]]
+    return [f"| {r['duration_s']:g} s clip | {_f(r['min'])} / {_f(r['median'])} / {_f(r['max'])} s | {_f(r['dit_median'])} s | {_f(r['vae_median'])} s | {_f(r['other_median'])} s | "
+            f"{_f(r['duration_s'] / r['median'], 1)} | {_f(r.get('base_median'))} s | {r['label']} (n={r['n']}, warm-up {r['warmup']}) | `evidence/sweep.json`, `evidence/sweep-base.json` |"
+            for r in s["sweep"]["rows"]]
 
 
 def load_rows(s: dict) -> list[str]:
@@ -129,9 +148,10 @@ def agreement_line(s: dict) -> str:
 
 def boot_line(s: dict) -> str:
     b = s["boot"]
-    return (f"Boot check of this package on one chip: ready in {_f(b['ready_s'], 1)} s; a {b['duration_s']:g} s request returned in {_f(b['request_s'], 2)} s; "
+    return (f"Boot check of this package on one chip: ready in {_f(b['ready_s'], 1)} s; a {b['duration_s']:g} s request returned in {_f(b['request_s'], 2)} s"
+            f"{' (the first request after the start; an identical second request took ' + _f(b['second_request_s'], 2) + ' s)' if b.get('second_request_s') is not None else ''}; "
             f"the WAV is {b['sample_rate']} Hz, {b['channels']} channels, {b['clip_duration_s']:.2f} s, and passes the sound checks; "
-            f"it {'has the same samples as' if b['identical_to_recorded_clip'] else 'differs from'} the clip recorded in the bring-up run with the same prompt and seed.")
+            f"it {'has the same samples as' if b['identical_to_recorded_clip'] else 'differs from'} the clip that `runtime/acestep_run.py` records for the same prompt, seed and steps.")
 
 
 # ---- the card -------------------------------------------------------------------------------------------------------------
@@ -140,8 +160,8 @@ def render_card(s: dict) -> str:
              f"# {PACKAGE_NAME}", "", f"Version {VERSION}. See `CHANGELOG.md`.", "",
              f"> Runs [{MODEL_ID}](https://huggingface.co/{MODEL_ID}) (revision `{REVISION}`), the ACE-Step 1.5 turbo text-to-music model, on one Tenstorrent Blackhole chip. "
              "The model weights are not in this repository. This is a community package and not a release of ACE-Step or Tenstorrent.", "",
-             "A local HTTP server that keeps the diffusion transformer (24 layers, 8 steps) and the Oobleck VAE decoder on one chip and makes a 48 kHz stereo clip from a "
-             "caption and optional lyrics. The chip port is the community bundle named below; this package adds the server, the checks, the evidence and the pins.", "",
+             "A local HTTP server that keeps the diffusion transformer (24 layers, 8 steps), the Oobleck VAE decoder, the text encoder and the lyric encoder on one chip and makes a 48 kHz stereo clip from a "
+             "caption and optional lyrics. The transformer and decoder port is the community bundle named below; this package adds the server, the encoder ports, the checks, the evidence and the pins.", "",
              "## Weights and bundle code are not included", "",
              f"- Weights: [{MODEL_ID}](https://huggingface.co/{MODEL_ID}), MIT, not gated. Revision `{REVISION}`.",
              f"- Chip port and ACE-Step code: the `code/` directory of [{BUNDLE_REPO}](https://huggingface.co/{BUNDLE_REPO}) (Apache 2.0), revision `{BUNDLE_REVISION}`.",
@@ -149,6 +169,17 @@ def render_card(s: dict) -> str:
              "The bundle code must not be a cache snapshot of links: ACE-Step finds its own model code through its resolved path, and with links it silently runs the model "
              "repository's copy and makes different music (measured: waveform correlation 0.65 against the same prompt and seed with real files). `tools/check_bundle.py` and the server refuse links.",
              "- `bash run.sh check` compares both with `pins.json`: a hash over every bundle file, and the size of each weight file.", "",
+             "## What runs on the chip", "",
+             "| Piece | Where | Source |", "| --- | --- | --- |",
+             "| Diffusion transformer, 24 layers, 8 steps | chip | the bundle |",
+             "| Oobleck VAE decoder | chip | the bundle |",
+             "| Text encoder (Qwen3-Embedding-0.6B, 28 layers) | chip, bfloat16 | `runtime/acestep_chip.py` (`text_on_chip`) |",
+             "| Lyric encoder (8 layers) | chip, bfloat16 | `runtime/acestep_chip.py` (`lyric_on_chip`) |",
+             "| Cross-attention keys and values of the 24 layers | chip, bfloat16 | `runtime/acestep_chip.py` (`kv_on_chip`) |",
+             "| Timbre encoding of the silence reference | computed once, then cached (a constant of the checkpoint) | `runtime/acestep_fast.py` (`timbre_cache`) |",
+             "| Tokeniser, masks, sampler update and wavelet correction, peak normalisation, WAV write | CPU | the bundle |", "",
+             "The steps can be switched off one at a time with `ACESTEP_FAST` (`all`, `none`, or a comma-separated list of `gc_freeze`, `timbre_cache`, `cond_cache`, `kv_on_chip`, `text_on_chip`, `lyric_on_chip`). "
+             "`none` is the path of version 0.1.0. The three cache steps change no output. The three chip steps change the arithmetic (bfloat16 on the chip in place of float32 on the CPU) and are covered by the per-step check below.", "",
              "## Try it", "",
              f"Needs a Tenstorrent Blackhole chip, a tt-metal build with `ttnn` (tested with tt-metal {TT_METAL_TAG}), Python 3.12, torch, numpy and the packages in `requirements.txt`.", "",
              "```bash", "pip install -r requirements.txt", "export TT_METAL_HOME=<your tt-metal checkout>   # used when `import ttnn` does not work yet",
@@ -165,15 +196,20 @@ def render_card(s: dict) -> str:
              "  -d '{\"prompt\":\"warm lo-fi hip hop, mellow rhodes piano\",\"duration\":30,\"seed\":42}' -o clip.wav", "```", "",
              "## Numbers", "",
              "Measured on one chip of a Blackhole p300c board, with the weights above, on a host shared with other jobs (load average 2 to 6). "
-             "Total is the time of one generate call (text and lyric encoders, 8 transformer steps, decode, post-processing). A label states how many runs are behind a number.", "",
-             "| Length | Total, min / median / max | Transformer (chip) | VAE (chip) | Audio seconds per second | Label | Evidence |", "| --- | --- | --- | --- | --- | --- | --- |", *speed_rows(s), "",
+             "Total is the time of one generate call (encoders, 8 transformer steps, decode, post-processing). A label states how many runs are behind a number. "
+             "The last speed column is the median total of the same sweep with every step switched off, measured in the same hour.", "",
+             "| Length | Total, min / median / max | Transformer (chip) | VAE (chip) | Other (median total minus the two chip stages) | Audio seconds per second | Median before the chip steps | Label | Evidence |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |", *speed_rows(s), "",
              "| Number | Value | Label | Evidence |", "| --- | --- | --- | --- |", *load_rows(s), "",
-             "The rest of each total is on the CPU: encoders, sampler, copies between host and chip, and post-processing.", "",
+             "\"Other\" is the median total minus the transformer and the VAE decoder. It holds the chip-side encoders and key/value projection (about 0.03 s), the tokeniser, "
+             "the host-side mask and rotary tables of each clip, the sampler update, the peak normalisation, the WAV write and the host-chip copies. It grows with the length because the tables and the WAV do.", "",
              "## Agreement with the CPU reference", "",
              agreement_line(s), "",
-             "That comparison lets each step feed its error into the next. A CPU run with the same two stages in bfloat16 also fails it, by more than the chip does, so the failures come from precision "
-             "feeding back through the sampler. They do not point to a chip fault. The per-step check holds the input of every step equal: the chip's transformer receives the float32 CPU run's recorded input of "
-             "step k and its velocity is compared with the recorded one (relative L2 error); the decoder receives the CPU run's final latent. The bar of each step is "
+             "That comparison lets each step feed its error into the next. A CPU run with the same two stages in bfloat16 also fails it (latent PCC 0.968 and waveform PCC 0.892 in the first bring-up run), so the failures come from precision "
+             "feeding back through the sampler. They do not point to a chip fault. It also varies by a few hundredths of latent correlation when the lyric encoder alone moves to the chip "
+             "(a conditioning change of 0.0002); `evidence/agreement-end-to-end.json` has four clips and an ablation, so it cannot show that a moved piece is correct.  The per-step check holds the input of every step equal: the chip's transformer receives the float32 CPU run's recorded input of "
+             "step k and its velocity is compared with the recorded one (relative L2 error), with the conditioning (text encoder, lyric encoder and cross-attention keys and values) made by this package's own "
+             "chip path; the decoder receives the CPU run's final latent. The bar of each step is "
              f"{STEP_MARGIN:g} times the error a bfloat16 CPU run makes on the same input. The wrong-step control is the neighbouring step's velocity; it fails the bar at every step.", "",
              "| Run | " + " | ".join(f"step {k}" for k in range(8)) + " | decoder |", "| --- | " + " | ".join("---" for _ in range(9)) + " |", *bar_rows(s), "",
              "A bar is also the largest error that can hide at that step: noise of 25 percent of the velocity gets under the bar at steps 0 and 1. The margin of 2 was chosen after the chip's "
@@ -241,7 +277,7 @@ RUN_SH = f"""#!/usr/bin/env bash
 #   check            compare the bundle code and the weights with pins.json (opens no device and no network connection).
 #   --self-test      check, then import the runtime files without opening a device.
 # Environment: ACESTEP_PYTHON (python to use), ACESTEP_BUNDLE_CODE (default ./fetched/bundle/code) and ACESTEP_SNAPSHOT (default: the pinned revision in the Hugging Face cache),
-# ACESTEP_WORK (a writable directory, default ./work), PORT, HOST, TT_METAL_HOME (only when `import ttnn` does not work yet).
+# ACESTEP_WORK (a writable directory, default ./work), ACESTEP_FAST (all, none or a list of steps; default all), PORT, HOST, TT_METAL_HOME (only when `import ttnn` does not work yet).
 set -euo pipefail
 cd "$(dirname "$0")"
 PY="${{ACESTEP_PYTHON:-python}}"
@@ -275,7 +311,7 @@ if ! "$PY" -c "import ttnn" 2>/dev/null; then
 fi
 "$PY" tools/check_bundle.py --code "$CODE" --snapshot "$SNAP"
 mkdir -p "$WORK"
-exec "$PY" runtime/acestep_serve.py --bundle-code "$CODE" --snapshot "$SNAP" --root "$WORK" --host "${{HOST:-127.0.0.1}}" --port "${{PORT:-{PORT}}}"
+exec "$PY" runtime/acestep_serve.py --bundle-code "$CODE" --snapshot "$SNAP" --root "$WORK" --host "${{HOST:-127.0.0.1}}" --port "${{PORT:-{PORT}}}" --fast "${{ACESTEP_FAST:-all}}"
 """
 
 
@@ -611,6 +647,7 @@ def main(argv=None) -> int:
     st.add_argument("--out", required=True)
     sm = sub.add_parser("summary")
     sm.add_argument("--sweep", required=True)
+    sm.add_argument("--base", default=None, help="a sweep of the path without the chip steps, for the before column")
     sm.add_argument("--bars", action="append", required=True)
     sm.add_argument("--agreement", required=True)
     sm.add_argument("--boot", required=True)
@@ -619,7 +656,7 @@ def main(argv=None) -> int:
     g.add_argument("pkg")
     a = p.parse_args(argv)
     if a.cmd == "summary":
-        s = make_summary(_read(a.sweep), [_read(b) for b in a.bars], _read(a.agreement), _read(a.boot))
+        s = make_summary(_read(a.sweep), [_read(b) for b in a.bars], _read(a.agreement), _read(a.boot), base=_read(a.base) if a.base else None)
         Path(a.out).write_text(json.dumps(s, indent=1) + "\n")
         print(f"wrote {a.out}")
         return 0

@@ -124,21 +124,28 @@ def make_server(session, host: str, port: int, work_dir) -> ThreadingHTTPServer:
     return Server((host, port), Handler)
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--bundle-code", required=True)
     p.add_argument("--snapshot", required=True)
     p.add_argument("--root", required=True, help="a writable directory for ACE-Step's project root and the clips in flight")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=PORT)
-    a = p.parse_args(argv)
+    p.add_argument("--fast", default="all", help="the request-level savings and chip steps of acestep_fast.py: all (default), none (the bundle path of version 0.1.0) or a comma-separated list")
+    return p
+
+
+def main(argv=None) -> int:
+    a = build_parser().parse_args(argv)
+    import acestep_fast                                  # names of the steps; checked before the model loads
+    steps = acestep_fast.parse_steps(a.fast)
     import acestep_run                                   # the model session; imports torch
     t0 = time.perf_counter()
-    session = acestep_run.Session(device="chip", bundle_code=a.bundle_code, snapshot=a.snapshot, root=a.root)
+    session = acestep_run.Session(device="chip", bundle_code=a.bundle_code, snapshot=a.snapshot, root=a.root, fast=steps)
     work = Path(a.root) / "clips-in-flight"
     work.mkdir(parents=True, exist_ok=True)
     srv = make_server(session, a.host, a.port, work)
-    print(json.dumps({"event": "ready", "model": "ACE-Step/Ace-Step1.5", "revision": session.WEIGHTS_REVISION, "host": a.host, "port": srv.server_address[1],
+    print(json.dumps({"event": "ready", "model": "ACE-Step/Ace-Step1.5", "revision": session.WEIGHTS_REVISION, "host": a.host, "port": srv.server_address[1], "fast": list(session.fast),
                       "load_s": round(time.perf_counter() - t0, 2)}), flush=True)
     try:
         srv.serve_forever()

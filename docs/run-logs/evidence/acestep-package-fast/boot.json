@@ -1,0 +1,20 @@
+{
+ "ok": true,
+ "ready_s": 18.0,
+ "server_load_s": 15.26,
+ "request_s": 1.569,
+ "second_request_s": 0.968,
+ "duration_s": 30.0,
+ "sample_rate": 48000,
+ "channels": 2,
+ "clip_duration_s": 30.0,
+ "loud_window_fraction": 0.79,
+ "identical_to_recorded_clip": true,
+ "max_abs_sample_difference": 0.0,
+ "recorded_clip": "the 30 s clip made by acestep_run.py with --fast all for the same prompt and seed 42 (the clip under evidence in the run log)",
+ "sound_checks_ok": true,
+ "self_test": "pass",
+ "fetch": "run.sh fetch downloaded the bundle code as real files (21 s)",
+ "other_requests": "60 s with a 207-token lyric (seed 7) returned in 1.91 s; 120 s (seed 11) returned in 3.31 s; both passed the 48 kHz sound checks",
+ "fast_steps": ["cond_cache", "timbre_cache", "gc_freeze", "kv_on_chip", "text_on_chip", "lyric_on_chip"]
+}
