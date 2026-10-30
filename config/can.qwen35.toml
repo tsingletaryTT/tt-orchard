@@ -1,0 +1,91 @@
+# The can for Qwen/Qwen3.5-35B-A3B on one Blackhole p300 board (two dies), kind vllm (orchard/can.py). From the repository root:
+#   python3 scripts/qwen35/build_wheels.py wheelhouse          # the three wheels, from the image the recipe package pins
+#   tt-orchard can stage config/can.qwen35.toml --out <new directory>/qwen3.5-35b-a3b-blackhole-p300
+# Paths are relative to the directory the command runs in (or --base).
+
+[can]
+name = "qwen3.5-35b-a3b-blackhole-p300"
+kind = "vllm"
+model_py = "pkgsrc/can/qwen35/model.py"            # re-exports the vLLM model class from the models wheel
+metadata = "pkgsrc/can/qwen35/vllm_metadata.json"
+readme = "pkgsrc/can/qwen35-README.md"
+arch = "blackhole"
+mesh = "P300"
+device_count = 2                                   # both dies of one board
+python = "3.12"
+port = 20160
+vllm_version = "0.26.0"
+# Serving limits of the measured recipe (package_src/run.sh): one sequence, a 4096-token context, 64-token blocks.
+max_num_seqs = 1
+block_size = 64
+max_model_len = 4096
+mesh_fabric = "FABRIC_1D"
+trace_region_bytes = 805306368
+# The rest of the recipe's vllm serve line. package-thin writes the limits above and --additional-config; the can adds --host and --port.
+extra_args = ["--enable-prefix-caching", "--enable-chunked-prefill", "--max-num-batched-tokens", "2048"]
+tt_config = { sample_on_device_mode = "all", l1_small_size = 24576 }
+
+# The wheels. The ttnn wheel is the tt-metal build in the recipe's image: it has the MoE ops (moe_sorted_dispatch, moe_gather_add_rows) that
+# neither the PyPI ttnn 0.80.0 nor the ttnn of the 27B bundles has. The models wheel is that image's `models` tree with weights_qwen35_moe.patch
+# applied to the autoport's loader. All three come from scripts/qwen35/build_wheels.py.
+plugin_wheel = "wheelhouse/vllm_tt_plugin-0.1.0-py3-none-any.whl"
+models_wheels = [
+  "wheelhouse/ttnn-0.79.0.dev20261030+qwen35moe-cp312-cp312-linux_x86_64.whl",
+  "wheelhouse/tt_metal_models-0.79.0.dev20261030+qwen35moe-py3-none-any.whl",
+]
+# Exact pins. The first two name the shipped wheels (the gate checks the versions match). transformers and tokenizers are the image's.
+requirements = [
+  "ttnn==0.79.0.dev20261030+qwen35moe",
+  "tt-metal-models==0.79.0.dev20261030+qwen35moe",
+  "transformers==5.12.1",
+  "tokenizers==0.22.2",
+]
+# run at the end of install.sh. Neither line imports ttnn (an import opens the device).
+verify = [
+  "import importlib.metadata as m; assert m.version('ttnn') == '0.79.0.dev20261030+qwen35moe', m.version('ttnn')",
+  "import importlib.util as u; assert u.find_spec('vllm_tt_plugin') is not None",
+]
+
+[weights]
+repo = "Qwen/Qwen3.5-35B-A3B"
+revision = "59d61f3ce65a6d9863b86d2e96597125219dc754"
+
+# The recipe's fused-decode settings (package_src/run.sh).
+[env]
+QWEN35_ATTN_DECODE_OPS = "1"
+QWEN35_CHUNKED_PREFILL = "1"
+QWEN35_DECODE_REPLICATED = "1"
+QWEN35_GDN_DECODE_OPS = "1"
+QWEN35_MOE_FUSED_DECODE = "1"
+QWEN35_PROGRAM_GUARD = "1"
+QWEN35_ROWS_TOPK = "1"
+QWEN35_TRACE_REGION_MIB = "768"
+ARCH_NAME = "blackhole"
+
+# The model class registers the architecture Qwen3NextForCausalLM, and the checkpoint says Qwen3_5MoeForConditionalGeneration. The recipe's
+# fetch_weights.py edits config.json (architecture name, no multi-token-prediction layers, no mrope keys); this file is that edited config. The
+# bundle's prepare_model_dir.py builds model-dir/ at start-up from the pinned snapshot (tokenizer, index and weight files, linked) and this file.
+[model_dir]
+base_config = ["pkgsrc/can/qwen35/config.json"]
+
+[[bundle_file]]
+src = "package_src/LICENSE"
+dst = "LICENSE"
+[[bundle_file]]
+src = "pkgsrc/can/qwen35/NOTICE"
+dst = "NOTICE"
+[[bundle_file]]
+src = "package_src/check/bench.py"
+dst = "tools/bench.py"
+[[bundle_file]]
+src = "package_src/check/prompt.txt"
+dst = "tools/prompt.txt"
+
+[check]
+prompt = "What is the capital of France? Answer in one word."
+expect = "Paris"
+max_tokens = 64
+request_extra = { chat_template_kwargs = { enable_thinking = false } }
+min_decode_tok_s = 100.0          # the recipe measured 126.8 tok/s; this floor leaves room for host load
+rate_max_tokens = 128
+ready_contains = ["Application startup complete"]

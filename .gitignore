@@ -13,3 +13,4 @@ project.db
 project.db-*
 project.db.*
 RECOVERY-REQUIRED
+/wheelhouse/

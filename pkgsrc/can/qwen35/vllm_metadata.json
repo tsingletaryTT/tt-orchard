@@ -1,0 +1,7 @@
+{
+  "arch": "Qwen3NextForCausalLM",
+  "main_class": "models.autoports.qwen_qwen3_coder_next.tt.generator_vllm:Qwen3NextForCausalLM",
+  "hf_model": "Qwen/Qwen3.5-35B-A3B",
+  "mesh_device": ["P300"],
+  "notes": "Text-only serving of Qwen3.5-35B-A3B with the Qwen3-Coder-Next autoport (fused decode ops) on the two dies of one p300 board. The model directory's config.json names the architecture Qwen3NextForCausalLM; prepare_model_dir.py writes it."
+}

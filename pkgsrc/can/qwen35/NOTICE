@@ -1,0 +1,16 @@
+Qwen3.5-35B-A3B thin bundle for Tenstorrent Blackhole
+
+This bundle contains no model weights and no container image.
+
+The model, Qwen/Qwen3.5-35B-A3B, is by the Qwen team (Alibaba Cloud) and is licensed under the Apache License, Version 2.0 (see LICENSE, copied
+from the model repository at revision 59d61f3ce65a6d9863b86d2e96597125219dc754). The weights are fetched from the Hugging Face Hub at that
+revision when the server first starts.
+
+The wheels in wheels/ were built from tt-metal (Apache License 2.0) as it is installed in the Tenstorrent image
+tt-model/qwen3-coder-next:0c170421ca1b, the image of the raahemnabeel/qwen3-coder-next bundle:
+  - ttnn: the image's tt-metal build, packaged with the image's own setup.py;
+  - tt_metal_models: the image's `models` tree. One file, models/autoports/qwen_qwen3_coder_next/tt/weights.py, has the 41-line patch of
+    the recipe package qwen3.5-35b-a3b-blackhole-p300 applied. The patch adds a reader for this checkpoint's tensor layout;
+  - vllm_tt_plugin: the vLLM plugin installed in that image.
+config.json in base_config/ is the model repository's config.json with three edits (the architecture name, no multi-token-prediction
+layers, no mrope keys).
