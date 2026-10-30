@@ -356,6 +356,7 @@
         <div><b>Result</b><p>33.7 tok/s in bfloat16 on one chip (54 percent of the 62.8 tok/s DRAM floor), 39.9 with an 8-bit MLP, 39.2 on two chips. 16 of 16 teacher-forced tokens match the CPU, and perplexity on 767 WikiText-2 tokens is 8.007 against 8.057 in float32. The supervisor was not used. Findings went to issues 213 and 214.</p></div>
         <div><b>What the next model got</b><p>This used the decode floor, hazard scan and first-divergence tools that had been written the day before, and the harness needed two small edits.</p></div>
       </div>
+      <p class="what">A weights-free package for this model is on the Hub as <a href="https://huggingface.co/episod/minicpm3-4b-blackhole">episod/minicpm3-4b-blackhole</a>. The authors' link to the weights' license returned 404 on 2026-10-30, and the card says so.</p>
       <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-overnight-minicpm3-4b.md">Run log</a></p>
     </article>
     <article class="story" id="m-qwen35">
