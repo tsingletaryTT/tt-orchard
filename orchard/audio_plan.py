@@ -13,7 +13,7 @@ import math
 import shlex
 from pathlib import Path
 
-from orchard import resident, safeio
+from orchard import audio_profile, resident, safeio
 from orchard.audio_runtime import REFERENCE_FILE, RESULT_FILE, STAGE_DISK_GB
 
 SCHEMA = 1
@@ -53,8 +53,44 @@ def library_name(repo) -> str | None:
     return LIBRARY_NAMES.get(str(repo or "").split("@", 1)[0])
 
 
+def profile_item(model_id) -> dict | None:
+    """The plan fields of a model that has an audio profile and no Stable Audio library name (`name` and `profile` are the profile's key), or None.
+    A Stable Audio model keeps its library name and carries no profile key, so its plans are the ones the stages always made."""
+    if library_name(model_id) is not None:
+        return None
+    p = audio_profile.for_model(model_id)
+    return None if p is None else {"name": p.key, "profile": p.key}
+
+
+def _profile_of(item: dict):
+    """The profile an item names, or None for a Stable Audio item. An unknown key is an error: falling back would apply Stable Audio's rate and clip."""
+    key = item.get("profile")
+    if key is None:
+        return None
+    if key not in audio_profile.PROFILES:
+        raise AudioStageError(f"the plan item {item.get('name')!r} names the audio profile {key!r}, which does not exist ({sorted(audio_profile.PROFILES)})")
+    return audio_profile.PROFILES[key]
+
+
+def sample_rate_of(item: dict) -> int:
+    """The sample rate of the run a plan item describes: its profile's, else Stable Audio's."""
+    p = _profile_of(item)
+    return SAMPLE_RATE if p is None else p.sample_rate
+
+
+def clip_name_of(item: dict) -> str:
+    """The clip file under `clips/` of the run a plan item describes: its profile's, else `audio.flac`."""
+    p = _profile_of(item)
+    return "audio.flac" if p is None else p.clip_name
+
+
 def settings_for(name: str) -> dict:
-    """The recorded settings (audio_reference.MATCH_KEYS) of the run of library model `name`."""
+    """The recorded settings (audio_reference.MATCH_KEYS) of the run of library model `name`, or of the profile model whose profile key is `name`."""
+    if name in audio_profile.PROFILES:
+        p = audio_profile.PROFILES[name]
+        duration = p.settings.get("duration", DURATION_S)
+        return {"prompt": PROMPT, "duration": duration, "steps": p.settings.get("steps", p.steps), "cfg_scale": p.settings.get("cfg_scale", 1.0),
+                "sampler": p.settings.get("sampler"), "seed": SEED, "sample_size": int(duration * p.sample_rate)}
     s = MODEL_SETTINGS[name]
     return {"prompt": s.get("prompt", PROMPT), "duration": DURATION_S, "steps": s["steps"], "cfg_scale": s["cfg_scale"], "sampler": s["sampler"], "seed": SEED,
             "sample_size": SAMPLE_SIZE}
@@ -95,7 +131,10 @@ def reference_plan(model_id, base_id) -> list[dict]:
     run exist only when the base is a model this module knows."""
     name = library_name(model_id)
     if name is None:
-        raise AudioStageError(f"{model_id} is not a model the audio runtime knows ({sorted(LIBRARY_NAMES)})")
+        extra = profile_item(model_id)
+        if extra is None:
+            raise AudioStageError(f"{model_id} is not a model the audio runtime knows ({sorted(LIBRARY_NAMES)}, or a model with an audio profile)")
+        return [{"role": ROLE_REFERENCE, **extra, "interpreter": "reference", "dir": f"reference/{extra['name']}"}]
     plan = [{"role": ROLE_REFERENCE, "name": name, "interpreter": "reference", "dir": f"reference/{name}"},
             {"role": ROLE_HOST, "name": name, "interpreter": "chip", "dir": f"host/{name}"}]
     base = library_name(base_id)
@@ -107,6 +146,9 @@ def reference_plan(model_id, base_id) -> list[dict]:
 def reference_command(item: dict, paths, stage_rel_dir: Path, script: Path) -> tuple[list[str], dict]:
     """argv and extra environment for one CPU run. The reference interpreter finds the library through its editable install; the chip interpreter
     through PYTHONPATH. `--expect-src` makes the script refuse a library from anywhere else."""
+    if item.get("profile") is not None:
+        raise AudioStageError(f"the CPU command for the {item['profile']} profile is not wired yet: it is scripts/acestep/acestep_run.py --device cpu, which needs "
+                              "the bundle code, the snapshot and a project root that the audio paths do not hold (issue 269)")
     s = settings_for(item["name"])
     python = paths.reference_python if item["interpreter"] == "reference" else paths.chip_python
     argv = [python, str(script), "--model", item["name"], "--out", str(stage_rel_dir / item["dir"]), "--prompt", s["prompt"],
@@ -127,7 +169,10 @@ def write_json(path, value) -> None:
 def chip_plan(model_id, base_id) -> list[dict]:
     name = library_name(model_id)
     if name is None:
-        raise AudioStageError(f"{model_id} is not a model the audio runtime knows")
+        extra = profile_item(model_id)
+        if extra is None:
+            raise AudioStageError(f"{model_id} is not a model the audio runtime knows")
+        return [{"role": ROLE_CHIP, **extra}]
     plan = [{"role": ROLE_CHIP, "name": name}]
     base = library_name(base_id)
     if base is not None and base != name:
