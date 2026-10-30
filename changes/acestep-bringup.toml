@@ -1,0 +1,4 @@
+target = "0.9.70"
+summary = "ACE-Step 1.5 turbo runs on one chip from the community bundle: scripts, sweep, per-step agreement checks and run log."
+pr = 261
+kind = "feature"
