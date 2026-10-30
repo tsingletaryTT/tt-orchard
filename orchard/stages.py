@@ -478,6 +478,18 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
+def _delta_refusal(run_dir) -> str | None:
+    """A reason when stages/0/delta.json is there and the safe reader refuses it (NaN, a repeated key, over the cap, a link, a FIFO), else None.
+    A missing file is not a refusal. The readers that take the class or the nearest model from delta.json answer None for a refused file, and
+    a gate that asks "is this a vocabulary trim?" must not take that None as "no"."""
+    try:
+        _safe_json(Path(run_dir) / "stages" / "0" / "delta.json")
+    except safeio.SafeReadError as exc:
+        if not _is_missing(exc):
+            return f"stage 0's delta.json is not readable JSON: {exc.reason}, so the run's class cannot be told and the vocabulary-trim check cannot be made"
+    return None
+
+
 def _trim_vocab(run_dir) -> int | None:
     """The model's vocabulary size when stage 0 classed the run vocab-trim, else None (no check is made)."""
     delta, err = _load(Path(run_dir) / "stages" / "0", "delta.json")
@@ -508,6 +520,9 @@ def _trim_reasons(want: int, sources, serving, where: str = "") -> list[str]:
 
 def vocab_trim_problems(stage_dir, run_dir) -> list[str]:
     """Stage 2's check of a vocabulary trim (see _trim_reasons). Nothing is asked of any other class."""
+    refused = _delta_refusal(run_dir)
+    if refused:
+        return [refused]
     want = _trim_vocab(run_dir)
     if want is None:
         return []
@@ -861,6 +876,9 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
     reasons, seen = list(base.reasons), list(base.evidence)
     rel = os.path.relpath(os.path.realpath(stage_dir), os.path.realpath(run_dir))
     trim = _trim_vocab(run_dir)
+    refused = _delta_refusal(run_dir)
+    if refused:
+        reasons.append(refused)
     for c in d.get("configs") if isinstance(d.get("configs"), list) else []:
         if (not isinstance(c, dict) or c.get("pass") is not True or isinstance(c.get("chips"), bool)
                 or not isinstance(c.get("chips"), int)):
@@ -912,7 +930,14 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
                 "against it"]
     if kind != "bundle":
         return []
-    sources = _read_json(cdir / "model-dir-sources.json")
+    try:
+        sources = _safe_json(cdir / "model-dir-sources.json")
+    except safeio.SafeReadError as exc:
+        if not _is_missing(exc):
+            # A record that is there and refused is not an absent record: it could hold the graft the decision did not choose.
+            return [f"{where}: configs/{n}/model-dir-sources.json is not readable JSON: {exc.reason}, so what this configuration was built "
+                    "with cannot be checked against stage 2's graft decision"]
+        sources = None
     built = isinstance(sources, dict) and isinstance(sources.get("mtp_graft"), dict)
     chose = graft_chosen(run_dir)
     if chose and not built:
