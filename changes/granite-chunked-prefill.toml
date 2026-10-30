@@ -1,4 +1,4 @@
 target = "0.9.77"
-summary = "Granite: chunked-scan prefill candidate (CPU-checked algebra, chip path unverified, off by default)"
+summary = "Granite: chunked-scan prefill candidate (CPU-checked algebra, agrees with the step path on short prompts on a chip, no speed number, off by default)"
 kind = "feature"
 pr = 286
