@@ -53,6 +53,23 @@ def load(path) -> dict:
     return data
 
 
+def run_problems(run, n_steps: int) -> list[str]:
+    """Reasons the recorded run cannot be the float32 CPU reference the two reports were forced with: another dtype or device, a step count that the
+    reports do not match, or fewer recorded velocities than steps. `run` is an `audio_reference.Run`; `n_steps` is the number of steps in the reports."""
+    out = []
+    if run.settings.get("dtype") != "float32":
+        out.append(f"the run's dtype is {run.settings.get('dtype')!r}; the floor is measured against a float32 reference")
+    if run.settings.get("device") != "cpu":
+        out.append(f"the run's device is {run.settings.get('device')!r}; the floor is measured against a cpu reference")
+    steps = run.settings.get("steps")
+    if steps != n_steps:
+        out.append(f"the run has {steps!r} steps and the reports {n_steps}")
+    missing = [k for k in range(n_steps) if ("step_denoised", f"v{k}") not in run.entries]
+    if missing:
+        out.append(f"the run has no recorded velocity for step(s) {missing}")
+    return out
+
+
 def rel_l2(ref: np.ndarray, cand: np.ndarray) -> float:
     ref = np.asarray(ref, dtype=np.float64)
     cand = np.asarray(cand, dtype=np.float64)
@@ -139,8 +156,16 @@ def main(argv=None) -> int:
         if doc.get("ref_manifest_sha256") != digest:
             print(f"refused: the {name} file was not made from the run given with --run (manifest sha256 {doc.get('ref_manifest_sha256')!r}, run {digest})")
             return 2
+    n = len(floor_doc["dit_steps"])
+    if len(chip_doc["dit_steps"]) != n:
+        print(f"refused: the floor has {n} steps and the chip file {len(chip_doc['dit_steps'])}")
+        return 2
     with ar.load_run(a.run) as run:
-        vel = [np.asarray(run.array("step_denoised", f"v{k}")) for k in range(len(load(a.floor)["dit_steps"]))]
+        problems = run_problems(run, n)
+        if problems:
+            print("refused: " + "; ".join(problems))
+            return 2
+        vel = [np.asarray(run.array("step_denoised", f"v{k}")) for k in range(n)]
     result = analyse(floor_doc, chip_doc, controls_from_velocities(vel), a.margin)
     text = json.dumps(result, indent=1) + "\n"
     if a.out:

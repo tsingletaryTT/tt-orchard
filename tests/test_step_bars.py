@@ -108,3 +108,63 @@ def test_a_report_that_is_not_a_bfloat16_cpu_floor_is_refused_as_a_floor():
     del chip["dtype"]                      # a chip step check carries no dtype
     r = sb.analyse(chip, chip, {"wrong_step": [0.9] * 4})
     assert not r["usable"] and any("not a teacher-forced bfloat16" in x for x in r["reasons"])
+
+
+# ---- issue 274: the reports are checked against the run they claim to come from -------------------------------------------
+
+def _make_run(path, steps=2, dtype="float32", device="cpu", velocities=None):
+    from orchard import audio_reference as ar
+    rec = ar.Recorder(path, model={"name": "m"}, library={"name": "l"},
+                      settings={"prompt": "p", "duration": 1.0, "steps": steps, "cfg_scale": 1.0, "sampler": "s", "seed": 1, "dtype": dtype,
+                                "sample_size": 10, "device": device})
+    for k in range(steps if velocities is None else velocities):
+        rec.record("step_denoised", f"v{k}", np.ones((4, 4), np.float32) * (k + 1))
+    rec.finish()
+    import hashlib
+    return hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
+
+
+def _reports(tmp_path, digest, n):
+    good = _doc([0.02] * n)
+    good["ref_manifest_sha256"] = digest
+    (tmp_path / "f.json").write_text(json.dumps(good))
+    (tmp_path / "c.json").write_text(json.dumps(good))
+    return ["--floor", str(tmp_path / "f.json"), "--chip", str(tmp_path / "c.json"), "--run", str(tmp_path / "run")]
+
+
+def test_reports_with_too_few_steps_for_the_run_are_refused(tmp_path, capsys):
+    digest = _make_run(tmp_path / "run", steps=4)
+    assert sb.main(_reports(tmp_path, digest, 3)) == 2
+    assert "4 steps" in capsys.readouterr().out
+
+
+def test_reports_with_too_many_steps_for_the_run_are_refused(tmp_path, capsys):
+    digest = _make_run(tmp_path / "run", steps=2)
+    assert sb.main(_reports(tmp_path, digest, 3)) == 2
+    assert "2 steps" in capsys.readouterr().out
+
+
+def test_a_run_that_is_not_a_float32_cpu_reference_is_refused(tmp_path, capsys):
+    digest = _make_run(tmp_path / "run", steps=2, dtype="bfloat16")
+    assert sb.main(_reports(tmp_path, digest, 2)) == 2
+    assert "float32" in capsys.readouterr().out
+    digest = _make_run(tmp_path / "run2", steps=2, device="tt")
+    args = _reports(tmp_path, digest, 2)
+    args[-1] = str(tmp_path / "run2")
+    assert sb.main(args) == 2
+    assert "cpu" in capsys.readouterr().out
+
+
+def test_a_run_whose_recorded_velocities_are_fewer_than_its_steps_is_refused(tmp_path, capsys):
+    digest = _make_run(tmp_path / "run", steps=3, velocities=2)
+    assert sb.main(_reports(tmp_path, digest, 3)) == 2
+    assert "velocit" in capsys.readouterr().out
+
+
+def test_a_chip_file_with_another_step_count_than_the_floor_is_refused_not_a_crash(tmp_path, capsys):
+    digest = _make_run(tmp_path / "run", steps=2)
+    args = _reports(tmp_path, digest, 2)
+    chip = _doc([0.02] * 3)
+    chip["ref_manifest_sha256"] = digest
+    (tmp_path / "c.json").write_text(json.dumps(chip))
+    assert sb.main(args) == 2
