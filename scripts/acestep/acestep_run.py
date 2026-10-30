@@ -62,13 +62,27 @@ def parse(argv=None):
                    "calls on the single loaded process. Writes <out>.sweep.json (timings and host load only; no arrays are recorded). Needs --device chip or cpu.")
     p.add_argument("--stepcheck", default=None, help="chip: a recorded CPU run directory. Feeds its recorded inputs of every step to the chip's "
                    "transformer (so errors do not compound) and its final latent to the chip's VAE; writes <out>.stepcheck.json")
+    p.add_argument("--own-conditioning", action="store_true", help="with --stepcheck: first make one clip, and give the chip's transformer the conditioning this process made "
+                   "(text encoder, lyric encoder and cross-attention keys and values, with any --fast chip steps) instead of the recorded float32 one. The inputs x_k and "
+                   "the reference velocities stay the recorded ones, so the per-step bars then cover the moved encoders as well as the transformer.")
     p.add_argument("--teacher-forced", default=None, help="cpu: a recorded CPU float32 run directory. Runs one generate call in which every transformer "
                    "call receives that run's recorded input of the same step (and the VAE its recorded final latent), in the dtype given by --cpu-dtype, "
                    "and writes <out>.teacher.json with the per-step errors against the recorded float32 velocities. With --cpu-dtype bfloat16 this "
                    "is the precision floor of the chip's per-step check (issue 262): the same comparison as --stepcheck with the chip replaced by "
                    "a bfloat16 CPU run.")
+    p.add_argument("--fast", default="none", help="request-level savings of acestep_fast.py that leave the outputs unchanged: all, none or a comma-separated list "
+                   "(cond_cache, timbre_cache, gc_freeze, and the chip-path steps listed there). Recorded reference runs use none.")
     p.add_argument("--no-vae-warm", action="store_true", help="chip: skip the VAE warm-up at load (a first decode then compiles)")
     return p.parse_args(argv)
+
+
+def fast_steps_for(text: str) -> tuple:
+    """The steps named by --fast. `none` does not import acestep_fast, so a runtime copy without that file still runs the default path."""
+    if (text or "none").strip() == "none":
+        return ()
+    sys.path.insert(0, str(HERE))
+    import acestep_fast
+    return acestep_fast.parse_steps(text)
 
 
 def repeat_dir(out: Path, k: int) -> Path:
@@ -147,7 +161,39 @@ def _manifest_digest(run_dir) -> str:
     return hashlib.sha256((Path(run_dir) / "manifest.json").read_bytes()).hexdigest()
 
 
-def stepcheck(worker, ref_dir: Path, out_json: Path) -> None:
+def stepcheck_conditioning(rec_enc, rec_ctx, tap, own: bool):
+    """The encoder states and context latents the step check prepares the chip with: the recorded float32 ones, or (own) the ones `tap` saw in this process's last clip."""
+    if not own:
+        return rec_enc, rec_ctx
+    if tap.enc is None or tap.ctx is None:
+        raise SystemExit("--own-conditioning needs a clip made first: this process has no conditioning of its own to use")
+    return tap.enc.float(), tap.ctx.float()
+
+
+OWN_ENCODER_BOUND = 0.25      # relative L2 of the encoder states against the reference run's: a gross-mismatch check (a bfloat16 encoder differs by about 0.02)
+OWN_CONTEXT_BOUND = 1e-4      # the context latents do not depend on the precision of the encoders
+
+
+def check_own_conditioning(ref_run, args, tap) -> None:
+    """Refuses `--stepcheck --own-conditioning` when the conditioning this process made is not for the reference run's request: the prompt, duration and seed of the command line must equal the
+    reference run's settings, the arrays must have its shapes, the context latents must equal its context latents, and the encoder states must be near its encoder states. The lyrics are not
+    in the manifest; a different lyric shows as a different encoder-state shape or distance."""
+    import numpy as np
+    s = ref_run.settings
+    for key, got in (("prompt", args.prompt), ("duration", args.duration), ("seed", args.seed)):
+        if s.get(key) != got:
+            raise SystemExit(f"--own-conditioning: --{key} {got!r} differs from the reference run's {key} {s.get(key)!r}; use the request the reference run was made with")
+    for name, got, bound, label in (("encoder_states", tap.enc, OWN_ENCODER_BOUND, "encoder states"), ("context", tap.ctx, OWN_CONTEXT_BOUND, "context latents")):
+        ref = np.asarray(ref_run.array("conditioning", name))
+        if tuple(got.shape) != ref.shape:
+            raise SystemExit(f"--own-conditioning: the {label} have shape {tuple(got.shape)}, the reference run's {ref.shape}; use the prompt, lyrics and duration of the reference run")
+        err = float(np.linalg.norm(got.numpy() - ref) / max(np.linalg.norm(ref), 1e-30))
+        if err > bound:
+            raise SystemExit(f"--own-conditioning: the {label.split()[0] if name == 'context' else 'encoder'} differ from the reference run's by relative L2 {err:.3g} (bound {bound:g}); "
+                             "this is not the reference run's request")
+
+
+def stepcheck(worker, ref_dir: Path, out_json: Path, tap=None, own: bool = False, args=None) -> None:
     """Feeds the recorded CPU inputs of each step (not the chip's own earlier outputs) to the chip's transformer, and the CPU run's final
     latent to the chip's VAE. Each result is then the error of one chip call against the CPU's call on the same input, with nothing compounded."""
     import numpy as np
@@ -158,6 +204,9 @@ def stepcheck(worker, ref_dir: Path, out_json: Path) -> None:
     run = ar.load_run(ref_dir)
     enc = torch.from_numpy(np.asarray(run.array("conditioning", "encoder_states")))
     ctx = torch.from_numpy(np.asarray(run.array("conditioning", "context")))
+    enc, ctx = stepcheck_conditioning(enc, ctx, tap, own)
+    if own and args is not None:
+        check_own_conditioning(run, args, tap)
     worker.call({"op": "prepare", "enc": wire.encode(enc.float()), "ctx": wire.encode(ctx.float())})
     steps = []
     for k, t in enumerate(TURBO_SCHEDULE):
@@ -233,7 +282,7 @@ class Session:
     CHECKPOINT = "acestep-v15-turbo"
     WEIGHTS_REVISION = "19671f406d603126926c1b7e2adc169acbcade22"
 
-    def __init__(self, *, device, bundle_code, snapshot, root, cpu_dtype="float32", no_vae_warm=False, force_x=None, force_z=None):
+    def __init__(self, *, device, bundle_code, snapshot, root, cpu_dtype="float32", no_vae_warm=False, force_x=None, force_z=None, fast=()):
         code = Path(bundle_code).resolve()
         snapshot = Path(snapshot).resolve()
         sys.path.insert(0, str(code))          # acestep, tt_acestep and the bundle's models/ before the host tree's
@@ -315,11 +364,21 @@ class Session:
         self.vtap = VaeTap(handler.tiled_decode, cast=torch.bfloat16 if bf16 else None, force=force_z)
         handler.tiled_decode = self.vtap
         self.llm = LLMHandler()
+        if fast:
+            sys.path.insert(0, str(HERE))
+            import acestep_fast
+            self.fast = acestep_fast.apply(handler, fast, worker=self.worker)
+        else:
+            self.fast = ()
+        self.load["fast_steps"] = list(self.fast)
         self.load["total_load_s"] = round(time.perf_counter() - t_start, 2)
 
     def one(self, save_dir, duration, prompt, lyrics="", seed=42):
         """One generate call (8 steps, no planner). Returns (path of the written WAV, timings)."""
         from acestep.inference import GenerationConfig, GenerationParams, generate_music
+        if self.fast:
+            import acestep_fast
+            acestep_fast.new_request(self.handler)
         tap, vtap = self.tap, self.vtap
         tap.reset_taps()
         vtap.seconds.clear()
@@ -365,8 +424,9 @@ def main(argv=None) -> int:
         teacher_run = ar.load_run(Path(args.teacher_forced))
         force_x = [torch.from_numpy(np.asarray(teacher_run.array("step_latent", f"x{k}")).T.copy()).float() for k in range(8)]
         force_z = torch.from_numpy(np.asarray(teacher_run.array("latent", "final"))).float()
+    fast_steps = fast_steps_for(args.fast)
     sess = Session(device=args.device, bundle_code=args.bundle_code, snapshot=args.snapshot, root=args.root, cpu_dtype=args.cpu_dtype,
-                   no_vae_warm=args.no_vae_warm, force_x=force_x, force_z=force_z)
+                   no_vae_warm=args.no_vae_warm, force_x=force_x, force_z=force_z, fast=fast_steps)
     srv, worker, load, tap, vtap = sess, sess.worker, sess.load, sess.tap, sess.vtap
 
     def one(save_dir, duration=None):
@@ -380,7 +440,9 @@ def main(argv=None) -> int:
         teacher_run.close()
         return 0
     if args.stepcheck:
-        stepcheck(worker, Path(args.stepcheck), Path(str(out) + ".stepcheck.json"))
+        if args.own_conditioning:
+            one(tmp / "own-conditioning")         # this clip's conditioning is what the check prepares the chip with
+        stepcheck(worker, Path(args.stepcheck), Path(str(out) + ".stepcheck.json"), tap=tap, own=args.own_conditioning, args=args)
     if args.sweep:
         sweep(one, tmp, [float(x) for x in args.sweep.split(",")], args, Path(str(out) + ".sweep.json"), load)
         if worker is not None:

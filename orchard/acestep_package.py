@@ -45,6 +45,7 @@ VERSION = "0.1.0"
 TT_METAL_TAG = "v0.80.0"
 ROOT = Path(__file__).resolve().parent.parent
 SRC_FILES = (("scripts/acestep/acestep_run.py", "runtime/acestep_run.py"), ("scripts/acestep/acestep_serve.py", "runtime/acestep_serve.py"),
+             ("scripts/acestep/acestep_fast.py", "runtime/acestep_fast.py"), ("scripts/acestep/acestep_chip.py", "runtime/acestep_chip.py"),
              ("orchard/audio_reference.py", "runtime/orchard/audio_reference.py"), ("orchard/pinned_files.py", "runtime/orchard/pinned_files.py"),
              ("pkgsrc/acestep/tools/check_bundle.py", "tools/check_bundle.py"), ("pkgsrc/acestep/tools/smoke.py", "tools/smoke.py"))
 RUNTIME_INIT = '"""A stand-in package so the copied runtime files import `orchard.audio_reference` from this directory."""\n'

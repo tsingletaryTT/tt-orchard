@@ -1,0 +1,110 @@
+{
+ "note": "30 s lo-fi instrumental, seed 42, one warm-up and three timed calls per row; each row adds one step to the row above. The vocal rows are 60 s, a 207-token lyric, seed 7.",
+ "ladder_30s_lofi": [
+  {
+   "fast": "none",
+   "total_s": [
+    3.0012,
+    3.0687,
+    3.0074
+   ],
+   "median_s": 3.0074
+  },
+  {
+   "fast": "gc_freeze",
+   "total_s": [
+    2.3695,
+    2.3671,
+    2.4304
+   ],
+   "median_s": 2.3695
+  },
+  {
+   "fast": "gc_freeze,timbre_cache",
+   "total_s": [
+    1.4076,
+    1.3943,
+    1.4013
+   ],
+   "median_s": 1.4013
+  },
+  {
+   "fast": "gc_freeze,timbre_cache,cond_cache",
+   "total_s": [
+    1.376,
+    1.3632,
+    1.3214
+   ],
+   "median_s": 1.3632
+  },
+  {
+   "fast": "gc_freeze,timbre_cache,cond_cache,kv_on_chip",
+   "total_s": [
+    1.1779,
+    1.1812,
+    1.1637
+   ],
+   "median_s": 1.1779
+  },
+  {
+   "fast": "gc_freeze,timbre_cache,cond_cache,kv_on_chip,text_on_chip",
+   "total_s": [
+    1.0007,
+    1.0083,
+    1.0013
+   ],
+   "median_s": 1.0013
+  },
+  {
+   "fast": "all (adds lyric_on_chip)",
+   "total_s": [
+    0.9387,
+    0.9301,
+    0.9383
+   ],
+   "median_s": 0.9383
+  }
+ ],
+ "vocal_60s_long_lyrics": {
+  "all_but_lyric_on_chip": {
+   "total_s": [
+    1.931,
+    1.9223,
+    1.9551
+   ],
+   "median_s": 1.931
+  },
+  "all": {
+   "total_s": [
+    1.7334,
+    1.7314,
+    1.682
+   ],
+   "median_s": 1.7314
+  }
+ },
+ "chip_piece_checks": {
+  "kv_on_chip": {
+   "host_s": 0.139,
+   "chip_s": 0.0097,
+   "rel_l2_keys": 0.003,
+   "rel_l2_values": 0.006
+  },
+  "text_on_chip": {
+   "cpu_s": 0.163,
+   "chip_s": 0.011,
+   "rel_l2_hifi2": 0.0228,
+   "rel_l2_hifi4": 0.0187,
+   "bfloat16_cpu_floor_rel_l2": 0.0182,
+   "tokens": 73
+  },
+  "lyric_on_chip": {
+   "cpu_s": 0.252,
+   "chip_s": 0.01,
+   "rel_l2_hifi2": 0.0125,
+   "rel_l2_hifi4": 0.0316,
+   "bfloat16_cpu_rel_l2": 0.186,
+   "tokens": 207
+  }
+ }
+}

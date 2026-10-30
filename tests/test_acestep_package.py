@@ -167,3 +167,13 @@ def test_the_manifest_command_names_the_paths_the_server_requires(staged):
 
 def test_run_sh_honours_xdg_cache_home(staged):
     assert "XDG_CACHE_HOME" in (staged / "run.sh").read_text()
+
+
+def test_every_acestep_module_the_staged_runtime_imports_is_staged(staged):
+    # a runtime file that imports a sibling the stager does not copy fails only in the packaged copy
+    import re
+    names = set()
+    for f in (staged / "runtime").glob("*.py"):
+        names |= set(re.findall(r"^\s*import (acestep_\w+)", f.read_text(), re.M)) | set(re.findall(r"^\s*from (acestep_\w+) import", f.read_text(), re.M))
+    assert names, "the runtime imports no acestep_* sibling; the test is not looking at anything"
+    assert all((staged / "runtime" / f"{n}.py").is_file() for n in names), sorted(n for n in names if not (staged / "runtime" / f"{n}.py").is_file())

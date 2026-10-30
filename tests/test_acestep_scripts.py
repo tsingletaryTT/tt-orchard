@@ -321,3 +321,74 @@ def test_smoke_rejects_non_finite_samples():
     assert not r["ok"] and "finite" in r["reasons"][0]
     x[5] = 0.1
     assert smoke.sound_checks(hdr + x.tobytes(), 1.0)["ok"]
+
+
+def test_stepcheck_conditioning_is_the_recorded_one_unless_own_is_asked_for():
+    rec_enc, rec_ctx = torch.zeros(3, 8), torch.zeros(4, 128)
+    tap = run.Tap(FakeDecoder())
+    _call(tap)                                  # records enc [3, 8] and ctx [4, 128] of this process's own conditioning
+    tap.enc, tap.ctx = torch.ones(3, 8), torch.ones(4, 128)
+    enc, ctx = run.stepcheck_conditioning(rec_enc, rec_ctx, tap, own=False)
+    assert enc is rec_enc and ctx is rec_ctx
+    enc, ctx = run.stepcheck_conditioning(rec_enc, rec_ctx, tap, own=True)
+    assert float(enc.sum()) == 24.0 and float(ctx.sum()) == 512.0
+    tap.reset_taps()
+    with pytest.raises(SystemExit, match="no conditioning of its own"):
+        run.stepcheck_conditioning(rec_enc, rec_ctx, tap, own=True)
+
+
+def test_own_conditioning_flag_is_parsed():
+    a = run.parse(["--device", "chip", "--bundle-code", "b", "--snapshot", "s", "--root", "r", "--out", "o", "--prompt", "p", "--own-conditioning"])
+    assert a.own_conditioning is True
+
+
+def test_fast_steps_are_parsed_without_importing_acestep_fast_when_none(monkeypatch):
+    # a package that lacks acestep_fast.py must still run the default path (--fast none)
+    monkeypatch.setitem(sys.modules, "acestep_fast", None)        # an import of it now raises ImportError
+    assert run.fast_steps_for("none") == ()
+    with pytest.raises(ImportError):
+        run.fast_steps_for("all")
+
+
+class _RefRun:
+    """Stands in for a recorded reference run: settings of the manifest and the two conditioning arrays."""
+
+    def __init__(self, prompt="p", duration=30.0, seed=42, enc=None, ctx=None):
+        import numpy as _np
+        self.settings = {"prompt": prompt, "duration": duration, "seed": seed}
+        self._a = {("conditioning", "encoder_states"): _np.ones((5, 8)) if enc is None else enc, ("conditioning", "context"): _np.ones((6, 4)) if ctx is None else ctx}
+
+    def array(self, kind, name):
+        return self._a[(kind, name)]
+
+
+def _tap_with(enc, ctx):
+    tap = run.Tap(FakeDecoder())
+    tap.enc, tap.ctx = torch.from_numpy(np.asarray(enc, dtype="float32")), torch.from_numpy(np.asarray(ctx, dtype="float32"))
+    return tap
+
+
+def _args(**kw):
+    import types
+    base = dict(prompt="p", duration=30.0, seed=42)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_own_conditioning_is_refused_when_the_settings_differ_from_the_reference_run():
+    ref = _RefRun()
+    good = _tap_with(np.ones((5, 8)) * 1.01, np.ones((6, 4)))
+    run.check_own_conditioning(ref, _args(), good)              # the same prompt, duration and seed: no error
+    for kw in ({"prompt": "other"}, {"duration": 60.0}, {"seed": 7}):
+        with pytest.raises(SystemExit, match="reference run"):
+            run.check_own_conditioning(ref, _args(**kw), good)
+
+
+def test_own_conditioning_is_refused_when_the_arrays_do_not_match_the_reference_run():
+    ref = _RefRun()
+    with pytest.raises(SystemExit, match="shape"):
+        run.check_own_conditioning(ref, _args(), _tap_with(np.ones((7, 8)), np.ones((6, 4))))         # other lyrics or prompt length
+    with pytest.raises(SystemExit, match="context"):
+        run.check_own_conditioning(ref, _args(), _tap_with(np.ones((5, 8)), np.ones((6, 4)) * 2))      # the context latents are exact, so a difference is another request
+    with pytest.raises(SystemExit, match="encoder"):
+        run.check_own_conditioning(ref, _args(), _tap_with(-np.ones((5, 8)), np.ones((6, 4))))         # same shape, far from the reference
