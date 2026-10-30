@@ -1,0 +1,3 @@
+target = "0.9.72"
+summary = "ACE-Step per-step bars set from a teacher-forced bfloat16 CPU floor (issue 262) and an audio profile with a 48 kHz model (issue 263)."
+pr = 267
