@@ -35,8 +35,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 KEYS = ("run_dir", "model_id", "model_name", "model_snapshot", "tt_metal_dir", "scratch_dir", "mesh_device", "chips", "optimizations",
         "tt_cache", "deadline_s")
-# The root conftest.py imports `tests.scripts.common`, so the package that holds it is copied too (about 700 KB).
-COPIED = ("models", "conftest.py", "pytest.ini", "tests/__init__.py", "tests/scripts")
+# The root conftest.py imports `tests.scripts.common` at load and `tests.tests_common.cache_entries_counter` when the mesh fixture opens a device, so
+# the packages that hold them are copied too (about 700 KB).
+COPIED = ("models", "conftest.py", "pytest.ini", "tests/__init__.py", "tests/scripts", "tests/tests_common")
 OPTIONAL_KEYS = {"python_path_extra": [], "import_check": ["numpy", "cv2", "torch", "accelerate"]}
 # `demo_python` (optional): the interpreter every child runs under, built by `tt-orchard demo-env`. Without it the children use the
 # interpreter that runs this script, which is what the shared environment gave on 2026-10-26 (numpy 2 with ttnn needing numpy below 2).

@@ -63,6 +63,8 @@ class Rig:
         (self.host / "tests/scripts").mkdir(parents=True)
         (self.host / "tests/__init__.py").write_text("")
         (self.host / "tests/scripts/common.py").write_text("X = 1\n")
+        (self.host / "tests/tests_common").mkdir(parents=True)
+        (self.host / "tests/tests_common/cache_entries_counter.py").write_text("Y = 2\n")
         (self.host / "conftest.py").write_text("")
         (self.host / "pytest.ini").write_text("[pytest]\n")
         (self.host / "models/__pycache__").mkdir()
@@ -125,6 +127,13 @@ def test_prepare_also_copies_the_package_the_root_conftest_imports(rig):
     rig.go("prepare")
     sc = rig.run_dir / "tt-metal-scratch"
     assert (sc / "tests/__init__.py").is_file() and (sc / "tests/scripts/common.py").read_text() == "X = 1\n"
+
+
+def test_prepare_copies_tests_common_which_the_mesh_fixture_imports_after_the_device_opens(rig):
+    """The first real run (2026-10-29) opened the board and then failed in conftest.py's mesh_device fixture on
+    `from tests.tests_common.cache_entries_counter import ...`, a package the first copy list did not have."""
+    rig.go("prepare")
+    assert (rig.run_dir / "tt-metal-scratch/tests/tests_common/cache_entries_counter.py").read_text() == "Y = 2\n"
 
 
 def test_prepare_refuses_an_interpreter_that_cannot_import_a_named_module_before_anything_else(rig):
