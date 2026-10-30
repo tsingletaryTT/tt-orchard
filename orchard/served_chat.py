@@ -42,6 +42,9 @@ LABEL = "check of the served files and the recorded chat replies; this check sen
 NOT_CHECKED = ("whether a reply begins and ends as the model's card describes (the card is prose); whether a model trained on a different "
                "template answers worse; the card of the model was not read")
 # A role header at the start of a reply: the word `assistant` followed by a colon or a line end, with an optional start-of-turn token before it.
+# The files whose digests the swap test records when it runs the suite (serve_and_compare.py `served_files`). The replies are tied to them.
+INPUT_FILES = ("tokenizer.json", "tokenizer_config.json", "generation_config.json", "config.json", "chat_template.jinja")
+MAX_INPUT_BYTES = 256 << 20
 ROLE_HEADER = re.compile(r"\A\s*(?:<\|im_start\|>\s*)?[Aa]ssistant[ \t]*(?::|\n)")
 
 
@@ -69,7 +72,8 @@ def _json(path, incomplete: list, what: str):
 
 def _text(path, incomplete: list, what: str) -> str | None:
     try:
-        return safeio.read_bytes(_real(path), max_bytes=MAX_TEMPLATE_BYTES).decode("utf-8", errors="replace")
+        # the swap test reads the file as text, which turns CRLF and CR line ends into LF before it hashes the template
+        return safeio.read_bytes(_real(path), max_bytes=MAX_TEMPLATE_BYTES).decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     except safeio.SafeReadError as exc:
         if not _absent(exc):
             incomplete.append(f"{what} could not be read: {exc.reason}")
@@ -85,6 +89,17 @@ def _inline(value) -> str | None:
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def file_digests(directory) -> dict:
+    """{file name: sha256 of its bytes, or None when the file is absent or cannot be read} for the files in INPUT_FILES, read through links."""
+    out = {}
+    for name in INPUT_FILES:
+        try:
+            out[name] = hashlib.sha256(safeio.read_bytes(_real(Path(directory) / name), max_bytes=MAX_INPUT_BYTES)).hexdigest()
+        except safeio.SafeReadError:
+            out[name] = None
+    return out
 
 
 def template_of(directory, notes: list, incomplete: list) -> tuple[str | None, str | None]:
@@ -178,7 +193,7 @@ def check_files(served_dir, new_snapshot) -> dict:
         if served_tokens[name] != new_tokens[name]:
             problems.append({"name": "special_token_differs",
                              "detail": f"{name} is {served_tokens[name]!r} in the served directory and {new_tokens[name]!r} in the new model"})
-    s_to_id, _ = _vocab(served_dir, incomplete)
+    s_to_id, s_to_tok = _vocab(served_dir, incomplete)
     n_to_id, n_to_tok = _vocab(new_snapshot, incomplete)
     ids = {}
     for label, tokens, to_id in (("served", served_tokens, s_to_id), ("new", new_tokens, n_to_id)):
@@ -189,10 +204,25 @@ def check_files(served_dir, new_snapshot) -> dict:
     if ids["served"] is not None and ids["new"] is not None and ids["served"] != ids["new"]:
         problems.append({"name": "eos_id_differs",
                          "detail": f"the served tokenizer gives the eos token {new_tokens['eos_token']!r} the id {ids['served']}; the new model's gives it {ids['new']}"})
+    for name in TOKEN_NAMES[1:]:                       # bos, pad, unk: the named tokens must map to the same ids in both tokenizers
+        tok = new_tokens[name]
+        if tok is None or tok != served_tokens[name]:
+            continue
+        a, b = n_to_id.get(tok), s_to_id.get(tok)
+        if a is None or b is None:
+            incomplete.append(f"the id of the {name} {tok!r} could not be found in the {'new' if a is None else 'served'} directory's tokenizer.json")
+        elif a != b:
+            problems.append({"name": "special_token_id_differs", "detail": f"{name} {tok!r} has id {b} in the served tokenizer and {a} in the new model's"})
     served_ids = stop_ids_of(served_dir, incomplete)
     ends = stop_ids_of(new_snapshot, incomplete)
+    nested = (_json(Path(new_snapshot) / "config.json", incomplete, f"{Path(new_snapshot).name}/config.json") or {}).get("text_config")
+    for x in _ids(nested.get("eos_token_id") if isinstance(nested, dict) else None):     # the new model's own config may nest its end ids
+        if x not in ends:
+            ends.append(x)
     if ids["new"] is not None and ids["new"] not in ends:
         ends.append(ids["new"])
+    if not ends:
+        incomplete.append("the new model's snapshot names no end id (no eos_token_id in its generation_config.json or config.json and no eos token the tokenizer knows)")
     missing = [i for i in ends if i not in served_ids]
     if missing:
         problems.append({"name": "stop_id_missing",
@@ -202,6 +232,14 @@ def check_files(served_dir, new_snapshot) -> dict:
         problems.append({"name": "unexpected_stop_id",
                          "detail": f"the served directory stops on id {', '.join(map(str, extra))}, which the new model does not end a turn with "
                                    f"(its end ids are {ends}); an ordinary token with that id would stop a reply early"})
+    for i in ends:                                     # every end id must be the same token in the served tokenizer
+        want, got = n_to_tok.get(i), s_to_tok.get(i)
+        if want is None:
+            incomplete.append(f"the token of the new model's end id {i} could not be found in its tokenizer.json")
+        elif got is None:
+            incomplete.append(f"the token of end id {i} ({want!r}) could not be found in the served tokenizer.json")
+        elif want != got:
+            problems.append({"name": "end_id_token_differs", "detail": f"end id {i} is {got!r} in the served tokenizer and {want!r} in the new model's"})
     return {"template": {"served_file": s_file, "served_sha256": s_sha, "new_file": n_file, "new_sha256": n_sha},
             "special_tokens": {"served": served_tokens, "new": new_tokens}, "eos_ids": ids,
             "stop_ids": {"served": served_ids, "new_model_ends": ends},
@@ -215,7 +253,7 @@ def _texts(e: dict) -> list[str]:
 def check_replies(record, end_tokens=()) -> dict:
     """The recorded chat replies of a swap check's `prompt_suite` record, with `end_tokens` the strings of the new model's end-of-turn ids.
     Never raises."""
-    empty = {"mode": None, "checked": False, "why_not": "", "counts": {"checked": 0, "stopped": 0, "length": 0}, "problems": []}
+    empty = {"mode": None, "checked": False, "why_not": "", "counts": {"checked": 0, "stopped": 0, "length": 0}, "problems": [], "incomplete": []}
     if not isinstance(record, dict) or record.get("ran") is not True:
         return {**empty, "why_not": "the prompt suite did not run"}
     mode = record.get("mode") if record.get("mode") in ("chat", "completion") else None
@@ -254,8 +292,11 @@ def check_replies(record, end_tokens=()) -> dict:
                     break
     if counts["checked"] >= 2 and counts["stopped"] == 0 and counts["length"] == counts["checked"]:
         add("no_reply_stopped", f"all {counts['checked']} chat replies ran to the length limit, so the server may not be stopping on the model's end token")
+    unseen = []
+    if counts["checked"] and not counts["stopped"]:
+        unseen.append("no checked chat reply was seen to stop (a stop or tool-call finish), so the replies do not show the server stopping on the end token")
     return {"mode": "chat", "checked": counts["checked"] > 0, "why_not": "" if counts["checked"] else "no chat reply was recorded without an error",
-            "counts": counts, "problems": problems}
+            "counts": counts, "problems": problems, "incomplete": unseen}
 
 
 def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
@@ -273,15 +314,31 @@ def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
     if suite is None:
         replies = {**replies, "why_not": "the swap check could not be read"}
     problems = files["problems"] + replies["problems"]
+    incomplete += replies.get("incomplete", [])
     if replies["mode"] == "chat":
-        # tie the replies to the files: the template the swap test saw when it ran must be the template compared now
+        # tie the replies to the files: the template and the tokenizer and stop files the swap test saw when it ran must be what is compared now
         recorded = suite.get("chat_template") if isinstance(suite.get("chat_template"), dict) else {}
         digest, now = recorded.get("sha256"), files["template"]["served_sha256"]
         if not isinstance(digest, str):
             incomplete.append("the swap check recorded no chat template digest, so the replies cannot be tied to the files compared here")
-        elif now is not None and digest != now:
+        elif now is None:
+            incomplete.append("the swap test recorded a chat template digest and the served directory has no template on disk now, so the "
+                              "replies cannot be tied to a template")
+        elif digest != now:
             problems.append({"name": "template_changed_since_replies",
                              "detail": f"the swap test recorded a chat template with sha256 {digest[:12]}; the served directory now holds {now[:12]}"})
+        seen = suite.get("served_files")
+        if not isinstance(seen, dict):
+            incomplete.append("the swap check recorded no served_files digests, so the replies cannot be tied to the tokenizer and stop files compared here")
+        else:
+            here = file_digests(served_dir)
+            changed = sorted(n for n in INPUT_FILES if n != "chat_template.jinja" and n in seen and seen.get(n) != here.get(n))
+            if changed:
+                problems.append({"name": "inputs_changed_since_replies",
+                                 "detail": "these files differ from the ones the swap test served: " + ", ".join(changed)})
+            absent = [n for n in INPUT_FILES if n not in seen]
+            if absent:
+                incomplete.append("the swap check's served_files lacks " + ", ".join(absent))
     return {"label": LABEL, "not_checked": NOT_CHECKED, "ok": not problems and not incomplete and replies["checked"], "problems": problems,
             "incomplete": incomplete, "files": files, "replies": replies}
 

@@ -159,10 +159,14 @@ def reply(content="Paris, with the Eiffel Tower.", finish="stop", error=None, mo
     return {"id": "x", "mode": mode, "content": content, "reasoning": "", "tool_calls": [], "finish_reason": finish, "error": error}
 
 
-def suite(entries, mode="chat", specials=("<|im_end|>", "<|im_start|>", "<|endoftext|>"), template=TEMPLATE_A):
-    """A prompt_suite record the way serve_and_compare.py writes it: the digest of the template the test saw is in it."""
-    return {"ran": True, "mode": mode, "max_tokens": 256, "special_tokens": list(specials), "entries": entries,
-            "chat_template": {"present": mode == "chat", "sha256": sc._sha(template)}}
+def suite(entries, mode="chat", specials=("<|im_end|>", "<|im_start|>", "<|endoftext|>"), template=TEMPLATE_A, files=None):
+    """A prompt_suite record the way serve_and_compare.py writes it: the digest of the template the test saw is in it, and `files` (the digests
+    of the served tokenizer and stop-id files, or None to leave them out)."""
+    rec = {"ran": True, "mode": mode, "max_tokens": 256, "special_tokens": list(specials), "entries": entries,
+           "chat_template": {"present": mode == "chat", "sha256": sc._sha(template)}}
+    if files is not None:
+        rec["served_files"] = files
+    return rec
 
 
 def test_replies_that_stop_and_start_cleanly_pass(tmp_path):
@@ -213,9 +217,11 @@ def test_a_hostile_entry_shape_never_raises():
 
 # ---- the record ------------------------------------------------------------------------------------------------------------
 
-def swap_check(tmp_path, entries):
+def swap_check(tmp_path, entries, served=None, **kw):
+    """A swap-check.json whose prompt suite recorded the digests of the files of `served` (default: tmp_path/served, the layout of pair())."""
     p = tmp_path / "swap-check.json"
-    p.write_text(json.dumps({"prompt_suite": suite(entries)}))
+    served = Path(served) if served else tmp_path / "served"
+    p.write_text(json.dumps({"prompt_suite": suite(entries, files=sc.file_digests(served) if served.is_dir() else None, **kw)}))
     return p
 
 
@@ -287,7 +293,7 @@ def stage_files(run: Path, rel: str, tmp_path: Path, *, entries, served_kw=None,
     make(d / "model-dir", gen=GOOD_GEN, **(served_kw or {}))
     (d / "swap_config.json").write_text(json.dumps({"new_snapshot": str(new)}))
     (d / "evidence").mkdir(exist_ok=True)
-    (d / "evidence" / "swap-check.json").write_text(json.dumps({"prompt_suite": suite(entries)}))
+    (d / "evidence" / "swap-check.json").write_text(json.dumps({"prompt_suite": suite(entries, files=sc.file_digests(d / "model-dir"))}))
     return d
 
 
@@ -508,7 +514,8 @@ def test_stage_2_also_checks_the_graft_and_sampling_trial_variants_that_served(t
             v = run / "stages/2" / trial / "variant"
             make(v / "model-dir", gen=GOOD_GEN)
             (v / "evidence").mkdir(parents=True)
-            (v / "evidence" / "swap-check.json").write_text(json.dumps({"prompt_suite": suite([reply("assistant\nhi"), reply()])}))
+            (v / "evidence" / "swap-check.json").write_text(json.dumps({"prompt_suite": suite([reply("assistant\nhi"), reply()],
+                                                                                                files=sc.file_digests(v / "model-dir"))}))
         make(run / "stages/2" / "sampling-trial" / "variant2" / "model-dir", gen=GOOD_GEN)       # not a variant the trials write: ignored
     run, ev = end_stage(tmp_path, 2, prepare)
     paths = sorted(e["data"]["path"] for e in ev)
@@ -594,7 +601,7 @@ def test_a_served_stop_id_set_that_matches_exactly_has_no_unexpected_id(tmp_path
 
 def test_a_unigram_list_vocabulary_gives_the_eos_id_by_position(tmp_path):
     uni = {"added_tokens": [], "model": {"vocab": [["<unk>", 0.0], ["</s>", 0.0], ["a", -1.0]]}}
-    tok = {**TOK, "eos_token": "</s>"}
+    tok = {**TOK, "eos_token": "</s>", "pad_token": None}
     new = make(tmp_path / "new", tokens=tok, tokenizer=uni, gen=None)
     served = make(tmp_path / "served", tokens=tok, tokenizer=uni, gen={"eos_token_id": 1})
     rec = sc.check_files(served, new)
@@ -644,3 +651,203 @@ def test_an_incomplete_record_is_never_ok_even_with_no_problem_and_checked_repli
     (served / "tokenizer_config.json").write_text("{nope")
     rec = sc.build_record(served, new, swap_check(tmp_path, [reply(), reply()]))
     assert rec["replies"]["checked"] is True and rec["incomplete"] and rec["ok"] is False
+
+
+# ---- review of PR 294, round 2 ---------------------------------------------------------------------------------------------------
+
+def test_a_new_model_whose_config_nests_its_end_ids_under_text_config_has_them_counted(tmp_path):
+    new = make(tmp_path / "new", cfg={"text_config": {"eos_token_id": [7, 8]}})
+    served = make(tmp_path / "served", gen={"eos_token_id": [7]})
+    rec = sc.check_files(served, new)
+    assert rec["stop_ids"]["new_model_ends"] == [7, 8] and "stop_id_missing" in names(rec)
+
+
+def test_a_secondary_end_id_that_maps_to_another_token_in_the_served_tokenizer_is_a_problem(tmp_path):
+    other = {"added_tokens": [{"id": 7, "content": "<|im_end|>", "special": True}, {"id": 8, "content": "<|ordinary|>", "special": True}],
+             "model": {"vocab": {}}}
+    new = make(tmp_path / "new", gen=GOOD_GEN)
+    served = make(tmp_path / "served", gen=GOOD_GEN, tokenizer=other)
+    rec = sc.check_files(served, new)
+    assert "end_id_token_differs" in names(rec) and "8" in next(p["detail"] for p in rec["problems"] if p["name"] == "end_id_token_differs")
+
+
+def test_a_named_special_token_with_another_id_in_the_served_tokenizer_is_a_problem_and_an_unresolved_one_is_incomplete(tmp_path):
+    other = {"added_tokens": [{"id": 7, "content": "<|im_end|>", "special": True}, {"id": 11, "content": "<|endoftext|>", "special": True}],
+             "model": {"vocab": {}}}
+    new = make(tmp_path / "new", gen=GOOD_GEN)
+    served = make(tmp_path / "served", gen=GOOD_GEN, tokenizer=other)
+    assert "special_token_id_differs" in names(sc.check_files(served, new))
+    gone = {"added_tokens": [{"id": 7, "content": "<|im_end|>", "special": True}], "model": {"vocab": {}}}
+    served2 = make(tmp_path / "served2", gen=GOOD_GEN, tokenizer=gone)
+    new2 = make(tmp_path / "new2", gen=GOOD_GEN, tokenizer=gone)
+    assert any("pad_token" in i for i in sc.check_files(served2, new2)["incomplete"])
+
+
+def test_a_new_model_with_no_known_end_id_is_incomplete_not_clean(tmp_path):
+    tokens = {**TOK, "eos_token": None}
+    new = make(tmp_path / "new", tokens=tokens)
+    served = make(tmp_path / "served", tokens=tokens, gen={"eos_token_id": [123]})
+    rec = sc.check_files(served, new)
+    assert any("no end id" in i for i in rec["incomplete"]) and "unexpected_stop_id" not in names(rec)
+
+
+def test_the_replies_are_tied_to_the_tokenizer_and_stop_files_the_swap_test_saw(tmp_path):
+    served, new = pair(tmp_path)
+    p = swap_check(tmp_path, [reply(), reply()])
+    assert sc.build_record(served, new, p)["ok"] is True
+    (served / "generation_config.json").write_text(json.dumps({"eos_token_id": [7, 8, 9]}))      # changed after the test
+    rec = sc.build_record(served, new, p)
+    assert "inputs_changed_since_replies" in {x["name"] for x in rec["problems"]} and rec["ok"] is False
+    assert "generation_config.json" in next(x["detail"] for x in rec["problems"] if x["name"] == "inputs_changed_since_replies")
+
+
+def test_a_swap_check_that_recorded_no_input_digests_makes_the_record_incomplete(tmp_path):
+    served, new = pair(tmp_path)
+    p = tmp_path / "swap-check.json"
+    p.write_text(json.dumps({"prompt_suite": suite([reply(), reply()])}))
+    rec = sc.build_record(served, new, p)
+    assert rec["ok"] is False and any("served_files" in i for i in rec["incomplete"])
+
+
+def test_file_digests_are_sha256_of_the_raw_bytes_and_none_for_a_file_that_is_absent(tmp_path):
+    served, _ = pair(tmp_path)
+    d = sc.file_digests(served)
+    assert d["tokenizer.json"] == __import__("hashlib").sha256((served / "tokenizer.json").read_bytes()).hexdigest()
+    assert d["config.json"] is None and set(d) == set(sc.INPUT_FILES)
+
+
+def test_a_recorded_template_digest_with_no_template_on_disk_now_is_incomplete(tmp_path):
+    new = make(tmp_path / "new", template=None, gen=GOOD_GEN)
+    served = make(tmp_path / "served", template=None, gen=GOOD_GEN)
+    rec = sc.build_record(served, new, swap_check(tmp_path, [reply(), reply()]))
+    assert rec["ok"] is False and any("template" in i and "on disk now" in i for i in rec["incomplete"])
+
+
+@pytest.mark.parametrize("entries", [[reply(finish="length")], [reply(finish=None), reply(finish=None)], [reply(finish="weird")]])
+def test_replies_of_which_none_was_seen_to_stop_make_the_record_incomplete(tmp_path, entries):
+    served, new = pair(tmp_path)
+    rec = sc.build_record(served, new, swap_check(tmp_path, entries))
+    assert rec["ok"] is False and any("seen to stop" in i for i in rec["incomplete"])
+
+
+def test_a_template_with_windows_line_endings_matches_the_digest_the_suite_computes(tmp_path):
+    crlf = TEMPLATE_A.replace("\n", "\r\n")
+    new = make(tmp_path / "new", template=None, gen=GOOD_GEN)
+    served = make(tmp_path / "served", template=None, gen=GOOD_GEN)
+    for d in (new, served):
+        (d / "chat_template.jinja").write_bytes(crlf.encode())
+    suite_digest = sc._sha((served / "chat_template.jinja").read_text(encoding="utf-8"))          # what serve_and_compare.py computes
+    p = tmp_path / "swap-check.json"
+    p.write_text(json.dumps({"prompt_suite": {**suite([reply(), reply()], files=sc.file_digests(served)),
+                                              "chat_template": {"present": True, "sha256": suite_digest}}}))
+    rec = sc.build_record(served, new, p)
+    assert "template_changed_since_replies" not in {x["name"] for x in rec["problems"]} and rec["ok"] is True
+
+
+def test_the_swap_template_records_the_digests_of_the_files_it_served(tmp_path):
+    from test_weights_swap_templates import load_swap_template
+    mod = load_swap_template()
+    served, _ = pair(tmp_path)
+    assert mod.served_files(served) == sc.file_digests(served)
+
+
+def test_a_snapshot_path_in_a_swap_config_is_resolved_against_the_run_directory(tmp_path):
+    def prepare(run):
+        d = stage_files(run, "stages/2", tmp_path, entries=[reply(), reply()])
+        new = Path(json.loads((d / "swap_config.json").read_text())["new_snapshot"])
+        rel = os.path.relpath(new, run)
+        (d / "swap_config.json").write_text(json.dumps({"new_snapshot": rel}))
+    run, ev = end_stage(tmp_path, 2, prepare)
+    assert [e["data"]["path"] for e in ev] == ["stages/2/served-chat.json"]
+
+
+def test_a_stage_4_configuration_with_no_swap_check_is_skipped(tmp_path):
+    def prepare(run):
+        stage_files(run, "stages/4/configs/2", tmp_path, entries=[reply(), reply()], name="a")
+        d = stage_files(run, "stages/4/configs/4", tmp_path, entries=[reply(), reply()], name="b")
+        (d / "evidence" / "swap-check.json").unlink()
+    run, ev = end_stage(tmp_path, 4, prepare)
+    assert [e["data"]["path"] for e in ev] == ["stages/4/configs/2/served-chat.json"]
+
+
+def test_a_write_failure_decision_names_the_record_path(tmp_path, monkeypatch):
+    from orchard.stages import GateResult, spec_for
+    from test_supervisor_stock import Rig, _supervisor
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+    r = Rig(tmp_path)
+    try:
+        r.run()
+        stage_files(r.run_dir, "stages/2", tmp_path, entries=[reply(), reply()])
+        monkeypatch.setattr(sc, "write_record", boom)
+        sup, led = _supervisor(r)
+        try:
+            spec = spec_for(2, "weights-only")
+            stage = r.run_dir / "stages/2"
+            if spec.gate_file and not (stage / spec.gate_file).exists():
+                (stage / spec.gate_file).write_text("{}")
+            sup._end_stage(spec, stage, "pass", [], GateResult(True, (), ()), False)
+            entries = led.read()
+        finally:
+            led.__exit__(None, None, None)
+        assert any(e["data"].get("decision") == "served chat check not written" and e["data"].get("path") == "stages/2/served-chat.json" for e in entries)
+    finally:
+        r.close()
+
+
+# ---- the bundle, round 2 ---------------------------------------------------------------------------------------------------------
+
+def test_a_write_failure_with_no_record_file_is_reported_and_not_hidden_by_the_old_fallback(tmp_path):
+    from orchard.ledger import Ledger
+    from test_operator_bundle_template import CHAT_HAZARD, build, bundle_of, make_run, section, write_json
+    run = make_run(tmp_path)
+    p = run / "stages/0/delta.json"
+    d = json.loads(p.read_text())
+    d["hazards"] = [*d.get("hazards", []), CHAT_HAZARD]
+    write_json(p, d)
+    with Ledger(run / "ledger.jsonl") as led:
+        led.append("decision", 2, decision="served chat check not written", path="stages/2/served-chat.json", reason="OSError: disk full")
+    assert build(run).returncode == 0
+    block = [b for b in section((bundle_of(run) / "RISKS.md").read_text(), "## Stage 0 hazards").split("### ") if b.startswith("chat_template")][0]
+    assert "Dealt with: Not shown" in block and "failed to write" in block and "stages/2/served-chat.json" in block
+
+
+def test_a_write_failure_that_a_later_successful_record_for_the_same_path_supersedes_is_not_counted(tmp_path):
+    from orchard.ledger import Ledger
+    from orchard.stages import evidence_record
+
+    def retry(run):
+        with Ledger(run / "ledger.jsonl") as led:
+            led.append("decision", 2, decision="served chat check not written", path="stages/2/served-chat.json", reason="OSError: disk full")
+            led.append("evidence", 2, what="served chat check", ok=True, problems=[], incomplete=0,
+                       **evidence_record(run, run / "stages/2" / sc.FILE))
+    block, _ = chat_block(tmp_path / "run", all_good(tmp_path), ledger=True, mutate=retry)
+    assert "Dealt with: yes" in block
+
+
+def test_a_record_that_is_a_fifo_or_a_link_to_a_device_is_unverified_and_never_blocks_the_build(tmp_path):
+    import threading
+    from test_operator_bundle_template import build, bundle_of
+
+    def swap_in_fifo(run):
+        f = run / "stages/2" / sc.FILE
+        f.unlink()
+        os.mkfifo(f)
+    box = {}
+
+    def go():
+        box["block"], box["run"] = chat_block(tmp_path / "run", all_good(tmp_path), mutate=swap_in_fifo)
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(40)
+    assert "block" in box, "the bundle build blocked on a FIFO"
+    assert "Dealt with: Not shown" in box["block"]
+
+
+def test_the_record_that_is_parsed_is_the_record_that_was_hashed(tmp_path, monkeypatch):
+    """One read of the bytes serves both: the verdict reads the file once through safeio and hashes and parses that buffer."""
+    import re
+    text = (Path(__file__).parent.parent / "orchard/skills/operator-bundle-templates/build_bundle.py").read_text()
+    body = text[text.index("def served_chat_verdict"):text.index("def chat_template_dealt_with")]
+    assert body.count("read_bytes(") == 1 and "path.read_bytes()" not in body and "parse_json_bytes(" in body

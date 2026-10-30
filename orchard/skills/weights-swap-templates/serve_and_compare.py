@@ -360,6 +360,26 @@ def chat_template_info(model_dir: Path) -> dict:
             "mentions_tools": "tools" in text}
 
 
+SERVED_INPUT_FILES = ("tokenizer.json", "tokenizer_config.json", "generation_config.json", "config.json", "chat_template.jinja")
+
+
+def served_files(model_dir: Path) -> dict:
+    """{file name: sha256 of its bytes, or None when absent} for the tokenizer, stop-id and template files of the served directory, read through
+    links. orchard/served_chat.py compares these digests with the files as they are when stage 2 or 4 ends, so a file changed after this test
+    (the replies below were made with the old one) is caught."""
+    out = {}
+    for name in SERVED_INPUT_FILES:
+        try:
+            h = hashlib.sha256()
+            with open(model_dir / name, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            out[name] = h.hexdigest()
+        except OSError:
+            out[name] = None
+    return out
+
+
 def special_tokens(model_dir: Path) -> list[str]:
     """The strings of the tokenizer's special added tokens, in file order."""
     try:
@@ -412,7 +432,7 @@ def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict) ->
         entries.append(ask_suite_prompt(port, model, prompt, mode, max_tokens))
     return {"ran": True, "model_id": cfg.get("new_model_id"), "suite_sha256": setup["suite_sha256"], "mode": mode,
             "max_tokens": max_tokens,
-            "chat_template": template, "special_tokens": special_tokens(model_dir), "entries": entries,
+            "chat_template": template, "special_tokens": special_tokens(model_dir), "served_files": served_files(model_dir), "entries": entries,
             "skipped": skipped, "control": setup["control"]}
 
 

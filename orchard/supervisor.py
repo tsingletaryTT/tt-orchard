@@ -1938,14 +1938,18 @@ class Supervisor:
             except safeio.SafeReadError:
                 continue
             new = cfg.get("new_snapshot")
-            if not isinstance(new, str) or not new or not Path(new).is_dir() or not (d / "model-dir").is_dir():
+            if not isinstance(new, str) or not new:
+                continue
+            new = str(self.run_dir / new) if not os.path.isabs(new) else new        # the sampling trial resolves a relative path against the run directory
+            if not Path(new).is_dir() or not (d / "model-dir").is_dir() or not (d / "evidence" / "swap-check.json").is_file():
                 continue
             try:
                 rec = served_chat.write_record(d, d / "model-dir", new, d / "evidence" / "swap-check.json")
                 self.ledger.append("evidence", n, what="served chat check", ok=rec["ok"], problems=[p["name"] for p in rec["problems"]],
                                    incomplete=len(rec["incomplete"]), **evidence_record(self.run_dir, d / served_chat.FILE))
             except (OSError, ValueError) as exc:
-                self.ledger.append("decision", n, decision="served chat check not written", reason=f"{type(exc).__name__}: {exc}"[:200])
+                self.ledger.append("decision", n, decision="served chat check not written", path=os.path.relpath(d / served_chat.FILE, self.run_dir),
+                                   reason=f"{type(exc).__name__}: {exc}"[:200])
 
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).

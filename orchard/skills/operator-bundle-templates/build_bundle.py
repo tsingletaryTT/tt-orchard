@@ -1874,41 +1874,44 @@ def _served_chat_shape(rec) -> bool:
 
 
 def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | None:
-    """What the served-chat.json records (orchard/served_chat.py, issue 17) say, as (dealt with, why), or None when stage 2 has no record.
+    """What the served-chat.json records (orchard/served_chat.py, issue 17) say, as (dealt with, why), or None when stage 2 has no record and
+    the ledger names no failed write.
 
-    A record is believed only when its sha256 equals the latest `served chat check` evidence entry the supervisor wrote for that path, so a
-    file overwritten later is unverified. The hazard is dealt with only when every required record is present, believed, has no problem,
-    nothing incomplete, and checked chat replies. Required: stage 2's, every record the ledger names (the trials' variants and each stage 4
-    configuration the supervisor checked), each stage 4 configuration that passed, and none that the supervisor failed to write."""
-    if not (run.dir / SERVED_CHAT).exists():
-        return None
-    latest = {}
-    failed_writes = 0
+    A record is believed only when the bytes read once from it (size capped, no link followed, regular files only) have a sha256 equal to the
+    latest `served chat check` evidence entry the supervisor wrote for that path; the same bytes are parsed. The hazard is dealt with only when
+    every required record is present, believed, has no problem, nothing incomplete, and checked chat replies. Required: stage 2's, every
+    record the ledger names (the trials' variants and each stage 4 configuration the supervisor checked) and each stage 4 configuration that
+    passed. A failed write the ledger names counts until a later evidence entry for the same path supersedes it."""
+    from orchard import safeio
+    latest, failed = {}, {}
     for e in run.entries:
         d = e.get("data") if isinstance(e.get("data"), dict) else {}
         if e.get("event") == "evidence" and d.get("what") == "served chat check" and isinstance(d.get("path"), str):
             latest[d["path"]] = d.get("sha256")
+            failed.pop(d["path"], None)
         elif e.get("event") == "decision" and d.get("decision") == "served chat check not written":
-            failed_writes += 1
+            failed[d.get("path") if isinstance(d.get("path"), str) else SERVED_CHAT] = d.get("reason")
+    if not (run.dir / SERVED_CHAT).exists() and not failed:
+        return None
     required = {SERVED_CHAT, *latest}
     required |= {f"stages/4/configs/{c.get('chips')}/served-chat.json" for c in run.configs() if c.get("pass") is True}
-    ok, why = True, []
-    if failed_writes:
+    ok, why, problems = True, [], []
+    for rel in sorted(failed):
         ok = False
-        why.append(f"The supervisor failed to write {failed_writes} served-chat record(s) (see the ledger).")
-    problems = []
+        why.append(f"The supervisor failed to write `{rel}` ({redact(one_line(str(failed[rel])))}).")
     for rel in sorted(required):
-        path = run.dir / rel
-        rec = read_json(path, "", required=False)
+        if rel in failed:
+            continue
+        try:
+            data = safeio.read_bytes(run.dir / rel, max_bytes=8 << 20)
+            rec = safeio.parse_json_bytes(data, max_bytes=8 << 20)
+        except safeio.SafeReadError:
+            rec = data = None
         if not _served_chat_shape(rec):
             ok = False
             why.append(f"`{rel}` is missing or unreadable.")
             continue
-        try:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            digest = None
-        if latest.get(rel) != digest:
+        if latest.get(rel) != hashlib.sha256(data).hexdigest():
             ok = False
             why.append(f"`{rel}` does not match the sha256 the ledger recorded for it" if rel in latest else
                        f"`{rel}` has no ledger entry, so it cannot be tied to the supervisor's check.")

@@ -133,3 +133,18 @@ def test_an_error_body_that_cannot_be_read_is_said_in_its_place(error):
 
     tpl = load_swap_template()
     assert type(error).__name__ in tpl.error_body(Broken())
+
+
+def test_the_suite_record_holds_the_digests_of_the_served_tokenizer_and_stop_files(raw, tmp_path):
+    """orchard/served_chat.py ties the recorded replies to the files they were made with (issue 17, review of PR 294)."""
+    import hashlib
+    suite = ps.load_suite()
+    srv = raw(OK)
+    (tmp_path / "chat_template.jinja").write_text("{% for m in messages %}{{ m.content }}{% endfor %}")
+    (tmp_path / "generation_config.json").write_text('{"eos_token_id": 7}')
+    tpl = load_swap_template()
+    record = tpl.run_suite({"new_model_id": "x/y"}, srv.server_address[1], "m", tmp_path,
+                           {"suite": suite, "suite_sha256": ps.suite_sha256(), "control": None})
+    got = record["served_files"]
+    assert got["generation_config.json"] == hashlib.sha256(b'{"eos_token_id": 7}').hexdigest()
+    assert got["tokenizer.json"] is None and set(got) == {"tokenizer.json", "tokenizer_config.json", "generation_config.json", "config.json", "chat_template.jinja"}
