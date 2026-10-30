@@ -63,6 +63,15 @@ def test_the_card_names_the_numbers_and_the_limits(staged):
     assert card.startswith("---\nlicense: apache-2.0\n")
 
 
+def test_the_card_says_what_the_model_is_for_and_where_it_is_not_a_fit(staged):
+    card = (staged.pkg / "README.md").read_text()
+    assert "## What it is for" in card and card.index("## What it is for") < card.index("## Numbers")
+    section = card.split("## What it is for")[1].split("\n## ")[0]
+    assert "Chinese and English" in section and "chat" in section
+    assert "authors say" in section.lower() and "not tested here" in section.lower()
+    assert "greedy" in section and "2048" in section
+
+
 def test_the_publish_commands_are_text_only(staged):
     text = tp.publish_commands(M, "example-org", "x/pkg")
     assert "hf upload --repo-type model --private example-org/minicpm3-4b-blackhole x/pkg ." in text and "#    hf repos settings" in text

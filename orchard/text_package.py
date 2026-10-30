@@ -126,6 +126,11 @@ def render_card(rtm, res: dict, bench: dict, context: dict | None, *, revision: 
              "scripts and no weights. Download the weights from the model's own repository.", "",
              "Variants:", ""]
     lines += [f"- `{n}`: {v.description}" for n, v in variants.items()]
+    if getattr(rtm, "uses", ()):
+        lines += ["", "## What it is for", ""]
+        for para in rtm.uses:
+            lines += [para, ""]
+        lines.pop()
     lines += ["", NUMBERS_HEAD, "", "Every number comes from the run's result files under `evidence/`. The bars the stages used are provisional choices, set from the CPU "
               "bfloat16 error; they are not a measured chip noise level.", "", "| Number | Value | Label | Evidence |", "|---|---|---|---|"]
     lines += [_row(r) for r in rows]
