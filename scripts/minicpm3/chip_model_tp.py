@@ -24,10 +24,33 @@ NB = 8                      # DRAM banks per chip, one worker core per bank in t
 FPAD = 3328                 # per-chip intermediate width after padding (3,200 rounded up to 8 banks of whole tiles)
 
 
+TP_MLP_DTYPES = ("bf16", "bfp8")                 # the two-chip model has no bfp4 weights
+TP_MLP_FIDELITIES = ("hifi2", "lofi")            # and no HiFi4 MLP kernel configuration
+
+
+def check_tp_options(mlp_dtype, mlp_fidelity) -> None:
+    """Refuse an MLP dtype or fidelity the two-chip model cannot build, before a device is opened. A ValueError names the choices."""
+    if mlp_dtype not in TP_MLP_DTYPES:
+        raise ValueError(f"the two-chip model supports --mlp-dtype {' or '.join(TP_MLP_DTYPES)}, not {mlp_dtype!r}")
+    if mlp_fidelity not in TP_MLP_FIDELITIES:
+        raise ValueError(f"the two-chip model supports --mlp-fidelity {' or '.join(TP_MLP_FIDELITIES)}, not {mlp_fidelity!r}")
+
+
+def refuse_unsupported_tp_args(parser, args) -> None:
+    """For a command line with `--tp`, `--mlp-dtype` and `--mlp-fidelity`: when `--tp 2` names an option the two-chip model cannot build, exit with the parser's
+    usage error. Call it right after `parse_args`, before the fabric is configured or the mesh is opened."""
+    if args.tp == 2:
+        try:
+            check_tp_options(args.mlp_dtype, args.mlp_fidelity)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+
 class ChipMiniCPM3TP:
     def __init__(self, mesh, model_dir, weights_file, *, max_len=256, n_layers=0, mlp_dtype="bf16", mlp_fidelity="hifi2", links=2, log=print):
         import json
         from ref_model import rope_tables
+        check_tp_options(mlp_dtype, mlp_fidelity)
         self.mesh, self.nd, self.links, self.log = mesh, 2, links, log
         self.cfg = c = json.load(open(f"{model_dir}/config.json"))
         self.L = n_layers or c["num_hidden_layers"]

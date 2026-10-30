@@ -261,6 +261,9 @@ def test_the_chip_cache_is_sized_for_the_prompt_and_the_requested_decode_length(
     assert rt.chip_max_len(256) % 128 == 0
     with pytest.raises(rt.TextStageError, match="decode"):
         rt.chip_max_len(0)
+    with pytest.raises(rt.TextStageError, match="from 2 to"):          # one step has no next-token match to count (the agreement check counts steps 1 and up)
+        rt.chip_max_len(1)
+    assert rt.chip_max_len(2) == 256
     with pytest.raises(rt.TextStageError, match="decode"):
         rt.chip_max_len(10_000)
 

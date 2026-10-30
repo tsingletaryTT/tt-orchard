@@ -1,0 +1,4 @@
+target = "0.9.77"
+summary = "The audio plan layer reads the audio profile for the sample rate, clip file and settings."
+pr = 285
+kind = "feature"

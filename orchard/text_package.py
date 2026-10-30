@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 
 from orchard import audio_package as ap
@@ -385,9 +386,9 @@ def publish_commands(rtm, namespace: str, pkg_path: str) -> str:
         "# Commands that would publish the staged package. The builder never ran them. Each needs the operator's explicit go-ahead.",
         "# Read the card's License section first: the weights' terms are the model authors' to state, and the link in their card was not reachable when this was staged.",
         "# 1. Create a private repository and upload the package directory (the weights are not in it):",
-        f"hf upload --repo-type model --private {namespace}/{rtm.package_name} {pkg_path} .",
+        f"hf upload --repo-type model --private {shlex.quote(f'{namespace}/{rtm.package_name}')} {shlex.quote(pkg_path)} .",
         "# 2. After a pull from the private repository and a second boot check, make it public (a separate decision):",
-        f"#    hf repos settings {namespace}/{rtm.package_name} --no-private", ""])
+        f"#    hf repos settings {shlex.quote(f'{namespace}/{rtm.package_name}')} --no-private", ""])
 
 
 # ---- the gate ----------------------------------------------------------------------------------------------------------------------
@@ -475,7 +476,10 @@ def package_problems(pkg, *, rtm, hostname: str | None = None, home: str | None 
             problems.append(f"{rel}: is in {RECORD_FILE} and not in the package")
         elif sha((pkg / rel).read_bytes()) != digest:
             problems.append(f"{rel}: differs from the hash in {RECORD_FILE}")
-    if sha((pkg / "LICENSE").read_bytes()) != (rec.get("license") or {}).get("sha256"):
+    lic = rec.get("license")
+    if not isinstance(lic, dict) or not isinstance(lic.get("sha256"), str):
+        problems.append(f"{RECORD_FILE} needs a license entry that is an object with a sha256 string")
+    elif sha((pkg / "LICENSE").read_bytes()) != lic["sha256"]:
         problems.append("LICENSE is not the license text the record names")
     if validate_manifest is not None:
         problems += [f"tt-model.yaml: {p}" for p in validate_manifest(pkg / "tt-model.yaml")]

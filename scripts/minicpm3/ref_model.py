@@ -111,6 +111,9 @@ class RefModel:
         if self.cache is None:
             self.reset()
         c = self.cfg
+        if start + ids.shape[1] > self.cos.shape[0]:
+            raise ValueError(f"the rope table holds {self.cos.shape[0]} positions and this call needs {start + ids.shape[1]}; build the model with a larger max_len "
+                             "(the prompt length plus the decode length)")
         pos = torch.arange(start, start + ids.shape[1])
         x = F.embedding(ids, self.w["model.embed_tokens.weight"]) * c["scale_emb"]
         tap("embed", x)
