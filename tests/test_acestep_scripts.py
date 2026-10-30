@@ -131,3 +131,19 @@ def test_vae_tap_teacher_forcing_decodes_the_recorded_latent():
     vt = run.VaeTap(lambda z, *a, **k: (seen.append(z.clone()), z.sum(dim=1, keepdim=True).repeat(1, 2, 1))[1], force=torch.full((64, 6), 2.0))
     vt(torch.zeros(1, 64, 6))
     assert float(seen[0].mean()) == 2.0 and float(vt.latent.mean()) == 2.0
+
+
+def test_teacher_forcing_refuses_conditioning_that_differs_from_the_reference(tmp_path):
+    class R:
+        root = tmp_path / "ref"
+
+        def array(self, kind, name):
+            return np.ones((3, 8), np.float32) if name == "encoder_states" else np.ones((4, 128), np.float32)
+    (tmp_path / "ref").mkdir()
+    (tmp_path / "ref" / "manifest.json").write_text("{}")
+    tap = run.Tap(FakeDecoder())
+    _call(tap)
+    tap.enc = torch.ones(3, 8) * 1.5            # another prompt gives other encoder states
+    vt = run.VaeTap(lambda z: z)
+    with pytest.raises(SystemExit, match="teacher forcing refused"):
+        run.teacher_forced(tap, vt, R(), tmp_path / "o.json", "bfloat16")

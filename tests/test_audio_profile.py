@@ -99,3 +99,12 @@ def test_a_stable_audio_clip_must_still_equal_the_waveform(tmp_path):
     wave = _tone(44100, DUR)
     assert st.clip_matches_waveform(d, wave, 44100) != []
     assert st.clip_matches_waveform(d, wave, 44100, exact=False) == []
+
+
+def test_a_silent_or_unrelated_clip_is_refused_even_when_not_exact(tmp_path):
+    d = _make_run(tmp_path)
+    wave = _tone(48000, DUR)
+    sf.write(str(d / "clips" / "audio.wav"), np.zeros_like(wave).T, 48000)
+    assert st.clip_matches_waveform(d, wave, 48000, "audio.wav", exact=False) != []
+    sf.write(str(d / "clips" / "audio.wav"), _tone(48000, DUR, amp=0.3)[::-1].T * np.sin(np.arange(int(48000 * DUR)))[:, None].astype(np.float32), 48000)
+    assert st.clip_matches_waveform(d, wave, 48000, "audio.wav", exact=False) != []

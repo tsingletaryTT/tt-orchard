@@ -45,3 +45,9 @@ which stage-2 checks apply, and the runtime files of a package. Two profiles: St
 Check on the recorded runs from the first bring-up: the CPU float32, chip and bfloat16 CPU runs pass the ACE-Step profile and fail the Stable Audio one (1,440,000 samples is not 30 s at 44.1 kHz).
 
 Not done: `audio_plan.reference_plan`, the supervisor's stage commands and `audio_cli` still name the Stable Audio library. They need to read the profile and start `scripts/acestep/acestep_run.py`. Left to an issue.
+
+## Review round 1 (PR 267)
+
+Copilot found three High and one Medium defect, all fixed with tests that went red when the fix was removed: a non-exact clip check accepted a silent or unrelated file (it now needs correlation 0.999 with the recorded waveform, since peak normalisation is a gain);
+`analyse` accepted a missing required control; the CLI combined files made from different reference runs (both reports now carry the sha256 of the reference manifest and the CLI refuses a mismatch); teacher forcing did not check that the conditioning
+made from the current prompt equals the reference run's (it now refuses above relative L2 1e-4). The six evidence files were made before the digest existed; the digest was added to them afterwards from the recorded reference runs, which still existed.
