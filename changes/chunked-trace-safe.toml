@@ -1,0 +1,4 @@
+target = "0.9.80"
+summary = "Granite chunked prefill releases and recaptures the decode traces, is the composed-mode default, and package 0.3.0 is staged locally"
+pr = 296
+kind = "feature"
