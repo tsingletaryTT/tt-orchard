@@ -347,3 +347,10 @@ def test_server_options_default_to_every_fast_step_and_accept_none():
     a = p.parse_args(["--bundle-code", "b", "--snapshot", "s", "--root", "r"])
     assert a.fast == "all"
     assert p.parse_args(["--bundle-code", "b", "--snapshot", "s", "--root", "r", "--fast", "none"]).fast == "none"
+
+def test_fast_steps_are_parsed_without_importing_acestep_fast_when_none(monkeypatch):
+    # a package that lacks acestep_fast.py must still run the default path (--fast none)
+    monkeypatch.setitem(sys.modules, "acestep_fast", None)        # an import of it now raises ImportError
+    assert run.fast_steps_for("none") == ()
+    with pytest.raises(ImportError):
+        run.fast_steps_for("all")

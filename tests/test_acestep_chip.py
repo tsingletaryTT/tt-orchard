@@ -78,7 +78,7 @@ def test_lyric_encoder_runs_on_the_chip_for_one_item_with_every_token_valid():
     assert le.cpu_calls == 0
 
 
-@pytest.mark.parametrize("kind", ["batch2", "padded", "attentions"])
+@pytest.mark.parametrize("kind", ["batch2", "padded", "attentions", "positions"])
 def test_lyric_encoder_falls_back_to_the_cpu_path_when_the_chip_stack_does_not_apply(kind):
     h, le = _lyric_handler()
     chip.install_lyric_on_chip(_worker(), h)
@@ -90,6 +90,9 @@ def test_lyric_encoder_falls_back_to_the_cpu_path_when_the_chip_stack_does_not_a
         m = torch.ones(1, 5)
         m[0, 4] = 0
         le.forward(inputs_embeds=torch.zeros(1, 5, 4), attention_mask=m)
+    elif kind == "positions":
+        # the chip stack builds zero-based rotary tables; explicit positions would be ignored, so the original path runs
+        le.forward(inputs_embeds=torch.zeros(1, 5, 4), attention_mask=torch.ones(1, 5), position_ids=torch.arange(5, 10)[None])
     else:
         le.forward(inputs_embeds=torch.zeros(1, 5, 4), attention_mask=torch.ones(1, 5), output_attentions=True)
     assert le.cpu_calls == 1 and len(stack.forwards) == n

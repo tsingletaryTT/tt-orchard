@@ -3396,6 +3396,7 @@ Prompt (operator, relayed): the ACE-Step 1.5 turbo package is not ready; put mor
 - A higher matmul fidelity was not always better: the text encoder gained (0.0228 to 0.0187), the lyric encoder lost (0.0125 to 0.0316). Each stack has its own setting.
 - Not done: the planner (272), the XL transformer (273), sampler and wavelet correction on the device (under 0.2 s at 480 s).
 - Log: `docs/run-logs/2026-10-30-acestep-chip-path.md`; evidence in `docs/run-logs/evidence/acestep-chip-path/`. Clips: `orchard-audio/acestep-2026-10-30-chip-path/` (before and after, same prompt and seed).
+- Review of PR 278 (Copilot; 1 High, 1 Medium, both fixed test first): `acestep_run.py` imported `acestep_fast` even with `--fast none`, which a packaged runtime without that file could not do (the file is staged by PR 279; the import is now made only when a step is asked for); the chip lyric encoder ignored explicit `position_ids` (zero-based rotary tables), so such calls now run the original CPU path.
 
 ## 2026-10-30 ACE-Step package 0.2.0: the faster path packaged, regated, boot-checked (issue 254 step 3; branch `acestep-package-fast`, stacked on `acestep-chip-path`)
 Prompt (operator, relayed): rebuild the local package with the faster path, regate, boot check on a chip, update its numbers from fresh measurements (1 warm-up, 3 timed runs at 30, 60, 120, 240, 480 s).
