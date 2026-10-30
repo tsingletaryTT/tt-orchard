@@ -126,7 +126,12 @@ Four facts decide whether a swap works. Each was found by failing first.
    is `python3 stages/2/serve_and_compare_container.py` with the same deadline. That script exits 6 when the container fetched a model from the
    Hugging Face Hub (it runs with the Hub switched off, so a package that ignores `MODEL_WEIGHTS_DIR` fails or leaves a fetch behind): the test then
    measured another model and the stage fails. Report that text; do not try to make it pass.
-5. Write `handoff.json` and reply with a short summary.
+5. Read `stages/0/hazard-scan.json` when it exists. It predicts kernel hazards from the model's config (an expert count above the
+   256-bit mask, vocabulary columns per die above 65,536, a tile count a kernel rejects, a mixer the bundle lacks). A hit never stops
+   the run. Each hit has a `stage2_check`: the targeted test that would show the problem first. This stage runs one hardware test and
+   does not add others. If the output is wrong, look at the hit's dimension first. In your summary, list each hit by name and say that
+   its check was not run, so the operator bundle does not read the hit as settled.
+6. Write `handoff.json` and reply with a short summary.
 
 Do not run `serve_and_compare.py` yourself. The supervisor runs it on a leased board.
 
