@@ -28,6 +28,7 @@ from pathlib import Path
 from orchard import decode_floor as df
 from orchard import defaults, model_config as mc, safeio, sampling_probe
 
+TEXT_FIELDS = ("board", "dtype_policy_source", "bandwidth_source", "assumptions")      # the strings the share records and the bundle copy
 FLOOR_FILE = "decode-floor.json"
 SHARE_FILE = "decode-share.json"
 BOARD = "p300"
@@ -116,9 +117,13 @@ def read_floor(run_dir) -> dict | None:
     floors = rec.get("floors")
     if rec.get("scan") != "ran" or not isinstance(floors, dict) or not floors:
         return None
+    if not isinstance(rec.get("dtype_policy"), dict) or not all(isinstance(rec.get(k), str) for k in TEXT_FIELDS):
+        return None
     for v in floors.values():
-        t = v.get("floor_tok_s") if isinstance(v, dict) else None
-        if isinstance(t, bool) or not isinstance(t, (int, float)) or not math.isfinite(t) or t <= 0:
+        if not isinstance(v, dict) or not all(_good(v.get(k)) for k in ("floor_tok_s", "floor_ms", "bytes_per_token")):
+            return None
+        inputs = v.get("inputs")
+        if not isinstance(inputs, dict) or not _good(inputs.get("per_die_bandwidth_gb_s")):
             return None
     return rec
 
@@ -174,7 +179,7 @@ def measured(run_dir) -> list[dict]:
         v = _probe_speed(run / rel)
         if v:
             out.append({"stage": 4, "source": f"stage 4 sampling probe, greedy request, {int(name)} chips", "evidence": rel,
-                        "dies": _chips(run / "stages/4/configs" / name / "swap_config.json", int(name)), "tok_s": v, "basis": PROBE_BASIS})
+                        "dies": int(name), "tok_s": v, "basis": PROBE_BASIS})
     decision = _json(run / "stages/2/graft-decision.json")
     nums = decision.get("numbers") if decision and isinstance(decision.get("numbers"), dict) else {}
     for key, label, basis in (("safe_decode_tok_s", "stage 2 graft trial, safe configuration", GRAFT_BASIS),

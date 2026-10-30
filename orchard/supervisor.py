@@ -1917,17 +1917,20 @@ class Supervisor:
         """Issue 181. Stage 0 writes stages/0/decode-floor.json (the DRAM-bandwidth floor for 1, 2 and 4 dies); stages 2 and 4 write
         decode-share.json (each decode speed they measured as a share of that floor). Both are estimates and say so. A model the floor
         cannot count, or a stage with no speed, leaves a record that says it was skipped or no file. The ledger gets an evidence entry."""
-        if n == 0:
-            rec = floor_report.write_floor(stage_dir, model_dir=self.inputs.get("model"))
-            what, name = "decode floor", floor_report.FLOOR_FILE
-            extra = {"scan": rec["scan"]}
-        else:
-            rec = floor_report.write_share(self.run_dir, stage_dir, n)
-            if rec is None:
-                return
-            what, name = "decode share", floor_report.SHARE_FILE
-            extra = {"shares": [round(r["share"], 4) for r in rec["rows"]]}
-        self.ledger.append("evidence", n, what=what, **extra, **evidence_record(self.run_dir, stage_dir / name))
+        try:
+            if n == 0:
+                rec = floor_report.write_floor(stage_dir, model_dir=self.inputs.get("model"))
+                what, name = "decode floor", floor_report.FLOOR_FILE
+                extra = {"scan": rec["scan"]}
+            else:
+                rec = floor_report.write_share(self.run_dir, stage_dir, n)
+                if rec is None:
+                    return
+                what, name = "decode share", floor_report.SHARE_FILE
+                extra = {"shares": [round(r["share"], 4) for r in rec["rows"]]}
+            self.ledger.append("evidence", n, what=what, **extra, **evidence_record(self.run_dir, stage_dir / name))
+        except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
+            self.ledger.append("decision", n, decision="decode record not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).

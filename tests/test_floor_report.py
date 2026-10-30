@@ -338,3 +338,65 @@ def test_stage_2_and_stage_4_passing_each_write_their_share_through_the_real_end
             assert (r.run_dir / "stages" / str(n) / fr.SHARE_FILE).is_file(), n
     finally:
         r.close()
+
+
+# ---- review of PR 295 -------------------------------------------------------------------------------------------------------
+
+def _floor_with(run, edit):
+    rec = json.loads((run / "stages/0" / fr.FLOOR_FILE).read_text())
+    edit(rec)
+    write(run / "stages/0" / fr.FLOOR_FILE, rec)
+
+
+@pytest.mark.parametrize("edit", [
+    lambda r: r["floors"]["2"].pop("floor_ms"),
+    lambda r: r["floors"]["2"].pop("bytes_per_token"),
+    lambda r: r["floors"]["2"].update(floor_ms="slow"),
+    lambda r: r["floors"]["2"].update(bytes_per_token=float("nan")),
+    lambda r: r.pop("assumptions"),
+    lambda r: r.pop("dtype_policy"),
+    lambda r: r.update(dtype_policy="bf16"),
+    lambda r: r.pop("bandwidth_source"),
+    lambda r: r.pop("dtype_policy_source"),
+    lambda r: r.pop("board"),
+    lambda r: r["floors"]["2"].pop("inputs"),
+    lambda r: r["floors"]["2"]["inputs"].update(per_die_bandwidth_gb_s=0),
+])
+def test_a_floor_record_missing_a_field_the_readers_use_is_refused_whole(tmp_path, edit):
+    run = run_dir(tmp_path)
+    _floor_with(run, edit)
+    assert fr.read_floor(run) is None and fr.share_rows(run) == [] and fr.write_share(run, run / "stages/2", 2) is None
+
+
+def test_a_stage_4_row_uses_the_directory_the_test_ran_in_for_its_die_count_not_the_swap_config(tmp_path):
+    run = run_dir(tmp_path, stage4=(4,))
+    write(run / "stages/4/configs/4/swap_config.json", {"chips": 2})                  # stale
+    assert [r["dies"] for r in fr.share_rows(run) if r["stage"] == 4] == [4]
+
+
+def test_a_failure_to_write_the_floor_or_share_is_a_ledger_decision_and_the_stage_still_passes(tmp_path, monkeypatch):
+    from orchard.stages import GateResult, spec_for
+    from test_supervisor_stock import Rig, _supervisor
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+    r = Rig(tmp_path)
+    try:
+        r.run()
+        write(r.run_dir / "stages/2/evidence/swap-check.json", {"sampling_probe": probe()})
+        monkeypatch.setattr(fr, "write_floor", boom)
+        monkeypatch.setattr(fr, "write_share", boom)
+        sup, led = _supervisor(r)
+        try:
+            for n in (0, 2):
+                spec = spec_for(n, "weights-only")
+                stage = r.run_dir / "stages" / str(n)
+                if spec.gate_file and not (stage / spec.gate_file).exists():
+                    (stage / spec.gate_file).write_text("{}")
+                assert sup._end_stage(spec, stage, "pass", [], GateResult(True, (), ()), False) == "pass"
+            entries = led.read()
+        finally:
+            led.__exit__(None, None, None)
+        assert {e["stage"] for e in entries if e["data"].get("decision") == "decode record not written"} == {0, 2}
+    finally:
+        r.close()
