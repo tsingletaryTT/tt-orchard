@@ -139,25 +139,43 @@ def tree_facts(tt_metal_dir: str) -> dict:
 
 # ---- prepare ----------------------------------------------------------------------------------------------------
 
-def make_scratch(cfg: dict) -> Path:
-    scratch, host = Path(cfg["scratch_dir"]), Path(cfg["tt_metal_dir"])
-    marker = scratch / MARKER
-    if marker.is_file():
-        say(f"the scratch copy exists ({scratch.name}); keeping it, with any change a stage made")
-        return scratch
-    if scratch.exists() and any(scratch.iterdir()):
-        fail(2, f"{scratch} exists and has no {MARKER}; it is not a scratch copy this script made")
-    scratch.mkdir(parents=True, exist_ok=True)
-    for name in COPIED:
-        src = host / name
+def copy_paths(host: Path, scratch: Path, names, *, only_missing: bool) -> list[str]:
+    """Copy `names` from the host tree into the scratch copy. With `only_missing`, a path the copy already has is left as it is (a stage may have edited it)."""
+    copied = []
+    for name in names:
+        src, dst = host / name, scratch / name
         if not src.exists():
             fail(2, f"{src} does not exist: tt_metal_dir is not a tt-metal tree")
-        dst = scratch / name
+        if only_missing and dst.exists():
+            continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_dir():
             shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         else:
             shutil.copy2(src, dst)
+        copied.append(name)
+    return copied
+
+
+def make_scratch(cfg: dict) -> Path:
+    scratch, host = Path(cfg["scratch_dir"]), Path(cfg["tt_metal_dir"])
+    marker = scratch / MARKER
+    if marker.is_file():
+        # A copy made by an older template lacks the paths added to COPIED since (tests/tests_common, for one). Add those and leave every other file as a
+        # stage left it.
+        added = copy_paths(host, scratch, COPIED, only_missing=True)
+        if added:
+            record = json.loads(marker.read_text())
+            record["copied"] = list(COPIED)
+            marker.write_text(json.dumps(record, indent=2) + "\n")
+            say(f"the scratch copy exists ({scratch.name}); added {', '.join(added)} and kept every other file as it is")
+        else:
+            say(f"the scratch copy exists ({scratch.name}); keeping it, with any change a stage made")
+        return scratch
+    if scratch.exists() and any(scratch.iterdir()):
+        fail(2, f"{scratch} exists and has no {MARKER}; it is not a scratch copy this script made")
+    scratch.mkdir(parents=True, exist_ok=True)
+    copy_paths(host, scratch, COPIED, only_missing=False)
     marker.write_text(json.dumps({"copied": list(COPIED), "tt_metal": tree_facts(cfg["tt_metal_dir"])}, indent=2) + "\n")
     say(f"copied {', '.join(COPIED)} from the host tree into {scratch.name}")
     return scratch
@@ -185,14 +203,20 @@ _orchard_ttnn.as_tensor = _orchard_as_tensor_no_cache
 
 
 def apply_cache_patch(cfg: dict, scratch: Path) -> None:
-    """Append CACHE_PATCH to the scratch copy's root conftest.py when the config asks for it, once (the scratch copy is kept between prepares)."""
-    if not cfg["disable_tensor_cache"]:
-        return
+    """Make the scratch copy's root conftest.py match `disable_tensor_cache`: append CACHE_PATCH once when it is true; when it is false, remove CACHE_PATCH if
+    it is there as written, and stop (exit 2) when a patch with the marker is there but was edited, since it cannot be removed safely."""
     conftest = scratch / "conftest.py"
     text = conftest.read_text(encoding="utf-8")
-    if CACHE_PATCH_MARK not in text:
-        conftest.write_text(text + CACHE_PATCH, encoding="utf-8")
-        say("the scratch conftest.py runs with no tensor cache files (disable_tensor_cache)")
+    if cfg["disable_tensor_cache"]:
+        if CACHE_PATCH_MARK not in text:
+            conftest.write_text(text + CACHE_PATCH, encoding="utf-8")
+            say("the scratch conftest.py runs with no tensor cache files (disable_tensor_cache)")
+    elif CACHE_PATCH_MARK in text:
+        if CACHE_PATCH not in text:
+            fail(2, "disable_tensor_cache is false but the scratch conftest.py has a patch that was edited, so it cannot be removed safely; "
+                    "remove it by hand or delete the scratch copy")
+        conftest.write_text(text.replace(CACHE_PATCH, "", 1), encoding="utf-8")
+        say("removed the tensor cache patch from the scratch conftest.py (disable_tensor_cache is false)")
 
 
 def make_model_dir(cfg: dict, scratch: Path) -> Path:
@@ -326,16 +350,22 @@ def parse_free_run(text: str) -> dict:
 
 
 NO_TARGET = re.compile(r"ValueError: (Could not find centralized accuracy targets for [^\n]*)")
+# pytest's last line when exactly one test failed and nothing else happened: no error, no pass, no skip, no crash text
+ONLY_ONE_FAILED = re.compile(r"^=+ 1 failed(?:, \d+ (?:deselected|warnings?))* in [0-9.]+s(?: \([0-9:]+\))? =+$", re.M)
 
 
 def missing_target(acc_text: str, accuracy, rc: int) -> str | None:
     """tt-transformers' own test looks up a published accuracy target for the model and board after it prints the accuracy, and fails when the table has
-    no row. The 2-chip run of Llama-3.1-8B on P300 (2026-10-29) did exactly that. The message when the test failed for that reason alone (the accuracy line
-    was printed first), else None: any other failure is still a failure."""
-    if rc == 0 or accuracy is None:
+    no row. The 2-chip run of Llama-3.1-8B on P300 (2026-10-29) did exactly that. The message when that was the only failure: pytest exited 1 (a test failed,
+    not a timeout, a crash or an interrupt), the accuracy line was printed first, and pytest's last line counts one failure with no error, pass or skip beside
+    it. Any other nonzero exit is still a failure (Copilot, PR 275)."""
+    if rc != 1 or accuracy is None:
         return None
     found = NO_TARGET.findall(acc_text)
-    return found[-1] if found else None
+    if not found:
+        return None
+    last = [ln for ln in acc_text.splitlines() if ln.startswith("=") and " in " in ln][-1:]
+    return found[-1] if last and ONLY_ONE_FAILED.fullmatch(last[0]) else None
 
 
 def hub_fetches(model_dir: Path, log_text: str) -> list[str]:

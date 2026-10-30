@@ -61,7 +61,7 @@ def test_the_patch_is_summarised_as_a_line_count(tmp_path):
     text, _ = results(stock_run(tmp_path, patch="--- a\n+++ b\n@@\n-a\n+b\n+c\n"))
     assert "2 lines added, 1 removed" in section(text, HEADING)
     text, _ = results(stock_run(tmp_path / "two", patch=""))
-    assert "no change to the host tree's models directory" in section(text, HEADING)
+    assert "no change to the copied host tree paths" in section(text, HEADING)
 
 
 def test_a_dirty_tree_and_a_patch_are_risks(tmp_path):
@@ -79,3 +79,22 @@ def test_the_section_text_passes_the_plain_english_sweep(tmp_path):
     text, risks = results(stock_run(tmp_path))
     mine = section(text, HEADING) + section(risks, "## Stock runtime run")
     assert [w for w in SWEEP if w in mine] == []
+
+
+def test_an_evidence_path_that_leaves_the_stage_directory_is_not_read(tmp_path):
+    """Copilot, PR 275: the containment check accepted every string, so a path such as /dev/zero or a link out of the stage could hang the build."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("+++ not a patch\n+x\n+y\n")
+    for i, name in enumerate(("/dev/zero", "../../../secret.txt", "evidence/../../../secret.txt", str(secret), "evidence/link.patch")):
+        run = stock_run(tmp_path / f"case{i}", stock_check(scratch_patch=name))
+        if name == "evidence/link.patch":
+            (run / "stages" / "2" / "evidence" / "link.patch").symlink_to(secret)
+        text, _ = results(run)
+        assert "lines added" not in section(text, HEADING), name
+        assert "Scratch patch | " in text and "not recorded" in section(text, HEADING)
+
+
+def test_a_patch_file_over_the_size_limit_is_not_read(tmp_path):
+    big = "+x\n" * 800_000
+    text, _ = results(stock_run(tmp_path, patch=big))
+    assert "lines added" not in section(text, HEADING)

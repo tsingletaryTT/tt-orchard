@@ -69,6 +69,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import sys
 import time
 from pathlib import Path
@@ -1246,17 +1247,43 @@ STOCK_FILE = "stages/2/evidence/stock-check.json"
 STOCK_HEADING = "Stock runtime on a chip"
 
 
-def patch_summary(run: Run) -> str:
-    """Lines added and removed by the scratch patch of the host tree's models directory, counted from the patch file; "not recorded" when it cannot be read."""
-    name = dig(run.stock, "scratch_patch")
-    if not isinstance(name, str) or not under(f"stages/2/{name}", "stages/2"):
-        return NOT_RECORDED
+STOCK_PATCH_MAX_BYTES = 2_000_000       # the template cuts its patch at this size (PATCH_LIMIT in stock_check.py); a larger file is not read
+STOCK_PATCH_NAME = re.compile(r"evidence/[A-Za-z0-9._-]+")
+
+
+def read_stock_patch(run: Run, name) -> list[str] | None:
+    """The lines of the patch file `name` in stage 2, or None. The name comes from the evidence file, which is untrusted: it has to be `evidence/<one file name>`,
+    the file has to be a regular file that is not a link (it is opened with O_NOFOLLOW, so a link in the last place is refused, and the directory is checked
+    to be real), and it is read through a size limit. A path such as /dev/zero, a path with `..` or a link out of the stage gives None (Copilot, PR 275)."""
+    if not isinstance(name, str) or not STOCK_PATCH_NAME.fullmatch(name) or name in ("evidence/.", "evidence/.."):
+        return None
+    stage = run.dir / "stages" / "2"
+    folder = stage / "evidence"
+    if folder.is_symlink() or not folder.is_dir():
+        return None
     try:
-        lines = (run.dir / "stages" / "2" / name).read_text(encoding="utf-8", errors="replace").splitlines()
+        fd = os.open(folder / name.split("/", 1)[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(STOCK_PATCH_MAX_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return None if len(data) > STOCK_PATCH_MAX_BYTES else data.decode("utf-8", errors="replace").splitlines()
+
+
+def patch_summary(run: Run) -> str:
+    """Lines added and removed by the scratch patch of the host tree, counted from the patch file; "not recorded" when it cannot be read safely."""
+    lines = read_stock_patch(run, dig(run.stock, "scratch_patch"))
+    if lines is None:
         return NOT_RECORDED
     if not any(ln.strip() for ln in lines):
-        return "no change to the host tree's models directory"
+        return "no change to the copied host tree paths"
     added = sum(1 for ln in lines if ln.startswith("+") and not ln.startswith("+++"))
     removed = sum(1 for ln in lines if ln.startswith("-") and not ln.startswith("---"))
     return f"{added} lines added, {removed} removed"
@@ -1305,7 +1332,7 @@ def stock_risks(run: Run, redact: Redactor) -> list[str]:
     if as_dict(d.get("tt_metal")).get("dirty") is True:
         lines.append(f"- The host tt-metal tree has uncommitted changes, so the runtime is not a published build. Evidence: `{STOCK_FILE}`.")
     patch = patch_summary(run)
-    if patch not in (NOT_RECORDED, "no change to the host tree's models directory"):
+    if patch not in (NOT_RECORDED, "no change to the copied host tree paths"):
         lines.append(f"- The scratch patch changed the stock code ({patch}). The measured model is not the stock code until the patch is upstream. "
                      f"Evidence: `{STOCK_FILE}`.")
     lines += ["- No package was built for this model. A package needs the base-bundle step of issue 62.", ""]

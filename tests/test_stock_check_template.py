@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -456,7 +457,10 @@ def test_disable_tensor_cache_appends_the_patch_to_the_scratch_conftest_once(rig
     assert rig.go("prepare").returncode == 0 and rig.go("prepare").returncode == 0
     text = (rig.run_dir / "tt-metal-scratch" / "conftest.py").read_text()
     assert text.count("orchard scratch patch (issue 93)") == 1 and 'kwargs["cache_file_name"] = None' in text
-    rig.go("run")
+    # the patched conftest imports ttnn when the child pytest collects it: a scratch-local stub keeps this test off any real device
+    (rig.run_dir / "tt-metal-scratch" / "ttnn.py").write_text("def as_tensor(*a, **k):\n    return k\n")
+    done = rig.go("run")
+    assert done.returncode == 0, done.stderr
     patch = (rig.stage / "evidence/scratch.patch").read_text()
     assert "cache_file_name" in patch                      # the change is in the evidence, like any other scratch change
 
@@ -471,3 +475,62 @@ def test_disable_tensor_cache_must_be_true_or_false(rig):
     rig.write_cfg()
     done = rig.go("prepare")
     assert done.returncode == 2 and "disable_tensor_cache" in done.stderr
+
+
+def test_a_scratch_copy_made_by_an_older_template_gets_the_paths_added_since(rig):
+    """A marked scratch copy used to be kept as it was, so a template that needed a new path (tests/tests_common) never got it."""
+    rig.go("prepare")
+    sc = rig.run_dir / "tt-metal-scratch"
+    shutil.rmtree(sc / "tests" / "tests_common")
+    (sc / "models" / "edited.txt").write_text("a stage edit")
+    assert rig.go("prepare").returncode == 0
+    assert (sc / "tests/tests_common/cache_entries_counter.py").read_text() == "Y = 2\n"
+    assert (sc / "models" / "edited.txt").read_text() == "a stage edit"
+    assert "tests/tests_common" in json.loads((sc / ".orchard-scratch.json").read_text())["copied"]
+
+
+def test_turning_disable_tensor_cache_off_removes_the_patch_and_keeps_other_edits(rig):
+    rig.cfg["disable_tensor_cache"] = True
+    rig.write_cfg()
+    rig.go("prepare")
+    conftest = rig.run_dir / "tt-metal-scratch" / "conftest.py"
+    conftest.write_text("# a stage edit\n" + conftest.read_text())
+    rig.cfg["disable_tensor_cache"] = False
+    rig.write_cfg()
+    assert rig.go("prepare").returncode == 0
+    text = conftest.read_text()
+    assert "orchard scratch patch" not in text and text.startswith("# a stage edit\n")
+
+
+def test_a_patch_someone_edited_is_not_removed_silently(rig):
+    rig.cfg["disable_tensor_cache"] = True
+    rig.write_cfg()
+    rig.go("prepare")
+    conftest = rig.run_dir / "tt-metal-scratch" / "conftest.py"
+    conftest.write_text(conftest.read_text().replace('kwargs["cache_file_name"] = None', 'kwargs["cache_file_name"] = None  # edited'))
+    rig.cfg["disable_tensor_cache"] = False
+    rig.write_cfg()
+    done = rig.go("prepare")
+    assert done.returncode == 2 and "disable_tensor_cache" in done.stderr
+
+
+def _template_module():
+    sys.path.insert(0, str(TEMPLATE.parent))
+    import importlib
+    return importlib.import_module("stock_check")
+
+
+MISSING = "ValueError: Could not find centralized accuracy targets for Llama-3.1-8B on P300 (batch_size=1, seq_len=512)\n"
+
+
+@pytest.mark.parametrize("log,rc,expected", [
+    (MISSING + "=========== 1 failed, 45 deselected, 1 warning in 51.90s ===========\n", 1, True),
+    (MISSING + "=========== 1 failed, 1 error, 45 deselected in 51.90s ===========\n", 1, False),     # a teardown error beside it
+    (MISSING + "=========== 1 failed, 1 passed in 51.90s ===========\n", 1, False),
+    (MISSING, 1, False),                                                                              # no summary line: the run did not finish
+    (MISSING + "=========== 1 failed, 45 deselected in 51.90s ===========\n", 124, False),             # a timeout
+    (MISSING + "=========== 1 failed, 45 deselected in 51.90s ===========\n", -11, False),            # a crash
+    (MISSING + "=========== 1 failed, 45 deselected in 51.90s ===========\n", 0, False)])
+def test_the_missing_target_exemption_needs_it_to_be_the_only_failure(log, rc, expected):
+    mod = _template_module()
+    assert (mod.missing_target(log, (0.9, 1.0), rc) is not None) is expected
