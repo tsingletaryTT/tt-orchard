@@ -1,0 +1,3 @@
+target = "0.9.66"
+summary = "Recipe package for Qwen3.5-35B-A3B on one p300 board: stage, card, gate and measured numbers (not published)"
+pr = 246
