@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, bus, nearest, safeio, served_chat
+from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, served_chat, stage0_scan
 from orchard import text_runtime
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -1951,6 +1951,36 @@ class Supervisor:
                 self.ledger.append("decision", n, decision="served chat check not written", path=os.path.relpath(d / served_chat.FILE, self.run_dir),
                                    reason=f"{type(exc).__name__}: {exc}"[:200])
 
+    def _decode_floor_record(self, n: int, stage_dir: Path) -> None:
+        """Issue 181. Stage 0 writes stages/0/decode-floor.json (the DRAM-bandwidth floor for 1, 2 and 4 dies); stages 2 and 4 write
+        decode-share.json (each decode speed they measured as a share of that floor). Both are estimates and say so. A model the floor
+        cannot count, or a stage with no speed, leaves a record that says it was skipped or no file. The ledger gets an evidence entry."""
+        try:
+            if n == 0:
+                rec = floor_report.write_floor(stage_dir, model_dir=self.inputs.get("model"))
+                what, name = "decode floor", floor_report.FLOOR_FILE
+                extra = {"scan": rec["scan"]}
+            else:
+                rec = floor_report.write_share(self.run_dir, stage_dir, n)
+                if rec is None:
+                    return
+                what, name = "decode share", floor_report.SHARE_FILE
+                extra = {"shares": [round(r["share"], 4) for r in rec["rows"]]}
+            self.ledger.append("evidence", n, what=what, **extra, **evidence_record(self.run_dir, stage_dir / name))
+        except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
+            self.ledger.append("decision", n, decision="decode record not written", reason=f"{type(exc).__name__}: {exc}"[:200])
+
+    def _stage_0_hazard_scan(self, stage_dir: Path) -> None:
+        """Write stages/0/hazard-scan.json (orchard/stage0_scan.py) and record it in the ledger. The scan predicts kernel hazards from the
+        model's config; a hit never stops the run, and a model directory it cannot read gives a record that says it was skipped."""
+        model_dir = self.inputs.get("model")
+        try:
+            rec = stage0_scan.write_scan(stage_dir, model_dir=model_dir)
+            self.ledger.append("evidence", 0, what="hazard scan", scan=rec["scan"], hazards=[h["name"] for h in rec["hazards"]],
+                               **evidence_record(self.run_dir, stage_dir / stage0_scan.FILE))
+        except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
+            self.ledger.append("decision", 0, decision="hazard scan not written", reason=f"{type(exc).__name__}: {exc}"[:200])
+
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
         The template decides form and modality from the files; `serving` is a property of this machine, so it comes from the
@@ -1975,8 +2005,12 @@ class Supervisor:
                 self._served_chat_records(n, stage_dir)
             if n == 6 and spec.gate_file == "result.json":
                 self._record_numbers(stage_dir)
+            if n in (0, 2, 4):
+                self._decode_floor_record(n, stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
+            if n == 0:
+                self._stage_0_hazard_scan(stage_dir)
             extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts()}
                      if n == 0 else {})
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)

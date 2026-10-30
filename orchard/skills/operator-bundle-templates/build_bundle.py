@@ -242,6 +242,16 @@ class Redactor:
 
 # ---- what the run produced --------------------------------------------------------------------------
 
+def read_capped_json(path: Path, *, max_bytes: int = 4 << 20) -> dict | None:
+    """The JSON object at `path` through orchard/safeio.py (size cap, no link followed, no FIFO read, strict JSON). None when the file is
+    absent, {} when it exists and cannot be read as an object."""
+    from orchard import safeio
+    try:
+        return safeio.read_json(path, max_bytes=max_bytes, expect=dict)
+    except safeio.SafeReadError as exc:
+        return None if "ENOENT" in str(exc.reason) else {}
+
+
 class Run:
     """Everything the bundle is built from, read once. Raises Missing for a required input."""
 
@@ -270,6 +280,9 @@ class Run:
         s = run_dir / "stages"
         self.delta = read_json(s / "0" / "delta.json", "stages/0/delta.json", required=True)
         # An audio run has no reference.json: stage 1 wrote audio_reference.json, which the audio section reads through stage 2's result.
+        # Stage 0's hazard scan (orchard/stage0_scan.py, issue 183): None when the run has none (an older run), {} when the file is unreadable.
+        self.scan_file = s / "0" / "hazard-scan.json"
+        self.scan = read_capped_json(self.scan_file)
         self.reference = {} if (self.audio_run or self.text_run) else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
@@ -634,6 +647,46 @@ SAMPLING_FLAG_RISKS = {
 }
 
 
+FLOOR_HEADING = "Decode against the DRAM floor"
+
+
+def floor_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Decode against the DRAM floor" section (issue 181): each decode speed the run measured, as a share of the estimated floor for
+    the dies it ran on, with the inputs, what each speed includes and, for a low share, the likely causes in order (text only).
+    The shares are recomputed here from the raw measurement files (orchard/floor_report.py), so a summary written into a file is not read.
+    No lines when the run has no stage 0 floor record or no speed with a floor, so a run from before gets the same RESULTS.md as before."""
+    from orchard import floor_report
+    rows = floor_report.share_rows(run.dir)
+    if not rows:
+        return []
+    rec = floor_report.read_floor(run.dir)
+    policy = rec.get("dtype_policy") if isinstance(rec.get("dtype_policy"), dict) else {}
+    bw = max((f.get("inputs", {}).get("per_die_bandwidth_gb_s") for f in rec["floors"].values() if isinstance(f, dict)
+              and isinstance(f.get("inputs"), dict)), default=None)
+    lines = ["", f"## {FLOOR_HEADING}", "",
+             "Decode on this hardware is limited by DRAM bandwidth: each token reads the active weights once, so time per token cannot be below "
+             "the active weight bytes divided by the bandwidth of the dies. Every figure below is an ESTIMATE. The floor is computed from the "
+             f"model's config with the weight dtype {redact(', '.join(f'{k} {v}' for k, v in sorted(policy.items())))} "
+             f"({redact(str(rec.get('dtype_policy_source')))}) and {fmt(bw)} GB/s per die "
+             f"({redact(one_line(str(rec.get('bandwidth_source'))))}). Evidence: `stages/0/decode-floor.json`.", "",
+             "| Speed | Dies | tok/s | Estimated floor tok/s | Share of the estimated floor | What the speed is | Label | Evidence |",
+             "|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {redact(r['source'])} | {r['dies']} | {fmt(round(r['tok_s'], 2))} | {fmt(round(r['floor_tok_s'], 1))} | "
+                     f"{fmt(round(r['share'] * 100, 1))} percent | {redact(one_line(r['basis']))} | measured speed, estimated floor | `{r['evidence']}` |")
+    lines.append("")
+    for r in rows:
+        if r.get("note"):
+            lines.append(f"- {redact(r['source'])}: {redact(r['note'])}.")
+    for note in floor_report.share_notes(run.dir):
+        lines.append(f"- {redact(one_line(note))}")
+    hints = [r for r in rows if r.get("hint")]
+    if hints:
+        lines += ["", redact(one_line(hints[0]["hint"])) + " This is text only; it does not block a run."]
+    lines += ["", f"What the floor leaves out: {redact(one_line(rec.get('assumptions') or ''))}"]
+    return lines
+
+
 def sampling_choice_section(run: Run, redact: Redactor) -> list[str]:
     """The "The sampling choice" section, from stage 2's `sampling-decision.json` (orchard/sampling_choice.py): which configuration the run ships,
     why, and the numbers it used. No lines when the run has no decision file, so a run from before the choice gets the same RESULTS.md as before.
@@ -837,7 +890,8 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
         if isinstance(x, dict):
             lines.append(f"- {x.get('area')}: {end(redact(x.get('finding', '')))} "
                          f"Evidence: {ev(x.get('evidence'))}.")
-    body[0] = lines + ["", "Evidence: `stages/0/delta.json`."]
+    scan_line = scan_results_line(run)
+    body[0] = lines + ([""] + [scan_line] if scan_line else []) + ["", "Evidence: `stages/0/delta.json`."]
 
     r = run.reference
     env = r.get("environment") if isinstance(r.get("environment"), dict) else {}
@@ -1694,6 +1748,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += graft_section(run, redact)
     lines += sampling_section(run, redact)
     lines += sampling_choice_section(run, redact)
+    lines += floor_section(run, redact)
     lines += reported_section(run, redact)
     lines += audio_section(run, redact)
     lines += text_section(run, redact)
@@ -2047,6 +2102,60 @@ def thin_evidence(run: Run, redact: Redactor) -> list[str]:
     return items
 
 
+SCAN_FILE = "stages/0/hazard-scan.json"
+
+
+def scan_hits(run: Run) -> list[dict] | None:
+    """The hazards of stage 0's scan: a list of dicts, [] when it ran and found none or was skipped, None when the file is absent or
+    unreadable."""
+    scan = run.scan
+    if not scan or not isinstance(scan.get("hazards"), list) or not isinstance(scan.get("notes", []), list):
+        return None
+    if not all(isinstance(h, dict) and isinstance(h.get("name"), str) and h["name"] for h in scan["hazards"]):
+        return None            # an entry with no name is unusable evidence, and dropping it would report a clean scan
+    return list(scan["hazards"])
+
+
+def scan_results_line(run: Run) -> str:
+    """One line for stage 0's section of RESULTS.md, "" when the run has no scan file."""
+    if run.scan is None:
+        return ""           # a run from before the scan gets the same RESULTS.md as before
+    hits = scan_hits(run)
+    if hits is None:
+        return f"Hazard scan: `{SCAN_FILE}` could not be read."
+    if run.scan.get("scan") == "skipped":
+        return f"Hazard scan: skipped. Evidence: `{SCAN_FILE}`."
+    return f"Hazard scan: {len(hits)} kernel hazard(s) predicted from the config, listed in RISKS.md. Evidence: `{SCAN_FILE}`."
+
+
+def scan_risks(run: Run, redact: Redactor) -> list[str]:
+    """The "Stage 0 hazard scan" section of RISKS.md. A hit is a prediction from the model's config. No stage records that its check was
+    run, so each hit says `Not shown` for that."""
+    if run.scan is None:
+        return []           # a run from before the scan gets the same RISKS.md as before
+    lines = ["## Stage 0 hazard scan", "",
+             "A prediction from the model's config of dimensions that break known kernels. A hit does not stop a run. Each hit names the "
+             "check stage 2 should run first. `Not shown` means no file in the run records that the check was run.", ""]
+    hits = scan_hits(run)
+    if hits is None:
+        return lines + [f"The scan file `{SCAN_FILE}` could not be read.", ""]
+    if run.scan.get("scan") == "skipped":
+        return lines + [f"The scan was skipped: {redact(one_line(run.scan.get('reason', 'no reason recorded')))} Evidence: `{SCAN_FILE}`.", ""]
+    for note in run.scan.get("notes") or []:
+        if isinstance(note, str):
+            lines += [f"Note: {redact(one_line(note))}", ""]
+    if not hits:
+        return lines + [f"The scan found no hazards. Evidence: `{SCAN_FILE}`.", ""]
+    for h in hits:
+        also = " The nearest bundle also hits it, and that bundle is known to run." if h.get("also_on_nearest") is True else ""
+        lines += [f"### {redact(h['name'])}", "",
+                  f"{redact(one_line(h.get('why', '')))} The model has {redact(one_line(fmt(h.get('value'))))}; the limit is "
+                  f"{redact(one_line(fmt(h.get('limit'))))}. Source: {redact(one_line(h.get('source', '')))}.{also}", "",
+                  f"- Stage 2 check: {redact(one_line(h.get('stage2_check', '')))}.",
+                  f"- Check run: Not shown. Evidence: `{SCAN_FILE}`.", ""]
+    return lines
+
+
 def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
     repo, _ = run.model()
     lines = [f"# Risks: {repo}", "",
@@ -2064,6 +2173,7 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
                   f"- Dealt with: {'yes' if ok else 'Not shown'}. {' '.join(why)}", ""]
     if not hazards:
         lines += ["Stage 0 listed no hazards.", ""]
+    lines += scan_risks(run, redact)
     d = run.sampling_decision
     if d is not None and d.get("flag"):
         lines += ["## Sampling choice", "",

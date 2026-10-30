@@ -1,0 +1,4 @@
+target = "0.9.79"
+summary = "Stage 0 writes the hazard scan, and the operator bundle and the stage 2 skill read it."
+pr = 292
+kind = "feature"

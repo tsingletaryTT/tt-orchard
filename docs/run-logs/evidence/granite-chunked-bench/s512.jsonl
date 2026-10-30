@@ -1,0 +1,15 @@
+{"chunk": 128, "event": "start", "max_len": 2048, "mode": "time", "path": "step", "runs": 3, "t": 1793377665.186, "tokens": 512, "trace": false, "warmups": 1}
+{"event": "prompt", "sha256": "555e89efd449c0f37d628c8ceb4bd68d74116538cff5c6f546176bba44f76dfb", "t": 1793377665.548, "tokens": 512}
+{"event": "before", "iteration": 0, "label": "construct", "phase": "setup", "t": 1793377667.008, "timeout_s": 240}
+{"event": "after", "iteration": 0, "label": "construct", "phase": "setup", "seconds": 3.0939, "t": 1793377670.103}
+{"event": "before", "iteration": 0, "label": "step", "phase": "warmup", "t": 1793377670.114, "timeout_s": 180}
+{"event": "after", "iteration": 0, "label": "step", "phase": "warmup", "seconds": 26.5017, "t": 1793377696.616}
+{"event": "before", "iteration": 1, "label": "step", "phase": "timed", "t": 1793377696.62, "timeout_s": 120}
+{"event": "after", "iteration": 1, "label": "step", "phase": "timed", "seconds": 38.1683, "t": 1793377734.789}
+{"event": "before", "iteration": 2, "label": "step", "phase": "timed", "t": 1793377734.796, "timeout_s": 120}
+{"event": "after", "iteration": 2, "label": "step", "phase": "timed", "seconds": 19.7849, "t": 1793377754.584}
+{"event": "before", "iteration": 3, "label": "step", "phase": "timed", "t": 1793377754.585, "timeout_s": 120}
+{"event": "after", "iteration": 3, "label": "step", "phase": "timed", "seconds": 21.0363, "t": 1793377775.622}
+{"event": "result", "path": "step", "t": 1793377775.624, "tok_s_median": 24.34, "tokens": 512}
+{"event": "before", "iteration": 0, "label": "close", "phase": "setup", "t": 1793377775.627, "timeout_s": 60}
+{"event": "after", "iteration": 0, "label": "close", "phase": "setup", "seconds": 0.0173, "t": 1793377775.647}
