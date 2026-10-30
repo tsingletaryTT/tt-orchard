@@ -3360,3 +3360,10 @@ The operator approved publishing. `episod/qwen3.5-35b-a3b-blackhole-p300` was up
 - First verify-package pass failed 2 of 7: it did not read a record whose `files` is a path-to-sha256 map, and the manifest still said `NAMESPACE`. Both are fixed in the builder with tests that failed first. The manifest and the publish text name `episod`.
 - The restaged package was gated (`package_problems` empty) and booted cold on board 1 in 471 s (PR 265). Only the manifest, record and publish text changed after that boot, so `run.sh` is the booted one.
 - After the fixes: private upload, 7 of 7; public, 7 of 7 without a token.
+
+## 2026-10-30 ACE-Step: per-step bars and an audio profile (issues 262, 263; branch `acestep-stepbars`)
+Prompt (operator): continue the ACE-Step bring-up; per-step bars with a teacher-forced bfloat16 CPU floor, then an audio profile for non-Stable-Audio models, then a local package.
+- Teacher-forced bfloat16 CPU floor added to `acestep_run.py` (`--teacher-forced`); `orchard/step_bars.py` sets per-step bars at 2.0 times that floor and refuses when a wrong-step control passes them. Two prompts, 30 s.
+- Finding: the earlier 0.10 bar was too tight at steps 0 and 1 (the CPU bfloat16 floor is 0.13 to 0.17 there) and loose at steps 5 to 7. The chip is under the CPU floor on steps 0 to 4; its decoder is 1.6 to 1.9 times the CPU decoder floor, which is why the margin is 2.
+- `orchard/audio_profile.py`: sample rate, clip file, recorded layout and stage-2 kind per model family (Stable Audio and ACE-Step). `audio_stages.check_run_dir` takes a profile. The supervisor and `audio_plan` are not wired to it yet.
+- Log: `docs/run-logs/2026-10-30-acestep-step-bars.md`; evidence in `docs/run-logs/evidence/acestep-step-bars/`.
