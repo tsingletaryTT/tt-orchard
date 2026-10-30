@@ -1868,32 +1868,72 @@ def sampling_defaults_dealt_with(run: Run) -> tuple[bool, list[str]]:
 SERVED_CHAT = "stages/2/served-chat.json"
 
 
+def _served_chat_shape(rec) -> bool:
+    return (isinstance(rec, dict) and isinstance(rec.get("problems"), list) and isinstance(rec.get("incomplete"), list)
+            and isinstance(rec.get("replies"), dict))
+
+
 def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | None:
-    """What stage 2's served-chat.json (orchard/served_chat.py, issue 17) says, as (dealt with, why), or None when the run has no usable
-    record. The record is read as data: it counts only when `ok` is true, `problems` is a list, and its replies were checked. A stage 4
-    configuration with a problem makes it not shown too."""
-    rec = read_json(run.dir / SERVED_CHAT, "", required=False)
-    if not isinstance(rec, dict) or not isinstance(rec.get("problems"), list) or not isinstance(rec.get("replies"), dict):
+    """What the served-chat.json records (orchard/served_chat.py, issue 17) say, as (dealt with, why), or None when stage 2 has no record.
+
+    A record is believed only when its sha256 equals the latest `served chat check` evidence entry the supervisor wrote for that path, so a
+    file overwritten later is unverified. The hazard is dealt with only when every required record is present, believed, has no problem,
+    nothing incomplete, and checked chat replies. Required: stage 2's, every record the ledger names (the trials' variants and each stage 4
+    configuration the supervisor checked), each stage 4 configuration that passed, and none that the supervisor failed to write."""
+    if not (run.dir / SERVED_CHAT).exists():
         return None
-    records = [(SERVED_CHAT, rec)]
-    configs = run.dir / "stages" / "4" / "configs"
-    for d in sorted(configs.glob("*/served-chat.json")) if configs.is_dir() else []:
-        other = read_json(d, "", required=False)
-        if isinstance(other, dict) and isinstance(other.get("problems"), list) and isinstance(other.get("replies"), dict):
-            records.append((str(d.relative_to(run.dir)), other))
-    names = sorted({str(p.get("name")) for _, r in records for p in r["problems"] if isinstance(p, dict)})
-    checked = all(r["replies"].get("checked") is True for _, r in records)
-    ok = all(r.get("ok") is True for _, r in records) and not names and checked
-    where = ", ".join(f"`{rel}`" for rel, _ in records)
+    latest = {}
+    failed_writes = 0
+    for e in run.entries:
+        d = e.get("data") if isinstance(e.get("data"), dict) else {}
+        if e.get("event") == "evidence" and d.get("what") == "served chat check" and isinstance(d.get("path"), str):
+            latest[d["path"]] = d.get("sha256")
+        elif e.get("event") == "decision" and d.get("decision") == "served chat check not written":
+            failed_writes += 1
+    required = {SERVED_CHAT, *latest}
+    required |= {f"stages/4/configs/{c.get('chips')}/served-chat.json" for c in run.configs() if c.get("pass") is True}
+    ok, why = True, []
+    if failed_writes:
+        ok = False
+        why.append(f"The supervisor failed to write {failed_writes} served-chat record(s) (see the ledger).")
+    problems = []
+    for rel in sorted(required):
+        path = run.dir / rel
+        rec = read_json(path, "", required=False)
+        if not _served_chat_shape(rec):
+            ok = False
+            why.append(f"`{rel}` is missing or unreadable.")
+            continue
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            digest = None
+        if latest.get(rel) != digest:
+            ok = False
+            why.append(f"`{rel}` does not match the sha256 the ledger recorded for it" if rel in latest else
+                       f"`{rel}` has no ledger entry, so it cannot be tied to the supervisor's check.")
+            continue
+        names = sorted({str(p.get("name")) for p in rec["problems"] if isinstance(p, dict)})
+        if names:
+            ok = False
+            problems.append(f"`{rel}` found: " + ", ".join(redact(n) for n in names) + ".")
+        if rec["incomplete"]:
+            ok = False
+            why.append(f"`{rel}` is incomplete: " + redact(one_line("; ".join(str(i) for i in rec["incomplete"][:3]))) + ".")
+        if rec["replies"].get("checked") is not True:
+            ok = False
+            why.append(f"`{rel}` checked no chat reply" + (f" ({redact(one_line(str(rec['replies'].get('why_not'))))})"
+                                                           if rec["replies"].get("why_not") else "") + ".")
+        if rec.get("ok") is not True and not names and not rec["incomplete"] and rec["replies"].get("checked") is True:
+            ok = False
+            why.append(f"`{rel}` does not say ok.")
+    where = ", ".join(f"`{r}`" for r in sorted(required))
     if ok:
-        return True, [f"Stage 2's swap test sent chat requests, and {where} compares what it served with the new model's snapshot: the same chat "
+        return True, [f"The swap tests sent chat requests, and {where} compare what each served with the new model's snapshot: the same chat "
                       "template, special tokens and stop ids, no reply began with a role header or held an end token, and replies stopped on their "
-                      "own. It did not check the replies against the model card, and it did not compare answer quality with a model trained on "
+                      "own. They did not check the replies against the model card, and did not compare answer quality with a model trained on "
                       "another template."]
-    why = [f"{where}: " + ("problems found: " + ", ".join(redact(n) for n in names) + "." if names else
-                           "no chat reply was checked" + (f" ({redact(one_line(str(rec['replies'].get('why_not'))))})"
-                                                            if rec["replies"].get("why_not") else "") + ".")]
-    return False, why
+    return False, problems + why
 
 
 def chat_template_dealt_with(run: Run, redact: Redactor) -> tuple[bool, list[str]]:

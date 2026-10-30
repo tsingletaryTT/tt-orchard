@@ -1916,27 +1916,36 @@ class Supervisor:
     def _served_chat_records(self, n: int, stage_dir: Path) -> None:
         """Issue 17. When stage 2 or stage 4 passes, check what each swap test served: the chat template, special tokens and stop ids of its
         model-dir against the new model's snapshot, and the chat replies its prompt suite recorded (orchard/served_chat.py). One
-        served-chat.json per stage 2 directory and per stage 4 configuration. A stage with no swap_config.json (the stock, text and audio
-        stages) or whose new snapshot is not a directory gets none. The check never stops a run; the bundle reads the record."""
+        served-chat.json per swap test: stage 2's directory, the graft and sampling trials' variant directories when they served (stage 2 may
+        ship a variant), and each stage 4 configuration. A stage with no swap_config.json (the stock, text and audio stages) or whose new
+        snapshot is not a directory gets none. The check never stops a run: a failure to write is a ledger decision, and the bundle then leaves
+        the chat template hazard unverified."""
         if n == 2:
-            dirs = [stage_dir]
+            tests = [(stage_dir, stage_dir)]
+            for trial in ("graft-trial", "sampling-trial"):
+                v = stage_dir / trial / "variant"
+                if (v / "model-dir").is_dir() and (v / "evidence" / "swap-check.json").is_file():
+                    tests.append((v, stage_dir))
         else:
             configs = stage_dir / "configs"
             try:
-                dirs = sorted((p for p in configs.iterdir() if p.name.isdigit() and p.is_dir()), key=lambda p: int(p.name))
+                tests = [(p, p) for p in sorted((p for p in configs.iterdir() if p.name.isdigit() and p.is_dir()), key=lambda p: int(p.name))]
             except OSError:
-                dirs = []
-        for d in dirs:
+                tests = []
+        for d, config_dir in tests:
             try:
-                cfg = safeio.read_json(d / "swap_config.json", max_bytes=1 << 20, expect=dict)
+                cfg = safeio.read_json(config_dir / "swap_config.json", max_bytes=1 << 20, expect=dict)
             except safeio.SafeReadError:
                 continue
             new = cfg.get("new_snapshot")
             if not isinstance(new, str) or not new or not Path(new).is_dir() or not (d / "model-dir").is_dir():
                 continue
-            rec = served_chat.write_record(d, d / "model-dir", new, d / "evidence" / "swap-check.json")
-            self.ledger.append("evidence", n, what="served chat check", ok=rec["ok"], problems=[p["name"] for p in rec["problems"]],
-                               **evidence_record(self.run_dir, d / served_chat.FILE))
+            try:
+                rec = served_chat.write_record(d, d / "model-dir", new, d / "evidence" / "swap-check.json")
+                self.ledger.append("evidence", n, what="served chat check", ok=rec["ok"], problems=[p["name"] for p in rec["problems"]],
+                                   incomplete=len(rec["incomplete"]), **evidence_record(self.run_dir, d / served_chat.FILE))
+            except (OSError, ValueError) as exc:
+                self.ledger.append("decision", n, decision="served chat check not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
