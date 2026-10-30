@@ -56,3 +56,8 @@ The staged package was restaged after PR 267's review fixes. The only change to 
 
 Copilot found four defects, fixed with tests: handler threads were daemon threads (a Ctrl-C could close the chip worker during a request; now non-daemon), `run.sh` ignored `HF_HUB_CACHE`, the checked-in evidence directory lacked the two bars files the stager needs (a test now stages from it), and `smoke.py` accepted non-finite samples.
 Because `acestep_serve.py`, `run.sh` and `smoke.py` changed, the final restaged package was booted again on one chip (ready in 16 s, 30 s clip identical in samples to the recorded clip, bundle and weight check passed) and gated (0 problems). The boot figures in `evidence/boot.json` are from the first boot; the second gave the same.
+
+## Review round 2 (PR 268) and a third boot
+
+Fixed with tests: the manifest command now names `--bundle-code`, `--snapshot` and `--root` and the gate requires them; `run.sh` honours `XDG_CACHE_HOME`; the gate returns a problem for a malformed metadata file instead of raising (three tests went red with the guard removed).
+The restaged package was gated (0 problems) and booted a third time on one chip: ready in 15 s, the 30 s clip has the same samples as the recorded one.

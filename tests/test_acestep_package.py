@@ -149,3 +149,21 @@ def test_the_checked_in_evidence_directory_can_stage_a_package(tmp_path):
 
 def test_run_sh_honours_hf_hub_cache(staged):
     assert "HF_HUB_CACHE" in (staged / "run.sh").read_text()
+
+
+@pytest.mark.parametrize("name,content", [("package-record.json", "[]"), ("pins.json", "[]"), ("pins.json", '{"weights": 5}'), ("evidence/summary.json", "[]"),
+                                          ("tt-model.yaml", "- a\n- b\n"), ("tt-model.yaml", "runtime: 5\nweights: 5\n")])
+def test_malformed_metadata_gives_problems_not_a_traceback(staged, name, content):
+    (staged / name).write_text(content)
+    assert pk.package_problems(staged), "a malformed file must be reported"
+
+
+def test_the_manifest_command_names_the_paths_the_server_requires(staged):
+    text = (staged / "tt-model.yaml").read_text()
+    assert all(f in text for f in ("--bundle-code", "--snapshot", "--root"))
+    (staged / "tt-model.yaml").write_text(text.replace("--root, /work, ", ""))
+    assert any("lacks --root" in x for x in pk.package_problems(staged))
+
+
+def test_run_sh_honours_xdg_cache_home(staged):
+    assert "XDG_CACHE_HOME" in (staged / "run.sh").read_text()

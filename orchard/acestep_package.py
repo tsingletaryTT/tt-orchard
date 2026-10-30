@@ -244,7 +244,7 @@ RUN_SH = f"""#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
 PY="${{ACESTEP_PYTHON:-python}}"
-HUB="${{HF_HUB_CACHE:-${{HF_HOME:-$HOME/.cache/huggingface}}/hub}}"
+HUB="${{HF_HUB_CACHE:-${{HF_HOME:-${{XDG_CACHE_HOME:-$HOME/.cache}}/huggingface}}/hub}}"
 MODEL_REV={REVISION}
 BUNDLE_REV={BUNDLE_REVISION}
 CODE="${{ACESTEP_BUNDLE_CODE:-$PWD/fetched/bundle/code}}"
@@ -281,6 +281,7 @@ exec "$PY" runtime/acestep_serve.py --bundle-code "$CODE" --snapshot "$SNAP" --r
 def manifest_text() -> str:
     return f"""# DRAFT. NOT BUILT. A v5.1 container manifest of kind `http-server` for runtime/acestep_serve.py. It cannot be built from this directory alone:
 # `source.tt_metal` must be a tt-metal checkout, `source.extra_code` must name this directory, and the bundle code and weights are fetched by the user.
+# The command names where the bundle code, the weights and a writable work directory are mounted; the build would have to supply those mounts.
 # `bash run.sh` runs the package without tt-model.
 schema: "5.1"
 repo: {NAMESPACE}/{PACKAGE_NAME}
@@ -302,7 +303,7 @@ source:
   ubuntu: "22.04"
   python: "3.12"
 runtime:
-  command: [python, runtime/acestep_serve.py, --host, "{{host}}", --port, "{{port}}"]
+  command: [python, runtime/acestep_serve.py, --bundle-code, /bundle/code, --snapshot, /weights, --root, /work, --host, "{{host}}", --port, "{{port}}"]
   ready_line: '"event": "ready"'
   packages: [numpy, torch, soundfile, transformers, tokenizers]
 serve:
@@ -421,12 +422,11 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
                 problems.append(f"{rel}: does not compile ({exc.msg}, line {exc.lineno})")
     if (pkg / "run.sh").is_file() and subprocess.run(["bash", "-n", str(pkg / "run.sh")], capture_output=True).returncode != 0:
         problems.append("run.sh: bash -n reports a syntax error")
-    problems += _record_problems(pkg)
-    problems += _release_problems(pkg)
-    problems += _pins_problems(pkg)
-    problems += _license_problems(pkg)
-    problems += _card_problems(pkg)
-    problems += _manifest_problems(pkg)
+    for check in (_record_problems, _release_problems, _pins_problems, _license_problems, _card_problems, _manifest_problems):
+        try:
+            problems += check(pkg)
+        except (TypeError, AttributeError, KeyError, ValueError, IndexError) as exc:      # malformed metadata is a problem, not a crash
+            problems.append(f"{check.__name__.strip('_').replace('_problems', '')}: the file it reads is malformed ({type(exc).__name__})")
     return sorted(set(problems))
 
 
@@ -582,6 +582,9 @@ def _manifest_problems(pkg: Path) -> list[str]:
     cmd = rt.get("command") or []
     if "{port}" not in " ".join(map(str, cmd)):
         out.append("tt-model.yaml: runtime.command needs a {port} placeholder")
+    for flag in ("--bundle-code", "--snapshot", "--root"):
+        if flag not in [str(c) for c in cmd]:
+            out.append(f"tt-model.yaml: runtime.command lacks {flag}, which runtime/acestep_serve.py requires")
     for sc in [c for c in cmd if str(c).endswith(".py")]:
         if not (pkg / sc).is_file():
             out.append(f"tt-model.yaml: runtime.command names {sc}, which is not in the package")
