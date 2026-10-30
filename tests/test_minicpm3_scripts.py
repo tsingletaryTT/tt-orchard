@@ -308,3 +308,19 @@ def test_serve_refuses_an_unsupported_two_chip_option_before_opening_the_mesh(mo
     with pytest.raises(SystemExit) as exc:
         serve.main()
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("script,argv", [("run_chip", ["agree"]), ("ppl_check", ["chip", "--parquet", "p.parquet"])])
+def test_run_chip_and_ppl_check_refuse_an_unsupported_two_chip_option_before_opening_the_mesh(monkeypatch, tmp_path, capsys, script, argv):
+    tp = _tp_module(monkeypatch)
+    ttnn = lenient_ttnn()
+    ttnn.open_mesh_device.side_effect = AssertionError("the mesh was opened")
+    ttnn.set_fabric_config.side_effect = AssertionError("the fabric was configured")
+    chip = types.ModuleType("chip_model")
+    chip.ChipMiniCPM3 = object
+    mod = load_script(monkeypatch, script, {"ttnn": ttnn, "chip_model_tp": tp, "chip_model": chip})
+    monkeypatch.setattr(sys, "argv", [script + ".py", *argv, "--tp", "2", "--mlp-fidelity", "hifi4", "--out", str(tmp_path / "o"), "--model-dir", str(tmp_path),
+                                      "--weights", "w"])
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 2 and "two-chip" in capsys.readouterr().err        # the refusal, not an argument error or the mesh

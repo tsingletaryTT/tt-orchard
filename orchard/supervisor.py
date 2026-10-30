@@ -1722,11 +1722,15 @@ class Supervisor:
             raise text_runtime.TextStageError("no WikiText-2 test parquet was found for the perplexity window; give --input text_ppl_parquet=<file> or put the "
                                               "dataset in the Hugging Face cache")
         (stage_dir / "prompt.txt").write_text(text_runtime.DEFAULT_PROMPT + "\n", encoding="utf-8")
+        try:
+            ppl_sha = hashlib.sha256(Path(ctx.ppl_parquet).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise text_runtime.TextStageError(f"the perplexity dataset file cannot be read ({exc.__class__.__name__}): {Path(ctx.ppl_parquet).name}") from exc
         text_runtime.write_json(stage_dir / text_runtime.STAGE_CONFIG_FILE, {
             "schema": text_runtime.SCHEMA, "runtime": rtm.name, "model_id": self.model_id.split("@", 1)[0], "model_dir": ctx.model_dir, "weights": ctx.weights,
             "config_sha256": facts["config_sha256"], "n_layers": rtm.n_layers(cfgd), "decode_tokens": ctx.decode_tokens, "ppl_tokens": ctx.ppl_tokens, "max_len": ctx.max_len,
             "prompt_sha256": hashlib.sha256(text_runtime.DEFAULT_PROMPT.encode("utf-8")).hexdigest(), "ppl_parquet_name": Path(ctx.ppl_parquet).name,
-            "ppl_parquet": str(Path(ctx.ppl_parquet).resolve()), "ppl_parquet_sha256": hashlib.sha256(Path(ctx.ppl_parquet).read_bytes()).hexdigest()})
+            "ppl_parquet": str(Path(ctx.ppl_parquet).resolve()), "ppl_parquet_sha256": ppl_sha})
         ctx = dataclasses.replace(ctx, prompt_file=str((stage_dir / "prompt.txt").resolve()), out_dir=str((stage_dir / "reference").resolve()),
                                   ref_dir=str((stage_dir / "reference").resolve()))
         result = text_remote.call(paths.python, "references", {

@@ -137,11 +137,8 @@ def main():
     if a.port in (8000, 8011, 8780) or 8100 <= a.port <= 8103:
         sys.exit("refused: that port belongs to other work on this machine")
     if a.tp == 2:
-        from chip_model_tp import check_tp_options
-        try:
-            check_tp_options(a.mlp_dtype, a.mlp_fidelity)          # before any device is opened or the fabric is configured
-        except ValueError as exc:
-            ap.error(str(exc))
+        from chip_model_tp import refuse_unsupported_tp_args
+        refuse_unsupported_tp_args(ap, a)                        # before any device is opened or the fabric is configured
     from transformers import AutoTokenizer
     STATE["tok"] = AutoTokenizer.from_pretrained(a.model_dir)
     STATE["max_len"] = -(-a.max_len // 128) * 128

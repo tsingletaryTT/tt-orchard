@@ -340,3 +340,16 @@ def test_stage_2_refuses_a_perplexity_window_that_changed_since_stage_1(trig):
         trig.run()
     end = trig.ends(2)[0]
     assert end["result"] == "fail" and "perplexity" in " ".join(end["reasons"])
+
+
+def test_an_unreadable_perplexity_file_fails_stage_1_with_a_perplexity_message(trig):
+    make_environment(trig)
+    parquet = Path([i for i in trig.args.input if i.startswith("text_ppl_parquet=")][0].split("=", 1)[1])
+    parquet.chmod(0)
+    try:
+        with pytest.raises(Stop):
+            trig.run()
+    finally:
+        parquet.chmod(0o644)
+    end = trig.ends(1)[0]
+    assert end["result"] == "fail" and "perplexity" in " ".join(end["reasons"])
