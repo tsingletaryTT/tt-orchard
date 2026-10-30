@@ -122,14 +122,28 @@ def inside(run_dir, rel) -> Path | None:
     return Path(p)
 
 
+JSON_MAX_BYTES = 16 * 1024 * 1024       # the largest stage record or evidence file a gate will read (docs/safe-reading.md)
+
+
+def _safe_json(path, *, max_bytes: int = JSON_MAX_BYTES, expect=None):
+    """The JSON in `path`, read through orchard.safeio: a size cap, no FIFO or device, no NaN or Infinity, no repeated key, bounded
+    nesting. Raises only safeio.SafeReadError."""
+    return safeio.read_json(path, max_bytes=max_bytes, expect=expect)
+
+
+def _is_missing(exc: "safeio.SafeReadError") -> bool:
+    """True when `exc` says the file does not exist (as opposed to a refusal of what is there)."""
+    return isinstance(exc, safeio.ReadFailed) and "ENOENT" in exc.reason
+
+
 def _load(stage_dir, name: str) -> tuple[dict | None, str | None]:
     path = Path(stage_dir) / name
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None, f"{name} is missing"
-    except (OSError, ValueError) as exc:
-        return None, f"{name} is not readable JSON: {exc}"
+        data = _safe_json(path)
+    except safeio.SafeReadError as exc:
+        if _is_missing(exc):
+            return None, f"{name} is missing"
+        return None, f"{name} is not readable JSON: {exc.reason}"
     if not isinstance(data, dict):
         return None, f"{name} is not a JSON object"
     return data, None
@@ -395,16 +409,20 @@ def _evidence_json(stage_dir: Path, name: str, *, required: bool, reasons: list)
         if required:
             reasons.append(f"{rel} is missing: reference_gate.py was copied into this stage, so it must have written it")
         return None
+    # A link that stays inside the stage directory is followed once here (safeio.resolved never raises, so a link loop
+    # becomes a path that the read refuses); the read itself refuses links, FIFOs and devices and stops at the cap.
+    target = safeio.resolved(path)
+    base = safeio.resolved(stage_dir)
+    if not (target == base or target.startswith(base.rstrip(os.sep) + os.sep)):
+        reasons.append(f"{rel} is a link to a file outside the stage directory, so it was not read")
+        return None
     try:
-        if not path.resolve().is_relative_to(stage_dir.resolve()):
-            reasons.append(f"{rel} is a link to a file outside the stage directory, so it was not read")
-            return None
-        if path.stat().st_size > EVIDENCE_MAX_BYTES:
-            reasons.append(f"{rel} is too large to read ({path.stat().st_size} bytes; the cap is {EVIDENCE_MAX_BYTES})")
-            return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        reasons.append(f"{rel} is not readable JSON: {exc}")
+        data = _safe_json(target, max_bytes=EVIDENCE_MAX_BYTES)
+    except safeio.TooLarge:
+        reasons.append(f"{rel} is too large to read (the cap is {EVIDENCE_MAX_BYTES} bytes)")
+        return None
+    except safeio.SafeReadError as exc:
+        reasons.append(f"{rel} is not readable JSON: {exc.reason}")
         return None
     if not isinstance(data, dict):
         reasons.append(f"{rel} is not a JSON object")
@@ -761,11 +779,11 @@ def hw_record_problem(stage_dir, chips: int) -> str | None:
     """Why the supervisor's record does not show a finished test on `chips` chips, or None."""
     path = hw_record_path(stage_dir, chips)
     try:
-        rec = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return f"the supervisor has no record of its test (tests/{chips}/test-result.json)"
-    except (OSError, ValueError) as exc:
-        return f"tests/{chips}/test-result.json is not readable JSON: {exc}"
+        rec = _safe_json(path)
+    except safeio.SafeReadError as exc:
+        if _is_missing(exc):
+            return f"the supervisor has no record of its test (tests/{chips}/test-result.json)"
+        return f"tests/{chips}/test-result.json is not readable JSON: {exc.reason}"
     if not isinstance(rec, dict):
         return f"tests/{chips}/test-result.json is not a JSON object"
     if rec.get("timed_out") is not False:
@@ -814,8 +832,8 @@ def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
     """`_suite_reasons` for the swap-check.json at `path`. A file that is missing or not a JSON object has none: the
     other checks of the gate already say what they need of it."""
     try:
-        report = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        report = _safe_json(path)
+    except safeio.SafeReadError:
         return []
     return _suite_reasons(report, run_dir, where) if isinstance(report, dict) else []
 
@@ -856,9 +874,9 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
             reasons.append(f"{where}: evidence must include {swap}")
             continue
         try:
-            report = json.loads(inside(run_dir, swap).read_text(encoding="utf-8"))
+            report = _safe_json(inside(run_dir, swap))
             draft = report["result_draft"]
-        except (AttributeError, OSError, ValueError, KeyError, TypeError):
+        except (AttributeError, safeio.SafeReadError, KeyError, TypeError):
             report, draft = None, None
         if not isinstance(draft, dict) or draft.get("top1_agreement") != c.get("top1_agreement"):
             reasons.append(f"{where}: top1_agreement {c.get('top1_agreement')!r} is not the "
@@ -929,8 +947,8 @@ def _serving_type(cfg) -> str | None:
 
 def _read_json(path: Path):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return _safe_json(path)
+    except safeio.SafeReadError:
         return None
 
 
@@ -1008,9 +1026,9 @@ def gate_bundle(stage_dir, run_dir) -> GateResult:
         else:
             seen.append(os.path.relpath(f, run_dir))
     try:
-        built = json.loads((stage_dir / BUNDLE_RECORD).read_text(encoding="utf-8"))
+        built = _safe_json(stage_dir / BUNDLE_RECORD)
         recorded = {f["path"]: f["sha256"] for f in built["files"]}
-    except (OSError, ValueError, KeyError, TypeError):
+    except (safeio.SafeReadError, KeyError, TypeError):
         reasons.append(f"stages/8/{BUNDLE_RECORD} is missing or unreadable: the bundle was not built "
                        "by build_bundle.py")
     else:
@@ -1172,9 +1190,12 @@ def gate_package(stage_dir, run_dir) -> GateResult:
             reasons.append(f"profile {name!r}: its dir is not a directory inside the run directory")
             continue
         try:
-            m = json.loads((out / "tt_kernel_manifest.json").read_text(encoding="utf-8"))
+            m = _safe_json(out / "tt_kernel_manifest.json", expect=dict)
             run_sh = (out / "run.sh").read_text(encoding="utf-8")
             card = (out / "README.md").read_text(encoding="utf-8")
+        except safeio.SafeReadError as exc:
+            reasons.append(f"profile {name}: tt_kernel_manifest.json is not readable JSON: {exc.reason}")
+            continue
         except (OSError, ValueError) as exc:
             reasons.append(f"profile {name}: {exc}")
             continue
@@ -1517,8 +1538,8 @@ def delta_path(run_dir) -> str | None:
     """The path in stages/0/delta.json, or None when the file is missing, unreadable or names
     another value. The stage 0 gate validated the file; this only reads it."""
     try:
-        data = json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = _safe_json(Path(run_dir) / "stages" / "0" / "delta.json")
+    except safeio.SafeReadError:
         return None
     path = data.get("path") if isinstance(data, dict) else None
     return path if path in PATHS else None
@@ -1528,8 +1549,8 @@ def delta_facts(run_dir) -> dict | None:
     """The `facts` record of stages/0/delta.json (form and modality; orchard/audio_facts.py), or None when the file has none or
     is unreadable. The stage 0 gate validated it; this only reads it."""
     try:
-        data = json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = _safe_json(Path(run_dir) / "stages" / "0" / "delta.json")
+    except safeio.SafeReadError:
         return None
     facts = data.get("facts") if isinstance(data, dict) else None
     return dict(facts) if isinstance(facts, dict) else None
@@ -1558,8 +1579,8 @@ def delta_class(run_dir) -> str | None:
     """The class in stages/0/delta.json (a delta.json with a path and no class implies one), or None when
     the file is missing, unreadable, or names a value that is not a class."""
     try:
-        data = json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = _safe_json(Path(run_dir) / "stages" / "0" / "delta.json")
+    except safeio.SafeReadError:
         return None
     if not isinstance(data, dict):
         return None

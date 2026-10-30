@@ -3418,3 +3418,10 @@ Prompt (operator, relayed): rebuild the local package with the faster path, rega
 The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uploaded private, checked with `tt-orchard verify-package`, made public (a personal namespace, outside the Tenstorrent organisation and the catalog), and checked again without a token. The package gate was clean on main.
 - The first verify pass failed the revision check: the card pins two repositories (the weights and the code bundle) and the check looked up both commits in the weights repository. `verify-package` now looks up each commit in the repository named beside it on the card, and falls back to the base model. A test failed first.
 - The package carries the card's caveats: nobody has judged the music, and end-to-end agreement with the float32 run is lower after the encoders moved to the chip.
+
+## 2026-10-30 Stage gates read their JSON through safeio (issues 135 to 139; branch `safeio-stages`)
+Prompt (operator, relayed): keep resolving open issues; move the remaining JSON readers onto `orchard/safeio.py`.
+- Every other reader on the hostile-input list had already moved. Only `orchard/stages.py` was left: `_load`, `_evidence_json`, `_read_json`, `_suite_reasons_in`, `hw_record_problem`, `gate_delta` and the delta, swap-check, bundle-record and kernel-manifest reads now go through `stages._safe_json` (a 16 MiB cap, 2 MiB for evidence files).
+- `_evidence_json` follows a link that stays inside the stage directory once, with `safeio.resolved`, which does not raise on a link loop, and then reads the target with the safe reader.
+- The strict xfail pairs for these readers were the failing tests; they now pass and their entries are removed from `KNOWN_DEFECTS`, which is empty. One stock-runtime test that expected a NaN `top1` to be named as a bar failure now expects the file to be refused as unreadable JSON.
+- Left: the 55 modules in `UNREGISTERED_MODULES` still have no registered reader.
