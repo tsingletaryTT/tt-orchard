@@ -118,3 +118,48 @@ def test_text_encoder_runs_on_the_chip_for_batch_one_only():
     assert tuple(out.shape) == (1, 3, 6) and calls == [] and (3, 6) in stack.forwards
     h.infer_text_embeddings(torch.tensor([[1, 2, 3], [4, 5, 6]]))
     assert calls == [(2, 3)], "a batch of two keeps the CPU path"
+
+
+# ---- the attention masks of the chip stack (a pure function, so the layout of the mask is tested without a chip) ----------------------------------
+NEG = -1e9
+
+
+def _allowed(mask):
+    return (mask == 0).numpy()
+
+
+def test_causal_mask_blocks_the_future_and_the_padding():
+    full, sliding = chip.encoder_masks(8, 5, causal=True, window=None, neg=NEG)
+    a = _allowed(full)
+    for i in range(8):
+        for j in range(8):
+            assert a[i, j] == (j <= i and j < 5), (i, j)
+    assert torch.equal(sliding, full), "without a window the sliding mask is the full mask"
+
+
+def test_bidirectional_mask_blocks_only_the_padded_keys():
+    full, _ = chip.encoder_masks(8, 5, causal=False, window=None, neg=NEG)
+    a = _allowed(full)
+    for i in range(8):
+        assert list(a[i]) == [True] * 5 + [False] * 3
+
+
+def test_sliding_window_keeps_keys_within_the_window_on_both_sides_and_still_blocks_padding():
+    _, sliding = chip.encoder_masks(10, 8, causal=False, window=2, neg=NEG)
+    a = _allowed(sliding)
+    for i in range(10):
+        for j in range(10):
+            assert a[i, j] == (abs(i - j) <= 2 and j < 8), (i, j)
+
+
+def test_a_causal_sliding_mask_combines_both():
+    _, sliding = chip.encoder_masks(6, 6, causal=True, window=1, neg=NEG)
+    a = _allowed(sliding)
+    for i in range(6):
+        for j in range(6):
+            assert a[i, j] == (j <= i and i - j <= 1), (i, j)
+
+
+def test_the_masks_are_square_in_the_padded_length():
+    full, sliding = chip.encoder_masks(128, 73, causal=True, window=None, neg=NEG)
+    assert tuple(full.shape) == (128, 128) and tuple(sliding.shape) == (128, 128)
