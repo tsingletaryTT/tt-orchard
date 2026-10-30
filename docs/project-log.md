@@ -3303,3 +3303,11 @@ Prompt: fix what is left of issues 201 and 164, wire the noise floor into audio 
 - Hugging Face cache snapshots hold config.json and the weight index as links into the blobs directory. `safeio.resolved` follows the link before the bounded read in `stock_runtime` (config and index), `nearest` and `swap_draft` (manifests), `package` and `verdict` (run files), and the operator-named files of `bench_session`, `classify_bench`, `prompt_suite`, `opinventory`, `opvariants`, `transcripts` and `toolcall_bench`. A link to a device or a loop is still refused. Test: a cache-shaped snapshot with linked config and sharded index.
 - Release rollback: `atomic_write(created=...)` records the creation at the link, so the rollback removes the notes file only when this call made it. Test: another invocation creates the file and this one fails before the link.
 - `audio_bars.py`, `boards_seen.py` and `verify_package.py` (new on main) joined the hostile-reader backlog list.
+
+## 2026-10-29 Music model survey (PR 253)
+Prompt: "are there more music models for us to try?" Desk survey, no hardware, no weight downloads.
+- Sources blended: Hugging Face Hub API (text-to-audio, text-to-music, audio-to-audio by downloads, likes and trending, plus named authors), model cards and configs, GitHub repository metadata, one web search, an internal search (summarised, not linked), and the tt-model-manager catalog entries on the Hub.
+- Ranked shortlist: 1 ACE-Step 1.5 (MIT), 2 HeartMuLa-oss-3B (Apache 2.0), 3 DiffRhythm 1.2 and 2 (Apache 2.0), 4 YuE2-3B (CC BY-NC), 5 MOSS-SoundEffect-v2.0 (Apache 2.0, sound effects). Recommended first: ACE-Step 1.5.
+- Key finding: another team already put the ACE-Step 1.5 diffusion transformer and Oobleck decoder, and the DiffRhythm 1.2 transformer and decoder, on one Blackhole chip as community bundles. Step one for those is a run through our audio stages, not a port. The ACE-Step planner LM is not in the bundle and goes through the text-model route.
+- Not worth it now: MusicGen (non-commercial, 2023), SongGeneration v2 (licence unclear), Magenta RealTime 2 (streaming runtime, MLX and JAX weights), Stable Audio Open, TangoFlux, Woosh, AudioX, speech models.
+- Issues for the top three: 254 (ACE-Step 1.5), 255 (HeartMuLa), 256 (DiffRhythm). Effort numbers are estimates and no model was run.
