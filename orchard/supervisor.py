@@ -1602,6 +1602,19 @@ class Supervisor:
             pass
         if saved and all(isinstance(saved.get(k), int) for k in ("decode_tokens", "ppl_tokens", "max_len")):
             decode, ppl_tokens, max_len = saved["decode_tokens"], saved["ppl_tokens"], saved["max_len"]
+            if not (isinstance(saved.get("ppl_parquet"), str) and isinstance(saved.get("ppl_parquet_sha256"), str)):
+                # stage 1 of an earlier version recorded only the file name: the window the reference used cannot be checked, so a later stage must not pick one
+                raise text_runtime.TextStageError("stage 1's saved settings do not record the perplexity dataset (path and sha256), so the window its reference used cannot be "
+                                                  "verified; start a new run")
+            else:
+                # the perplexity window is cut from this file: the reference was made from it, so later stages use it and refuse a changed copy
+                parquet = saved["ppl_parquet"]
+                try:
+                    now = hashlib.sha256(Path(parquet).read_bytes()).hexdigest()
+                except OSError as exc:
+                    raise text_runtime.TextStageError(f"the perplexity dataset stage 1 used cannot be read ({exc.__class__.__name__}); the window must stay the same") from exc
+                if now != saved["ppl_parquet_sha256"]:
+                    raise text_runtime.TextStageError("the perplexity dataset file changed since stage 1 made its reference (its sha256 differs); the window must stay the same")
         else:
             try:
                 decode = int(self.inputs.get("text_decode_tokens") or text_runtime.DECODE_TOKENS)
@@ -1713,10 +1726,15 @@ class Supervisor:
             raise text_runtime.TextStageError("no WikiText-2 test parquet was found for the perplexity window; give --input text_ppl_parquet=<file> or put the "
                                               "dataset in the Hugging Face cache")
         (stage_dir / "prompt.txt").write_text(text_runtime.DEFAULT_PROMPT + "\n", encoding="utf-8")
+        try:
+            ppl_sha = hashlib.sha256(Path(ctx.ppl_parquet).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise text_runtime.TextStageError(f"the perplexity dataset file cannot be read ({exc.__class__.__name__}): {Path(ctx.ppl_parquet).name}") from exc
         text_runtime.write_json(stage_dir / text_runtime.STAGE_CONFIG_FILE, {
             "schema": text_runtime.SCHEMA, "runtime": rtm.name, "model_id": self.model_id.split("@", 1)[0], "model_dir": ctx.model_dir, "weights": ctx.weights,
             "config_sha256": facts["config_sha256"], "n_layers": rtm.n_layers(cfgd), "decode_tokens": ctx.decode_tokens, "ppl_tokens": ctx.ppl_tokens, "max_len": ctx.max_len,
-            "prompt_sha256": hashlib.sha256(text_runtime.DEFAULT_PROMPT.encode("utf-8")).hexdigest(), "ppl_parquet_name": Path(ctx.ppl_parquet).name})
+            "prompt_sha256": hashlib.sha256(text_runtime.DEFAULT_PROMPT.encode("utf-8")).hexdigest(), "ppl_parquet_name": Path(ctx.ppl_parquet).name,
+            "ppl_parquet": str(Path(ctx.ppl_parquet).resolve()), "ppl_parquet_sha256": ppl_sha})
         ctx = dataclasses.replace(ctx, prompt_file=str((stage_dir / "prompt.txt").resolve()), out_dir=str((stage_dir / "reference").resolve()),
                                   ref_dir=str((stage_dir / "reference").resolve()))
         result = text_remote.call(paths.python, "references", {
@@ -3196,6 +3214,12 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                              f"{required} differs. Leave the option out to resume with the recorded value, or move this run's directory "
                              f"aside and start a new run with the counts you want")
         required = recorded
+    if progress.started:                        # a resumed run keeps the route it started on (the text runtime is read from the ledger)
+        recorded_route = ((progress.run_start or {}).get("inputs") or {}).get(text_runtime.RUNTIME_INPUT)
+        given_route = inputs.get(text_runtime.RUNTIME_INPUT)
+        if given_route is not None and given_route != recorded_route:
+            raise ValueError(f"this run started with text_runtime {recorded_route!r}; --input text_runtime={given_route} differs. Leave the input out to "
+                             "resume with the recorded route, or move this run's directory aside and start a new run")
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
         graft_on = False                        # a run that opted out of the graft trial stays opted out

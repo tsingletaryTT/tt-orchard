@@ -1,0 +1,3 @@
+target = "0.9.77"
+summary = "The stage gates read their JSON files through orchard.safeio: size cap, no FIFO or device, no NaN or Infinity, bounded nesting."
+kind = "fix"

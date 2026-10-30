@@ -1,0 +1,4 @@
+target = "0.9.77"
+summary = "Step-bar reports are checked against their run, and a non-exact clip must be finite and loud enough."
+pr = 281
+kind = "fix"

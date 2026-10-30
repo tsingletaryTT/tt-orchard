@@ -8,6 +8,8 @@ without a suite record (an older run, or a config that did not ask for the suite
 import copy
 import json
 
+import pytest
+
 from orchard import prompt_suite as ps
 from orchard.stages import gate_mesh_swap, gate_weights_swap, gate_weights_swap_sidecar
 from test_prompt_suite_verdict import LOOP, control_of, make_record, with_entry
@@ -46,10 +48,34 @@ def test_a_healthy_suite_passes(tmp_path):
     assert g.ok, g.reasons
 
 
-def test_a_swap_check_file_that_is_not_json_changes_nothing(tmp_path):
+def _stage2_with_raw_swap_check(tmp_path, raw: bytes, link: bool = False):
     sd, run = stage(tmp_path, 2, "result.json", SWAP)
-    write(run, "stages/2/evidence/swap-check.json", "{not json")
-    assert gate_weights_swap(sd, run).ok
+    write(run, "stages/0/delta.json", GOOD_DELTA)
+    path = run / "stages/2/evidence/swap-check.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if link:
+        target = tmp_path / "elsewhere.json"
+        target.write_bytes(raw)
+        path.symlink_to(target)
+    else:
+        path.write_bytes(raw)
+    return gate_weights_swap(sd, run), gate_weights_swap_sidecar
+
+
+def test_a_swap_check_file_that_is_not_json_fails_the_stage_and_says_so(tmp_path):
+    g, _ = _stage2_with_raw_swap_check(tmp_path, b"{not json")
+    assert not g.ok and any("swap-check.json is not readable JSON" in r for r in g.reasons), g.reasons
+
+
+@pytest.mark.parametrize("raw,link,why", [
+    pytest.param(b'{"hub_fetch": ["x/y"], "tok_s": NaN}', False, "an unrelated NaN", id="nan"),
+    pytest.param(b'{"hub_fetch": ["x/y"], "pad": "' + b"a" * (17 * 1024 * 1024) + b'"}', False, "a file over the size cap", id="oversize"),
+    pytest.param(b'{"hub_fetch": ["x/y"]}', True, "a link", id="link"),
+])
+def test_a_swap_check_the_safe_reader_refuses_cannot_hide_a_failing_report(tmp_path, raw, link, why):
+    """The report holds a non-empty hub_fetch, which fails the gate when it is read. A refusal of the file must not drop that."""
+    g, _ = _stage2_with_raw_swap_check(tmp_path, raw, link)
+    assert not g.ok and any("swap-check.json is not readable JSON" in r for r in g.reasons), (why, g.reasons)
 
 
 def test_a_blocking_finding_the_control_does_not_share_fails_the_stage_and_names_it(tmp_path):

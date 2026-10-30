@@ -44,6 +44,9 @@ def main():
     ap.add_argument("--mlp-dtype", default="bf16")
     ap.add_argument("--mlp-fidelity", default="hifi2")
     a = ap.parse_args()
+    if a.mode == "chip" and a.tp == 2:               # reference mode is CPU only and must not import ttnn
+        from chip_model_tp import refuse_unsupported_tp_args
+        refuse_unsupported_tp_args(ap, a)                        # before any device is opened or the fabric is configured
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.model_dir)
     ids = window(tok, a.parquet, a.tokens)

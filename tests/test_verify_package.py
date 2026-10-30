@@ -343,3 +343,185 @@ def test_a_revision_named_next_to_another_repository_is_checked_against_that_rep
     hub = FakeHub(files)
     run(hub, tmp_path, check=True)
     assert ("exists", "org/bundle", other) in hub.calls and ("exists", "ibm/thing", other) not in hub.calls
+
+
+# ---- issue 251: pins in manifests and launchers, graft pins, scratch paths with spaces, the cache directory
+
+OTHER = "b" * 40
+
+
+def _manifest(**weights):
+    return json.dumps({"weights": {"repo_id": "ibm/thing", "revision": REV, **weights}}).encode()
+
+
+def test_a_kernel_manifest_that_pins_the_cards_revision_passes(tmp_path):
+    files = good_files()
+    files["tt_kernel_manifest.json"] = _manifest()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert line(text, "manifests").strip().startswith("ok"), text
+
+
+@pytest.mark.parametrize("weights,word", [
+    ({"revision": "main"}, "40-character"),
+    ({"revision": OTHER}, "card"),
+    ({"repo_id": "not a repo"}, "repo_id"),
+    ({"repo_id": "someone/else"}, "someone/else"),
+])
+def test_a_kernel_manifest_whose_weights_pin_is_not_the_cards_fails(tmp_path, weights, word):
+    files = good_files()
+    files["tt_kernel_manifest.json"] = _manifest(**weights)
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests") and word in line(text, "manifests"), text
+
+
+def test_a_kernel_manifest_with_no_weights_pin_fails(tmp_path):
+    files = good_files()
+    files["tt_kernel_manifest.json"] = json.dumps({"weights": {}}).encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests") and "weights" in line(text, "manifests"), text
+
+
+def test_a_tt_model_yaml_weights_revision_the_card_does_not_name_fails(tmp_path):
+    files = good_files()
+    files["tt-model.yaml"] = f"schema: \"5.1\"\nrepo: {REPO}\nweights:\n  repo: ibm/thing\n  revision: \"{OTHER}\"\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests") and OTHER in line(text, "manifests"), text
+
+
+def test_a_launcher_that_pins_other_weights_fails_and_an_auxiliary_pin_is_only_a_note(tmp_path):
+    files = good_files()
+    files["run.sh"] = f"#!/bin/sh\nWEIGHTS_REVISION={OTHER}\nexec python serve.py\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "revision") and OTHER in line(text, "revision"), text
+    files["run.sh"] = f"#!/bin/sh\nCODE_REVISION={OTHER}\nexec python serve.py\n".encode()
+    _, text = run(FakeHub(files), tmp_path / "again")
+    assert not line(text, "revision").strip().startswith("FAIL"), text
+    assert OTHER in line(text, "revision")
+
+
+def test_a_graft_pin_in_the_card_is_checked_against_the_repository_graft_json_names(tmp_path):
+    files = good_files()
+    files["README.md"] = (CARD + f"The MTP head is taken at revision `{OTHER}`.\n").encode()
+    files["graft.json"] = json.dumps({"schema": 1, "repo": "ibm/thing-nearest", "revision": OTHER}).encode()
+    files.pop("package-record.json")
+    asked = []
+
+    class Hub(FakeHub):
+        def revision_exists(self, repo, revision):
+            asked.append((repo, revision))
+            return repo == "ibm/thing-nearest" or revision == REV
+    run(Hub(files), tmp_path)
+    assert ("ibm/thing-nearest", OTHER) in asked and ("ibm/thing", OTHER) not in asked, asked
+
+
+def test_the_printed_boot_instructions_quote_a_scratch_path_with_spaces(tmp_path):
+    scratch = tmp_path / "has some spaces" / "s"
+    args = SimpleNamespace(repo_id=REPO, scratch=str(scratch), staged=None, revision=None, plan=False, check=False)
+    buf = io.StringIO()
+    vp.main(args, out=buf, hub=FakeHub(good_files()), hostname="testhost", home="/home/nobody-here")
+    cd = [l for l in buf.getvalue().splitlines() if l.startswith("cd ")][0]
+    assert cd == f"cd -- '{scratch}'", cd
+
+
+def test_a_file_the_package_publishes_under_dot_cache_is_not_deleted_before_the_checks(tmp_path):
+    files = good_files()
+    files[".cache/notes.txt"] = b"published by the package"
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert (tmp_path / "s" / ".cache" / "notes.txt").is_file()
+    assert "FAIL" in line(text, "scrub") and ".cache" in line(text, "scrub"), text
+
+
+def test_a_weights_pin_that_is_the_auxiliary_repositorys_revision_fails_in_every_place_it_can_appear(tmp_path):
+    """The card pins the weights at REV and a code bundle (another repository) at OTHER. A weights pin at OTHER is the bundle's commit."""
+    card = CARD + f"The code bundle is someone/bundle (revision `{OTHER}`).\n"
+    for name, body, word in (
+            ("tt_kernel_manifest.json", _manifest(revision=OTHER), "tt_kernel_manifest.json"),
+            ("tt-model.yaml", f"schema: \"5.1\"\nrepo: {REPO}\nweights:\n  repo: ibm/thing\n  revision: \"{OTHER}\"\n".encode(), "tt-model.yaml"),
+    ):
+        files = good_files()
+        files["README.md"] = card.encode()
+        files[name] = body
+        files.pop("package-record.json")
+        _, text = run(FakeHub(files), tmp_path / name)
+        assert "FAIL" in line(text, "manifests") and word in line(text, "manifests"), (name, text)
+    files = good_files()
+    files["README.md"] = card.encode()
+    files["run.sh"] = f"#!/bin/sh\nWEIGHTS_REVISION={OTHER}\n".encode()
+    _, text = run(FakeHub(files), tmp_path / "launcher")
+    assert "FAIL" in line(text, "revision") and "run.sh" in line(text, "revision"), text
+
+
+def test_a_manifest_pin_must_also_be_the_package_records_revision(tmp_path):
+    files = good_files()
+    files["README.md"] = (CARD + f"The code bundle is someone/bundle (revision `{OTHER}`).\n").encode()
+    files["tt_kernel_manifest.json"] = _manifest(revision=OTHER)
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests"), text
+
+
+def test_the_generated_launchers_default_weights_pin_is_enforced(tmp_path):
+    files = good_files()
+    files["run.sh"] = (f'#!/bin/sh\nexport TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{OTHER}}}"\n').encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "revision") and OTHER in line(text, "revision"), text
+    files["run.sh"] = (f'#!/bin/sh\nexport TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{REV}}}"\n').encode()
+    _, text = run(FakeHub(files), tmp_path / "ok")
+    assert not line(text, "revision").strip().startswith("FAIL"), text
+
+
+# ---- review of PR 284, second round
+
+def _bundle_card():
+    return CARD + f"The code bundle is someone/bundle (revision `{OTHER}`).\n"
+
+
+def test_a_record_at_the_code_bundles_commit_is_not_taken_as_the_primary_weights_pin(tmp_path):
+    """The card pins the weights at REV and the bundle at OTHER. A record, manifest and launcher that all say OTHER must fail."""
+    files = good_files()
+    files["README.md"] = _bundle_card().encode()
+    rec = json.loads(files["package-record.json"])
+    rec["revision"] = OTHER
+    rec["files"] = [{"path": p, "sha256": h(b)} for p, b in sorted(files.items()) if p != "package-record.json"]
+    files["package-record.json"] = json.dumps(rec).encode()
+    files["tt_kernel_manifest.json"] = _manifest(revision=OTHER)
+    files["run.sh"] = f"#!/bin/sh\nWEIGHTS_REVISION={OTHER}\n".encode()
+    rec["files"] = [{"path": p, "sha256": h(b)} for p, b in sorted(files.items()) if p != "package-record.json"]
+    files["package-record.json"] = json.dumps(rec).encode()
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests"), text
+    assert "FAIL" in line(text, "revision") and "package record" in line(text, "revision"), text
+
+
+@pytest.mark.parametrize("rev,ok", [(OTHER, False), (REV, True)])
+def test_an_inline_weights_mapping_in_tt_model_yaml_is_checked(tmp_path, rev, ok):
+    files = good_files()
+    files["tt-model.yaml"] = f"schema: \"5.1\"\nrepo: {REPO}\nweights: {{repo: ibm/thing, revision: {rev}}}     # text only\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert line(text, "manifests").strip().startswith("ok") == ok, text
+    if not ok:
+        assert OTHER in line(text, "manifests"), text
+
+
+def test_a_commented_launcher_assignment_is_not_an_active_pin(tmp_path):
+    files = good_files()
+    files["run.sh"] = f"#!/bin/sh\n# WEIGHTS_REVISION={OTHER}  (the old pin)\nWEIGHTS_REVISION={REV}\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert not line(text, "revision").strip().startswith("FAIL"), text
+
+
+def test_a_quoted_base_model_in_the_card_front_matter_matches_the_manifests_repo_id(tmp_path):
+    files = good_files()
+    files["README.md"] = CARD.replace("base_model: ibm/thing", 'base_model: "ibm/thing"').encode()
+    files["tt_kernel_manifest.json"] = _manifest()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert line(text, "manifests").strip().startswith("ok"), text
