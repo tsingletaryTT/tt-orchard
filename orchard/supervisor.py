@@ -127,6 +127,7 @@ from urllib.parse import urlparse
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
 from orchard import audio_reference_env, audio_runtime, bus, nearest, safeio
+from orchard import text_runtime
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
@@ -153,7 +154,7 @@ from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for)
@@ -164,7 +165,7 @@ from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, 
 
 MAX_SWAP_CONFIG_BYTES = 1024 * 1024    # choice: a stage's swap_config.json is a few kilobytes (issue 137)
 
-WHO = "orchard:supervisor"
+WHO = os.environ.get("ORCHARD_LEASE_WHO") or "orchard:supervisor"       # the name gozer shows for the supervisor's leases; an operator's session may set its own
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
 EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
@@ -904,7 +905,8 @@ class Supervisor:
             entries = self.ledger.read()
             spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries),
                             run_class(entries, self.run_dir), stock=stock_params(entries) is not None,
-                            audio_runtime=audio_runtime.selected(entries) is not None)
+                            audio_runtime=audio_runtime.selected(entries) is not None,
+                            text_runtime=text_runtime.selected(entries) is not None)
             try:
                 if spec.needs_coder or self._coder_in_use():
                     self._ensure_coder()
@@ -930,6 +932,8 @@ class Supervisor:
         entries = self.ledger.read()
         if run_path(entries, self.run_dir) != "full-port":
             return False
+        if text_runtime.selected(entries) is not None:
+            return False          # the harness's text runtime is the full port for this model (orchard/text_runtime.py)
         # Unattended, a full port always blocks: an operator's resume is what lets an attended run go on
         # into the full-port stages, and no unattended retry may do that. A pause for a restricted head
         # counts as the same acknowledgement, so one resume is enough.
@@ -1411,6 +1415,8 @@ class Supervisor:
 
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         self._wrapup_used = False           # at most one wrap-up per run of the stage body
+        if spec in TEXT_SPECS:
+            return self._text_body(spec, stage_dir, resumed)
         if spec.harness:
             if spec.number == 0:
                 return self._stock_triage_body(spec, stage_dir)
@@ -1564,6 +1570,161 @@ class Supervisor:
 
     # ---- the audio runtime path (orchard/audio_runtime.py, orchard/audio_stages.py) ---------------------------------------------
 
+    # ---- the text runtime path (orchard/text_runtime.py, orchard/text_stages.py) ----------------------------------------------------
+
+    def _text_runtime(self):
+        """The adapter this run was started with (run_start's input `text_runtime`), or None."""
+        return text_runtime.get(text_runtime.selected(self.ledger.read()))
+
+    def _text_env(self) -> dict:
+        """The environment of the text stages' children: the agent shells' (no token, HOME in the run directory, no chip) plus the Hugging Face cache directory,
+        with the Hub offline."""
+        env = agent_env(self.run_dir, extra=self.extra_env)
+        env.update({"HF_HOME": self.paths.hf_home, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
+        return env
+
+    def _text_context(self, rtm, stage_dir: Path) -> "text_runtime.TextContext":
+        """The context of a text stage's commands: absolute paths, the stage directory as the output directory, stage 1's reference directory."""
+        model_dir = str(Path(self.inputs["model"]).absolute())
+        # A resumed run keeps the interpreter its stage 0 recorded: the orchestrator and the gates use it, so the commands must too.
+        sel = text_runtime.selection(self.ledger.read())
+        recorded = (sel or {}).get("paths") if isinstance((sel or {}).get("paths"), dict) else None
+        paths = text_runtime.TextPaths.from_record(recorded) if recorded and "python" in recorded else text_runtime.text_paths(self.paths.operator_home)
+        cache = Path(self.paths.cache_root) / "text-runtime" / rtm.name
+        weights = rtm.weights_path(model_dir, cache)
+        parquet = text_runtime.find_ppl_parquet(self.paths.hf_home, self.inputs.get("text_ppl_parquet"))
+        # Once stage 1 has saved its settings, later stages use those: a resume that omits or changes an input must not change the window or the decode length
+        # the reference was made with.
+        saved = None
+        try:
+            saved = text_runtime.load_json(self.run_dir / "stages" / "1" / text_runtime.STAGE_CONFIG_FILE, "stage 1's saved settings")
+        except text_runtime.TextStageError:
+            pass
+        if saved and all(isinstance(saved.get(k), int) for k in ("decode_tokens", "ppl_tokens", "max_len")):
+            decode, ppl_tokens, max_len = saved["decode_tokens"], saved["ppl_tokens"], saved["max_len"]
+        else:
+            try:
+                decode = int(self.inputs.get("text_decode_tokens") or text_runtime.DECODE_TOKENS)
+                ppl_tokens = int(self.inputs.get("text_ppl_tokens") or text_runtime.PPL_TOKENS)
+            except ValueError as exc:
+                raise text_runtime.TextStageError(f"text_decode_tokens and text_ppl_tokens must be whole numbers: {exc}") from exc
+            max_len = text_runtime.chip_max_len(decode)
+        return text_runtime.TextContext(python=paths.python, model_dir=model_dir, weights=str(weights), out_dir=str(stage_dir.resolve()),
+                                        ref_dir=str((self.run_dir / "stages" / "1" / "reference").resolve()),
+                                        prompt_file=str((self.run_dir / "stages" / "1" / "prompt.txt").resolve()), ppl_parquet=parquet or "",
+                                        decode_tokens=decode, ppl_tokens=ppl_tokens, max_len=max_len)
+
+    def _text_body(self, spec, stage_dir: Path, resumed: bool):
+        """Stages 0, 1, 2 and 6 of a text-runtime run, as supervisor code. The numeric work runs in the configured interpreter (orchard/text_remote.py), so the
+        supervisor needs only the standard library. Stages 2 and 6 use the one-test hardware phase: a lease (no coder to park when none was booted), one
+        command that runs the adapter's chip commands in order, the lease back."""
+        from orchard import text_remote
+        from orchard.text_runtime import TextStageError
+        n = spec.number
+        rtm = self._text_runtime()
+        if rtm is None:
+            return "fail", ["the run was not started with a registered text_runtime input"], None
+        if self.lab is not None:
+            return "fail", ["the text runtime does not run in lab mode"], None
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        if n == 0:
+            return self._text_triage_body(spec, stage_dir, rtm)
+        sel = text_runtime.selection(self.ledger.read())
+        if sel is None:
+            return "fail", ["the ledger holds no text runtime selection with its paths"], None
+        paths = text_runtime.TextPaths.from_record(sel["paths"])
+        try:
+            if n == 1:
+                if not (resumed and (stage_dir / text_runtime.REFERENCE_FILE).is_file()):
+                    self._text_stage_1(stage_dir, paths, rtm)
+            else:
+                ctx = self._text_context(rtm, stage_dir)
+                if not (resumed and (stage_dir / "test-result.json").is_file()):
+                    commands = text_runtime.chip_config_commands(rtm, ctx, n)
+                    text_runtime.write_chip_config(stage_dir, commands)
+                    command = text_runtime.chip_test_command(paths, stage_dir.resolve())
+                    try:
+                        check_string(command, self.run_dir)
+                    except Denied as exc:
+                        return "fail", [f"the test command is refused: {exc}"], None
+                    deadline = text_runtime.CHIP_DEADLINE_S if n == 2 else text_runtime.BENCH_DEADLINE_S
+                    test = {"command": command, "deadline_s": deadline}
+                    (stage_dir / "hw_test.json").write_text(json.dumps(test) + "\n", encoding="utf-8")
+                    (stage_dir / "handoff.json").write_text(json.dumps({
+                        "goal": f"run the {rtm.name} text model on one chip: " + ("teacher-forced agreement and perplexity" if n == 2 else "benchmark with repeats"),
+                        "stage": n, "evidence": f"stages/{n}/{text_runtime.CHIP_CONFIG_FILE}", "next_action": "the supervisor runs the chip commands under its own lease",
+                        "check_on_return": f"stages/{n}/test-result.json"}) + "\n", encoding="utf-8")
+                    self._hardware_phase(spec, stage_dir, test)
+                failed = hardware_test_failure(stage_dir)
+                if failed:
+                    return "fail", [failed["problem"] + f"; see stages/{n}/evidence/hw-test-output.txt and stages/{n}/log"], None
+                text_remote.call(paths.python, "finish_chip" if n == 2 else "finish_bench", {
+                    "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "ref_stage_dir": str(self.run_dir / "stages" / "1"), "runtime": rtm.name},
+                    timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+        except TextStageError as exc:
+            return "fail", [str(exc)], None
+        self.ledger.append("evidence", n, what="text stage record", **evidence_record(self.run_dir, stage_dir / spec.gate_file))
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _text_triage_body(self, spec, stage_dir: Path, rtm):
+        """Stage 0 of a text-runtime run: read the model's own files, write delta.json and its evidence, record the runtime selection (the interpreter and the script
+        hashes), run the gate. No model is asked anything, so no coder boots for it."""
+        n = spec.number
+        model_dir = self.inputs.get("model")
+        if not model_dir:
+            return "fail", ["a text-runtime run needs the input model (the snapshot directory)"], None
+        paths = text_runtime.text_paths(self.paths.operator_home)
+        missing = text_runtime.environment_problems(paths)
+        if missing:
+            return "fail", missing, None
+        try:
+            facts = text_runtime.model_facts(model_dir, rtm)
+        except (OSError, ValueError, text_runtime.safeio.SafeReadError) as exc:
+            return "fail", [f"the model directory cannot be read: {exc}"], None
+        (stage_dir / "evidence").mkdir(exist_ok=True)
+        evidence = {"runtime": rtm.name, "model": self.model_id, "snapshot": Path(model_dir).resolve().name, "facts": facts, "scripts": text_runtime.script_hashes(rtm), "context_limit_measured": rtm.context_limit}
+        (stage_dir / "evidence" / "triage.json").write_text(json.dumps(evidence, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        delta = {"model": self.model_id, "nearest_model": f"none: the {rtm.name} runtime (scripts in this repository) serves it",
+                 "path": "full-port", "class": "full-port",
+                 "path_reasons": [f"the harness's {rtm.name} text runtime implements this architecture; no installed bundle or container package serves it"],
+                 "differences": [{"area": "architecture", "evidence": ["stages/0/evidence/triage.json"],
+                                  "finding": f"{facts.get('architectures')} ({facts.get('model_type')}), {facts.get('n_layers')} layers; served by the {rtm.name} runtime's own scripts"}],
+                 "hazards": [], "facts": {"form": "full", "serving": "none", "modality": "text"},
+                 "text_runtime": {"name": rtm.name, "config_problems": facts["config_problems"], "card_license": facts["card_license"],
+                                  "expected_license": rtm.license_id}}
+        if facts["card_license"] and facts["card_license"] != rtm.license_id:
+            delta["hazards"].append({"area": "license", "evidence": ["stages/0/evidence/triage.json"],
+                                     "finding": f"the card says license {facts['card_license']}; the adapter expects {rtm.license_id}"})
+        (stage_dir / "delta.json").write_text(json.dumps(delta, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        self.ledger.append("decision", n, decision=text_runtime.TEXT_RUNTIME_SELECTED, runtime=rtm.name, paths=paths.record(),
+                           scripts=text_runtime.script_hashes(rtm), model=self.model_id)
+        self.ledger.append("evidence", n, what="text triage", **evidence_record(self.run_dir, stage_dir / "delta.json"))
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _text_stage_1(self, stage_dir: Path, paths, rtm) -> None:
+        """Write the stage's inputs (the prompt, the configuration the gates read) and run the reference commands."""
+        from orchard import text_remote
+        ctx = self._text_context(rtm, stage_dir)
+        cfgd = json.loads((Path(ctx.model_dir) / "config.json").read_text(encoding="utf-8"))
+        facts = text_runtime.model_facts(ctx.model_dir, rtm)
+        if not ctx.ppl_parquet:
+            raise text_runtime.TextStageError("no WikiText-2 test parquet was found for the perplexity window; give --input text_ppl_parquet=<file> or put the "
+                                              "dataset in the Hugging Face cache")
+        (stage_dir / "prompt.txt").write_text(text_runtime.DEFAULT_PROMPT + "\n", encoding="utf-8")
+        text_runtime.write_json(stage_dir / text_runtime.STAGE_CONFIG_FILE, {
+            "schema": text_runtime.SCHEMA, "runtime": rtm.name, "model_id": self.model_id.split("@", 1)[0], "model_dir": ctx.model_dir, "weights": ctx.weights,
+            "config_sha256": facts["config_sha256"], "n_layers": rtm.n_layers(cfgd), "decode_tokens": ctx.decode_tokens, "ppl_tokens": ctx.ppl_tokens, "max_len": ctx.max_len,
+            "prompt_sha256": hashlib.sha256(text_runtime.DEFAULT_PROMPT.encode("utf-8")).hexdigest(), "ppl_parquet_name": Path(ctx.ppl_parquet).name})
+        ctx = dataclasses.replace(ctx, prompt_file=str((stage_dir / "prompt.txt").resolve()), out_dir=str((stage_dir / "reference").resolve()),
+                                  ref_dir=str((stage_dir / "reference").resolve()))
+        result = text_remote.call(paths.python, "references", {
+            "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "runtime": rtm.name, "context": dataclasses.asdict(ctx), "env": self._text_env(),
+            "timeout_s": text_runtime.REFERENCE_TIMEOUT_S}, timeout_s=text_runtime.REFERENCE_TIMEOUT_S + 600, env={"PATH": os.environ.get("PATH", "")})
+        for note in result.get("notes", []):
+            self.ledger.append("decision", 1, decision="text reference", note=note)
+
     def _audio_models(self) -> tuple[str | None, str | None]:
         """The model and its base as stage 0 wrote them (`<repo>@<revision>`)."""
         try:
@@ -1670,7 +1831,8 @@ class Supervisor:
         script = stage_dir / "build_bundle.py"
         # An audio run's other stages already use the scripts of the checkout that is running (audio_runtime.TEMPLATES), so its bundle builder is that
         # checkout's too: a run started under an older checkout can then finish with the audio section. Other runs keep the recorded checkout.
-        orchard_dir = (Path(__file__).resolve().parent.parent if audio_runtime.selected(self.ledger.read()) is not None
+        orchard_dir = (Path(__file__).resolve().parent.parent
+                       if (audio_runtime.selected(self.ledger.read()) is not None or text_runtime.selected(self.ledger.read()) is not None)
                        else Path(self.paths.orchard_dir))
         shutil.copyfile(orchard_dir / "orchard" / "skills" / "operator-bundle-templates" / "build_bundle.py", script)
         (stage_dir / "bundle_config.json").write_text(
@@ -1753,7 +1915,7 @@ class Supervisor:
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
             ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
-            if n == 6:
+            if n == 6 and spec.gate_file == "result.json":
                 self._record_numbers(stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.

@@ -1,0 +1,80 @@
+[
+ {
+  "prompt": "The history of the printing press began ",
+  "tokens": 32,
+  "leading_agree": 8,
+  "same_position_share": 0.781,
+  "first_diff": {
+   "index": 8,
+   "ref_token": 34319,
+   "device_token": 7633,
+   "device_token_in_ref_top5": true,
+   "ref_gap_nats": 0.125
+  }
+ },
+ {
+  "prompt": "def fibonacci(n):\n    \"\"\"Return the n-th",
+  "tokens": 32,
+  "leading_agree": 5,
+  "same_position_share": 0.344,
+  "first_diff": {
+   "index": 5,
+   "ref_token": 15,
+   "device_token": 16,
+   "device_token_in_ref_top5": true,
+   "ref_gap_nats": 0.375
+  }
+ },
+ {
+  "prompt": "Question: What is 17 multiplied by 23? A",
+  "tokens": 32,
+  "leading_agree": 10,
+  "same_position_share": 0.312,
+  "first_diff": {
+   "index": 10,
+   "ref_token": 220,
+   "device_token": 279,
+   "device_token_in_ref_top5": true,
+   "ref_gap_nats": 0.375
+  }
+ },
+ {
+  "prompt": "La capital de Francia es Par\u00eds, y la cap",
+  "tokens": 32,
+  "leading_agree": 3,
+  "same_position_share": 0.094,
+  "first_diff": {
+   "index": 3,
+   "ref_token": 8482,
+   "device_token": 2434,
+   "device_token_in_ref_top5": true,
+   "ref_gap_nats": 0.438
+  }
+ },
+ {
+  "prompt": "Photosynthesis is the process by which p",
+  "tokens": 32,
+  "leading_agree": 17,
+  "same_position_share": 0.531,
+  "first_diff": {
+   "index": 17,
+   "ref_token": 1330,
+   "device_token": 279,
+   "device_token_in_ref_top5": true,
+   "ref_gap_nats": 0.125
+  }
+ },
+ {
+  "prompt": "Q: Name three primary colors.\nA:",
+  "tokens": 32,
+  "leading_agree": 0,
+  "same_position_share": 0.0,
+  "first_diff": {
+   "index": 0,
+   "ref_token": 271,
+   "device_token": 3605,
+   "device_token_in_ref_top5": true,
+   "ref_gap_nats": 0.375
+  }
+ }
+]
