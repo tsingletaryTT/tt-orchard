@@ -415,3 +415,25 @@ def test_a_package_record_with_a_malformed_file_list_is_a_failed_gate_not_a_cras
         rec["files"] = bad
         rec_path.write_text(json.dumps(rec))
         assert any("file list" in p for p in gate(staged)), bad
+
+
+# ---- issue 259: quoting and record shape ------------------------------------------------------------------------------------
+
+def test_the_publish_commands_quote_a_package_path_with_a_space_or_a_shell_character():
+    text = tp.publish_commands(M, "example-org", "/tmp/my pkgs/a;b")
+    assert "'/tmp/my pkgs/a;b'" in text
+    assert "a;b ." not in text.replace("'/tmp/my pkgs/a;b'", "")
+
+
+def test_the_publish_commands_quote_the_namespace_too():
+    text = tp.publish_commands(M, "o;rm", "x/pkg")
+    assert "'o;rm/" in text
+
+
+def test_a_record_whose_license_entry_is_not_an_object_is_a_failed_gate_not_a_crash(staged):
+    for bad in ("apache", 3, ["x"], {"id": "a"}, {"sha256": 5}):
+        rec_path = staged.pkg / tp.RECORD_FILE
+        rec = json.loads(rec_path.read_text())
+        rec["license"] = bad
+        rec_path.write_text(json.dumps(rec))
+        assert any("license" in p and "record" in p for p in gate(staged)), bad

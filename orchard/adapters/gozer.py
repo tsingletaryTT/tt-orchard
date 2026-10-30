@@ -38,8 +38,9 @@ EXIT_SERIAL_UNREADABLE = 14    # the board serials cannot be read (a reset of a 
 EXIT_REFUSED = 15              # reset refused, or release refused after it may have reset first
 EXIT_RESET_FAILED = 17         # reset ran tt-smi and it failed; the lease is untouched
 EXIT_RESET_CHANGED_HANDS = 18  # reset ran, and afterwards the lease was gone or taken
+EXIT_RELEASE_RESET_FAILED = 19  # gozer 0.3.7: `release` whose reset failed (the lease is gone, the units are not marked clean); gozer 0.3.6 and older exit 0
 
-# `gozer release` exits 0 even when its reset failed. These phrases in its message say so
+# Before gozer 0.3.7 `gozer release` exits 0 even when its reset failed. These phrases in its message say so
 # (orchard/hardware_check.py makes the same check).
 RELEASE_RESET_FAILED_TEXT = ("NOT marked clean", "not resetting")
 
@@ -178,6 +179,10 @@ class GozerAdapter:
                 raise ResetFailed(f"lease {lease.lease_id} released, but its reset did not "
                                   f"succeed: {msg}")
             return
+        if res.returncode == EXIT_RELEASE_RESET_FAILED:
+            recovery = str((payload or {}).get("recovery", "")).strip()
+            raise ResetFailed(f"lease {lease.lease_id} released, but its reset failed; the units are not marked clean"
+                              + (f". Recovery: {recovery}" if recovery else ""))
         if res.returncode == EXIT_NO_LEASE:
             return                       # already gone: nothing is left to release
         if res.returncode == EXIT_REFUSED:

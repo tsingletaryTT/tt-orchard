@@ -83,3 +83,11 @@ def test_a_delta_whose_model_vocab_is_not_a_whole_number_cannot_be_matched_by_a_
     write(run, "stages/0/delta.json", {**TRIM_DELTA, "vocab_trim": {**TRIM, "model_vocab": size}})
     g = gate_mesh_swap(sd, run, required=(2,))
     assert not g.ok and any("2-chip" in r and "vocab" in r for r in g.reasons), g.reasons
+
+
+def test_a_stage_0_record_the_safe_reader_refuses_does_not_switch_the_trim_check_off(tmp_path):
+    """delta.json with a NaN in it is refused by the reader; the gate must not take that as 'this run is not a vocabulary trim'."""
+    sd, run = build(tmp_path, sources=GOOD_SOURCES, serving={"drafter": "on"})
+    (run / "stages/0/delta.json").write_text('{"class": "vocab-trim", "x": NaN}')
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok and any("delta.json" in r and "not readable" in r for r in g.reasons), g.reasons

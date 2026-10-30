@@ -57,6 +57,9 @@ def main():
     ap.add_argument("--batched-prefill", action="store_true", help="bench: process the prompt with m.prefill (all rows at once) instead of one decode step per token")
     ap.add_argument("--layers", type=int, default=0, help="debug: truncate the stack (0 = all)")
     a = ap.parse_args()
+    if a.tp == 2:
+        from chip_model_tp import refuse_unsupported_tp_args
+        refuse_unsupported_tp_args(ap, a)                        # before any device is opened or the fabric is configured
     if a.prompt_file:
         import make_reference
         make_reference.PROMPT = open(a.prompt_file, encoding="utf-8").read().strip()

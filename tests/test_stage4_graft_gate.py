@@ -157,3 +157,22 @@ def test_a_graft_record_that_is_not_an_object_is_not_a_record(tmp_path):
     write(run, "stages/4/configs/2/swap_config.json", {"bundle_dir": "/b", "tt_cache": "/c"})
     write(run, "stages/4/configs/2/model-dir-sources.json", {"mtp_graft": True})
     assert not gate_mesh_swap(sd, run, required=(2,)).ok
+
+
+# A sources record the safe reader refuses (NaN, a repeated key, a FIFO, over the cap) is not an absent record: an unrelated NaN must not hide
+# a grafted head that stage 2 did not choose (Copilot review of PR 283).
+
+REFUSED_SOURCES = ('{"mtp_graft": {"from": "Qwen/Qwen3.8-27B", "file": "m.safetensors", "tensors": 15}, "other": NaN}',
+                   '{"mtp_graft": {}, "mtp_graft": {}}', "not json")
+
+
+@pytest.mark.parametrize("choice", ["safe", "graft", None])
+@pytest.mark.parametrize("text", REFUSED_SOURCES)
+def test_a_sources_record_the_safe_reader_refuses_is_refused_whatever_stage_2_chose(tmp_path, choice, text):
+    sd, run = gate(tmp_path)
+    if choice:
+        decided(run, choice)
+    write(run, "stages/4/configs/2/swap_config.json", {"bundle_dir": "/b", "tt_cache": "/c"})
+    write(run, "stages/4/configs/2/model-dir-sources.json", text)
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok and any("2-chip configuration" in r and "model-dir-sources.json" in r and "not readable" in r for r in g.reasons), g.reasons

@@ -3419,6 +3419,62 @@ The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uplo
 - The first verify pass failed the revision check: the card pins two repositories (the weights and the code bundle) and the check looked up both commits in the weights repository. `verify-package` now looks up each commit in the repository named beside it on the card, and falls back to the base model. A test failed first.
 - The package carries the card's caveats: nobody has judged the music, and end-to-end agreement with the float32 run is lower after the encoders moved to the chip.
 
+## 2026-10-30 gozer 0.3.7 exit codes
+
+The tt-gozer agent shipped 0.3.7: a queued `acquire --owner-pid N` keeps N through `gozer wait`; `gozer release` whose reset failed exits 19 (it was 0) with `status: "reset-failed"`, `units` and `recovery` in `--json`; a chip whose serial reads all ones shows as UNREADABLE and is never granted (`--exact` exits 12); a p300 with a dead chip shows as DEGRADED; `gozer reset-all --who W` resets the whole box and exits 20 if a chip still reads all ones. `GozerAdapter.release` now raises `ResetFailed` on exit 19 and includes the recovery text; the older exit 0 with "NOT marked clean" check stays for gozer 0.3.6 and older. The exit 14 "unreadable tt_serial" retry stays (gozer did not change that). A test failed first. `reset-all` was not used. These changes came from the six items sent to that agent on 2026-10-30 after the MiniCPM3, Qwen3.5 and Llama runs.
+## 2026-10-30 verify-package: weights pins, graft pins, quoted scratch path, cache directory (issue 251; branch `verify-pins`)
+Prompt (operator, relayed): continue resolving issues; 251 after the safeio readers.
+- `tt_kernel_manifest.json` is checked as a pin: `weights.repo_id` must be a repository id and match the package's base model, `weights.revision` must be a 40-character commit that the card names, and a manifest with no weights pin fails. A tt-model.yaml weights revision that the card does not name fails.
+- A launcher (`run.sh`, `install.sh`) line that sets `WEIGHTS_REVISION` or `MODEL_REVISION` to a commit the card does not name is a problem. Other revisions in a launcher (a code bundle, a drafter head) stay notes.
+- The card's pin for the graft head is looked up in the repository that `graft.json` names.
+- The printed boot instructions use `cd -- <quoted path>`, so a scratch path with spaces works.
+- The pull removes only the download library's bookkeeping under `.cache/huggingface`, and keeps the files the repository lists. A file a package publishes under `.cache` now reaches the scrub, which fails it.
+- The launcher rule picks the pin by variable name. A launcher that pins the weights some other way is still only a note.
+
+Review of PR 284 (Copilot; two High, fixed test first): a weights pin at the code bundle's commit passed because every commit the card names counted, and the generated launcher's `TT_MODEL_WEIGHTS_REVISION="${TT_MODEL_WEIGHTS_REVISION:-<commit>}"` default was not matched. The manifest, tt-model.yaml and launcher pins are now held to the card's primary weights pin (the package record's revision, else the card's commits that are not the graft head's and not named beside another repository), and the launcher pattern reads the default form. A mutation that falls back to every card commit turns the new test red.
+
+## 2026-10-30 verify-package second review round (PR 284)
+Copilot's second review found that a package record naming the code bundle's commit was taken as the primary weights pin, and that
+`tt-model.yaml`'s inline form `weights: {repo: ..., revision: ...}` was not read. The primary pin now comes from the card's repository
+associations first, and a record revision outside that set fails the revision check. The inline mapping is parsed. Whole-line comments
+in launchers are skipped, and quotes around a front-matter `base_model` are removed. Live `verify-package --check` of the four published
+episod packages (ACE-Step, Qwen3.5, MiniCPM3, Granite) still passes 6 of 6 each.
+## 2026-10-30 Stage gates read their JSON through safeio (issues 135 to 139; branch `safeio-stages`)
+Prompt (operator, relayed): keep resolving open issues; move the remaining JSON readers onto `orchard/safeio.py`.
+- Every other reader on the hostile-input list had already moved. Only `orchard/stages.py` was left: `_load`, `_evidence_json`, `_read_json`, `_suite_reasons_in`, `hw_record_problem`, `gate_delta` and the delta, swap-check, bundle-record and kernel-manifest reads now go through `stages._safe_json` (a 16 MiB cap, 2 MiB for evidence files).
+- `_evidence_json` follows a link that stays inside the stage directory once, with `safeio.resolved`, which does not raise on a link loop, and then reads the target with the safe reader.
+- The strict xfail pairs for these readers were the failing tests; they now pass and their entries are removed from `KNOWN_DEFECTS`, which is empty. One stock-runtime test that expected a NaN `top1` to be named as a bar failure now expects the file to be refused as unreadable JSON.
+- Left: the 55 modules in `UNREGISTERED_MODULES` still have no registered reader.
+
+Review of PR 283 (Copilot; one High, fixed test first): `_suite_reasons_in` returned no reasons when the safe reader refused a swap-check.json, so a report that held a failing record (a non-empty hub_fetch) could pass both stage 2 swap gates if it also held an unrelated NaN, passed the size cap, or was a link. A refused file now fails the gate with "swap-check.json is not readable JSON: <reason>"; a missing file still has no reason. The stage 2 test that expected an unparseable swap-check.json to change nothing now expects a failure.
+## 2026-10-30 Medium findings of PR 245 and PR 247 (issues 258 and 259)
+
+Fixed, test first (each new test failed before its fix):
+- A resume refuses a `--input text_runtime=` that differs from the run's recorded one, including adding one to a run that had none. Leaving it out keeps the recorded route.
+- Stage 1 records the perplexity dataset path and its sha256. Later stages use that path, and stage 2 fails with a message that names the perplexity window when the file changed or cannot be read.
+- `text_stages.run_problems` refuses a token path whose length is not the claimed decode length, even when every run shares it.
+- `chip_max_len` refuses a decode length below 2 (`MIN_DECODE_TOKENS`).
+- `RefModel.forward` raises a named error when a position is past the rope table. `make_reference` builds the model with a table for the prompt plus the decode length.
+- The two-chip model and `serve.py --tp 2` refuse bfp4 and HiFi4 before any device or fabric is opened (`check_tp_options`).
+- `text-package`: the publish commands shell-quote the repository name and the package path. The gate refuses a package record whose `license` entry is not an object with a sha256 string (it raised AttributeError).
+Already done before this change, with tests: the latest runtime selection decides the script hashes, a malformed file list in the record is a failed gate, the card does not say which check a variant failed. The hostile-input backlog already lists the three modules named in the issue.
+Still open: the wording of block failures for ambiguous stage-2 errors. `qual_check.py` keeps the 2048-position rope table, which now raises a named error past it.
+- Review of PR 282 (Copilot, two Medium, fixed test first): an unreadable perplexity file at stage 1 now fails the stage with a perplexity message (it raised PermissionError past the stage handler). `run_chip.py` and `ppl_check.py` refuse unsupported two-chip options before the fabric is configured, as `serve.py` does, through `refuse_unsupported_tp_args`.
+- Second review of PR 282 (Copilot, one High, one Medium, fixed test first): stage 1 settings written before the dataset hash was recorded are refused on resume with a message to start a new run, since the window the reference used cannot be verified. `ppl_check.py ref` no longer imports the two-chip module (it needs ttnn); the guard runs in chip mode only.
+## 2026-10-30 Audio profile in the plan layer (part of issue 269)
+
+- `audio_plan.reference_plan` and `chip_plan` accept a model that has an `audio_profile` and no Stable Audio library name (ACE-Step 1.5 turbo). Its plan item carries `profile` (the profile key) and uses the key as its name. Stable Audio plans have no `profile` key and are unchanged. A model with neither is still refused.
+- `settings_for` answers for a profile key from the profile's settings. `sample_rate_of(item)` and `clip_name_of(item)` read the profile, and an unknown key is an error. `write_clip` takes the clip file name. `run_references` and `finish_chip` use these for the clip path and rate.
+- `reference_command` refuses a profile item with a message that names `acestep_run.py`: the supervisor still has no CPU command for it, because the audio paths hold no bundle code, snapshot or project root.
+- Left on issue 269: the per-step stage 2 commands (`--teacher-forced`, `--stepcheck`, then `step_bars`), the supervisor's choice of runner, the gate callers passing the profile to `check_run_dir`, and the bundle and package builder reading the rate and clip file from the profile.
+## 2026-10-30 Validation gaps from the third review of PR 267 (issue 274)
+
+- `orchard.step_bars` main now reads the recorded run. It refuses a run whose `dtype` is not float32 or whose `device` is not cpu, a run whose step count differs from the reports, a run that lacks a recorded velocity for a step, and a chip file whose step count differs from the floor's. Four tests failed first.
+- `audio_stages.clip_matches_waveform` refuses a clip with non-finite samples in both modes (a NaN made the exact comparison and the correlation test return False, which accepted the clip). With `exact` false it also refuses a peak below `MIN_CLIP_PEAK` (0.01), because correlation ignores level. Both tests failed first.
+
+## 2026-10-30 PR 283, second Copilot review
+A model-dir-sources.json that the safe reader refuses (for example an unrelated NaN) was read as "no record", so a grafted head that stage 2 did not choose passed the stage 4 gate. `_graft_reasons` now gives a reason for a refused sources record whatever stage 2 chose. The same gap was in the vocabulary-trim check: a refused stage 0 delta.json made `_trim_vocab` answer None ("not a trim"). Stage 2's trim check and stage 4 now report a refused delta.json. Tests: tests/test_stage4_graft_gate.py and tests/test_stage4_trim_gate.py. Not changed: sampling_choice.py and graft_trial.py have their own `_read_json` helpers that return None for a refused file.
+
 ## 2026-10-30 Granite chunked-scan prefill: algorithm checked on the CPU, chip path unverified (issue 252; branch `granite-chunked-prefill`)
 Prompt (operator, relayed): keep resolving open issues; build a chunked-scan prefill for the Granite Mamba-2 layers, check it against the CPU reference and the composed decode path, measure on the chip.
 - `pkgsrc/runtime/granite_scan.py` holds the chunked scan (state space duality form, decay written as the exp of a difference that is at most 0) and a block causal conv, in torch. `tests/test_granite_scan.py` checks them in float64 against the one-token recurrence: one chunk, chunk-to-chunk state hand-off with a short last chunk, a strong decay, and the conv state. Four mutations (drop D, unmasked upper triangle, swapped decay difference, wrong conv state rows) each turned tests red.

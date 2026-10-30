@@ -1,0 +1,3 @@
+target = "0.9.77"
+summary = "The gozer adapter treats release exit 19 (gozer 0.3.7) as a failed reset and shows the recovery text"
+pr = 289
