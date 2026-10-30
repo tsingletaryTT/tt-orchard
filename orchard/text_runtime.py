@@ -123,6 +123,7 @@ class TextRuntime:
     variants: tuple[Variant, ...] = ()
     context_limit = 0               # the context length the package states: the server's default cache length
     limits: tuple[str, ...] = ()
+    uses: tuple[str, ...] = ()      # what the model is for and where it is not a fit: paragraphs for the card's "What it is for" section
     min_layers = 1
     stage_scripts: tuple[str, ...] | None = None      # the shipped scripts the stages ran (default: all of `shipped_files`); a package must carry exactly these as the run used them
     model_dir_env = "MODEL_DIR"                       # the environment variables and flags the package's launcher uses for the model directory and the weights file
@@ -212,6 +213,16 @@ class MiniCPM3(TextRuntime):
     variants = (Variant("bf16", ("--opt", "3", "--upd", "paged"), "all weights bfloat16, HiFi2 for the MLP"),
                 Variant("mlp8", ("--opt", "3", "--upd", "paged", "--mlp-dtype", "bfp8", "--mlp-fidelity", "lofi"),
                         "MLP weights 8-bit block floating point with LoFi, everything else bfloat16"))
+    uses = (
+        "MiniCPM3-4B is a small chat model (4 billion parameters) from OpenBMB that fits on one Blackhole chip and answers at interactive speed. "
+        "Its model card lists Chinese and English, and says its overall performance is above Phi-3.5-mini-Instruct and GPT-3.5-Turbo-0125 and comparable with "
+        "many 7B to 9B models. These are the authors' claims; this package did not run their benchmarks.",
+        "Good fits on this package: a local Chinese and English chat assistant, drafting, rewriting and summarising short texts, question answering over a short "
+        "pasted document, and a low-cost model for a first pass in a pipeline. Measured here: decode speed in the table below, which is fast enough to follow as the text streams.",
+        "The authors say the model supports function calls, a code interpreter and a 32k context window. The function-call, code-interpreter and long-context features are not tested here. Decoding on this server is greedy "
+        "only (it ignores temperature and top_p), its default context is 2048 tokens, and it feeds a prompt one token per step, so a long prompt starts slowly. "
+        "It is a single-user server.",
+    )
     context_limit = 2048           # the server's default cache length (serve.py --max-len); the model's own limit is 32768
     limits = ("One chip only on this route. The two-chip tensor-parallel version (chip_model_tp.py) is in the scripts and was not run by the stages.",
               "Decoding is greedy only; the server ignores temperature and top_p.",
