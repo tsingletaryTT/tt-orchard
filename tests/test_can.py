@@ -441,3 +441,77 @@ def test_wheel_options_are_refused_for_the_dit_kind(base):
     (base / "w.whl").write_bytes(b"x")
     with pytest.raises(can.CanError, match="are for kind vllm"):
         edit_spec(base, 'port = 20123', 'port = 20123\nplugin_wheel = "w.whl"')
+
+
+# ---- review of PR 303
+
+def test_a_directory_link_inside_base_that_points_outside_is_refused(base, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("SECRET = 1\n")
+    (base / "dl").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(can.CanError, match="outside|not a regular file"):
+        edit_spec(base, 'src = "toy_core.py"', 'src = "dl/secret.py"')
+
+
+@pytest.mark.parametrize("line", ["numpy==1.*", "numpy==1.26.*", "numpy===*"])
+def test_a_wildcard_is_not_an_exact_pin(line):
+    assert can.requirement_problems(line + "\n")
+
+
+@needs_tt_model
+def test_a_dotted_asgi_module_is_looked_for_as_a_path(spec, bundle):
+    _, pkg = bundle
+    dotted = can.Spec(**{**spec.__dict__, "app": "server.api:app"})
+    assert any("ASGI module" in p for p in can.gate(pkg, dotted))
+    (pkg / "extra_code" / "server").mkdir()
+    (pkg / "extra_code" / "server" / "api.py").write_text("app = None\n")
+    can.write_sums(pkg)
+    assert not any("ASGI module" in p for p in can.gate(pkg, dotted))
+    (pkg / "extra_code" / "server" / "api.py").unlink()
+    (pkg / "extra_code" / "server" / "__init__.py").write_text("")   # a package's __init__ holds `server`, not `server.api`
+    can.write_sums(pkg)
+    assert any("ASGI module" in p for p in can.gate(pkg, dotted))
+
+
+def test_a_relative_work_directory_works(spec, tmp_path, monkeypatch):
+    b = fake_bundle(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    ev = can.boot_check(b, "rel-work", spec, install=False, health_timeout=30)
+    assert ev["passed"], ev
+
+
+def test_a_reused_work_directory_with_another_bundle_is_refused(spec, tmp_path):
+    first = fake_bundle(tmp_path)
+    assert can.boot_check(first, tmp_path / "work", spec, install=False, health_timeout=30)["passed"]
+    other = tmp_path / "other"
+    shutil.copytree(first, other)
+    (other / "run.sh").write_text("#!/usr/bin/env bash\nexit 3\n")
+    ev = can.boot_check(other, tmp_path / "work", spec, install=False, health_timeout=30)
+    assert not ev["passed"] and not ev["checks"]["bundle_copy"]["ok"]
+
+
+def test_an_old_log_does_not_satisfy_ready_contains(spec, tmp_path):
+    work = tmp_path / "work"
+    (work / "logs").mkdir(parents=True)
+    (work / "logs" / "server.log").write_text('{"ready": true}\n')
+    b = fake_bundle(tmp_path)
+    (b / "server.py").write_text(SERVER.replace('print(json.dumps({"ready": True}), flush=True)', "pass"))
+    ev = can.boot_check(b, work, spec, install=False, health_timeout=30)
+    assert not ev["passed"] and not ev["checks"]['log contains "ready": true']["ok"]
+
+
+def test_a_transport_failure_after_readiness_writes_failed_evidence(spec, tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "boot-check.json").write_text('{"passed": true}')        # an earlier successful run
+    real = can._http
+
+    def flaky(method, url, body=None, *, timeout=30.0):
+        if method == "POST":
+            raise TimeoutError("timed out")
+        return real(method, url, body, timeout=timeout)
+    monkeypatch.setattr(can, "_http", flaky)
+    ev = can.boot_check(fake_bundle(tmp_path), work, spec, install=False, health_timeout=30)
+    assert not ev["passed"] and "timed out" in str(ev["checks"]["transport"])
+    assert '"passed": false' in (work / "boot-check.json").read_text()

@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import json
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -178,7 +179,11 @@ def test_a_failure_on_the_chip_gives_500_and_frees_the_slot():
 
 
 def test_client_disconnect_mid_stream_frees_the_slot():
-    engine = FakeEngine([0] * 50)
+    class SlowStep(FakeEngine):
+        def step(self, tok):
+            time.sleep(0.03)            # gives the event loop time to deliver the disconnect, even on a busy host
+            return super().step(tok)
+    engine = SlowStep([0] * 50)
     serve.STATE["engine"] = engine
     status, _, _ = run(post({**MSG, "stream": True, "max_tokens": 40}, disconnect_after=3))
     assert status == 200

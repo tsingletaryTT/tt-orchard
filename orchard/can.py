@@ -71,7 +71,7 @@ CAN_KEYS = {"name", "kind", "app", "model_py", "metadata", "readme", "arch", "me
 WEIGHTS_KEYS = {"repo", "revision"}
 CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens"}
 FILE_KEYS = {"src", "dst"}
-PIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?===?[A-Za-z0-9][A-Za-z0-9.!+_*-]*(\s*;.*)?$")
+PIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?===?[A-Za-z0-9][A-Za-z0-9.!+_-]*(\s*;.*)?$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 FORBIDDEN_PORTS = (8000, 8011, 8012, 8780)
@@ -144,6 +144,8 @@ def _inside(base: Path, rel, what: str, *, must_exist: bool = True) -> Path:
     p = base / rel
     if must_exist and (p.is_symlink() or not p.is_file()):
         raise CanError(f"{what}: {rel} is not a regular file under {base}")
+    if not p.resolve().is_relative_to(base.resolve()):      # a link in a directory component can lead outside base
+        raise CanError(f"{what}: {rel} resolves to a path outside {base}")
     return p
 
 
@@ -448,7 +450,8 @@ def gate(pkg, spec: Spec, *, hostname: str | None = None, namespace: str | None 
     # the server entry is in the bundle and the code compiles
     if spec.kind == "tt-dit-server":
         module = spec.app.split(":")[0]
-        if not any((pkg / base / f"{module}.py").is_file() for base in (".", "extra_code")):
+        as_path = Path(*module.split(".")).with_suffix(".py")       # server.api is server/api.py
+        if not any((pkg / base / as_path).is_file() for base in (".", "extra_code")):
             problems.append(f"the ASGI module {module!r} is not at the bundle root or in extra_code/")
     # install.sh runs each verify statement with only extra_code/ on PYTHONPATH (found on the first real install: a statement that
     # imported a module at the bundle root passed in the bundle's own directory and failed under tt-model's installer)
@@ -512,7 +515,7 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
     """Install a COPY of the staged bundle under `work`, serve it with the copy's own run.sh and test it. The staged directory is never
     installed into or served. `env` is the environment of both children (for a hardware run it carries the lease's TT_VISIBLE_DEVICES).
     Returns the evidence; `passed` is true only if every check passed. A server that is still running is stopped on every path."""
-    work = Path(work)
+    work = Path(work).resolve()          # the server starts in the copy's directory, so a relative path would double up
     work.mkdir(parents=True, exist_ok=True)
     copy = work / "bundle"
     if not copy.exists():
@@ -526,6 +529,10 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         evidence["checks"][name] = {"ok": bool(ok), **({"detail": detail} if detail is not None else {})}
         return bool(ok)
 
+    stale = [rel for rel in _files_of(Path(bundle)) if not (copy / rel).is_file() or sha256(copy / rel) != sha256(Path(bundle) / rel)]
+    if not check("bundle_copy", not stale, "the copy matches the bundle" if not stale else
+                 f"the copy in {work} differs from the requested bundle ({stale[0]} and {len(stale) - 1} more); use a new --work directory"):
+        return _finish(work, evidence)
     if install and not (copy / "venv" / "bin" / "python").exists():
         rc = run_logged(["bash", copy / "install.sh"], log=log_dir / "install.log", timeout=PACKAGE_INSTALL_TIMEOUT_S, env=env)
         if not check("install", rc == 0, f"install.sh exited {rc}"):
@@ -534,7 +541,7 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
     base = f"http://127.0.0.1:{port}"
     server_log = log_dir / "server.log"
     serve_env = {**env, "PORT": str(port), "HOST": "127.0.0.1"}
-    with open(server_log, "ab") as out:
+    with open(server_log, "wb") as out:          # a log from an earlier run must not satisfy ready_contains
         proc = subprocess.Popen(["bash", str(copy / "run.sh")], stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=serve_env,
                                 start_new_session=True, cwd=str(copy))
     evidence["server_pid"] = proc.pid
@@ -590,6 +597,9 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         for needle in ck.ready_contains:
             check(f"log contains {needle}", needle in log_text)
         evidence["passed"] = all(c["ok"] for c in evidence["checks"].values())
+        return _finish(work, evidence)
+    except OSError as exc:       # a timeout or a refused connection after the server was ready: record it, and overwrite any earlier evidence
+        check("transport", False, f"{type(exc).__name__}: {exc}")
         return _finish(work, evidence)
     finally:
         _stop(proc)
