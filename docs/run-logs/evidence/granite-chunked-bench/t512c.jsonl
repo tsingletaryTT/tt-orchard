@@ -1,0 +1,9 @@
+{"chunk": 128, "event": "start", "max_len": 2048, "mode": "time", "path": "chunked", "runs": 1, "t": 1793378131.295, "tokens": 512, "trace": true, "warmups": 1}
+{"event": "prompt", "sha256": "555e89efd449c0f37d628c8ceb4bd68d74116538cff5c6f546176bba44f76dfb", "t": 1793378131.654, "tokens": 512}
+{"event": "before", "iteration": 0, "label": "construct", "phase": "setup", "t": 1793378133.177, "timeout_s": 240}
+{"event": "after", "iteration": 0, "label": "construct", "phase": "setup", "seconds": 3.4444, "t": 1793378136.623}
+{"event": "before", "iteration": 0, "label": "chunked", "phase": "warmup", "t": 1793378136.629, "timeout_s": 180}
+{"event": "after", "iteration": 0, "label": "chunked", "phase": "warmup", "seconds": 1.5257, "t": 1793378138.155}
+{"event": "before", "iteration": 1, "label": "chunked", "phase": "timed", "t": 1793378138.158, "timeout_s": 120}
+{"event": "before", "iteration": 0, "label": "close", "phase": "setup", "t": 1793378170.637, "timeout_s": 60}
+{"event": "hang", "iteration": 0, "label": "close", "phase": "setup", "t": 1793378230.637, "timeout_s": 60}
