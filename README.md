@@ -1878,6 +1878,17 @@ are provisional until the reference's own bfloat16 noise floor has been measured
 The `control` command requires the two runs to share the prompt, duration, steps, guidance scale, sampler, seed, dtype and sample size, so a difference in the
 waveform comes from the weights. `--unmatched` allows runs that differ in those settings; the report then says `matched: false` and carries a note.
 
+### 5.9fa The canning step (a v6 thin bundle that tt-model can install and serve)
+
+```
+tt-orchard can stage SPEC --out DIR [--base DIR] [--run-dir RUN]   # package-thin --out, the edits it leaves wrong, SHA256SUMS, the gate
+tt-orchard can gate BUNDLE SPEC                                    # the gate alone (scrub, manifest, pins, checksums); exit 1 on a problem
+tt-orchard can boot BUNDLE SPEC --work DIR [--hf-home DIR] [--health-timeout S]   # install a copy, serve its run.sh, send requests; run under a gozer lease
+tt-orchard can commands SPEC --namespace ORG                       # the publish commands, as text only
+```
+
+`config/can.granite.toml` is the first spec. The pattern, the two kinds (`vllm`, `tt-dit-server`) and the ASGI adapter are in [docs/canning.md](docs/canning.md).
+
 ### 5.9fb The audio package builder (stage a Stable Audio 3 small-music package, locally)
 
 ```

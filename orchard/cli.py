@@ -22,6 +22,7 @@
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
     tt-orchard text-package RUN_DIR --namespace ORG --revision SHA --license-file FILE --out DIR [--context FILE] [--check]
     tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--out DIR] [--result FILE] [--check]
+    tt-orchard can (stage SPEC --out DIR | gate BUNDLE SPEC | boot BUNDLE SPEC --work DIR [--hf-home DIR] | commands SPEC --namespace ORG) [--base DIR] [--run-dir RUN]
     tt-orchard verify-package REPO_ID [--scratch DIR] [--staged DIR] [--revision SHA] [--plan] [--check]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
@@ -399,6 +400,18 @@ def _parser() -> argparse.ArgumentParser:
     tp.add_argument("--context", help="an earlier context-length record (JSON) the card cites")
     tp.add_argument("--out", required=True, help="a new directory to stage into; the package goes in <out>/<package name> and the commands text beside it")
     tp.add_argument("--check", action="store_true", help="stage nothing; run the gate on the package already staged in --out")
+    cn = sub.add_parser("can", parents=[common],
+                        help="the canning step: build a v6 thin bundle that tt-model can install and serve from a per-model spec (TOML), check it, "
+                             "boot-check a copy of it. Uploads and publishes nothing")
+    cn.add_argument("action", choices=["stage", "gate", "boot", "commands"])
+    cn.add_argument("args", nargs="+", help="stage: SPEC | gate: BUNDLE SPEC | boot: BUNDLE SPEC | commands: SPEC")
+    cn.add_argument("--base", help="the directory the spec's paths are relative to (default: the current directory)")
+    cn.add_argument("--out", help="stage: a new directory for the bundle")
+    cn.add_argument("--work", help="boot: a new directory for the installed copy, the logs and boot-check.json")
+    cn.add_argument("--hf-home", help="boot: HF_HOME for the served copy (a cache that already holds the pinned weights avoids a download)")
+    cn.add_argument("--health-timeout", type=float, default=1800.0, help="boot: seconds to wait for /health")
+    cn.add_argument("--namespace", help="the Hugging Face namespace, used in the publish text and checked by the scrub")
+    cn.add_argument("--run-dir", help="a run directory: write stages/7/can.json and add an evidence entry to its ledger")
     vp = sub.add_parser("verify-package", parents=[common],
                         help="pull a published package from the Hub into a scratch directory, run its checks and print the boot command as "
                              "text. Opens no device and publishes nothing")
@@ -1080,6 +1093,16 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "audio-package":
         from orchard import audio_package
         return audio_package.main(args, out=out)
+    if args.cmd == "can":
+        from orchard import can
+        words = list(args.args)
+        want = {"stage": 1, "gate": 2, "boot": 2, "commands": 1}[args.action]
+        if len(words) != want:
+            print(f"tt-orchard can {args.action} takes {want} argument(s)", file=out)
+            return 2
+        args.spec = words[-1]
+        args.bundle = words[0] if want == 2 else None
+        return can.main(args, out=out)
     if args.cmd == "verify-package":
         from orchard import verify_package
         return verify_package.main(args, out=out)

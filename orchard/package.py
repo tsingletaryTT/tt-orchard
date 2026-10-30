@@ -862,7 +862,10 @@ THIN_VALUE_OPTIONS = frozenset({
     "--models-wheel", "--vllm-wheel", "--vllm-version", "--arch", "--arch-name", "--main-class",
     "--metadata", "--weights", "--weights-revision", "--mesh", "--device-count", "--python",
     "--tt-metal-version", "--max-num-seqs", "--block-size", "--max-model-len", "--env", "--name",
-    "--out"})
+    "--out",
+    # the canning step (orchard/can.py) also passes these
+    "--extra-code", "--verify", "--readme", "--provenance", "--mesh-fabric", "--constraints"})
+THIN_FLAGS = frozenset({"--no-vllm"})     # options with no value; the canning step passes this one for kind tt-dit-server
 
 
 def assert_no_publish(argv) -> None:
@@ -881,6 +884,8 @@ def assert_no_publish(argv) -> None:
         a = argv[i]
         if a in THIN_VALUE_OPTIONS and i + 1 < len(argv):
             i += 2
+        elif a in THIN_FLAGS:
+            i += 1
         elif a.startswith("-"):
             raise PackageError(f"option {a} is not one stage 7 passes (--public and --publish "
                                "change visibility or list the repo)")

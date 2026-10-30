@@ -123,7 +123,7 @@ Run these checks, in this order. Each is one command.
        python3 -m orchard.operator_checks --run-dir {{RUN_DIR}}
 
 3. Write one log line with the result. Tell the human the run is ready and that you published
-   nothing. Then stop.
+   nothing. Then stop. (A model with its own runtime and server is canned first: see the `canning` skill.)
 
 If `checks: ok` is missing, copy the PROBLEM lines into the log and ask a human. Do not delete or
 change a repo that already exists on the hub.
