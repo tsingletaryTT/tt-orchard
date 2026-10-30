@@ -185,6 +185,7 @@ class GraniteChip:
     def reset(self):
         """Start a new sequence. The recurrent state is zeroed. The key/value caches are not: positions that are not written yet are
         masked, and a stale value that is masked contributes exactly zero."""
+        granite_trace.check_usable(self)
         self.pos = 0
         z = lambda *s: self.host(torch.zeros(*s))  # noqa: E731
         for i in self.cs:
@@ -223,8 +224,7 @@ class GraniteChip:
 
     def step(self, token):
         """One token in, the logits of the next token out (a float tensor of the vocabulary size)."""
-        if self.unusable:
-            raise RuntimeError(f"the chip is unusable until the server is restarted: {self.unusable}")
+        granite_trace.check_usable(self)
         self._set_inputs(token)
         return self._run(True)
 
@@ -241,6 +241,7 @@ class GraniteChip:
 
     def run_tail_token(self, t):
         """One prompt token through the decode step, with no read-back."""
+        granite_trace.check_usable(self)
         self._set_inputs(t)
         self._run(False, head=False)                    # a second trace that stops after the last layer: no final norm, no lm_head
 
@@ -268,9 +269,13 @@ class GraniteChip:
         """The traces could not be captured again. A capture that failed part way may have left a trace the chip does not track, so later
         requests would allocate while it exists. Every later prefill and step is refused until the server is restarted."""
         self.unusable = f"{type(exc).__name__}: {exc}"
-        print(f"granite_chip: trace capture failed, the chip is unusable until restart: {self.unusable}", file=sys.stderr, flush=True)
+        try:
+            print(f"granite_chip: trace capture failed, the chip is unusable until restart: {self.unusable}", file=sys.stderr, flush=True)
+        except Exception:                                   # a closed or full stderr must not hide the capture error
+            pass
 
     def run_chunk(self, toks):
+        granite_trace.check_usable(self)
         self._run_chunk(toks)
 
     def traces_alive(self):

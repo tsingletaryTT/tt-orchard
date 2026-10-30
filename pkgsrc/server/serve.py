@@ -178,7 +178,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/models":
             self._json(200, {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "ibm-granite"}]})
         elif path == "/health":
-            self._json(200, {"status": "ok", "model": MODEL_ID, "context": STATE["engine"].max_len})
+            bad = getattr(STATE["engine"], "unusable", None)
+            if bad:                                         # a failed trace capture: health checks must see it so the instance is restarted
+                self._json(503, {"status": "unusable", "reason": bad, "model": MODEL_ID})
+            else:
+                self._json(200, {"status": "ok", "model": MODEL_ID, "context": STATE["engine"].max_len})
         else:
             self._json(404, {"error": {"message": "not found"}})
 
@@ -193,6 +197,9 @@ class Handler(BaseHTTPRequestHandler):
             ids = encode_prompt(STATE["tok"], STATE["template"], r["messages"])
         except (RequestError, ValueError, json.JSONDecodeError, jinja2.TemplateError) as exc:
             return self._json(400, {"error": {"message": f"bad request: {exc}"}})
+        bad = getattr(STATE["engine"], "unusable", None)
+        if bad:
+            return self._json(503, {"error": {"message": f"the chip is unusable until the server is restarted: {bad}"}})
         cid, created, timings = f"chatcmpl-{int(time.time() * 1000)}", int(time.time()), {}
         args = dict(max_tokens=r["max_tokens"], stop_ids=STATE["stop_ids"], stop_strings=r["stop"], temperature=r["temperature"],
                     top_p=r["top_p"], seed=r["seed"], timings=timings)
@@ -260,13 +267,25 @@ class ChipEngine:
     def __init__(self, model):
         self.m, self.max_len = model, model.L
 
+    @property
+    def unusable(self):
+        """Why the chip cannot serve (a failed trace capture), or None. Read by /health and by every request."""
+        return getattr(self.m, "unusable", None)
+
+    def _check(self):
+        if self.unusable:
+            raise RuntimeError(f"the chip is unusable until the server is restarted: {self.unusable}")
+
     def reset(self):
+        self._check()
         self.m.reset()
 
     def prefill(self, ids):
+        self._check()
         return self.m.prefill(ids)
 
     def step(self, tok):
+        self._check()
         return self.m.step(tok)
 
 

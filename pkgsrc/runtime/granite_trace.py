@@ -34,12 +34,18 @@ def trace_names(chunked: bool, fast_prefill: bool) -> tuple:
     return ("full", "nohead") if fast_prefill and not chunked else ("full",)
 
 
+def check_usable(chip):
+    """Refuse an unusable chip. `mark_unusable` sets `chip.unusable` after a failed trace capture: a half-captured trace may exist, so nothing
+    more runs on the chip until the server is restarted."""
+    if getattr(chip, "unusable", None):
+        raise RuntimeError(f"the chip is unusable until the server is restarted: {chip.unusable}")
+
+
 def prefill(chip, ids, chunked=True, chunk=128, report=None):
     """The prefill the server uses. Chunked in composed mode when `chunked` is on and the prompt has a full block of 32 before its last
     token. Everything else is the step loop (one decode step per token). A chip whose traces could not be captured again is refused
     (`unusable` is set by `mark_unusable`): it may hold a half-captured trace, so nothing more runs until the server is restarted."""
-    if getattr(chip, "unusable", None):
-        raise RuntimeError(f"the chip is unusable until the server is restarted: {chip.unusable}")
+    check_usable(chip)
     if chunked and chip.ssd == "composed" and len(ids) - 1 >= chunk_sizes(chip, chunk)[-1]:
         return prefill_chunked(chip, ids, chunk, report=report)
     return chip.run_step_prefill(ids)
@@ -50,6 +56,7 @@ def prefill_chunked(chip, ids, chunk=128, report=None):
 
     `report(exc)` is called with a failure of a block before the traces are captured again, so the failure is on record even if the capture
     then hangs. A failure of the capture while a block failure is pending raises the block failure, with the capture failure as its cause."""
+    check_usable(chip)
     if chip.ssd != "composed":
         raise ValueError("prefill_chunked needs ssd='composed'")
     if chip.pos + len(ids) > chip.L:
@@ -80,7 +87,10 @@ def prefill_chunked(chip, ids, chunk=128, report=None):
             chip.capture_traces()
         except BaseException as cap:
             if hasattr(chip, "mark_unusable"):
-                chip.mark_unusable(cap)             # a half-captured trace may exist: refuse every later request
+                try:
+                    chip.mark_unusable(cap)         # a half-captured trace may exist: refuse every later request
+                except Exception:                   # best effort: the capture error must still reach the caller
+                    pass
             if failed is not None:
                 raise failed from cap
             raise

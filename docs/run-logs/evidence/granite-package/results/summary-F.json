@@ -139,10 +139,10 @@
     ]
    ],
    "server": {
-    "first_token_s": 0.5736517906188965,
-    "decode_tok_s": 33.6411,
+    "first_token_s": 0.5730392932891846,
+    "decode_tok_s": 34.6238,
     "long_prompt_tokens": 1481,
-    "long_prompt_first_token_s": 1.4927
+    "long_prompt_first_token_s": 1.2372
    },
    "evidence": "`evidence/s4-bench-fast.json`",
    "server_evidence": "`evidence/s4-server-smoke.json`"

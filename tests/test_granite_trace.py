@@ -254,3 +254,59 @@ def test_the_server_flow_passes_the_reporter_to_the_chunked_path():
     with pytest.raises(RuntimeError):
         gt.prefill(chip, list(range(200)), chunked=True, report=lambda exc: seen.append(str(exc)))
     assert seen == ["block failed"]
+
+
+# ---- review of PR 296, round 3: an unusable chip refuses every entry point ------------------------------------------------------
+class BrokenChip(FakeChip):
+    """A chip whose recapture failed once: it has marked itself unusable."""
+    def __init__(self):
+        super().__init__(traced=True)
+        self.unusable = None
+
+    def mark_unusable(self, exc):
+        self.unusable = f"{type(exc).__name__}: {exc}"
+
+
+def broken_after_failed_recapture():
+    chip = BrokenChip()
+
+    def bad_capture():
+        raise OSError("capture failed")
+    real = chip.capture_traces
+    chip.capture_traces = bad_capture
+    with pytest.raises(OSError):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    chip.capture_traces = real
+    return chip
+
+
+def test_prefill_chunked_itself_refuses_an_unusable_chip_before_touching_anything():
+    chip = broken_after_failed_recapture()
+    chip.events.clear()
+    with pytest.raises(RuntimeError, match="unusable until the server is restarted"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert chip.events == []                      # no release, no block, no capture
+
+
+def test_every_entry_point_checks_usable():
+    chip = broken_after_failed_recapture()
+    for call in (lambda: gt.prefill(chip, list(range(200))), lambda: gt.prefill(chip, list(range(5))),
+                 lambda: gt.prefill_chunked(chip, list(range(200))), lambda: gt.check_usable(chip)):
+        with pytest.raises(RuntimeError, match="capture failed"):
+            call()
+
+
+def test_a_diagnostic_that_cannot_be_written_does_not_replace_the_capture_error():
+    """mark_unusable on the real chip prints; the flow must survive a mark_unusable that raises."""
+    chip = FakeChip(traced=True)
+
+    def bad_mark(exc):
+        raise OSError("stderr closed")
+    chip.mark_unusable = bad_mark
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+
+    def bad_capture():
+        raise OSError("capture failed")
+    chip.capture_traces = bad_capture
+    with pytest.raises(RuntimeError, match="block failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)

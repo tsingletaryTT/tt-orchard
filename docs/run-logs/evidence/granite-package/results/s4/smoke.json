@@ -15,11 +15,11 @@
   "timings": {
    "prompt_tokens": 42,
    "completion_tokens": 7,
-   "prefill_s": 0.7079,
-   "first_token_s": 0.708,
-   "decode_tok_s": 28.7919
+   "prefill_s": 0.5299,
+   "first_token_s": 0.53,
+   "decode_tok_s": 29.3461
   },
-  "wall_s": 0.9176721572875977
+  "wall_s": 0.7355213165283203
  },
  "decode_run": {
   "usage": {
@@ -30,28 +30,28 @@
   "timings": {
    "prompt_tokens": 38,
    "completion_tokens": 64,
-   "prefill_s": 0.3325,
-   "first_token_s": 0.3326,
-   "decode_tok_s": 33.6411
+   "prefill_s": 0.309,
+   "first_token_s": 0.309,
+   "decode_tok_s": 34.6238
   },
-  "wall_s": 2.206763505935669
+  "wall_s": 2.1296277046203613
  },
  "stream": {
   "text": "Bonjour !",
   "finish_reason": "stop",
-  "first_content_s": 0.5736517906188965,
-  "wall_s": 0.6339881420135498
+  "first_content_s": 0.5730392932891846,
+  "wall_s": 0.6311423778533936
  },
  "long_prompt": {
   "prompt_tokens": 1481,
   "timings": {
    "prompt_tokens": 1481,
    "completion_tokens": 7,
-   "prefill_s": 1.4927,
-   "first_token_s": 1.4928,
-   "decode_tok_s": 28.351
+   "prefill_s": 1.2372,
+   "first_token_s": 1.2373,
+   "decode_tok_s": 29.6005
   },
-  "wall_s": 1.707406997680664
+  "wall_s": 1.4427320957183838
  },
  "checks": [
   {
@@ -82,7 +82,7 @@
   {
    "check": "stream returns text and a finish reason",
    "ok": true,
-   "detail": "{'text': 'Bonjour !', 'finish_reason': 'stop', 'first_content_s': 0.5736517906188965}"
+   "detail": "{'text': 'Bonjour !', 'finish_reason': 'stop', 'first_content_s': 0.5730392932891846}"
   },
   {
    "check": "a prompt of about a thousand tokens is accepted",
