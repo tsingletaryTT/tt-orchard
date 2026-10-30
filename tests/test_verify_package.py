@@ -435,3 +435,42 @@ def test_a_file_the_package_publishes_under_dot_cache_is_not_deleted_before_the_
     _, text = run(FakeHub(files), tmp_path)
     assert (tmp_path / "s" / ".cache" / "notes.txt").is_file()
     assert "FAIL" in line(text, "scrub") and ".cache" in line(text, "scrub"), text
+
+
+def test_a_weights_pin_that_is_the_auxiliary_repositorys_revision_fails_in_every_place_it_can_appear(tmp_path):
+    """The card pins the weights at REV and a code bundle (another repository) at OTHER. A weights pin at OTHER is the bundle's commit."""
+    card = CARD + f"The code bundle is someone/bundle (revision `{OTHER}`).\n"
+    for name, body, word in (
+            ("tt_kernel_manifest.json", _manifest(revision=OTHER), "tt_kernel_manifest.json"),
+            ("tt-model.yaml", f"schema: \"5.1\"\nrepo: {REPO}\nweights:\n  repo: ibm/thing\n  revision: \"{OTHER}\"\n".encode(), "tt-model.yaml"),
+    ):
+        files = good_files()
+        files["README.md"] = card.encode()
+        files[name] = body
+        files.pop("package-record.json")
+        _, text = run(FakeHub(files), tmp_path / name)
+        assert "FAIL" in line(text, "manifests") and word in line(text, "manifests"), (name, text)
+    files = good_files()
+    files["README.md"] = card.encode()
+    files["run.sh"] = f"#!/bin/sh\nWEIGHTS_REVISION={OTHER}\n".encode()
+    _, text = run(FakeHub(files), tmp_path / "launcher")
+    assert "FAIL" in line(text, "revision") and "run.sh" in line(text, "revision"), text
+
+
+def test_a_manifest_pin_must_also_be_the_package_records_revision(tmp_path):
+    files = good_files()
+    files["README.md"] = (CARD + f"The code bundle is someone/bundle (revision `{OTHER}`).\n").encode()
+    files["tt_kernel_manifest.json"] = _manifest(revision=OTHER)
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests"), text
+
+
+def test_the_generated_launchers_default_weights_pin_is_enforced(tmp_path):
+    files = good_files()
+    files["run.sh"] = (f'#!/bin/sh\nexport TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{OTHER}}}"\n').encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "revision") and OTHER in line(text, "revision"), text
+    files["run.sh"] = (f'#!/bin/sh\nexport TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{REV}}}"\n').encode()
+    _, text = run(FakeHub(files), tmp_path / "ok")
+    assert not line(text, "revision").strip().startswith("FAIL"), text

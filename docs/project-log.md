@@ -3427,3 +3427,5 @@ Prompt (operator, relayed): continue resolving issues; 251 after the safeio read
 - The printed boot instructions use `cd -- <quoted path>`, so a scratch path with spaces works.
 - The pull removes only the download library's bookkeeping under `.cache/huggingface`, and keeps the files the repository lists. A file a package publishes under `.cache` now reaches the scrub, which fails it.
 - The launcher rule picks the pin by variable name. A launcher that pins the weights some other way is still only a note.
+
+Review of PR 284 (Copilot; two High, fixed test first): a weights pin at the code bundle's commit passed because every commit the card names counted, and the generated launcher's `TT_MODEL_WEIGHTS_REVISION="${TT_MODEL_WEIGHTS_REVISION:-<commit>}"` default was not matched. The manifest, tt-model.yaml and launcher pins are now held to the card's primary weights pin (the package record's revision, else the card's commits that are not the graft head's and not named beside another repository), and the launcher pattern reads the default form. A mutation that falls back to every card commit turns the new test red.

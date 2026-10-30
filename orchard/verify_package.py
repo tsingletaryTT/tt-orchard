@@ -269,7 +269,20 @@ def _model_of(root: Path, card: str | None) -> str | None:
     return model if isinstance(model, str) and "/" in model else None
 
 
-def _manifest_pin_problems(doc, rel: str, card: str | None, model: str | None) -> list[str]:
+def primary_revisions(root: Path, card: str | None, model: str | None) -> set[str]:
+    """The commits the card pins for the primary weights. The package record's revision when it has one. Otherwise the card's
+    commits other than the graft head's, and other than one the card names beside a different repository (a code bundle).
+    When that leaves none, every commit the card names."""
+    named = card_revisions(card)
+    record = _read_record(root)
+    if record and isinstance(record[2], str) and record[2].lower() in named:
+        return {record[2].lower()}
+    _, graft_rev = _graft_pin(root)
+    out = {rev for rev in named if rev != graft_rev and _repo_named_before(card, rev) in (None, model)}
+    return out or named
+
+
+def _manifest_pin_problems(doc, rel: str, card: str | None, model: str | None, primary: set[str]) -> list[str]:
     """tt_kernel_manifest.json's weights.repo_id and weights.revision select the weights that are downloaded, so they are
     checked as pins: a repository id, a 40-character commit, and the commit and repository the card names."""
     weights = doc.get("weights") if isinstance(doc, dict) else None
@@ -284,15 +297,15 @@ def _manifest_pin_problems(doc, rel: str, card: str | None, model: str | None) -
     if not isinstance(rev, str) or not HEX40.match(rev):
         out.append(f"{rel}'s weights.revision {rev!r} is not a 40-character commit")
     else:
-        named = card_revisions(card)
-        if named and rev.lower() not in named:
-            out.append(f"{rel}'s weights.revision {rev} is not one the card names ({', '.join(sorted(named))})")
+        if primary and rev.lower() not in primary:
+            out.append(f"{rel}'s weights.revision {rev} is not the card's primary weights pin ({', '.join(sorted(primary))})")
     return out
 
 
 def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
     problems, seen = [], []
     model = _model_of(root, card)
+    primary = primary_revisions(root, card, model)
     for p in sorted(root.rglob("*.json")):
         rel = p.relative_to(root).as_posix()
         if rel.startswith(".cache/") or "manifest" not in p.name and p.name != "vllm_metadata.json":
@@ -304,7 +317,7 @@ def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
             problems.append(f"{rel} is not JSON ({exc})")
             continue
         if p.name == "tt_kernel_manifest.json":
-            problems += _manifest_pin_problems(doc, rel, card, model)
+            problems += _manifest_pin_problems(doc, rel, card, model, primary)
     y = root / "tt-model.yaml"
     if y.is_file():
         seen.append("tt-model.yaml")
@@ -315,9 +328,9 @@ def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
         rev = _yaml_scalar(text, r"^  revision:\s*(\S+)")
         if rev is not None and not HEX40.match(rev):
             problems.append(f"tt-model.yaml's weights revision {rev!r} is not a 40-character commit")
-        elif rev is not None and card_revisions(card) and rev.lower() not in card_revisions(card):
-            problems.append(f"tt-model.yaml's weights revision {rev} is not one the card names "
-                            f"({', '.join(sorted(card_revisions(card)))})")
+        elif rev is not None and primary and rev.lower() not in primary:
+            problems.append(f"tt-model.yaml's weights revision {rev} is not the card's primary weights pin "
+                            f"({', '.join(sorted(primary))})")
     if problems:
         return Finding("manifests", FAIL, "; ".join(problems))
     return Finding("manifests", OK, ("checked " + ", ".join(seen)) if seen else "the package ships no manifest to check")
@@ -343,7 +356,8 @@ def _repo_named_before(card: str | None, rev: str) -> str | None:
 
 # A launcher line that sets the primary weights pin (WEIGHTS_REVISION=<commit>, MODEL_REVISION=<commit>). Other pins in a launcher
 # (a code bundle, a drafter head) stay notes, because the card names them only when it chooses to.
-LAUNCHER_WEIGHTS_PIN = re.compile(r"\b(?:WEIGHTS|MODEL)_REV(?:ISION)?\s*[=:]\s*[\"']?([0-9a-f]{40})\b", re.IGNORECASE)
+# It also reads the generated launchers' default form: TT_MODEL_WEIGHTS_REVISION="${TT_MODEL_WEIGHTS_REVISION:-<commit>}".
+LAUNCHER_WEIGHTS_PIN = re.compile(r"\b(?:\w+_)?(?:WEIGHTS|MODEL)_REV(?:ISION)?\s*[=:]\s*[\"']?(?:\$\{\w+:?-)?([0-9a-f]{40})\b", re.IGNORECASE)
 
 
 def _graft_pin(root: Path) -> tuple[str | None, str | None]:
@@ -370,12 +384,13 @@ def check_revision(root: Path, card: str | None, record, hub: Hub | None) -> Fin
         problems.append(f"package record revision {rrev} is not the card's ({', '.join(sorted(named))})")
     for fname in ("tt-model.yaml", "run.sh", "install.sh"):
         t = _text(root / fname) or ""
-        primary = {m.lower() for m in LAUNCHER_WEIGHTS_PIN.findall(t)} if fname != "tt-model.yaml" else set()
         for rev in sorted({m.lower() for m in REVISION_NEAR.findall(t)} - named):
             notes.append(f"{fname} names revision {rev}, which the card does not")
-        for rev in sorted(primary - named):
-            problems.append(f"{fname} pins the weights at {rev}, and the card pins {', '.join(sorted(named))}")
     model = _model_of(root, card)
+    want = primary_revisions(root, card, model)
+    for fname in ("run.sh", "install.sh"):
+        for rev in sorted({m.lower() for m in LAUNCHER_WEIGHTS_PIN.findall(_text(root / fname) or "")} - want):
+            problems.append(f"{fname} pins the weights at {rev}; the card's primary weights pin is {', '.join(sorted(want))}")
     graft_repo, graft_rev = _graft_pin(root)
     if hub is not None and model:
         for rev in sorted(named):
