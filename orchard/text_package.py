@@ -131,8 +131,7 @@ def render_card(rtm, res: dict, bench: dict, context: dict | None, *, revision: 
     lines += [_row(r) for r in rows]
     for name, v in sorted((res.get("variants") or {}).items()):
         if not v.get("ok"):
-            lines += ["", f"The `{name}` variant did not meet the numeric bar of stage 2: at least one block's error against the float32 reference is above the bar's multiple of the CPU "
-                      "bfloat16 error. Its agreement and perplexity rows are listed above as measured. `evidence/text_result.json` names the first block that left."]
+            lines += ["", f"The `{name}` variant did not meet the stage 2 bar. Its rows above are listed as measured, and `evidence/text_result.json` records which check failed and why."]
     lines += ["", "## Running it", "", "See `docs/running.md`. In short: set `MINICPM3_DIR` and `MINICPM3_WEIGHTS` (the repository's files, and the weights as one safetensors file made by "
               "`convert_weights.py`), take a chip lease, and run `./run.sh`. The server listens on 127.0.0.1 and answers `POST /v1/chat/completions`.", "",
               LICENSE_HEAD, "", f"The model's repository card states the license `{rtm.license_id}` ({license_name}). `LICENSE` is that license's text. {weights_terms}", "",
@@ -262,7 +261,7 @@ def orchard_closure(sources: dict[str, str], root: Path) -> list[str]:
 def _recorded_scripts(run: Path) -> dict:
     """The script hashes the run's `text runtime selected` decision recorded at stage 0."""
     try:
-        for line in (run / "ledger.jsonl").read_text(encoding="utf-8").splitlines():
+        for line in reversed((run / "ledger.jsonl").read_text(encoding="utf-8").splitlines()):       # the latest selection decides, as text_runtime.selection() reads it
             if rt.TEXT_RUNTIME_SELECTED in line:
                 e = json.loads(line)
                 if e.get("data", {}).get("decision") == rt.TEXT_RUNTIME_SELECTED and isinstance(e["data"].get("scripts"), dict):
@@ -459,7 +458,10 @@ def package_problems(pkg, *, rtm, hostname: str | None = None, home: str | None 
         problems.append("the card must name the recorded model revision")
     names = {re.split(r"[<>=!~ ;\[]", ln.strip(), maxsplit=1)[0].lower() for ln in (ap._text(pkg / "requirements.txt") or "").splitlines() if ln.strip() and not ln.startswith("#")}
     problems += [f"requirements.txt must name {d}" for d in HOST_REQUIREMENTS if d not in names]
-    listed = {f["path"]: f["sha256"] for f in rec.get("files", [])}
+    files = rec.get("files")
+    if not isinstance(files, list) or not all(isinstance(f, dict) and isinstance(f.get("path"), str) and isinstance(f.get("sha256"), str) for f in files):
+        return problems + [f"{RECORD_FILE} needs a file list of objects that each have a path and a sha256"]
+    listed = {f["path"]: f["sha256"] for f in files}
     on_disk = {f.relative_to(pkg).as_posix() for f in ap._tree(pkg)} - {RECORD_FILE}
     for rel in sorted(on_disk - set(listed)):
         problems.append(f"{rel}: is in the package and not in {RECORD_FILE}")

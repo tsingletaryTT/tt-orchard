@@ -266,7 +266,7 @@ def test_the_card_says_when_a_variant_missed_the_bar(done, tmp_path):
     assert "did not meet the numeric bar" not in tp.render_card(M, res, bench, None, revision=REV, namespace="o", license_name="x", weights_terms="t")
     res["variants"]["mlp8"]["ok"] = False
     card = tp.render_card(M, res, bench, None, revision=REV, namespace="o", license_name="x", weights_terms="t")
-    assert "The `mlp8` variant did not meet the numeric bar" in card and "`bf16` variant did not" not in card
+    assert "The `mlp8` variant did not meet the stage 2 bar" in card and "`bf16` variant did not" not in card
 
 
 # ---- the Copilot review of PR 247 ------------------------------------------------------------------------------------------------
@@ -375,3 +375,34 @@ def test_the_card_shows_the_host_load_the_benchmark_ran_under(staged):
         v["summary"].pop("host_loadavg_1m", None)
     res = json.loads((staged.pkg / "evidence" / "text_result.json").read_text())
     assert "host load not recorded" in next(r[1] for r in tp.number_rows(res, bench, None) if r[0] == "decode speed, bf16")
+
+
+# ---- the second review of PR 247 ----------------------------------------------------------------------------------------------------------------
+
+def test_the_card_does_not_say_which_check_a_variant_failed(done, tmp_path):
+    res = json.loads((done.run_dir / "stages" / "2" / "text_result.json").read_text())
+    bench = json.loads((done.run_dir / "stages" / "6" / "text_bench.json").read_text())
+    res["variants"]["mlp8"]["ok"] = False
+    card = tp.render_card(M, res, bench, None, revision=REV, namespace="o", license_name="x", weights_terms="t")
+    sentence = next(l for l in card.splitlines() if "mlp8" in l and "did not meet" in l)
+    assert "block" not in sentence and "text_result.json" in sentence
+
+
+def test_the_latest_runtime_selection_in_the_ledger_decides_the_script_hashes(done, tmp_path):
+    ledger = done.run_dir / "ledger.jsonl"
+    lines = ledger.read_text().splitlines()
+    i = next(n for n, l in enumerate(lines) if rt.TEXT_RUNTIME_SELECTED in l)
+    stale = json.loads(lines[i])
+    stale["data"]["scripts"] = {k: "0" * 64 for k in stale["data"]["scripts"]}
+    lines.insert(i, json.dumps(stale))                 # a failed first attempt wrote another selection with other hashes
+    ledger.write_text("\n".join(lines) + "\n")
+    stage(done, tmp_path)                              # the later selection is the one that counts
+
+
+def test_a_package_record_with_a_malformed_file_list_is_a_failed_gate_not_a_crash(staged):
+    for bad in (None, [3], [{"path": "x"}], "text"):
+        rec_path = staged.pkg / tp.RECORD_FILE
+        rec = json.loads(rec_path.read_text())
+        rec["files"] = bad
+        rec_path.write_text(json.dumps(rec))
+        assert any("file list" in p for p in gate(staged)), bad
