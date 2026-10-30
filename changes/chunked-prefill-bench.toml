@@ -1,2 +1,4 @@
 target = "0.9.79"
 summary = "Granite chunked prefill: a watchdog benchmark harness, speed and agreement with trace off (3 to 30 times faster, agrees to 1,024 tokens), and a chip wedge with trace on; chunked prefill stays off."
+pr = 291
+kind = "feature"
