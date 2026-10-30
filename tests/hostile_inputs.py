@@ -939,6 +939,7 @@ UNREGISTERED_MODULES = (
     'text_package.py',
     'text_stages.py',
     'text_remote.py',
+    'text_stages.py',
     'text_runtime.py',
     'ttnn_dump.py',
     'verify_package.py',
