@@ -26,6 +26,7 @@ from pathlib import Path
 from orchard.audio_package import scrub_files
 from orchard.decode_floor import ASSUMPTIONS as FLOOR_ASSUMPTIONS, floor_for_board
 from orchard import model_config as mc
+from orchard import safeio
 
 PACKAGE_NAME = "qwen3.5-35b-a3b-blackhole-p300"
 MODEL_ID = "Qwen/Qwen3.5-35B-A3B"
@@ -199,16 +200,32 @@ def _bench_line(path: Path) -> dict:
     raise PackageError(f"{path.name} has no BENCH line")
 
 
-def _compare_module(base: Path):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("qwen35_compare", base / "check" / "compare.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def compare_rows(ref, dev):
+    """Per prompt: leading tokens that agree, the share of equal positions and the first difference with its reference gap. Raises ValueError on
+    inputs that cannot be compared. This is the comparison the card uses; `check/compare.py` in the package is a standalone copy for users, and the
+    gate never imports or runs it (a test keeps the two in step)."""
+    if len(ref) != len(dev):
+        raise ValueError(f"the reference has {len(ref)} prompts and the device run has {len(dev)}")
+    rows = []
+    for i, (r, d) in enumerate(zip(ref, dev)):
+        if r["prompt"] != d["prompt"]:
+            raise ValueError(f"prompt {i} differs between the reference and the device run")
+        a, b = r["tokens"], d["tokens"]
+        if not a or len(a) != len(b):
+            raise ValueError(f"prompt {i}: the reference has {len(a)} tokens and the device run has {len(b)}")
+        k = next((j for j in range(len(a)) if a[j] != b[j]), None)
+        row = {"prompt": r["prompt"][:40], "tokens": len(a), "leading_agree": len(a) if k is None else k,
+               "same_position_share": round(sum(x == y for x, y in zip(a, b)) / len(a), 3)}
+        if k is not None:
+            t5 = dict(zip(r["top5"][k]["ids"], r["top5"][k]["logprobs"]))
+            row["first_diff"] = {"index": k, "ref_token": a[k], "device_token": b[k], "device_token_in_ref_top5": b[k] in t5,
+                                 "ref_gap_nats": round(t5[a[k]] - t5[b[k]], 3) if b[k] in t5 else None}
+        rows.append(row)
+    return rows
 
 
-def facts_from_evidence(evidence, compare_dir) -> dict:
-    """Every measured number on the card, recomputed from the raw files in `evidence`. `compare_dir` holds `check/compare.py`.
+def facts_from_evidence(evidence) -> dict:
+    """Every measured number on the card, recomputed from the raw files in `evidence` with this module's own code.
     Raises PackageError when a file is missing or cannot be read."""
     ev = Path(evidence)
     for n in EVIDENCE_FILES:
@@ -226,7 +243,7 @@ def facts_from_evidence(evidence, compare_dir) -> dict:
             raise PackageError("evidence/boot.txt needs one cold and one warm BOOT line")
         ref = json.loads((ev / "cpu_reference.json").read_text(encoding="utf-8"))
         dev = json.loads((ev / "device_quality.json").read_text(encoding="utf-8"))
-        rows = _compare_module(Path(compare_dir)).compare_rows(ref, dev["completions"])
+        rows = compare_rows(ref, dev["completions"])
         cfg = mc.read_model_config(ev / "config.json")
         floor = floor_for_board(cfg, POLICY, "p300")
         ttft = sorted(r["ttft_s"] for r in runs)
@@ -242,7 +259,7 @@ def facts_from_evidence(evidence, compare_dir) -> dict:
             "ablations": {"grid_median": _bench_line(ev / "bench_40layer_grid105.log")["median"],
                           "rk_median": _bench_line(ev / "bench_40layer_rk72.log")["median"]},
         }
-    except (KeyError, ValueError, TypeError, OSError, mc.ModelConfigError) as exc:
+    except Exception as exc:       # the evidence is untrusted data: any shape of it that breaks the derivation is a named problem
         if isinstance(exc, PackageError):
             raise
         raise PackageError(f"the evidence could not be used: {type(exc).__name__}: {exc}") from exc
@@ -331,7 +348,7 @@ def stage_package(src, evidence, out) -> dict:
     src, evidence, out = Path(src), Path(evidence), Path(out)
     if out.exists():
         raise PackageError("the output directory already exists; stage into a new one")
-    facts = facts_from_evidence(evidence, src)
+    facts = facts_from_evidence(evidence)
     files: dict[str, bytes | str] = {}
     for rel in SOURCE_FILES:
         files[rel] = (src / rel).read_bytes()
@@ -356,9 +373,9 @@ def stage_package(src, evidence, out) -> dict:
     return record
 
 
-def _pins(path: Path) -> dict:
+def _pins(body: str) -> dict:
     out = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in body.splitlines():
         if line.strip() and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
             out[k.strip()] = v.strip()
@@ -386,65 +403,129 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
         return early
     problems: list[str] = [f"scrub: {h}" for h in scrub_files(pkg, hostname=hostname, home=home)]
     all_files = [p for p in pkg.rglob("*") if p.is_file()]
+    texts: dict[str, str] = {}
+
+    def text(rel: str) -> str:
+        """The package file as UTF-8 text through the bounded reader; a failure is one named problem and an empty string."""
+        if rel in texts:
+            return texts[rel]
+        try:
+            texts[rel] = safeio.read_bytes(pkg / rel, max_bytes=MAX_FILE_BYTES).decode("utf-8")
+        except (safeio.SafeReadError, UnicodeDecodeError, OSError) as exc:
+            problems.append(f"{rel} could not be read as UTF-8 text ({type(exc).__name__})")
+            texts[rel] = ""
+        return texts[rel]
+
     for p in all_files:
         rel = p.relative_to(pkg).as_posix()
         try:
-            text = p.read_text(encoding="utf-8").lower()
-        except (UnicodeDecodeError, OSError):
-            continue
+            low = safeio.read_bytes(p, max_bytes=MAX_FILE_BYTES).decode("utf-8").lower()
+        except (safeio.SafeReadError, UnicodeDecodeError, OSError):
+            continue          # scrub_files already reported a file it could not read as text
         for w in BANNED_WORDS:
-            if w in text:
+            if w in low:
                 problems.append(f"{rel} mentions {w!r}")
     need = ["README.md", "NOTICE", "LICENSE", "run.sh", "pins.env", "fetch_weights.py", "weights_qwen35_moe.patch", "tt-model.yaml",
             "package-record.json", "check/compare.py"] + [f"evidence/{n}" for n in EVIDENCE_FILES] + ["evidence/facts.json"]
     missing = [n for n in need if not (pkg / n).is_file()]
     if missing:
         return problems + [f"{n} is missing" for n in missing]
-    lic = (pkg / "LICENSE").read_text(encoding="utf-8")
+    lic = text("LICENSE")
     if LICENSE_FIRST not in lic[:200] or "Version 2.0" not in lic[:300]:
         problems.append("LICENSE is not the Apache License 2.0 text")
-    card = (pkg / "README.md").read_text(encoding="utf-8")
+    card = text("README.md")
     if not re.search(r"^license:\s*apache-2\.0\s*$", card, re.M):
         problems.append("the card front matter does not say license: apache-2.0")
     for ph in REQUIRED_PHRASES:
         if ph not in card:
             problems.append(f"the card lacks the phrase {ph!r}")
     for n in ("README.md", "tt-model.yaml", "fetch_weights.py", "NOTICE"):
-        found = set(REVISION_RE.findall((pkg / n).read_text(encoding="utf-8")))
+        found = set(REVISION_RE.findall(text(n)))
         if found != {REVISION}:
             problems.append(f"{n} does not pin exactly the revision {REVISION} (found {sorted(found)})")
-    pins = _pins(pkg / "pins.env")
+    pins = _pins(text("pins.env"))
     for k, v in (("IMAGE_ID", IMAGE_ID), ("LOADER", LOADER_PATH), ("ORIG_SHA", ORIG_SHA), ("PATCHED_SHA", PATCHED_SHA)):
         if pins.get(k) != v:
             problems.append(f"pins.env {k} is {pins.get(k)!r}, expected {v!r}")
-    run = (pkg / "run.sh").read_text(encoding="utf-8")
+    run = text("run.sh")
     if "pins.env" not in run or "PATCHED_SHA" not in run:
         problems.append("run.sh does not read pins.env and check PATCHED_SHA")
     # The card must equal a rendering of facts recomputed from the raw evidence, and facts.json must equal those facts. A number edited in
-    # the card, in facts.json or in a raw file fails here.
+    # the card, in facts.json or in a raw file fails here. The derivation is this module's own code; nothing from the package is imported or run.
     try:
-        facts = facts_from_evidence(pkg / "evidence", pkg)
+        facts = facts_from_evidence(pkg / "evidence")
     except PackageError as exc:
         problems.append(str(exc))
         facts = None
     if facts is not None:
-        stored = json.loads((pkg / "evidence" / "facts.json").read_text(encoding="utf-8"))
-        if stored != json.loads(json.dumps(facts)):
+        try:
+            stored = safeio.read_json(pkg / "evidence" / "facts.json", max_bytes=MAX_FILE_BYTES, expect=dict)
+        except (safeio.SafeReadError, OSError) as exc:
+            problems.append(f"evidence/facts.json is not a readable JSON object ({type(exc).__name__})")
+            stored = None
+        if stored is not None and stored != json.loads(json.dumps(facts)):
             diff = sorted(k for k in set(stored) | set(facts) if stored.get(k) != facts.get(k))
             problems.append(f"evidence/facts.json differs from the facts recomputed from the raw evidence in: {', '.join(diff)}")
-        if card != render_card(facts):
+        try:
+            rendered = render_card(facts)
+        except Exception as exc:
+            problems.append(f"the card could not be rendered from the evidence ({type(exc).__name__})")
+            rendered = None
+        if rendered is not None and card != rendered:
             problems.append("README.md is not the card rendered from the evidence (a measured value or sentence was edited)")
-    rec = json.loads((pkg / "package-record.json").read_text(encoding="utf-8"))
-    for rel, sha in rec.get("files", {}).items():
-        f = pkg / rel
-        if not f.is_file():
-            problems.append(f"{rel} is in the record and missing on disk")
-        elif _sha(f) != sha:
-            problems.append(f"{rel} was changed after staging (sha256 differs from the record)")
-    on_disk = {p.relative_to(pkg).as_posix() for p in all_files if p.name != "package-record.json"}
-    for extra in sorted(on_disk - set(rec.get("files", {}))):
-        problems.append(f"{extra} is not in the record")
+    problems += _record_problems(pkg, all_files)
     for rel in EXECUTABLE:
         if (pkg / rel).is_file() and not os.access(pkg / rel, os.X_OK):
             problems.append(f"{rel} is not executable")
     return problems
+
+
+def _plain_inside(pkg: Path, rel) -> bool:
+    """True when `rel` is a relative POSIX path of plain components (no '', '.', '..', no leading slash) that stays inside `pkg` after links are resolved."""
+    if not isinstance(rel, str) or not rel or "\x00" in rel:
+        return False
+    parts = rel.split("/")
+    if rel.startswith("/") or any(x in ("", ".", "..") for x in parts):
+        return False
+    try:
+        (pkg / rel).resolve().relative_to(pkg.resolve())
+    except (ValueError, OSError):
+        return False
+    return not any((pkg.joinpath(*parts[:i + 1])).is_symlink() for i in range(len(parts)))
+
+
+def _record_problems(pkg: Path, all_files) -> list[str]:
+    """Check `package-record.json`: its shape, each path, each sha256, and that no file on disk is missing from it. A path is opened only after it is
+    shown to be a plain path inside the package; a file is hashed only through the bounded reader."""
+    out: list[str] = []
+    try:
+        rec = safeio.read_json(pkg / "package-record.json", max_bytes=MAX_FILE_BYTES, expect=dict)
+    except (safeio.SafeReadError, OSError) as exc:
+        return [f"package-record.json is not a readable JSON object ({type(exc).__name__})"]
+    files = rec.get("files")
+    if not isinstance(files, dict) or not files:
+        return ["package-record.json has no `files` object"]
+    good = {}
+    for rel, sha in files.items():
+        if not _plain_inside(pkg, rel):
+            out.append(f"package-record.json: record path {str(rel)[:80]!r} is not a plain path inside the package")
+        elif not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+            out.append(f"package-record.json: the entry for {rel} is not a sha256")
+        else:
+            good[rel] = sha
+    for rel, sha in good.items():
+        f = pkg / rel
+        if not f.is_file():
+            out.append(f"{rel} is in the record and missing on disk")
+            continue
+        try:
+            got = hashlib.sha256(safeio.read_bytes(f, max_bytes=MAX_FILE_BYTES)).hexdigest()
+        except (safeio.SafeReadError, OSError) as exc:
+            out.append(f"{rel} could not be read to check the record ({type(exc).__name__})")
+            continue
+        if got != sha:
+            out.append(f"{rel} was changed after staging (sha256 differs from the record)")
+    on_disk = {p.relative_to(pkg).as_posix() for p in all_files if p.name != "package-record.json"}
+    for extra in sorted(on_disk - set(files)):
+        out.append(f"{extra} is not in the record")
+    return out

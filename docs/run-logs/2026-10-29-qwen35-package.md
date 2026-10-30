@@ -113,3 +113,19 @@ Boot check of the fixed launcher, from the restaged package, on chips 2 and 3 (t
   The card now says the warm start was measured once, may have overlapped another job, and was not re-measured. The slice boot took 471 s on the slow disk and is not a timing for the package.
 - The cold start (728 s), decode speed (126.83 tok/s median), quality and chat results are unchanged from the first boot check, which ran before the review fixes; they are not re-run. The launcher changes
   (device resolution, checks) do not change the container command that produced them, apart from which host device nodes are mounted.
+
+## Review round 2 (Copilot review of commit eafe0050)
+
+The review resolved the seven earlier findings (device mapping, patched-loader hash on every launch, image id, prompt and token counts, staging against evidence,
+early return on oversized files, all-agree runs) and listed four open ones. Each now has a test that was red first.
+
+| Severity | Finding | Fix |
+| --- | --- | --- |
+| High | The gate executed the package's `check/compare.py` (to recompute the comparison) before checking the record | The comparison is trusted code in `orchard/qwen35_package.py` (`compare_rows`). The package's `check/compare.py` is a standalone copy for users; the gate and staging never import or run it, and it is covered by the record like any other file. A test puts top-level code that writes a marker file into the staged script: the gate does not run it and reports the changed file. A parity test keeps the two copies in step. |
+| High | Record keys were used as paths without a containment check | A record path must be relative, made of plain components (no empty, `.` or `..` part, no leading slash, no NUL), must stay inside the package after resolution and must not pass through a link. Otherwise the gate reports it and never opens it. Hashing goes through `safeio.read_bytes` with the 5 MB cap. Tests: `../x`, an absolute path, `a/../../x`, an empty key, `evidence//x`, `evidence/./facts.json`. The resolution check is a second layer: the early link check already rejects any package that holds a link. |
+| Medium | A truncated or non-object `facts.json` crashed the gate | Read with `safeio.read_json(expect=dict)`; a failure is one named problem. |
+| Medium | A malformed `package-record.json` crashed the gate | The record must be a JSON object with a non-empty `files` object of path to 64-hex sha256; each failure is a named problem. |
+
+Also changed: every package file the gate reads goes through the bounded reader and a non-UTF-8 file is a named problem; the derivation of facts from evidence catches any failure on untrusted evidence
+and raises `PackageError`, so a wrong-shaped evidence file is a named problem and a staging error. Tests: 75. Mutations run: the path check, its component rule, the shape check of the record, the dict
+requirement on the record, the broad catch on evidence (each red); removing only the resolve-and-contain check leaves the tests green because the link check rejects first.

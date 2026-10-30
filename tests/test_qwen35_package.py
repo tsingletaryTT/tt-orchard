@@ -362,3 +362,87 @@ def test_run_sh_refuses_a_loader_that_is_not_the_patched_one_on_every_launch(lau
 def test_run_sh_refuses_an_image_loader_that_the_patch_was_not_made_for(launcher):
     r, _ = launcher(TT_VISIBLE_DEVICES="0,1", FAKE_LOADER="some other file\n")
     assert r.returncode == 2 and "not the file the patch was made for" in r.stderr
+
+
+# ---- review round 2: untrusted package content ------------------------------------------------------------------------
+
+def test_the_gate_never_executes_code_in_the_package(pkg, tmp_path):
+    marker = tmp_path / "ran"
+    f = pkg / "check" / "compare.py"
+    f.write_text(f"open({str(marker)!r}, 'w').write('x')\n" + f.read_text())
+    p = gate(pkg)
+    assert not marker.exists()
+    assert any("check/compare.py was changed after staging" in x for x in p)
+
+
+def test_staging_does_not_execute_the_source_compare_script_either(tmp_path, ev):
+    src = tmp_path / "src"
+    shutil.copytree(SRC, src)
+    marker = tmp_path / "ran2"
+    f = src / "check" / "compare.py"
+    f.write_text(f"open({str(marker)!r}, 'w').write('x')\n" + f.read_text())
+    qp.stage_package(src, ev, tmp_path / "p")
+    assert not marker.exists()
+
+
+def test_the_shipped_compare_script_and_the_trusted_comparison_agree(ev):
+    ref = json.loads((ev / "cpu_reference.json").read_text())
+    dev = json.loads((ev / "device_quality.json").read_text())["completions"]
+    assert compare_mod().compare_rows(ref, dev) == qp.compare_rows(ref, dev)
+
+
+def _set_record(pkg, value):
+    (pkg / "package-record.json").write_text(value if isinstance(value, str) else json.dumps(value))
+
+
+@pytest.mark.parametrize("bad", ["../outside.safetensors", "/etc/hostname", "a/../../outside.txt", "", "evidence//x", "evidence/./facts.json"])
+def test_record_paths_that_escape_or_are_not_plain_are_rejected_without_reading(pkg, tmp_path, bad):
+    outside = tmp_path / "outside.safetensors"
+    outside.write_text("big model")
+    rec = json.loads((pkg / "package-record.json").read_text())
+    rec["files"][bad] = "0" * 64
+    _set_record(pkg, rec)
+    p = gate(pkg)
+    assert any("record path" in x and "not a plain path inside the package" in x for x in p), p
+
+
+def test_a_record_path_through_a_link_is_rejected(pkg, tmp_path):
+    (tmp_path / "target.txt").write_text("x")
+    # a directory link inside the package would be reported as a link first; a record naming a path under one must not be read either
+    rec = json.loads((pkg / "package-record.json").read_text())
+    rec["files"]["docs/../README.md"] = "0" * 64
+    _set_record(pkg, rec)
+    assert any("not a plain path inside the package" in x for x in gate(pkg))
+
+
+@pytest.mark.parametrize("bad", ["{", "[]", "null", '{"files": null}', '{"files": []}', '{"files": {"README.md": 5}}', '{"files": {"README.md": "xyz"}}', '{"files": {}}'])
+def test_a_malformed_record_is_a_problem_not_a_crash(pkg, bad):
+    _set_record(pkg, bad)
+    p = gate(pkg)
+    assert any("package-record.json" in x for x in p), p
+
+
+@pytest.mark.parametrize("bad", ["{", "[]", "null", '"text"', "5"])
+def test_a_malformed_facts_file_is_a_problem_not_a_crash(pkg, bad):
+    (pkg / "evidence" / "facts.json").write_text(bad)
+    p = gate(pkg)
+    assert any("facts.json" in x for x in p), p
+
+
+@pytest.mark.parametrize("name,content", [("device_quality.json", '{"completions": [1, 2]}'), ("device_quality.json", "[]"),
+                                          ("cpu_reference.json", '{"a": 1}'), ("bench_package.log", "BENCH [1]"), ("bench_package.log", 'BENCH {"runs": [3]}'),
+                                          ("boot.txt", "BOOT cold api_up_s=1 first_answer_s=2"), ("config.json", "[]")])
+def test_malformed_evidence_is_a_named_problem_and_staging_error(pkg, tmp_path, name, content):
+    (pkg / "evidence" / name).write_text(content)
+    p = gate(pkg)
+    assert p and not any("Traceback" in x for x in p)
+    bad_ev = make_evidence(tmp_path / "bad_ev")
+    (bad_ev / name).write_text(content)
+    with pytest.raises(qp.PackageError):
+        qp.stage_package(SRC, bad_ev, tmp_path / "never")
+
+
+def test_a_non_utf8_package_file_is_a_problem_not_a_crash(pkg):
+    (pkg / "README.md").write_bytes(b"\xff\xfe\x00bad")
+    p = gate(pkg)
+    assert any("README.md" in x for x in p), p
