@@ -3418,3 +3418,10 @@ Prompt (operator, relayed): rebuild the local package with the faster path, rega
 The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uploaded private, checked with `tt-orchard verify-package`, made public (a personal namespace, outside the Tenstorrent organisation and the catalog), and checked again without a token. The package gate was clean on main.
 - The first verify pass failed the revision check: the card pins two repositories (the weights and the code bundle) and the check looked up both commits in the weights repository. `verify-package` now looks up each commit in the repository named beside it on the card, and falls back to the base model. A test failed first.
 - The package carries the card's caveats: nobody has judged the music, and end-to-end agreement with the float32 run is lower after the encoders moved to the chip.
+
+## 2026-10-30 Audio profile in the plan layer (part of issue 269)
+
+- `audio_plan.reference_plan` and `chip_plan` accept a model that has an `audio_profile` and no Stable Audio library name (ACE-Step 1.5 turbo). Its plan item carries `profile` (the profile key) and uses the key as its name. Stable Audio plans have no `profile` key and are unchanged. A model with neither is still refused.
+- `settings_for` answers for a profile key from the profile's settings. `sample_rate_of(item)` and `clip_name_of(item)` read the profile, and an unknown key is an error. `write_clip` takes the clip file name. `run_references` and `finish_chip` use these for the clip path and rate.
+- `reference_command` refuses a profile item with a message that names `acestep_run.py`: the supervisor still has no CPU command for it, because the audio paths hold no bundle code, snapshot or project root.
+- Left on issue 269: the per-step stage 2 commands (`--teacher-forced`, `--stepcheck`, then `step_bars`), the supervisor's choice of runner, the gate callers passing the profile to `check_run_dir`, and the bundle and package builder reading the rate and clip file from the profile.

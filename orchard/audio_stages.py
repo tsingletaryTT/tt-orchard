@@ -37,7 +37,7 @@ from orchard import resident
 from orchard import safeio
 from orchard.audio_runtime import REFERENCE_FILE, RESULT_FILE, STAGE_DISK_GB
 from orchard.audio_plan import (CONFIG_FILE, DURATION_S, LIBRARY_NAMES, MODEL_SETTINGS, PROMPT, ROLE_CHIP, ROLE_CONTROL_CHIP, ROLE_CONTROL_REFERENCE,
-                                ROLE_HOST, ROLE_REFERENCE, SAMPLE_RATE, SAMPLE_SIZE, SCHEMA, SEED, AudioStageError, agree, chip_plan,
+                                ROLE_HOST, ROLE_REFERENCE, SAMPLE_RATE, clip_name_of, sample_rate_of, SAMPLE_SIZE, SCHEMA, SEED, AudioStageError, agree, chip_plan,
                                 chip_test_command, inside, library_name, load_json, reference_command, reference_plan, settings_for,
                                 repeat_name, snapshot_identity, write_chip_config, write_json)
 
@@ -78,11 +78,11 @@ def sound_checks(wave, sample_rate: int, requested_s: float) -> dict:
             "loud_window_fraction": round(loud, 4), "full_scale_fraction": round(full, 6)}
 
 
-def write_clip(run_dir, sample_rate: int = SAMPLE_RATE) -> Path:
-    """`clips/audio.flac` of a recorded run, written from its waveform array (a run that already has one keeps it). The array's bytes are
+def write_clip(run_dir, sample_rate: int = SAMPLE_RATE, clip_name: str = "audio.flac") -> Path:
+    """`clips/<clip_name>` of a recorded run, written from its waveform array (a run that already has one keeps it). The array's bytes are
     re-hashed by `load_run`, so the clip is the recorded waveform."""
     import soundfile
-    clip = Path(run_dir) / "clips" / "audio.flac"
+    clip = Path(run_dir) / "clips" / clip_name
     if clip.is_file():
         return clip
     with ar.load_run(run_dir) as run:
@@ -401,7 +401,7 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, expected: dict, l
             from_cache = False
         seconds = round(time.time() - t0, 3)
         try:
-            write_clip(out)
+            write_clip(out, sample_rate_of(item), clip_name_of(item))
             facts = run_facts(run_dir, str(rel_stage / item["dir"]))
         except (ar.ReferenceError, OSError, KeyError) as exc:
             raise AudioStageError(f"the CPU run for {item['role']} cannot be read back: {exc}") from exc
@@ -409,7 +409,7 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, expected: dict, l
         if wrong:
             raise AudioStageError("; ".join(wrong))
         runs[item["role"]] = {**facts, "role": item["role"], "interpreter": item["interpreter"], "from_cache": from_cache, "wall_seconds": seconds,
-                              "clip": f"{facts['dir']}/clips/audio.flac"}
+                              "clip": f"{facts['dir']}/clips/{clip_name_of(item)}"}
     rec = {"schema": SCHEMA, "runs": runs, "expected": expected, "library_commit": library_commit,
            "environment_floor": compare(Path(run_dir) / runs[ROLE_REFERENCE]["dir"], Path(run_dir) / runs[ROLE_HOST]["dir"]),
            "limits": ["The reference is the library's own float32 CPU run. The same-environment run is the same code in the interpreter that the chip "
@@ -441,7 +441,7 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
         if wrong:
             raise AudioStageError("; ".join(wrong))
         try:
-            clip = write_clip(d)
+            clip = write_clip(d, sample_rate_of(item), clip_name_of(item))
         except (ar.ReferenceError, OSError) as exc:
             raise AudioStageError(f"the chip clip for {item['name']} cannot be written: {exc}") from exc
         chip_json = {}
@@ -449,7 +449,7 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
             chip_json = load_json(d / "chip.json", "chip.json")
         except AudioStageError:
             pass
-        runs[item["role"]] = {**facts, "role": item["role"], "clip": f"{facts['dir']}/clips/audio.flac", "device": chip_json.get("device"),
+        runs[item["role"]] = {**facts, "role": item["role"], "clip": f"{facts['dir']}/clips/{clip_name_of(item)}", "device": chip_json.get("device"),
                               "total_seconds": chip_json.get("total_s")}
         ref_role = reference_roles[item["role"]]
         ref_entry = ref_rec["runs"][ref_role]
@@ -468,7 +468,7 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
             if not (run_dir / rel_k / "manifest.json").is_file():
                 raise AudioStageError(f"repeat {k} of the chip run for {item['role']} ({item['name']}) left no manifest")
             try:
-                write_clip(run_dir / rel_k)
+                write_clip(run_dir / rel_k, sample_rate_of(item), clip_name_of(item))
             except (ar.ReferenceError, OSError) as exc:
                 raise AudioStageError(f"the clip of repeat {k} for {item['role']} cannot be written: {exc}") from exc
             facts_k = run_facts(run_dir, rel_k)
@@ -476,7 +476,7 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
                                       ref_rec.get("library_commit"), f"{item['role']} repeat {k}")
             if wrong:
                 raise AudioStageError("; ".join(wrong))
-            repeats[item["role"]].append({**facts_k, "role": item["role"], "clip": f"{facts_k['dir']}/clips/audio.flac"})
+            repeats[item["role"]].append({**facts_k, "role": item["role"], "clip": f"{facts_k['dir']}/clips/{clip_name_of(item)}"})
     control = discrimination = None
     if ROLE_CONTROL_CHIP in runs:
         control = control_difference(stage_dir / "chip" / plan[0]["name"], stage_dir / "chip" / plan[1]["name"])
