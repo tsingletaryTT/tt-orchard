@@ -1,0 +1,2 @@
+target = "0.9.69"
+summary = "Run log: restaged Qwen3.5-35B-A3B package passes the gate and boots cold on board 1 in 471 s."
