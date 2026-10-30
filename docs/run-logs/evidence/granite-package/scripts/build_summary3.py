@@ -96,7 +96,7 @@ s["prefill_note"] = (f"A prompt of 33 or more tokens is prefilled in blocks of u
                      f"the last token and any remainder that does not fill a block of 32 go through the decode step. Before the blocks run, the server releases its decode traces, because the "
                      f"blocks allocate device buffers and ttnn warns that buffers allocated while a trace is alive may be corrupted; it captures the traces again before the left-over tokens and decode. "
                      f"Measured in {h['name']} (3 runs each, median): {pf_best[128]:.0f} tok/s for a 128-token prompt, {pf_best[512]:.0f} for 512 and {pf_best[1024]:.0f} for 1,024, against "
-                     f"{ctl[128]:.0f}, {ctl[512]:.0f} and {ctl[1024]:.0f} tok/s for the one-token-per-step loop in the same session (`--no-chunked-prefill`, `evidence/s4-bench-step.json`). "
+                     f"{ctl[128]:.0f}, {ctl[512]:.0f} and {ctl[1024]:.0f} tok/s for the one-token-per-step loop (`--no-chunked-prefill`, `evidence/s4-bench-step.json`, measured earlier the same day on the same code path, host load 7 to 12). "
                      f"A 1,500-token prompt would take about {1500 / pf_best[1024]:.1f} seconds before the first token at the 1,024-token rate (not measured). The last-token logits differ from the step loop's by at most "
                      f"{max(v['max_abs_diff'] for v in chk.values()):.2f} (logit values near 20 to 45), with the same top-1 token at 128, 512 and 1,024 tokens. "
                      "Prompts of 32 tokens or fewer use the step loop. `--no-chunked-prefill` (or `GRANITE_CHUNKED_PREFILL=0`) turns the chunked path off.")
@@ -155,7 +155,7 @@ old = [
     "Package: `tt-model.yaml` checks (non-mapping root, ready marker), `SHA256SUMS`, `SECURITY.md`, this changelog, machine-readable `measured` rows, a Limits section, two or more measurement sessions, agreement on three kinds of text.",
 ]
 s["changelog"] = [
-    f"Runtime: prompts of 33 or more tokens are prefilled in blocks of up to 128 tokens (a chunked scan for the Mamba-2 layers). {pf_best[128]:.0f}, {pf_best[512]:.0f} and {pf_best[1024]:.0f} tok/s at 128, 512 and 1,024 tokens against {ctl[512]:.0f} tok/s for the step loop (session 4).",
+    f"Runtime: prompts of 33 or more tokens are prefilled in blocks of up to 128 tokens (a chunked scan for the Mamba-2 layers). {pf_best[128]:.0f}, {pf_best[512]:.0f} and {pf_best[1024]:.0f} tok/s at 128, 512 and 1,024 tokens against {ctl[512]:.0f} tok/s for the step loop (measured earlier the same day).",
     "Runtime: the decode trace is released before the blocks run and captured again after them, so no device buffer is allocated while a trace is alive (a trace-on run that did allocate left a chip unreadable). A second request does the same. With the chunked prefill on, only the full decode trace is captured (the 0.2.0 no-head trace is captured only with `--no-chunked-prefill`), so no capture starts while another trace exists.",
     "Server: `--no-chunked-prefill` or `GRANITE_CHUNKED_PREFILL=0` keeps the step-loop prefill. The ready line reports `chunked_prefill`.",
     "New file `runtime/granite_trace.py`, which `runtime/granite_chip.py` imports. `tools/evaluate.py` gains `--no-chunked-prefill` and `--skip-read-every-step`.",

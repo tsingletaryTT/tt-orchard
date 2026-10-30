@@ -114,28 +114,28 @@
   },
   {
    "name": "session 4",
-   "when": "10:38 Pacific, host load 8.1 (0.3.0 chunked prefill)",
-   "load": 8.12,
+   "when": "11:13 Pacific, host load 2.4 (0.3.0 chunked prefill)",
+   "load": 2.41,
    "prompt_tokens": 12,
    "decode": {
-    "mean": 33.4198734121752,
-    "min": 32.94626050422231,
-    "max": 33.914617960724634
+    "mean": 34.45567992523473,
+    "min": 34.21992397143447,
+    "max": 34.65850465981696
    },
    "decode_untraced": null,
-   "ttft_s": 0.32388901710510254,
+   "ttft_s": 0.3241574764251709,
    "prefill": [
     [
      128,
-     93.45507672731102
+     122.96022734560086
     ],
     [
      512,
-     371.79632020121994
+     405.6537030278714
     ],
     [
      1024,
-     564.8356422289334
+     650.8266767930714
     ]
    ],
    "server": {
@@ -290,12 +290,12 @@
   }
  ],
  "numbers_note": "Load averages of the host during each session are in the evidence files.",
- "sessions_note": "The same traced decode measured 25.2 to 34.3 tok/s across the sessions. The host runs other jobs, and the traced step still depends on the host for the per-token input writes and the logits read, so a loaded host lowers the number. Prefill in session 1 ran the 0.1.0 code (the full program for every prompt token); session 4 runs the 0.3.0 chunked prefill (see Context and prefill). Sessions 2 and 3 run the 0.2.0 prefill, which replays a second trace that stops after the last layer (same logits; 512-token prompt: 38.6 tok/s with it against 37.4 without it, same session).",
+ "sessions_note": "The same traced decode measured 25.2 to 34.5 tok/s across the sessions. The host runs other jobs, and the traced step still depends on the host for the per-token input writes and the logits read, so a loaded host lowers the number. Prefill in session 1 ran the 0.1.0 code (the full program for every prompt token); session 4 runs the 0.3.0 chunked prefill (see Context and prefill). Sessions 2 and 3 run the 0.2.0 prefill, which replays a second trace that stops after the last layer (same logits; 512-token prompt: 38.6 tok/s with it against 37.4 without it, same session).",
  "agreement_note": "The relative L2 of this package is 1.4 to 1.8 times that of the bf16 CPU run on the four prompts. Top-1 agreement equals the bf16 CPU run's on prompts 0, 1 and 3 and is higher on prompt 2 (one position of 24), and the first difference from the reference comes at the same token on prompts 0, 1 and 3 and later on prompt 2. Four prompts of 24 tokens do not support a claim about other text.",
  "long_note": "Mean relative L2 of this package is 1.6 to 1.6 times the bf16 CPU run's on these sequences, and top-1 agreement with fp32 is at or above the bf16 CPU run's on all three. The largest single-position relative L2 is higher than the bf16 CPU run's in all three (see the table). The code sequence has one position with a relative L2 of 0.62. The non-English passage is 653 tokens (a short passage). One sequence of each kind, one run: this does not describe other text.",
- "prefill_note": "A prompt of 33 or more tokens is prefilled in blocks of up to 128 tokens (a chunked scan for the Mamba-2 layers, causal attention over the cache for the others); the last token and any remainder that does not fill a block of 32 go through the decode step. Before the blocks run, the server releases its decode traces, because the blocks allocate device buffers and ttnn warns that buffers allocated while a trace is alive may be corrupted; it captures the traces again before the left-over tokens and decode. Measured in session 4 (3 runs each, median): 93 tok/s for a 128-token prompt, 372 for 512 and 565 for 1,024, against 39, 39 and 39 tok/s for the one-token-per-step loop in the same session (`--no-chunked-prefill`, `evidence/s4-bench-step.json`). A 1,500-token prompt would take about 2.7 seconds before the first token at the 1,024-token rate (not measured). The last-token logits differ from the step loop's by at most 0.25 (logit values near 20 to 45), with the same top-1 token at 128, 512 and 1,024 tokens. Prompts of 32 tokens or fewer use the step loop. `--no-chunked-prefill` (or `GRANITE_CHUNKED_PREFILL=0`) turns the chunked path off.",
+ "prefill_note": "A prompt of 33 or more tokens is prefilled in blocks of up to 128 tokens (a chunked scan for the Mamba-2 layers, causal attention over the cache for the others); the last token and any remainder that does not fill a block of 32 go through the decode step. Before the blocks run, the server releases its decode traces, because the blocks allocate device buffers and ttnn warns that buffers allocated while a trace is alive may be corrupted; it captures the traces again before the left-over tokens and decode. Measured in session 4 (3 runs each, median): 123 tok/s for a 128-token prompt, 406 for 512 and 651 for 1,024, against 39, 39 and 39 tok/s for the one-token-per-step loop (`--no-chunked-prefill`, `evidence/s4-bench-step.json`, measured earlier the same day on the same code path, host load 7 to 12). A 1,500-token prompt would take about 2.3 seconds before the first token at the 1,024-token rate (not measured). The last-token logits differ from the step loop's by at most 0.25 (logit values near 20 to 45), with the same top-1 token at 128, 512 and 1,024 tokens. Prompts of 32 tokens or fewer use the step loop. `--no-chunked-prefill` (or `GRANITE_CHUNKED_PREFILL=0`) turns the chunked path off.",
  "limits": [
-  "Prefill runs at about 565 tok/s for a 1,024-token prompt, so a 1,500-token prompt takes about 2.7 s before the first token. The chunked path was checked against the step loop up to 1,024 tokens; the Mamba-2 state it leaves differs from the step loop's by up to 5% (largest relative difference) at 1,024 tokens.",
+  "Prefill runs at about 651 tok/s for a 1,024-token prompt, so a 1,500-token prompt takes about 2.3 s before the first token. The chunked path was checked against the step loop up to 1,024 tokens; the Mamba-2 state it leaves differs from the step loop's by up to 5% (largest relative difference) at 1,024 tokens.",
   "One request at a time (a second one gets 503). No batching and no multi-chip mode.",
   "Greedy decoding is what was measured. A temperature above 0 samples on the host; sampled output was not evaluated.",
   "Weights are bf16 on one chip. The Mamba-2 state, the step size and the decay are kept in float32 (`--ssd-precision bf16` is about 8% faster and less accurate on long sequences: mean relative L2 0.041 on a 1,024-token sequence against 0.013 with float32, `evidence/long1024-agree-bf16.json`).",
@@ -303,7 +303,7 @@
   "No tool calls and no document inputs (the server refuses them with 400).",
   "The kernel modes are optional, need a bf16 state and the tt-lang pair (tt-lang-light 1.1.10.dev20261026 with tt-metal 0e9d200), and are not the default.",
   "Tested only on a Blackhole p300c board with tt-metal v0.80.0.",
-  "Traced decode is 19% of the one-die bf16 floor in session 4.",
+  "Traced decode is 20% of the one-die bf16 floor in session 4.",
   "The server has no sign-in and binds 127.0.0.1 by default."
  ],
  "not_tested": [
@@ -335,11 +335,11 @@
   "text": "The state update and the readout can run as tt-lang kernels written by a local coder model (`--ssd state_full`, `state_full_ro`, `bcast`, `bcast_ro`; they need tt-lang importable). They keep the state in bf16. Measured with this package's runtime at a 2048-position context, traced, in one session (one run each): composed with a bf16 state 37.1 tok/s, `state_full_ro` 38.8 tok/s. They are not the default. Agreement over the prose sequence (teacher forced against fp32, mean relative L2, top-1): `state_full_ro` with a bf16 state 0.073, 0.952 over 2,048 tokens and 0.042, 0.949 over the first 1,024; composed with a bf16 state 0.070, 0.955 and 0.041, 0.955; the default (float32 state) 0.017, 0.984 and 0.013, 0.978. The kernel mode has the same error as the bf16 composed path and three to four times the default's."
  },
  "changelog": [
-  "Runtime: prompts of 33 or more tokens are prefilled in blocks of up to 128 tokens (a chunked scan for the Mamba-2 layers). 93, 372 and 565 tok/s at 128, 512 and 1,024 tokens against 39 tok/s for the step loop (session 4).",
+  "Runtime: prompts of 33 or more tokens are prefilled in blocks of up to 128 tokens (a chunked scan for the Mamba-2 layers). 123, 406 and 651 tok/s at 128, 512 and 1,024 tokens against 39 tok/s for the step loop (measured earlier the same day).",
   "Runtime: the decode trace is released before the blocks run and captured again after them, so no device buffer is allocated while a trace is alive (a trace-on run that did allocate left a chip unreadable). A second request does the same. With the chunked prefill on, only the full decode trace is captured (the 0.2.0 no-head trace is captured only with `--no-chunked-prefill`), so no capture starts while another trace exists.",
   "Server: `--no-chunked-prefill` or `GRANITE_CHUNKED_PREFILL=0` keeps the step-loop prefill. The ready line reports `chunked_prefill`.",
   "New file `runtime/granite_trace.py`, which `runtime/granite_chip.py` imports. `tools/evaluate.py` gains `--no-chunked-prefill` and `--skip-read-every-step`.",
-  "Decode is unchanged: 33.4 tok/s traced in session 4 (32.9 to 33.9 over 5 runs)."
+  "Decode is unchanged: 34.5 tok/s traced in session 4 (34.2 to 34.7 over 5 runs)."
  ],
  "changelog_older": [
   {
