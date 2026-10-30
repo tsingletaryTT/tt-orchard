@@ -88,7 +88,7 @@ def instrument(sess, clock: StageClock):
     import acestep.inference as inf
     h, model = sess.handler, sess.handler.model
     for attr, name in (("_prepare_batch", "cond: _prepare_batch (tokenise, masks, silence latents)"),
-                       ("infer_text_embeddings", "cond: text encoder (Qwen3-Embedding, CPU)"),
+                       ("infer_text_embeddings", "cond: text encoder (Qwen3-Embedding; CPU, or chip with text_on_chip)"),
                        ("infer_lyric_embeddings", "cond: lyric token embedding"),
                        ("infer_refer_latent", "cond: reference-audio latent"),
                        ("service_generate", "service_generate (all of the diffusion call)"),
@@ -98,7 +98,7 @@ def instrument(sess, clock: StageClock):
     clock.wrap(model, "generate_audio", "generate_audio (encoder, sampler loop)")
     clock.wrap(model, "prepare_condition", "cond: prepare_condition (condition encoder)")
     enc = model.encoder
-    for sub, name in (("text_projector", "cond: text projector"), ("lyric_encoder", "cond: lyric encoder (CPU transformer)"),
+    for sub, name in (("text_projector", "cond: text projector"), ("lyric_encoder", "cond: lyric encoder (CPU, or chip with lyric_on_chip)"),
                       ("timbre_encoder", "cond: timbre encoder (reference audio)")):
         if hasattr(enc, sub):
             clock.wrap(getattr(enc, sub), "forward", name)
@@ -108,8 +108,8 @@ def instrument(sess, clock: StageClock):
     if worker is not None:
         clock.wrap(worker, "call", "worker.call (host to chip round trip, all ops)")
         dit = worker.model.dit
-        clock.wrap(dit, "prepare", "chip prepare (cross K/V on host, tables, upload)")
-        clock.wrap(dit.ref, "encode", "  prepare: cross K/V projection on the host CPU")
+        clock.wrap(dit, "prepare", "chip prepare (tables, masks, upload; cross K/V on the host unless kv_on_chip)")
+        clock.wrap(dit.ref, "encode", "  prepare: cross K/V projection on the host CPU (kv_on_chip off)")
         clock.wrap(dit, "forward", "chip forward (one DiT step incl. patchify and copies)")
         import tt_acestep.acestep_host as host
         clock.wrap(host, "patchify", "  forward: patchify on the host")

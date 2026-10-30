@@ -1,0 +1,233 @@
+{
+ "end_to_end_vs_float32_cpu": {
+  "lofi42": {
+   "base_chip": {
+    "latent/final": {
+     "pcc": 0.9818,
+     "rel_l2": 0.189
+    },
+    "waveform/audio": {
+     "pcc": 0.9389,
+     "rel_l2": 0.3458
+    },
+    "conditioning/encoder_states": {
+     "pcc": 1.0,
+     "rel_l2": 0.0
+    },
+    "wave_lsd": 0.1844
+   },
+   "fast_chip": {
+    "latent/final": {
+     "pcc": 0.9783,
+     "rel_l2": 0.2065
+    },
+    "waveform/audio": {
+     "pcc": 0.9176,
+     "rel_l2": 0.4008
+    },
+    "conditioning/encoder_states": {
+     "pcc": 0.9998,
+     "rel_l2": 0.0182
+    },
+    "wave_lsd": 0.228
+   }
+  },
+  "folk7": {
+   "base_chip": {
+    "latent/final": {
+     "pcc": 0.9978,
+     "rel_l2": 0.066
+    },
+    "waveform/audio": {
+     "pcc": 0.9798,
+     "rel_l2": 0.2004
+    },
+    "conditioning/encoder_states": {
+     "pcc": 1.0,
+     "rel_l2": 0.0
+    },
+    "wave_lsd": 0.1001
+   },
+   "fast_chip": {
+    "latent/final": {
+     "pcc": 0.9939,
+     "rel_l2": 0.1104
+    },
+    "waveform/audio": {
+     "pcc": 0.9793,
+     "rel_l2": 0.2034
+    },
+    "conditioning/encoder_states": {
+     "pcc": 0.9998,
+     "rel_l2": 0.0178
+    },
+    "wave_lsd": 0.1261
+   }
+  },
+  "lofi11": {
+   "base_chip": {
+    "latent/final": {
+     "pcc": 0.9927,
+     "rel_l2": 0.1198
+    },
+    "waveform/audio": {
+     "pcc": 0.9535,
+     "rel_l2": 0.3036
+    },
+    "conditioning/encoder_states": {
+     "pcc": 1.0,
+     "rel_l2": 0.0
+    },
+    "wave_lsd": 0.1473
+   },
+   "fast_chip": {
+    "latent/final": {
+     "pcc": 0.9635,
+     "rel_l2": 0.2683
+    },
+    "waveform/audio": {
+     "pcc": 0.8564,
+     "rel_l2": 0.5279
+    },
+    "conditioning/encoder_states": {
+     "pcc": 0.9998,
+     "rel_l2": 0.0182
+    },
+    "wave_lsd": 0.2319
+   }
+  },
+  "folk3": {
+   "base_chip": {
+    "latent/final": {
+     "pcc": 0.9986,
+     "rel_l2": 0.0523
+    },
+    "waveform/audio": {
+     "pcc": 0.9847,
+     "rel_l2": 0.1744
+    },
+    "conditioning/encoder_states": {
+     "pcc": 1.0,
+     "rel_l2": 0.0
+    },
+    "wave_lsd": 0.1074
+   },
+   "fast_chip": {
+    "latent/final": {
+     "pcc": 0.9985,
+     "rel_l2": 0.0547
+    },
+    "waveform/audio": {
+     "pcc": 0.9876,
+     "rel_l2": 0.1573
+    },
+    "conditioning/encoder_states": {
+     "pcc": 0.9998,
+     "rel_l2": 0.0178
+    },
+    "wave_lsd": 0.1038
+   }
+  }
+ },
+ "ablation": {
+  "lofi_seed11": {
+   "abl_A_s11": {
+    "latent/final": {
+     "pcc": 0.9785,
+     "rel_l2": 0.2059
+    },
+    "waveform/audio": {
+     "pcc": 0.8855,
+     "rel_l2": 0.4729
+    },
+    "conditioning/encoder_states": {
+     "pcc": 1.0,
+     "rel_l2": 0.0
+    },
+    "wave_lsd": 0.1994
+   },
+   "abl_B_s11": {
+    "latent/final": {
+     "pcc": 0.982,
+     "rel_l2": 0.1884
+    },
+    "waveform/audio": {
+     "pcc": 0.9155,
+     "rel_l2": 0.4077
+    },
+    "conditioning/encoder_states": {
+     "pcc": 1.0,
+     "rel_l2": 0.0002
+    },
+    "wave_lsd": 0.1799
+   },
+   "abl_C_s11": {
+    "latent/final": {
+     "pcc": 0.9669,
+     "rel_l2": 0.2554
+    },
+    "waveform/audio": {
+     "pcc": 0.8679,
+     "rel_l2": 0.5064
+    },
+    "conditioning/encoder_states": {
+     "pcc": 0.9998,
+     "rel_l2": 0.0182
+    },
+    "wave_lsd": 0.2339
+   }
+  },
+  "lofi_seed42": {
+   "abl_A_s42": {
+    "latent/final": {
+     "pcc": 0.9906,
+     "rel_l2": 0.136
+    },
+    "waveform/audio": {
+     "pcc": 0.9778,
+     "rel_l2": 0.2099
+    },
+    "conditioning/encoder_states": {
+     "pcc": 1.0,
+     "rel_l2": 0.0
+    },
+    "wave_lsd": 0.1447
+   },
+   "abl_B_s42": {
+    "latent/final": {
+     "pcc": 0.9784,
+     "rel_l2": 0.2062
+    },
+    "waveform/audio": {
+     "pcc": 0.9283,
+     "rel_l2": 0.3754
+    },
+    "conditioning/encoder_states": {
+     "pcc": 1.0,
+     "rel_l2": 0.0002
+    },
+    "wave_lsd": 0.1974
+   },
+   "abl_C_s42": {
+    "latent/final": {
+     "pcc": 0.9787,
+     "rel_l2": 0.2046
+    },
+    "waveform/audio": {
+     "pcc": 0.919,
+     "rel_l2": 0.3982
+    },
+    "conditioning/encoder_states": {
+     "pcc": 0.9998,
+     "rel_l2": 0.0182
+    },
+    "wave_lsd": 0.207
+   }
+  }
+ },
+ "ablation_legend": {
+  "A": "cond_cache,timbre_cache,gc_freeze,kv_on_chip",
+  "B": "A + lyric_on_chip",
+  "C": "A + text_on_chip"
+ }
+}

@@ -1,0 +1,145 @@
+{
+ "prompt": "indie folk, warm fingerpicked acoustic guitar, soft female vocals, gentle brushed drums",
+ "seed": 7,
+ "fast": [
+  "cond_cache",
+  "timbre_cache",
+  "gc_freeze",
+  "kv_on_chip",
+  "text_on_chip",
+  "lyric_on_chip"
+ ],
+ "runs": [
+  {
+   "duration_s": 60.0,
+   "repeat": 0,
+   "total_s": 1.6775,
+   "chip": {
+    "dit_chip_s": 0.5896,
+    "vae_chip_s": 0.9381
+   },
+   "stages": {
+    "cond: _prepare_batch (tokenise, masks, silence latents)": {
+     "calls": 1,
+     "inclusive_s": 0.012687315989751369,
+     "exclusive_s": 0.012687315989751369
+    },
+    "cond: reference-audio latent": {
+     "calls": 1,
+     "inclusive_s": 0.0007153220358304679,
+     "exclusive_s": 0.0007153220358304679
+    },
+    "cond: text encoder (Qwen3-Embedding; CPU, or chip with text_on_chip)": {
+     "calls": 1,
+     "inclusive_s": 0.011901397025212646,
+     "exclusive_s": 0.011901397025212646
+    },
+    "cond: lyric token embedding": {
+     "calls": 1,
+     "inclusive_s": 9.344198042526841e-05,
+     "exclusive_s": 9.344198042526841e-05
+    },
+    "cond: text projector": {
+     "calls": 1,
+     "inclusive_s": 0.0007522439700551331,
+     "exclusive_s": 0.0007522439700551331
+    },
+    "cond: lyric encoder (CPU, or chip with lyric_on_chip)": {
+     "calls": 1,
+     "inclusive_s": 0.01073619001545012,
+     "exclusive_s": 0.01073619001545012
+    },
+    "cond: timbre encoder (reference audio)": {
+     "calls": 1,
+     "inclusive_s": 0.00019837601576000452,
+     "exclusive_s": 0.00019837601576000452
+    },
+    "cond: prepare_condition (condition encoder)": {
+     "calls": 2,
+     "inclusive_s": 0.01413161598611623,
+     "exclusive_s": 0.002444805984850973
+    },
+    "chip prepare (tables, masks, upload; cross K/V on the host unless kv_on_chip)": {
+     "calls": 1,
+     "inclusive_s": 0.008539224974811077,
+     "exclusive_s": 0.008539224974811077
+    },
+    "worker.call (host to chip round trip, all ops)": {
+     "calls": 11,
+     "inclusive_s": 1.526493355864659,
+     "exclusive_s": 0.007271650887560099
+    },
+    "  forward: patchify on the host": {
+     "calls": 8,
+     "inclusive_s": 0.0015075629926286638,
+     "exclusive_s": 0.0015075629926286638
+    },
+    "  forward: unpatchify on the host": {
+     "calls": 8,
+     "inclusive_s": 8.200097363442183e-05,
+     "exclusive_s": 8.200097363442183e-05
+    },
+    "chip forward (one DiT step incl. patchify and copies)": {
+     "calls": 8,
+     "inclusive_s": 0.5882874410017394,
+     "exclusive_s": 0.5866978770354763
+    },
+    "dit step: RemoteDecoder.forward (copies in, chip, copy out)": {
+     "calls": 8,
+     "inclusive_s": 0.6022373440209776,
+     "exclusive_s": 0.0033474921947345138
+    },
+    "sampler: DCW correction (wavelet)": {
+     "calls": 8,
+     "inclusive_s": 0.010981887055095285,
+     "exclusive_s": 0.010981887055095285
+    },
+    "generate_audio (encoder, sampler loop)": {
+     "calls": 1,
+     "inclusive_s": 0.6180341900326312,
+     "exclusive_s": 0.004350885981693864
+    },
+    "service_generate (all of the diffusion call)": {
+     "calls": 1,
+     "inclusive_s": 0.6591989240259863,
+     "exclusive_s": 0.002099713950883597
+    },
+    "chip VAE decode (one window)": {
+     "calls": 2,
+     "inclusive_s": 0.9223950390005484,
+     "exclusive_s": 0.9223950390005484
+    },
+    "vae: one window (wire encode, chip, wire decode)": {
+     "calls": 2,
+     "inclusive_s": 0.9325322750373743,
+     "exclusive_s": 0.004928770998958498
+    },
+    "gc.collect": {
+     "calls": 2,
+     "inclusive_s": 0.0015331640024669468,
+     "exclusive_s": 0.0015331640024669468
+    },
+    "decode wrapper (VAE call and its clean-up)": {
+     "calls": 1,
+     "inclusive_s": 0.9502725769998506,
+     "exclusive_s": 0.016569743980653584
+    },
+    "post: normalize_audio (peak)": {
+     "calls": 1,
+     "inclusive_s": 0.006315720034763217,
+     "exclusive_s": 0.006315720034763217
+    },
+    "post: save_audio (WAV write)": {
+     "calls": 1,
+     "inclusive_s": 0.04673538397764787,
+     "exclusive_s": 0.04673538397764787
+    },
+    "vae: RemoteVae total (windows, copies, chip)": {
+     "calls": 1,
+     "inclusive_s": 0.938111511990428,
+     "exclusive_s": 0.0
+    }
+   }
+  }
+ ]
+}
