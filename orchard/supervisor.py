@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, bus, nearest, safeio, stage0_scan
+from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, stage0_scan
 from orchard import text_runtime
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -1913,6 +1913,25 @@ class Supervisor:
         log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
         return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
+    def _decode_floor_record(self, n: int, stage_dir: Path) -> None:
+        """Issue 181. Stage 0 writes stages/0/decode-floor.json (the DRAM-bandwidth floor for 1, 2 and 4 dies); stages 2 and 4 write
+        decode-share.json (each decode speed they measured as a share of that floor). Both are estimates and say so. A model the floor
+        cannot count, or a stage with no speed, leaves a record that says it was skipped or no file. The ledger gets an evidence entry."""
+        try:
+            if n == 0:
+                rec = floor_report.write_floor(stage_dir, model_dir=self.inputs.get("model"))
+                what, name = "decode floor", floor_report.FLOOR_FILE
+                extra = {"scan": rec["scan"]}
+            else:
+                rec = floor_report.write_share(self.run_dir, stage_dir, n)
+                if rec is None:
+                    return
+                what, name = "decode share", floor_report.SHARE_FILE
+                extra = {"shares": [round(r["share"], 4) for r in rec["rows"]]}
+            self.ledger.append("evidence", n, what=what, **extra, **evidence_record(self.run_dir, stage_dir / name))
+        except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
+            self.ledger.append("decision", n, decision="decode record not written", reason=f"{type(exc).__name__}: {exc}"[:200])
+
     def _stage_0_hazard_scan(self, stage_dir: Path) -> None:
         """Write stages/0/hazard-scan.json (orchard/stage0_scan.py) and record it in the ledger. The scan predicts kernel hazards from the
         model's config; a hit never stops the run, and a model directory it cannot read gives a record that says it was skipped."""
@@ -1946,6 +1965,8 @@ class Supervisor:
             ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
             if n == 6 and spec.gate_file == "result.json":
                 self._record_numbers(stage_dir)
+            if n in (0, 2, 4):
+                self._decode_floor_record(n, stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
             if n == 0:

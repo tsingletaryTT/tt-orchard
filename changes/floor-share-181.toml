@@ -1,0 +1,4 @@
+target = "0.9.79"
+summary = "Decode speed is reported as a share of the DRAM-bandwidth floor in stages 0, 2 and 4 and the operator bundle."
+pr = 295
+kind = "feature"
