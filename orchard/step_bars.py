@@ -95,7 +95,7 @@ def analyse(floor: dict, chip: dict, controls: dict, margin: float = MARGIN, req
         if len(vals) != n:
             raise ValueError(f"control {name} has {len(vals)} steps, expected {n}")
     bars = derive_bars(floor, margin)
-    reasons = []
+    reasons = [f"required control {name} was not supplied" for name in required if name not in controls]
     chip_rows = []
     for k in range(n):
         got = chip["dit_steps"][k]["rel_l2"]
@@ -130,9 +130,16 @@ def main(argv=None) -> int:
     p.add_argument("--margin", type=float, default=MARGIN)
     p.add_argument("--out", default=None)
     a = p.parse_args(argv)
+    floor_doc, chip_doc = load(a.floor), load(a.chip)
+    import hashlib
+    digest = hashlib.sha256((Path(a.run) / ar.MANIFEST).read_bytes()).hexdigest()
+    for name, doc in (("floor", floor_doc), ("chip", chip_doc)):
+        if doc.get("ref_manifest_sha256") != digest:
+            print(f"refused: the {name} file was not made from the run given with --run (manifest sha256 {doc.get('ref_manifest_sha256')!r}, run {digest})")
+            return 2
     with ar.load_run(a.run) as run:
         vel = [np.asarray(run.array("step_denoised", f"v{k}")) for k in range(len(load(a.floor)["dit_steps"]))]
-    result = analyse(load(a.floor), load(a.chip), controls_from_velocities(vel), a.margin)
+    result = analyse(floor_doc, chip_doc, controls_from_velocities(vel), a.margin)
     text = json.dumps(result, indent=1) + "\n"
     if a.out:
         Path(a.out).write_text(text)

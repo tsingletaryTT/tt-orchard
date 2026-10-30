@@ -65,5 +65,6 @@
   "slope": 0.9990575240129826,
   "max_abs_error": 0.02251090109348297,
   "log_spectrum_distance": 0.06437871623348775
- }
+ },
+ "ref_manifest_sha256": "3a0ede05cb43525e16b717b58738888ad8dc3b1064931ab2c186e2ccabcafd26"
 }

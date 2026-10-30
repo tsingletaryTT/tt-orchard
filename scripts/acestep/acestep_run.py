@@ -142,6 +142,11 @@ class VaeTap:
         return wave
 
 
+def _manifest_digest(run_dir) -> str:
+    import hashlib
+    return hashlib.sha256((Path(run_dir) / "manifest.json").read_bytes()).hexdigest()
+
+
 def stepcheck(worker, ref_dir: Path, out_json: Path) -> None:
     """Feeds the recorded CPU inputs of each step (not the chip's own earlier outputs) to the chip's transformer, and the CPU run's final
     latent to the chip's VAE. Each result is then the error of one chip call against the CPU's call on the same input, with nothing compounded."""
@@ -167,7 +172,7 @@ def stepcheck(worker, ref_dir: Path, out_json: Path) -> None:
     wave = vae(z[None].float())[0].numpy()
     ref_wave = np.asarray(run.array("waveform", "audio"))
     mw = ar.metrics(ref_wave, wave)
-    out_json.write_text(json.dumps({"ref_run": str(ref_dir.name), "dit_steps": steps,
+    out_json.write_text(json.dumps({"ref_run": str(ref_dir.name), "ref_manifest_sha256": _manifest_digest(ref_dir), "dit_steps": steps,
                                     "vae_on_cpu_final_latent": {**{k: mw[k] for k in ("pcc", "rel_l2", "slope", "max_abs_error")},
                                                                 "log_spectrum_distance": ar.log_spectrum_distance(ref_wave, wave)}}, indent=1) + "\n")
     print("stepcheck:", json.dumps(steps), flush=True)
@@ -180,6 +185,12 @@ def teacher_forced(tap, vtap, run, out_json: Path, dtype_name: str) -> None:
     error, each with equal inputs. This is the file `orchard.step_bars` reads as the floor."""
     import numpy as np
     from orchard import audio_reference as ar
+    for name, got, kind in (("encoder_states", tap.enc, "conditioning"), ("context", tap.ctx, "conditioning")):
+        ref = np.asarray(run.array(kind, name))
+        err = float(np.linalg.norm(got.numpy() - ref) / max(np.linalg.norm(ref), 1e-30)) if tuple(got.shape) == ref.shape else float("inf")
+        if err > 1e-4:
+            raise SystemExit(f"teacher forcing refused: the {name} made from this prompt and lyrics differ from the reference run's (relative L2 {err:.3g}); "
+                             "use the prompt, lyrics and seed the reference run was made with")
     steps = []
     for k, (x, v) in enumerate(tap.calls):
         v_ref = np.asarray(run.array("step_denoised", f"v{k}"))
@@ -187,7 +198,7 @@ def teacher_forced(tap, vtap, run, out_json: Path, dtype_name: str) -> None:
         steps.append({"step": k, **{key: m[key] for key in ("pcc", "rel_l2", "slope", "max_abs_error")}})
     ref_wave = np.asarray(run.array("waveform", "audio"))
     mw = ar.metrics(ref_wave, vtap.wave.numpy())
-    out_json.write_text(json.dumps({"ref_run": run.root.name, "dtype": dtype_name, "dit_steps": steps,
+    out_json.write_text(json.dumps({"ref_run": run.root.name, "ref_manifest_sha256": _manifest_digest(run.root), "dtype": dtype_name, "dit_steps": steps,
                                     "vae_on_cpu_final_latent": {**{k: mw[k] for k in ("pcc", "rel_l2", "slope", "max_abs_error")},
                                                                 "log_spectrum_distance": ar.log_spectrum_distance(ref_wave, vtap.wave.numpy())}}, indent=1) + "\n")
     print("teacher-forced:", json.dumps(steps), flush=True)

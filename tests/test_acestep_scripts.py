@@ -283,3 +283,17 @@ def test_check_bundle_refuses_a_code_directory_of_links(tmp_path):
     (code / "tt_acestep" / "b.py").unlink()
     (code / "tt_acestep" / "b.py").symlink_to(real)
     assert any("link" in x for x in cb.problems(code, snap, pins))
+def test_teacher_forcing_refuses_conditioning_that_differs_from_the_reference(tmp_path):
+    class R:
+        root = tmp_path / "ref"
+
+        def array(self, kind, name):
+            return np.ones((3, 8), np.float32) if name == "encoder_states" else np.ones((4, 128), np.float32)
+    (tmp_path / "ref").mkdir()
+    (tmp_path / "ref" / "manifest.json").write_text("{}")
+    tap = run.Tap(FakeDecoder())
+    _call(tap)
+    tap.enc = torch.ones(3, 8) * 1.5            # another prompt gives other encoder states
+    vt = run.VaeTap(lambda z: z)
+    with pytest.raises(SystemExit, match="teacher forcing refused"):
+        run.teacher_forced(tap, vt, R(), tmp_path / "o.json", "bfloat16")

@@ -108,6 +108,12 @@ def clip_matches_waveform(run_dir, wave, sample_rate: int = SAMPLE_RATE, clip_na
         return [f"the clip is {data.shape[1]} channels, {data.shape[0]} samples at {rate} Hz; the waveform is {w.shape[0]} channels, {w.shape[1]} samples"]
     if exact and float(np.abs(data - w.T).max()) > 2.0 / 32768:
         return ["the clip's samples differ from the recorded waveform by more than one 16-bit step"]
+    if not exact:
+        # A normalised clip is the recorded waveform times a gain (peak normalisation is linear), so it must correlate with it almost perfectly; a silent
+        # or unrelated file with the same rate and shape does not.
+        x, y = data.ravel(), w.T.ravel()
+        if x.std() == 0 or y.std() == 0 or float(np.corrcoef(x, y)[0, 1]) < 0.999:
+            return ["the clip is not the recorded waveform up to a gain (correlation below 0.999, or silent)"]
     return []
 
 
