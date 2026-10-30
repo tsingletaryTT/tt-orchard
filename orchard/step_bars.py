@@ -95,7 +95,9 @@ def analyse(floor: dict, chip: dict, controls: dict, margin: float = MARGIN, req
         if len(vals) != n:
             raise ValueError(f"control {name} has {len(vals)} steps, expected {n}")
     bars = derive_bars(floor, margin)
-    reasons = [f"required control {name} was not supplied" for name in required if name not in controls]
+    reasons = [] if floor.get("dtype") == "bfloat16" else ["the floor file is not a teacher-forced bfloat16 CPU measurement (its dtype is "
+                                                          f"{floor.get('dtype')!r}); a chip report cannot be its own floor"]
+    reasons += [f"required control {name} was not supplied" for name in required if name not in controls]
     chip_rows = []
     for k in range(n):
         got = chip["dit_steps"][k]["rel_l2"]
