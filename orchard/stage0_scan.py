@@ -38,7 +38,11 @@ def _triage_dirs(stage_dir: Path) -> tuple[str | None, str | None]:
 
 def _config_of(directory) -> dict:
     # a Hugging Face cache snapshot's config.json is a link into blobs/, so the path is resolved before the guarded read
-    return mc.read_model_config(os.path.realpath(Path(directory) / "config.json"))
+    try:
+        resolved = os.path.realpath(Path(directory) / "config.json")
+    except (ValueError, OSError) as exc:            # an embedded null byte, or a link loop
+        raise mc.ModelConfigError("model config not usable: the path cannot be resolved") from exc
+    return mc.read_model_config(resolved)
 
 
 def build_record(stage_dir, model_dir=None, nearest_dir=None, *, dies: int = 2) -> dict:
@@ -61,6 +65,11 @@ def build_record(stage_dir, model_dir=None, nearest_dir=None, *, dies: int = 2) 
             nearest = _config_of(nearest_dir)
         except mc.ModelConfigError as exc:
             note = f"the nearest model's config.json could not be used ({exc}), so the comparisons with it were skipped"
+    if nearest is not None:
+        try:
+            mc.dims(nearest)
+        except mc.ModelConfigError as exc:
+            nearest, note = None, f"the nearest model's config.json has unusable dimensions ({exc}), so the comparisons with it were skipped"
     try:
         scan = hazards.scan_model_hazards(model, nearest, dies=dies)
     except hazards.HazardInputError as exc:

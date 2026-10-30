@@ -179,3 +179,68 @@ def test_a_malformed_scan_file_never_stops_the_bundle(tmp_path):
 def test_the_stage_2_skill_points_the_agent_at_the_scan_and_says_not_to_claim_its_checks_ran():
     text = " ".join((Path(__file__).parent.parent / "orchard/skills/weights-swap-check.md").read_text().split())
     assert "stages/0/hazard-scan.json" in text and "`stage2_check`" in text and "its check was not run" in text
+
+
+# ---- review of PR 292 -------------------------------------------------------------------------------------------------------
+
+def test_a_null_byte_in_a_snapshot_path_is_a_skipped_input_and_never_raises(tmp_path):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "triage_config.json").write_text(json.dumps({"model_snapshot": str(snap(tmp_path, "m", MOE)), "nearest_snapshot": "a\u0000b"}))
+    rec = s0.write_scan(stage, model_dir=None, nearest_dir=None)
+    assert rec["scan"] == "ran" and any("nearest" in n for n in rec["notes"]) and "routed_experts_above_256" in {h["name"] for h in rec["hazards"]}
+    assert s0.write_scan(stage, model_dir="x\u0000y", nearest_dir=None)["scan"] == "skipped"
+
+
+def test_a_nearest_config_with_unusable_dimensions_keeps_the_models_own_hazards(tmp_path):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    rec = s0.write_scan(stage, model_dir=snap(tmp_path, "m", MOE), nearest_dir=snap(tmp_path, "n", {}))
+    assert rec["scan"] == "ran" and "routed_experts_above_256" in {h["name"] for h in rec["hazards"]}
+    assert any("nearest" in n and "skipped" in n for n in rec["notes"])
+
+
+def test_the_bundle_reads_the_scan_with_a_size_cap_and_refuses_a_fifo_or_a_device_link(tmp_path):
+    import os
+    import threading
+    from test_operator_bundle_template import build, bundle_of, make_run
+    run = make_run(tmp_path)
+    fifo = run / "stages/0" / s0.FILE
+    os.mkfifo(fifo)
+    done = []
+    t = threading.Thread(target=lambda: done.append(build(run)), daemon=True)
+    t.start()
+    t.join(30)
+    assert done and done[0].returncode == 0, "the bundle build blocked on a FIFO"
+    assert "could not be read" in (bundle_of(run) / "RISKS.md").read_text()
+    fifo.unlink()
+    os.symlink("/dev/zero", fifo)
+    assert build(run).returncode == 0
+    assert "could not be read" in (bundle_of(run) / "RISKS.md").read_text()
+
+
+def test_a_scan_whose_notes_are_not_a_list_is_reported_unreadable_and_never_stops_the_bundle(tmp_path):
+    risks, _ = _bundle(tmp_path, {"scan": "ran", "hazards": [], "notes": 1})
+    assert "could not be read" in risks
+
+
+def test_a_failure_to_write_the_scan_is_a_ledger_decision_and_the_stage_still_passes(tmp_path, monkeypatch):
+    from orchard.stages import GateResult, spec_for
+    from test_supervisor_stock import Rig, _supervisor
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+    r = Rig(tmp_path)
+    try:
+        r.run()
+        monkeypatch.setattr(s0, "write_scan", boom)
+        sup, led = _supervisor(r)
+        try:
+            spec = spec_for(0, "weights-only")
+            assert sup._end_stage(spec, r.run_dir / "stages/0", "pass", [], GateResult(True, (), ()), False) == "pass"
+            entries = led.read()
+        finally:
+            led.__exit__(None, None, None)
+        assert any(e["data"].get("decision") == "hazard scan not written" and "No space" in e["data"]["reason"] for e in entries)
+    finally:
+        r.close()

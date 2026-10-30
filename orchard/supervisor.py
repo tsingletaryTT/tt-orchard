@@ -1917,9 +1917,12 @@ class Supervisor:
         """Write stages/0/hazard-scan.json (orchard/stage0_scan.py) and record it in the ledger. The scan predicts kernel hazards from the
         model's config; a hit never stops the run, and a model directory it cannot read gives a record that says it was skipped."""
         model_dir = self.inputs.get("model")
-        rec = stage0_scan.write_scan(stage_dir, model_dir=model_dir)
-        self.ledger.append("evidence", 0, what="hazard scan", scan=rec["scan"], hazards=[h["name"] for h in rec["hazards"]],
-                           **evidence_record(self.run_dir, stage_dir / stage0_scan.FILE))
+        try:
+            rec = stage0_scan.write_scan(stage_dir, model_dir=model_dir)
+            self.ledger.append("evidence", 0, what="hazard scan", scan=rec["scan"], hazards=[h["name"] for h in rec["hazards"]],
+                               **evidence_record(self.run_dir, stage_dir / stage0_scan.FILE))
+        except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
+            self.ledger.append("decision", 0, decision="hazard scan not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).

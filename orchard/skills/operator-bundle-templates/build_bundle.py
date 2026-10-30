@@ -242,6 +242,16 @@ class Redactor:
 
 # ---- what the run produced --------------------------------------------------------------------------
 
+def read_capped_json(path: Path, *, max_bytes: int = 4 << 20) -> dict | None:
+    """The JSON object at `path` through orchard/safeio.py (size cap, no link followed, no FIFO read, strict JSON). None when the file is
+    absent, {} when it exists and cannot be read as an object."""
+    from orchard import safeio
+    try:
+        return safeio.read_json(path, max_bytes=max_bytes, expect=dict)
+    except safeio.SafeReadError as exc:
+        return None if "ENOENT" in str(exc.reason) else {}
+
+
 class Run:
     """Everything the bundle is built from, read once. Raises Missing for a required input."""
 
@@ -272,9 +282,7 @@ class Run:
         # An audio run has no reference.json: stage 1 wrote audio_reference.json, which the audio section reads through stage 2's result.
         # Stage 0's hazard scan (orchard/stage0_scan.py, issue 183): None when the run has none (an older run), {} when the file is unreadable.
         self.scan_file = s / "0" / "hazard-scan.json"
-        self.scan = read_json(self.scan_file, "", required=False)
-        if self.scan is None and (self.scan_file.exists() or self.scan_file.is_symlink()):
-            self.scan = {}
+        self.scan = read_capped_json(self.scan_file)
         self.reference = {} if (self.audio_run or self.text_run) else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
@@ -1978,7 +1986,7 @@ def scan_hits(run: Run) -> list[dict] | None:
     """The hazards of stage 0's scan: a list of dicts, [] when it ran and found none or was skipped, None when the file is absent or
     unreadable."""
     scan = run.scan
-    if not scan or not isinstance(scan.get("hazards"), list):
+    if not scan or not isinstance(scan.get("hazards"), list) or not isinstance(scan.get("notes", []), list):
         return None
     return [h for h in scan["hazards"] if isinstance(h, dict) and isinstance(h.get("name"), str)]
 
