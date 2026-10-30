@@ -400,3 +400,12 @@ def test_the_free_run_parser_handles_a_log_with_no_output_block():
     m = load_module()
     got = m.parse_free_run("nothing here")
     assert got["text"] == "" and got["prompt"] is None and got["decode_tokens_per_s"] is None and got["ttft_s"] is None
+
+
+def test_the_default_import_check_names_accelerate():
+    """The first real prepare (2026-10-29) loaded an 8B model on the CPU before it failed on a missing `accelerate`, which transformers needs for
+    device_map="auto" in tt-transformers' reference script. The default check names it, so the failure comes in seconds, before any model loads."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "orchard" / "skills" / "stock-runtime-templates"))
+    import importlib
+    mod = importlib.import_module("stock_check")
+    assert "accelerate" in mod.OPTIONAL_KEYS["import_check"]

@@ -62,6 +62,9 @@ REQUIREMENTS = (
     # newer"), found by the first real `--check` on 2026-10-26. 21.0.0 imports with numpy 1.26.4 (checked with `import datasets`).
     "pyarrow==21.0.0",
     "transformers==5.19.0",
+    # tt-transformers' generate_reference_hf.py loads the model with device_map="auto", which transformers refuses without accelerate
+    # (found by the first real stock-runtime prepare on 2026-10-29, Llama-3.1-8B-Instruct).
+    "accelerate==1.15.0",
     "tokenizers==0.23.3",
     "safetensors==0.8.0",
     "pytest==9.1.1",

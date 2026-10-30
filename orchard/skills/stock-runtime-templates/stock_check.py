@@ -17,7 +17,7 @@ lines; the gate (orchard/stages.py, gate_stock_runtime) judges them again agains
 
 stock_config.json keys: run_dir, model_id, model_name, model_snapshot, tt_metal_dir, scratch_dir, mesh_device, chips, optimizations,
 tt_cache, deadline_s; optional python_path_extra (directories put after the scratch copy on PYTHONPATH) and import_check (modules `prepare`
-must be able to import, default numpy, cv2 and torch) and demo_python (the interpreter every child runs under, from `tt-orchard demo-env`;
+must be able to import, default numpy, cv2, torch and accelerate) and demo_python (the interpreter every child runs under, from `tt-orchard demo-env`;
 default: the interpreter running this script). Exit codes: 0 done, 2 the config or an input does not fit (the message names it), 3 a run step failed (the log says
 which), 6 a model was fetched from the Hub."""
 from __future__ import annotations
@@ -37,7 +37,7 @@ KEYS = ("run_dir", "model_id", "model_name", "model_snapshot", "tt_metal_dir", "
         "tt_cache", "deadline_s")
 # The root conftest.py imports `tests.scripts.common`, so the package that holds it is copied too (about 700 KB).
 COPIED = ("models", "conftest.py", "pytest.ini", "tests/__init__.py", "tests/scripts")
-OPTIONAL_KEYS = {"python_path_extra": [], "import_check": ["numpy", "cv2", "torch"]}
+OPTIONAL_KEYS = {"python_path_extra": [], "import_check": ["numpy", "cv2", "torch", "accelerate"]}
 # `demo_python` (optional): the interpreter every child runs under, built by `tt-orchard demo-env`. Without it the children use the
 # interpreter that runs this script, which is what the shared environment gave on 2026-10-26 (numpy 2 with ttnn needing numpy below 2).
 MARKER = ".orchard-scratch.json"

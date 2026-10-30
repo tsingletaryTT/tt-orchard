@@ -165,7 +165,7 @@ def test_the_requirement_names_are_the_reviewed_set():
     got = {r.split("==")[0].lower() for r in de.REQUIREMENTS}
     assert got == {"numpy", "huggingface_hub", "datasets", "pyarrow", "transformers", "tokenizers", "safetensors", "pytest", "requests", "loguru",
                    "networkx", "graphviz", "pyyaml", "click", "pandas", "seaborn", "ml_dtypes", "pillow", "termcolor", "tqdm",
-                   "pydantic", "opencv-python-headless"}
+                   "pydantic", "opencv-python-headless", "accelerate"}
 
 
 def test_numpy_is_below_two_and_the_headless_opencv_is_the_one_asked_for():
