@@ -92,6 +92,9 @@ def write_clip(run_dir, sample_rate: int = SAMPLE_RATE, clip_name: str = "audio.
     return clip
 
 
+MIN_CLIP_PEAK = 0.01        # the lowest peak a normalised clip may have (full scale is 1.0)
+
+
 def clip_matches_waveform(run_dir, wave, sample_rate: int = SAMPLE_RATE, clip_name: str = "audio.flac", exact: bool = True) -> list[str]:
     """Reasons the clip file is not the recorded waveform: unreadable, or another length, rate or channel count. The FLAC is lossless on 16-bit
     samples, so the decoded values are compared with the waveform to within one 16-bit step. With `exact` false (a model whose pipeline normalises
@@ -106,6 +109,8 @@ def clip_matches_waveform(run_dir, wave, sample_rate: int = SAMPLE_RATE, clip_na
     w = np.asarray(wave, dtype=np.float64)
     if rate != sample_rate or data.shape != w.T.shape:
         return [f"the clip is {data.shape[1]} channels, {data.shape[0]} samples at {rate} Hz; the waveform is {w.shape[0]} channels, {w.shape[1]} samples"]
+    if not np.isfinite(data).all():                              # a NaN makes every comparison below False, which would accept the clip
+        return ["the clip holds samples that are not finite"]
     if exact and float(np.abs(data - w.T).max()) > 2.0 / 32768:
         return ["the clip's samples differ from the recorded waveform by more than one 16-bit step"]
     if not exact:
@@ -114,6 +119,8 @@ def clip_matches_waveform(run_dir, wave, sample_rate: int = SAMPLE_RATE, clip_na
         x, y = data.ravel(), w.T.ravel()
         if x.std() == 0 or y.std() == 0 or float(np.corrcoef(x, y)[0, 1]) < 0.999:
             return ["the clip is not the recorded waveform up to a gain (correlation below 0.999, or silent)"]
+        if float(np.abs(data).max()) < MIN_CLIP_PEAK:             # correlation ignores the level, so a copy scaled to near silence would pass
+            return [f"the clip is too quiet to be a usable clip (its peak is below {MIN_CLIP_PEAK}, about -40 dBFS)"]
     return []
 
 

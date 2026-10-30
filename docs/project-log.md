@@ -3425,3 +3425,7 @@ The operator approved publishing. `episod/ace-step-1.5-turbo-blackhole` was uplo
 - `settings_for` answers for a profile key from the profile's settings. `sample_rate_of(item)` and `clip_name_of(item)` read the profile, and an unknown key is an error. `write_clip` takes the clip file name. `run_references` and `finish_chip` use these for the clip path and rate.
 - `reference_command` refuses a profile item with a message that names `acestep_run.py`: the supervisor still has no CPU command for it, because the audio paths hold no bundle code, snapshot or project root.
 - Left on issue 269: the per-step stage 2 commands (`--teacher-forced`, `--stepcheck`, then `step_bars`), the supervisor's choice of runner, the gate callers passing the profile to `check_run_dir`, and the bundle and package builder reading the rate and clip file from the profile.
+## 2026-10-30 Validation gaps from the third review of PR 267 (issue 274)
+
+- `orchard.step_bars` main now reads the recorded run. It refuses a run whose `dtype` is not float32 or whose `device` is not cpu, a run whose step count differs from the reports, a run that lacks a recorded velocity for a step, and a chip file whose step count differs from the floor's. Four tests failed first.
+- `audio_stages.clip_matches_waveform` refuses a clip with non-finite samples in both modes (a NaN made the exact comparison and the correlation test return False, which accepted the clip). With `exact` false it also refuses a peak below `MIN_CLIP_PEAK` (0.01), because correlation ignores level. Both tests failed first.
