@@ -26,11 +26,12 @@ def _top(ids, lps):
 
 def make_evidence(d: Path, *, agree=False):
     d.mkdir(parents=True)
-    runs = [{"tokens": 128, "ttft_s": t, "decode_tok_s": v, "load1": 5.0 + i / 10} for i, (t, v) in enumerate([(0.11, 126.8), (0.10, 126.9), (0.12, 126.7)])]
-    bench = {"runs": runs, "min": 126.7, "median": 126.8, "max": 126.9}
-    (d / "bench_package.log").write_text("BENCH " + json.dumps(bench) + "\n")
-    for name, med in (("bench_40layer_grid105.log", 126.84), ("bench_40layer_rk72.log", 126.78)):
-        (d / name).write_text("BENCH " + json.dumps(dict(bench, median=med)) + "\n")
+    def bench(vals, ttfts=(0.11, 0.10, 0.12)):
+        runs = [{"tokens": 128, "ttft_s": t, "decode_tok_s": v, "load1": 5.0 + i / 10} for i, (t, v) in enumerate(zip(ttfts, vals))]
+        return "BENCH " + json.dumps({"runs": runs, "min": min(vals), "median": sorted(vals)[len(vals) // 2], "max": max(vals)}) + "\n"
+    (d / "bench_package.log").write_text(bench([126.8, 126.9, 126.7]))
+    (d / "bench_40layer_grid105.log").write_text(bench([126.84, 126.9, 126.7]))
+    (d / "bench_40layer_rk72.log").write_text(bench([126.78, 126.9, 126.7]))
     (d / "boot.txt").write_text("BOOT cold api_up_s=727 first_answer_s=728\nBOOT warm api_up_s=308 first_answer_s=309\n")
     ref, dev = [], []
     for i, p in enumerate(["alpha prompt", "beta prompt"]):
@@ -446,3 +447,117 @@ def test_a_non_utf8_package_file_is_a_problem_not_a_crash(pkg):
     (pkg / "README.md").write_bytes(b"\xff\xfe\x00bad")
     p = gate(pkg)
     assert any("README.md" in x for x in p), p
+
+
+# ---- review round 3 (Copilot review of commit f841ed5f): four medium findings ---------------------------------------------
+
+def _within(seconds, fn):
+    """Run fn in a thread; fail if it does not finish in time (a read that blocks on a FIFO)."""
+    import threading
+    box = {}
+    def run():
+        try:
+            box["v"] = fn()
+        except BaseException as exc:      # noqa: BLE001 - the test inspects it
+            box["e"] = exc
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(seconds)
+    assert not t.is_alive(), "the call blocked"
+    if "e" in box:
+        raise box["e"]
+    return box["v"]
+
+
+def test_fewer_than_three_measured_runs_are_refused(tmp_path):
+    ev = make_evidence(tmp_path / "ev3")
+    b = json.loads((ev / "bench_package.log").read_text()[6:])
+    b["runs"] = b["runs"][:2]
+    (ev / "bench_package.log").write_text("BENCH " + json.dumps(b) + "\n")
+    with pytest.raises(qp.PackageError, match="at least 3"):
+        qp.stage_package(SRC, ev, tmp_path / "p")
+
+
+def test_the_gate_reports_fewer_than_three_runs_in_a_staged_package(pkg):
+    f = pkg / "evidence" / "bench_package.log"
+    b = json.loads(f.read_text()[6:])
+    b["runs"] = b["runs"][:1]
+    f.write_text("BENCH " + json.dumps(b) + "\n")
+    assert any("at least 3" in x for x in gate(pkg))
+
+
+def test_summary_fields_must_match_the_per_run_values(tmp_path):
+    ev = make_evidence(tmp_path / "ev4")
+    b = json.loads((ev / "bench_package.log").read_text()[6:])
+    b["runs"][0]["decode_tok_s"] = 50.0               # the summary still says min 126.7
+    (ev / "bench_package.log").write_text("BENCH " + json.dumps(b) + "\n")
+    with pytest.raises(qp.PackageError, match="summary"):
+        qp.stage_package(SRC, ev, tmp_path / "p")
+
+
+def test_ablation_logs_get_the_same_summary_check(tmp_path):
+    ev = make_evidence(tmp_path / "ev5")
+    b = json.loads((ev / "bench_40layer_rk72.log").read_text()[6:])
+    b["median"] = 140.0
+    (ev / "bench_40layer_rk72.log").write_text("BENCH " + json.dumps(b) + "\n")
+    with pytest.raises(qp.PackageError, match="summary"):
+        qp.stage_package(SRC, ev, tmp_path / "p")
+
+
+def test_the_card_uses_values_computed_from_the_runs(pkg):
+    assert "126.80 tok/s (min 126.70, max 126.90)" in (pkg / "README.md").read_text()
+
+
+def test_a_fifo_in_the_evidence_does_not_hang_staging(tmp_path):
+    ev = make_evidence(tmp_path / "ev6")
+    (ev / "boot.txt").unlink()
+    os.mkfifo(ev / "boot.txt")
+    with pytest.raises(qp.PackageError):
+        _within(10, lambda: qp.stage_package(SRC, ev, tmp_path / "p"))
+
+
+def test_a_fifo_in_a_staged_package_does_not_hang_the_gate(pkg):
+    (pkg / "evidence" / "boot.txt").unlink()
+    os.mkfifo(pkg / "evidence" / "boot.txt")
+    p = _within(10, lambda: gate(pkg))
+    assert p
+
+
+def test_evidence_over_the_size_cap_is_refused_at_staging(tmp_path):
+    ev = make_evidence(tmp_path / "ev7")
+    (ev / "bench_package.log").write_text("BENCH " + "x" * (qp.MAX_FILE_BYTES + 10))
+    with pytest.raises(qp.PackageError):
+        qp.stage_package(SRC, ev, tmp_path / "p")
+
+
+def test_a_source_file_fifo_does_not_hang_staging(tmp_path, ev):
+    src = tmp_path / "src"
+    shutil.copytree(SRC, src)
+    (src / "prompts.json").unlink()
+    os.mkfifo(src / "prompts.json")
+    with pytest.raises(qp.PackageError):
+        _within(10, lambda: qp.stage_package(src, ev, tmp_path / "p"))
+
+
+@pytest.mark.parametrize("rel", ["prompts.json", "check/bench.py", "check/ref_cpu.py", "check/device_quality.py", "check/prompt.txt", "docs/running.md", "NOTICE",
+                                 "tt-model.yaml", "publish-commands.txt"])
+def test_every_support_file_is_required_even_when_the_record_agrees(pkg, rel):
+    (pkg / rel).unlink()
+    rec = json.loads((pkg / "package-record.json").read_text())
+    rec["files"].pop(rel)
+    (pkg / "package-record.json").write_text(json.dumps(rec))
+    assert any(f"{rel} is missing" in x for x in gate(pkg)), gate(pkg)
+
+
+@pytest.mark.parametrize("rel", ["NOTICE", "tt-model.yaml", "docs/running.md", "publish-commands.txt"])
+def test_generated_files_must_equal_their_generator_output_even_when_the_record_agrees(pkg, rel):
+    f = pkg / rel
+    f.write_text(f.read_text() + "\nextra line\n")
+    rec = json.loads((pkg / "package-record.json").read_text())
+    rec["files"][rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+    (pkg / "package-record.json").write_text(json.dumps(rec))
+    assert any(f"{rel} is not what the package builder generates" in x for x in gate(pkg)), gate(pkg)
+
+
+def test_source_files_are_compared_with_the_record_not_regenerated(pkg):
+    assert not any("generates" in x for x in gate(pkg))

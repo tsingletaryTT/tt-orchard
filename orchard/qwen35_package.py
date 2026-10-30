@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import statistics
 import stat
 from pathlib import Path
 
@@ -50,6 +51,7 @@ PATCHED_SHA = "1b94978020b09501cdc404d55041f143b67258dbb609c485e1ac68bae54e8a7b"
 POLICY = {"attention": "bfp8", "dense_mlp": "bfp8", "router": "bf16", "routed_experts": "bfp4", "shared_experts": "bfp8", "lm_head": "bfp4"}
 POLICY_TEXT = "bfp8 attention and shared experts, bfp4 routed experts and head, bf16 router"
 EARLIER_WARM = "267 to 272 seconds in the earlier fusion-port runs (the kernel cache was seeded from the coder's)"
+GENERATED_FILES = {"README.md": None, "NOTICE": None, "tt-model.yaml": None, "docs/running.md": None, "publish-commands.txt": None}   # filled below
 # every file the evidence directory must hold; the facts are derived from these and nothing else
 EVIDENCE_FILES = ("bench_package.log", "bench_40layer_grid105.log", "bench_40layer_rk72.log", "boot.txt", "cpu_reference.json",
                   "device_quality.json", "config.json")
@@ -190,14 +192,39 @@ The weights revision pinned here is `{REVISION}`.
 """
 
 
-def _bench_line(path: Path) -> dict:
-    for line in path.read_text(encoding="utf-8").splitlines():
+MIN_REPEATS = 3          # docs/benchmark-rules.md: measured runs needed for the label "benchmark"
+
+
+def _read_capped(path: Path) -> bytes:
+    """The regular file's bytes, never more than MAX_FILE_BYTES, never blocking on a FIFO. A failure is a PackageError that names the file."""
+    try:
+        return safeio.read_bytes(path, max_bytes=MAX_FILE_BYTES)
+    except (safeio.SafeReadError, OSError) as exc:
+        raise PackageError(f"{path.name} could not be read ({type(exc).__name__})") from exc
+
+
+def load_evidence(evidence) -> dict:
+    """The raw evidence files as bytes, each read once through the capped reader. Staging copies these same bytes and the facts come from them."""
+    ev = Path(evidence)
+    return {n: _read_capped(ev / n) for n in EVIDENCE_FILES}
+
+
+def _bench_summary(blob: bytes, name: str) -> dict:
+    """The BENCH line of a benchmark log, with min, median and max recomputed from the per-run values. The log's own summary must agree
+    (to two decimals) and there must be at least MIN_REPEATS measured runs."""
+    for line in blob.decode("utf-8").splitlines():
         if line.startswith("BENCH "):
             d = json.loads(line[6:])
-            if not d.get("runs"):
-                raise PackageError(f"{path.name} has no measured runs")
-            return d
-    raise PackageError(f"{path.name} has no BENCH line")
+            runs = d["runs"]
+            if not isinstance(runs, list) or len(runs) < MIN_REPEATS:
+                raise PackageError(f"{name} has fewer than {MIN_REPEATS} measured runs; the rules need at least {MIN_REPEATS} for the label benchmark")
+            v = [float(r["decode_tok_s"]) for r in runs]
+            got = {"min": min(v), "median": statistics.median(v), "max": max(v)}
+            for k, x in got.items():
+                if round(float(d[k]), 2) != round(x, 2):
+                    raise PackageError(f"{name}: the summary field {k} ({d[k]}) does not match the per-run values ({round(x, 2)})")
+            return {"runs": runs, **got}
+    raise PackageError(f"{name} has no BENCH line")
 
 
 def compare_rows(ref, dev):
@@ -225,26 +252,26 @@ def compare_rows(ref, dev):
 
 
 def facts_from_evidence(evidence) -> dict:
-    """Every measured number on the card, recomputed from the raw files in `evidence` with this module's own code.
-    Raises PackageError when a file is missing or cannot be read."""
-    ev = Path(evidence)
-    for n in EVIDENCE_FILES:
-        if not (ev / n).is_file():
-            raise PackageError(f"evidence/{n} is missing")
+    """Every measured number on the card, recomputed from the raw files in `evidence` with this module's own code."""
+    return facts_from_blobs(load_evidence(evidence))
+
+
+def facts_from_blobs(blobs: dict) -> dict:
+    """The facts from evidence bytes already read. Raises PackageError when a file cannot be used."""
     try:
-        b = _bench_line(ev / "bench_package.log")
+        b = _bench_summary(blobs["bench_package.log"], "bench_package.log")
         runs = b["runs"]
         boots = {}
-        for line in (ev / "boot.txt").read_text(encoding="utf-8").splitlines():
+        for line in blobs["boot.txt"].decode("utf-8").splitlines():
             m = re.match(r"BOOT (cold|warm) api_up_s=(\d+) first_answer_s=(\d+)$", line.strip())
             if m:
                 boots[m.group(1)] = int(m.group(3))
         if set(boots) != {"cold", "warm"}:
             raise PackageError("evidence/boot.txt needs one cold and one warm BOOT line")
-        ref = json.loads((ev / "cpu_reference.json").read_text(encoding="utf-8"))
-        dev = json.loads((ev / "device_quality.json").read_text(encoding="utf-8"))
+        ref = safeio.parse_json_bytes(blobs["cpu_reference.json"], max_bytes=MAX_FILE_BYTES, expect=list)
+        dev = safeio.parse_json_bytes(blobs["device_quality.json"], max_bytes=MAX_FILE_BYTES, expect=dict)
         rows = compare_rows(ref, dev["completions"])
-        cfg = mc.read_model_config(ev / "config.json")
+        cfg = safeio.parse_json_bytes(blobs["config.json"], max_bytes=MAX_FILE_BYTES, expect=dict)
         floor = floor_for_board(cfg, POLICY, "p300")
         ttft = sorted(r["ttft_s"] for r in runs)
         chat = dev["chat"]
@@ -256,8 +283,8 @@ def facts_from_evidence(evidence) -> dict:
             "quality": {"rows": rows},
             "chat": {"default": chat["default"]["text"][:160] + "...", "finish": chat["default"]["finish"], "thinking_off": chat["thinking_off"]["text"]},
             "long_prompt": {"tokens": dev["long_prompt"]["prompt_tokens"], "text": dev["long_prompt"]["text"].split("\n")[0]},
-            "ablations": {"grid_median": _bench_line(ev / "bench_40layer_grid105.log")["median"],
-                          "rk_median": _bench_line(ev / "bench_40layer_rk72.log")["median"]},
+            "ablations": {"grid_median": _bench_summary(blobs["bench_40layer_grid105.log"], "bench_40layer_grid105.log")["median"],
+                          "rk_median": _bench_summary(blobs["bench_40layer_rk72.log"], "bench_40layer_rk72.log")["median"]},
         }
     except Exception as exc:       # the evidence is untrusted data: any shape of it that breaks the derivation is a named problem
         if isinstance(exc, PackageError):
@@ -348,17 +375,18 @@ def stage_package(src, evidence, out) -> dict:
     src, evidence, out = Path(src), Path(evidence), Path(out)
     if out.exists():
         raise PackageError("the output directory already exists; stage into a new one")
-    facts = facts_from_evidence(evidence)
+    blobs = load_evidence(evidence)            # each evidence file is read once; the facts and the copies use these bytes
+    facts = facts_from_blobs(blobs)
     files: dict[str, bytes | str] = {}
     for rel in SOURCE_FILES:
-        files[rel] = (src / rel).read_bytes()
+        files[rel] = _read_capped(src / rel)
     files["README.md"] = render_card(facts)
     files["NOTICE"] = notice_text()
     files["tt-model.yaml"] = manifest_text()
     files["docs/running.md"] = running_doc()
     files["publish-commands.txt"] = publish_text()
     for n in EVIDENCE_FILES:
-        files[f"evidence/{n}"] = (evidence / n).read_bytes()
+        files[f"evidence/{n}"] = blobs[n]
     files["evidence/facts.json"] = json.dumps(facts, indent=1, sort_keys=True)
     record = {"package": PACKAGE_NAME, "revision": REVISION, "image_id": IMAGE_ID, "files": {}}
     for rel, data in files.items():
@@ -425,8 +453,8 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
         for w in BANNED_WORDS:
             if w in low:
                 problems.append(f"{rel} mentions {w!r}")
-    need = ["README.md", "NOTICE", "LICENSE", "run.sh", "pins.env", "fetch_weights.py", "weights_qwen35_moe.patch", "tt-model.yaml",
-            "package-record.json", "check/compare.py"] + [f"evidence/{n}" for n in EVIDENCE_FILES] + ["evidence/facts.json"]
+    # every file the builder writes is required whatever the record says: a removed file and its record entry together must not pass
+    need = list(SOURCE_FILES) + list(GENERATED_FILES) + ["package-record.json"] + [f"evidence/{n}" for n in EVIDENCE_FILES] + ["evidence/facts.json"]
     missing = [n for n in need if not (pkg / n).is_file()]
     if missing:
         return problems + [f"{n} is missing" for n in missing]
@@ -447,6 +475,9 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
     for k, v in (("IMAGE_ID", IMAGE_ID), ("LOADER", LOADER_PATH), ("ORIG_SHA", ORIG_SHA), ("PATCHED_SHA", PATCHED_SHA)):
         if pins.get(k) != v:
             problems.append(f"pins.env {k} is {pins.get(k)!r}, expected {v!r}")
+    for rel, make in GENERATED_FILES.items():
+        if rel != "README.md" and text(rel) != make():
+            problems.append(f"{rel} is not what the package builder generates")
     run = text("run.sh")
     if "pins.env" not in run or "PATCHED_SHA" not in run:
         problems.append("run.sh does not read pins.env and check PATCHED_SHA")
@@ -529,3 +560,6 @@ def _record_problems(pkg: Path, all_files) -> list[str]:
     for extra in sorted(on_disk - set(files)):
         out.append(f"{extra} is not in the record")
     return out
+
+
+GENERATED_FILES.update({"NOTICE": notice_text, "tt-model.yaml": manifest_text, "docs/running.md": running_doc, "publish-commands.txt": publish_text})

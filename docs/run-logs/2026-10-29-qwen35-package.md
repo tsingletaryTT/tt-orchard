@@ -129,3 +129,17 @@ early return on oversized files, all-agree runs) and listed four open ones. Each
 Also changed: every package file the gate reads goes through the bounded reader and a non-UTF-8 file is a named problem; the derivation of facts from evidence catches any failure on untrusted evidence
 and raises `PackageError`, so a wrong-shaped evidence file is a named problem and a staging error. Tests: 75. Mutations run: the path check, its component rule, the shape check of the record, the dict
 requirement on the record, the broad catch on evidence (each red); removing only the resolve-and-contain check leaves the tests green because the link check rejects first.
+
+## Review round 3 (Copilot review of commit f841ed5f): four medium findings, no high
+
+That review resolved the two high and two medium findings of round 2 and listed four new medium ones. Each has tests that were red first (16 failures before the fix, 98 passing after).
+
+| Finding | Fix |
+| --- | --- |
+| A log with one measured run was labelled "benchmark" | Evidence logs (the package run and both ablation runs) need at least 3 measured runs (`docs/benchmark-rules.md`); fewer is a staging error and a gate problem |
+| min, median and max came from the log's summary fields | They are recomputed from `runs[*].decode_tok_s`; a summary that disagrees to two decimals is refused, for the ablation logs too |
+| Evidence was reopened with ordinary reads (a FIFO hangs, a large file is read whole) | Every evidence and source file is read once through `safeio.read_bytes` (5 MB cap, non-blocking); the facts and the copies in the package use those same bytes. Tests with a FIFO in the evidence, in the source and in a staged package finish within 10 seconds; an oversize log is refused |
+| The gate did not require every support file | The required list is every source file and every generated file, whatever the record says; `NOTICE`, `tt-model.yaml`, `docs/running.md` and `publish-commands.txt` must equal their generator's output |
+
+Mutations run, each red: the minimum repeats, the summary comparison, the capped reader, the generated-file comparison, the required list, and reading evidence outside the reader. The real evidence stages and passes the gate (checked after the changes).
+Per the operator's rule, no further Copilot review was requested: the last review listed no High finding.
