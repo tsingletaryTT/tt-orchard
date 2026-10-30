@@ -3361,6 +3361,20 @@ The operator approved publishing. `episod/qwen3.5-35b-a3b-blackhole-p300` was up
 - The restaged package was gated (`package_problems` empty) and booted cold on board 1 in 471 s (PR 265). Only the manifest, record and publish text changed after that boot, so `run.sh` is the booted one.
 - After the fixes: private upload, 7 of 7; public, 7 of 7 without a token.
 
+## 2026-10-30 ACE-Step: per-step bars and an audio profile (issues 262, 263; branch `acestep-stepbars`)
+Prompt (operator): continue the ACE-Step bring-up; per-step bars with a teacher-forced bfloat16 CPU floor, then an audio profile for non-Stable-Audio models, then a local package.
+- Teacher-forced bfloat16 CPU floor added to `acestep_run.py` (`--teacher-forced`); `orchard/step_bars.py` sets per-step bars at 2.0 times that floor and refuses when a wrong-step control passes them. Two prompts, 30 s.
+- Finding: the earlier 0.10 bar was too tight at steps 0 and 1 (the CPU bfloat16 floor is 0.13 to 0.17 there) and loose at steps 5 to 7. The chip is under the CPU floor on steps 0 to 4; its decoder is 1.6 to 1.9 times the CPU decoder floor, so the margin is 2.
+- `orchard/audio_profile.py`: sample rate, clip file, recorded layout and stage-2 kind per model family (Stable Audio and ACE-Step). `audio_stages.check_run_dir` takes a profile. The supervisor and `audio_plan` are not wired to it yet.
+- Log: `docs/run-logs/2026-10-30-acestep-step-bars.md`; evidence in `docs/run-logs/evidence/acestep-step-bars/`.
+
+## 2026-10-30 ACE-Step package, gate and boot check (issue 254 step 3; branch `acestep-package`)
+Prompt (operator): a weights-free local package built like the Granite and audio packages, gate-clean and boot-checked on a chip.
+- New: `orchard/acestep_package.py` (stage, summary, gate), `scripts/acestep/acestep_serve.py` (HTTP server around a loaded `Session`), `pkgsrc/acestep/tools/` (`check_bundle.py`, `smoke.py`), tests (13 package, 11 server and bundle check).
+- The package pins the model revision, the bundle revision, a hash over the 1,307 bundle files and each weight file. It carries no weights and no bundle code.
+- Finding: with the bundle code as a directory of cache links, ACE-Step does not find its own model code and runs the Hub's copy; the music differs with no error. The runner, `check_bundle.py` and `run.sh fetch` now require real files.
+- Boot check on one chip of board 1: ready in 16 s, 30 s clip in 3.3 s, samples identical to the first bring-up's recorded clip. Gate: 0 problems.
+- Log: `docs/run-logs/2026-10-30-acestep-package.md`; evidence in `docs/run-logs/evidence/acestep-package/`.
 ## 2026-10-30 Stock-runtime class: first chip result, Llama-3.1-8B-Instruct (branch `stock-chip-result`, issues 93 and 62)
 Prompt (operator, relayed): start #93 together with #62 on Llama-3.1-8B-Instruct (fallback Qwen2.5-7B-Instruct), work out what each issue needs, test first, measure on hardware.
 - Result: `stock_check.py` ran by hand under a gozer lease on board 1. One chip (P150): top-1 97.2 percent, top-5 100 percent over 500 tokens, 45.46 tok/s/user, first token 53 ms. Two chips (P300): 96.6 and 100 percent, 55.86 tok/s/user. Both pass `gate_stock_runtime`. Run log: `docs/run-logs/2026-10-30-stock-runtime-llama31-8b.md`.

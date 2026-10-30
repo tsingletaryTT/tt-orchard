@@ -1,0 +1,17 @@
+{
+ "ok": true,
+ "ready_s": 16.0,
+ "server_load_s": 12.74,
+ "request_s": 3.3185,
+ "duration_s": 30.0,
+ "sample_rate": 48000,
+ "channels": 2,
+ "clip_duration_s": 30.0,
+ "loud_window_fraction": 0.8033,
+ "identical_to_recorded_clip": true,
+ "max_abs_sample_difference": 0.0,
+ "recorded_clip": "the 30 s clip of the bring-up run (same prompt, seed 42)",
+ "sound_checks_ok": true,
+ "self_test": "pass",
+ "fetch": "run.sh fetch downloaded the bundle code as real files"
+}

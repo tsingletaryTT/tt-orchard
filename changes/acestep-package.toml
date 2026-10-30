@@ -1,0 +1,3 @@
+target = "0.9.73"
+summary = "ACE-Step 1.5 turbo local package: HTTP server, pins, gate, boot check on one chip; the bundle code must be a directory of real files."
+pr = 268
