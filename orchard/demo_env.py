@@ -49,6 +49,8 @@ INSTALLER = "orchard-demo-env"
 
 # CPU torch comes first and alone: the CPU index carries old copies of certifi and requests (README, "setup").
 TORCH = "torch==2.7.0"
+# The root conftest.py of the host tree imports torchvision (found by the first real stock-runtime run, 2026-10-29). It comes from the same CPU index as torch.
+TORCHVISION = "torchvision==0.22.0"
 # Resolved together by uv on 2026-10-26 (Python 3.12, linux x86_64) and chosen because they import together:
 # numpy 1.26.4 (ttnn declares numpy<2, and cv2 and torch 2.7 accept it), huggingface_hub 1.33.0 with datasets 4.8.5
 # (datasets 2.x imports HfFolder, which hub 1.x dropped) and transformers 5.19.0 (the version stage 1 was run with).
@@ -65,6 +67,8 @@ REQUIREMENTS = (
     # tt-transformers' generate_reference_hf.py loads the model with device_map="auto", which transformers refuses without accelerate
     # (found by the first real stock-runtime prepare on 2026-10-29, Llama-3.1-8B-Instruct).
     "accelerate==1.15.0",
+    # benchmarking_utils in the host tree imports pytz (found by the same run).
+    "pytz==2026.6",
     "tokenizers==0.23.3",
     "safetensors==0.8.0",
     "pytest==9.1.1",
@@ -88,7 +92,7 @@ REQUIREMENTS = (
 PURELIB_CODE = "import sysconfig; print(sysconfig.get_paths()['purelib'])"
 CV2_CODE = "import cv2"
 DATASETS_CODE = "import datasets"
-TORCH_CODE = "import torch, transformers, tokenizers, safetensors"
+TORCH_CODE = "import torch, torchvision, transformers, tokenizers, safetensors"
 VERSIONS_CODE = ("import importlib.metadata as m, json; "
                  "print(json.dumps({d.metadata['Name']: d.version for d in m.distributions()}))")
 TAG = re.compile(r"v\d+(\.\d+){1,3}([-.]?(rc|dev|post)\d+)?")
@@ -100,7 +104,7 @@ def dist_code(name: str) -> str:
 
 
 def requirements_sha256() -> str:
-    text = "\n".join([TORCH_CPU_INDEX, TORCH, PYPI_INDEX, *REQUIREMENTS])
+    text = "\n".join([TORCH_CPU_INDEX, TORCH, TORCHVISION, PYPI_INDEX, *REQUIREMENTS])
     return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -316,7 +320,7 @@ def step_packages(env: DEnv, check_only: bool) -> Result:
     removed after the last build (numpy 2 after a stray `pip install`, for example), which the record's hash of the pins cannot see.
     `--check` and `--dry-run` change nothing: they take the record's word for the install and the rules judge the result."""
     py = str(env.py)
-    torch = ["uv", "pip", "install", "--quiet", "--python", py, "--index-url", TORCH_CPU_INDEX, TORCH]
+    torch = ["uv", "pip", "install", "--quiet", "--python", py, "--index-url", TORCH_CPU_INDEX, TORCH, TORCHVISION]
     pins = ["uv", "pip", "install", "--quiet", "--python", py, "--index-url", PYPI_INDEX, *REQUIREMENTS]
     if check_only:
         rec = read_record(env)
@@ -383,7 +387,7 @@ def pin_rule(env: DEnv) -> Result:
     if installed is None:
         return Result("pins", FAIL, f"the installed versions could not be listed. Run `{fix_command(env)}`")
     bad = []
-    for pin in (TORCH, *REQUIREMENTS):
+    for pin in (TORCH, TORCHVISION, *REQUIREMENTS):
         name, want = pin.split("==")
         have = installed.get(_norm(name))
         if have is None:

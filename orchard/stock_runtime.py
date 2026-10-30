@@ -312,7 +312,9 @@ def draft_config(*, run_dir, delta, inputs: dict, chips, cache_root) -> tuple[di
     cfg = {"run_dir": str(run_dir), "model_id": delta.get("model"), "model_name": name, "model_snapshot": str(snapshot),
             "tt_metal_dir": str(Path(params).parents[3]), "scratch_dir": str(Path(run_dir) / "tt-metal-scratch"),
             "mesh_device": MESH_DEVICE[chips], "chips": chips, "optimizations": "accuracy",
-            "tt_cache": str(Path(cache_root) / "stock" / name.lower() / MESH_DEVICE[chips]), "deadline_s": STOCK_DEADLINE_S}
+            "tt_cache": str(Path(cache_root) / "stock" / name.lower() / MESH_DEVICE[chips]), "deadline_s": STOCK_DEADLINE_S,
+            # ttnn 0.80.0 on this box does not return from loading a cached tensor of about 35 MB or more (2026-10-29): run with no cache files
+            "disable_tensor_cache": True}
     if "demo_python" in inputs:
         cfg["demo_python"] = demo        # the interpreter every child of stock_check.py runs under (issue 92)
     return cfg, []

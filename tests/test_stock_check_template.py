@@ -34,6 +34,10 @@ def test_demo_text(opt, case):
         for i in range(500):
             print(f"Iteration {i}: 25ms @ 40.0 tok/s/user (40.0 tok/s throughput)")
         print(" Top1 Accuracy: 91.20%, Top5 Accuracy: 98.40%")
+        if pathlib.Path("fake-no-target").exists():
+            raise ValueError("Could not find centralized accuracy targets for Llama-3.1-8B on P300 (batch_size=1, seq_len=512)")
+        if pathlib.Path("fake-late-fail").exists():
+            raise ValueError("something else went wrong after the accuracy line")
     else:
         for i in range(200):
             print(f"2026-10-26 10:00:00.000 | INFO     | demo:run:1 - Iteration {i}: 25ms @ 40.0 tok/s/user (40.0 tok/s throughput)")
@@ -418,3 +422,52 @@ def test_the_default_import_check_names_accelerate():
     import importlib
     mod = importlib.import_module("stock_check")
     assert "accelerate" in mod.OPTIONAL_KEYS["import_check"]
+
+
+def test_a_missing_tt_transformers_target_after_the_accuracy_is_printed_is_recorded_and_does_not_fail_the_run(rig):
+    """The 2-chip run of 2026-10-29 (Llama-3.1-8B on P300) printed 96.6 percent and 100 percent, then tt-transformers' own check found no published
+    target for that board and failed the test. The numbers are the measurement; orchard's gate judges them against its own bars. The record says the
+    upstream check could not run."""
+    rig.go("prepare")
+    (rig.run_dir / "tt-metal-scratch" / "fake-no-target").write_text("x")
+    done = rig.go("run")
+    assert done.returncode == 0, done.stderr
+    ev = rig.evidence()
+    assert ev["teacher_forced"]["top1"] == 0.912 and ev["exit_codes"]["token_accuracy"] != 0
+    assert ev["tt_transformers_target"]["found"] is False and "P300" in ev["tt_transformers_target"]["message"]
+
+
+def test_any_other_failure_after_the_accuracy_line_still_fails_the_run(rig):
+    rig.go("prepare")
+    (rig.run_dir / "tt-metal-scratch" / "fake-late-fail").write_text("x")
+    done = rig.go("run")
+    assert done.returncode == 3 and "token accuracy 1" in done.stderr
+
+
+def test_a_run_with_the_target_present_records_that_it_was_found(rig):
+    rig.go("prepare")
+    rig.go("run")
+    assert rig.evidence()["tt_transformers_target"] == {"found": True, "message": None}
+
+
+def test_disable_tensor_cache_appends_the_patch_to_the_scratch_conftest_once(rig):
+    rig.cfg["disable_tensor_cache"] = True
+    rig.write_cfg()
+    assert rig.go("prepare").returncode == 0 and rig.go("prepare").returncode == 0
+    text = (rig.run_dir / "tt-metal-scratch" / "conftest.py").read_text()
+    assert text.count("orchard scratch patch (issue 93)") == 1 and 'kwargs["cache_file_name"] = None' in text
+    rig.go("run")
+    patch = (rig.stage / "evidence/scratch.patch").read_text()
+    assert "cache_file_name" in patch                      # the change is in the evidence, like any other scratch change
+
+
+def test_without_disable_tensor_cache_the_scratch_conftest_is_a_plain_copy(rig):
+    rig.go("prepare")
+    assert (rig.run_dir / "tt-metal-scratch" / "conftest.py").read_text() == (rig.host / "conftest.py").read_text()
+
+
+def test_disable_tensor_cache_must_be_true_or_false(rig):
+    rig.cfg["disable_tensor_cache"] = "yes"
+    rig.write_cfg()
+    done = rig.go("prepare")
+    assert done.returncode == 2 and "disable_tensor_cache" in done.stderr

@@ -3360,3 +3360,12 @@ The operator approved publishing. `episod/qwen3.5-35b-a3b-blackhole-p300` was up
 - First verify-package pass failed 2 of 7: it did not read a record whose `files` is a path-to-sha256 map, and the manifest still said `NAMESPACE`. Both are fixed in the builder with tests that failed first. The manifest and the publish text name `episod`.
 - The restaged package was gated (`package_problems` empty) and booted cold on board 1 in 471 s (PR 265). Only the manifest, record and publish text changed after that boot, so `run.sh` is the booted one.
 - After the fixes: private upload, 7 of 7; public, 7 of 7 without a token.
+
+## 2026-10-30 Stock-runtime class: first chip result, Llama-3.1-8B-Instruct (branch `stock-chip-result`, issues 93 and 62)
+Prompt (operator, relayed): start #93 together with #62 on Llama-3.1-8B-Instruct (fallback Qwen2.5-7B-Instruct), work out what each issue needs, test first, measure on hardware.
+- Result: `stock_check.py` ran by hand under a gozer lease on board 1. One chip (P150): top-1 97.2 percent, top-5 100 percent over 500 tokens, 45.46 tok/s/user, first token 53 ms. Two chips (P300): 96.6 and 100 percent, 55.86 tok/s/user. Both pass `gate_stock_runtime`. Run log: `docs/run-logs/2026-10-30-stock-runtime-llama31-8b.md`.
+- The first real run stopped four times, each fixed test first: `accelerate`, `torchvision` and `pytz` missing from the demo venv (pinned; the default import check names `accelerate`); `tests/tests_common` missing from the scratch copy; and a ttnn 0.80.0 hang in `load_tensor_flatbuffer` for cached tensors of about 35 MB or more, worked around by the new config key `disable_tensor_cache` (a scratch patch to `conftest.py`). `scratch.patch` now covers every copied path.
+- The template records a missing tt-transformers accuracy target (P300 has none for this model) as `tt_transformers_target` and does not fail the run on it.
+- Stage 8 gets a "Stock runtime on a chip" section and a "Stock runtime run" risk section.
+- Not done: stage 4 supervisor wiring, a 4-chip run, #62's package-thin install and boot, other models. The text route does not apply: tt-transformers is the runtime, not a script set in this repository.
+- Lease note: `gozer wait` on a queued `--owner-pid` acquire granted under the waiter's pid and the lease went stale. The second lease was taken directly with `--owner-pid`.

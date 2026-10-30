@@ -43,8 +43,9 @@ def test_the_other_stages_of_the_stock_path_are_skipped_with_a_reason(n):
     assert s.skip and len(s.skip) > 30
 
 
-def test_stage_four_says_it_is_not_built_yet():
-    assert "not built" in spec_for(4, "stock-runtime").skip
+def test_stage_four_says_it_is_not_wired_and_names_the_hand_run():
+    skip = spec_for(4, "stock-runtime").skip
+    assert "not wired" in skip and "2-chip" in skip and "stock_check.py" in skip
 
 
 def test_the_weights_only_and_full_port_tables_are_unchanged():

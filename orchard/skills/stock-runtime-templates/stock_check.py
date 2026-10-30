@@ -16,7 +16,7 @@ runtime is the host build's `ttnn`, found on the interpreter's path. The numbers
 lines; the gate (orchard/stages.py, gate_stock_runtime) judges them again against the bars in orchard/defaults.py.
 
 stock_config.json keys: run_dir, model_id, model_name, model_snapshot, tt_metal_dir, scratch_dir, mesh_device, chips, optimizations,
-tt_cache, deadline_s; optional python_path_extra (directories put after the scratch copy on PYTHONPATH) and import_check (modules `prepare`
+tt_cache, deadline_s; optional disable_tensor_cache (true runs the scratch copy with no tensor cache files), python_path_extra (directories put after the scratch copy on PYTHONPATH) and import_check (modules `prepare`
 must be able to import, default numpy, cv2, torch and accelerate) and demo_python (the interpreter every child runs under, from `tt-orchard demo-env`;
 default: the interpreter running this script). Exit codes: 0 done, 2 the config or an input does not fit (the message names it), 3 a run step failed (the log says
 which), 6 a model was fetched from the Hub."""
@@ -90,6 +90,8 @@ def load_config() -> dict:
         fail(2, "python_path_extra must hold absolute paths")
     if any(not re.fullmatch(r"[A-Za-z0-9_]+", m) for m in cfg["import_check"]):
         fail(2, "import_check must hold module names")
+    if not isinstance(cfg.setdefault("disable_tensor_cache", False), bool):
+        fail(2, "disable_tensor_cache must be true or false")
     if "demo_python" in cfg:
         py = cfg["demo_python"]
         if not isinstance(py, str) or not Path(py).is_absolute():
@@ -159,6 +161,38 @@ def make_scratch(cfg: dict) -> Path:
     marker.write_text(json.dumps({"copied": list(COPIED), "tt_metal": tree_facts(cfg["tt_metal_dir"])}, indent=2) + "\n")
     say(f"copied {', '.join(COPIED)} from the host tree into {scratch.name}")
     return scratch
+
+
+CACHE_PATCH_MARK = "orchard scratch patch (issue 93)"
+CACHE_PATCH = f"""
+
+# ---- {CACHE_PATCH_MARK} -------------------------------------------------------------------------------------------
+# On the box where this was found (ttnn 0.80.0, 2026-10-29) `ttnn._ttnn.tensor.load_tensor_flatbuffer(..., device=mesh)` spins in the kernel and never returns
+# for a cached tensor of about 35 MB or more (a 33 MB KV cache entry, a 1 GB embedding). tt-transformers reaches it on the second `ttnn.as_tensor` of the K and V
+# caches, which share one cache file name. Dropping the cache file name makes every as_tensor convert and upload from the in-memory tensor, which was fast in a
+# probe. The numbers are unchanged. The config key `disable_tensor_cache` turns this on; the change shows in evidence/scratch.patch.
+import ttnn as _orchard_ttnn
+_orchard_as_tensor = _orchard_ttnn.as_tensor
+
+
+def _orchard_as_tensor_no_cache(*args, **kwargs):
+    kwargs["cache_file_name"] = None
+    return _orchard_as_tensor(*args, **kwargs)
+
+
+_orchard_ttnn.as_tensor = _orchard_as_tensor_no_cache
+"""
+
+
+def apply_cache_patch(cfg: dict, scratch: Path) -> None:
+    """Append CACHE_PATCH to the scratch copy's root conftest.py when the config asks for it, once (the scratch copy is kept between prepares)."""
+    if not cfg["disable_tensor_cache"]:
+        return
+    conftest = scratch / "conftest.py"
+    text = conftest.read_text(encoding="utf-8")
+    if CACHE_PATCH_MARK not in text:
+        conftest.write_text(text + CACHE_PATCH, encoding="utf-8")
+        say("the scratch conftest.py runs with no tensor cache files (disable_tensor_cache)")
 
 
 def make_model_dir(cfg: dict, scratch: Path) -> Path:
@@ -241,6 +275,7 @@ def prepare() -> None:
     cfg = load_config()
     check_imports(cfg, Path(cfg["scratch_dir"]))
     scratch = make_scratch(cfg)
+    apply_cache_patch(cfg, scratch)
     model_dir = make_model_dir(cfg, scratch)
     note = ensure_reference(cfg, scratch, model_dir)
     say(note)
@@ -290,19 +325,36 @@ def parse_free_run(text: str) -> dict:
             "decode_tokens_per_s": float(speed[-1]) if speed else None, "ttft_s": float(ttft[-1]) / 1000 if ttft else None}
 
 
+NO_TARGET = re.compile(r"ValueError: (Could not find centralized accuracy targets for [^\n]*)")
+
+
+def missing_target(acc_text: str, accuracy, rc: int) -> str | None:
+    """tt-transformers' own test looks up a published accuracy target for the model and board after it prints the accuracy, and fails when the table has
+    no row. The 2-chip run of Llama-3.1-8B on P300 (2026-10-29) did exactly that. The message when the test failed for that reason alone (the accuracy line
+    was printed first), else None: any other failure is still a failure."""
+    if rc == 0 or accuracy is None:
+        return None
+    found = NO_TARGET.findall(acc_text)
+    return found[-1] if found else None
+
+
 def hub_fetches(model_dir: Path, log_text: str) -> list[str]:
     """Anything the run fetched from the Hub: the runs switch it off, so any fetch is a failure."""
     return sorted({m for m in re.findall(r"(?:Fetching \d+ files|snapshot_download)[^\n]*", log_text)})
 
 
 def scratch_patch(cfg: dict, evidence: Path) -> str:
-    """The change between the host tree's models/ and the scratch copy (what a stage changed), as a unified diff."""
-    host, scratch = Path(cfg["tt_metal_dir"]) / "models", Path(cfg["scratch_dir"]) / "models"
-    done = subprocess.run(["diff", "-ruN", "-x", "__pycache__", "-x", "*.pyc", "-x", "*.refpt", "-x", "*.refpt.orchard.json", str(host), str(scratch)],
-                          capture_output=True, text=True)
-    lines = [ln.split("\t", 1)[0] if ln.startswith(("--- ", "+++ ")) else ln for ln in done.stdout.splitlines()
+    """The change between the host tree and the scratch copy (what a stage or the config changed), as a unified diff over every path the copy holds
+    (`models/` and the root files and test packages in COPIED), with `a/` for the host tree and `b/` for the copy."""
+    host, scratch = Path(cfg["tt_metal_dir"]), Path(cfg["scratch_dir"])
+    out = []
+    for name in COPIED:
+        done = subprocess.run(["diff", "-ruN", "-x", "__pycache__", "-x", "*.pyc", "-x", "*.refpt", "-x", "*.refpt.orchard.json",
+                               str(host / name), str(scratch / name)], capture_output=True, text=True)
+        out.append(done.stdout)
+    lines = [ln.split("\t", 1)[0] if ln.startswith(("--- ", "+++ ")) else ln for ln in "".join(out).splitlines()
              if not ln.startswith("diff ")]                         # no command line, no timestamps, no machine path
-    text = "\n".join(lines).replace(str(host), "a/models").replace(str(scratch), "b/models")
+    text = "\n".join(lines).replace(str(host) + "/", "a/").replace(str(scratch) + "/", "b/")
     text = text + "\n" if text else ""
     if len(text) > PATCH_LIMIT:
         text = text[:PATCH_LIMIT] + "\n[cut: the patch is longer than the evidence limit]\n"
@@ -326,6 +378,7 @@ def run() -> None:
     rc = pytest_run(cfg, scratch, model_dir, ACCURACY_TEST, acc_log, deadline)
     acc_text = acc_log.read_text(errors="replace")
     accuracy = parse_accuracy(acc_text)
+    no_target = missing_target(acc_text, accuracy, rc)
     if rc != 0 and accuracy is None:
         fail(3, f"the token-accuracy run exited {rc} and printed no accuracy; see log/token-accuracy.log")
     free_log = HERE / "log" / "free-run.log"
@@ -340,14 +393,14 @@ def run() -> None:
                            "top5": accuracy[1] if accuracy else None},
         "free_run": {k: free[k] for k in ("prompt", "text", "new_tokens", "finish")},
         "speed": {"decode_tokens_per_s": free["decode_tokens_per_s"], "ttft_s": free["ttft_s"]}, "hub_fetch": fetched,
-        "reference": reference,
+        "reference": reference, "tt_transformers_target": {"found": no_target is None, "message": no_target},
         "scratch_patch": scratch_patch(cfg, evidence), "exit_codes": {"token_accuracy": rc, "free_run": rc2},
         "seconds": round(time.time() - started, 1)}
     (evidence / "stock-check.json").write_text(json.dumps(result, indent=2) + "\n")
     say(f"wrote evidence/stock-check.json (top1 {result['teacher_forced']['top1']}, top5 {result['teacher_forced']['top5']})")
     if fetched:
         fail(6, "the run fetched from the Hub: " + "; ".join(fetched))
-    if rc != 0 or rc2 != 0:
+    if (rc != 0 and no_target is None) or rc2 != 0:
         fail(3, f"a run step exited non-zero (token accuracy {rc}, free run {rc2}); see log/")
 
 
