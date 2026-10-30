@@ -3430,4 +3430,4 @@ Fixed, test first (each new test failed before its fix):
 - The two-chip model and `serve.py --tp 2` refuse bfp4 and HiFi4 before any device or fabric is opened (`check_tp_options`).
 - `text-package`: the publish commands shell-quote the repository name and the package path. The gate refuses a package record whose `license` entry is not an object with a sha256 string (it raised AttributeError).
 Already done before this change, with tests: the latest runtime selection decides the script hashes, a malformed file list in the record is a failed gate, the card does not say which check a variant failed. The hostile-input backlog already lists the three modules named in the issue.
-Still open: the wording of block failures for ambiguous stage-2 errors; the flaky second full-model rope table in `qual_check.py` (it keeps the 2048 default, now with a clear error past it).
+Still open: the wording of block failures for ambiguous stage-2 errors. `qual_check.py` keeps the 2048-position rope table, which now raises a named error past it.
