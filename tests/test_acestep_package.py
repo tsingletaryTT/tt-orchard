@@ -231,3 +231,21 @@ def test_the_boot_line_states_the_second_request_when_the_record_has_one():
     assert "0.97" in pk.boot_line(s) and "second" in pk.boot_line(s)
     del b["second_request_s"]
     assert "second" not in pk.boot_line(s)
+
+def test_every_acestep_module_the_staged_runtime_imports_is_staged(staged):
+    # a runtime file that imports a sibling the stager does not copy fails only in the packaged copy
+    import re
+    names = set()
+    for f in (staged / "runtime").glob("*.py"):
+        names |= set(re.findall(r"^\s*import (acestep_\w+)", f.read_text(), re.M)) | set(re.findall(r"^\s*from (acestep_\w+) import", f.read_text(), re.M))
+    assert names, "the runtime imports no acestep_* sibling; the test is not looking at anything"
+    assert all((staged / "runtime" / f"{n}.py").is_file() for n in names), sorted(n for n in names if not (staged / "runtime" / f"{n}.py").is_file())
+
+
+def test_the_other_time_is_described_as_time_outside_the_two_chip_stages_not_as_cpu_time(staged):
+    # "other" is the median total minus the transformer and the VAE; it holds the chip-side encoders and key/value projection as well as the CPU pieces
+    s = json.loads((staged / "evidence" / "summary.json").read_text())
+    line = next(x for x in s["limits"] if "tokeniser" in x)
+    assert "Outside the transformer and the VAE decoder" in line and "chip-side" in line
+    card = (staged / "README.md").read_text()
+    assert "\"Other\" is the median total minus the transformer and the VAE decoder" in card and "chip-side encoders" in card

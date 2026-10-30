@@ -95,9 +95,10 @@ def make_summary(sweep, bars, agreement, boot, base=None) -> dict:
     first, last = rows[0], rows[-1]
     return {"sweep": {"rows": rows, "load": sweep.get("load", {}), "seed": sweep.get("seed")}, "step_bars": prompts, "agreement": agreement, "boot": boot,
             "limits": ["The planner language model is not loaded, so there is no thinking mode and no audio-code conditioning; the clip follows the caption and lyrics only.",
-                       "The tokeniser, the sampler update and wavelet correction, the peak normalisation and the WAV write run on the CPU: "
-                       f"{_f(first['other_median'])} s of a {first['duration_s']:g} s request and {_f(last['other_median'])} s of a {last['duration_s']:g} s request (the median total minus the two chip stages, "
-                       "which also contains the host-side mask and rotary tables of each clip).",
+                       "Outside the transformer and the VAE decoder a request spends "
+                       f"{_f(first['other_median'])} s of {first['duration_s']:g} s and {_f(last['other_median'])} s of {last['duration_s']:g} s (the median total minus those two stages). That time holds the chip-side "
+                       "encoders and key/value projection as well as the CPU pieces: the tokeniser, the host-side mask and rotary tables of each clip, the sampler update and wavelet correction, "
+                       "the peak normalisation and the WAV write.",
                        "The text encoder, the lyric encoder and the cross-attention projection run on the chip in bfloat16. They are ports in `runtime/acestep_chip.py` that replace methods of the bundle at run time; "
                        "the bundle's files are not edited. They add a conditioning error of the size of a bfloat16 run (relative L2 about 0.02 for the text encoder). A request with several items or a padded lyric mask "
                        "uses the CPU path for the lyric encoder.",
@@ -200,8 +201,8 @@ def render_card(s: dict) -> str:
              "| Length | Total, min / median / max | Transformer (chip) | VAE (chip) | Other (median total minus the two chip stages) | Audio seconds per second | Median before the chip steps | Label | Evidence |",
              "| --- | --- | --- | --- | --- | --- | --- | --- | --- |", *speed_rows(s), "",
              "| Number | Value | Label | Evidence |", "| --- | --- | --- | --- |", *load_rows(s), "",
-             "\"Other\" holds the tokeniser, the host-side mask and rotary tables of each clip, the sampler update, the peak normalisation, the WAV write and the host-chip copies. "
-             "It grows with the length because the tables and the WAV do.", "",
+             "\"Other\" is the median total minus the transformer and the VAE decoder. It holds the chip-side encoders and key/value projection (about 0.03 s), the tokeniser, "
+             "the host-side mask and rotary tables of each clip, the sampler update, the peak normalisation, the WAV write and the host-chip copies. It grows with the length because the tables and the WAV do.", "",
              "## Agreement with the CPU reference", "",
              agreement_line(s), "",
              "That comparison lets each step feed its error into the next. A CPU run with the same two stages in bfloat16 also fails it (latent PCC 0.968 and waveform PCC 0.892 in the first bring-up run), so the failures come from precision "

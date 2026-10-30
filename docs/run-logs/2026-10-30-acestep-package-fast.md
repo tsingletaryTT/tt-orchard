@@ -33,9 +33,11 @@ Load: chip open and VAE warm-up 7.6 s; the server printed its ready line 18.0 s 
 ## Boot check on a chip
 
 A first staging with a placeholder boot record (the gate reported only "the boot check did not pass") was copied, `run.sh fetch` downloaded the bundle code as real files (21 s), `run.sh --self-test` passed, and `run.sh` started
-the server on port 20121 (one chip pair of board 1 under the lease). Then the evidence was completed from the boot, and the final package was restaged. Review of PR 278 then changed two runtime files (`acestep_run.py`, `acestep_chip.py`), so the package was restaged and booted a second time from a copy of the restaged
-package (ready line after 18.0 s; 30 s requests of 1.58 s and 0.96 s; both clips identical to each other and to the CLI clip, maximum absolute difference 0.0). The `boot.json` figures are from the first boot.
-All runtime files, `run.sh`, the tools, `pins.json` and the card of the final package are byte-identical to the second booted copy (compared with `cmp`).
+the server on port 20121 (one chip pair of board 1 under the lease). Then the evidence was completed from the boot, and the final package was restaged. Two review rounds of PR 278 then changed runtime files (`acestep_run.py`, `acestep_chip.py`), and a review of this PR changed the card text, so the package was restaged and booted two more times from a copy of the
+restaged package. The last boot: ready line after 18.0 s; 30 s requests of 1.60 s and 0.95 s; both clips identical to each other and to the CLI clip (maximum absolute difference 0.0). The `boot.json` figures are from the first boot
+(the later boots gave the same). All runtime files, `run.sh`, the tools, `pins.json` and the card of the final package are byte-identical to the last booted copy (compared with `cmp`).
+
+Review of this PR (Copilot, one Low, fixed test first): the "Other" time is the median total minus the transformer and the VAE, so it also holds the chip-side encoders and key/value projection (about 0.03 s). The card and the limits line now say so; before, they called it CPU time.
 
 - Ready line after 18.0 s, listing all six steps.
 - A 30 s request (lo-fi, seed 42) returned in 1.57 s (the first after the start); an identical second request in 0.97 s. Both pass the 48 kHz sound checks. The samples of the two are identical, and identical to the clip that

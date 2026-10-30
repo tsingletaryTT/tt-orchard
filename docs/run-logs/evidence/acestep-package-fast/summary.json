@@ -241,7 +241,7 @@
  },
  "limits": [
   "The planner language model is not loaded, so there is no thinking mode and no audio-code conditioning; the clip follows the caption and lyrics only.",
-  "The tokeniser, the sampler update and wavelet correction, the peak normalisation and the WAV write run on the CPU: 0.07 s of a 30 s request and 0.96 s of a 480 s request (the median total minus the two chip stages, which also contains the host-side mask and rotary tables of each clip).",
+  "Outside the transformer and the VAE decoder a request spends 0.07 s of 30 s and 0.96 s of 480 s (the median total minus those two stages). That time holds the chip-side encoders and key/value projection as well as the CPU pieces: the tokeniser, the host-side mask and rotary tables of each clip, the sampler update and wavelet correction, the peak normalisation and the WAV write.",
   "The text encoder, the lyric encoder and the cross-attention projection run on the chip in bfloat16. They are ports in `runtime/acestep_chip.py` that replace methods of the bundle at run time; the bundle's files are not edited. They add a conditioning error of the size of a bfloat16 run (relative L2 about 0.02 for the text encoder). A request with several items or a padded lyric mask uses the CPU path for the lyric encoder.",
   "Text and lyric sequences are padded to a multiple of 128 tokens. A prompt or lyric that needs a new length compiles that shape on first use and takes several seconds longer.",
   "One request runs at a time. The first request at a new duration compiles kernels and takes several seconds longer.",

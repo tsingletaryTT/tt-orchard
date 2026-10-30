@@ -170,7 +170,30 @@ def stepcheck_conditioning(rec_enc, rec_ctx, tap, own: bool):
     return tap.enc.float(), tap.ctx.float()
 
 
-def stepcheck(worker, ref_dir: Path, out_json: Path, tap=None, own: bool = False) -> None:
+OWN_ENCODER_BOUND = 0.25      # relative L2 of the encoder states against the reference run's: a gross-mismatch check (a bfloat16 encoder differs by about 0.02)
+OWN_CONTEXT_BOUND = 1e-4      # the context latents do not depend on the precision of the encoders
+
+
+def check_own_conditioning(ref_run, args, tap) -> None:
+    """Refuses `--stepcheck --own-conditioning` when the conditioning this process made is not for the reference run's request: the prompt, duration and seed of the command line must equal the
+    reference run's settings, the arrays must have its shapes, the context latents must equal its context latents, and the encoder states must be near its encoder states. The lyrics are not
+    in the manifest; a different lyric shows as a different encoder-state shape or distance."""
+    import numpy as np
+    s = ref_run.settings
+    for key, got in (("prompt", args.prompt), ("duration", args.duration), ("seed", args.seed)):
+        if s.get(key) != got:
+            raise SystemExit(f"--own-conditioning: --{key} {got!r} differs from the reference run's {key} {s.get(key)!r}; use the request the reference run was made with")
+    for name, got, bound, label in (("encoder_states", tap.enc, OWN_ENCODER_BOUND, "encoder states"), ("context", tap.ctx, OWN_CONTEXT_BOUND, "context latents")):
+        ref = np.asarray(ref_run.array("conditioning", name))
+        if tuple(got.shape) != ref.shape:
+            raise SystemExit(f"--own-conditioning: the {label} have shape {tuple(got.shape)}, the reference run's {ref.shape}; use the prompt, lyrics and duration of the reference run")
+        err = float(np.linalg.norm(got.numpy() - ref) / max(np.linalg.norm(ref), 1e-30))
+        if err > bound:
+            raise SystemExit(f"--own-conditioning: the {label.split()[0] if name == 'context' else 'encoder'} differ from the reference run's by relative L2 {err:.3g} (bound {bound:g}); "
+                             "this is not the reference run's request")
+
+
+def stepcheck(worker, ref_dir: Path, out_json: Path, tap=None, own: bool = False, args=None) -> None:
     """Feeds the recorded CPU inputs of each step (not the chip's own earlier outputs) to the chip's transformer, and the CPU run's final
     latent to the chip's VAE. Each result is then the error of one chip call against the CPU's call on the same input, with nothing compounded."""
     import numpy as np
@@ -182,6 +205,8 @@ def stepcheck(worker, ref_dir: Path, out_json: Path, tap=None, own: bool = False
     enc = torch.from_numpy(np.asarray(run.array("conditioning", "encoder_states")))
     ctx = torch.from_numpy(np.asarray(run.array("conditioning", "context")))
     enc, ctx = stepcheck_conditioning(enc, ctx, tap, own)
+    if own and args is not None:
+        check_own_conditioning(run, args, tap)
     worker.call({"op": "prepare", "enc": wire.encode(enc.float()), "ctx": wire.encode(ctx.float())})
     steps = []
     for k, t in enumerate(TURBO_SCHEDULE):
@@ -417,7 +442,7 @@ def main(argv=None) -> int:
     if args.stepcheck:
         if args.own_conditioning:
             one(tmp / "own-conditioning")         # this clip's conditioning is what the check prepares the chip with
-        stepcheck(worker, Path(args.stepcheck), Path(str(out) + ".stepcheck.json"), tap=tap, own=args.own_conditioning)
+        stepcheck(worker, Path(args.stepcheck), Path(str(out) + ".stepcheck.json"), tap=tap, own=args.own_conditioning, args=args)
     if args.sweep:
         sweep(one, tmp, [float(x) for x in args.sweep.split(",")], args, Path(str(out) + ".sweep.json"), load)
         if worker is not None:
