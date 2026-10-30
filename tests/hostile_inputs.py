@@ -846,35 +846,14 @@ SELFTEST = {r.name: r for r in [
 # xfail(strict=True) by tests/test_hostile_readers.py, so a reader that is fixed turns its test red until the entry is removed.
 KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
     135: {          # NaN, Infinity, 1e999 and lone surrogates are accepted and returned
-        'stages._evidence_json': ['nan_in_object', 'lone_surrogate_key'],
-        'stages._load': ['nan_in_object', 'lone_surrogate_key'],
-        'stages._read_json': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
     },
     136: {          # very deep nesting or a long integer raises an undocumented exception, or a deep structure is returned unbounded
-        'stages._evidence_json': ['nest_1000_object', 'nest_100000'],
-        'stages._load': ['nest_1000_object', 'nest_100000'],
-        'stages._read_json': ['nest_1000', 'nest_1000_object', 'nest_100000'],
-        'stages._suite_reasons_in': ['nest_100000'],
-        'stages.gate_delta': ['nest_100000'],
-        'stages.hw_record_problem': ['nest_100000'],
     },
     137: {          # the file is read with no size limit (a 50 MB file is held in memory; a link to /dev/zero is read until memory runs out)
-        'stages._load': ['big_string_50mb', 'link_to_dev_zero'],
-        'stages._read_json': ['big_string_50mb', 'link_to_dev_zero'],
-        'stages._suite_reasons_in': ['big_string_50mb', 'link_to_dev_zero'],
-        'stages.gate_delta': ['big_string_50mb', 'link_to_dev_zero'],
-        'stages.hw_record_problem': ['big_string_50mb', 'link_to_dev_zero'],
     },
     138: {          # the reader blocks forever on a FIFO
-        'stages._evidence_json': ['fifo'],
-        'stages._load': ['fifo'],
-        'stages._read_json': ['fifo'],
-        'stages._suite_reasons_in': ['fifo'],
-        'stages.gate_delta': ['fifo'],
-        'stages.hw_record_problem': ['fifo'],
     },
     139: {          # an undocumented exception type for a directory, a symlink loop or invalid UTF-8
-        'stages._evidence_json': ['link_loop'],
     },
     140: {          # valid JSON that is not an object raises AttributeError
     },
