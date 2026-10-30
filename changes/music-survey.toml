@@ -1,0 +1,3 @@
+target = "0.9.68"
+summary = "Music and audio model survey: a ranked shortlist of open music models for the audio path, with ACE-Step 1.5 recommended first (docs only)."
+pr = 253
