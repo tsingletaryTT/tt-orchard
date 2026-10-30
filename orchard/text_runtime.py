@@ -54,6 +54,8 @@ CHIP_DEADLINE_S = 3000.0
 BENCH_DEADLINE_S = 2400.0
 REFERENCE_TIMEOUT_S = 7200.0
 DECODE_TOKENS = 16
+PROMPT_ALLOWANCE = 128                    # tokens the chip cache keeps for the prompt, beyond the decode length (the fixed prompt is about 40)
+MAX_DECODE_TOKENS = 2048
 PPL_TOKENS = 768
 BENCH_STEPS = 64
 TEMPLATES = Path(__file__).with_name("skills") / "text-chip-templates"
@@ -217,7 +219,7 @@ class MiniCPM3(TextRuntime):
 
     def config_problems(self, model_dir) -> list[str]:
         try:
-            cfg = safeio.read_json((Path(model_dir) / "config.json").resolve(), max_bytes=1 << 20, expect=dict)
+            cfg = safeio.read_json(safeio.resolved(Path(model_dir) / "config.json"), max_bytes=1 << 20, expect=dict)
         except (OSError, ValueError, safeio.SafeReadError) as exc:
             return [f"config.json cannot be read: {exc}"]
         out = []
@@ -238,7 +240,9 @@ class MiniCPM3(TextRuntime):
         d = Path(model_dir).resolve()
         if (d / "model.safetensors").is_file():
             return d / "model.safetensors"
-        return Path(cache_dir) / f"{d.name}.safetensors"
+        # the key holds the canonical source directory, so two directories with one basename never share a converted file
+        import hashlib
+        return Path(cache_dir) / f"{d.name}-{hashlib.sha256(str(d).encode('utf-8')).hexdigest()[:12]}.safetensors"
 
     def prepare_argv(self, ctx):
         if Path(ctx.weights).is_file():
@@ -346,7 +350,7 @@ def environment_problems(paths: TextPaths) -> list[str]:
 def card_license(model_dir) -> str | None:
     """The `license:` value in the front matter of the model directory's README.md (the Hub card), or None. Read with a size limit."""
     try:
-        text = safeio.read_bytes((Path(model_dir) / "README.md").resolve(), max_bytes=2 << 20).decode("utf-8", "replace")
+        text = safeio.read_bytes(safeio.resolved(Path(model_dir) / "README.md"), max_bytes=2 << 20).decode("utf-8", "replace")
     except (OSError, ValueError, safeio.SafeReadError):
         return None
     if not text.startswith("---"):
@@ -362,12 +366,27 @@ def model_facts(model_dir, rtm: TextRuntime) -> dict:
     accepts the configuration."""
     import hashlib
     d = Path(model_dir).resolve()
-    cfg_file = (d / "config.json").resolve()          # a Hugging Face snapshot holds the file as a link into blobs/
+    cfg_file = safeio.resolved(d / "config.json")      # a Hugging Face snapshot holds the file as a link into blobs/
     cfg = safeio.read_json(cfg_file, max_bytes=1 << 20, expect=dict)
+    try:
+        n_layers = rtm.n_layers(cfg)
+        problems = rtm.config_problems(d)
+    except (KeyError, TypeError, ValueError):
+        n_layers, problems = None, rtm.config_problems(d)
+        if not any("num_hidden_layers" in p for p in problems):
+            problems = problems + ["num_hidden_layers is missing or is not a number"]
     weights = sorted(p.name for p in d.iterdir() if p.suffix in (".safetensors", ".bin") and p.is_file())
     return {"config_sha256": hashlib.sha256(safeio.read_bytes(cfg_file, max_bytes=1 << 20)).hexdigest(), "architectures": cfg.get("architectures"),
-            "model_type": cfg.get("model_type"), "n_layers": rtm.n_layers(cfg), "hidden_size": cfg.get("hidden_size"), "card_license": card_license(d),
-            "weight_files": weights, "config_problems": rtm.config_problems(d)}
+            "model_type": cfg.get("model_type"), "n_layers": n_layers, "hidden_size": cfg.get("hidden_size"), "card_license": card_license(d),
+            "weight_files": weights, "config_problems": problems}
+
+
+def chip_max_len(decode_tokens) -> int:
+    """The chip cache length (a multiple of 128, at least 256) that holds the prompt and `decode_tokens` decode steps. A decode length that is not a whole number from 1 to
+    MAX_DECODE_TOKENS is refused here, before any reference run is made."""
+    if isinstance(decode_tokens, bool) or not isinstance(decode_tokens, int) or not 1 <= decode_tokens <= MAX_DECODE_TOKENS:
+        raise TextStageError(f"the decode length must be a whole number from 1 to {MAX_DECODE_TOKENS}, got {decode_tokens!r}")
+    return max(256, -(-(decode_tokens + PROMPT_ALLOWANCE) // 128) * 128)
 
 
 def prompt_file_for(stage_dir) -> str:

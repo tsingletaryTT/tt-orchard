@@ -22,6 +22,11 @@ import struct
 import subprocess
 from pathlib import Path
 
+from orchard import safeio
+
+MAX_CONFIG_BYTES = 4 * 1024 * 1024       # choice: a model config.json is a few kilobytes
+MAX_INDEX_BYTES = 16 * 1024 * 1024       # choice: a weight-map index for a very large model is a few megabytes
+
 PARAMS_SUB = Path("models") / "tt_transformers" / "model_params"
 MESH_DEVICE = {1: "P150", 2: "P300", 4: "P150x4"}      # chips -> the board name tt-transformers uses (determine_device_name)
 STOCK_DEADLINE_S = 5400.0                              # choice: one hardware test: a cold weight load of an 8B model, the token-accuracy run
@@ -85,8 +90,8 @@ def tt_metal_tree(tt_metal_dir) -> dict:
 
 def _load_config(path: Path):
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_CONFIG_BYTES)     # a snapshot file is a link into the cache blobs
+    except safeio.SafeReadError as exc:
         return None, f"{path.name} is not readable JSON: {type(exc).__name__}"
     return (data, None) if isinstance(data, dict) else (None, f"{path.name} is not a JSON object")
 
@@ -115,9 +120,9 @@ def read_tensors(snapshot: Path) -> tuple[dict, list[str]]:
     index = snapshot / "model.safetensors.index.json"
     if index.is_file():
         try:
-            wm = json.loads(index.read_text(encoding="utf-8")).get("weight_map")
+            wm = safeio.read_json(safeio.resolved(index), max_bytes=MAX_INDEX_BYTES, expect=dict).get("weight_map")
             files = sorted({v for v in wm.values() if isinstance(v, str)}) if isinstance(wm, dict) else []
-        except (OSError, ValueError, AttributeError):
+        except safeio.SafeReadError:
             problems.append("model.safetensors.index.json is not readable")
     if not files:
         files = sorted(p.name for p in snapshot.glob("model*.safetensors"))

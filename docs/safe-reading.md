@@ -17,6 +17,7 @@ one place with its own tests.
 | --- | --- | --- |
 | A path to a JSON file | `read_json(path, max_bytes=..., expect=dict)` | the parsed value, or one `SafeReadError` |
 | A path to a file inside a directory you already hold open | `read_json(rel, anchor=pin.fd, ...)` or `pin.read_json(parts, ...)` | the same, with every path component opened without following a link |
+| A file of JSON lines (one value per line) | `read_jsonl(path, max_bytes=..., expect=dict)` | the list of values, every line parsed with the same guards; the error names the line number and holds none of its content |
 | JSON text or bytes already in memory (a ledger line, an HTTP body) | `parse_json_bytes(data, max_bytes=...)` | the same guards without the file |
 | The raw bytes of a small file | `read_bytes(path, max_bytes=...)` | the bytes, never more than the cap |
 | A directory to walk | `pinned_root(dir)` then `scan_beneath(pin)` | the entries, plus a result that says whether a limit was hit |

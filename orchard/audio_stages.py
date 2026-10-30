@@ -16,7 +16,8 @@ Stage table for such a run (orchard/stages.py `spec_for`):
 Everything a gate relies on is re-derived from the saved arrays and clips. The result files hold the numbers for people to read and for the bundle;
 a gate recomputes each one and refuses a file that disagrees.
 
-Bars. The agreement bars are the provisional ones in `audio_reference.DEFAULT_BARS`. The result says so. The sound checks (duration, level,
+Bars. The agreement bars are the provisional ones in `audio_reference.DEFAULT_BARS` unless stage 1's directory holds a usable noise-floor record
+(`noise_floor.json`, orchard/audio_bars.py); then the measured bars decide. The result says which, and says "no floor measured" when there is none. The sound checks (duration, level,
 clipping) use the audio spec's numbers (docs/superpowers/specs/2026-10-15-audio-bringup-design.md, section 6), which were set from 24 real clips.
 """
 from __future__ import annotations
@@ -30,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
+from orchard import audio_bars
 from orchard import audio_reference as ar
 from orchard import resident
 from orchard import safeio
@@ -135,13 +137,18 @@ def waveform_distance(ref_run, cand_run) -> float | None:
     return ar.log_spectrum_distance(ref_run.array("waveform", "audio"), cand_run.array("waveform", "audio"))
 
 
-def compare(ref_dir, cand_dir, *, informational: bool = False) -> dict:
+def compare(ref_dir, cand_dir, *, informational: bool = False, floor=None) -> dict:
     """`summarise(compare_runs(...))` of two run directories, float32 reference against the candidate with the dtype setting left out of the
-    match, and the waveform's log-spectrum distance added. `informational` says the numbers are reported and no bar decides anything (the base
+    match, and the waveform's log-spectrum distance added. `floor` (an `audio_bars.Floor`) supplies measured bars and the text that says so; without
+    one the bars are the provisional defaults. `informational` says the numbers are reported and no bar decides anything (the base
     control: fifty guided steps compound the same per-pass error the fine-tune's eight steps show)."""
     with ar.load_run(ref_dir) as ref, ar.load_run(cand_dir) as cand:
-        out = summarise(ar.compare_runs(ref, cand, cross_precision=True))
-        if informational:
+        out = summarise(ar.compare_runs(ref, cand, None if floor is None else floor.bars, cross_precision=True))
+        if floor is not None:
+            out["bars"] = floor.describe({k for k, _ in ref.entries})
+        if informational and floor is not None and floor.measured:
+            out["bars"] = "informational: the bars from the measured floor are shown as met or failed, and the control's verdict rests on the discrimination check"
+        elif informational:
             out["bars"] = "informational: the provisional bars are shown as met or failed, and the control's verdict rests on the discrimination check"
         if out["comparable"] and out["waveform"] is not None:
             out["waveform"]["log_spectrum_distance"] = waveform_distance(ref, cand)
@@ -408,6 +415,7 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
     stage_dir, run_dir, ref_stage_dir = Path(stage_dir), Path(run_dir), Path(ref_stage_dir)
     ref_rec = load_json(ref_stage_dir / REFERENCE_FILE, REFERENCE_FILE)
     rel = stage_dir.resolve().relative_to(run_dir.resolve())
+    floor = audio_bars.load_floor(ref_stage_dir)
     runs, agreement, sound = {}, {}, {}
     for item in plan:
         d = stage_dir / "chip" / item["name"]
@@ -431,7 +439,7 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
                               "total_seconds": chip_json.get("total_s")}
         ref_role = reference_roles[item["role"]]
         ref_entry = ref_rec["runs"][ref_role]
-        agreement[f"{item['role']}_vs_{ref_role}"] = compare(run_dir / ref_entry["dir"], d, informational=item["role"] == ROLE_CONTROL_CHIP)
+        agreement[f"{item['role']}_vs_{ref_role}"] = compare(run_dir / ref_entry["dir"], d, informational=item["role"] == ROLE_CONTROL_CHIP, floor=floor)
     if ROLE_CHIP in runs and ROLE_HOST in ref_rec["runs"]:
         agreement["chip_vs_host_same_env"] = compare(run_dir / ref_rec["runs"][ROLE_HOST]["dir"], stage_dir / "chip" / plan[0]["name"])
     repeats = {}
@@ -463,9 +471,9 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
     result = {"schema": SCHEMA, "runtime": "stable-audio-3-dit-on-chip", "settings": settings_for(plan[0]["name"]), "runs": runs,
               "timing": timing_record(repeats, configured_warmup(stage_dir)),
               "reference_runs": ref_rec["runs"], "agreement": agreement, "environment_floor": ref_rec.get("environment_floor"),
-              "control_difference": control, "control_discrimination": discrimination, "repeats": repeats,
+              "noise_floor": floor.record(), "control_difference": control, "control_discrimination": discrimination, "repeats": repeats,
               "limits": ["Nobody has listened to the clips; no check here says the music is good.",
-                         "The agreement bars are provisional choices, not yet set from a measured noise floor.",
+                         audio_bars.limit_line(floor),
                          ("The diffusion transformer and the autoencoder decoder's transformer ran on the chip. The T5Gemma encoder, the sampler, the decoder's first linear layer, "
                           "its final convolution and the waveform unpatching ran on the host." if chip_decoder_configured(stage_dir) else
                           "Only the diffusion transformer ran on the chip. The T5Gemma encoder, the sampler and the autoencoder decoder ran on the host."),
@@ -572,6 +580,9 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
     except AudioStageError as exc:
         return [str(exc)]
     runs, ref_runs, agreement = res.get("runs"), ref.get("runs"), res.get("agreement")
+    floor = audio_bars.load_floor(ref_stage_dir)
+    if not agree(res.get("noise_floor"), floor.record()):
+        problems.append(f"noise_floor: the result's record of its bars is not what {audio_bars.FLOOR_FILE} gives now ({floor.label[:120]})")
     if not isinstance(runs, dict) or not isinstance(ref_runs, dict) or not isinstance(agreement, dict):
         return [f"{RESULT_FILE} needs runs, reference_runs and agreement"]
     if ROLE_CHIP not in runs:
@@ -596,7 +607,8 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
             continue
         rec = agreement.get(key)
         try:
-            fresh = compare(Path(run_dir) / ref_runs[ref_role]["dir"], Path(run_dir) / runs[chip_role]["dir"], informational=chip_role == ROLE_CONTROL_CHIP)
+            fresh = compare(Path(run_dir) / ref_runs[ref_role]["dir"], Path(run_dir) / runs[chip_role]["dir"], informational=chip_role == ROLE_CONTROL_CHIP,
+                           floor=floor)
         except (ar.ReferenceError, KeyError) as exc:
             problems.append(f"{key}: {exc}")
             continue

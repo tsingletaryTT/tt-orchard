@@ -31,6 +31,8 @@ import os
 import time
 from pathlib import Path
 
+from orchard import safeio
+
 GENESIS = "0" * 64
 
 EVENTS = frozenset({
@@ -56,14 +58,24 @@ def _digest(line: str) -> str:
     return hashlib.sha256(line.encode("utf-8")).hexdigest()
 
 
+MAX_LEDGER_BYTES = 16 * 1024 * 1024       # a real run ledger is under a megabyte; a larger file is not read (issue 137)
+
+
 def _complete_lines(path: Path) -> list[str]:
     """The complete lines of the file (those that end in a newline). Bytes after the last newline
     are a write in progress or cut off by a crash; they are not part of the chain and are ignored
-    here. Only a writer's `_recover` sets them aside."""
-    if not path.exists():
-        return []
+    here. Only a writer's `_recover` sets them aside.
+
+    The file is read through `safeio.read_prefix`: a FIFO does not block, a link or a device is refused, and a file over
+    MAX_LEDGER_BYTES is never read. Every refusal is a LedgerCorrupt (issues 137, 138, 139). A missing file is an empty ledger."""
     try:
-        text = path.read_text(encoding="utf-8")
+        data = safeio.read_prefix(path, max_bytes=MAX_LEDGER_BYTES)     # a live supervisor appends while this reads: only the prefix is taken
+    except safeio.SafeReadError as exc:
+        if not os.path.lexists(path):
+            return []
+        raise LedgerCorrupt(f"{path} cannot be read: {exc.reason}") from exc
+    try:
+        text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         # Not a line the ledger wrote (it writes ASCII JSON), so a person has to look.
         raise LedgerCorrupt(f"{path} is not valid UTF-8 ({exc.reason} at byte {exc.start})") from exc
@@ -97,7 +109,8 @@ def entries_from_lines(lines: list[str]) -> list[dict]:
     for i, line in enumerate(lines, start=1):
         try:
             entry = json.loads(line)
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
+            # ValueError covers a JSONDecodeError and an integer of more than 4300 digits; RecursionError is a line nested very deeply (issue 136).
             raise LedgerCorrupt(f"line {i} is not JSON") from exc
         # Valid JSON is not enough: replay_state indexes these fields, so a wrong shape must be
         # reported here as corruption and not surface later as a KeyError or AttributeError.

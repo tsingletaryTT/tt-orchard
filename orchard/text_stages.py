@@ -158,6 +158,8 @@ def reference_record(stage_dir, run_dir, cfg: dict, runtime_name: str) -> dict:
         for role in (ROLE_FLOOR, ROLE_FLOOR_NATIVE):
             if role in runs:
                 problems += run_problems(runs[role], f"the {role} run", {**cfg, "prompt_tokens": prompt_tokens}, dtype="bfloat16", tokens=tokens)
+        if cfg.get("max_len") and prompt_tokens + cfg["decode_tokens"] >= cfg["max_len"]:
+            problems.append(f"the prompt ({prompt_tokens} tokens) and {cfg['decode_tokens']} decode steps do not fit the chip cache of {cfg['max_len']} positions")
         if len(set(tokens)) < MIN_DISTINCT_TOKENS:
             problems.append(f"the reference's greedy path has {len(set(tokens))} distinct token(s); there is nothing to compare with")
         if problems:
@@ -364,7 +366,9 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
         try:
             if sha256_file(rp) != recorded.get("report_sha256"):
                 problems.append(f"{v.name}: the per-array report file is not the recorded one")
-        except OSError:
+            elif not agree(load_json(rp, rp.name), json.loads(json.dumps(report))):
+                problems.append(f"{v.name}: the per-array report holds numbers that are not what the arrays give now")
+        except (OSError, TextStageError):
             problems.append(f"{v.name}: the per-array report file is missing")
         if v.name == rtm.default_variant().name and not fresh["ok"]:
             problems += [f"{v.name}: {r}" for r in fresh["numeric"]["reasons"] + fresh["perplexity"]["reasons"]] or [f"{v.name}: the chip run does not meet the bar"]
@@ -377,6 +381,9 @@ def bench_entry(stage_dir, rtm, variant, model_config: dict) -> dict:
     """The record of one variant's benchmark file, with the floor and the share of it recomputed here."""
     path = Path(stage_dir) / f"bench_{variant.name}.json"
     data = load_json(path, path.name)
+    chips = (data.get("config") or {}).get("chips") if isinstance(data.get("config"), dict) else None
+    if chips != 1:
+        raise TextStageError(f"{path.name} records {chips!r} chips; the floor and the card are for one chip, so only a one-chip benchmark is accepted")
     runs = data.get("runs")
     if not isinstance(runs, list) or not runs:
         raise TextStageError(f"{path.name} lists no runs")
@@ -401,7 +408,7 @@ def finish_bench(stage_dir, run_dir, ref_stage_dir, runtime_name: str) -> dict:
     if rtm is None:
         raise TextStageError(f"no text runtime named {runtime_name!r}")
     cfg = stage_config(Path(ref_stage_dir))
-    model_config = mc.read_model_config((Path(cfg["model_dir"]) / "config.json").resolve())
+    model_config = mc.read_model_config(safeio.resolved(Path(cfg["model_dir"]) / "config.json"))
     variants = {v.name: bench_entry(stage_dir, rtm, v, model_config) for v in rtm.variants}
     result = {"schema": SCHEMA, "runtime": runtime_name, "model_id": cfg["model_id"], "default_variant": rtm.default_variant().name, "variants": variants,
               "rules": "docs/benchmark-rules.md: one discarded warm-up run, then at least three measured runs, in one process; spread is min, median and max",
@@ -419,7 +426,7 @@ def bench_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
     try:
         res = load_json(stage_dir / BENCH_FILE, BENCH_FILE)
         cfg = stage_config(Path(ref_stage_dir))
-        model_config = mc.read_model_config((Path(cfg["model_dir"]) / "config.json").resolve())
+        model_config = mc.read_model_config(safeio.resolved(Path(cfg["model_dir"]) / "config.json"))
     except (TextStageError, mc.ModelConfigError) as exc:
         return [str(exc)]
     rtm = rt.get(res.get("runtime"))

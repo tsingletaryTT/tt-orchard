@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, bus, nearest
+from orchard import audio_reference_env, audio_runtime, bus, nearest, safeio
 from orchard import text_runtime
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -162,6 +162,8 @@ from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
                               TurnRepeat, Watchdog)
+
+MAX_SWAP_CONFIG_BYTES = 1024 * 1024    # choice: a stage's swap_config.json is a few kilobytes (issue 137)
 
 WHO = os.environ.get("ORCHARD_LEASE_WHO") or "orchard:supervisor"       # the name gozer shows for the supervisor's leases; an operator's session may set its own
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
@@ -1591,11 +1593,26 @@ class Supervisor:
         cache = Path(self.paths.cache_root) / "text-runtime" / rtm.name
         weights = rtm.weights_path(model_dir, cache)
         parquet = text_runtime.find_ppl_parquet(self.paths.hf_home, self.inputs.get("text_ppl_parquet"))
+        # Once stage 1 has saved its settings, later stages use those: a resume that omits or changes an input must not change the window or the decode length
+        # the reference was made with.
+        saved = None
+        try:
+            saved = text_runtime.load_json(self.run_dir / "stages" / "1" / text_runtime.STAGE_CONFIG_FILE, "stage 1's saved settings")
+        except text_runtime.TextStageError:
+            pass
+        if saved and all(isinstance(saved.get(k), int) for k in ("decode_tokens", "ppl_tokens", "max_len")):
+            decode, ppl_tokens, max_len = saved["decode_tokens"], saved["ppl_tokens"], saved["max_len"]
+        else:
+            try:
+                decode = int(self.inputs.get("text_decode_tokens") or text_runtime.DECODE_TOKENS)
+                ppl_tokens = int(self.inputs.get("text_ppl_tokens") or text_runtime.PPL_TOKENS)
+            except ValueError as exc:
+                raise text_runtime.TextStageError(f"text_decode_tokens and text_ppl_tokens must be whole numbers: {exc}") from exc
+            max_len = text_runtime.chip_max_len(decode)
         return text_runtime.TextContext(python=paths.python, model_dir=model_dir, weights=str(weights), out_dir=str(stage_dir.resolve()),
                                         ref_dir=str((self.run_dir / "stages" / "1" / "reference").resolve()),
                                         prompt_file=str((self.run_dir / "stages" / "1" / "prompt.txt").resolve()), ppl_parquet=parquet or "",
-                                        decode_tokens=int(self.inputs.get("text_decode_tokens") or text_runtime.DECODE_TOKENS),
-                                        ppl_tokens=int(self.inputs.get("text_ppl_tokens") or text_runtime.PPL_TOKENS))
+                                        decode_tokens=decode, ppl_tokens=ppl_tokens, max_len=max_len)
 
     def _text_body(self, spec, stage_dir: Path, resumed: bool):
         """Stages 0, 1, 2 and 6 of a text-runtime run, as supervisor code. The numeric work runs in the configured interpreter (orchard/text_remote.py), so the
@@ -1698,7 +1715,7 @@ class Supervisor:
         (stage_dir / "prompt.txt").write_text(text_runtime.DEFAULT_PROMPT + "\n", encoding="utf-8")
         text_runtime.write_json(stage_dir / text_runtime.STAGE_CONFIG_FILE, {
             "schema": text_runtime.SCHEMA, "runtime": rtm.name, "model_id": self.model_id.split("@", 1)[0], "model_dir": ctx.model_dir, "weights": ctx.weights,
-            "config_sha256": facts["config_sha256"], "n_layers": rtm.n_layers(cfgd), "decode_tokens": ctx.decode_tokens, "ppl_tokens": ctx.ppl_tokens,
+            "config_sha256": facts["config_sha256"], "n_layers": rtm.n_layers(cfgd), "decode_tokens": ctx.decode_tokens, "ppl_tokens": ctx.ppl_tokens, "max_len": ctx.max_len,
             "prompt_sha256": hashlib.sha256(text_runtime.DEFAULT_PROMPT.encode("utf-8")).hexdigest(), "ppl_parquet_name": Path(ctx.ppl_parquet).name})
         ctx = dataclasses.replace(ctx, prompt_file=str((stage_dir / "prompt.txt").resolve()), out_dir=str((stage_dir / "reference").resolve()),
                                   ref_dir=str((stage_dir / "reference").resolve()))
@@ -2039,8 +2056,8 @@ class Supervisor:
     def _container_config(stage_dir: Path) -> bool:
         """Does the stage's swap_config.json name a container package (issue 60)? An unreadable or missing config is not one."""
         try:
-            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            cfg = safeio.read_json(stage_dir / "swap_config.json", max_bytes=MAX_SWAP_CONFIG_BYTES)
+        except safeio.SafeReadError:
             return False
         return isinstance(cfg, dict) and "package" in cfg
 
@@ -2387,7 +2404,7 @@ class Supervisor:
     def _set_stale_trial_outputs_aside(stage_dir: Path) -> None:
         """A skipped decision says no variant was served. A trial killed after its script wrote `trial-result.json` and before the supervisor wrote
         `test-result.json` leaves outputs that the stage 2 gate would read as a variant and then refuse the decision for (issue 194). Move them into
-        `sampling-trial/stale/`, which no reader looks at, so the evidence is kept. A trial whose test record exists is not touched."""
+        `sampling-trial/stale/` (or `stale-1`, `stale-2` when an earlier call already made one), which no reader looks at, so the evidence is kept. A trial whose test record exists is not touched."""
         trial_dir = stage_dir / sampling.TRIAL_DIR
         if (trial_dir / "test-result.json").exists():
             return
@@ -2395,9 +2412,16 @@ class Supervisor:
         leftovers = [x for x in leftovers if x.exists()]
         if not leftovers:
             return
-        stale = trial_dir / "stale"
-        shutil.rmtree(stale, ignore_errors=True)
-        stale.mkdir()
+        # Never remove an archive that an earlier, interrupted call made: it can hold the only copy of the trial result (issue 196). Each call
+        # moves into an unused name (stale, stale-1, stale-2, ...), and `mkdir` without `exist_ok` raises when the name is taken.
+        k, stale = 0, trial_dir / "stale"
+        while True:
+            try:
+                stale.mkdir()
+                break
+            except FileExistsError:
+                k += 1
+                stale = trial_dir / f"stale-{k}"
         for x in leftovers:
             os.replace(x, stale / x.name)
 
@@ -2602,8 +2626,8 @@ class Supervisor:
     @staticmethod
     def _swap_cache(stage_dir: Path) -> list[str]:
         try:
-            cache = json.loads((stage_dir / "swap_config.json").read_text()).get("tt_cache")
-        except (OSError, ValueError, AttributeError):
+            cache = safeio.read_json(stage_dir / "swap_config.json", max_bytes=MAX_SWAP_CONFIG_BYTES, expect=dict).get("tt_cache")
+        except safeio.SafeReadError:
             return []
         return [cache] if isinstance(cache, str) and cache else []
 

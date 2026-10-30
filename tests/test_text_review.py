@@ -225,3 +225,80 @@ def test_a_lab_configuration_does_not_select_the_text_route_in_run_preflight(tmp
 def test_stage_0_records_the_snapshot_directory_name(done):
     ev = json.loads((done.run_dir / "stages" / "0" / "evidence" / "triage.json").read_text())
     assert ev["snapshot"] == "a" * 40
+
+
+# ---- the second review of PR 245 ------------------------------------------------------------------------------------------------------------------
+
+def test_two_model_directories_with_one_basename_do_not_share_a_converted_weights_file(tmp_path):
+    a, b = tmp_path / "rev-a" / "model", tmp_path / "rev-b" / "model"
+    for d in (a, b):
+        d.mkdir(parents=True)
+    cache = tmp_path / "cache"
+    assert M.weights_path(a, cache) != M.weights_path(b, cache)
+    assert M.weights_path(a, cache) == M.weights_path(a, cache) and M.weights_path(a, cache).parent == cache
+
+
+def test_a_saved_per_array_report_is_compared_with_the_recomputed_one_not_only_hashed(done):
+    s1, s2, _, d = dirs(done)
+    rp = s2 / "evidence" / "numeric_report_bf16.json"
+    edit(rp, lambda r: r["blocks"][0].update(rel_l2=1e-9))
+    import hashlib
+    digest = hashlib.sha256(rp.read_bytes()).hexdigest()
+    edit(s2 / rt.RESULT_FILE, lambda r: r["variants"]["bf16"].update(report_sha256=digest))
+    assert any("per-array report" in p for p in st.chip_problems(s2, d, s1))
+
+
+def test_a_benchmark_that_reports_two_chips_is_not_accepted_as_one_chip_timings(done):
+    s1, _, s6, d = dirs(done)
+    edit(s6 / "bench_bf16.json", lambda x: x.update(config={"chips": 2, "layers": 62}))
+    assert any("chips" in p for p in st.bench_problems(s6, d, s1))
+    with pytest.raises(rt.TextStageError, match="chip"):
+        st.finish_bench(s6, d, s1, "minicpm3")
+
+
+def test_the_chip_cache_is_sized_for_the_prompt_and_the_requested_decode_length():
+    assert rt.chip_max_len(16) == 256 and rt.chip_max_len(256) >= 256 + rt.PROMPT_ALLOWANCE
+    assert rt.chip_max_len(256) % 128 == 0
+    with pytest.raises(rt.TextStageError, match="decode"):
+        rt.chip_max_len(0)
+    with pytest.raises(rt.TextStageError, match="decode"):
+        rt.chip_max_len(10_000)
+
+
+def test_a_reference_whose_prompt_and_decode_do_not_fit_the_chip_cache_is_refused(done):
+    s1, _, _, d = dirs(done)
+    edit(s1 / rt.STAGE_CONFIG_FILE, lambda c: c.update(max_len=8))
+    assert any("cache" in p for p in st.reference_problems(s1, d))
+
+
+def test_later_stages_use_the_token_counts_stage_1_saved_not_the_current_inputs(trig, monkeypatch):
+    make_environment(trig)
+    assert trig.run() == 0
+    from orchard import supervisor
+    holder = {}
+    orig = supervisor.Supervisor.__init__
+
+    def grab(self, *a, **k):
+        orig(self, *a, **k)
+        holder["s"] = self
+    monkeypatch.setattr(supervisor.Supervisor, "__init__", grab)
+    trig.run()
+    sup = holder["s"]
+    sup.inputs["text_ppl_tokens"] = "512"
+    sup.inputs["text_decode_tokens"] = "99"
+    ctx = sup._text_context(M, trig.run_dir / "stages" / "2")
+    saved = json.loads((trig.run_dir / "stages" / "1" / rt.STAGE_CONFIG_FILE).read_text())
+    assert (ctx.ppl_tokens, ctx.decode_tokens, ctx.max_len) == (saved["ppl_tokens"], saved["decode_tokens"], saved["max_len"])
+
+
+def test_a_configuration_with_no_layer_count_fails_stage_0_with_a_reason(trig):
+    make_environment(trig)
+    bad = {k: v for k, v in CONFIG.items() if k != "num_hidden_layers"}
+    (trig.snap / "config.json").write_text(json.dumps(bad))
+    from test_supervisor_text_runtime import Stop
+    with pytest.raises(Stop):
+        trig.run()
+    end = trig.ends(0)[0]
+    assert end["result"] == "fail" and "num_hidden_layers" in " ".join(end["reasons"])
+    facts = rt.model_facts(trig.snap, M)
+    assert facts["n_layers"] is None and any("num_hidden_layers" in p for p in facts["config_problems"])
