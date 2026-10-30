@@ -3429,3 +3429,10 @@ Prompt (operator, relayed): continue resolving issues; 251 after the safeio read
 - The launcher rule picks the pin by variable name. A launcher that pins the weights some other way is still only a note.
 
 Review of PR 284 (Copilot; two High, fixed test first): a weights pin at the code bundle's commit passed because every commit the card names counted, and the generated launcher's `TT_MODEL_WEIGHTS_REVISION="${TT_MODEL_WEIGHTS_REVISION:-<commit>}"` default was not matched. The manifest, tt-model.yaml and launcher pins are now held to the card's primary weights pin (the package record's revision, else the card's commits that are not the graft head's and not named beside another repository), and the launcher pattern reads the default form. A mutation that falls back to every card commit turns the new test red.
+
+## 2026-10-30 verify-package second review round (PR 284)
+Copilot's second review found that a package record naming the code bundle's commit was taken as the primary weights pin, and that
+`tt-model.yaml`'s inline form `weights: {repo: ..., revision: ...}` was not read. The primary pin now comes from the card's repository
+associations first, and a record revision outside that set fails the revision check. The inline mapping is parsed. Whole-line comments
+in launchers are skipped, and quotes around a front-matter `base_model` are removed. Live `verify-package --check` of the four published
+episod packages (ACE-Step, Qwen3.5, MiniCPM3, Granite) still passes 6 of 6 each.

@@ -266,20 +266,24 @@ def _model_of(root: Path, card: str | None) -> str | None:
         except (ValueError, AttributeError):
             model = None
     model = model if isinstance(model, str) else _front_matter(card).get("base_model")
+    model = model.strip().strip("'\"") if isinstance(model, str) else model       # YAML quotes are not part of the id
     return model if isinstance(model, str) and "/" in model else None
 
 
 def primary_revisions(root: Path, card: str | None, model: str | None) -> set[str]:
-    """The commits the card pins for the primary weights. The package record's revision when it has one. Otherwise the card's
-    commits other than the graft head's, and other than one the card names beside a different repository (a code bundle).
-    When that leaves none, every commit the card names."""
+    """The commits the card pins for the primary weights: the card's commits other than the graft head's, and other than one the
+    card names beside a different repository (a code bundle). The package record's revision does not choose among them; a record
+    that names a commit outside this set conflicts with the card (check_revision reports it). When the card's associations leave
+    none, the record's revision if the card names it, else every commit the card names."""
     named = card_revisions(card)
+    _, graft_rev = _graft_pin(root)
+    out = {rev for rev in named if rev != graft_rev and _repo_named_before(card, rev) in (None, model)}
+    if out:
+        return out
     record = _read_record(root)
     if record and isinstance(record[2], str) and record[2].lower() in named:
         return {record[2].lower()}
-    _, graft_rev = _graft_pin(root)
-    out = {rev for rev in named if rev != graft_rev and _repo_named_before(card, rev) in (None, model)}
-    return out or named
+    return named
 
 
 def _manifest_pin_problems(doc, rel: str, card: str | None, model: str | None, primary: set[str]) -> list[str]:
@@ -326,6 +330,8 @@ def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
         if named is not None and named != repo:
             problems.append(f"tt-model.yaml names repo {named}; the package is {repo}")
         rev = _yaml_scalar(text, r"^  revision:\s*(\S+)")
+        if rev is None:                          # the inline form: weights: {repo: ORG/NAME, revision: <commit>}
+            rev = _yaml_scalar(text, r"^weights:\s*\{[^}\n]*\brevision:\s*[\"']?([^\s,}\"']+)")
         if rev is not None and not HEX40.match(rev):
             problems.append(f"tt-model.yaml's weights revision {rev!r} is not a 40-character commit")
         elif rev is not None and primary and rev.lower() not in primary:
@@ -379,17 +385,20 @@ def check_revision(root: Path, card: str | None, record, hub: Hub | None) -> Fin
     if not named:
         return Finding("revision", WARN, "the card names no pinned weights revision (a 40-character commit after the word revision)")
     problems, notes = [], []
-    rrev = record[2] if record else None
+    rrev = record[2].lower() if record and record[2] else None
+    model = _model_of(root, card)
+    want = primary_revisions(root, card, model)
     if rrev and rrev not in named:
         problems.append(f"package record revision {rrev} is not the card's ({', '.join(sorted(named))})")
+    elif rrev and rrev not in want:
+        problems.append(f"package record revision {rrev} is not the card's primary weights pin ({', '.join(sorted(want))})")
     for fname in ("tt-model.yaml", "run.sh", "install.sh"):
         t = _text(root / fname) or ""
         for rev in sorted({m.lower() for m in REVISION_NEAR.findall(t)} - named):
             notes.append(f"{fname} names revision {rev}, which the card does not")
-    model = _model_of(root, card)
-    want = primary_revisions(root, card, model)
     for fname in ("run.sh", "install.sh"):
-        for rev in sorted({m.lower() for m in LAUNCHER_WEIGHTS_PIN.findall(_text(root / fname) or "")} - want):
+        active = "\n".join(l for l in (_text(root / fname) or "").splitlines() if not l.lstrip().startswith("#"))
+        for rev in sorted({m.lower() for m in LAUNCHER_WEIGHTS_PIN.findall(active)} - want):
             problems.append(f"{fname} pins the weights at {rev}; the card's primary weights pin is {', '.join(sorted(want))}")
     graft_repo, graft_rev = _graft_pin(root)
     if hub is not None and model:

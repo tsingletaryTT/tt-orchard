@@ -474,3 +474,54 @@ def test_the_generated_launchers_default_weights_pin_is_enforced(tmp_path):
     files["run.sh"] = (f'#!/bin/sh\nexport TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-{REV}}}"\n').encode()
     _, text = run(FakeHub(files), tmp_path / "ok")
     assert not line(text, "revision").strip().startswith("FAIL"), text
+
+
+# ---- review of PR 284, second round
+
+def _bundle_card():
+    return CARD + f"The code bundle is someone/bundle (revision `{OTHER}`).\n"
+
+
+def test_a_record_at_the_code_bundles_commit_is_not_taken_as_the_primary_weights_pin(tmp_path):
+    """The card pins the weights at REV and the bundle at OTHER. A record, manifest and launcher that all say OTHER must fail."""
+    files = good_files()
+    files["README.md"] = _bundle_card().encode()
+    rec = json.loads(files["package-record.json"])
+    rec["revision"] = OTHER
+    rec["files"] = [{"path": p, "sha256": h(b)} for p, b in sorted(files.items()) if p != "package-record.json"]
+    files["package-record.json"] = json.dumps(rec).encode()
+    files["tt_kernel_manifest.json"] = _manifest(revision=OTHER)
+    files["run.sh"] = f"#!/bin/sh\nWEIGHTS_REVISION={OTHER}\n".encode()
+    rec["files"] = [{"path": p, "sha256": h(b)} for p, b in sorted(files.items()) if p != "package-record.json"]
+    files["package-record.json"] = json.dumps(rec).encode()
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests"), text
+    assert "FAIL" in line(text, "revision") and "package record" in line(text, "revision"), text
+
+
+@pytest.mark.parametrize("rev,ok", [(OTHER, False), (REV, True)])
+def test_an_inline_weights_mapping_in_tt_model_yaml_is_checked(tmp_path, rev, ok):
+    files = good_files()
+    files["tt-model.yaml"] = f"schema: \"5.1\"\nrepo: {REPO}\nweights: {{repo: ibm/thing, revision: {rev}}}     # text only\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert line(text, "manifests").strip().startswith("ok") == ok, text
+    if not ok:
+        assert OTHER in line(text, "manifests"), text
+
+
+def test_a_commented_launcher_assignment_is_not_an_active_pin(tmp_path):
+    files = good_files()
+    files["run.sh"] = f"#!/bin/sh\n# WEIGHTS_REVISION={OTHER}  (the old pin)\nWEIGHTS_REVISION={REV}\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert not line(text, "revision").strip().startswith("FAIL"), text
+
+
+def test_a_quoted_base_model_in_the_card_front_matter_matches_the_manifests_repo_id(tmp_path):
+    files = good_files()
+    files["README.md"] = CARD.replace("base_model: ibm/thing", 'base_model: "ibm/thing"').encode()
+    files["tt_kernel_manifest.json"] = _manifest()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert line(text, "manifests").strip().startswith("ok"), text
