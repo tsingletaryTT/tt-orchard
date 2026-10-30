@@ -206,6 +206,10 @@ class Handler(BaseHTTPRequestHandler):
         self._started = False                                 # set once response headers have gone out
         if not LOCK.acquire(blocking=False):                  # one request runs at a time; a second one is told so at once and never waits
             return self._json(503, {"error": {"message": "the server is busy with another request; retry shortly"}}, [("Retry-After", "5")])
+        bad = getattr(STATE["engine"], "unusable", None)       # look again under the lock: the request that held it may have failed a recapture
+        if bad:
+            LOCK.release()
+            return self._json(503, {"error": {"message": f"the chip is unusable until the server is restarted: {bad}"}})
         try:
             try:
                 if r["stream"]:

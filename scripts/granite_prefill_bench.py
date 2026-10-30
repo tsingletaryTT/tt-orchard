@@ -74,7 +74,8 @@ def main():
 
     def open_and_build():
         d = ttnn.open_device(device_id=0, trace_region_size=400 * 1024 * 1024)
-        return d, GraniteChip(d, a.model_dir, max_len=a.max_len, trace=trace)
+        # the step baseline of `time --path step` is the server's `--no-chunked-prefill` fallback (full and no-head traces), so that model is built with chunking off
+        return d, GraniteChip(d, a.model_dir, max_len=a.max_len, trace=trace, chunked_prefill=not (a.mode == "time" and a.path == "step"))
 
     (dev, m), _ = pb.run_iteration(log, wd, "construct", 0, a.construct_timeout, open_and_build, phase="setup")
     result = {"mode": a.mode, "tokens": a.tokens, "trace": trace, "max_len": a.max_len, "prompt_sha256": sha, "chunk": a.chunk}

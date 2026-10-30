@@ -402,3 +402,25 @@ def test_the_chip_engine_exposes_the_models_unusable_state_and_refuses_reset_pre
     for call in (eng.reset, lambda: eng.prefill([1, 2]), lambda: eng.step(1)):
         with pytest.raises(RuntimeError, match="unusable"):
             call()
+
+
+def test_a_request_that_loses_the_race_to_a_failed_recapture_gets_503_before_any_header():
+    """The chip becomes unusable after the first check and before the lock: the second check, under the lock, must still answer 503."""
+    import urllib.error
+
+    class Flaky(FakeEngine):
+        calls = 0
+
+        @property
+        def unusable(self):
+            Flaky.calls += 1
+            return None if Flaky.calls == 1 else "OSError: capture failed"      # healthy at the first look, broken afterwards
+    srv, base = _serve_with(Flaky([0, 1]))
+    try:
+        rq = urllib.request.Request(base + "/v1/chat/completions", json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                    {"Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(rq)
+        assert e.value.code == 503
+    finally:
+        srv.shutdown()

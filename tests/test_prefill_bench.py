@@ -192,3 +192,9 @@ def test_greedy_tokens_refuses_a_nonpositive_count():
     for n in (0, -3):
         with pytest.raises(ValueError, match="at least 1"):
             pb.greedy_tokens(torch.tensor([0.0, 1.0]), lambda t: torch.tensor([1.0, 0.0]), n)
+
+
+def test_the_step_baseline_model_is_built_with_chunking_off():
+    """Review of PR 296: the step baseline must be the server's --no-chunked-prefill fallback (two traces), not a chunked-configured model."""
+    src = (ROOT / "scripts" / "granite_prefill_bench.py").read_text()
+    assert 'chunked_prefill=not (a.mode == "time" and a.path == "step")' in src

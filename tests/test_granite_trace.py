@@ -310,3 +310,29 @@ def test_a_diagnostic_that_cannot_be_written_does_not_replace_the_capture_error(
     chip.capture_traces = bad_capture
     with pytest.raises(RuntimeError, match="block failed"):
         gt.prefill_chunked(chip, list(range(200)), chunk=128)
+
+
+# ---- review of PR 296, round 4 ------------------------------------------------------------------------------------------------
+def test_a_failed_trace_release_marks_the_chip_unusable_and_the_original_error_propagates():
+    chip = BrokenChip()
+
+    def bad_release():
+        raise RuntimeError("release failed")
+    chip.release_traces = bad_release
+    with pytest.raises(RuntimeError, match="release failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert chip.unusable and "release failed" in chip.unusable
+    with pytest.raises(RuntimeError, match="unusable"):
+        gt.prefill(chip, list(range(200)))
+
+
+def test_prefill_chunked_refuses_a_chip_that_would_capture_the_no_head_trace():
+    """chunked_prefill=False with fast_prefill captures two traces; recapturing them after the blocks would capture the second while the first is alive."""
+    chip = FakeChip(traced=True)
+    chip.trace_names = lambda: ("full", "nohead")
+    chip.events.clear()
+    with pytest.raises(ValueError, match="chunked_prefill=True"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert chip.events == []
+    chip.trace_names = lambda: ("full",)
+    gt.prefill_chunked(chip, list(range(200)), chunk=128)

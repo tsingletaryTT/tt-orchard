@@ -13,7 +13,7 @@ a trace capture and its release. The flow is
     5. run the left-over tokens and the last token through the traced decode step, which only writes persistent buffers and replays.
 
 Step 4 runs in a `finally`, so a failure in step 3 still leaves the chip with its traces for the next request. The chip object supplies
-`release_traces`, `capture_traces`, `traces_alive`, `run_chunk`, `run_tail_token`, `step`, `run_step_prefill`, optionally `mark_unusable`, and the fields `ssd`, `pos`, `L`,
+`release_traces`, `capture_traces`, `traces_alive`, `run_chunk`, `run_tail_token`, `step`, `run_step_prefill`, optionally `mark_unusable` and `trace_names`, and the fields `ssd`, `pos`, `L`,
 `CHUNKS`.
 """
 from __future__ import annotations
@@ -66,8 +66,19 @@ def prefill_chunked(chip, ids, chunk=128, report=None):
     if len(body) < sizes[-1]:
         return chip.run_step_prefill(ids)                       # no full block: nothing for the chunked path to do
     had_traces = chip.traces_alive()
+    if had_traces and "nohead" in (chip.trace_names() if hasattr(chip, "trace_names") else ()):
+        raise ValueError("prefill_chunked needs a chip built with chunked_prefill=True: this chip captures the no-head trace, and recapturing it "
+                         "after the blocks would allocate while the full trace is alive")
     if had_traces:
-        chip.release_traces()
+        try:
+            chip.release_traces()
+        except BaseException as exc:                # the traces may be half released: refuse every later request
+            if hasattr(chip, "mark_unusable"):
+                try:
+                    chip.mark_unusable(exc)
+                except Exception:
+                    pass
+            raise
     failed = None
     try:
         i = 0
