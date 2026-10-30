@@ -400,3 +400,14 @@ def test_a_failure_to_write_the_floor_or_share_is_a_ledger_decision_and_the_stag
         assert {e["stage"] for e in entries if e["data"].get("decision") == "decode record not written"} == {0, 2}
     finally:
         r.close()
+
+
+def test_a_floor_record_with_a_key_that_is_not_a_die_count_is_refused_and_the_bundle_still_builds(tmp_path):
+    run = run_dir(tmp_path)
+    _floor_with(run, lambda r: r["floors"].update({"bad": dict(r["floors"]["2"])}))
+    assert fr.read_floor(run) is None and fr.share_rows(run) == [] and fr.share_notes(run) == []
+
+
+def test_a_text_models_own_dtype_wins_over_a_top_level_dtype_of_the_whole_config():
+    policy, source = fr.policy_for({"torch_dtype": "float32", "text_config": {"dtype": "bfloat16"}})
+    assert policy == {"default": "bf16"} and "dtype" in source

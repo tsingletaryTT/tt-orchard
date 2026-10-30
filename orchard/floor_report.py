@@ -52,14 +52,17 @@ GRAFT_DRAFTER_BASIS = GRAFT_BASIS + "; the grafted variant keeps the drafter on,
 def policy_for(config) -> tuple[dict, str]:
     """(dtype policy, where it came from). The policy is the weights' stored dtype from the config's `torch_dtype` (or `dtype`), or
     bf16 when the config names none or one the floor has no width for (an FP8 checkpoint, for one). The source says which."""
-    try:
-        flat = mc.text_config(config)
-    except mc.ModelConfigError:
-        flat = {}
-    for key in ("torch_dtype", "dtype"):
-        v = flat.get(key) if isinstance(flat.get(key), str) else (config.get(key) if isinstance(config, dict) and isinstance(config.get(key), str) else None)
-        if v in _DTYPES:
-            return {"default": _DTYPES[v]}, f"the config's {key} {v}"
+    # the text model's own keys come first, then the top level of the whole config (a multimodal config can hold both)
+    holders = []
+    if isinstance(config, dict):
+        if isinstance(config.get("text_config"), dict):
+            holders.append(config["text_config"])
+        holders.append(config)
+    for holder in holders:
+        for key in ("torch_dtype", "dtype"):
+            v = holder.get(key)
+            if isinstance(v, str) and v in _DTYPES:
+                return {"default": _DTYPES[v]}, f"the config's {key} {v}"
     return {"default": "bf16"}, "assumed bf16: the config names no weight dtype the floor has a width for"
 
 
@@ -118,6 +121,8 @@ def read_floor(run_dir) -> dict | None:
     if rec.get("scan") != "ran" or not isinstance(floors, dict) or not floors:
         return None
     if not isinstance(rec.get("dtype_policy"), dict) or not all(isinstance(rec.get(k), str) for k in TEXT_FIELDS):
+        return None
+    if not all(isinstance(k, str) and k.isdigit() and int(k) >= 1 for k in floors):
         return None
     for v in floors.values():
         if not isinstance(v, dict) or not all(_good(v.get(k)) for k in ("floor_tok_s", "floor_ms", "bytes_per_token")):
