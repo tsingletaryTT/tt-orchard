@@ -3543,3 +3543,7 @@ Prompt (operator): "keep resolving open issues", with issue 17 assigned as a pur
 ## 2026-10-30 hostile-readers backlog: prefill_bench.py
 
 PR 291 added `orchard/prefill_bench.py`, which parses JSON, without listing it in the hostile-readers backlog, so `tests/test_hostile_readers.py` failed on main. It is listed now (issue 293 covers the module's review findings).
+
+## 2026-10-30 site: ACE-Step story
+
+The site gains story 12 (ACE-Step 1.5 turbo): what stopped it, what was built (per-step bars, audio profile, package, moving the encoders to the chip), the result (30 s clip in 0.93 s, 480 s in 12.3 s, music not judged), and the Hub link. The limits list says the ACE-Step package is published.
