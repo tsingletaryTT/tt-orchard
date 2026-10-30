@@ -553,3 +553,16 @@ def test_the_target_message_is_recorded_whether_or_not_the_run_qualifies_for_the
     assert mod.missing_target(mixed, (0.9, 1.0), 1) is None            # still a failure
     assert mod.target_message(mixed) is not None and "P300" in mod.target_message(mixed)
     assert mod.target_message("everything fine\n") is None
+
+
+def test_a_chained_failure_beside_the_missing_target_is_not_exempted():
+    """Copilot, PR 275 (round 4): a RuntimeError chained to the missing-target ValueError (a cleanup failure) must keep the run failing."""
+    mod = _template_module()
+    summary = "=========== 1 failed, 45 deselected in 51.90s ===========\n"
+    chained = ("E   ValueError: Could not find centralized accuracy targets for X on P300\n\nDuring handling of the above exception, another exception occurred:\n"
+               "E   RuntimeError: device close failed\n" + MISSING + summary)
+    assert mod.missing_target(chained, (0.9, 1.0), 1) is None
+    other = "E   RuntimeError: device close failed\n" + MISSING + summary
+    assert mod.missing_target(other, (0.9, 1.0), 1) is None
+    only = "E   ValueError: Could not find centralized accuracy targets for X on P300\n" + MISSING + summary
+    assert mod.missing_target(only, (0.9, 1.0), 1) is not None

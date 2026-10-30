@@ -370,6 +370,10 @@ def missing_target(acc_text: str, accuracy, rc: int) -> str | None:
     found = [target_message(acc_text)] if target_message(acc_text) else []
     if not found:
         return None
+    if "During handling of the above exception" in acc_text or "direct cause of the following exception" in acc_text:
+        return None                                  # a chained failure: something else went wrong beside the missing target
+    if any("Error" in ln and "Could not find centralized accuracy targets" not in ln for ln in acc_text.splitlines() if ln.startswith("E ")):
+        return None                                  # pytest's own failure lines name another error
     last = [ln for ln in acc_text.splitlines() if ln.startswith("=") and " in " in ln][-1:]
     return found[-1] if last and ONLY_ONE_FAILED.fullmatch(last[0]) else None
 
