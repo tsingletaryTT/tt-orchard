@@ -3547,3 +3547,11 @@ PR 291 added `orchard/prefill_bench.py`, which parses JSON, without listing it i
 ## 2026-10-30 site: ACE-Step story
 
 The site gains story 12 (ACE-Step 1.5 turbo): what stopped it, what was built (per-step bars, audio profile, package, moving the encoders to the chip), the result (30 s clip in 0.93 s, 480 s in 12.3 s, music not judged), and the Hub link. The limits list says the ACE-Step package is published.
+
+## 2026-10-30 issue triage (branch `issue-triage`)
+
+Prompt (operator): "take a break from bringing up models and fixing things; analyse the existing open issues (about 78) and prioritise them with tags and descriptors." Analysis and labels only: no code change, no issue closed or edited, no comment posted, no hardware.
+- Read all 78 open issues (body and comments) and checked each against the merged pull requests, the log, the run logs and the code on `main`.
+- Created 28 labels: `priority:P0` to `P3`, `size:S`, `M`, `L`, `needs:hardware`, `blocked:upstream`, `needs:operator-decision`, `ready`, and 17 `area:*` labels. Applied them to every open issue (priority: 2 P0, 13 P1, 25 P2, 38 P3).
+- `docs/issue-triage.md` holds the ranked table, the top ten, the models each issue would unlock, 26 closure candidates (none closed), the blocked items and the risks seen across the list.
+- Findings that corrected earlier notes: issues 136 to 139 have no known defect left in the hostile-input registry; the stage 0 hazard scan (183) and the served chat check (17) are wired; the next-round plan said 183 was not wired.
