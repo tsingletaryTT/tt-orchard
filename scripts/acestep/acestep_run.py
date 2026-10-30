@@ -76,6 +76,15 @@ def parse(argv=None):
     return p.parse_args(argv)
 
 
+def fast_steps_for(text: str) -> tuple:
+    """The steps named by --fast. `none` does not import acestep_fast, so a runtime copy without that file still runs the default path."""
+    if (text or "none").strip() == "none":
+        return ()
+    sys.path.insert(0, str(HERE))
+    import acestep_fast
+    return acestep_fast.parse_steps(text)
+
+
 def repeat_dir(out: Path, k: int) -> Path:
     return out if k == 0 else out.with_name(f"{out.name}-r{k}")
 
@@ -390,9 +399,7 @@ def main(argv=None) -> int:
         teacher_run = ar.load_run(Path(args.teacher_forced))
         force_x = [torch.from_numpy(np.asarray(teacher_run.array("step_latent", f"x{k}")).T.copy()).float() for k in range(8)]
         force_z = torch.from_numpy(np.asarray(teacher_run.array("latent", "final"))).float()
-    sys.path.insert(0, str(HERE))
-    import acestep_fast
-    fast_steps = acestep_fast.parse_steps(args.fast)
+    fast_steps = fast_steps_for(args.fast)
     sess = Session(device=args.device, bundle_code=args.bundle_code, snapshot=args.snapshot, root=args.root, cpu_dtype=args.cpu_dtype,
                    no_vae_warm=args.no_vae_warm, force_x=force_x, force_z=force_z, fast=fast_steps)
     srv, worker, load, tap, vtap = sess, sess.worker, sess.load, sess.tap, sess.vtap

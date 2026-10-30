@@ -241,7 +241,8 @@ def install_text_on_chip(worker, handler):
 
 def install_lyric_on_chip(worker, handler):
     """Replaces `handler.model.encoder.lyric_encoder.forward` with a version that runs its 8 layers on the chip. Used only for batch 1 with every token valid (the
-    lyric mask all ones, which is what a single request makes); anything else goes to the original CPU path."""
+    lyric mask all ones, which is what a single request makes) and no explicit position ids (the stack builds zero-based rotary tables); anything else goes to the
+    original CPU path."""
     import torch
     from transformers.modeling_outputs import BaseModelOutput
 
@@ -258,7 +259,7 @@ def install_lyric_on_chip(worker, handler):
     original = le.forward
 
     def forward(input_ids=None, attention_mask=None, position_ids=None, inputs_embeds=None, *a, **kw):
-        ok = (inputs_embeds is not None and attention_mask is not None and not a and input_ids is None and inputs_embeds.dim() == 3 and inputs_embeds.shape[0] == 1
+        ok = (inputs_embeds is not None and attention_mask is not None and not a and input_ids is None and position_ids is None and inputs_embeds.dim() == 3 and inputs_embeds.shape[0] == 1
               and bool(attention_mask.bool().all()) and not kw.get("output_hidden_states") and not kw.get("output_attentions"))
         if not ok:
             return original(input_ids, attention_mask, position_ids, inputs_embeds, *a, **kw)

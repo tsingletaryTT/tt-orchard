@@ -340,3 +340,11 @@ def test_stepcheck_conditioning_is_the_recorded_one_unless_own_is_asked_for():
 def test_own_conditioning_flag_is_parsed():
     a = run.parse(["--device", "chip", "--bundle-code", "b", "--snapshot", "s", "--root", "r", "--out", "o", "--prompt", "p", "--own-conditioning"])
     assert a.own_conditioning is True
+
+
+def test_fast_steps_are_parsed_without_importing_acestep_fast_when_none(monkeypatch):
+    # a package that lacks acestep_fast.py must still run the default path (--fast none)
+    monkeypatch.setitem(sys.modules, "acestep_fast", None)        # an import of it now raises ImportError
+    assert run.fast_steps_for("none") == ()
+    with pytest.raises(ImportError):
+        run.fast_steps_for("all")
