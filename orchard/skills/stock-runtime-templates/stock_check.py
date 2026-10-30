@@ -53,7 +53,7 @@ TTFT = re.compile(r"Average Time to First Token \(TTFT\): ([0-9.]+)ms")
 USER_PROMPT = re.compile(r"==USER 0 - PROMPT\n(.*?)\s*\n==USER 0 - OUTPUT\n", re.S)
 # The output ends at the next marker, at the next log record (loguru starts each with a date) or at the end of the log.
 USER_OUTPUT = re.compile(r"==USER 0 - OUTPUT\n(.*?)(?:\n==|\n\d{4}-\d\d-\d\d[ T]|\Z)", re.S)
-PATCH_LIMIT = 2_000_000
+PATCH_LIMIT = 2_000_000                 # bytes, notice included; stage 8 reads at most this many (STOCK_PATCH_MAX_BYTES in build_bundle.py)
 
 
 def fail(code: int, message: str) -> None:
@@ -386,9 +386,12 @@ def scratch_patch(cfg: dict, evidence: Path) -> str:
              if not ln.startswith("diff ")]                         # no command line, no timestamps, no machine path
     text = "\n".join(lines).replace(str(host) + "/", "a/").replace(str(scratch) + "/", "b/")
     text = text + "\n" if text else ""
-    if len(text) > PATCH_LIMIT:
-        text = text[:PATCH_LIMIT] + "\n[cut: the patch is longer than the evidence limit]\n"
-    (evidence / "scratch.patch").write_text(text)
+    data = text.encode("utf-8")
+    if len(data) > PATCH_LIMIT:
+        # the limit is in bytes and covers the notice; the cut keeps whole characters
+        notice = b"\n[cut: the patch is longer than the evidence limit]\n"
+        text = data[:PATCH_LIMIT - len(notice)].decode("utf-8", errors="ignore") + notice.decode()
+    (evidence / "scratch.patch").write_text(text, encoding="utf-8")
     return "evidence/scratch.patch"
 
 

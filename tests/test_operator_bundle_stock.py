@@ -98,3 +98,10 @@ def test_a_patch_file_over_the_size_limit_is_not_read(tmp_path):
     big = "+x\n" * 800_000
     text, _ = results(stock_run(tmp_path, patch=big))
     assert "lines added" not in section(text, HEADING)
+
+
+def test_a_cut_patch_is_summarised_and_labelled_partial(tmp_path):
+    patch = "+x\n" * 10 + "[cut: the patch is longer than the evidence limit]\n"
+    text, risks = results(stock_run(tmp_path, patch=patch))
+    assert "10 lines added, 0 removed (partial: the patch was cut)" in section(text, HEADING)
+    assert "scratch patch changed the stock code" in section(risks, "## Stock runtime run")

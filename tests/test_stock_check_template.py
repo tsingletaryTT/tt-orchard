@@ -534,3 +534,13 @@ MISSING = "ValueError: Could not find centralized accuracy targets for Llama-3.1
 def test_the_missing_target_exemption_needs_it_to_be_the_only_failure(log, rc, expected):
     mod = _template_module()
     assert (mod.missing_target(log, (0.9, 1.0), rc) is not None) is expected
+
+
+def test_a_long_scratch_patch_is_cut_inside_the_byte_limit_with_a_notice(rig):
+    """Copilot, PR 275: the cut text plus its notice went over the limit the bundle reads, so stage 8 dropped the whole patch. UTF-8 text counts in bytes."""
+    rig.go("prepare")
+    (rig.run_dir / "tt-metal-scratch" / "models" / "big.txt").write_text("\u00e9" * 3_000_000)
+    assert rig.go("run").returncode == 0
+    data = (rig.stage / "evidence/scratch.patch").read_bytes()
+    mod = _template_module()
+    assert len(data) <= mod.PATCH_LIMIT and data.endswith(b"[cut: the patch is longer than the evidence limit]\n")

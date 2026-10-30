@@ -1286,7 +1286,8 @@ def patch_summary(run: Run) -> str:
         return "no change to the copied host tree paths"
     added = sum(1 for ln in lines if ln.startswith("+") and not ln.startswith("+++"))
     removed = sum(1 for ln in lines if ln.startswith("-") and not ln.startswith("---"))
-    return f"{added} lines added, {removed} removed"
+    partial = " (partial: the patch was cut)" if any(ln.startswith("[cut: the patch is longer") for ln in lines) else ""
+    return f"{added} lines added, {removed} removed{partial}"
 
 
 def stock_section(run: Run, redact: Redactor) -> list[str]:
