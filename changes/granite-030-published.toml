@@ -1,0 +1,3 @@
+target = "0.9.83"
+summary = "Log the Granite 0.3.0 boot check and publish."
+kind = "docs"
