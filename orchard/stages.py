@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchard import audio_decision, audio_facts, audio_runtime, safeio
+from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import prompt_suite, sampling_choice, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
@@ -1424,6 +1425,78 @@ AUDIO_TABLE = {1: AUDIO_STAGE_1, 2: AUDIO_STAGE_2,
                8: dataclasses.replace(STAGES[8], needs_coder=False)}
 
 
+# The text-model runtime path (orchard/text_runtime.py, orchard/text_stages.py): a run started with the input `text_runtime=<name>`, for a text model whose
+# scripts are in this repository. Stage 0 to 2, 6 and 8 are supervisor code and none of them asks the local coder anything. Stages 3 to 5 are skipped with a
+# reason; stage 7 is skipped until the package builder is wired in (issue 61).
+def _text_verb(verb: str, run_dir, args: dict) -> list[str]:
+    """Run a numeric text gate in the configured interpreter (the supervisor needs only the standard library). A failure to run it is a reason, never a pass."""
+    from orchard import text_remote
+    from orchard.text_runtime import TextStageError
+    sel = _text_rt.selection_from_run_dir(run_dir)
+    if sel is None:
+        return ["the ledger holds no text runtime selection, so there is no interpreter to check the stage with"]
+    try:
+        result = text_remote.call(sel[1].python, verb, {**args, "runtime": sel[0]}, timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+    except TextStageError as exc:
+        return [str(exc)]
+    return [str(x) for x in result] if isinstance(result, list) else ["the text gate gave an answer that is not a list"]
+
+
+def gate_text_triage(stage_dir, run_dir) -> GateResult:
+    """Stage 0 of a text-runtime run. Supervisor code wrote delta.json from the model's own files, so there is no template copy to check. The record has to
+    name a registered runtime, the runtime has to accept the model's configuration, and delta.json has to pass the checks every stage 0 passes."""
+    d, err = _load(stage_dir, "delta.json")
+    if err:
+        return GateResult(False, (err,))
+    reasons, seen = [], []
+    _delta_reasons(d, run_dir, reasons, seen)
+    rec = d.get("text_runtime")
+    if not isinstance(rec, dict) or _text_rt.get(rec.get("name")) is None:
+        reasons.append("delta.json needs a text_runtime record that names a registered text runtime")
+        return _done(reasons, seen)
+    if rec.get("config_problems"):
+        reasons.append(f"the {rec['name']} runtime does not accept this model's configuration: {'; '.join(map(str, rec['config_problems']))[:300]}")
+    if d.get("facts", {}).get("modality") != "text":
+        reasons.append("a text-runtime run needs facts.modality to be text")
+    return _done(reasons, seen)
+
+
+def gate_text_reference(stage_dir, run_dir) -> GateResult:
+    reasons = _text_verb("gate_reference", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir)})
+    return _done(reasons, [os.path.relpath(Path(stage_dir) / _text_rt.REFERENCE_FILE, run_dir)] if not reasons else [])
+
+
+def gate_text_chip(stage_dir, run_dir) -> GateResult:
+    reasons = _text_verb("gate_chip", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir), "ref_stage_dir": str(Path(run_dir) / "stages" / "1")})
+    return _done(reasons, [os.path.relpath(Path(stage_dir) / _text_rt.RESULT_FILE, run_dir)] if not reasons else [])
+
+
+def gate_text_bench(stage_dir, run_dir) -> GateResult:
+    reasons = _text_verb("gate_bench", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir), "ref_stage_dir": str(Path(run_dir) / "stages" / "1")})
+    return _done(reasons, [os.path.relpath(Path(stage_dir) / _text_rt.BENCH_FILE, run_dir)] if not reasons else [])
+
+
+TEXT_STAGE_0 = StageSpec(0, "intake and triage for a text-runtime model", "", (), 0, "delta.json", gate_text_triage, None, harness=True, needs_coder=False)
+TEXT_STAGE_1 = StageSpec(1, "CPU reference for the text model", "", (), 0, _text_rt.REFERENCE_FILE, gate_text_reference, _text_rt.REFERENCE_FILE,
+                         harness=True, disk=_text_rt.STAGE_DISK_GB, needs_coder=False)
+TEXT_STAGE_2 = StageSpec(2, "one chip: teacher-forced agreement and perplexity against the CPU reference", "", ("tt-device-usage",), 1, _text_rt.RESULT_FILE,
+                         gate_text_chip, "test-result.json", harness=True, disk=_text_rt.STAGE_DISK_GB, needs_coder=False)
+TEXT_STAGE_6 = StageSpec(6, "benchmark with repeats and the share of the decode floor", "", ("tt-device-usage",), 1, _text_rt.BENCH_FILE, gate_text_bench,
+                         "test-result.json", harness=True, disk=_text_rt.STAGE_DISK_GB, needs_coder=False)
+SKIP_TEXT_3 = "text runtime path: stage 2 ran the whole model on the chip with the runtime's scripts; there is no separate full-model stage"
+SKIP_TEXT_4 = ("text runtime path: one chip runs the model; a multichip port and a shrink to fewer chips are not part of this path (the runtime may ship "
+               "a tensor-parallel version that these stages do not run)")
+SKIP_TEXT_5 = "text runtime path: no serving integration stage; the package's server is checked when the package is built"
+SKIP_TEXT_7 = "text runtime path: the package is built from this run's results by the package builder, not by this stage (issue 61)"
+TEXT_TABLE = {0: TEXT_STAGE_0, 1: TEXT_STAGE_1, 2: TEXT_STAGE_2, 6: TEXT_STAGE_6,
+              3: dataclasses.replace(STAGES[3], skip=SKIP_TEXT_3, needs_coder=False),
+              4: dataclasses.replace(STAGES[4], skip=SKIP_TEXT_4, needs_coder=False),
+              5: dataclasses.replace(STAGES[5], skip=SKIP_TEXT_5, needs_coder=False),
+              7: dataclasses.replace(STAGES[7], skip=SKIP_TEXT_7, needs_coder=False),
+              8: dataclasses.replace(STAGES[8], needs_coder=False)}
+TEXT_SPECS = (TEXT_STAGE_0, TEXT_STAGE_1, TEXT_STAGE_2, TEXT_STAGE_6)
+
+
 def scratch_stage(number: int, path) -> bool:
     """Whether an agent in this stage may write to <run>/tt-metal-scratch: stages 2 to 4 of the stock-runtime path only."""
     return path == "stock-runtime" and number in (2, 3, 4)
@@ -1528,11 +1601,13 @@ def run_facts(entries: list[dict], run_dir) -> dict | None:
 
 
 def spec_for(number: int, path: str | None, package_format: str | None = None,
-             cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False) -> StageSpec:
+             cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False, text_runtime: bool = False) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
     --package-format v6, stage 7 packages the model. Every other run skips stage 7."""
+    if text_runtime and number in TEXT_TABLE:
+        return TEXT_TABLE[number]
     if number == 0 and stock:
         return STOCK_STAGE_0
     if audio_runtime and number in AUDIO_TABLE:

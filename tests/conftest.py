@@ -107,3 +107,7 @@ def no_updates_network(monkeypatch, tmp_path):
     yield
     if calls:
         pytest.fail(f"this test reached the real network or runner of the updates check: {calls[:3]}", pytrace=False)
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_bundle: run the real stage 8 bundle builder in a supervisor test that fakes it by default")
