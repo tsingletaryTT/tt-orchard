@@ -1,0 +1,3 @@
+target = "0.9.77"
+summary = "Granite: chunked-scan prefill candidate (CPU-checked algebra, chip path unverified, off by default)"
+kind = "feature"

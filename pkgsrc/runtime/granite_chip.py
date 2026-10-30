@@ -10,7 +10,9 @@ The decode step is a fixed-shape program that is captured once as a ttnn trace a
   * each step the host writes four small tensors (the embedding, the one-hot position, its complement, the mask) into persistent
     device buffers and replays the trace.
 
-Prefill is a loop of these decode steps (one token per step). A chunked scan for the prompt is not built.
+Prefill is a loop of these decode steps (one token per step). `prefill_chunked` is a candidate chunked-scan prefill (composed mode only, not used by
+the server). Its algebra is checked on the CPU (tests/test_granite_scan.py). The ttnn version has NOT been verified on a chip: the first
+run (a 128-token prompt) did not finish within 15 minutes and left the chip needing a reset.
 
 `ssd` picks how the Mamba-2 state update and readout are computed:
   composed (default)  stock ttnn ops. The readout is one batched matmul with C broadcast over the heads.
@@ -138,8 +140,12 @@ class GraniteChip:
                 L["cb"] = self._vec(w, m + "conv1d.bias", (1, 1, 1, self.convdim))
                 A = (-torch.exp(w[m + "A_log"].float())).view(self.H, 1, 1)
                 L["A"] = self.up32(A) if self.f32 else self.up(A)
+                Ar = A.view(1, 1, 1, self.H)                            # the same values as a row, for the chunked scan
+                L["Ar"] = self.up32(Ar) if self.f32 else self.up(Ar)
                 dtb, D = w[m + "dt_bias"].float().view(1, 1, 1, self.H), w[m + "D"].float().view(self.H, 1, 1)
                 L["dtb"], L["D"] = (self.up32(dtb), self.up32(D)) if self.f32 else (self.up(dtb), self.up(D))
+                Dr = D.view(self.H, 1).expand(self.H, self.P).reshape(1, 1, 1, self.inter)      # D repeated over the head dimension
+                L["Dr"] = self.up32(Dr) if self.f32 else self.up(Dr)
             else:
                 a = p + "self_attn."
                 L["q"], L["k"], L["v"], L["o"] = (self._lin(w, a + n + "_proj.weight") for n in "qkvo")
@@ -211,6 +217,144 @@ class GraniteChip:
             self._set_inputs(t)
             self._run(False, head=False)                    # a second trace that stops after the last layer: no final norm, no lm_head
         return self.step(ids[-1])
+
+    # ---- chunked prefill (candidate) ------------------------------------------------------------------------------------------
+    CHUNKS = (128, 64, 32)
+
+    def prefill_chunked(self, ids, chunk=128):
+        """Prefill with blocks of tokens instead of one token per step. Needs the composed mode.
+
+        Blocks are multiples of 32 (the tile size), at most `chunk` tokens, largest first. The last token and the tokens that do not fill a
+        block of 32 go through the decode step, so the logits come from the same path as before. The recurrent state, the conv state
+        and the key/value caches are the buffers the decode trace uses, so decode continues from them unchanged.
+        """
+        if self.ssd != "composed":
+            raise ValueError("prefill_chunked needs ssd='composed'")
+        sizes = [c for c in self.CHUNKS if c <= chunk] or [32]
+        body, i = ids[:-1], 0
+        while len(body) - i >= sizes[-1]:
+            T = next(c for c in sizes if c <= len(body) - i)
+            if self.pos + T > self.L:
+                raise ValueError(f"position {self.pos + T} is past the context limit {self.L}")
+            self._run_chunk(body[i:i + T])
+            i += T
+        for t in body[i:]:
+            self._set_inputs(t)
+            self._run(False, head=False)
+        return self.step(ids[-1])
+
+    def _rm(self, t):
+        return ttnn.to_layout(t, ttnn.ROW_MAJOR_LAYOUT)
+
+    def _tl(self, t):
+        return ttnn.to_layout(t, TILE)
+
+    def _tri(self, T):
+        """[1,1,T,T] lower-triangular ones (cumulative sum by matmul) and the additive mask for the upper triangle, in float32."""
+        if not hasattr(self, "_tri_cache"):
+            self._tri_cache = {}
+        if T not in self._tri_cache:
+            lo = torch.tril(torch.ones(T, T))
+            self._tri_cache[T] = (self.up32(lo.view(1, 1, T, T)), self.up32(((1 - lo) * NEG).view(1, 1, T, T)))
+        return self._tri_cache[T]
+
+    def _run_chunk(self, toks):
+        T, pos0, L, r = len(toks), self.pos, self.L, self.nh // self.nkv
+        emb = (self.embed[torch.tensor(toks)].float() * self.cfg["embedding_multiplier"]).view(1, 1, T, self.hid)
+        x = self.up(emb)
+        sel = torch.zeros(1, self.nkv, L, T)
+        sel[:, :, pos0 + torch.arange(T), torch.arange(T)] = 1
+        keep = (1 - sel.sum(-1, keepdim=True))
+        mask = torch.zeros(1, 1, T * r, L)
+        for t in range(T):
+            mask[0, 0, t * r:(t + 1) * r, pos0 + t + 1:] = NEG
+        att = {"sel": self.up(sel), "keep": self.up(keep), "mask": self.up(mask)}
+        rm = self.cfg["residual_multiplier"]
+        for i in range(self.NL):
+            Ly = self.Ls[i]
+            h = ttnn.rms_norm(x, weight=Ly["ln1"], epsilon=self.eps, compute_kernel_config=self.ck)
+            m = self._mamba_chunk(i, h, T) if self.types[i] == "mamba" else self._attention_chunk(i, h, T, att)
+            x = ttnn.add(x, ttnn.multiply(m, rm))
+            h = ttnn.rms_norm(x, weight=Ly["ln2"], epsilon=self.eps, compute_kernel_config=self.ck)
+            a = self._linear(h, Ly["mlp_in"])
+            gate = ttnn.slice(a, [0, 0, 0, 0], [1, 1, T, 4096])
+            up = ttnn.slice(a, [0, 0, 0, 4096], [1, 1, T, 8192])
+            x = ttnn.add(x, ttnn.multiply(self._linear(ttnn.multiply(ttnn.silu(gate), up), Ly["mlp_out"]), rm))
+        ttnn.synchronize_device(self.dev)
+        self.pos += T
+
+    def _attention_chunk(self, i, h, T, att):
+        """Causal attention of T new tokens over the cache. The new keys and values are written at positions pos .. pos+T-1 with
+        cache * keep + sel (x) new, as the decode step does for one."""
+        Ly, r, nkv, hd = self.Ls[i], self.nh // self.nkv, self.nkv, self.hd
+        q = self._rm(self._linear(h, Ly["q"]))
+        k = self._rm(self._linear(h, Ly["k"]))
+        v = self._rm(self._linear(h, Ly["v"]))
+        q = self._tl(ttnn.reshape(ttnn.permute(ttnn.reshape(q, (1, T, nkv, r * hd)), (0, 2, 1, 3)), (1, nkv, T * r, hd)))
+        k = self._tl(ttnn.permute(ttnn.reshape(k, (1, T, nkv, hd)), (0, 2, 1, 3)))
+        v = self._tl(ttnn.permute(ttnn.reshape(v, (1, T, nkv, hd)), (0, 2, 1, 3)))
+        Kn = ttnn.add(ttnn.multiply(self.kc[i], att["keep"]), ttnn.matmul(att["sel"], k, compute_kernel_config=self.ck))
+        Vn = ttnn.add(ttnn.multiply(self.vc[i], att["keep"]), ttnn.matmul(att["sel"], v, compute_kernel_config=self.ck))
+        ttnn.copy(Kn, self.kc[i])
+        ttnn.copy(Vn, self.vc[i])
+        s = ttnn.multiply(ttnn.matmul(q, ttnn.transpose(Kn, -2, -1), compute_kernel_config=self.ck), self.cfg["attention_multiplier"])
+        p = ttnn.softmax(ttnn.add(s, att["mask"]), dim=-1)
+        o = self._rm(ttnn.matmul(p, Vn, compute_kernel_config=self.ck))
+        o = ttnn.reshape(ttnn.permute(ttnn.reshape(o, (1, nkv, T, r * hd)), (0, 2, 1, 3)), (1, 1, T, self.hid))
+        return self._linear(self._tl(o), Ly["o"])
+
+    def _mamba_chunk(self, i, h, T):
+        """The chunked scan of granite_scan.ssd_chunk with ttnn ops (see that file for the algebra)."""
+        Ly, H, P, N = self.Ls[i], self.H, self.P, self.N
+        proj = self._linear(h, Ly["in_proj"])
+        gate = ttnn.slice(proj, [0, 0, 0, 0], [1, 1, T, self.inter])
+        xbc = ttnn.slice(proj, [0, 0, 0, self.inter], [1, 1, T, self.inter + self.convdim])
+        dtr = ttnn.slice(proj, [0, 0, 0, self.inter + self.convdim], [1, 1, T, self.inter + self.convdim + H])
+        # causal conv over [three saved rows, T new rows]
+        pad = ttnn.concat([self._rm(b) for b in self.cs[i]] + [self._rm(xbc)], dim=2)          # [1,1,T+3,convdim]
+        taps = [self._tl(ttnn.slice(pad, [0, 0, j, 0], [1, 1, j + T, self.convdim])) for j in range(4)]
+        c = ttnn.multiply(taps[0], Ly["cw"][0])
+        for j in (1, 2, 3):
+            c = ttnn.add(c, ttnn.multiply(taps[j], Ly["cw"][j]))
+        c = ttnn.silu(ttnn.add(c, Ly["cb"]))
+        for j, b in enumerate(self.cs[i]):                                                      # the last three inputs become the conv state
+            ttnn.copy(self._tl(ttnn.slice(pad, [0, 0, T + j, 0], [1, 1, T + j + 1, self.convdim])), b)
+        f = (lambda t: ttnn.typecast(t, ttnn.float32)) if self.f32 else (lambda t: t)  # noqa: E731
+        x = f(ttnn.slice(c, [0, 0, 0, 0], [1, 1, T, self.inter]))                               # [1,1,T,H*P]
+        B = f(ttnn.slice(c, [0, 0, 0, self.inter], [1, 1, T, self.inter + N]))                  # [1,1,T,N]
+        C = f(ttnn.slice(c, [0, 0, 0, self.inter + N], [1, 1, T, self.convdim]))
+        dt = ttnn.softplus(ttnn.add(f(dtr), Ly["dtb"]))                                         # [1,1,T,H]
+        tri, negm = self._tri(T)
+        if not self.f32:
+            tri, negm = ttnn.typecast(tri, ttnn.bfloat16), ttnn.typecast(negm, ttnn.bfloat16)
+        cs = ttnn.matmul(tri, ttnn.multiply(dt, Ly["Ar"]), compute_kernel_config=self.ck)       # inclusive cumulative sum of dt*A: [1,1,T,H]
+        csh = ttnn.transpose(cs, -2, -1)                                                        # [1,1,H,T]
+        diff = ttnn.subtract(ttnn.reshape(csh, (1, H, T, 1)), ttnn.reshape(csh, (1, H, 1, T)))  # cs_i - cs_j
+        Lm = ttnn.exp(ttnn.add(diff, negm))                                                     # [1,H,T,T], zero above the diagonal
+        M = ttnn.multiply(Lm, ttnn.matmul(C, ttnn.transpose(B, -2, -1), compute_kernel_config=self.ck))
+        xh = ttnn.permute(ttnn.reshape(self._rm(x), (1, T, H, P)), (0, 2, 1, 3))                # [1,H,T,P]
+        xh = self._tl(xh)
+        dth = ttnn.reshape(ttnn.transpose(dt, -2, -1), (1, H, T, 1))
+        dtx = ttnn.multiply(xh, dth)
+        S = self.ss[i]
+        y_in = ttnn.matmul(M, dtx, compute_kernel_config=self.ck)                               # [1,H,T,P]
+        y_st = ttnn.matmul(C, ttnn.transpose(S, -2, -1), compute_kernel_config=self.ck)         # [1,1,T,H*P]: C . S0 for every head
+        y_st = self._tl(ttnn.permute(ttnn.reshape(self._rm(y_st), (1, T, H, P)), (0, 2, 1, 3)))
+        y = ttnn.add(y_in, ttnn.multiply(y_st, ttnn.reshape(ttnn.exp(csh), (1, H, T, 1))))
+        y = ttnn.reshape(self._rm(ttnn.permute(self._rm(y), (0, 2, 1, 3))), (1, 1, T, self.inter))
+        y = ttnn.add(self._tl(y), ttnn.multiply(Ly["Dr"], x))
+        # state after the block
+        csT = ttnn.slice(csh, [0, 0, 0, T - 1], [1, 1, H, T])                                   # [1,1,H,1]
+        wgt = ttnn.multiply(ttnn.exp(ttnn.subtract(ttnn.reshape(csT, (1, H, 1, 1)), ttnn.reshape(csh, (1, H, T, 1)))), dtx)
+        wT = self._tl(ttnn.reshape(self._rm(ttnn.permute(self._rm(wgt), (0, 1, 3, 2))), (1, 1, H * P, T)))
+        add = ttnn.matmul(wT, B, compute_kernel_config=self.ck)                                 # [1,1,H*P,N]
+        Sd = ttnn.multiply(ttnn.reshape(S, (1, H, P, N)), ttnn.reshape(ttnn.exp(csT), (1, H, 1, 1)))
+        ttnn.copy(ttnn.reshape(ttnn.add(ttnn.reshape(Sd, (1, 1, H * P, N)), add), (H * P, N)), S)
+        if self.f32:
+            y = ttnn.typecast(y, ttnn.bfloat16)
+        z = ttnn.multiply(y, ttnn.silu(gate))
+        z = ttnn.rms_norm(z, weight=Ly["gnorm"], epsilon=self.eps, compute_kernel_config=self.ck)
+        return self._linear(z, Ly["out_proj"])
 
     def enable_trace(self):
         """Run the program once eagerly (this compiles every op), then capture it."""
