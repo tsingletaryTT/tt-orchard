@@ -285,6 +285,20 @@ def card_revisions(card: str | None) -> set[str]:
     return {m.lower() for m in REVISION_NEAR.findall(card or "")}
 
 
+REPO_ID = re.compile(r"\b([A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*)\b")
+
+
+def _repo_named_before(card: str | None, rev: str) -> str | None:
+    """The `owner/name` nearest before `rev` on its own line, or None. A card that pins a second repository (a code bundle) names it next to its commit."""
+    for line in (card or "").splitlines():
+        at = line.lower().find(rev)
+        if at < 0:
+            continue
+        ids = [m.group(1) for m in REPO_ID.finditer(line[:at]) if not m.group(1).startswith(("http", "huggingface.co"))]
+        return ids[-1].rstrip(".") if ids else None
+    return None
+
+
 def check_revision(root: Path, card: str | None, record, hub: Hub | None) -> Finding:
     named = card_revisions(card)
     if not named:
@@ -307,11 +321,12 @@ def check_revision(root: Path, card: str | None, record, hub: Hub | None) -> Fin
     model = model if isinstance(model, str) else _front_matter(card).get("base_model")
     if hub is not None and model and "/" in model:
         for rev in sorted(named):
-            found = hub.revision_exists(model, rev)
+            repo = _repo_named_before(card, rev) or model
+            found = hub.revision_exists(repo, rev)
             if found is False:
-                problems.append(f"{model} has no revision {rev} on the Hub")
+                problems.append(f"{repo} has no revision {rev} on the Hub")
             elif found is None:
-                notes.append(f"could not ask the Hub whether {model} has revision {rev}")
+                notes.append(f"could not ask the Hub whether {repo} has revision {rev}")
     if problems:
         return Finding("revision", FAIL, "; ".join(problems + notes))
     detail = f"the card pins {', '.join(sorted(named))}" + (f" ({model})" if model else "")
