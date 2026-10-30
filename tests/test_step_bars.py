@@ -10,7 +10,7 @@ from orchard import step_bars as sb
 
 
 def _doc(rels, vae=0.01):
-    return {"dit_steps": [{"step": i, "pcc": 0.99, "rel_l2": r, "slope": 1.0} for i, r in enumerate(rels)],
+    return {"dtype": "bfloat16", "dit_steps": [{"step": i, "pcc": 0.99, "rel_l2": r, "slope": 1.0} for i, r in enumerate(rels)],
             "vae_on_cpu_final_latent": {"rel_l2": vae}}
 
 
@@ -101,3 +101,10 @@ def test_cli_refuses_files_made_from_another_run(tmp_path):
     (tmp_path / "c_bad.json").write_text(json.dumps(bad))
     assert sb.main(["--floor", str(tmp_path / "f.json"), "--chip", str(tmp_path / "c.json"), "--run", str(tmp_path / "run")]) in (0, 1)
     assert sb.main(["--floor", str(tmp_path / "f.json"), "--chip", str(tmp_path / "c_bad.json"), "--run", str(tmp_path / "run")]) == 2
+
+
+def test_a_report_that_is_not_a_bfloat16_cpu_floor_is_refused_as_a_floor():
+    chip = _doc([0.03] * 4)
+    del chip["dtype"]                      # a chip step check carries no dtype
+    r = sb.analyse(chip, chip, {"wrong_step": [0.9] * 4})
+    assert not r["usable"] and any("not a teacher-forced bfloat16" in x for x in r["reasons"])
