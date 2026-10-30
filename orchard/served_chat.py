@@ -274,7 +274,7 @@ def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
         replies = {**replies, "why_not": "the swap check could not be read"}
     problems = files["problems"] + replies["problems"]
     if replies["mode"] == "chat":
-        # tie the replies to the files: the template the swap test saw when it ran must be the one compared now
+        # tie the replies to the files: the template the swap test saw when it ran must be the template compared now
         recorded = suite.get("chat_template") if isinstance(suite.get("chat_template"), dict) else {}
         digest, now = recorded.get("sha256"), files["template"]["served_sha256"]
         if not isinstance(digest, str):

@@ -553,7 +553,7 @@ def test_a_failure_to_write_the_record_is_a_ledger_decision_and_the_stage_still_
         r.close()
 
 
-# ---- review of PR 294: a check that could not finish is not a clean one; the ids, not the spelling; the evidence must match -------------
+# ---- review of PR 294: incomplete checks, end ids, and evidence tied to the ledger -------------
 
 def test_an_oversized_template_file_is_incomplete_and_does_not_fall_back_to_the_inline_template(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "MAX_TEMPLATE_BYTES", 10)
