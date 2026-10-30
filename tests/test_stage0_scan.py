@@ -244,3 +244,8 @@ def test_a_failure_to_write_the_scan_is_a_ledger_decision_and_the_stage_still_pa
         assert any(e["data"].get("decision") == "hazard scan not written" and "No space" in e["data"]["reason"] for e in entries)
     finally:
         r.close()
+
+
+def test_a_scan_entry_with_no_name_makes_the_whole_scan_unreadable_and_never_a_clean_one(tmp_path):
+    risks, results = _bundle(tmp_path, {"label": "x", "scan": "ran", "dies": 2, "facts": {}, "notes": [], "hazards": [{"value": 512, "limit": 256}]})
+    assert "could not be read" in risks and "found no hazards" not in risks and "0 kernel hazard" not in results

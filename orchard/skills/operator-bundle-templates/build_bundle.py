@@ -1988,7 +1988,9 @@ def scan_hits(run: Run) -> list[dict] | None:
     scan = run.scan
     if not scan or not isinstance(scan.get("hazards"), list) or not isinstance(scan.get("notes", []), list):
         return None
-    return [h for h in scan["hazards"] if isinstance(h, dict) and isinstance(h.get("name"), str)]
+    if not all(isinstance(h, dict) and isinstance(h.get("name"), str) and h["name"] for h in scan["hazards"]):
+        return None            # an entry with no name is unusable evidence, and dropping it would report a clean scan
+    return list(scan["hazards"])
 
 
 def scan_results_line(run: Run) -> str:
