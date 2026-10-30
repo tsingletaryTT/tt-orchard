@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio
+from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, stage0_scan
 from orchard import text_runtime
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -1932,6 +1932,17 @@ class Supervisor:
         except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
             self.ledger.append("decision", n, decision="decode record not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
+    def _stage_0_hazard_scan(self, stage_dir: Path) -> None:
+        """Write stages/0/hazard-scan.json (orchard/stage0_scan.py) and record it in the ledger. The scan predicts kernel hazards from the
+        model's config; a hit never stops the run, and a model directory it cannot read gives a record that says it was skipped."""
+        model_dir = self.inputs.get("model")
+        try:
+            rec = stage0_scan.write_scan(stage_dir, model_dir=model_dir)
+            self.ledger.append("evidence", 0, what="hazard scan", scan=rec["scan"], hazards=[h["name"] for h in rec["hazards"]],
+                               **evidence_record(self.run_dir, stage_dir / stage0_scan.FILE))
+        except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
+            self.ledger.append("decision", 0, decision="hazard scan not written", reason=f"{type(exc).__name__}: {exc}"[:200])
+
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
         The template decides form and modality from the files; `serving` is a property of this machine, so it comes from the
@@ -1958,6 +1969,8 @@ class Supervisor:
                 self._decode_floor_record(n, stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
+            if n == 0:
+                self._stage_0_hazard_scan(stage_dir)
             extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts()}
                      if n == 0 else {})
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)
