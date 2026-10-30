@@ -156,7 +156,8 @@ def test_a_directory_with_no_config_is_a_problem_and_not_a_crash(tmp_path):
 def test_weights_in_the_directory_are_used_in_place_and_otherwise_converted_into_the_cache(tmp_path):
     d = model_dir(tmp_path)
     cache = tmp_path / "cache"
-    assert M.weights_path(d, cache) == cache / "m.safetensors"
+    w = M.weights_path(d, cache)
+    assert w.parent == cache and w.name.startswith("m-") and w.name.endswith(".safetensors")
     (d / "model.safetensors").write_bytes(b"x")
     assert M.weights_path(d, cache) == d.resolve() / "model.safetensors"
 

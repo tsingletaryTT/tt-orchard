@@ -203,3 +203,47 @@ def test_adopt_that_finds_no_holder_raises():
     a, _ = make({"adopt": [(0, {"adopted": False}, "")]})
     with pytest.raises(AdapterError, match="gozer adopt"):
         a.adopt("u1", "w", "r")
+
+
+# ---- "unreadable tt_serial": gozer cannot read a board serial while another lease's board is being reset -------------------------------------------------
+
+SERIAL = (14, None, "gozer: unreadable tt_serial for 0000:03:00.0, 0000:04:00.0 under /sys/class/tenstorrent -- board serials are what determine the lease grain")
+
+
+def make_with_sleep(script):
+    run = FakeRun(script)
+    slept = []
+    return GozerAdapter(owner_pid=OWNER, run=run, sleep=slept.append), run, slept
+
+
+def test_an_acquire_that_hits_the_serial_read_failure_is_tried_again():
+    a, run, slept = make_with_sleep({"acquire": [SERIAL, SERIAL, (0, GRANT, "")]})
+    assert a.acquire(2, "w", "r") == LEASE
+    assert len(run.argvs()) == 3 and slept == [a.serial_wait_s, a.serial_wait_s]
+
+
+def test_a_claim_that_hits_the_serial_read_failure_is_tried_again():
+    a, run, slept = make_with_sleep({"acquire": [SERIAL, (0, GRANT, "")]})
+    assert a.claim("t-7", 2, "w", "r") == LEASE
+    assert run.argvs()[1][-2:] == ["--ticket", "t-7"] and len(slept) == 1
+
+
+def test_the_serial_read_failure_is_given_up_on_after_the_retries():
+    a, run, slept = make_with_sleep({"acquire": [SERIAL] * 10})
+    with pytest.raises(AdapterError, match="unreadable tt_serial"):
+        a.acquire(2, "w", "r")
+    assert len(run.argvs()) == a.serial_retries + 1 and len(slept) == a.serial_retries
+
+
+def test_another_exit_14_is_not_retried():
+    a, run, slept = make_with_sleep({"acquire": [(14, None, "gozer: something else")]})
+    with pytest.raises(AdapterError):
+        a.acquire(2, "w", "r")
+    assert len(run.argvs()) == 1 and slept == []
+
+
+def test_the_serial_text_with_another_exit_code_is_not_retried():
+    a, run, slept = make_with_sleep({"acquire": [(1, None, SERIAL[2])]})
+    with pytest.raises(AdapterError):
+        a.acquire(2, "w", "r")
+    assert len(run.argvs()) == 1 and slept == []

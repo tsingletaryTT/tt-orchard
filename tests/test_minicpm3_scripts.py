@@ -231,3 +231,20 @@ def test_bench_floor_uses_the_layers_the_model_ran_and_the_record_says_how_many(
     short = bench_record(monkeypatch, tmp_path, 3)
     assert full["config"]["layers"] == 62 and short["config"]["layers"] == 3
     assert short["floor"]["floor_tok_s"] > 5 * full["floor"]["floor_tok_s"]
+
+
+def test_bench_reads_a_configuration_that_is_a_link_into_a_cache(monkeypatch, tmp_path):
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "c").write_text(json.dumps(BENCH_CONFIG))
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").symlink_to(blobs / "c")
+    chip = types.ModuleType("chip_model")
+    chip.ChipMiniCPM3 = Recorder
+    run_chip = load_script(monkeypatch, "run_chip", {"ttnn": fake_ttnn(), "chip_model": chip})
+    out = tmp_path / "rec.json"
+    a = types.SimpleNamespace(model_dir=str(snap), trace=False, batched_prefill=True, repeats=1, steps=4, tp=1, mlp_dtype="bf16", mlp_fidelity="hifi2", attn="mla", opt=3,
+                              shard=False, upd="paged", fidelity="default", out=str(out))
+    run_chip.bench(a, BenchModel(62), [1, 2, 3], 3, types.SimpleNamespace(decode=lambda ids: "x"))
+    assert json.loads(out.read_text())["config"]["layers"] == 62

@@ -1593,11 +1593,26 @@ class Supervisor:
         cache = Path(self.paths.cache_root) / "text-runtime" / rtm.name
         weights = rtm.weights_path(model_dir, cache)
         parquet = text_runtime.find_ppl_parquet(self.paths.hf_home, self.inputs.get("text_ppl_parquet"))
+        # Once stage 1 has saved its settings, later stages use those: a resume that omits or changes an input must not change the window or the decode length
+        # the reference was made with.
+        saved = None
+        try:
+            saved = text_runtime.load_json(self.run_dir / "stages" / "1" / text_runtime.STAGE_CONFIG_FILE, "stage 1's saved settings")
+        except text_runtime.TextStageError:
+            pass
+        if saved and all(isinstance(saved.get(k), int) for k in ("decode_tokens", "ppl_tokens", "max_len")):
+            decode, ppl_tokens, max_len = saved["decode_tokens"], saved["ppl_tokens"], saved["max_len"]
+        else:
+            try:
+                decode = int(self.inputs.get("text_decode_tokens") or text_runtime.DECODE_TOKENS)
+                ppl_tokens = int(self.inputs.get("text_ppl_tokens") or text_runtime.PPL_TOKENS)
+            except ValueError as exc:
+                raise text_runtime.TextStageError(f"text_decode_tokens and text_ppl_tokens must be whole numbers: {exc}") from exc
+            max_len = text_runtime.chip_max_len(decode)
         return text_runtime.TextContext(python=paths.python, model_dir=model_dir, weights=str(weights), out_dir=str(stage_dir.resolve()),
                                         ref_dir=str((self.run_dir / "stages" / "1" / "reference").resolve()),
                                         prompt_file=str((self.run_dir / "stages" / "1" / "prompt.txt").resolve()), ppl_parquet=parquet or "",
-                                        decode_tokens=int(self.inputs.get("text_decode_tokens") or text_runtime.DECODE_TOKENS),
-                                        ppl_tokens=int(self.inputs.get("text_ppl_tokens") or text_runtime.PPL_TOKENS))
+                                        decode_tokens=decode, ppl_tokens=ppl_tokens, max_len=max_len)
 
     def _text_body(self, spec, stage_dir: Path, resumed: bool):
         """Stages 0, 1, 2 and 6 of a text-runtime run, as supervisor code. The numeric work runs in the configured interpreter (orchard/text_remote.py), so the
@@ -1700,7 +1715,7 @@ class Supervisor:
         (stage_dir / "prompt.txt").write_text(text_runtime.DEFAULT_PROMPT + "\n", encoding="utf-8")
         text_runtime.write_json(stage_dir / text_runtime.STAGE_CONFIG_FILE, {
             "schema": text_runtime.SCHEMA, "runtime": rtm.name, "model_id": self.model_id.split("@", 1)[0], "model_dir": ctx.model_dir, "weights": ctx.weights,
-            "config_sha256": facts["config_sha256"], "n_layers": rtm.n_layers(cfgd), "decode_tokens": ctx.decode_tokens, "ppl_tokens": ctx.ppl_tokens,
+            "config_sha256": facts["config_sha256"], "n_layers": rtm.n_layers(cfgd), "decode_tokens": ctx.decode_tokens, "ppl_tokens": ctx.ppl_tokens, "max_len": ctx.max_len,
             "prompt_sha256": hashlib.sha256(text_runtime.DEFAULT_PROMPT.encode("utf-8")).hexdigest(), "ppl_parquet_name": Path(ctx.ppl_parquet).name})
         ctx = dataclasses.replace(ctx, prompt_file=str((stage_dir / "prompt.txt").resolve()), out_dir=str((stage_dir / "reference").resolve()),
                                   ref_dir=str((stage_dir / "reference").resolve()))

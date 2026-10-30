@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from orchard.adapters import (AdapterError, ChipState, Lease, LeaseLost, Queued, Refused,
                               ResetFailed, TicketGone)
@@ -33,6 +34,7 @@ EXIT_OK = 0
 EXIT_QUEUED = 10
 EXIT_UNAVAILABLE = 12          # acquire --no-queue found no chips; also a bad argument
 EXIT_NO_LEASE = 13             # no such lease or ticket
+EXIT_SERIAL_UNREADABLE = 14    # the board serials cannot be read (a reset of a neighbouring board is under way); gozer says "unreadable tt_serial"
 EXIT_REFUSED = 15              # reset refused, or release refused after it may have reset first
 EXIT_RESET_FAILED = 17         # reset ran tt-smi and it failed; the lease is untouched
 EXIT_RESET_CHANGED_HANDS = 18  # reset ran, and afterwards the lease was gone or taken
@@ -44,7 +46,7 @@ RELEASE_RESET_FAILED_TEXT = ("NOT marked clean", "not resetting")
 
 class GozerAdapter:
     def __init__(self, *, gozer: str = "gozer", owner_pid: int | None = None, run=run_command,
-                 timeout: float = CMD_TIMEOUT_S, reset_timeout: float = RESET_TIMEOUT_S):
+                 timeout: float = CMD_TIMEOUT_S, reset_timeout: float = RESET_TIMEOUT_S, sleep=time.sleep):
         pid = os.getpid() if owner_pid is None else owner_pid
         # gozer counts the owner's descendants as the owner's own work only for owner pids above
         # 1, because every process descends from pid 1 (spec section 8, item 2).
@@ -53,6 +55,9 @@ class GozerAdapter:
         self.gozer, self.owner_pid, self.run = gozer, pid, run
         self.timeout, self.reset_timeout = timeout, reset_timeout
         self.in_flight: set[str] = set()
+        # gozer exits 14 with "unreadable tt_serial" when it reads a board's serial while another lease's board is being reset (seen at the moment a claim window opened).
+        # The serial is readable again within seconds, so an acquire or a claim is tried again a few times before the error is raised.
+        self.sleep, self.serial_retries, self.serial_wait_s = sleep, 3, 10.0
 
     # ---- plumbing ---------------------------------------------------------------------------
 
@@ -64,6 +69,16 @@ class GozerAdapter:
         except json.JSONDecodeError:
             payload = None
         return res, payload if isinstance(payload, dict) else None
+
+    def _call_serial_safe(self, *args: str) -> tuple[CommandResult, dict | None]:
+        """`_call`, tried again (after `serial_wait_s`) while gozer says it cannot read a board serial, at most `serial_retries` more times."""
+        for attempt in range(self.serial_retries + 1):
+            res, payload = self._call(*args)
+            text = f"{res.stderr} {res.stdout}"
+            if res.returncode != EXIT_SERIAL_UNREADABLE or "unreadable tt_serial" not in text or attempt == self.serial_retries:
+                return res, payload
+            self.sleep(self.serial_wait_s)
+        return res, payload
 
     @staticmethod
     def _detail(res: CommandResult, payload: dict | None) -> str:
@@ -134,11 +149,11 @@ class GozerAdapter:
             argv += ["--exact", exact]
         if not queue:
             argv.append("--no-queue")
-        return self._granted(*self._call(*argv), op="acquire")
+        return self._granted(*self._call_serial_safe(*argv), op="acquire")
 
     def claim(self, ticket: str, chips: int, who: str, reason: str) -> Lease:
         argv = self._acquire_argv(chips, who, reason) + ["--ticket", ticket]
-        return self._granted(*self._call(*argv), op="claim", ticket=ticket)
+        return self._granted(*self._call_serial_safe(*argv), op="claim", ticket=ticket)
 
     def cancel(self, ticket: str) -> None:
         res, payload = self._call("cancel", ticket, "--json")

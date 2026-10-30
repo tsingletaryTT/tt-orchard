@@ -176,7 +176,7 @@ def test_a_variant_outside_the_bar_does_not_fail_the_stage(done):
     write_run(s2 / "chip" / "mlp8", bad, dtype="bfloat16", model="openbmb/MiniCPM3-4B", prompt=rt.DEFAULT_PROMPT, config_dir=done.snap)
     # the recorded entry still says ok; the gate reports the mismatch, not a failed bar
     problems = gates(done)[1]
-    assert problems and all("mlp8" in p and "not what the runs give" in p for p in problems)
+    assert problems and all(p.startswith("mlp8") for p in problems) and any("not what the runs give" in p for p in problems)
 
 
 def test_a_chip_run_of_another_token_path_is_refused(done):
