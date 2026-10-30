@@ -13,7 +13,7 @@ a trace capture and its release. The flow is
     5. run the left-over tokens and the last token through the traced decode step, which only writes persistent buffers and replays.
 
 Step 4 runs in a `finally`, so a failure in step 3 still leaves the chip with its traces for the next request. The chip object supplies
-`release_traces`, `capture_traces`, `traces_alive`, `run_chunk`, `run_tail_token`, `step`, `run_step_prefill`, and the fields `ssd`, `pos`, `L`,
+`release_traces`, `capture_traces`, `traces_alive`, `run_chunk`, `run_tail_token`, `step`, `run_step_prefill`, optionally `mark_unusable`, and the fields `ssd`, `pos`, `L`,
 `CHUNKS`.
 """
 from __future__ import annotations
@@ -34,11 +34,14 @@ def trace_names(chunked: bool, fast_prefill: bool) -> tuple:
     return ("full", "nohead") if fast_prefill and not chunked else ("full",)
 
 
-def prefill(chip, ids, chunked=True, chunk=128):
+def prefill(chip, ids, chunked=True, chunk=128, report=None):
     """The prefill the server uses. Chunked in composed mode when `chunked` is on and the prompt has a full block of 32 before its last
-    token. Everything else is the step loop (one decode step per token)."""
+    token. Everything else is the step loop (one decode step per token). A chip whose traces could not be captured again is refused
+    (`unusable` is set by `mark_unusable`): it may hold a half-captured trace, so nothing more runs until the server is restarted."""
+    if getattr(chip, "unusable", None):
+        raise RuntimeError(f"the chip is unusable until the server is restarted: {chip.unusable}")
     if chunked and chip.ssd == "composed" and len(ids) - 1 >= chunk_sizes(chip, chunk)[-1]:
-        return prefill_chunked(chip, ids, chunk)
+        return prefill_chunked(chip, ids, chunk, report=report)
     return chip.run_step_prefill(ids)
 
 
@@ -68,11 +71,16 @@ def prefill_chunked(chip, ids, chunk=128, report=None):
     except BaseException as exc:                    # recapture first, then raise this failure
         failed = exc
         if report is not None:
-            report(exc)
+            try:
+                report(exc)
+            except Exception:                       # reporting is best effort: the recapture and the original failure matter more
+                pass
     if had_traces:
         try:
             chip.capture_traces()
         except BaseException as cap:
+            if hasattr(chip, "mark_unusable"):
+                chip.mark_unusable(cap)             # a half-captured trace may exist: refuse every later request
             if failed is not None:
                 raise failed from cap
             raise

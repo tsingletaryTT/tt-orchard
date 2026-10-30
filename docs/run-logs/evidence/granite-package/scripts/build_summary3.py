@@ -4,10 +4,12 @@ Run it from the package run directory (a copy of this file sits beside f1/, f2/,
 all in the repository, `results/` holds the ones that are). The CPU reference is read from `../ibm-granite--granite-4.0-h-1b/reference/`.
 Each session is reported on its own; nothing is averaged across sessions. S3_DIR (optional) holds bench-fast.json, bench-untraced.json, smoke.json."""
 import json
+import os
 import sys
 from pathlib import Path
 
-R = Path(__file__).resolve().parent
+# The raw results: GRANITE_RUN_DIR when set (in the repository: docs/run-logs/evidence/granite-package/results), else the directory of this file.
+R = Path(os.environ.get("GRANITE_RUN_DIR") or Path(__file__).resolve().parent).resolve()
 J = lambda p: json.load(open(R / p))  # noqa: E731
 dec = lambda d: {k: d["decode"][k] for k in ("mean", "min", "max")}  # noqa: E731
 LAB = "5 repeats after 1 warm-up, one process"
@@ -56,7 +58,9 @@ sessions.append({"name": "session 4", "when": f"{t4} Pacific, host load {l4:.1f}
                  "ttft_s": J(f"{d4}/bench-fast.json")["first_token_s_12_token_prompt"]["median"], "prefill": pf(J(f"{d4}/bench-fast.json")),
                  "server": srv(J(f"{d4}/smoke.json")) if (R / d4 / "smoke.json").exists() else None,
                  "evidence": "`evidence/s4-bench-fast.json`", "server_evidence": "`evidence/s4-server-smoke.json`"})
-floor = J("../ibm-granite--granite-4.0-h-1b/reference/bf16_cpu_control.json")
+_ref = [p for p in ("../ibm-granite--granite-4.0-h-1b/reference/bf16_cpu_control.json", "../../granite-real-port/reference/bf16_cpu_control.json")
+        if (R / p).exists()]                                  # the run directory's sibling, or the copy kept in the repository
+floor = J(_ref[0])
 prose = J("s1/agree-prose.json")
 long_ = []
 for kind, f in (("prose (the model card and an English project log)", "s1/agree-prose.json"), ("code (Python source files)", "s1/agree-code.json"),

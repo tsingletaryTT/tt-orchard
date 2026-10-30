@@ -242,7 +242,7 @@ def test_a_named_headline_session_leads_the_machine_readable_rows():
     assert gp.headline(s)["name"] == "session 2" and gp.headline(SUMMARY)["name"] == "session 1"      # without the key: the lowest load
     row = [x for x in gp.number_rows(s) if x.startswith("| Decode speed, `chat` prompt")][0]
     assert "25.0 tok/s" in row
-    with pytest.raises(StopIteration):
+    with pytest.raises(ValueError, match="session 9"):
         gp.headline({**SUMMARY, "headline": "session 9"})
 
 
@@ -251,3 +251,11 @@ def test_a_card_that_cites_an_evidence_file_the_package_lacks_fails_the_gate(sta
     (staged / "evidence" / "bench.json").unlink()
     out = problems(staged)
     assert any("cites evidence/bench.json" in x for x in out), out
+
+
+def test_a_summary_with_an_unknown_headline_is_a_gate_finding_and_not_a_crash(staged):
+    summary = json.loads((staged / "evidence" / "summary.json").read_text())
+    summary["headline"] = "session 9"
+    (staged / "evidence" / "summary.json").write_text(json.dumps(summary))
+    out = problems(staged)
+    assert any("cannot be used to check the card" in x for x in out), out

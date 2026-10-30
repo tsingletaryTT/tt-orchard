@@ -16,8 +16,8 @@ if [ -d "$2" ]; then
   [ -f $2/smoke.json ] && cp $2/smoke.json $E/s3-server-smoke.json
 fi
 if [ -d "$3" ]; then       # session 4 (0.3.0, chunked prefill): the chunked bench, the step-loop control in the same session, the conditions
-  cp $3/bench-fast.json $E/s4-bench-fast.json; cp $3/bench-step.json $E/s4-bench-step.json; cp $3/conditions.txt $E/conditions-s4.txt
-  [ -f $3/smoke.json ] && cp $3/smoke.json $E/s4-server-smoke.json
+  cp "$3/bench-fast.json" "$E/s4-bench-fast.json"; cp "$3/bench-step.json" "$E/s4-bench-step.json"; cp "$3/conditions.txt" "$E/conditions-s4.txt"
+  [ -f "$3/smoke.json" ] && cp "$3/smoke.json" "$E/s4-server-smoke.json"
 fi
 sed -i "s#$HOME/orchard-runs/ibm-granite--granite-4.0-h-1b#<run-dir>#g; s#$HOME/orchard-runs/granite-package#<pkg-run-dir>#g; s#$HOME/.cache/huggingface#<hf-cache>#g; s#$HOME#<home>#g" $E/*
 grep -l "/home/\|ttuser" $E/* && echo "HOME PATH LEFT" || echo "evidence clean"

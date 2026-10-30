@@ -66,7 +66,10 @@ def headline(s: dict) -> dict:
     """The session whose numbers go in the machine-readable rows: the session named in the summary's `headline`, else the session recorded
     with the lowest host load. A summary that names a session the list does not hold is an error."""
     if s.get("headline"):
-        return next(x for x in s["sessions"] if x["name"] == s["headline"])
+        for x in s["sessions"]:
+            if x["name"] == s["headline"]:
+                return x
+        raise ValueError(f"headline names {s['headline']!r}, which is not a session in the summary")
     return min(s["sessions"], key=lambda x: x["load"])
 
 

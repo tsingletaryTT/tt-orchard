@@ -71,6 +71,7 @@ class GraniteChip:
         ssd_precision = self.effective_precision(ssd, ssd_precision)
         self.dev, self.L, self.ssd, self.use_trace, self.tid, self.out = dev, max_len, ssd, trace, None, None
         self.fast_prefill, self.tid_nohead = fast_prefill, None
+        self.unusable = None                                              # set by mark_unusable when a trace capture failed
         self.chunked_prefill = chunked_prefill and ssd == "composed"      # the server's prefill; False keeps the step loop
         self.f32 = ssd_precision == "fp32"                               # dt, decay and the state in float32
         model_dir = Path(model_dir)
@@ -222,13 +223,15 @@ class GraniteChip:
 
     def step(self, token):
         """One token in, the logits of the next token out (a float tensor of the vocabulary size)."""
+        if self.unusable:
+            raise RuntimeError(f"the chip is unusable until the server is restarted: {self.unusable}")
         self._set_inputs(token)
         return self._run(True)
 
     def prefill(self, ids, chunk=128):
         """The prefill the server calls. In composed mode with `chunked_prefill` on (the default) a prompt with a full block of 32 tokens
         before its last token goes through `prefill_chunked`; every other prompt, and every kernel mode, uses the step loop."""
-        return granite_trace.prefill(self, ids, chunked=self.chunked_prefill, chunk=chunk)
+        return granite_trace.prefill(self, ids, chunked=self.chunked_prefill, chunk=chunk, report=self._report_chunk_failure)
 
     def run_step_prefill(self, ids):
         """A loop of decode steps. The logits are read back only after the last prompt token."""
@@ -260,6 +263,12 @@ class GraniteChip:
     def _report_chunk_failure(exc):
         """Put a failed block on record before the traces are captured again (the capture could hang)."""
         print(f"granite_chip: chunked prefill block failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    def mark_unusable(self, exc):
+        """The traces could not be captured again. A capture that failed part way may have left a trace the chip does not track, so later
+        requests would allocate while it exists. Every later prefill and step is refused until the server is restarted."""
+        self.unusable = f"{type(exc).__name__}: {exc}"
+        print(f"granite_chip: trace capture failed, the chip is unusable until restart: {self.unusable}", file=sys.stderr, flush=True)
 
     def run_chunk(self, toks):
         self._run_chunk(toks)
@@ -402,12 +411,12 @@ class GraniteChip:
         if self.traces_alive():
             raise RuntimeError("capture_traces with a trace already alive; release_traces first")
         tid = ttnn.begin_trace_capture(self.dev, cq_id=0)
+        self.tid = tid                                      # tracked from the start, so `close` releases it if the capture fails
         self.out = self.program()
         ttnn.end_trace_capture(self.dev, tid, cq_id=0)
         ttnn.synchronize_device(self.dev)
-        self.tid = tid
         if "nohead" in self.trace_names():
-            self.tid_nohead = ttnn.begin_trace_capture(self.dev, cq_id=0)
+            self.tid_nohead = ttnn.begin_trace_capture(self.dev, cq_id=0)       # tracked from the start, as above
             self.program(head=False)
             ttnn.end_trace_capture(self.dev, self.tid_nohead, cq_id=0)
             ttnn.synchronize_device(self.dev)

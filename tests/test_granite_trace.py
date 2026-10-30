@@ -216,3 +216,41 @@ def test_the_requested_chunk_size_reaches_the_server_flow():
     chip = FakeChip(traced=False)
     gt.prefill(chip, list(range(300)), chunked=True, chunk=64)
     assert [e[1] for e in chip.events if e[0] == "alloc" and e[1].startswith("chunk")] == ["chunk64"] * 4 + ["chunk32"]
+
+
+# ---- review of PR 296, round 2 ----------------------------------------------------------------------------------------------------
+def test_a_failed_recapture_marks_the_chip_unusable_and_the_next_request_is_refused():
+    chip = FakeChip(traced=True)
+    marked = []
+    chip.mark_unusable = lambda exc: (marked.append(str(exc)), setattr(chip, "unusable", str(exc)))
+
+    def bad_capture():
+        raise OSError("capture failed")
+    chip.capture_traces = bad_capture
+    with pytest.raises(OSError, match="capture failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128)
+    assert marked == ["capture failed"]
+    with pytest.raises(RuntimeError, match="unusable"):
+        gt.prefill(chip, list(range(200)), chunked=True)
+    with pytest.raises(RuntimeError, match="unusable"):
+        gt.prefill(chip, list(range(5)), chunked=True)
+
+
+def test_a_reporter_that_raises_does_not_stop_the_recapture_or_replace_the_failure():
+    chip = FakeChip(traced=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+
+    def bad_report(exc):
+        raise OSError("stderr closed")
+    with pytest.raises(RuntimeError, match="block failed"):
+        gt.prefill_chunked(chip, list(range(200)), chunk=128, report=bad_report)
+    assert chip.traces_alive()
+
+
+def test_the_server_flow_passes_the_reporter_to_the_chunked_path():
+    chip = FakeChip(traced=True)
+    chip.run_chunk = lambda toks: (_ for _ in ()).throw(RuntimeError("block failed"))
+    seen = []
+    with pytest.raises(RuntimeError):
+        gt.prefill(chip, list(range(200)), chunked=True, report=lambda exc: seen.append(str(exc)))
+    assert seen == ["block failed"]
