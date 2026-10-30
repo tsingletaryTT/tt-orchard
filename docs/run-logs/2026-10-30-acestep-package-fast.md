@@ -33,8 +33,9 @@ Load: chip open and VAE warm-up 7.6 s; the server printed its ready line 18.0 s 
 ## Boot check on a chip
 
 A first staging with a placeholder boot record (the gate reported only "the boot check did not pass") was copied, `run.sh fetch` downloaded the bundle code as real files (21 s), `run.sh --self-test` passed, and `run.sh` started
-the server on port 20121 (one chip pair of board 1 under the lease). Then the evidence was completed from the boot, and the final package was restaged. Two review rounds of PR 278 then changed runtime files (`acestep_run.py`, `acestep_chip.py`), and a review of this PR changed the card text, so the package was restaged and booted two more times from a copy of the
-restaged package. The last boot: ready line after 18.0 s; 30 s requests of 1.60 s and 0.95 s; both clips identical to each other and to the CLI clip (maximum absolute difference 0.0). The `boot.json` figures are from the first boot
+the server on port 20121 (one chip pair of board 1 under the lease). Then the evidence was completed from the boot, and the final package was restaged. Two review rounds of PR 278 then changed runtime files (`acestep_run.py`, `acestep_chip.py`), and a review of this PR changed the card text, and a third review made the encoder masks a tested function, so the package was restaged and booted three more times from a copy of the
+restaged package. The last boot: ready line after 18.0 s; 30 s requests of 1.64 s and 0.96 s, and a 60 s request with a 207-token lyric in 1.90 s; the 30 s clips are identical to each other and to the CLI clip, and the long-lyric clip is
+identical to the one the first boot made (maximum absolute difference 0.0 in both comparisons, which shows that the mask refactor changed nothing). The `boot.json` figures are from the first boot
 (the later boots gave the same). All runtime files, `run.sh`, the tools, `pins.json` and the card of the final package are byte-identical to the last booted copy (compared with `cmp`).
 
 Review of this PR (Copilot, one Low, fixed test first): the "Other" time is the median total minus the transformer and the VAE, so it also holds the chip-side encoders and key/value projection (about 0.03 s). The card and the limits line now say so; before, they called it CPU time.
