@@ -107,6 +107,9 @@ def run_problems(run, label: str, cfg: dict, *, dtype: str, tokens: list[int] | 
     bad = [f"{k}/{n}" for (k, n), e in run.entries.items() if not e.get("finite", True)]
     if bad:
         out.append(f"{label}: these arrays hold a value that is not finite: {', '.join(bad[:4])}")
+    path_shape = run.entries[("other", tr.TOKENS)].get("shape")
+    if path_shape != [cfg["decode_tokens"]]:                  # equal paths of the wrong length would pass the comparison below
+        out.append(f"{label}: its token path has {path_shape[0] if path_shape else 'no'} entries; the {cfg['decode_tokens']} decode steps it claims need {cfg['decode_tokens']}")
     if tokens is not None and [int(v) for v in run.array("other", tr.TOKENS)] != tokens:
         out.append(f"{label}: its token path is not the reference's")
     return out
