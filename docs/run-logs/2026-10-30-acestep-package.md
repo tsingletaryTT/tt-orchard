@@ -51,3 +51,8 @@ Module lookup of `orchard/` works from the repository and from the package.
 ## After the boot check
 
 The staged package was restaged after PR 267's review fixes. The only change to `runtime/acestep_run.py` since the boot is in the teacher-forcing and step-check functions (conditioning check, reference digest); `Session`, `acestep_serve.py` and `run.sh` are the booted ones (checked by comparing the text of the Session class). The restaged copy was gated again (0 problems) and was not booted a second time.
+
+## Review round 1 (PR 268) and a second boot
+
+Copilot found four defects, fixed with tests: handler threads were daemon threads (a Ctrl-C could close the chip worker during a request; now non-daemon), `run.sh` ignored `HF_HUB_CACHE`, the checked-in evidence directory lacked the two bars files the stager needs (a test now stages from it), and `smoke.py` accepted non-finite samples.
+Because `acestep_serve.py`, `run.sh` and `smoke.py` changed, the final restaged package was booted again on one chip (ready in 16 s, 30 s clip identical in samples to the recorded clip, bundle and weight check passed) and gated (0 problems). The boot figures in `evidence/boot.json` are from the first boot; the second gave the same.

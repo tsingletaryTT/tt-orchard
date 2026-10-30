@@ -54,6 +54,8 @@ def sound_checks(wav_bytes: bytes, requested_s: float) -> dict:
         return {"ok": False, "reasons": [str(exc)]}
     if rate <= 0 or ch <= 0 or x.size == 0:
         return {"ok": False, "reasons": ["the WAV has no samples or a zero rate"]}
+    if not np.isfinite(x).all():
+        return {"ok": False, "reasons": ["the WAV has a sample that is not finite"]}
     win = max(1, int(rate * 0.1))
     k = x.shape[1] // win
     rms = np.sqrt((x[:, :k * win].reshape(ch, k, win) ** 2).mean(axis=(0, 2))) if k else np.zeros(0)

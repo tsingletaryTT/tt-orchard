@@ -297,3 +297,27 @@ def test_teacher_forcing_refuses_conditioning_that_differs_from_the_reference(tm
     vt = run.VaeTap(lambda z: z)
     with pytest.raises(SystemExit, match="teacher forcing refused"):
         run.teacher_forced(tap, vt, R(), tmp_path / "o.json", "bfloat16")
+
+
+def test_serve_handlers_are_not_daemon_threads(tmp_path):
+    srv = serve.make_server(FakeSession(tmp_path / "x"), "127.0.0.1", 0, tmp_path)
+    try:
+        assert srv.daemon_threads is False
+    finally:
+        srv.server_close()
+
+
+def test_smoke_rejects_non_finite_samples():
+    import struct
+    spec = importlib.util.spec_from_file_location("smoke", SCRIPTS.parents[1] / "pkgsrc" / "acestep" / "tools" / "smoke.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    n = 48000 * 2
+    x = (0.3 * np.sin(np.arange(n) / 10.0)).astype("<f4")
+    x[5] = np.nan
+    data = x.tobytes()
+    hdr = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE" + b"fmt " + struct.pack("<IHHIIHH", 16, 3, 2, 48000, 48000 * 8, 8, 32) + b"data" + struct.pack("<I", len(data))
+    r = smoke.sound_checks(hdr + data, 1.0)
+    assert not r["ok"] and "finite" in r["reasons"][0]
+    x[5] = 0.1
+    assert smoke.sound_checks(hdr + x.tobytes(), 1.0)["ok"]

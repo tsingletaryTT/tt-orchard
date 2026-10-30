@@ -133,3 +133,19 @@ def test_the_manifest_ready_line_must_be_in_the_server(staged):
 def test_run_sh_is_valid_shell_and_names_both_pins(staged):
     text = (staged / "run.sh").read_text()
     assert pk.REVISION in text and pk.BUNDLE_REVISION in text and "--local-dir" in text
+
+
+def test_the_checked_in_evidence_directory_can_stage_a_package(tmp_path):
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "a.py").write_text("x = 1\n")
+    snap = tmp_path / "snap" / pk.REVISION
+    for rel in pk.WEIGHT_FILES:
+        (snap / rel).parent.mkdir(parents=True, exist_ok=True)
+        (snap / rel).write_bytes(b"w")
+    out = pk.stage(REPO / "docs" / "run-logs" / "evidence" / "acestep-package", code, snap, tmp_path / "pkg")
+    assert pk.package_problems(out) == []
+
+
+def test_run_sh_honours_hf_hub_cache(staged):
+    assert "HF_HUB_CACHE" in (staged / "run.sh").read_text()

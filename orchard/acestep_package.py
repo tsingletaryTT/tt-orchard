@@ -244,7 +244,7 @@ RUN_SH = f"""#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
 PY="${{ACESTEP_PYTHON:-python}}"
-HUB="${{HF_HOME:-$HOME/.cache/huggingface}}/hub"
+HUB="${{HF_HUB_CACHE:-${{HF_HOME:-$HOME/.cache/huggingface}}/hub}}"
 MODEL_REV={REVISION}
 BUNDLE_REV={BUNDLE_REVISION}
 CODE="${{ACESTEP_BUNDLE_CODE:-$PWD/fetched/bundle/code}}"

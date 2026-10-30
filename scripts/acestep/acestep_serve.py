@@ -118,7 +118,10 @@ def make_server(session, host: str, port: int, work_dir) -> ThreadingHTTPServer:
             finally:
                 busy.release()
 
-    return ThreadingHTTPServer((host, port), Handler)
+    class Server(ThreadingHTTPServer):
+        daemon_threads = False         # server_close() waits for a request in flight, so the chip worker is not closed under it
+
+    return Server((host, port), Handler)
 
 
 def main(argv=None) -> int:
