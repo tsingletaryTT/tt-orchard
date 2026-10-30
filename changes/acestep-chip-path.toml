@@ -1,3 +1,4 @@
 target = "0.9.74"
 summary = "ACE-Step 1.5 turbo request profile and moves: timbre and condition caches, garbage collector, cross K/V, text and lyric encoders on the chip (30 s request 3.0 s to 0.93 s)."
+pr = 278
 kind = "feature"
