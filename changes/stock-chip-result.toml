@@ -1,3 +1,4 @@
 target = "0.9.72"
 summary = "Stock-runtime path: first chip result for Llama-3.1-8B-Instruct, stage 8 section, accelerate in the demo venv"
 kind = "feature"
+pr = 275
