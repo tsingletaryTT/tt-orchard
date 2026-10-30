@@ -1,0 +1,3 @@
+target = "0.9.69"
+summary = "MiniCPM3-4B package published to the Hugging Face Hub as episod/minicpm3-4b-blackhole; the card quotes the authors' weights-license statement and says its link was unreachable"
+pr = 260
