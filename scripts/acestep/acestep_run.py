@@ -37,7 +37,10 @@ from pathlib import Path
 
 import torch
 
-REPO = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
+# In the repository this file is scripts/acestep/acestep_run.py and `orchard/` is two levels up; in the package it is runtime/acestep_run.py and
+# `orchard/` (the few modules it needs) sits beside it.
+REPO = HERE if (HERE / "orchard").is_dir() else HERE.parents[1]
 
 
 def parse(argv=None):
@@ -222,119 +225,117 @@ def sweep(one, tmp: Path, durations, args, out_json: Path, load: dict) -> None:
                                         "rows": rows}, indent=1) + "\n")
 
 
-def main(argv=None) -> int:
-    args = parse(argv)
-    code = Path(args.bundle_code).resolve()
-    snapshot = Path(args.snapshot).resolve()
-    sys.path.insert(0, str(code))          # acestep, tt_acestep and the bundle's models/ before the host tree's
-    sys.path.insert(1, str(REPO))
-    os.environ.setdefault("ACESTEP_DISABLE_TQDM", "1")
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    os.environ["HF_HUB_OFFLINE"] = "1"      # the weights are the local snapshot; nothing is fetched
-    os.environ["ACESTEP_CHECKPOINTS"] = str(snapshot)
-    os.environ["ACESTEP_ROOT"] = str(Path(args.root).resolve())
-    import numpy as np
-    import torch
-    from orchard import audio_reference as ar
+class Session:
+    """One loaded ACE-Step process: the handler, the taps and (on the chip) the worker. `main` records runs through it and `acestep_serve.py` keeps one
+    open for as long as the server runs. Nothing is read from the Hub: the bundle's code directory, the weights snapshot and the project root are local
+    paths. `force_x` and `force_z` are the teacher-forcing inputs of `Tap` and `VaeTap`."""
 
-    out = Path(args.out)
-    for k in range(args.repeats):
-        if repeat_dir(out, k).exists():
-            raise SystemExit(f"{repeat_dir(out, k)} exists; a run is never overwritten")
+    CHECKPOINT = "acestep-v15-turbo"
+    WEIGHTS_REVISION = "19671f406d603126926c1b7e2adc169acbcade22"
 
-    t_start = time.perf_counter()
-    # The bundle's server module is not imported: `tt_acestep/__init__` imports ttnn, which opens a device, and the CPU reference must not.
-    # The three pieces of it this script needs (the project-root link, the handler class with the narrowed preflight, the constants) are
-    # written out here with the same behaviour.
-    CHECKPOINT, WEIGHTS_REVISION = "acestep-v15-turbo", "19671f406d603126926c1b7e2adc169acbcade22"
-    root = Path(args.root).resolve()
-    # ACE-Step's handler rewrites the model's .py files inside the checkpoint directory ("Model code mismatch ... auto-syncing"), and a write
-    # through a link into the Hugging Face cache would change the cached files. So `checkpoints` is a private tree: small files are copied
-    # (they may be rewritten), the large weight files are links (they are only read).
-    link = root / "checkpoints"
-    if link.is_symlink():
-        link.unlink()
-    elif link.exists():
-        shutil.rmtree(link)
-    for src in snapshot.rglob("*"):
-        if src.is_dir():
-            continue
-        dst = link / src.relative_to(snapshot)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.stat().st_size > (8 << 20):
-            dst.symlink_to(src)
-        else:
-            shutil.copy2(src.resolve(), dst)
-    from acestep.handler import AceStepHandler
-    required = {CHECKPOINT: ("config.json", "silence_latent.pt"), "vae": ("config.json",),
-                "Qwen3-Embedding-0.6B": ("config.json", "tokenizer_config.json", "tokenizer.json")}
+    def __init__(self, *, device, bundle_code, snapshot, root, cpu_dtype="float32", no_vae_warm=False, force_x=None, force_z=None):
+        code = Path(bundle_code).resolve()
+        snapshot = Path(snapshot).resolve()
+        sys.path.insert(0, str(code))          # acestep, tt_acestep and the bundle's models/ before the host tree's
+        sys.path.insert(1, str(REPO))
+        os.environ.setdefault("ACESTEP_DISABLE_TQDM", "1")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        os.environ["HF_HUB_OFFLINE"] = "1"      # the weights are the local snapshot; nothing is fetched
+        os.environ["ACESTEP_CHECKPOINTS"] = str(snapshot)
+        os.environ["ACESTEP_ROOT"] = str(Path(root).resolve())
+        self.device = device
+        t_start = time.perf_counter()
+        # ACE-Step finds its own model code with `Path(__file__).resolve().parent / "models"`. When the bundle's files are links (a Hugging Face cache
+        # snapshot), resolve() leaves the directory, nothing is found, the sync of the model code is skipped, and the Hub's copy of the model code runs.
+        # That gives different music without an error (measured: waveform correlation 0.65 against the run with real files).
+        import acestep.model_downloader as _md
+        if not (_md._get_models_source_dir() / "turbo").is_dir():
+            raise SystemExit(f"ACE-Step cannot find its model code ({_md._get_models_source_dir() / 'turbo'}): the bundle code directory {code} holds links, not files. "
+                             "Copy it to a real directory (hf download --local-dir) and pass that one.")
+        # The bundle's server module is not imported: `tt_acestep/__init__` imports ttnn, which opens a device, and the CPU reference must not.
+        # The three pieces of it this script needs (the project-root link, the handler class with the narrowed preflight, the constants) are
+        # written out here with the same behaviour.
+        root = Path(root).resolve()
+        self.root = root
+        # ACE-Step's handler rewrites the model's .py files inside the checkpoint directory ("Model code mismatch ... auto-syncing"), and a write
+        # through a link into the Hugging Face cache would change the cached files. So `checkpoints` is a private tree: small files are copied
+        # (they may be rewritten), the large weight files are links (they are only read).
+        link = root / "checkpoints"
+        if link.is_symlink():
+            link.unlink()
+        elif link.exists():
+            shutil.rmtree(link)
+        for src in snapshot.rglob("*"):
+            if src.is_dir():
+                continue
+            dst = link / src.relative_to(snapshot)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.stat().st_size > (8 << 20):
+                dst.symlink_to(src)
+            else:
+                shutil.copy2(src.resolve(), dst)
+        from acestep.handler import AceStepHandler
+        required = {self.CHECKPOINT: ("config.json", "silence_latent.pt"), "vae": ("config.json",),
+                    "Qwen3-Embedding-0.6B": ("config.json", "tokenizer_config.json", "tokenizer.json")}
 
-    class LocalCheckpointHandler(AceStepHandler):
-        def _ensure_models_present(self, *, checkpoint_path, config_path, prefer_source, vae_variant=None):
-            problems = [f"{c}/{n}" for c, names in required.items() for n in names if not (Path(checkpoint_path) / c / n).is_file()]
-            problems += [f"{c}/weights" for c in required if not any((Path(checkpoint_path) / c).glob("*.safetensors"))]
-            return ("ERROR: these ACE-Step assets are missing: " + ", ".join(problems), False) if problems else None
+        class LocalCheckpointHandler(AceStepHandler):
+            def _ensure_models_present(self, *, checkpoint_path, config_path, prefer_source, vae_variant=None):
+                problems = [f"{c}/{n}" for c, names in required.items() for n in names if not (Path(checkpoint_path) / c / n).is_file()]
+                problems += [f"{c}/weights" for c in required if not any((Path(checkpoint_path) / c).glob("*.safetensors"))]
+                return ("ERROR: these ACE-Step assets are missing: " + ", ".join(problems), False) if problems else None
 
-    srv = type("srv", (), {"CHECKPOINT": CHECKPOINT, "WEIGHTS_REVISION": WEIGHTS_REVISION})
-    worker = None
-    load = {}
-    if args.device == "chip":
-        from tt_acestep.local import LocalWorker      # imports ttnn: the caller holds a lease
+        self.worker = None
+        self.load = {}
+        if device == "chip":
+            from tt_acestep.local import LocalWorker      # imports ttnn: the caller holds a lease
+            t0 = time.perf_counter()
+            self.worker = LocalWorker(root / "checkpoints" / self.CHECKPOINT, warm=not no_vae_warm).start()
+            self.load["chip_open_upload_vae_warm_s"] = round(time.perf_counter() - t0, 2)
+            self.load["worker"] = dict(self.worker.wait_ready())
+        from acestep.llm_inference import LLMHandler
         t0 = time.perf_counter()
-        worker = LocalWorker(root / "checkpoints" / srv.CHECKPOINT, warm=not args.no_vae_warm).start()
-        load["chip_open_upload_vae_warm_s"] = round(time.perf_counter() - t0, 2)
-        load["worker"] = dict(worker.wait_ready())
-    from acestep.llm_inference import LLMHandler
-    t0 = time.perf_counter()
-    handler = LocalCheckpointHandler()
-    status, ok = handler.initialize_service(project_root=str(root), config_path=srv.CHECKPOINT, device="cpu", use_flash_attention=False,
-                                            compile_model=False, offload_to_cpu=False, offload_dit_to_cpu=False, quantization=None)
-    if not ok:
-        raise SystemExit(f"initialize_service failed: {status}")
-    load["handler_init_s"] = round(time.perf_counter() - t0, 2)
-    if worker is not None:
-        from tt_acestep.remote import RemoteDecoder, RemoteVae, skip_unused_lm_hints
-        handler.model.decoder = RemoteDecoder(worker)
-        handler.tiled_decode = RemoteVae(worker, upsample=worker.upsample)
-        skip_unused_lm_hints(handler.model)
-    bf16 = args.device == "cpu" and args.cpu_dtype == "bfloat16"
-    if bf16:
-        # Only the two stages that run on the chip change precision: the transformer and the VAE decoder. The encoders and the sampler stay float32.
-        handler.model.decoder.to(torch.bfloat16)
-        handler.vae.to(torch.bfloat16)
-    force_x = force_z = teacher_run = None
-    if args.teacher_forced:
-        if args.device != "cpu":
-            raise SystemExit("--teacher-forced is a CPU mode; use --stepcheck for the chip")
-        teacher_run = ar.load_run(Path(args.teacher_forced))
-        force_x = [torch.from_numpy(np.asarray(teacher_run.array("step_latent", f"x{k}")).T.copy()).float() for k in range(8)]
-        force_z = torch.from_numpy(np.asarray(teacher_run.array("latent", "final"))).float()
-    tap = Tap(handler.model.decoder, cast=torch.bfloat16 if bf16 else None, force=force_x)
-    handler.model.decoder = tap
-    vtap = VaeTap(handler.tiled_decode, cast=torch.bfloat16 if bf16 else None, force=force_z)
-    handler.tiled_decode = vtap
-    llm = LLMHandler()
-    load["total_load_s"] = round(time.perf_counter() - t_start, 2)
+        self.handler = handler = LocalCheckpointHandler()
+        status, ok = handler.initialize_service(project_root=str(root), config_path=self.CHECKPOINT, device="cpu", use_flash_attention=False,
+                                                compile_model=False, offload_to_cpu=False, offload_dit_to_cpu=False, quantization=None)
+        if not ok:
+            raise SystemExit(f"initialize_service failed: {status}")
+        self.load["handler_init_s"] = round(time.perf_counter() - t0, 2)
+        if self.worker is not None:
+            from tt_acestep.remote import RemoteDecoder, RemoteVae, skip_unused_lm_hints
+            handler.model.decoder = RemoteDecoder(self.worker)
+            handler.tiled_decode = RemoteVae(self.worker, upsample=self.worker.upsample)
+            skip_unused_lm_hints(handler.model)
+        bf16 = device == "cpu" and cpu_dtype == "bfloat16"
+        if bf16:
+            # Only the two stages that run on the chip change precision: the transformer and the VAE decoder. The encoders and the sampler stay float32.
+            handler.model.decoder.to(torch.bfloat16)
+            handler.vae.to(torch.bfloat16)
+        self.tap = Tap(handler.model.decoder, cast=torch.bfloat16 if bf16 else None, force=force_x)
+        handler.model.decoder = self.tap
+        self.vtap = VaeTap(handler.tiled_decode, cast=torch.bfloat16 if bf16 else None, force=force_z)
+        handler.tiled_decode = self.vtap
+        self.llm = LLMHandler()
+        self.load["total_load_s"] = round(time.perf_counter() - t_start, 2)
 
-    from acestep.inference import GenerationConfig, GenerationParams, generate_music
-
-    def one(save_dir, duration=None):
-        duration = args.duration if duration is None else duration
+    def one(self, save_dir, duration, prompt, lyrics="", seed=42):
+        """One generate call (8 steps, no planner). Returns (path of the written WAV, timings)."""
+        from acestep.inference import GenerationConfig, GenerationParams, generate_music
+        tap, vtap = self.tap, self.vtap
         tap.reset_taps()
         vtap.seconds.clear()
         if hasattr(tap.inner, "seconds"):
             tap.inner.seconds.clear()
         if hasattr(tap.inner, "reset"):
             tap.inner.reset()
-        params = GenerationParams(caption=args.prompt, lyrics=args.lyrics if args.lyrics.strip() else "[Instrumental]",
-                                  instrumental=not args.lyrics.strip(), vocal_language="en", duration=float(duration), inference_steps=8,
-                                  seed=args.seed, thinking=False, use_cot_metas=False, use_cot_caption=False, use_cot_language=False)
-        config = GenerationConfig(batch_size=1, audio_format="wav", use_random_seed=False, seeds=[args.seed])
+        params = GenerationParams(caption=prompt, lyrics=lyrics if lyrics.strip() else "[Instrumental]",
+                                  instrumental=not lyrics.strip(), vocal_language="en", duration=float(duration), inference_steps=8,
+                                  seed=seed, thinking=False, use_cot_metas=False, use_cot_caption=False, use_cot_language=False)
+        config = GenerationConfig(batch_size=1, audio_format="wav", use_random_seed=False, seeds=[seed])
         t0 = time.perf_counter()
-        result = generate_music(handler, llm, params, config, save_dir=str(save_dir))
+        result = generate_music(self.handler, self.llm, params, config, save_dir=str(save_dir))
         total = time.perf_counter() - t0
         if not result.success or not result.audios:
-            raise SystemExit(f"generation failed: {result.error or result.status_message}")
+            raise RuntimeError(f"generation failed: {result.error or result.status_message}")
         timings = {"generate_and_decode_s": round(total, 4), "vae_s": round(sum(vtap.seconds), 4)}
         if hasattr(tap.inner, "seconds"):
             timings["dit_s"] = round(sum(tap.inner.seconds), 4)
@@ -342,6 +343,34 @@ def main(argv=None) -> int:
         else:
             timings["dit_calls"] = len(tap.calls)
         return Path(result.audios[0]["path"]), timings
+
+    def close(self):
+        if self.worker is not None:
+            self.worker.close()
+
+
+def main(argv=None) -> int:
+    args = parse(argv)
+    import numpy as np
+    out = Path(args.out)
+    for k in range(args.repeats):
+        if repeat_dir(out, k).exists():
+            raise SystemExit(f"{repeat_dir(out, k)} exists; a run is never overwritten")
+    sys.path.insert(0, str(REPO))
+    from orchard import audio_reference as ar
+    force_x = force_z = teacher_run = None
+    if args.teacher_forced:
+        if args.device != "cpu":
+            raise SystemExit("--teacher-forced is a CPU mode; use --stepcheck for the chip")
+        teacher_run = ar.load_run(Path(args.teacher_forced))
+        force_x = [torch.from_numpy(np.asarray(teacher_run.array("step_latent", f"x{k}")).T.copy()).float() for k in range(8)]
+        force_z = torch.from_numpy(np.asarray(teacher_run.array("latent", "final"))).float()
+    sess = Session(device=args.device, bundle_code=args.bundle_code, snapshot=args.snapshot, root=args.root, cpu_dtype=args.cpu_dtype,
+                   no_vae_warm=args.no_vae_warm, force_x=force_x, force_z=force_z)
+    srv, worker, load, tap, vtap = sess, sess.worker, sess.load, sess.tap, sess.vtap
+
+    def one(save_dir, duration=None):
+        return sess.one(save_dir, args.duration if duration is None else duration, args.prompt, args.lyrics, args.seed)
 
     tmp = Path(args.root) / "gen"
     tmp.mkdir(parents=True, exist_ok=True)

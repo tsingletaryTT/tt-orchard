@@ -1,0 +1,229 @@
+{
+ "sweep": {
+  "rows": [
+   {
+    "duration_s": 30.0,
+    "n": 3,
+    "warmup": 1,
+    "min": 3.1123,
+    "median": 3.4704,
+    "max": 3.6219,
+    "dit_median": 0.3891,
+    "vae_median": 0.4627,
+    "label": "benchmark"
+   },
+   {
+    "duration_s": 60.0,
+    "n": 3,
+    "warmup": 1,
+    "min": 3.8171,
+    "median": 3.8462,
+    "max": 3.8554,
+    "dit_median": 0.5872,
+    "vae_median": 0.9479,
+    "label": "benchmark"
+   },
+   {
+    "duration_s": 120.0,
+    "n": 3,
+    "warmup": 1,
+    "min": 5.1337,
+    "median": 5.1548,
+    "max": 5.1686,
+    "dit_median": 0.8301,
+    "vae_median": 1.9136,
+    "label": "benchmark"
+   },
+   {
+    "duration_s": 240.0,
+    "n": 3,
+    "warmup": 1,
+    "min": 8.0177,
+    "median": 8.0792,
+    "max": 8.1527,
+    "dit_median": 1.9144,
+    "vae_median": 3.3324,
+    "label": "benchmark"
+   },
+   {
+    "duration_s": 480.0,
+    "n": 3,
+    "warmup": 1,
+    "min": 14.4214,
+    "median": 14.7309,
+    "max": 14.9049,
+    "dit_median": 4.6696,
+    "vae_median": 6.652,
+    "label": "benchmark"
+   }
+  ],
+  "load": {
+   "chip_open_upload_vae_warm_s": 7.91,
+   "worker": {
+    "op": "ready",
+    "model": "acestep",
+    "upsample": 1920,
+    "vae_warm_s": 2.15,
+    "load_s": 7.91,
+    "dram": {
+     "allocated_bytes": 3185069056,
+     "free_bytes": 30993661952
+    }
+   },
+   "handler_init_s": 1.61,
+   "total_load_s": 13.26
+  },
+  "seed": 42
+ },
+ "step_bars": [
+  {
+   "margin": 2.0,
+   "usable": true,
+   "chip": [
+    0.07754566613016167,
+    0.053857541672108926,
+    0.02341324792978209,
+    0.01983651276032465,
+    0.02302633025216635,
+    0.020410695986826842,
+    0.022456290858144972,
+    0.02798655888708583
+   ],
+   "floor": [
+    0.1718296631926107,
+    0.12595122021312585,
+    0.051157061286549996,
+    0.03159671158160845,
+    0.03786063597389656,
+    0.021348239687052094,
+    0.017099379821988413,
+    0.021840271660182962
+   ],
+   "bar": [
+    0.3436593263852214,
+    0.2519024404262517,
+    0.10231412257309999,
+    0.0631934231632169,
+    0.07572127194779311,
+    0.04269647937410419,
+    0.034198759643976825,
+    0.043680543320365924
+   ],
+   "vae": {
+    "floor": 0.007531880172373382,
+    "bar": 0.015063760344746765,
+    "chip": 0.014131991692287257,
+    "pass": true
+   },
+   "wrong_step": [
+    0.6028946187454166,
+    0.4499195673423226,
+    0.22001728330684858,
+    0.1741623888119566,
+    0.15390400750931937,
+    0.16072075821820547,
+    0.3199136096574692,
+    0.26338389543797947
+   ]
+  },
+  {
+   "margin": 2.0,
+   "usable": true,
+   "chip": [
+    0.04165814157348538,
+    0.03348383281414021,
+    0.02231229354643068,
+    0.01786172963024701,
+    0.019652182835662314,
+    0.020207497642988702,
+    0.022765505967624007,
+    0.027631848386071526
+   ],
+   "floor": [
+    0.13263198230258952,
+    0.0982638894462688,
+    0.04030763665752653,
+    0.0262243354199051,
+    0.01678024545182111,
+    0.02002066751051404,
+    0.018660340962721678,
+    0.022680296614877853
+   ],
+   "bar": [
+    0.26526396460517904,
+    0.1965277788925376,
+    0.08061527331505305,
+    0.0524486708398102,
+    0.03356049090364222,
+    0.04004133502102808,
+    0.037320681925443355,
+    0.045360593229755705
+   ],
+   "vae": {
+    "floor": 0.007940247202183117,
+    "bar": 0.015880494404366233,
+    "chip": 0.012511897996490719,
+    "pass": true
+   },
+   "wrong_step": [
+    0.5353338214344449,
+    0.335726209076676,
+    0.18896869982923648,
+    0.16517242403762614,
+    0.12162226233571564,
+    0.13039876439152095,
+    0.22955340874670813,
+    0.20122178157030768
+   ]
+  }
+ ],
+ "agreement": {
+  "passed": 17,
+  "arrays": 21,
+  "failed": [
+   "step_denoised/v4",
+   "step_denoised/v5",
+   "step_denoised/v6",
+   "step_denoised/v7"
+  ],
+  "latent_pcc": 0.9818356319357189,
+  "latent_rel_l2": 0.18895912340541263,
+  "waveform_pcc": 0.9388736883704815,
+  "waveform_rel_l2": 0.3457507744611135,
+  "bars": "provisional: audio_reference.DEFAULT_BARS",
+  "reference": "float32 CPU run, same prompt and seed"
+ },
+ "boot": {
+  "ok": true,
+  "ready_s": 16.0,
+  "server_load_s": 12.74,
+  "request_s": 3.3185,
+  "duration_s": 30.0,
+  "sample_rate": 48000,
+  "channels": 2,
+  "clip_duration_s": 30.0,
+  "loud_window_fraction": 0.8033,
+  "identical_to_recorded_clip": true,
+  "max_abs_sample_difference": 0.0,
+  "recorded_clip": "the 30 s clip of the bring-up run (same prompt, seed 42)",
+  "sound_checks_ok": true,
+  "self_test": "pass",
+  "fetch": "run.sh fetch downloaded the bundle code as real files"
+ },
+ "limits": [
+  "The planner language model is not loaded, so there is no thinking mode and no audio-code conditioning; the clip follows the caption and lyrics only.",
+  "Only the diffusion transformer and the VAE decoder run on the chip. The text and lyric encoders, the sampler and the post-processing run on the CPU, and they are most of each request.",
+  "One request runs at a time. The first request at a new duration compiles kernels and takes several seconds longer.",
+  "Seeds do not reproduce across backends: a chip clip and a CPU clip of the same seed are different music of the same kind.",
+  "The longest clip measured is 480 s."
+ ],
+ "not_tested": [
+  "Whether the music is good, or whether sung words are intelligible. The checks measure length and level only.",
+  "Languages other than English, lyrics longer than two sections, and styles other than the prompts listed in the evidence.",
+  "Any machine other than one Blackhole p300c board, and more than one chip.",
+  "The XL transformer and the 1.7B planner."
+ ],
+ "changelog": [
+  "First version: the server, the runtime copied from tt-orchard, the bundle and weight pins, the evidence and the card."
+ ]
+}
