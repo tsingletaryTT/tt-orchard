@@ -271,3 +271,72 @@ def test_a_variant_outside_the_bar_is_shown_as_not_met_and_listed_in_the_risks(t
     risks = (trig.run_dir / "stages" / "8" / "bundle" / "RISKS.md").read_text()
     assert "Variant mlp8 did not meet the stage 2 bar" in risks and "Variant bf16" not in risks
     assert "The chip comparison is in the section Text model on a chip" in results
+
+
+# ---- issue 258: a resume keeps the route the ledger recorded ---------------------------------------------------------------------
+
+def _with_input(args, key, value):
+    """The parsed arguments with the --input `key` set to `value` (None removes it)."""
+    kept = [i for i in args.input if not i.startswith(key + "=")]
+    args.input = kept + ([] if value is None else [f"{key}={value}"])
+
+
+def test_a_resume_that_names_another_text_runtime_is_refused(trig):
+    make_environment(trig)
+    with pytest.raises(Crash):
+        trig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 1)
+    _with_input(trig.args, "text_runtime", "not-the-recorded-one")
+    with pytest.raises(ValueError, match="text_runtime"):
+        trig.run()
+
+
+def test_a_resume_that_adds_a_text_runtime_to_a_run_that_had_none_is_refused(trig):
+    make_environment(trig)
+    _with_input(trig.args, "text_runtime", None)
+    try:
+        trig.run()                        # an ordinary run: whatever stops it, its ledger has a run_start with no text route
+    except Exception:                     # noqa: BLE001
+        pass
+    assert any(e["event"] == "run_start" for e in trig.entries())
+    _with_input(trig.args, "text_runtime", "minicpm3")
+    with pytest.raises(ValueError, match="text_runtime"):
+        trig.run()
+
+
+def test_a_resume_that_omits_the_text_runtime_keeps_the_recorded_one(trig):
+    make_environment(trig)
+    with pytest.raises(Crash):
+        trig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 1)
+    _with_input(trig.args, "text_runtime", None)
+    assert trig.run() == EXIT_READY
+
+
+def _ppl_parquet_of_stage(rig, n):
+    cfg = json.loads((rig.run_dir / "stages" / str(n) / rt.CHIP_CONFIG_FILE).read_text())
+    found = {c["argv"][c["argv"].index("--parquet") + 1] for c in cfg["commands"] if "--parquet" in c["argv"]}
+    assert len(found) == 1
+    return found.pop()
+
+
+def test_a_resume_keeps_the_perplexity_window_stage_1_recorded(trig, tmp_path):
+    make_environment(trig)
+    original = [i for i in trig.args.input if i.startswith("text_ppl_parquet=")][0].split("=", 1)[1]
+    with pytest.raises(Crash):
+        trig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 1)
+    other = tmp_path / "other.parquet"
+    other.write_bytes(b"another window")
+    _with_input(trig.args, "text_ppl_parquet", other)
+    assert trig.run() == EXIT_READY
+    assert _ppl_parquet_of_stage(trig, 2) == original
+
+
+def test_stage_2_refuses_a_perplexity_window_that_changed_since_stage_1(trig):
+    make_environment(trig)
+    original = Path([i for i in trig.args.input if i.startswith("text_ppl_parquet=")][0].split("=", 1)[1])
+    with pytest.raises(Crash):
+        trig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 1)
+    original.write_bytes(b"edited after the reference was made")
+    with pytest.raises(Stop):
+        trig.run()
+    end = trig.ends(2)[0]
+    assert end["result"] == "fail" and "perplexity" in " ".join(end["reasons"])

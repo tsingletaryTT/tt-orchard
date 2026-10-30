@@ -35,6 +35,11 @@ def prompt_ids(tok):
     return ids if torch.is_tensor(ids) else ids["input_ids"]
 
 
+def reference_model(model_dir, weights, dtype, n_prompt, decode):
+    """The plain-torch reference with a rope table that covers every position the run reaches: the prompt plus `decode` steps."""
+    return RefModel(model_dir, weights, dtype=dtype, max_len=n_prompt + decode + 1)
+
+
 def make_recorder(out, kind_name, dtype, n_prompt, n_dec, cfg_path, weights):
     """The recorder for one run; the settings mapping is orchard/text_reference.py's."""
     from orchard import text_reference as tr
@@ -69,7 +74,7 @@ def main():
     def run_plain(dtype_name, force=None):
         dt = getattr(torch, dtype_name)
         rec = make_recorder(out / dtype_name, "plain", "float32" if dtype_name == "float32" else "bfloat16", n, a.decode, cfg_path, weights)
-        m = RefModel(a.model_dir, a.weights, dtype=dt)
+        m = reference_model(a.model_dir, a.weights, dt, n, a.decode)
         step = {"k": -1}
 
         def tap(name, t):

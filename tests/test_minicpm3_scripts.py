@@ -262,3 +262,49 @@ def test_bench_reads_a_configuration_that_is_a_link_into_a_cache(monkeypatch, tm
                               shard=False, upd="paged", fidelity="default", out=str(out))
     run_chip.bench(a, BenchModel(62), [1, 2, 3], 3, types.SimpleNamespace(decode=lambda ids: "x"))
     assert json.loads(out.read_text())["config"]["layers"] == 62
+
+
+def test_make_reference_sizes_the_rope_table_for_the_prompt_and_the_decode_length(tmp_path, monkeypatch):
+    make_reference = load_script(monkeypatch, "make_reference", {})
+    seen = {}
+
+    class Fake:
+        def __init__(self, model_dir, weights, dtype=None, max_len=2048):
+            seen["max_len"] = max_len
+    monkeypatch.setattr(make_reference, "RefModel", Fake)
+    make_reference.reference_model("m", "w", torch.float32, n_prompt=40, decode=2048)
+    assert seen["max_len"] >= 40 + 2048
+    make_reference.reference_model("m", "w", torch.float32, n_prompt=40, decode=16)
+    assert seen["max_len"] >= 40 + 16
+
+
+def lenient_ttnn():
+    """A ttnn stand-in that answers any attribute with a mock, for modules that read ttnn constants at import."""
+    from unittest import mock
+    m = mock.MagicMock(name="ttnn")
+    m.__name__ = "ttnn"
+    return m
+
+
+def _tp_module(monkeypatch):
+    chip = types.ModuleType("chip_model")
+    chip._rot_matrix = lambda *a, **k: None
+    return load_script(monkeypatch, "chip_model_tp", {"ttnn": lenient_ttnn(), "chip_model": chip})
+
+
+@pytest.mark.parametrize("dtype,fid", [("bfp4", "hifi2"), ("bf16", "hifi4"), ("fp32", "lofi")])
+def test_the_two_chip_model_refuses_an_unsupported_dtype_or_fidelity_before_it_touches_a_device(monkeypatch, tmp_path, dtype, fid):
+    tp = _tp_module(monkeypatch)
+    with pytest.raises(ValueError, match="two-chip"):
+        tp.ChipMiniCPM3TP(object(), str(tmp_path), "w", mlp_dtype=dtype, mlp_fidelity=fid)    # no config file exists: the check comes first
+
+
+def test_serve_refuses_an_unsupported_two_chip_option_before_opening_the_mesh(monkeypatch, tmp_path):
+    tp = _tp_module(monkeypatch)
+    ttnn = lenient_ttnn()
+    ttnn.open_mesh_device.side_effect = AssertionError("the mesh was opened")
+    serve = load_script(monkeypatch, "serve", {"ttnn": ttnn, "chip_model_tp": tp, "chip_model": types.ModuleType("chip_model")})
+    monkeypatch.setattr(sys, "argv", ["serve.py", "--tp", "2", "--mlp-dtype", "bfp4", "--model-dir", str(tmp_path), "--weights", "w", "--port", "8210"])
+    with pytest.raises(SystemExit) as exc:
+        serve.main()
+    assert exc.value.code == 2
