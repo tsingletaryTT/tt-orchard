@@ -829,12 +829,16 @@ def _suite_reasons(report, run_dir, where: str = "") -> list[str]:
 
 
 def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
-    """`_suite_reasons` for the swap-check.json at `path`. A file that is missing or not a JSON object has none: the
-    other checks of the gate already say what they need of it."""
+    """`_suite_reasons` for the swap-check.json at `path`. A file that is missing has none, and neither has a JSON value that
+    is not an object: the other checks of the gate already say what they need of those. A file that is there and that the safe
+    reader refuses (not JSON, NaN, over the size cap, a link, a FIFO) is a reason: the report could have held a failing record
+    (a non-empty hub_fetch, a suite finding), and a refused read must not drop it."""
     try:
         report = _safe_json(path)
-    except safeio.SafeReadError:
-        return []
+    except safeio.SafeReadError as exc:
+        if _is_missing(exc):
+            return []
+        return [f"{where}swap-check.json is not readable JSON: {exc.reason}"]
     return _suite_reasons(report, run_dir, where) if isinstance(report, dict) else []
 
 
