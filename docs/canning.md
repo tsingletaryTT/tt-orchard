@@ -99,6 +99,18 @@ Points that were easy to get wrong:
 
 It does not publish. `can commands` prints text; the supervisor and the stage agents never run it. It does not make `tt-model serve ORG/NAME` work before the bundle is on the Hub, because tt-model installs a v6 bundle only from the Hub. The boot check serves the bundle's own `run.sh`, which is what `tt-model serve` runs after the install.
 
+## MiniCPM3-4B (`config/can.minicpm3.toml`)
+
+Another can after Granite. It needed four things that Granite did not.
+
+- **The standard-library server did its request checks inline.** `scripts/minicpm3/serve.py` read the body, checked the messages and built the prompt inside `Handler.do_POST`. The adapter needs the same checks without an HTTP handler, so `serve.py` now has `parse_request`, `encode_prompt` and `generate_ids`, and its handler calls them. `import ttnn` moved into `main()`, so the install check `import minicpm3_asgi` loads no device library. `generate_ids` takes a `should_stop` callable that it checks before every chip step. The prompt goes through the chip one token per step (about 30 ms each), so a client that leaves during a long prompt would otherwise hold the slot for the whole prompt.
+- **The weights are a PyTorch pickle** (`pytorch_model.bin`, 8 GB) and the chip model reads one safetensors file. The adapter downloads the pinned revision, then converts once with `convert_weights.convert` into `tt-orchard-minicpm3` inside `HF_HOME` (or `MINICPM3_CACHE`). The cache file name holds a hash of the snapshot path. The pickle is read with `weights_only=True`.
+- **The server reported no timings.** The boot check reads `timings.decode_tok_s`, so the adapter adds `timings` (seconds to the first piece, decode tokens per second) to the non-streaming answer.
+- **A failed chip step is not recoverable.** The recipe's own boot check found that a chip that timed out once failed every later request. The adapter marks the server unusable after a failure inside a chip step: `/health` and every later request answer 503 until restart.
+
+The adapter, `chip_model.py`, `ref_model.py`, `convert_weights.py` and `serve.py` (as `minicpm3_serve.py`) go to `extra_code/`. The pins are Granite's plus `transformers==5.19.0`; the PyPI wheel `ttnn==0.80.0` with numpy 1.26.4 ran the model unchanged (the recipe ran on a source build with numpy 2.5). Settings are `MINICPM3_*` environment variables. Greedy decoding only, default context 2048, no batched prefill and no two-chip variant, as in the recipe package. Numbers and the comparison with the recipe package are in `docs/run-logs/2026-10-30-minicpm3-thin-bundle.md`.
+
+
 ## ACE-Step 1.5 turbo (`config/can.acestep.toml`, `pkgsrc/server/acestep_asgi.py`)
 
 The second can, for a model that returns audio. What it needed that Granite did not:

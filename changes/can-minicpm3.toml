@@ -1,0 +1,3 @@
+target = "0.9.85"
+summary = "MiniCPM3-4B canned as a v6 thin bundle: ASGI adapter over serve.py, spec, card with benchmark conditions, boot check on one chip"
+pr = 308
