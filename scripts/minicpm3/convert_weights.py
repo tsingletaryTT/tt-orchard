@@ -14,16 +14,28 @@ import uuid
 from pathlib import Path
 
 
+class ConvertError(Exception):
+    """The conversion cannot start: the output exists or the pickle is missing."""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--out", required=True, help="the safetensors file to write; it must not exist")
     a = ap.parse_args()
-    out, src = Path(a.out), Path(a.model_dir) / "pytorch_model.bin"
+    try:
+        convert(a.model_dir, a.out)
+    except ConvertError as exc:
+        sys.exit(str(exc))
+
+
+def convert(model_dir, out):
+    """Write `out` from `model_dir/pytorch_model.bin` (the ASGI server calls this on its first start; main() calls it for the command line)."""
+    out, src = Path(out), Path(model_dir) / "pytorch_model.bin"
     if out.exists():
-        sys.exit(f"{out} exists; it is never overwritten")
+        raise ConvertError(f"{out} exists; it is never overwritten")
     if not src.is_file():
-        sys.exit(f"{src} is not a file")
+        raise ConvertError(f"{src} is not a file")
     import torch
     from safetensors.torch import save_file
     state = torch.load(src, map_location="cpu", weights_only=True)
