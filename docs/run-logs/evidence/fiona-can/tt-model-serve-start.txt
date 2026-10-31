@@ -1,0 +1,4 @@
+log line 30:2026-10-30 16:50:51,624 INFO minimax_music3: mesh (1, 1) open (1 device)
+log line 1680:2026-10-30 16:59:05,416 INFO minimax_music3: warmup done in 285.2s: {'prompt_len': 52, 'frames': 200, 'ended': False, 'prefill_s': 131.09761023521423, 'semantic_s': 106.90684843063354, 'llm_s': 64.3982162475586, 'depth_s': 42.22711515426636, 'denoise_s': 38.850396394729614, 'decode_s': 7.814959526062012, 'vocoder_s': 7.796507358551025, 'total_s': 284.740615606308, 'audio_s': 7.999274376417233, 'chunks': 1, 'rtf': 35.59580559528694, 'ms_per_frame_llm': 321.99108123779297, 'ms_per_frame_depth': 211.1355757713318}
+log line 1682:INFO:     Application startup complete.
+health answer at 2026-10-30 16:59:10 local time: "uptime_s":513.0 (the server had been up 513 s when /v1/health first answered 200)
