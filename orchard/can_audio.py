@@ -123,13 +123,22 @@ def audio_checks(http, base: str, ck, evidence: dict, check, *, job_timeout: flo
         near = abs(got - ck.audio_seconds) <= LENGTH_TOLERANCE * ck.audio_seconds
         check("audio_length", near, f"{got:.3f} s in the file header; {ck.audio_seconds} s asked for")
         evidence["audio"]["first"]["file_s"] = round(got, 3)
+    first_s = evidence["audio"]["first"].get("file_s")
+    total = evidence["audio"]["first"].get("server_total_s")
+    if kind_ok and isinstance(total, (int, float)) and first_s:
+        evidence["audio"]["first"]["rtf"] = round(total / first_s, 3)        # from the validated file length, not the server's audio_s
+    else:
+        evidence["audio"]["first"]["rtf"] = None
     second = run_job(http, base, settings, timeout=job_timeout)
     evidence["audio"]["second"] = _summary(second, ck.audio_seconds)
+    evidence["audio"]["second"]["rtf"] = None          # set below from the clip's own length; a clip that cannot be read has no rate
     second_ok = second["ok"]
     if second_ok:
         try:
             second_s = clip_seconds(second["audio"])
             evidence["audio"]["second"]["file_s"] = round(second_s, 3)
+            total2 = evidence["audio"]["second"].get("server_total_s")
+            evidence["audio"]["second"]["rtf"] = round(total2 / second_s, 3) if isinstance(total2, (int, float)) else None
             second_ok = abs(second_s - ck.audio_seconds) <= LENGTH_TOLERANCE * ck.audio_seconds
         except ValueError:
             second_ok = False

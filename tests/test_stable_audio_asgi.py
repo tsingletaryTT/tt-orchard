@@ -526,3 +526,88 @@ def test_the_environment_can_override_the_repo_and_revision_the_launcher_sets(tm
     download = fake_download(tmp_path, "1" * 40)
     asgi.resolve_weights(env, download)
     assert download.seen == ("other/model", "1" * 40)
+
+
+# ---- review findings of PR 310
+
+def test_a_load_that_fails_after_the_device_opened_closes_the_runtime_and_keeps_the_original_error(tmp_path):
+    class Failing(FakeRuntime):
+        def load(self):
+            raise RuntimeError("weights did not upload")
+    rt = Failing()
+    g = asgi.ResidentChipGenerator(runtime_factory=lambda: rt, work_dir=str(tmp_path / "w"))
+    with pytest.raises(RuntimeError, match="weights did not upload"):
+        g.load()
+    assert rt.closed == 1 and g.runtime is None
+
+
+def test_a_close_that_fails_while_cleaning_up_does_not_hide_the_load_error(tmp_path):
+    class Failing(FakeRuntime):
+        def load(self):
+            raise RuntimeError("weights did not upload")
+
+        def close(self):
+            raise OSError("device already gone")
+    g = asgi.ResidentChipGenerator(runtime_factory=lambda: Failing(), work_dir=str(tmp_path / "w"))
+    with pytest.raises(RuntimeError, match="weights did not upload"):
+        g.load()
+
+
+def test_a_loaded_checkpoint_of_another_revision_is_refused_and_the_device_closed(tmp_path):
+    class Wrong(FakeRuntime):
+        ckpt_path = Path("/cache/snapshots/" + "f" * 40 + "/model.safetensors")
+    rt = Wrong()
+    g = asgi.ResidentChipGenerator(runtime_factory=lambda: rt, work_dir=str(tmp_path / "w"), pinned_revision=REV)
+    with pytest.raises(RuntimeError, match="revision"):
+        g.load()
+    assert rt.closed == 1 and g.runtime is None
+
+
+def test_a_loaded_checkpoint_of_the_pinned_revision_is_accepted(tmp_path):
+    class Right(FakeRuntime):
+        ckpt_path = Path("/cache/snapshots/" + REV + "/model.safetensors")
+    g = asgi.ResidentChipGenerator(runtime_factory=lambda: Right(), work_dir=str(tmp_path / "w"), pinned_revision=REV)
+    g.load()
+    assert g.runtime is not None
+
+
+def test_the_hub_client_is_pointed_at_the_private_cache_even_after_it_was_imported(tmp_path):
+    constants = pytest.importorskip("huggingface_hub.constants")
+    before = constants.HF_HUB_CACHE
+    try:
+        private = asgi.resolve_weights({"AUDIO_PKG_CACHE": str(tmp_path / "c")}, fake_download(tmp_path), repo="a/b", revision=REV)
+        assert constants.HF_HUB_CACHE == str(private)
+    finally:
+        constants.HF_HUB_CACHE = before
+
+
+def test_shutdown_that_times_out_on_a_running_clip_leaves_the_device_open_and_says_so(monkeypatch, capsys):
+    gen = GatedGenerator()
+    monkeypatch.setattr(asgi, "build_generator", lambda a: gen)
+    monkeypatch.setattr(asgi, "SHUTDOWN_WAIT_S", 0.3)
+
+    async def go():
+        inbox = asyncio.Queue()
+        sent = []
+
+        async def receive():
+            return await inbox.get()
+
+        async def send(msg):
+            sent.append(msg["type"])
+        task = asyncio.ensure_future(asgi.app({"type": "lifespan"}, receive, send))
+        await inbox.put({"type": "lifespan.startup"})
+        while not sent:
+            await asyncio.sleep(0.01)
+        t = threading.Thread(target=lambda: submit())
+        t.start()
+        while not gen.started.is_set():
+            await asyncio.sleep(0.01)
+        await inbox.put({"type": "lifespan.shutdown"})
+        await asyncio.wait_for(task, 20)
+        closes_at_exit = gen.closes
+        gen.release.set()
+        t.join()
+        return closes_at_exit
+    assert asyncio.run(go()) == 0
+    assert "still running" in capsys.readouterr().err

@@ -136,6 +136,11 @@ def resolve_weights(environ, download, *, repo=None, revision=None):
     check = _load_file(_roots() / "orchard" / "skills" / "audio-chip-templates" / "check_revision.py", "audio_check_revision")
     check.build_private_cache(private, snapshot.parents[1].name, revision, Path(os.path.abspath(snapshot)))
     environ["HF_HUB_CACHE"] = str(private)
+    try:       # the Hub client reads the variable once, when it is imported; the download above already imported it, so set the value it holds too
+        import huggingface_hub.constants as hub_constants
+        hub_constants.HF_HUB_CACHE = str(private)
+    except ImportError:
+        pass
     return private
 
 
@@ -150,13 +155,14 @@ class ResidentChipGenerator(jobs.Generator):
     clips. `load` runs once (it opens the device); `generate` runs in the job server's worker thread, one clip at a time; `close` closes the device."""
     device_name = "one Blackhole chip"
 
-    def __init__(self, model="small-music", *, chip_decoder=True, max_seconds=jobs.MAX_SECONDS, work_dir=None, warmup_seconds=0, runtime_factory=None):
+    def __init__(self, model="small-music", *, chip_decoder=True, max_seconds=jobs.MAX_SECONDS, work_dir=None, warmup_seconds=0, runtime_factory=None, pinned_revision=None):
         if isinstance(max_seconds, bool) or not isinstance(max_seconds, int) or not jobs.MIN_SECONDS <= max_seconds <= jobs.MAX_SECONDS:
             raise ValueError(f"max_seconds must be a whole number from {jobs.MIN_SECONDS} to {jobs.MAX_SECONDS} (the model's own limit), got {max_seconds!r}")
         self.model, self.chip_decoder, self.max_seconds, self.warmup_seconds = model, chip_decoder, max_seconds, warmup_seconds
         self.model_name = f"stable-audio-3 {model}, diffusion transformer" + (" and decoder layers" if chip_decoder else "") + " on one Blackhole chip"
         self.work = Path(work_dir) if work_dir else None
         self._factory = runtime_factory
+        self.pinned_revision = pinned_revision          # the revision the loaded checkpoint must come from (None: not checked)
         self.runtime = None
         self.load_timings: dict = {}
         self._closed = False
@@ -179,7 +185,17 @@ class ResidentChipGenerator(jobs.Generator):
             self.work = Path(tempfile.mkdtemp(prefix="audio-clips-"))
         self.work.mkdir(parents=True, exist_ok=True)
         runtime = self._runtime()
-        self.load_timings = runtime.load() or {}
+        try:
+            self.load_timings = runtime.load() or {}
+            ckpt = getattr(runtime, "ckpt_path", None)
+            if self.pinned_revision and ckpt is not None and Path(ckpt).parent.name != self.pinned_revision:
+                raise RuntimeError(f"the model library loaded the checkpoint of revision {Path(ckpt).parent.name}, and this bundle is pinned to revision {self.pinned_revision}")
+        except BaseException:
+            try:
+                runtime.close()                        # the device may be open already; the error to report is the load's
+            except Exception:  # noqa: BLE001
+                pass
+            raise
         self.runtime = runtime
         if self.warmup_seconds:
             t0 = time.time()
@@ -221,7 +237,7 @@ def build_generator(a):
     if a.generator == "fake":
         return jobs.FakeGenerator(delay_s=float(os.environ.get("AUDIO_FAKE_DELAY", "0.2")))
     return ResidentChipGenerator(a.model, chip_decoder=not a.host_decoder, max_seconds=a.max_seconds, work_dir=os.environ.get("AUDIO_WORK_DIR") or None,
-                                 warmup_seconds=a.warmup_seconds)
+                                 warmup_seconds=a.warmup_seconds, pinned_revision=os.environ.get("TT_MODEL_WEIGHTS_REVISION") or REVISION)
 
 
 # ---- life cycle -----------------------------------------------------------------------------------------------------------
@@ -252,6 +268,10 @@ def startup(a):
             js.wake.notify_all()
         for t in js.threads:
             t.join(SHUTDOWN_WAIT_S)
+        if any(t.is_alive() for t in js.threads):
+            # closing the device under a running clip would crash the runtime; leave it for the process exit to release
+            print(f"serve: a clip was still running after {SHUTDOWN_WAIT_S:.0f} s; the device is left open and the process exit releases it", file=sys.stderr, flush=True)
+            return
         gen.close()
     return close
 

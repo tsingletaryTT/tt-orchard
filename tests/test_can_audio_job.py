@@ -197,7 +197,7 @@ SERVER = textwrap.dedent('''
 
 def fake_bundle(tmp_path, mode="good"):
     b = tmp_path / "fake-bundle"
-    b.mkdir()
+    b.mkdir(parents=True)
     (b / "server.py").write_text(SERVER)
     (b / "install.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     (b / "run.sh").write_text(f'#!/usr/bin/env bash\nexport TOY_MODE="{mode}"\nexec "{sys.executable}" "$(dirname "$0")/server.py"\n')
@@ -257,3 +257,24 @@ def test_a_truncated_wav_is_refused_like_a_cut_short_clip():
     assert can_audio.clip_seconds(good) == 1.0
     with pytest.raises(ValueError, match="cut short"):
         can_audio.clip_seconds(good[:-100])
+
+
+def test_a_malformed_wav_is_a_value_error_and_never_another_exception():
+    from orchard import can_audio
+    for bad in (b"RIFF\0\0\0\0WAVE", b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0", b"RIFF\0\0\0\0WAVEdata\0\0\0\0", b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0" + b"\0" * 16 + b"data\0\0\0\0"):
+        with pytest.raises(ValueError):
+            can_audio.clip_seconds(bad)
+
+
+def test_the_rate_uses_the_validated_file_length_and_not_the_servers_audio_seconds(tmp_path, base):
+    """The server says 2 s of audio but the clip's own header says 1 s (mode short halves it): rtf = 1.5 / 1.0 = 1.5, not 0.75."""
+    ev = boot(tmp_path, base, "short", job_timeout=3)
+    assert ev["audio"]["first"]["rtf"] == 1.5 and ev["audio"]["first"]["file_s"] == 1.0
+
+
+def test_the_second_jobs_rate_also_uses_the_file_length_and_an_unreadable_clip_has_no_rate(tmp_path, base):
+    spec = load(base, SPEC.replace("audio_seconds = 2", "audio_seconds = 4"))
+    out = can.boot_check(fake_bundle(tmp_path / "a", "short"), tmp_path / "w1", spec, install=False, health_timeout=30)
+    assert out["audio"]["second"]["file_s"] == 2.0 and out["audio"]["second"]["rtf"] == 0.75      # 1.5 s of generation over the 2 s clip, not over the 4 s the server claims
+    out = can.boot_check(fake_bundle(tmp_path / "b", "notflac"), tmp_path / "w2", load(base), install=False, health_timeout=30)
+    assert out["audio"]["second"]["rtf"] is None and not out["checks"]["audio_rate"]["ok"]
