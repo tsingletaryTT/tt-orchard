@@ -33,6 +33,10 @@ The recipe's `device_quality.py` against this server (the model name changed to 
 | cold start | 471 s and 727 s | 2,334 s and 2,052 s (loaded host; the cause was not isolated) |
 | decode | 126.83 tok/s | 125.75 tok/s |
 
+## What the booted copy differs from the final staged bundle in
+
+The boot check and the installer-path serve ran on a bundle staged before the card was rewritten in the can-cards sections (and before `--served-model-name` was added for the installer-path run; the boot check's copy had the model's path as its name). The final staged bundle differs from the booted copy in `README.md`, `NOTICE` (SFPI sentence), `run.sh` (`--served-model-name`), `SHA256SUMS` and the manifest timestamp. The wheels, `prepare_model_dir.py`, `base_config/` and `requirements.txt` are the same files. The installer-path run used a bundle that had the served name and the final wheels; it was staged before the last card and NOTICE edits.
+
 ## Not done
 
 - A start on a quiet host with an empty kernel cache. The 4x longer start is unexplained: the recipe's kernel cache had been seeded, and the bundle compiled with a load average of 7 to 50.

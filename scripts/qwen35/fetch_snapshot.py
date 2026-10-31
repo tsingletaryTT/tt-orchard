@@ -38,6 +38,23 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def cached_blob_ok(blob: Path, size, lfs_sha256) -> bool:
+    """True when the cached blob can be kept: it exists, has the Hub's size and, for an LFS file, hashes to the Hub's sha256. A file of the
+    right size with other bytes (a download cut short and padded, or a damaged disk) is fetched again."""
+    if not (blob.is_file() and blob.stat().st_size == size):
+        return False
+    return lfs_sha256 is None or file_sha256(blob) == lfs_sha256
+
+
+def record_ref(root: Path, rev: str, *, pinned: bool) -> None:
+    """Point refs/main at `rev` only when the caller asked for the branch. A pinned commit leaves refs alone, so another repository user's
+    `main` is not moved to an old commit."""
+    if pinned:
+        return
+    (root / "refs").mkdir(exist_ok=True)
+    (root / "refs" / "main").write_text(rev)
+
+
 def fetch_range(fs, remote: str, fd: int, lo: int, hi: int) -> int:
     for attempt in range(RETRIES):
         try:
@@ -68,7 +85,6 @@ def main(argv) -> int:
     (root / "blobs").mkdir(parents=True, exist_ok=True)
     snap = root / "snapshots" / rev
     snap.mkdir(parents=True, exist_ok=True)
-    (root / "refs").mkdir(exist_ok=True)
     infos = api.model_info(repo, revision=rev, files_metadata=True).siblings
     total = sum(s.size or 0 for s in infos)
     done = 0
@@ -79,7 +95,7 @@ def main(argv) -> int:
         blob = root / "blobs" / oid
         link = snap / s.rfilename
         link.parent.mkdir(parents=True, exist_ok=True)
-        if not (blob.is_file() and blob.stat().st_size == s.size):
+        if not cached_blob_ok(blob, s.size, s.lfs.sha256 if s.lfs else None):
             part = root / "blobs" / f"{oid}.ranged"
             fd = os.open(part, os.O_RDWR | os.O_CREAT)
             try:
@@ -99,7 +115,7 @@ def main(argv) -> int:
         if link.is_symlink() or link.exists():
             link.unlink()
         link.symlink_to(os.path.relpath(blob, link.parent))
-    (root / "refs" / "main").write_text(rev)
+    record_ref(root, rev, pinned=True)          # this script always takes a 40-character commit
     print("done", flush=True)
     return 0
 

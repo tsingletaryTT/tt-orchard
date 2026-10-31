@@ -47,7 +47,7 @@ SPEC = textwrap.dedent('''
     [env]
     TOY_FLAG = "1"
     [model_dir]
-    base_config = ["toy_config.json"]
+    base_config = ["config.json"]
     [check]
     expect = "Paris"
     min_decode_tok_s = 20.0
@@ -61,7 +61,7 @@ def base(tmp_path):
     (b / "wheels").mkdir(parents=True)
     (b / "toy_model.py").write_text("class Toy: pass\n")
     (b / "toy_metadata.json").write_text(json.dumps({"arch": "ToyForCausalLM", "main_class": "toy_model:Toy"}))
-    (b / "toy_config.json").write_text(json.dumps({"architectures": ["ToyForCausalLM"], "model_type": "toy"}))
+    (b / "config.json").write_text(json.dumps({"architectures": ["ToyForCausalLM"], "model_type": "toy"}))
     (b / "README.src.md").write_text("# toy\n")
     for name in ("vllm_tt_plugin-0.1.0-py3-none-any.whl", "ttnn-0.79.0.dev1+toy-cp312-cp312-linux_x86_64.whl",
                  "tt_metal_models-0.79.0.dev1+toy-py3-none-any.whl"):
@@ -89,7 +89,7 @@ def test_the_serving_fields_load(spec):
     assert spec.extra_args == ("--enable-prefix-caching", "--enable-chunked-prefill", "--max-num-batched-tokens", "2048")
     assert spec.tt_config == {"sample_on_device_mode": "all", "l1_small_size": 24576}
     assert spec.trace_region_bytes == 805306368
-    assert [d for _, d in spec.base_config] == ["toy_config.json"]
+    assert [d for _, d in spec.base_config] == ["config.json"]
     assert spec.check.request_extra == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
@@ -97,10 +97,15 @@ def test_the_serving_fields_load(spec):
     ('extra_args = ["--enable-prefix-caching"', 'extra_args = [1, "--enable-prefix-caching"', "extra_args"),
     ('extra_args = ["--enable-prefix-caching"', 'extra_args = ["--port", "9", "--enable-prefix-caching"', "extra_args must not set --port"),
     ('extra_args = ["--enable-prefix-caching"', 'extra_args = ["--model", "x", "--enable-prefix-caching"', "extra_args must not set --model"),
+    ('extra_args = ["--enable-prefix-caching"', 'extra_args = ["--max-model-len", "8192", "--enable-prefix-caching"', "extra_args must not set --max_model_len"),
+    ('extra_args = ["--enable-prefix-caching"', 'extra_args = ["--max_num_seqs=4", "--enable-prefix-caching"', "extra_args must not set --max_num_seqs"),
+    ('extra_args = ["--enable-prefix-caching"', 'extra_args = ["--block-size", "32", "--enable-prefix-caching"', "extra_args must not set --block_size"),
+    ('extra_args = ["--enable-prefix-caching"', 'extra_args = ["--max_model_len=1", "--enable-prefix-caching"', "extra_args must not set --max_model_len"),
+    ('base_config = ["config.json"]', 'base_config = ["toy_model.py"]', "config.json"),
     ("tt_config = { sample", "tt_config = { fabric_config = \"FABRIC_2D\", sample", "reserved"),
     ("tt_config = { sample", "tt_config = { trace_region_size = 5, sample", "reserved"),
-    ('base_config = ["toy_config.json"]', 'base_config = ["nope.json"]', "nope.json"),
-    ('base_config = ["toy_config.json"]', "base_config = []", "base_config"),
+    ('base_config = ["config.json"]', 'base_config = ["nope.json"]', "nope.json"),
+    ('base_config = ["config.json"]', "base_config = []", "base_config"),
     ("[model_dir]", "[model_dir]\nsurprise = 1", "surprise"),
     ("trace_region_bytes = 805306368", 'trace_region_bytes = "big"', "trace_region_bytes"),
 ])
@@ -168,7 +173,7 @@ def test_a_staged_vllm_bundle_has_the_wiring_the_wheels_and_the_serving_argument
     assert cmd.endswith('--host "${HOST:-127.0.0.1}" --port "${PORT:-20161}" "$@")')
     assert 'export HF_MODEL="$HERE/model-dir"' in run_sh and 'export MODEL_WEIGHTS_DIR="$HERE/model-dir"' in run_sh
     assert run_sh.index("prepare_model_dir.py") < run_sh.index('exec "${CMD[@]}"')
-    assert (pkg / "base_config" / "toy_config.json").read_text() == (spec.base_config[0][0]).read_text()
+    assert (pkg / "base_config" / "config.json").read_text() == (spec.base_config[0][0]).read_text()
     assert os.access(pkg / "prepare_model_dir.py", os.X_OK)
     assert (pkg / "vllm_models" / "toy-moe-p300" / "vllm_metadata.json").is_file()
     assert sorted(p.name for p in (pkg / "wheels").iterdir()) == sorted(p.name for p in (spec.plugin_wheel, *spec.models_wheels))
@@ -206,10 +211,12 @@ RUN_CMD_HEAD = '--model "$HERE/model-dir"'
     ("a revision left on the command", lambda p: edit_file(p, "run.sh", " --max_model_len", " --revision " + REV + " --max_model_len"), "--revision"),
     ("no prepare step", lambda p: edit_file(p, "run.sh", '"$PYBIN" "$HERE/prepare_model_dir.py"\n', ""), "prepare_model_dir.py"),
     ("a missing prepare script", lambda p: drop(p, "prepare_model_dir.py"), "prepare_model_dir.py is missing"),
-    ("a base config that is not the spec's", lambda p: edit_file(p, "base_config/toy_config.json", "toy", "other"), "base_config/toy_config.json"),
-    ("a missing base config", lambda p: drop(p, "base_config/toy_config.json"), "base_config/toy_config.json is missing"),
+    ("a base config that is not the spec's", lambda p: edit_file(p, "base_config/config.json", "toy", "other"), "base_config/config.json"),
+    ("a missing base config", lambda p: drop(p, "base_config/config.json"), "base_config/config.json is missing"),
     ("a lost serving argument", lambda p: edit_file(p, "run.sh", " --enable-prefix-caching", ""), "--enable-prefix-caching"),
     ("a changed serving limit", lambda p: edit_file(p, "run.sh", "--max_model_len 4096", "--max_model_len 8192"), "max_model_len"),
+    ("a limit passed twice", lambda p: edit_file(p, "run.sh", " --max_model_len 4096", " --max_model_len 4096 --max_model_len 9999"), "max_model_len is passed 2 times"),
+    ("a limit set again under another spelling", lambda p: edit_file(p, "run.sh", " --enable-prefix-caching", " --max-model-len 99 --enable-prefix-caching"), "max_model_len is passed 2 times"),
     ("every interface", lambda p: edit_file(p, "run.sh", '--host "${HOST:-127.0.0.1}" ', ""), "127.0.0.1"),
     ("the wrong default port", lambda p: edit_file(p, "run.sh", "${PORT:-20161}", "${PORT:-8000}"), "port 20161"),
     ("a changed additional-config key", lambda p: edit_file(p, "run.sh", '"l1_small_size": 24576', '"l1_small_size": 1'), "additional-config"),
@@ -251,7 +258,7 @@ SERVER = textwrap.dedent('''
                 for i in range(count):
                     self.wfile.write(b"data: " + json.dumps({"choices": [{"delta": {"content": "w"}}]}).encode() + b"\\n\\n"); self.wfile.flush()
                     time.sleep(0.01)
-                self.wfile.write(b"data: " + json.dumps({"choices": [], "usage": {"completion_tokens": count}}).encode() + b"\\n\\n")
+                self.wfile.write(b"data: " + json.dumps({"choices": [], "usage": {"completion_tokens": count * int(os.environ.get("TOY_TOKENS_PER_CHUNK", "1"))}}).encode() + b"\\n\\n")
                 self.wfile.write(b"data: [DONE]\\n\\n"); self.wfile.flush()
                 self.close_connection = True
             else:
@@ -314,3 +321,24 @@ def test_the_rate_helper_needs_a_stream_that_has_a_first_and_a_last_token():
     assert can.stream_rate([]) is None
     assert can.stream_rate([(1.0, 1)]) is None
     assert can.stream_rate([(1.0, 1), (2.0, 11)]) == pytest.approx(10.0)
+
+
+def test_the_boot_check_counts_two_tokens_a_chunk_when_the_server_reports_them(spec, tmp_path, monkeypatch):
+    monkeypatch.setenv("TOY_TOKENS_PER_CHUNK", "2")
+    ev = can.boot_check(fake_bundle(tmp_path), tmp_path / "work", spec, install=False, health_timeout=30)
+    rt = ev["rate_timings"]
+    assert rt["completion_tokens"] == 128 and rt["streamed_chunks"] == 64
+    assert rt["decode_tok_s"] == pytest.approx(127 / rt["stream_seconds"], rel=0.02)
+
+
+def test_the_stream_rate_uses_the_reported_token_count_when_a_chunk_holds_more_than_one_token():
+    # 3 chunks over 2 seconds, but the server says it generated 21 tokens: (21 - 1) tokens after the first one, over 2 s
+    events = [(1.0, 1), (2.0, 2), (3.0, 3)]
+    assert can.stream_rate(events, reported=21) == pytest.approx(10.0)
+    assert can.stream_rate(events) == pytest.approx(1.0)        # no report: one token a chunk
+
+
+def test_the_boot_check_records_the_reported_token_count_in_the_rate(spec, tmp_path):
+    ev = can.boot_check(fake_bundle(tmp_path), tmp_path / "work", spec, install=False, health_timeout=30)
+    assert ev["rate_timings"]["completion_tokens"] == 64 and ev["rate_timings"]["decode_tok_s"] == pytest.approx(
+        63 / ev["rate_timings"]["stream_seconds"], rel=0.02)

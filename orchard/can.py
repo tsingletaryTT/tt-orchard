@@ -81,7 +81,13 @@ VLLM_ONLY_KEYS = ("plugin_wheel", "ops_wheels", "models_wheels", "vllm_version",
 # package-thin owns these `tt` keys of --additional-config (it writes them from --mesh-fabric and --trace-region-bytes)
 RESERVED_TT_KEYS = ("fabric_config", "trace_region_size")
 # vLLM flags the can sets itself, so a spec's extra_args may not repeat them
-OWNED_FLAGS = ("--model", "--host", "--port", "--revision", "--tokenizer-revision", "--additional-config")
+OWNED_FLAGS = ("--model", "--host", "--port", "--revision", "--tokenizer_revision", "--additional_config",
+               "--max_num_seqs", "--block_size", "--max_model_len")     # names as flag_name() writes them: vLLM takes --max-model-len and --max_model_len alike
+
+
+def flag_name(word: str) -> str:
+    """A command-line word's option name with dashes and underscores unified (`--max-model-len=4096` and `--max_model_len` are the same option)."""
+    return "--" + word.split("=", 1)[0].lstrip("-").replace("-", "_")
 # stage 7's weights_wiring_problems asks that run.sh name no "nearest model" (a fine-tune is built from a base model). A can has none, and its
 # run.sh names its own weights repo, so the check gets an id that cannot occur.
 NO_NEAREST_MODEL = "orchard-can/no-nearest-model"
@@ -271,9 +277,8 @@ def _serving(can: dict, raw: dict, base: Path) -> dict:
         if not isinstance(args, list) or not all(isinstance(a, str) and a for a in args):
             raise CanError("[can] extra_args must be a list of non-empty strings (one vLLM command-line word each)")
         for a in args:
-            for flag in OWNED_FLAGS:
-                if a == flag or a.startswith(flag + "="):
-                    raise CanError(f"[can] extra_args must not set {flag}: the can sets it (see docs/canning.md)")
+            if a.startswith("--") and flag_name(a) in OWNED_FLAGS:
+                raise CanError(f"[can] extra_args must not set {flag_name(a)}: the can sets it (see docs/canning.md)")
         out["extra_args"] = tuple(args)
     if "tt_config" in can:
         tt = can["tt_config"]
@@ -296,6 +301,8 @@ def _serving(can: dict, raw: dict, base: Path) -> dict:
         pairs = tuple((_inside(base, f, "[model_dir] base_config"), Path(f).name) for f in files)
         if len({d for _, d in pairs}) != len(pairs):
             raise CanError("[model_dir] base_config names two files with the same file name")
+        if "config.json" not in {d for _, d in pairs}:
+            raise CanError("[model_dir] base_config must include a file named config.json (the model class's architecture name goes there)")
         out["base_config"] = pairs
     return out
 
@@ -643,9 +650,12 @@ def vllm_problems(pkg: Path, spec: Spec, run_sh: str) -> list[str]:
         problems.append("run.sh must pass --host \"${HOST:-127.0.0.1}\" (the server has no sign-in) and never name 0.0.0.0")
     if f"${{PORT:-{spec.port}}}" not in cmd:
         problems.append(f"run.sh does not default to port {spec.port}")
+    passed = [flag_name(w) for w in re.findall(r"(?<=\s)--[\w-]+", cmd)]
     for flag, value in (("--max_num_seqs", spec.max_num_seqs), ("--block_size", spec.block_size), ("--max_model_len", spec.max_model_len)):
         if value is not None and f" {flag} {value}" not in cmd:
             problems.append(f"run.sh does not pass {flag} {value}, the spec's serving limit")
+        if passed.count(flag) > 1:         # a later copy (an extra argument) would win over the spec's value
+            problems.append(f"run.sh: {flag} is passed {passed.count(flag)} times; the spec's value must be the only one")
     if spec.extra_args and " ".join(spec.extra_args) not in cmd:
         problems.append(f"run.sh does not pass the spec's extra_args as one run: {' '.join(spec.extra_args)}")
     wanted_tt = {**spec.tt_config, **({"fabric_config": spec.mesh_fabric} if spec.mesh_fabric else {}),
@@ -786,13 +796,18 @@ def _http(method: str, url: str, body: dict | None = None, *, timeout: float = 3
         return exc.code, exc.read()
 
 
-def stream_rate(events) -> float | None:
-    """Tokens per second between the first and the last streamed token. `events` is a list of (time in seconds, tokens so far), one per token
-    chunk. The time to the first token is left out on purpose: it is prefill, and the card reports it apart. None when there is no span."""
+def stream_rate(events, reported: int | None = None) -> float | None:
+    """Tokens per second between the first and the last streamed chunk. `events` is a list of (time in seconds, chunks so far), one per chunk with
+    text. A chunk may hold more than one token (speculative decoding), so when the server reported its completion_tokens the rate is those
+    tokens after the first one, over the span; without a report each chunk counts as one token. The time to the first token is left out on
+    purpose: it is prefill, and the card reports it apart. None when there is no span."""
     if len(events) < 2:
         return None
     span = events[-1][0] - events[0][0]
-    return (events[-1][1] - events[0][1]) / span if span > 0 else None
+    if span <= 0:
+        return None
+    tokens = (reported - 1) if isinstance(reported, int) and reported > 1 else events[-1][1] - events[0][1]
+    return tokens / span
 
 
 def _stream_events(url: str, body: dict, *, timeout: float) -> tuple[int, list[tuple[float, int]], int | None]:
@@ -1007,9 +1022,9 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
                 # the last one; the time to the first token (prefill) is not in the rate.
                 code, events, reported = _stream_events(chat, {**rate_body, "stream": True, "stream_options": {"include_usage": True}},
                                                         timeout=BOOT_REQUEST_TIMEOUT_S)
-                rate = stream_rate(events)
+                rate = stream_rate(events, reported)
                 rate_timings = {"source": "stream", "decode_tok_s": rate and round(rate, 2), "completion_tokens": reported or len(events),
-                                "streamed_chunks": len(events)}
+                                "streamed_chunks": len(events), "stream_seconds": round(events[-1][0] - events[0][0], 3) if len(events) > 1 else None}
             evidence["rate_timings"] = rate_timings
             check("decode_rate", code == 200 and isinstance(rate, (int, float)) and rate >= ck.min_decode_tok_s,
                   f"{rate} tok/s reported over {rate_timings.get('completion_tokens')} tokens; at least {ck.min_decode_tok_s} wanted")
