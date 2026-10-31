@@ -1,0 +1,3 @@
+target = "0.9.85"
+summary = "Canning step for kind vllm: Qwen3.5-35B-A3B spec, wheels built from the recipe image, serving arguments, model-dir wiring, vLLM boot check (not booted on a board)."
+pr = 304

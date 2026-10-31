@@ -548,8 +548,8 @@ def vllm_problems(pkg: Path, spec: Spec, run_sh: str) -> list[str]:
     if wanted_tt:
         m = re.search(r"--additional-config '([^']*)'", cmd)
         try:
-            got = (json.loads(m.group(1)) if m else {}).get("tt", {})
-        except ValueError:
+            got = (safeio.parse_json_bytes(m.group(1).encode(), max_bytes=MAX_JSON_BYTES, expect=dict) if m else {}).get("tt", {})
+        except safeio.SafeReadError:
             got = {}
         for key, value in wanted_tt.items():
             if got.get(key) != value:
@@ -703,8 +703,8 @@ def _stream_events(url: str, body: dict, *, timeout: float) -> tuple[int, list[t
                 if not line.startswith("data:") or line == "data: [DONE]":
                     continue
                 try:
-                    chunk = json.loads(line[5:])
-                except ValueError:
+                    chunk = safeio.parse_json_bytes(line[5:].encode(), max_bytes=MAX_JSON_BYTES, expect=dict)
+                except safeio.SafeReadError:
                     continue
                 if isinstance(chunk.get("usage"), dict):
                     reported = chunk["usage"].get("completion_tokens", reported)
