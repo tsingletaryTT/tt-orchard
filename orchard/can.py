@@ -33,12 +33,15 @@ package scrub (orchard/scrub.py, `scrub_package`) and stage 7's refusal of any u
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import math
 import os
 import re
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -64,13 +67,16 @@ BOOT_REQUEST_TIMEOUT_S = 600.0      # choice: one chat request in the boot check
 HOST_ARG = "--host 0.0.0.0"         # what package-thin writes into the uvicorn line
 PORT_DEFAULT = '"${PORT:-8000}"'
 
-TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "bundle_file"}
+TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "extra_tree", "bundle_file"}
 CAN_KEYS = {"name", "kind", "app", "model_py", "metadata", "readme", "arch", "mesh", "device_count", "python", "port", "requirements",
             "verify", "max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "plugin_wheel", "ops_wheels", "models_wheels",
             "vllm_version"}
 WEIGHTS_KEYS = {"repo", "revision"}
-CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens"}
+CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens",
+              "mode", "health_path", "lyrics", "caption", "seconds", "seed", "sample_rate", "min_seconds", "min_peak", "min_loud_fraction"}
+CHECK_MODES = ("chat", "music")
 FILE_KEYS = {"src", "dst"}
+TREE_SKIP_DIRS = ("__pycache__",)          # a directory in an [[extra_tree]] that is never copied
 PIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?===?[A-Za-z0-9][A-Za-z0-9.!+_-]*(\s*;.*)?$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
 REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -91,6 +97,17 @@ class Check:
     rate_prompt: str = "Write a long story about a dragon who learns to read."   # asks for an answer long enough to time (the short answer is one token)
     rate_max_tokens: int = 64
     stream: bool = True
+    # mode "chat" (the default) asks /v1/chat/completions. Mode "music" asks /v1/audio/speech for a short WAV clip and tests the audio:
+    mode: str = "chat"
+    health_path: str = "/health"           # the path the boot check waits on (a server of its own may use /v1/health)
+    lyrics: str = "[verse]\nla la la la la\nla la la la la\n[chorus]\nla la la la la\nla la la la la"
+    caption: str = "A warm acoustic pop song with a female vocal and fingerpicked guitar."
+    seconds: float = 5.0                   # the clip length asked for (audio_duration)
+    seed: int = 7
+    sample_rate: int = 32000               # the rate the clip must have
+    min_seconds: float | None = None       # the shortest clip that passes (default: 0.8 of `seconds`; a song ends when its lyrics are finished)
+    min_peak: float = 0.05                 # the loudest sample, as a fraction of full scale
+    min_loud_fraction: float = 0.3         # the share of 100 ms windows that must be louder than LOUD_DBFS
 
 
 @dataclass(frozen=True)
@@ -155,6 +172,38 @@ def _dst(rel, what: str) -> str:
     return rel
 
 
+def _tree(raw: dict, key: str, base: Path) -> tuple[tuple[Path, str], ...]:
+    """`[[extra_tree]]` entries: every regular file under the directory `src` goes to `dst/<its path under src>`. A link anywhere in it is refused,
+    and `__pycache__` directories and `.pyc` files are skipped."""
+    rows = raw.get(key, [])
+    if not isinstance(rows, list):
+        raise CanError(f"[[{key}]] must be an array of tables")
+    out = []
+    for i, row in enumerate(rows):
+        what = f"[[{key}]] {i}"
+        if not isinstance(row, dict) or set(row) != FILE_KEYS:
+            raise CanError(f"{what} needs exactly the keys {sorted(FILE_KEYS)}")
+        src, dst = row["src"], _dst(row["dst"], f"{what} dst")
+        root = _inside(base, src, f"{what} src", must_exist=False)
+        if root.is_symlink() or not root.is_dir():
+            raise CanError(f"{what} src: {src} is not a directory under {base} (a link to one is refused)")
+        found = []
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = sorted(d for d in dirnames if d not in TREE_SKIP_DIRS)
+            for name in sorted(dirnames) + sorted(filenames):
+                p = Path(dirpath) / name
+                if p.is_symlink():
+                    raise CanError(f"{what}: {p.relative_to(base)} is a link; a tree holds regular files only")
+            for name in sorted(filenames):
+                if not name.endswith(".pyc"):
+                    p = Path(dirpath) / name
+                    found.append((p, (Path(dst) / p.relative_to(root)).as_posix()))
+        if not found:
+            raise CanError(f"{what}: {src} has no files to copy")
+        out += found
+    return tuple(out)
+
+
 def _files(raw: dict, key: str, base: Path) -> tuple[tuple[Path, str], ...]:
     rows = raw.get(key, [])
     if not isinstance(rows, list):
@@ -165,6 +214,17 @@ def _files(raw: dict, key: str, base: Path) -> tuple[tuple[Path, str], ...]:
             raise CanError(f"[[{key}]] entry {i} needs exactly the keys {sorted(FILE_KEYS)}")
         out.append((_inside(base, row["src"], f"[[{key}]] {i} src"), _dst(row["dst"], f"[[{key}]] {i} dst")))
     return tuple(out)
+
+
+def _extra_code(raw: dict, base: Path) -> tuple[tuple[Path, str], ...]:
+    """[[extra_code]] files and [[extra_tree]] directories, as (source, destination) pairs. A destination named twice is refused."""
+    pairs = _files(raw, "extra_code", base) + _tree(raw, "extra_tree", base)
+    seen = set()
+    for _, dst in pairs:
+        if dst in seen:
+            raise CanError(f"extra_code/{dst} is named twice")
+        seen.add(dst)
+    return pairs
 
 
 def load_spec(path, *, base=None) -> Spec:
@@ -224,6 +284,10 @@ def load_spec(path, *, base=None) -> Spec:
     if not isinstance(device_count, int) or isinstance(device_count, bool) or device_count < 1:
         raise CanError("[can] device_count must be a whole number of 1 or more")
     ck = Check(**{k: (tuple(v) if k == "ready_contains" else v) for k, v in check.items()})
+    if ck.mode not in CHECK_MODES:
+        raise CanError(f"[check] mode must be one of {CHECK_MODES}, got {ck.mode!r}")
+    if not isinstance(ck.health_path, str) or not re.fullmatch(r"/[A-Za-z0-9._/-]*", ck.health_path):
+        raise CanError(f"[check] health_path must be a URL path such as /health, got {ck.health_path!r}")
     try:
         re.compile(ck.expect)
     except re.error as exc:
@@ -245,7 +309,7 @@ def load_spec(path, *, base=None) -> Spec:
                 python=can.get("python", "3.12"), port=port, app=app,
                 metadata=_inside(base, can["metadata"], "[can] metadata") if can.get("metadata") else None,
                 requirements=tuple(pins), verify=tuple(verify), env=dict(env),
-                extra_code=_files(raw, "extra_code", base), bundle_files=_files(raw, "bundle_file", base), check=ck, **optional)
+                extra_code=_extra_code(raw, base), bundle_files=_files(raw, "bundle_file", base), check=ck, **optional)
 
 
 # ---- staging -------------------------------------------------------------------------------------------------------------
@@ -510,6 +574,66 @@ def _stop(proc: subprocess.Popen, grace: float = 60.0) -> None:
             continue
 
 
+LOUD_DBFS = -40.0        # choice: a 100 ms window louder than this counts as sound (the clips of the first music runs had at least 59% of windows above it)
+WINDOW_S = 0.1
+
+
+def wav_stats(data: bytes) -> dict:
+    """Sample rate, channels, length, peak (a fraction of full scale) and the share of 100 ms windows above LOUD_DBFS, for a 16-bit PCM WAV file.
+    Raises CanError for anything else. Standard library only."""
+    import array
+    import wave
+    try:
+        with wave.open(io.BytesIO(data), "rb") as w:
+            rate, channels, width, n = w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()
+            raw = w.readframes(n)
+    except (wave.Error, EOFError, struct.error) as exc:
+        raise CanError(f"the response is not a readable WAV file: {exc}") from exc
+    if width != 2:
+        raise CanError(f"the WAV file is {8 * width}-bit; the check reads 16-bit PCM")
+    if rate <= 0 or channels <= 0:
+        raise CanError("the WAV file has no sample rate or no channels")
+    samples = array.array("h")
+    samples.frombytes(raw[: len(raw) - len(raw) % 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    peak = (max(abs(v) for v in samples) / 32768.0) if samples else 0.0
+    step = max(1, int(rate * WINDOW_S)) * channels
+    windows = loud = 0
+    for start in range(0, len(samples), step):
+        chunk = samples[start:start + step]
+        windows += 1
+        rms = math.sqrt(sum(v * v for v in chunk) / len(chunk)) / 32768.0
+        if rms > 0 and 20 * math.log10(rms) > LOUD_DBFS:
+            loud += 1
+    return {"sample_rate": rate, "channels": channels, "seconds": (n / rate), "peak": round(peak, 4),
+            "loud_fraction": round(loud / windows, 4) if windows else 0.0}
+
+
+def _music_checks(base: str, ck: Check, check, evidence: dict) -> None:
+    """The boot check of a music model: one short clip through /v1/audio/speech, then its sample rate, length and level."""
+    body = {"input": ck.lyrics, "instructions": ck.caption, "audio_duration": ck.seconds, "response_format": "wav",
+            "sample_rate": ck.sample_rate, "seed": ck.seed}
+    t0 = time.time()
+    status, raw = _http("POST", f"{base}/v1/audio/speech", body, timeout=BOOT_REQUEST_TIMEOUT_S)
+    evidence["clip_wall_s"] = round(time.time() - t0, 1)
+    if not check("music_request", status == 200, f"status {status}" + ("" if status == 200 else f": {raw[:200].decode('utf-8', errors='replace')}")):
+        return
+    try:
+        st = wav_stats(raw)
+    except CanError as exc:
+        check("music_decodes", False, str(exc))
+        return
+    check("music_decodes", True, f"{len(raw)} bytes")
+    evidence["audio"] = {**st, "requested_seconds": ck.seconds, "seed": ck.seed}
+    check("music_sample_rate", st["sample_rate"] == ck.sample_rate, f"{st['sample_rate']} Hz; {ck.sample_rate} Hz wanted")
+    low = ck.min_seconds if ck.min_seconds is not None else 0.8 * ck.seconds
+    high = ck.seconds + 0.5            # the server counts 25 frames a second and may round up
+    check("music_length", low <= st["seconds"] <= high, f"{st['seconds']:.2f} s; between {low:g} and {high:g} s wanted")
+    check("music_not_silent", st["peak"] >= ck.min_peak and st["loud_fraction"] >= ck.min_loud_fraction,
+          f"peak {st['peak']}, {st['loud_fraction']:.0%} of 100 ms windows above {LOUD_DBFS:g} dBFS; at least {ck.min_peak} and {ck.min_loud_fraction:.0%} wanted")
+
+
 def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_timeout: float = BOOT_HEALTH_TIMEOUT_S,
                port: int | None = None, install: bool = True) -> dict:
     """Install a COPY of the staged bundle under `work`, serve it with the copy's own run.sh and test it. The staged directory is never
@@ -549,19 +673,27 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         t0, healthy = time.time(), False
         while time.time() - t0 < health_timeout and proc.poll() is None:
             try:
-                healthy = _http("GET", f"{base}/health", timeout=5)[0] == 200
+                healthy = _http("GET", f"{base}{spec.check.health_path}", timeout=5)[0] == 200
             except (OSError, urllib.error.URLError):
                 healthy = False
             if healthy:
                 break
             time.sleep(3)
         evidence["ready_s"] = round(time.time() - t0, 1)
-        if not check("health", healthy, "200 from /health" if healthy else
-                     f"no 200 from /health ({'the server exited with ' + str(proc.returncode) if proc.poll() is not None else 'timed out'})"):
+        if not check("health", healthy, f"200 from {spec.check.health_path}" if healthy else
+                     f"no 200 from {spec.check.health_path} ({'the server exited with ' + str(proc.returncode) if proc.poll() is not None else 'timed out'})"):
             return _finish(work, evidence)
         status, body = _http("GET", f"{base}/v1/models")
         check("models", status == 200)
         ck = spec.check
+        if ck.mode == "music":
+            _music_checks(base, ck, check, evidence)
+            status, _ = _http("GET", f"{base}{ck.health_path}")
+            check("health_after", status == 200)
+            log_text = server_log.read_text(encoding="utf-8", errors="replace")
+            for needle in ck.ready_contains:
+                check(f"log contains {needle}", needle in log_text)
+            return _finish(work, evidence)
         status, body = _http("POST", f"{base}/v1/chat/completions", {"messages": [{"role": "user", "content": ck.prompt}], "max_tokens": ck.max_tokens},
                              timeout=BOOT_REQUEST_TIMEOUT_S)
         answer, timings = "", {}

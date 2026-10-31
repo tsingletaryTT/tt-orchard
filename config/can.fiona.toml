@@ -1,0 +1,104 @@
+# The can for episod/minimax-music3-fiona-crapple (MiniMax-Music3 with the fiona-crapple language-model adapter merged in) on one Blackhole chip
+# (orchard/can.py). Run from the repository root:
+#   tt-orchard can stage config/can.fiona.toml --out <new directory>/minimax-music3-fiona-crapple-blackhole
+# Paths are relative to the directory the command runs in (or --base).
+
+[can]
+name = "minimax-music3-fiona-crapple-blackhole"
+kind = "tt-dit-server"                 # the model's own server is a FastAPI app; run.sh serves the ASGI app below with uvicorn
+app = "fiona_asgi:app"
+model_py = "pkgsrc/music3/fiona_model.py"             # the runner file at the bundle root (re-exports the app; see that file)
+readme = "pkgsrc/music3/fiona-README.md"
+arch = "blackhole"
+mesh = "P150"
+device_count = 1
+python = "3.12"
+port = 20150
+# Exact pins. ttnn 0.80.0 is the PyPI wheel; it needs numpy below 2. The CPU wheel of torch comes from the PyTorch index. The versions of the
+# libraries the server imports are the ones of the Hub package this code comes from (its requirements.lock), except ttnn, which was a source build.
+requirements = [
+  "ttnn==0.80.0",
+  "numpy==1.26.4",
+  "torch==2.11.0",
+  "safetensors==0.8.0",
+  "tokenizers==0.23.2",
+  "transformers==5.17.0",
+  "huggingface_hub==1.33.0",
+  "jinja2==3.1.6",
+  "loguru==0.7.3",
+  "einops==0.8.2",
+  "soundfile==0.14.0",
+  "soxr==1.1.0",
+  "fastapi==0.141.1",
+  "uvicorn==0.52.4",
+  "pydantic==2.13.5",
+  "pillow==12.3.0",
+  "python-multipart==0.0.32",
+  "pyyaml==6.0.3",
+  "gradio==6.20.0",
+  "networkx==3.6.1",
+  "graphviz==0.21",
+  "click==8.5.0",
+  "pandas==3.0.5",
+  "seaborn==0.13.2",
+  "ml_dtypes==0.5.4",
+]
+# run at the end of install.sh; a failure fails the install. None of these opens a device (ttnn is imported by the first statement only to read its version).
+verify = [
+  "import importlib.metadata as m; assert m.version('ttnn') == '0.80.0', m.version('ttnn')",
+  "import models.autoports.minimaxai_minimax_music3.server.app as a; assert a.app",
+  "import models.autoports.minimaxai_minimax_music3.server.schemas as s; s.SpeechRequest(input='[verse]\\nla', instructions='pop')",
+  "import music_client, music_page",
+  "import soundfile as sf; assert 'WAV' in sf.available_formats() and 'FLAC' in sf.available_formats()",
+  "import soxr, numpy; assert numpy.__version__.startswith('1.'), numpy.__version__",
+]
+
+[weights]
+repo = "episod/minimax-music3-fiona-crapple"
+revision = "53fc7557ea3101d3efbe5e50598bd0bea7f44344"
+
+# the model code and its Gradio page. The model code is a copy of the files the server imports from jashansinghTT/minimax-music3-blackhole
+# (pkgsrc/music3/PROVENANCE.md); it lands in extra_code/models/..., which run.sh puts on PYTHONPATH.
+[[extra_tree]]
+src = "pkgsrc/music3/code"
+dst = "."
+[[extra_code]]
+src = "pkgsrc/music3/fiona_asgi.py"
+dst = "fiona_asgi.py"
+[[extra_code]]
+src = "pkgsrc/music3/demo/music_page.py"
+dst = "music_page.py"
+[[extra_code]]
+src = "pkgsrc/music3/demo/music_client.py"
+dst = "music_client.py"
+
+[[bundle_file]]
+src = "LICENSE"
+dst = "LICENSE"
+[[bundle_file]]
+src = "pkgsrc/music3/fiona-NOTICE"
+dst = "NOTICE"
+
+# What the server needs from the environment. The values are the ones the container of the recipe package ran with. TT_METAL_VISIBLE_DEVICES is not
+# set here: the model code pins device 0 unless the lease says otherwise.
+[env]
+MUSIC3_FABRIC_CONFIG = "none"
+MUSIC3_MESH_SHAPE = "1x1"
+MUSIC3_MAX_SEQ_LEN = "16384"
+MUSIC3_MAX_FRAMES = "9000"
+MUSIC3_WARMUP = "1"
+MUSIC3_WARMUP_FRAMES = "200"
+MUSIC3_TRACE_REGION_MB = "256"
+TT_METAL_OPERATION_TIMEOUT_SECONDS = "180.0"
+
+# what the boot check asks of the served bundle: one 5 s clip, then its sample rate, length and level
+[check]
+mode = "music"
+health_path = "/v1/health"
+lyrics = "[Verse 1]\nThe kettle sings at half past three\nThe rain keeps time on the window glass\n[Chorus]\nStay a little longer\nThe coffee is still warm"
+caption = "fiona crapple, jazzy piano, raw female vocal, confessional singer-songwriter, upright bass, brushed drums, intimate"
+seconds = 5.0
+seed = 11
+sample_rate = 32000
+min_seconds = 4.0
+ready_contains = ["Application startup complete", "warmup done"]
