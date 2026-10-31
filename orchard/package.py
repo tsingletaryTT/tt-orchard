@@ -864,7 +864,9 @@ THIN_VALUE_OPTIONS = frozenset({
     "--tt-metal-version", "--max-num-seqs", "--block-size", "--max-model-len", "--env", "--name",
     "--out",
     # the canning step (orchard/can.py) also passes these
-    "--extra-code", "--verify", "--readme", "--provenance", "--mesh-fabric", "--constraints"})
+    "--extra-code", "--verify", "--readme", "--provenance", "--mesh-fabric", "--constraints",
+    # the canning step, kind vllm: fixed serving arguments (their values may start with --), the `tt` additional-config, the trace region
+    "--extra-arg", "--tt-config-json", "--trace-region-bytes"})
 THIN_FLAGS = frozenset({"--no-vllm"})     # options with no value; the canning step passes this one for kind tt-dit-server
 
 

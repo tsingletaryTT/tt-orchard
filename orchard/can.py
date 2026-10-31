@@ -13,7 +13,9 @@ package-thin call, the edits package-thin leaves wrong, the gate and the boot ch
 
 Two kinds:
   * `vllm`: the model runs behind vLLM's OpenAI server through the tt-vllm plugin. The spec gives `metadata` (vllm_metadata.json) and `model_py`
-    (the class the plugin loads). Used for models that vLLM can drive (Qwen3.5 on the vLLM path).
+    (the class the plugin loads), the wheels the model needs (`plugin_wheel`, `ops_wheels`, `models_wheels`), the fixed serving arguments
+    (`extra_args`, `tt_config`, `trace_region_bytes`, the limits and `[env]`) and, when the checkpoint needs a config of its own, a `[model_dir]`
+    that wires the weights through stage 7's prepare_model_dir.py. Used for models that vLLM can drive (Qwen3.5-35B, config/can.qwen35.toml).
   * `tt-dit-server`: `run.sh` serves an ASGI app with uvicorn. The spec gives `app` ("module:attribute") and `model_py` (the file that holds it).
     A model with its own server (a standard-library HTTP server, a Gradio demo) needs a thin ASGI adapter that calls the same code; see
     pkgsrc/server/granite_asgi.py.
@@ -55,7 +57,8 @@ from pathlib import Path
 
 from orchard import can_audio, safeio
 from orchard.defaults import PACKAGE_INSTALL_TIMEOUT_S, PACKAGE_THIN_TIMEOUT_S
-from orchard.package import PackageError, assert_no_publish, run_logged
+from orchard.package import (PackageError, TEMPLATES, assert_no_publish, run_logged, splice_extra_args, weights_wiring_problems,
+                             wire_weights)
 from orchard.scrub import scrub_package
 
 MAX_SPEC_BYTES = 256 * 1024         # choice: a spec is a few kilobytes
@@ -68,12 +71,28 @@ BOOT_REQUEST_TIMEOUT_S = 600.0      # choice: one chat request in the boot check
 HOST_ARG = "--host 0.0.0.0"         # what package-thin writes into the uvicorn line
 PORT_DEFAULT = '"${PORT:-8000}"'
 
-TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "extra_tree", "bundle_file"}
+TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "extra_tree", "bundle_file", "model_dir"}
 CAN_KEYS = {"name", "kind", "app", "model_py", "metadata", "readme", "arch", "mesh", "device_count", "python", "port", "requirements",
             "verify", "max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "plugin_wheel", "ops_wheels", "models_wheels",
-            "vllm_version"}
+            "vllm_version", "extra_args", "tt_config", "trace_region_bytes"}
+MODEL_DIR_KEYS = {"base_config"}
+# set only by a kind vllm spec: the wheels, the serving arguments (an error names these for a tt-dit-server spec that sets one)
+VLLM_ONLY_KEYS = ("plugin_wheel", "ops_wheels", "models_wheels", "vllm_version", "extra_args", "tt_config", "trace_region_bytes")
+# package-thin owns these `tt` keys of --additional-config (it writes them from --mesh-fabric and --trace-region-bytes)
+RESERVED_TT_KEYS = ("fabric_config", "trace_region_size")
+# vLLM flags the can sets itself, so a spec's extra_args may not repeat them
+OWNED_FLAGS = ("--model", "--host", "--port", "--revision", "--tokenizer_revision", "--additional_config",
+               "--max_num_seqs", "--block_size", "--max_model_len")     # names as flag_name() writes them: vLLM takes --max-model-len and --max_model_len alike
+
+
+def flag_name(word: str) -> str:
+    """A command-line word's option name with dashes and underscores unified (`--max-model-len=4096` and `--max_model_len` are the same option)."""
+    return "--" + word.split("=", 1)[0].lstrip("-").replace("-", "_")
+# stage 7's weights_wiring_problems asks that run.sh name no "nearest model" (a fine-tune is built from a base model). A can has none, and its
+# run.sh names its own weights repo, so the check gets an id that cannot occur.
+NO_NEAREST_MODEL = "orchard-can/no-nearest-model"
 WEIGHTS_KEYS = {"repo", "revision"}
-CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens",
+CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens", "request_extra",
               "mode", "health_path", "lyrics", "caption", "seconds", "seed", "sample_rate", "min_seconds", "min_peak", "min_loud_fraction",
               "path", "body", "expect_seconds", "channels", "max_warm_s", "repeat_identical",
               "audio_seconds", "audio_steps", "audio_seed", "max_rtf"}
@@ -102,6 +121,8 @@ class Check:
     rate_prompt: str = "Write a long story about a dragon who learns to read."   # asks for an answer long enough to time (the short answer is one token)
     rate_max_tokens: int = 64
     stream: bool = True
+    # fields merged into every chat request body (for a thinking model: { chat_template_kwargs = { enable_thinking = false } })
+    request_extra: dict = field(default_factory=dict)
     # mode "chat" (the default) asks /v1/chat/completions. Mode "music" asks /v1/audio/speech for a short WAV clip and tests the audio:
     mode: str = "chat"
     health_path: str = "/health"           # the path the boot check waits on (a server of its own may use /v1/health)
@@ -157,6 +178,13 @@ class Spec:
     ops_wheels: tuple[Path, ...] = ()
     models_wheels: tuple[Path, ...] = ()
     vllm_version: str | None = None
+    # kind vllm: fixed vLLM arguments after the generated ones, the `tt` keys of --additional-config, the trace region, and the files that
+    # make the model directory (a config.json that names the architecture the model class registers; prepare_model_dir.py links the
+    # weights from the Hugging Face snapshot beside it)
+    extra_args: tuple[str, ...] = ()
+    tt_config: dict = field(default_factory=dict)
+    trace_region_bytes: int | None = None
+    base_config: tuple[tuple[Path, str], ...] = ()
 
 
 # ---- the spec ------------------------------------------------------------------------------------------------------------
@@ -239,6 +267,44 @@ def _files(raw: dict, key: str, base: Path) -> tuple[tuple[Path, str], ...]:
             raise CanError(f"[[{key}]] entry {i} needs exactly the keys {sorted(FILE_KEYS)}")
         out.append((_inside(base, row["src"], f"[[{key}]] {i} src"), _dst(row["dst"], f"[[{key}]] {i} dst")))
     return tuple(out)
+
+
+def _serving(can: dict, raw: dict, base: Path) -> dict:
+    """The kind-vllm serving fields: extra vLLM arguments, `tt` additional-config keys, the trace region and the model directory's files."""
+    out: dict = {}
+    if "extra_args" in can:
+        args = can["extra_args"]
+        if not isinstance(args, list) or not all(isinstance(a, str) and a for a in args):
+            raise CanError("[can] extra_args must be a list of non-empty strings (one vLLM command-line word each)")
+        for a in args:
+            if a.startswith("--") and flag_name(a) in OWNED_FLAGS:
+                raise CanError(f"[can] extra_args must not set {flag_name(a)}: the can sets it (see docs/canning.md)")
+        out["extra_args"] = tuple(args)
+    if "tt_config" in can:
+        tt = can["tt_config"]
+        if not isinstance(tt, dict):
+            raise CanError("[can] tt_config must be a table of `tt` additional-config keys")
+        for key in RESERVED_TT_KEYS:
+            if key in tt:
+                raise CanError(f"[can] tt_config key {key} is reserved: package-thin writes it from mesh_fabric and trace_region_bytes")
+        out["tt_config"] = dict(tt)
+    if "trace_region_bytes" in can:
+        n = can["trace_region_bytes"]
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            raise CanError("[can] trace_region_bytes must be a whole number of bytes")
+        out["trace_region_bytes"] = n
+    if "model_dir" in raw:
+        table = _table(raw, "model_dir", MODEL_DIR_KEYS, "[model_dir]")
+        files = table.get("base_config")
+        if not isinstance(files, list) or not files:
+            raise CanError("[model_dir] base_config must be a non-empty list of files (config.json at least)")
+        pairs = tuple((_inside(base, f, "[model_dir] base_config"), Path(f).name) for f in files)
+        if len({d for _, d in pairs}) != len(pairs):
+            raise CanError("[model_dir] base_config names two files with the same file name")
+        if "config.json" not in {d for _, d in pairs}:
+            raise CanError("[model_dir] base_config must include a file named config.json (the model class's architecture name goes there)")
+        out["base_config"] = pairs
+    return out
 
 
 def _extra_code(raw: dict, base: Path) -> tuple[tuple[Path, str], ...]:
@@ -333,10 +399,12 @@ def load_spec(path, *, base=None) -> Spec:
         re.compile(ck.expect)
     except re.error as exc:
         raise CanError(f"[check] expect is not a regular expression: {exc}") from exc
+    if not isinstance(ck.request_extra, dict):
+        raise CanError("[check] request_extra must be a table")
     optional = {k: can[k] for k in ("max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "vllm_version") if k in can}
-    wheel_keys = ("plugin_wheel", "ops_wheels", "models_wheels")
-    if can["kind"] != "vllm" and any(k in can for k in wheel_keys + ("vllm_version",)):
-        raise CanError("plugin_wheel, ops_wheels, models_wheels and vllm_version are for kind vllm")
+    if can["kind"] != "vllm" and (any(k in can for k in VLLM_ONLY_KEYS) or "model_dir" in raw):
+        raise CanError(f"{', '.join(VLLM_ONLY_KEYS)} and the [model_dir] table are for kind vllm")
+    optional.update(_serving(can, raw, base))
     if "plugin_wheel" in can:
         optional["plugin_wheel"] = _inside(base, can["plugin_wheel"], "[can] plugin_wheel")
     for key in ("ops_wheels", "models_wheels"):
@@ -371,8 +439,13 @@ def thin_argv(spec: Spec, *, out: Path, requirements: Path, extra_code: Path | N
                 argv += [flag, w]
         if spec.vllm_version:
             argv += ["--vllm-version", spec.vllm_version]
+        for word in spec.extra_args:           # package-thin puts these after the arguments it generates and before the operator's "$@"
+            argv += ["--extra-arg", word]
+        if spec.tt_config:
+            argv += ["--tt-config-json", json.dumps(spec.tt_config)]
     for flag, value in (("--max-num-seqs", spec.max_num_seqs), ("--block-size", spec.block_size),
-                        ("--max-model-len", spec.max_model_len), ("--mesh-fabric", spec.mesh_fabric)):
+                        ("--max-model-len", spec.max_model_len), ("--mesh-fabric", spec.mesh_fabric),
+                        ("--trace-region-bytes", spec.trace_region_bytes)):
         if value is not None:
             argv += [flag, value]
     if extra_code is not None:
@@ -392,6 +465,24 @@ def fix_run_sh(text: str, port: int) -> str:
         raise CanError("run.sh has no uvicorn line in the form this step edits (--host 0.0.0.0 and ${PORT:-8000}); "
                        "tt-model's launcher changed, and this step needs to follow it")
     return text.replace(HOST_ARG, '--host "${HOST:-127.0.0.1}"', 1).replace(PORT_DEFAULT, f'"${{PORT:-{port}}}"', 1)
+
+
+def host_port_args(port: int) -> str:
+    """The words a kind-vllm run.sh passes so the server listens on 127.0.0.1 and the spec's port (HOST and PORT override)."""
+    return f'--host "${{HOST:-127.0.0.1}}" --port "${{PORT:-{port}}}"'
+
+
+def fix_run_sh_vllm(text: str, port: int) -> str:
+    """package-thin's run.sh for kind vllm passes no --host, so vLLM listens on every interface, and no --port, so it uses 8000. The server has
+    no sign-in. The words go just before the operator's "$@", so an argument given at the command line still wins."""
+    cmd = [ln for ln in text.splitlines() if ln.startswith("CMD=(")]
+    if len(cmd) != 1 or "--host" in cmd[0] or "--port" in cmd[0]:
+        raise CanError("run.sh has no single CMD=(...) command in the form this step edits (one CMD line with no --host or --port); "
+                       "tt-model's launcher changed, and this step needs to follow it")
+    try:
+        return splice_extra_args(text, host_port_args(port))
+    except PackageError as exc:
+        raise CanError(f"the run.sh command is not in the form this step edits: {exc}") from exc
 
 
 def sha256(path) -> str:
@@ -428,6 +519,20 @@ def sums_problems(root: Path) -> list[str]:
     return problems
 
 
+def wire_model_dir(run_sh: str, spec: Spec, out: Path) -> str:
+    """Make vLLM load the weights through `model-dir/`, which prepare_model_dir.py builds at start-up from the pinned Hugging Face snapshot
+    plus the spec's base_config files (they replace the snapshot's own, for example a config.json that names the architecture the model class
+    registers). This is stage 7's wiring (`wire_weights`) and its prepare script; the weights stay a pointer. Returns the edited run.sh."""
+    text = wire_weights(run_sh, spec.repo)
+    problems = weights_wiring_problems(text, nearest_model=NO_NEAREST_MODEL)
+    if problems:
+        raise CanError("run.sh weights wiring: " + "; ".join(problems))
+    shutil.copyfile(TEMPLATES / "prepare_model_dir.py", out / "prepare_model_dir.py")
+    (out / "base_config").mkdir()
+    _copy_in(((src, f"base_config/{dst}") for src, dst in spec.base_config), out)
+    return text
+
+
 def _copy_in(pairs, dest: Path) -> None:
     for src, rel in pairs:
         target = dest / rel
@@ -445,8 +550,9 @@ def stage(spec: Spec, out, *, env: dict | None = None, hostname: str | None = No
     work = Path(tempfile.mkdtemp(prefix=f".{spec.name}.can-", dir=out.parent))
     try:
         req = work / "requirements.txt"
-        req.write_text("# Exact pins. The install builds a venv from these. ttnn comes from PyPI (it carries the TT-Metalium runtime).\n"
-                       + "\n".join(spec.requirements) + "\n", encoding="utf-8")
+        origin = ("ttnn and the models library are the wheels in wheels/, installed by path" if spec.models_wheels
+                  else "ttnn comes from PyPI (it carries the TT-Metalium runtime)")
+        req.write_text(f"# Exact pins. The install builds a venv from these. {origin}.\n" + "\n".join(spec.requirements) + "\n", encoding="utf-8")
         code = None
         if spec.extra_code:
             code = work / "extra_code"
@@ -465,8 +571,13 @@ def stage(spec: Spec, out, *, env: dict | None = None, hostname: str | None = No
         run_sh = out / "run.sh"
         if spec.kind == "tt-dit-server":
             run_sh.write_text(fix_run_sh(run_sh.read_text(encoding="utf-8"), spec.port), encoding="utf-8")
+        else:
+            text = fix_run_sh_vllm(run_sh.read_text(encoding="utf-8"), spec.port)
+            if spec.base_config:
+                text = wire_model_dir(text, spec, out)
+            run_sh.write_text(text, encoding="utf-8")
         _copy_in(spec.bundle_files, out)
-        for f in ("run.sh", "install.sh"):
+        for f in ("run.sh", "install.sh", *(("prepare_model_dir.py",) if spec.base_config else ())):
             (out / f).chmod(0o755)
         write_sums(out)
     finally:
@@ -503,6 +614,88 @@ def requirement_problems(text: str) -> list[str]:
         elif not PIN.match(line):
             problems.append(f"requirements.txt line {n} is not an exact pin (name==version): {line}")
     return problems
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def wheel_pin_problems(pkg: Path) -> list[str]:
+    """A requirements pin for a package whose wheel the bundle ships must name the shipped wheel's version. A different pin would send the
+    install to the package index for another build (for ttnn that is the PyPI wheel, which lacks the model's ops)."""
+    wheels = {}
+    for w in sorted((pkg / "wheels").glob("*.whl")) if (pkg / "wheels").is_dir() else []:
+        parts = w.name[:-4].split("-")
+        if len(parts) >= 5:
+            wheels[_norm(parts[0])] = (parts[1], w.name)
+    problems = []
+    for line in (pkg / "requirements.txt").read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*===?\s*([^\s;#]+)", line)
+        if m and _norm(m.group(1)) in wheels:
+            version, name = wheels[_norm(m.group(1))]
+            if m.group(2).lower() != version.lower():
+                problems.append(f"requirements.txt pins {m.group(1)}=={m.group(2)} but wheels/{name} is version {version}")
+    return problems
+
+
+def vllm_problems(pkg: Path, spec: Spec, run_sh: str) -> list[str]:
+    """What is wrong with a kind-vllm bundle beyond the checks every bundle gets: the vLLM command in run.sh, the weights wiring, the model
+    directory's files, the metadata, the shipped wheels' pins."""
+    problems: list[str] = []
+    cmd = [ln for ln in run_sh.splitlines() if ln.startswith("CMD=(")]
+    if len(cmd) != 1:
+        return [f"run.sh must have exactly one CMD=(...) line; it has {len(cmd)}"]
+    cmd = cmd[0]
+    if "--host \"${HOST:-127.0.0.1}\"" not in cmd or "0.0.0.0" in run_sh:
+        problems.append("run.sh must pass --host \"${HOST:-127.0.0.1}\" (the server has no sign-in) and never name 0.0.0.0")
+    if f"${{PORT:-{spec.port}}}" not in cmd:
+        problems.append(f"run.sh does not default to port {spec.port}")
+    passed = [flag_name(w) for w in re.findall(r"(?<=\s)--[\w-]+", cmd)]
+    for flag, value in (("--max_num_seqs", spec.max_num_seqs), ("--block_size", spec.block_size), ("--max_model_len", spec.max_model_len)):
+        if value is not None and f" {flag} {value}" not in cmd:
+            problems.append(f"run.sh does not pass {flag} {value}, the spec's serving limit")
+        if passed.count(flag) > 1:         # a later copy (an extra argument) would win over the spec's value
+            problems.append(f"run.sh: {flag} is passed {passed.count(flag)} times; the spec's value must be the only one")
+    if spec.extra_args and " ".join(spec.extra_args) not in cmd:
+        problems.append(f"run.sh does not pass the spec's extra_args as one run: {' '.join(spec.extra_args)}")
+    wanted_tt = {**spec.tt_config, **({"fabric_config": spec.mesh_fabric} if spec.mesh_fabric else {}),
+                 **({"trace_region_size": spec.trace_region_bytes} if spec.trace_region_bytes else {})}
+    if wanted_tt:
+        m = re.search(r"--additional-config '([^']*)'", cmd)
+        try:
+            got = (safeio.parse_json_bytes(m.group(1).encode(), max_bytes=MAX_JSON_BYTES, expect=dict) if m else {}).get("tt", {})
+        except safeio.SafeReadError:
+            got = {}
+        for key, value in wanted_tt.items():
+            if got.get(key) != value:
+                problems.append(f"run.sh --additional-config has tt.{key} = {got.get(key)!r}; the spec says {value!r}")
+    for key, value in spec.env.items():
+        if f'export {key}="{value}"' not in run_sh:
+            problems.append(f'run.sh does not export {key}="{value}", the spec\'s [env] setting')
+    if spec.base_config:
+        problems += weights_wiring_problems(run_sh, nearest_model=NO_NEAREST_MODEL)
+        prepare = pkg / "prepare_model_dir.py"
+        if not prepare.is_file():
+            problems.append("prepare_model_dir.py is missing")
+        elif not os.access(prepare, os.X_OK):
+            problems.append("prepare_model_dir.py is not executable")
+        elif prepare.read_bytes() != (TEMPLATES / "prepare_model_dir.py").read_bytes():
+            problems.append("prepare_model_dir.py differs from stage 7's template")
+        for src, dst in spec.base_config:
+            shipped = pkg / "base_config" / dst
+            if not shipped.is_file():
+                problems.append(f"base_config/{dst} is missing")
+            elif shipped.read_bytes() != src.read_bytes():
+                problems.append(f"base_config/{dst} differs from the spec's file")
+    meta = pkg / "vllm_models" / spec.name / "vllm_metadata.json"
+    try:
+        same = _json(meta) == _json(spec.metadata)
+    except CanError as exc:
+        problems.append(str(exc))
+    else:
+        if not same:
+            problems.append("vllm_models/%s/vllm_metadata.json differs from the spec's metadata file" % spec.name)
+    return problems + wheel_pin_problems(pkg)
 
 
 def gate(pkg, spec: Spec, *, hostname: str | None = None, namespace: str | None = None) -> list[str]:
@@ -552,6 +745,8 @@ def gate(pkg, spec: Spec, *, hostname: str | None = None, namespace: str | None 
         if f"${{PORT:-{spec.port}}}" not in run_sh:
             problems.append(f"run.sh does not default to port {spec.port}")
     problems += requirement_problems((pkg / "requirements.txt").read_text(encoding="utf-8", errors="replace"))
+    if spec.kind == "vllm":
+        problems += vllm_problems(pkg, spec, run_sh)
     # the server entry is in the bundle and the code compiles
     if spec.kind == "tt-dit-server":
         module = spec.app.split(":")[0]
@@ -599,6 +794,47 @@ def _http(method: str, url: str, body: dict | None = None, *, timeout: float = 3
             return r.status, r.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
+
+
+def stream_rate(events, reported: int | None = None) -> float | None:
+    """Tokens per second between the first and the last streamed chunk. `events` is a list of (time in seconds, chunks so far), one per chunk with
+    text. A chunk may hold more than one token (speculative decoding), so when the server reported its completion_tokens the rate is those
+    tokens after the first one, over the span; without a report each chunk counts as one token. The time to the first token is left out on
+    purpose: it is prefill, and the card reports it apart. None when there is no span."""
+    if len(events) < 2:
+        return None
+    span = events[-1][0] - events[0][0]
+    if span <= 0:
+        return None
+    tokens = (reported - 1) if isinstance(reported, int) and reported > 1 else events[-1][1] - events[0][1]
+    return tokens / span
+
+
+def _stream_events(url: str, body: dict, *, timeout: float) -> tuple[int, list[tuple[float, int]], int | None]:
+    """POST a streaming chat request and read the event stream as it arrives. Returns (status, [(time, token count)] per chunk with text,
+    the completion_tokens the server reported at the end, if it did). Each chunk with text counts as one token."""
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={"Content-Type": "application/json"})
+    events: list[tuple[float, int]] = []
+    reported = None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            for raw in r:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:") or line == "data: [DONE]":
+                    continue
+                try:
+                    chunk = safeio.parse_json_bytes(line[5:].encode(), max_bytes=MAX_JSON_BYTES, expect=dict)
+                except safeio.SafeReadError:
+                    continue
+                if isinstance(chunk.get("usage"), dict):
+                    reported = chunk["usage"].get("completion_tokens", reported)
+                for choice in chunk.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    if any(delta.get(k) for k in ("content", "reasoning_content", "reasoning")):
+                        events.append((time.monotonic(), len(events) + 1))
+            return r.status, events, reported
+    except urllib.error.HTTPError as exc:
+        return exc.code, events, reported
 
 
 def _stop(proc: subprocess.Popen, grace: float = 60.0) -> None:
@@ -749,7 +985,18 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
             for needle in ck.ready_contains:
                 check(f"log contains {needle}", needle in log_text)
             return _finish(work, evidence)
-        status, body = _http("POST", f"{base}/v1/chat/completions", {"messages": [{"role": "user", "content": ck.prompt}], "max_tokens": ck.max_tokens},
+        # A vLLM server serves the model under a name of its own and may refuse a request that names none, so the check sends the first
+        # name /v1/models lists. request_extra (for a thinking model, enable_thinking false) goes into every chat request.
+        extra: dict = {}
+        try:
+            models = safeio.parse_json_bytes(body, max_bytes=MAX_JSON_BYTES, expect=dict).get("data") or []
+            if models and isinstance(models[0], dict) and models[0].get("id"):
+                extra["model"] = models[0]["id"]
+        except (safeio.SafeReadError, TypeError):
+            pass
+        extra.update(ck.request_extra)
+        chat = f"{base}/v1/chat/completions"
+        status, body = _http("POST", chat, {"messages": [{"role": "user", "content": ck.prompt}], "max_tokens": ck.max_tokens, **extra},
                              timeout=BOOT_REQUEST_TIMEOUT_S)
         answer, timings = "", {}
         try:
@@ -762,20 +1009,28 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         check("chat", status == 200 and re.search(ck.expect, answer) is not None, f"status {status}; expected /{ck.expect}/")
         if ck.min_decode_tok_s is not None:
             # a separate request for a long answer, after the first one has warmed the kernels (a short answer has no decode rate)
-            code, raw = _http("POST", f"{base}/v1/chat/completions", {"messages": [{"role": "user", "content": ck.rate_prompt}],
-                                                                       "max_tokens": ck.rate_max_tokens}, timeout=BOOT_REQUEST_TIMEOUT_S)
+            rate_body = {"messages": [{"role": "user", "content": ck.rate_prompt}], "max_tokens": ck.rate_max_tokens, **extra}
+            code, raw = _http("POST", chat, rate_body, timeout=BOOT_REQUEST_TIMEOUT_S)
             rate_timings = {}
             try:
                 rate_timings = safeio.parse_json_bytes(raw, max_bytes=MAX_JSON_BYTES, expect=dict).get("timings") or {}
             except safeio.SafeReadError:
                 pass
-            evidence["rate_timings"] = rate_timings
             rate = rate_timings.get("decode_tok_s")
+            if rate is None:
+                # The server reports no timings (vLLM does not). Stream a request of the same size and time the tokens between the first and
+                # the last one; the time to the first token (prefill) is not in the rate.
+                code, events, reported = _stream_events(chat, {**rate_body, "stream": True, "stream_options": {"include_usage": True}},
+                                                        timeout=BOOT_REQUEST_TIMEOUT_S)
+                rate = stream_rate(events, reported)
+                rate_timings = {"source": "stream", "decode_tok_s": rate and round(rate, 2), "completion_tokens": reported or len(events),
+                                "streamed_chunks": len(events), "stream_seconds": round(events[-1][0] - events[0][0], 3) if len(events) > 1 else None}
+            evidence["rate_timings"] = rate_timings
             check("decode_rate", code == 200 and isinstance(rate, (int, float)) and rate >= ck.min_decode_tok_s,
                   f"{rate} tok/s reported over {rate_timings.get('completion_tokens')} tokens; at least {ck.min_decode_tok_s} wanted")
         if ck.stream:
-            status, body = _http("POST", f"{base}/v1/chat/completions", {"messages": [{"role": "user", "content": ck.prompt}],
-                                                                           "max_tokens": ck.max_tokens, "stream": True}, timeout=BOOT_REQUEST_TIMEOUT_S)
+            status, body = _http("POST", chat, {"messages": [{"role": "user", "content": ck.prompt}], "max_tokens": ck.max_tokens, "stream": True,
+                                                **extra}, timeout=BOOT_REQUEST_TIMEOUT_S)
             text = body.decode("utf-8", errors="replace")
             check("stream", status == 200 and text.rstrip().endswith("data: [DONE]"), f"status {status}; the event stream {'ends' if text.rstrip().endswith('data: [DONE]') else 'does not end'} with [DONE]")
         status, _ = _http("GET", f"{base}{ck.health_path}")
