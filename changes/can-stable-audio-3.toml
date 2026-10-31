@@ -1,0 +1,3 @@
+target = "0.9.85"
+summary = "Stable Audio 3 small music can: an ASGI front end around the job server, an audio-job boot check, [[extra_tree]], a base-directory script, a card in the tt-model vernacular and docs/can-cards.md."
+pr = 310
