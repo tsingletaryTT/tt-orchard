@@ -21,6 +21,10 @@ Full description: `docs/canning.md` in the repository. This page is the checklis
 8. **Record.** `--run-dir RUN` writes `stages/7/can.json` and an `evidence` ledger entry. Put the boot check's numbers in the run log.
 9. **Publish commands.** `tt-orchard can commands SPEC --namespace ORG` prints them as text. Hand the text to the operator. Do not run it. You do not publish, push, upload, merge or run `tt-model push` or `publish`.
 
+## Audio models
+
+A model that makes clips behind a job API (no chat endpoint) uses `[check] mode = "audio-job"` (`prompt`, `audio_seconds`, `audio_steps`, `audio_seed`, `max_rtf`). The boot check then submits two jobs and records the first (cold kernel cache) and the second (warm) separately. Files that are not in the repository (a model library, license files) go into a base directory that a small script builds, and `[[extra_tree]]` copies a directory into `extra_code/`. The card follows the tt-model conventions in `docs/can-cards.md`. The worked example is `config/can.stable-audio-3.toml`.
+
 ## Stop and ask when
 
 - the gate reports a hit you cannot trace to a source file;

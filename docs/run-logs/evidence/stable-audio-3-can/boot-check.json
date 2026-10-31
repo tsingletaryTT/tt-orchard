@@ -1,0 +1,90 @@
+{
+  "name": "stable-audio-3-small-music-blackhole",
+  "checks": {
+    "bundle_copy": {
+      "ok": true,
+      "detail": "the copy matches the bundle"
+    },
+    "health": {
+      "ok": true,
+      "detail": "200 from /health"
+    },
+    "audio_job": {
+      "ok": true,
+      "detail": "done in 41.716 s"
+    },
+    "audio_file": {
+      "ok": true,
+      "detail": "915718 bytes"
+    },
+    "audio_length": {
+      "ok": true,
+      "detail": "10.000 s in the file header; 10 s asked for"
+    },
+    "audio_second_job": {
+      "ok": true,
+      "detail": "the warm job finished with a clip of the length asked for"
+    },
+    "audio_rate": {
+      "ok": true,
+      "detail": "0.123 s of generation per second of audio on the warm job; at most 1.0 wanted"
+    },
+    "health_after": {
+      "ok": true
+    },
+    "log contains \"ready\": true": {
+      "ok": true
+    },
+    "log contains \"decoder_on_chip\": true": {
+      "ok": true
+    }
+  },
+  "passed": true,
+  "ready_s": 21.0,
+  "audio": {
+    "first": {
+      "settings": {
+        "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+        "duration": 10,
+        "steps": 8,
+        "cfg_scale": 1.0,
+        "seed": 42
+      },
+      "audio_s": 10.0,
+      "server_total_s": 41.407,
+      "wall_s": 41.716,
+      "rtf": 4.141,
+      "stages": {
+        "conditioning_s": 0.048,
+        "generate_and_decode_s": 41.105,
+        "chip_transformer_call_s": 24.703,
+        "chip_decoder_call_s": 16.293,
+        "chip_decoder_layers_s": 15.796
+      },
+      "audio_format": "flac",
+      "file_s": 10.0
+    },
+    "second": {
+      "settings": {
+        "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+        "duration": 10,
+        "steps": 8,
+        "cfg_scale": 1.0,
+        "seed": 42
+      },
+      "audio_s": 10.0,
+      "server_total_s": 1.234,
+      "wall_s": 1.541,
+      "rtf": 0.123,
+      "stages": {
+        "conditioning_s": 0.115,
+        "generate_and_decode_s": 1.03,
+        "chip_transformer_call_s": 0.279,
+        "chip_decoder_call_s": 0.519,
+        "chip_decoder_layers_s": 0.404
+      },
+      "audio_format": "flac",
+      "file_s": 10.0
+    }
+  }
+}

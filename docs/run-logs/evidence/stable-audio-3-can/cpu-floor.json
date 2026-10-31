@@ -1,0 +1,101 @@
+{
+  "load_s": 16.251,
+  "settings": {
+    "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+    "steps": 8,
+    "cfg_scale": 1.0,
+    "seed": 42
+  },
+  "device": "cpu, float32",
+  "threads": 8,
+  "runs": {
+    "10.0": {
+      "runs": [
+        {
+          "generate_and_decode_s": 42.196,
+          "wall_s": 43.163,
+          "host_loadavg_1m": 33.7802734375
+        },
+        {
+          "generate_and_decode_s": 16.183,
+          "wall_s": 16.312,
+          "host_loadavg_1m": 31.7451171875
+        },
+        {
+          "generate_and_decode_s": 54.217,
+          "wall_s": 54.415,
+          "host_loadavg_1m": 36.5283203125
+        }
+      ],
+      "median_s": 42.196,
+      "min_s": 16.183,
+      "max_s": 54.217
+    },
+    "30.0": {
+      "runs": [
+        {
+          "generate_and_decode_s": 29.704,
+          "wall_s": 30.069,
+          "host_loadavg_1m": 31.1591796875
+        },
+        {
+          "generate_and_decode_s": 33.253,
+          "wall_s": 33.563,
+          "host_loadavg_1m": 29.716796875
+        },
+        {
+          "generate_and_decode_s": 22.514,
+          "wall_s": 23.169,
+          "host_loadavg_1m": 28.1455078125
+        }
+      ],
+      "median_s": 29.704,
+      "min_s": 22.514,
+      "max_s": 33.253
+    },
+    "60.0": {
+      "runs": [
+        {
+          "generate_and_decode_s": 36.668,
+          "wall_s": 37.059,
+          "host_loadavg_1m": 27.0322265625
+        },
+        {
+          "generate_and_decode_s": 39.459,
+          "wall_s": 39.695,
+          "host_loadavg_1m": 24.85595703125
+        },
+        {
+          "generate_and_decode_s": 28.965,
+          "wall_s": 29.421,
+          "host_loadavg_1m": 23.48583984375
+        }
+      ],
+      "median_s": 36.668,
+      "min_s": 28.965,
+      "max_s": 39.459
+    },
+    "120.0": {
+      "runs": [
+        {
+          "generate_and_decode_s": 42.315,
+          "wall_s": 42.928,
+          "host_loadavg_1m": 20.04296875
+        },
+        {
+          "generate_and_decode_s": 40.535,
+          "wall_s": 41.039,
+          "host_loadavg_1m": 16.86572265625
+        },
+        {
+          "generate_and_decode_s": 38.944,
+          "wall_s": 39.356,
+          "host_loadavg_1m": 17.20703125
+        }
+      ],
+      "median_s": 40.535,
+      "min_s": 38.944,
+      "max_s": 42.315
+    }
+  }
+}

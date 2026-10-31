@@ -1,0 +1,130 @@
+# The can for stabilityai/stable-audio-3-small-music on one Blackhole chip (orchard/can.py). The spec's paths are relative to a base directory
+# that scripts/can_stable_audio_base.py builds (the model library, the license files and the card are not in this repository):
+#   python3 scripts/can_stable_audio_base.py --out BASE --library <stable-audio-3 checkout at the commit below> --snapshot <HF snapshot directory of the revision below>
+#   tt-orchard can stage config/can.stable-audio-3.toml --base BASE --out <new directory>/stable-audio-3-small-music-blackhole
+
+[can]
+name = "stable-audio-3-small-music-blackhole"
+kind = "tt-dit-server"                 # the job server is not a vLLM model; run.sh serves the ASGI app below with uvicorn
+app = "stable_audio_asgi:app"
+model_py = "stable_audio_model.py"     # the runner file at the bundle root (re-exports the app; see that file)
+readme = "README.md"
+arch = "blackhole"
+mesh = "P150"
+device_count = 1
+python = "3.12"
+port = 20170
+# Exact pins. ttnn 0.80.0 is the PyPI wheel; it needs numpy below 2. The CPU wheels of torch and torchaudio come from the PyTorch index (the default
+# PyPI wheel pulls the CUDA libraries, several gigabytes the host does not use). The library pins torch and torchaudio to the same version, so both are 2.7.1.
+# install.sh adds the PyTorch index as an extra index, and uv takes a package from the first index that has it. tqdm and packaging are on that index, at most
+# at 4.66.5 and 24.1, so those are the versions pinned here (the library asks for newer ones in its metadata; its code is copied, not installed, and uses neither in a new way).
+requirements = [
+  "ttnn==0.80.0",
+  "numpy==1.26.4",
+  "torch==2.7.1",
+  "torchaudio==2.7.1",
+  "transformers==5.19.0",
+  "safetensors==0.8.0",
+  "tokenizers==0.23.2",
+  "huggingface_hub==1.33.0",
+  "einops==0.8.2",
+  "einops-exts==0.0.4",
+  "soundfile==0.13.1",
+  "tqdm==4.66.5",
+  "packaging==24.1",
+  "scipy==1.15.3",
+  "fastapi==0.136.3",
+  "uvicorn==0.45.0",
+  "pydantic==2.12.5",
+  "pillow==10.4.0",
+  "loguru==0.7.3",
+  "networkx==3.6.1",
+  "graphviz==0.21",
+  "pyyaml==6.0.2",
+  "click==8.5.0",
+  "pandas==2.3.3",
+  "seaborn==0.13.2",
+  "ml_dtypes==0.5.4",
+]
+# run at the end of install.sh; a failure fails the install. None of them opens a device.
+verify = [
+  "import importlib.metadata as m; assert m.version('ttnn') == '0.80.0', m.version('ttnn')",
+  "import stable_audio_asgi",
+  "import stable_audio_3.model_configs",
+]
+
+[weights]
+repo = "stabilityai/stable-audio-3-small-music"
+revision = "8bdfb53c6b0fbc62113cd571fd37373efe15fa14"
+
+# the code the server runs, copied to extra_code/ (which run.sh puts on PYTHONPATH)
+[[extra_code]]
+src = "extra/stable_audio_asgi.py"
+dst = "stable_audio_asgi.py"
+[[extra_code]]
+src = "extra/stable_audio_jobs.py"
+dst = "stable_audio_jobs.py"
+[[extra_tree]]
+src = "runtime/orchard"
+dst = "orchard"
+[[extra_tree]]
+src = "lib/stable_audio_3"
+dst = "stable_audio_3"
+
+[[bundle_file]]
+src = "LICENSE.md"
+dst = "LICENSE.md"
+[[bundle_file]]
+src = "LICENSE_GEMMA.md"
+dst = "LICENSE_GEMMA.md"
+[[bundle_file]]
+src = "LICENSE-runtime"
+dst = "LICENSE-runtime"
+[[bundle_file]]
+src = "LICENSE-stable-audio-3-library"
+dst = "LICENSE-stable-audio-3-library"
+[[bundle_file]]
+src = "NOTICE"
+dst = "NOTICE"
+[[bundle_file]]
+src = "tools/audio_client.py"
+dst = "tools/audio_client.py"
+[[bundle_file]]
+src = "tools/cpu_floor.py"
+dst = "tools/cpu_floor.py"
+
+# the measurements the card's numbers come from (scripts/can_stable_audio_numbers.py writes them from the raw session files)
+[[bundle_file]]
+src = "evidence/boot-check.json"
+dst = "evidence/boot-check.json"
+[[bundle_file]]
+src = "evidence/clip-comparison.json"
+dst = "evidence/clip-comparison.json"
+[[bundle_file]]
+src = "evidence/cpu-floor.json"
+dst = "evidence/cpu-floor.json"
+[[bundle_file]]
+src = "evidence/session-recipe-package.json"
+dst = "evidence/session-recipe-package.json"
+[[bundle_file]]
+src = "evidence/session-s1.json"
+dst = "evidence/session-s1.json"
+[[bundle_file]]
+src = "evidence/session-s2.json"
+dst = "evidence/session-s2.json"
+[[bundle_file]]
+src = "evidence/session-s3.json"
+dst = "evidence/session-s3.json"
+[[bundle_file]]
+src = "evidence/session-ttmodel.json"
+dst = "evidence/session-ttmodel.json"
+
+# what the boot check asks of the served bundle: two 10-second jobs with the same settings (the first compiles kernels in the copy's empty cache)
+[check]
+mode = "audio-job"
+prompt = "A warm acoustic guitar melody with soft percussion, 100 BPM"
+audio_seconds = 10
+audio_steps = 8
+audio_seed = 42
+max_rtf = 1.0
+ready_contains = ['"ready": true', '"decoder_on_chip": true']

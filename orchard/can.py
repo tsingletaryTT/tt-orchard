@@ -49,7 +49,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from orchard import safeio
+from orchard import can_audio, safeio
 from orchard.defaults import PACKAGE_INSTALL_TIMEOUT_S, PACKAGE_THIN_TIMEOUT_S
 from orchard.package import PackageError, assert_no_publish, run_logged
 from orchard.scrub import scrub_package
@@ -64,12 +64,17 @@ BOOT_REQUEST_TIMEOUT_S = 600.0      # choice: one chat request in the boot check
 HOST_ARG = "--host 0.0.0.0"         # what package-thin writes into the uvicorn line
 PORT_DEFAULT = '"${PORT:-8000}"'
 
-TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "bundle_file"}
+TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "extra_tree", "bundle_file"}
 CAN_KEYS = {"name", "kind", "app", "model_py", "metadata", "readme", "arch", "mesh", "device_count", "python", "port", "requirements",
             "verify", "max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "plugin_wheel", "ops_wheels", "models_wheels",
             "vllm_version"}
 WEIGHTS_KEYS = {"repo", "revision"}
-CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens"}
+CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens", "mode",
+              "audio_seconds", "audio_steps", "audio_seed", "max_rtf"}
+CHAT_ONLY_KEYS = {"expect", "max_tokens", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens"}   # for mode "chat"
+AUDIO_ONLY_KEYS = {"audio_seconds", "audio_steps", "audio_seed", "max_rtf"}                                  # for mode "audio-job" (orchard/can_audio.py)
+CHECK_MODES = ("chat", "audio-job")
+SKIP_DIRS = {"__pycache__"}           # directories an [[extra_tree]] does not copy
 FILE_KEYS = {"src", "dst"}
 PIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?===?[A-Za-z0-9][A-Za-z0-9.!+_-]*(\s*;.*)?$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
@@ -91,6 +96,11 @@ class Check:
     rate_prompt: str = "Write a long story about a dragon who learns to read."   # asks for an answer long enough to time (the short answer is one token)
     rate_max_tokens: int = 64
     stream: bool = True
+    mode: str = "chat"                     # "chat" (an OpenAI-style chat server) or "audio-job" (a job server that makes clips; orchard/can_audio.py)
+    audio_seconds: float = 10.0            # audio-job: the clip length the boot check asks for
+    audio_steps: int = 8
+    audio_seed: int = 42
+    max_rtf: float | None = None           # audio-job: the warm job's generation time divided by its audio length must be at most this
 
 
 @dataclass(frozen=True)
@@ -167,6 +177,48 @@ def _files(raw: dict, key: str, base: Path) -> tuple[tuple[Path, str], ...]:
     return tuple(out)
 
 
+def _trees(raw: dict, base: Path) -> tuple[tuple[Path, str], ...]:
+    """`[[extra_tree]]` (src = a directory inside base, dst = a directory inside extra_code/) becomes one extra_code entry per regular file in it.
+    `__pycache__` directories are skipped; a link anywhere in the tree is refused."""
+    rows = raw.get("extra_tree", [])
+    if not isinstance(rows, list):
+        raise CanError("[[extra_tree]] must be an array of tables")
+    out = []
+    for i, row in enumerate(rows):
+        what = f"[[extra_tree]] {i}"
+        if not isinstance(row, dict) or set(row) != FILE_KEYS:
+            raise CanError(f"{what} needs exactly the keys {sorted(FILE_KEYS)}")
+        src, dst = row["src"], _dst(row["dst"], f"{what} dst")
+        if not isinstance(src, str) or not src or os.path.isabs(src) or ".." in Path(src).parts:
+            raise CanError(f"{what} src must be a relative directory inside the base directory, got {src!r}")
+        root = base / src
+        if root.is_symlink() or not root.is_dir() or not root.resolve().is_relative_to(base.resolve()):
+            raise CanError(f"{what}: {src} is not a directory under {base} (links are refused)")
+        found = 0
+        for p in sorted(root.rglob("*")):
+            if any(part in SKIP_DIRS for part in p.relative_to(root).parts) or p.suffix == ".pyc":
+                continue
+            if p.is_symlink():
+                raise CanError(f"{what}: {p.relative_to(base).as_posix()} is a link; a tree is copied from regular files only")
+            if p.is_file():
+                out.append((p, (Path(dst) / p.relative_to(root)).as_posix()))
+                found += 1
+        if not found:
+            raise CanError(f"{what}: {src} has no files")
+    return tuple(out)
+
+
+def _extra_code(raw: dict, base: Path) -> tuple[tuple[Path, str], ...]:
+    """The [[extra_code]] files and the files of each [[extra_tree]]; a path inside extra_code/ named twice is refused."""
+    pairs = _files(raw, "extra_code", base) + _trees(raw, base)
+    seen: set[str] = set()
+    for _, dst in pairs:
+        if dst in seen:
+            raise CanError(f"extra_code/{dst} is named twice")
+        seen.add(dst)
+    return pairs
+
+
 def load_spec(path, *, base=None) -> Spec:
     """Read and check a spec. Paths in it are relative to `base` (default: the current directory). Raises CanError on any fault."""
     base = Path(base or Path.cwd()).resolve()
@@ -223,6 +275,23 @@ def load_spec(path, *, base=None) -> Spec:
     device_count = can.get("device_count", 1)
     if not isinstance(device_count, int) or isinstance(device_count, bool) or device_count < 1:
         raise CanError("[can] device_count must be a whole number of 1 or more")
+    mode = check.get("mode", "chat")
+    if mode not in CHECK_MODES:
+        raise CanError(f"[check] mode must be one of {CHECK_MODES}, got {mode!r}")
+    wrong = set(check) & (AUDIO_ONLY_KEYS if mode == "chat" else CHAT_ONLY_KEYS)
+    if wrong:
+        raise CanError(f"[check] {sorted(wrong)} belong to the {'audio-job' if mode == 'chat' else 'chat'} mode, and mode is {mode!r}")
+    if mode == "audio-job":
+        if "prompt" not in check:
+            raise CanError("[check] mode audio-job needs a prompt")
+        for key in ("audio_seconds", "max_rtf"):
+            v = check.get(key)
+            if key in check and (isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0):
+                raise CanError(f"[check] {key} must be a number above 0")
+        for key in ("audio_steps", "audio_seed"):
+            v = check.get(key)
+            if key in check and (isinstance(v, bool) or not isinstance(v, int) or v < (1 if key == "audio_steps" else 0)):
+                raise CanError(f"[check] {key} must be a whole number ({'1' if key == 'audio_steps' else '0'} or more)")
     ck = Check(**{k: (tuple(v) if k == "ready_contains" else v) for k, v in check.items()})
     try:
         re.compile(ck.expect)
@@ -245,7 +314,7 @@ def load_spec(path, *, base=None) -> Spec:
                 python=can.get("python", "3.12"), port=port, app=app,
                 metadata=_inside(base, can["metadata"], "[can] metadata") if can.get("metadata") else None,
                 requirements=tuple(pins), verify=tuple(verify), env=dict(env),
-                extra_code=_files(raw, "extra_code", base), bundle_files=_files(raw, "bundle_file", base), check=ck, **optional)
+                extra_code=_extra_code(raw, base), bundle_files=_files(raw, "bundle_file", base), check=ck, **optional)
 
 
 # ---- staging -------------------------------------------------------------------------------------------------------------
@@ -511,7 +580,7 @@ def _stop(proc: subprocess.Popen, grace: float = 60.0) -> None:
 
 
 def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_timeout: float = BOOT_HEALTH_TIMEOUT_S,
-               port: int | None = None, install: bool = True) -> dict:
+               port: int | None = None, install: bool = True, job_timeout: float = BOOT_REQUEST_TIMEOUT_S) -> dict:
     """Install a COPY of the staged bundle under `work`, serve it with the copy's own run.sh and test it. The staged directory is never
     installed into or served. `env` is the environment of both children (for a hardware run it carries the lease's TT_VISIBLE_DEVICES).
     Returns the evidence; `passed` is true only if every check passed. A server that is still running is stopped on every path."""
@@ -559,9 +628,17 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         if not check("health", healthy, "200 from /health" if healthy else
                      f"no 200 from /health ({'the server exited with ' + str(proc.returncode) if proc.poll() is not None else 'timed out'})"):
             return _finish(work, evidence)
+        ck = spec.check
+        if ck.mode == "audio-job":
+            can_audio.audio_checks(_http, base, ck, evidence, lambda name, ok, detail=None: check(name, ok, detail), job_timeout=job_timeout)
+            status, _ = _http("GET", f"{base}/health")
+            check("health_after", status == 200)
+            log_text = server_log.read_text(encoding="utf-8", errors="replace")
+            for needle in ck.ready_contains:
+                check(f"log contains {needle}", needle in log_text)
+            return _finish(work, evidence)
         status, body = _http("GET", f"{base}/v1/models")
         check("models", status == 200)
-        ck = spec.check
         status, body = _http("POST", f"{base}/v1/chat/completions", {"messages": [{"role": "user", "content": ck.prompt}], "max_tokens": ck.max_tokens},
                              timeout=BOOT_REQUEST_TIMEOUT_S)
         answer, timings = "", {}
