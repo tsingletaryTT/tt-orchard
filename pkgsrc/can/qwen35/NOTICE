@@ -8,7 +8,9 @@ revision when the server first starts.
 
 The wheels in wheels/ were built from tt-metal (Apache License 2.0) as it is installed in the Tenstorrent image
 tt-model/qwen3-coder-next:0c170421ca1b, the image of the raahemnabeel/qwen3-coder-next bundle:
-  - ttnn: the image's tt-metal build, packaged with the image's own setup.py;
+  - ttnn: the image's tt-metal build, packaged with the image's own setup.py. It includes the image's SFPI compiler (a Tenstorrent build of
+    GCC for the RISC-V cores, version 7.74.0, under runtime/sfpi); its source is at https://github.com/tenstorrent/sfpi and it keeps its
+    own licenses;
   - tt_metal_models: the image's `models` tree. One file, models/autoports/qwen_qwen3_coder_next/tt/weights.py, has the 41-line patch of
     the recipe package qwen3.5-35b-a3b-blackhole-p300 applied. The patch adds a reader for this checkpoint's tensor layout;
   - vllm_tt_plugin: the vLLM plugin installed in that image.

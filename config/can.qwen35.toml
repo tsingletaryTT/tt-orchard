@@ -22,7 +22,7 @@ max_model_len = 4096
 mesh_fabric = "FABRIC_1D"
 trace_region_bytes = 805306368
 # The rest of the recipe's vllm serve line. package-thin writes the limits above and --additional-config; the can adds --host and --port.
-extra_args = ["--enable-prefix-caching", "--enable-chunked-prefill", "--max-num-batched-tokens", "2048"]
+extra_args = ["--served-model-name", "qwen3.5-35b-a3b", "--enable-prefix-caching", "--enable-chunked-prefill", "--max-num-batched-tokens", "2048"]
 tt_config = { sample_on_device_mode = "all", l1_small_size = 24576 }
 
 # The wheels. The ttnn wheel is the tt-metal build in the recipe's image: it has the MoE ops (moe_sorted_dispatch, moe_gather_add_rows) that
@@ -39,6 +39,9 @@ requirements = [
   "tt-metal-models==0.79.0.dev20261030+qwen35moe",
   "transformers==5.12.1",
   "tokenizers==0.22.2",
+  # The CPU builds the image runs. Without these pins vLLM's requirements pull the CUDA build of PyTorch (several GB of libraries the host does not use).
+  "torch==2.11.0+cpu",
+  "torchvision==0.26.0+cpu",
 ]
 # run at the end of install.sh. Neither line imports ttnn (an import opens the device).
 verify = [

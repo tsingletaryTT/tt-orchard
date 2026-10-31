@@ -75,6 +75,11 @@ def test_a_patched_loader_with_the_wrong_hash_is_refused(tmp_path):
         bw.apply_loader_patch({bw.LOADER: ORIG.encode()}, patch, sha(ORIG), sha("something else"))
 
 
+def test_the_ttnn_build_bundles_the_images_own_sfpi_compiler():
+    # the image's kernels do not compile with the newer SFPI a host may have; run.sh prefers the wheel's runtime/sfpi
+    assert "BUNDLE_SFPI = True" in bw.TTNN_SCRIPT and "setup.py bdist_wheel" in bw.TTNN_SCRIPT
+
+
 def test_the_recipes_pins_file_names_both_loader_hashes():
     pins = bw.pins(ROOT / "package_src" / "pins.env")
     assert len(pins["ORIG_SHA"]) == 64 and len(pins["PATCHED_SHA"]) == 64 and pins["ORIG_SHA"] != pins["PATCHED_SHA"]

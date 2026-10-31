@@ -136,6 +136,10 @@ def extract_from_image(image: str, dest: Path) -> None:
 TTNN_SCRIPT = """set -e
 cd /opt/tt-metal
 echo "ttnn built from the tt-metal tree in the qwen3-coder-next image" > README.md
+# The image's kernels were written for its own SFPI compiler (7.74.0). A newer SFPI on the host (7.89.0) refuses some of them (found on
+# the first boot: `sfpi::reinterpret` is gone), so the wheel carries the image's compiler in runtime/sfpi, which run.sh prefers to the host's.
+sed -i 's/^BUNDLE_SFPI = False/BUNDLE_SFPI = True/' setup.py
+grep -q '^BUNDLE_SFPI = True' setup.py
 export TT_FROM_PRECOMPILED_DIR=/opt/tt-metal SETUPTOOLS_SCM_PRETEND_VERSION=%s CXX=clang++-20
 python setup.py bdist_wheel --dist-dir /out
 """
