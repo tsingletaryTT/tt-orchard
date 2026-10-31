@@ -98,3 +98,14 @@ Points that were easy to get wrong:
 ## What the can does not do
 
 It does not publish. `can commands` prints text; the supervisor and the stage agents never run it. It does not make `tt-model serve ORG/NAME` work before the bundle is on the Hub, because tt-model installs a v6 bundle only from the Hub. The boot check serves the bundle's own `run.sh`, which is what `tt-model serve` runs after the install.
+
+## Second can: minimax-music3-fiona-crapple (`config/can.fiona.toml`), a music model with a Gradio page
+
+What it needed that Granite did not:
+
+- **No adapter for the model, one small one for the page.** The model's server is already a FastAPI app (`models.autoports.minimaxai_minimax_music3.server.app:app`). `pkgsrc/music3/fiona_asgi.py` imports it and mounts the Gradio page at `/ui` with `gradio.mount_gradio_app` (the page's `app.py` and `music_client.py` are copied unchanged from the companion repository). The mount keeps the server's lifespan, so the chip still opens in startup; `tests/test_fiona_asgi.py` checks that. The adapter also refuses to start without `HF_MODEL` (the model code falls back to the base MiniMax-Music3 weights), passes `TT_MODEL_WEIGHTS_REVISION` on as `MUSIC3_WEIGHTS_REVISION`, and puts the weight cache next to the tensor cache that `run.sh` chose.
+- **A tree of code from a Hub package.** The code was not in this repository, so the spec gained `[[extra_tree]]` (a directory copied into `extra_code/`, no links, `__pycache__` skipped). The 63 files the server imports are in `pkgsrc/music3/code/` with their source and revision in `pkgsrc/music3/PROVENANCE.md`.
+- **A boot check for audio.** `[check] mode = "music"` sends one `POST /v1/audio/speech` for a short WAV clip and tests the sample rate, the length and the level (peak and the share of 100 ms windows above -40 dBFS), and `[check] health_path` names a health route other than `/health`. Chat specs are unchanged.
+- **Caches inside the bundle.** `run.sh` points every cache at the bundle's directory, so a boot copy grows by about 22 GB. Pass `--hf-home` to `can boot` to reuse weights already on disk (27 GB).
+- **ttnn 0.80.0 from PyPI ran the code unchanged.** The Hub package ran a source build of tt-metal `v0.79.0-dev`. No code change was needed; the output is not the same samples as the container's for the same seed, and the speed under a loaded host was lower (card and `docs/run-logs/2026-10-30-fiona-thin-bundle.md`).
+- **UI tests need a current gradio.** The host's gradio 4.44.1 does not import with huggingface_hub 1.33, so six UI tests skip there and run in the bundle's own venv (`gradio==6.20.0`).
