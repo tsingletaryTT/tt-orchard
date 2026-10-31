@@ -591,6 +591,8 @@ def wav_stats(data: bytes) -> dict:
         raise CanError(f"the response is not a readable WAV file: {exc}") from exc
     if width != 2:
         raise CanError(f"the WAV file is {8 * width}-bit; the check reads 16-bit PCM")
+    if len(raw) != n * channels * width:      # readframes returns a short payload without raising when the file is cut off
+        raise CanError(f"the WAV header declares {n} frames ({n * channels * width} bytes) and the file holds {len(raw)} bytes of audio")
     if rate <= 0 or channels <= 0:
         raise CanError("the WAV file has no sample rate or no channels")
     samples = array.array("h")
@@ -723,7 +725,7 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
                                                                            "max_tokens": ck.max_tokens, "stream": True}, timeout=BOOT_REQUEST_TIMEOUT_S)
             text = body.decode("utf-8", errors="replace")
             check("stream", status == 200 and text.rstrip().endswith("data: [DONE]"), f"status {status}; the event stream {'ends' if text.rstrip().endswith('data: [DONE]') else 'does not end'} with [DONE]")
-        status, _ = _http("GET", f"{base}/health")
+        status, _ = _http("GET", f"{base}{ck.health_path}")
         check("health_after", status == 200)
         log_text = server_log.read_text(encoding="utf-8", errors="replace")
         for needle in ck.ready_contains:

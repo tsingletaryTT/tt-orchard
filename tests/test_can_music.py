@@ -203,6 +203,13 @@ def test_wav_stats_of_silence_has_zero_peak_and_no_loud_windows():
     assert st["peak"] == 0.0 and st["loud_fraction"] == 0.0
 
 
+def test_wav_stats_refuses_a_file_whose_header_promises_more_audio_than_it_holds():
+    good = wav_bytes(seconds=2.0, rate=8000)
+    short = good[:44] + good[44:44 + 1600]            # the header still declares 2 s; 100 ms of PCM follows
+    with pytest.raises(can.CanError, match="holds"):
+        can.wav_stats(short)
+
+
 @pytest.mark.parametrize("data", [b"", b"not a wav", b"RIFF" + b"\0" * 40])
 def test_wav_stats_refuses_data_that_is_not_a_pcm16_wav(data):
     with pytest.raises(can.CanError, match="WAV"):
@@ -364,3 +371,34 @@ def test_a_failed_decode_of_the_audio_is_reported_and_not_raised(spec, tmp_path,
     monkeypatch.setattr(can, "wav_stats", lambda data: (_ for _ in ()).throw(can.CanError("not a WAV file")))
     ev = run_check(spec, tmp_path)
     assert not ev["passed"] and not ev["checks"]["music_decodes"]["ok"] and "not a WAV file" in ev["checks"]["music_decodes"]["detail"]
+
+
+CHAT_SERVER = textwrap.dedent('''
+    import json, os
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    class H(BaseHTTPRequestHandler):
+        def _s(self, code, body, raw=None):
+            d = raw or json.dumps(body).encode(); self.send_response(code); self.send_header("Content-Length", str(len(d))); self.end_headers(); self.wfile.write(d)
+        def do_GET(self):
+            self._s(200 if self.path in ("/v1/health", "/v1/models") else 404, {"status": "ok", "data": []})
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            if req.get("stream"):
+                self._s(200, None, b"data: [DONE]\\n\\n")
+            else:
+                self._s(200, {"choices": [{"message": {"content": "Paris"}}], "timings": {"decode_tok_s": 99.0}})
+        def log_message(self, *a): pass
+    HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
+''')
+
+
+def test_the_chat_boot_check_also_uses_the_health_path_for_its_final_probe(tmp_path):
+    text = SPEC.split("[check]")[0] + '[check]\nhealth_path = "/v1/health"\n'
+    s = load(make_base(tmp_path), text)
+    fb = tmp_path / "chatb"
+    fb.mkdir()
+    (fb / "server.py").write_text(CHAT_SERVER)
+    (fb / "install.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (fb / "run.sh").write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$(dirname "$0")/server.py"\n')
+    ev = can.boot_check(fb, tmp_path / "work", s, install=False, health_timeout=30)
+    assert ev["checks"]["chat"]["ok"] and ev["checks"]["health_after"]["ok"], ev

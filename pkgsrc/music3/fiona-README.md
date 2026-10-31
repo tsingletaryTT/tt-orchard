@@ -75,7 +75,7 @@ The settings are environment variables, because uvicorn passes no flags. `run.sh
 | `MUSIC_URL` | the server the page talks to (default this server) |
 | `MUSIC3_MAX_SEQ_LEN`, `MUSIC3_MAX_FRAMES`, `MUSIC3_MAX_QUEUE`, `MUSIC3_WARMUP`, `MUSIC3_WARMUP_FRAMES`, `MUSIC3_TRACE_REGION_MB` | the model server's own settings (manifest defaults 16384, 9000, 8, 1, 200, 256) |
 | `MUSIC3_API_KEY` | the model server's bearer key. The page does not send it, so the page stops working when it is set. |
-| `TT_DIT_CACHE_DIR`, `TT_CACHE_PATH`, `TT_METAL_CACHE`, `HF_HOME` | where the weight views, the tensor cache, the kernel cache and the weights go (default: inside the bundle's directory) |
+| `TT_DIT_CACHE_DIR`, `TT_CACHE_PATH`, `TT_METAL_CACHE`, `HF_HOME` | where the weight views, the tensor cache, the kernel cache and the weights go (default: inside the bundle's directory; the tensor and weight caches get a subdirectory named for the weights repository and revision, so different weights never share one) |
 
 ## Expected performance
 
@@ -104,6 +104,7 @@ No quality evaluation against the base model has been run.
 - A seeded request gives the same file on one server. It does not give the same file as the container package.
 - Only the `p150` profile on one chip is tested, with clips of 5 to 20 s. The server allows up to 9000 frames (6 minutes).
 - A song ends when its lyrics are finished, which can be before the requested length.
+- Two faults in the model server's job queue (code from the container package, copied unchanged): after a device fault, jobs that were already queued stay `queued` and their waiting requests do not return until the client leaves; and a request refused with `429` when the queue is full stays in the server's job table, so many refused requests use memory until the server restarts.
 - A cold start takes 3 to 9 minutes on this host, with the caches empty.
 - No quality evaluation against the base model has been run. The adapter was trained on nine tracks in one style; its effect without the trigger phrase is not measured.
 - On some hosts, loading a cached tensor of about 32 MiB or more never returned in the container package (Linux 7.0.0-38, KMD 2.11.0). The bundle's cold start and restart did not show it on that host.

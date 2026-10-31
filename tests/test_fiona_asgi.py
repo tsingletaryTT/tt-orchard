@@ -172,10 +172,74 @@ def test_mounting_twice_does_not_add_a_second_page(load):
     assert sum(1 for r in mod.app.routes if getattr(r, "path", None) == "/" and "GET" in getattr(r, "methods", ())) == 1
 
 
-def test_the_weight_cache_goes_next_to_the_tensor_cache_run_sh_chose(load):
-    load(HF_MODEL="org/weights", TT_CACHE_PATH="/bundle/.tt_cache")
+def cache_dirs(load, **env):
     import os
-    assert os.environ["TT_DIT_CACHE_DIR"] == "/bundle/.tt_cache-dit"     # the model code would otherwise write under the home directory
+    load(HF_MODEL="org/weights", TT_CACHE_PATH="/bundle/.tt_cache", **env)
+    return os.environ["TT_CACHE_PATH"], os.environ["TT_DIT_CACHE_DIR"]
+
+
+def test_the_caches_go_under_the_directories_run_sh_chose(load):
+    tensor, dit = cache_dirs(load)
+    assert tensor.startswith("/bundle/.tt_cache/") and dit.startswith("/bundle/.tt_cache-dit/")      # the model code would otherwise write under the home directory
+    assert tensor.rsplit("/", 1)[1] == dit.rsplit("/", 1)[1]
+
+
+def test_two_revisions_never_share_a_cache_directory(load):
+    a = cache_dirs(load, TT_MODEL_WEIGHTS_REVISION="a" * 40)
+    b = cache_dirs(load, TT_MODEL_WEIGHTS_REVISION="b" * 40)
+    assert a[0] != b[0] and a[1] != b[1]
+
+
+def test_two_weight_repositories_never_share_a_cache_directory(load):
+    import os
+    a = cache_dirs(load, TT_MODEL_WEIGHTS_REVISION=REV)
+    load(HF_MODEL="org/other-weights", TT_CACHE_PATH="/bundle/.tt_cache", TT_MODEL_WEIGHTS_REVISION=REV)
+    assert os.environ["TT_CACHE_PATH"] != a[0] and os.environ["TT_DIT_CACHE_DIR"] != a[1]
+
+
+def test_a_local_snapshot_directory_and_a_repository_never_share_a_cache_directory(load, tmp_path):
+    import os
+    a = cache_dirs(load, TT_MODEL_WEIGHTS_REVISION=REV)
+    load(MUSIC3_SNAPSHOT=str(tmp_path), HF_MODEL="org/weights", TT_CACHE_PATH="/bundle/.tt_cache", TT_MODEL_WEIGHTS_REVISION=REV)
+    assert os.environ["TT_CACHE_PATH"] != a[0]
+
+
+def test_two_model_directories_never_share_a_cache_directory(load, tmp_path):
+    import os
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    load(HF_MODEL=str(tmp_path / "one"), TT_CACHE_PATH="/bundle/.tt_cache")
+    one = os.environ["TT_CACHE_PATH"]
+    load(HF_MODEL=str(tmp_path / "two"), TT_CACHE_PATH="/bundle/.tt_cache")
+    assert os.environ["TT_CACHE_PATH"] != one
+
+
+def test_two_snapshot_directories_never_share_a_cache_directory(load, tmp_path):
+    import os
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    load(MUSIC3_SNAPSHOT=str(tmp_path / "one"), TT_CACHE_PATH="/bundle/.tt_cache")
+    one = os.environ["TT_CACHE_PATH"]
+    load(MUSIC3_SNAPSHOT=str(tmp_path / "two"), TT_CACHE_PATH="/bundle/.tt_cache")
+    assert os.environ["TT_CACHE_PATH"] != one
+
+
+def test_the_same_weights_and_revision_share_a_cache_directory_across_restarts(load):
+    assert cache_dirs(load, TT_MODEL_WEIGHTS_REVISION=REV) == cache_dirs(load, TT_MODEL_WEIGHTS_REVISION=REV)
+
+
+def test_an_explicit_music3_revision_decides_the_cache_directory_over_the_tt_model_one(load):
+    a = cache_dirs(load, TT_MODEL_WEIGHTS_REVISION=REV, MUSIC3_WEIGHTS_REVISION="b" * 40)
+    b = cache_dirs(load, TT_MODEL_WEIGHTS_REVISION="c" * 40, MUSIC3_WEIGHTS_REVISION="b" * 40)
+    assert a == b
+
+
+def test_preparing_the_environment_twice_does_not_nest_the_key(load):
+    import os
+    mod = load(HF_MODEL="org/weights", TT_CACHE_PATH="/bundle/.tt_cache")
+    once = os.environ["TT_CACHE_PATH"]
+    mod.prepare_environment()
+    assert os.environ["TT_CACHE_PATH"] == once
 
 
 def test_an_explicit_weight_cache_is_kept(load):
@@ -184,7 +248,7 @@ def test_an_explicit_weight_cache_is_kept(load):
     assert os.environ["TT_DIT_CACHE_DIR"] == "/elsewhere"
 
 
-def test_without_a_tensor_cache_path_the_weight_cache_is_left_to_the_model_code(load):
+def test_without_a_tensor_cache_path_the_caches_are_left_to_the_model_code(load):
     load(HF_MODEL="org/weights")
     import os
-    assert "TT_DIT_CACHE_DIR" not in os.environ
+    assert "TT_DIT_CACHE_DIR" not in os.environ and "TT_CACHE_PATH" not in os.environ
