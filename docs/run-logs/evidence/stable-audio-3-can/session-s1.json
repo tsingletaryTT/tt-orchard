@@ -1,0 +1,459 @@
+{
+  "label": "s1",
+  "ready_s": 49.1,
+  "host_load_at_start": 19.72,
+  "host_load_at_end": 28.19,
+  "settings": {
+    "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+    "duration": 120.0,
+    "steps": 8,
+    "cfg_scale": 1.0,
+    "seed": 42
+  },
+  "jobs_by_seconds": {
+    "10": [
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 10.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 19.72,
+        "wall_s": 91.715,
+        "host_load_after": 27.87,
+        "id": "abeba0e29f494c99a09ad0992b44d939",
+        "server_total_s": 91.652,
+        "audio_s": 10.0,
+        "file_s": 10.0,
+        "rtf": 9.1652,
+        "stages": {
+          "conditioning_s": 0.559,
+          "generate_and_decode_s": 87.912,
+          "chip_transformer_call_s": 51.274,
+          "chip_decoder_call_s": 35.239,
+          "chip_decoder_layers_s": 34.894
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 10.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 27.87,
+        "wall_s": 12.019,
+        "host_load_after": 28.94,
+        "id": "583f928c52fc4f26bf88ac9b7bd4c356",
+        "server_total_s": 11.948,
+        "audio_s": 10.0,
+        "file_s": 10.0,
+        "rtf": 1.1948,
+        "stages": {
+          "conditioning_s": 6.88,
+          "generate_and_decode_s": 4.928,
+          "chip_transformer_call_s": 1.195,
+          "chip_decoder_call_s": 1.253,
+          "chip_decoder_layers_s": 0.654
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 10.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 28.94,
+        "wall_s": 7.141,
+        "host_load_after": 32.07,
+        "id": "c3d10aa741f6450c9dd45d8da76fa74f",
+        "server_total_s": 6.899,
+        "audio_s": 10.0,
+        "file_s": 10.0,
+        "rtf": 0.6899,
+        "stages": {
+          "conditioning_s": 2.004,
+          "generate_and_decode_s": 4.569,
+          "chip_transformer_call_s": 0.611,
+          "chip_decoder_call_s": 1.775,
+          "chip_decoder_layers_s": 0.885
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 10.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 32.07,
+        "wall_s": 17.303,
+        "host_load_after": 37.26,
+        "id": "0f18e01554d1441eb99238e5ba43bb04",
+        "server_total_s": 17.211,
+        "audio_s": 10.0,
+        "file_s": 10.0,
+        "rtf": 1.7211,
+        "stages": {
+          "conditioning_s": 11.147,
+          "generate_and_decode_s": 5.177,
+          "chip_transformer_call_s": 0.942,
+          "chip_decoder_call_s": 1.026,
+          "chip_decoder_layers_s": 0.61
+        },
+        "seed": 42
+      }
+    ],
+    "30": [
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 30.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 37.26,
+        "wall_s": 23.732,
+        "host_load_after": 36.53,
+        "id": "7c4e81ed098c49c99f290795852fdaee",
+        "server_total_s": 23.58,
+        "audio_s": 30.0,
+        "file_s": 30.0,
+        "rtf": 0.786,
+        "stages": {
+          "conditioning_s": 1.472,
+          "generate_and_decode_s": 21.752,
+          "chip_transformer_call_s": 18.224,
+          "chip_decoder_call_s": 1.536,
+          "chip_decoder_layers_s": 1.071
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 30.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 36.53,
+        "wall_s": 8.241,
+        "host_load_after": 41.53,
+        "id": "8ef038c54d24477392e480d3fcfcd40d",
+        "server_total_s": 8.167,
+        "audio_s": 30.0,
+        "file_s": 30.0,
+        "rtf": 0.2722,
+        "stages": {
+          "conditioning_s": 0.164,
+          "generate_and_decode_s": 7.645,
+          "chip_transformer_call_s": 1.546,
+          "chip_decoder_call_s": 2.845,
+          "chip_decoder_layers_s": 1.436
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 30.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 41.53,
+        "wall_s": 7.194,
+        "host_load_after": 43.17,
+        "id": "e283bc5cd88d4c2cb0e265d3ca177c28",
+        "server_total_s": 7.082,
+        "audio_s": 30.0,
+        "file_s": 30.0,
+        "rtf": 0.2361,
+        "stages": {
+          "conditioning_s": 0.439,
+          "generate_and_decode_s": 5.942,
+          "chip_transformer_call_s": 1.281,
+          "chip_decoder_call_s": 1.816,
+          "chip_decoder_layers_s": 0.886
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 30.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 43.17,
+        "wall_s": 8.553,
+        "host_load_after": 46.24,
+        "id": "8c2821c4c45345c09c9f795fafc0000e",
+        "server_total_s": 8.508,
+        "audio_s": 30.0,
+        "file_s": 30.0,
+        "rtf": 0.2836,
+        "stages": {
+          "conditioning_s": 2.039,
+          "generate_and_decode_s": 6.13,
+          "chip_transformer_call_s": 1.222,
+          "chip_decoder_call_s": 1.919,
+          "chip_decoder_layers_s": 1.086
+        },
+        "seed": 42
+      }
+    ],
+    "60": [
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 60.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 46.24,
+        "wall_s": 19.696,
+        "host_load_after": 39.89,
+        "id": "71b9ae1e2877407aae8ad8a0aa311747",
+        "server_total_s": 19.674,
+        "audio_s": 60.0,
+        "file_s": 60.0,
+        "rtf": 0.3279,
+        "stages": {
+          "conditioning_s": 4.146,
+          "generate_and_decode_s": 15.169,
+          "chip_transformer_call_s": 11.721,
+          "chip_decoder_call_s": 2.731,
+          "chip_decoder_layers_s": 2.028
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 60.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 39.89,
+        "wall_s": 4.357,
+        "host_load_after": 37.02,
+        "id": "36887bbf6c8441298e224a7ce9e2f6b0",
+        "server_total_s": 4.311,
+        "audio_s": 60.0,
+        "file_s": 60.0,
+        "rtf": 0.0718,
+        "stages": {
+          "conditioning_s": 0.052,
+          "generate_and_decode_s": 3.903,
+          "chip_transformer_call_s": 0.537,
+          "chip_decoder_call_s": 2.738,
+          "chip_decoder_layers_s": 1.869
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 60.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 37.02,
+        "wall_s": 4.949,
+        "host_load_after": 35.33,
+        "id": "d4616c6a153c415f8e972fb63a1444f3",
+        "server_total_s": 4.761,
+        "audio_s": 60.0,
+        "file_s": 60.0,
+        "rtf": 0.0794,
+        "stages": {
+          "conditioning_s": 0.04,
+          "generate_and_decode_s": 4.403,
+          "chip_transformer_call_s": 0.527,
+          "chip_decoder_call_s": 3.394,
+          "chip_decoder_layers_s": 1.899
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 60.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 35.33,
+        "wall_s": 4.76,
+        "host_load_after": 34.99,
+        "id": "61beefa3e3c04582bb81d43b514b0bfb",
+        "server_total_s": 4.697,
+        "audio_s": 60.0,
+        "file_s": 60.0,
+        "rtf": 0.0783,
+        "stages": {
+          "conditioning_s": 0.125,
+          "generate_and_decode_s": 4.189,
+          "chip_transformer_call_s": 0.62,
+          "chip_decoder_call_s": 2.717,
+          "chip_decoder_layers_s": 1.893
+        },
+        "seed": 42
+      }
+    ],
+    "120": [
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 120.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 34.99,
+        "wall_s": 34.413,
+        "host_load_after": 33.38,
+        "id": "4514c5dfbdea4a348eeceb26cb097f52",
+        "server_total_s": 34.318,
+        "audio_s": 120.0,
+        "file_s": 120.0,
+        "rtf": 0.286,
+        "stages": {
+          "conditioning_s": 0.752,
+          "generate_and_decode_s": 32.571,
+          "chip_transformer_call_s": 21.516,
+          "chip_decoder_call_s": 7.33,
+          "chip_decoder_layers_s": 4.226
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 120.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 33.38,
+        "wall_s": 13.88,
+        "host_load_after": 31.68,
+        "id": "3346a4c690c64a989478b2fd1c82e063",
+        "server_total_s": 13.636,
+        "audio_s": 120.0,
+        "file_s": 120.0,
+        "rtf": 0.1136,
+        "stages": {
+          "conditioning_s": 0.401,
+          "generate_and_decode_s": 12.219,
+          "chip_transformer_call_s": 0.873,
+          "chip_decoder_call_s": 8.521,
+          "chip_decoder_layers_s": 3.042
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 120.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 31.68,
+        "wall_s": 6.783,
+        "host_load_after": 29.86,
+        "id": "45df993d181f4e54a26abf3f7a0a9898",
+        "server_total_s": 6.782,
+        "audio_s": 120.0,
+        "file_s": 120.0,
+        "rtf": 0.0565,
+        "stages": {
+          "conditioning_s": 0.456,
+          "generate_and_decode_s": 5.637,
+          "chip_transformer_call_s": 0.86,
+          "chip_decoder_call_s": 3.896,
+          "chip_decoder_layers_s": 3.081
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 120.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 29.86,
+        "wall_s": 6.658,
+        "host_load_after": 28.19,
+        "id": "752e701f28ea482292e56e92686a47cd",
+        "server_total_s": 6.439,
+        "audio_s": 120.0,
+        "file_s": 120.0,
+        "rtf": 0.0537,
+        "stages": {
+          "conditioning_s": 0.041,
+          "generate_and_decode_s": 5.756,
+          "chip_transformer_call_s": 0.846,
+          "chip_decoder_call_s": 4.3,
+          "chip_decoder_layers_s": 3.133
+        },
+        "seed": 42
+      }
+    ]
+  },
+  "health": {
+    "status": "ok",
+    "model": "stable-audio-3 small-music, diffusion transformer and decoder layers on one Blackhole chip",
+    "device_name": "one Blackhole chip",
+    "queue_depth": 0,
+    "queue_max": 2,
+    "busy": false,
+    "limits": {
+      "min_seconds": 1,
+      "max_seconds": 120,
+      "max_steps": 100,
+      "min_cfg_scale": 1.0,
+      "max_cfg_scale": 20.0
+    },
+    "defaults": {
+      "duration": 10,
+      "steps": 8,
+      "cfg_scale": 1.0
+    }
+  }
+}

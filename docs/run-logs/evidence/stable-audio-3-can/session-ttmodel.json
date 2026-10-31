@@ -1,0 +1,143 @@
+{
+  "label": "tt-model serve of a copy installed with tt-model's installer",
+  "install_s": 29.4,
+  "ready_s": 17.0,
+  "host_load_at_ready": 25.48,
+  "jobs_by_seconds": {
+    "10": [
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 10.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 25.48,
+        "wall_s": 55.95,
+        "host_load_after": 24.32,
+        "id": "68d574dd991047be8ed6319370976e0e",
+        "server_total_s": 55.931,
+        "audio_s": 10.0,
+        "file_s": 10.0,
+        "rtf": 5.5931,
+        "stages": {
+          "conditioning_s": 0.048,
+          "generate_and_decode_s": 55.747,
+          "chip_transformer_call_s": 35.81,
+          "chip_decoder_call_s": 19.576,
+          "chip_decoder_layers_s": 19.329
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 10.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 24.32,
+        "wall_s": 11.199,
+        "host_load_after": 26.27,
+        "id": "c730a00bcd114e3e9d498453c2d2c5eb",
+        "server_total_s": 10.975,
+        "audio_s": 10.0,
+        "file_s": 10.0,
+        "rtf": 1.0975,
+        "stages": {
+          "conditioning_s": 6.424,
+          "generate_and_decode_s": 4.472,
+          "chip_transformer_call_s": 1.174,
+          "chip_decoder_call_s": 0.959,
+          "chip_decoder_layers_s": 0.593
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 10.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 26.27,
+        "wall_s": 8.995,
+        "host_load_after": 28.78,
+        "id": "dbd75de2cafe488baa170b01ef0ce743",
+        "server_total_s": 8.801,
+        "audio_s": 10.0,
+        "file_s": 10.0,
+        "rtf": 0.8801,
+        "stages": {
+          "conditioning_s": 3.681,
+          "generate_and_decode_s": 5.006,
+          "chip_transformer_call_s": 1.449,
+          "chip_decoder_call_s": 1.258,
+          "chip_decoder_layers_s": 0.661
+        },
+        "seed": 42
+      }
+    ],
+    "120": [
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 120.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 28.78,
+        "wall_s": 54.449,
+        "host_load_after": 46.54,
+        "id": "ee3d784e3e354a56998d6204154c3fb9",
+        "server_total_s": 54.375,
+        "audio_s": 120.0,
+        "file_s": 120.0,
+        "rtf": 0.4531,
+        "stages": {
+          "conditioning_s": 6.332,
+          "generate_and_decode_s": 46.172,
+          "chip_transformer_call_s": 32.768,
+          "chip_decoder_call_s": 10.354,
+          "chip_decoder_layers_s": 5.327
+        },
+        "seed": 42
+      },
+      {
+        "ok": true,
+        "settings": {
+          "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+          "duration": 120.0,
+          "steps": 8,
+          "cfg_scale": 1.0,
+          "seed": 42
+        },
+        "host_load_before": 46.54,
+        "wall_s": 19.482,
+        "host_load_after": 45.15,
+        "id": "5ae0fed50a2a4cd0a6cfcade43167418",
+        "server_total_s": 19.264,
+        "audio_s": 120.0,
+        "file_s": 120.0,
+        "rtf": 0.1605,
+        "stages": {
+          "conditioning_s": 2.852,
+          "generate_and_decode_s": 15.282,
+          "chip_transformer_call_s": 1.052,
+          "chip_decoder_call_s": 9.859,
+          "chip_decoder_layers_s": 4.643
+        },
+        "seed": 42
+      }
+    ]
+  },
+  "openapi_status": 200
+}

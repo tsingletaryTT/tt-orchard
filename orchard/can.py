@@ -53,7 +53,7 @@ from array import array
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from orchard import safeio
+from orchard import can_audio, safeio
 from orchard.defaults import PACKAGE_INSTALL_TIMEOUT_S, PACKAGE_THIN_TIMEOUT_S
 from orchard.package import PackageError, assert_no_publish, run_logged
 from orchard.scrub import scrub_package
@@ -75,8 +75,11 @@ CAN_KEYS = {"name", "kind", "app", "model_py", "metadata", "readme", "arch", "me
 WEIGHTS_KEYS = {"repo", "revision"}
 CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens",
               "mode", "health_path", "lyrics", "caption", "seconds", "seed", "sample_rate", "min_seconds", "min_peak", "min_loud_fraction",
-              "path", "body", "expect_seconds", "channels", "max_warm_s", "repeat_identical"}
-CHECK_MODES = ("chat", "music", "audio")
+              "path", "body", "expect_seconds", "channels", "max_warm_s", "repeat_identical",
+              "audio_seconds", "audio_steps", "audio_seed", "max_rtf"}
+CHECK_MODES = ("chat", "music", "audio", "audio-job")
+CHAT_ONLY_KEYS = {"expect", "max_tokens", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens"}   # refused in mode "audio-job"
+AUDIO_JOB_KEYS = {"audio_seconds", "audio_steps", "audio_seed", "max_rtf"}                                  # only for mode "audio-job" (orchard/can_audio.py)
 FILE_KEYS = {"src", "dst"}
 TREE_SKIP_DIRS = ("__pycache__",)          # a directory in an [[extra_tree]] that is never copied
 PIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?===?[A-Za-z0-9][A-Za-z0-9.!+_-]*(\s*;.*)?$")
@@ -118,6 +121,10 @@ class Check:
     channels: int = 2
     max_warm_s: float | None = None        # the second request must finish within this many seconds (none: the time is recorded, not checked)
     repeat_identical: bool = False         # the second request (same body, same seed) must return the same samples (the WAV header may differ)
+    audio_seconds: float = 10.0            # mode audio-job: the clip length the boot check asks for
+    audio_steps: int = 8
+    audio_seed: int = 42
+    max_rtf: float | None = None           # mode audio-job: the warm job's generation time divided by its audio length must be at most this
 
 
 @dataclass(frozen=True)
@@ -299,6 +306,23 @@ def load_spec(path, *, base=None) -> Spec:
     device_count = can.get("device_count", 1)
     if not isinstance(device_count, int) or isinstance(device_count, bool) or device_count < 1:
         raise CanError("[can] device_count must be a whole number of 1 or more")
+    mode = check.get("mode", "chat")
+    if mode not in CHECK_MODES:
+        raise CanError(f"[check] mode must be one of {CHECK_MODES}, got {mode!r}")
+    wrong = set(check) & (CHAT_ONLY_KEYS if mode == "audio-job" else AUDIO_JOB_KEYS)
+    if wrong:
+        raise CanError(f"[check] {sorted(wrong)} belong to the {'chat' if mode == 'audio-job' else 'audio-job'} mode, and mode is {mode!r}")
+    if mode == "audio-job":
+        if "prompt" not in check:
+            raise CanError("[check] mode audio-job needs a prompt")
+        for key in ("audio_seconds", "max_rtf"):
+            v = check.get(key)
+            if key in check and (isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0):
+                raise CanError(f"[check] {key} must be a number above 0")
+        for key in ("audio_steps", "audio_seed"):
+            v = check.get(key)
+            if key in check and (isinstance(v, bool) or not isinstance(v, int) or v < (1 if key == "audio_steps" else 0)):
+                raise CanError(f"[check] {key} must be a whole number ({'1' if key == 'audio_steps' else '0'} or more)")
     ck = Check(**{k: (tuple(v) if k == "ready_contains" else v) for k, v in check.items()})
     if ck.mode not in CHECK_MODES:
         raise CanError(f"[check] mode must be one of {CHECK_MODES}, got {ck.mode!r}")
@@ -654,7 +678,7 @@ def _music_checks(base: str, ck: Check, check, evidence: dict) -> None:
 
 
 def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_timeout: float = BOOT_HEALTH_TIMEOUT_S,
-               port: int | None = None, install: bool = True) -> dict:
+               port: int | None = None, install: bool = True, job_timeout: float = BOOT_REQUEST_TIMEOUT_S) -> dict:
     """Install a COPY of the staged bundle under `work`, serve it with the copy's own run.sh and test it. The staged directory is never
     installed into or served. `env` is the environment of both children (for a hardware run it carries the lease's TT_VISIBLE_DEVICES).
     Returns the evidence; `passed` is true only if every check passed. A server that is still running is stopped on every path."""
@@ -704,6 +728,15 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
             return _finish(work, evidence)
         if spec.check.mode == "audio":
             _audio_checks(base, spec.check, check, evidence, server_log)
+            return _finish(work, evidence)
+        ck = spec.check
+        if ck.mode == "audio-job":
+            can_audio.audio_checks(_http, base, ck, evidence, lambda name, ok, detail=None: check(name, ok, detail), job_timeout=job_timeout)
+            status, _ = _http("GET", f"{base}{ck.health_path}")
+            check("health_after", status == 200)
+            log_text = server_log.read_text(encoding="utf-8", errors="replace")
+            for needle in ck.ready_contains:
+                check(f"log contains {needle}", needle in log_text)
             return _finish(work, evidence)
         status, body = _http("GET", f"{base}/v1/models")
         check("models", status == 200)
