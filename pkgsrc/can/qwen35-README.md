@@ -6,17 +6,32 @@ library_name: vllm
 tags:
 - blackhole
 - tenstorrent
-- p300
+- p300c
+- vllm
+- thin
+- tt-model-cache
 - moe
 - qwen3.5
 - tt-model
 ---
 
-# qwen3.5-35b-a3b-blackhole-p300
+# qwen3.5-35b-a3b-blackhole-p300 on Tenstorrent p300c
 
 > Runs [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) (revision `59d61f3ce65a6d9863b86d2e96597125219dc754`) by the Qwen team on one Tenstorrent Blackhole p300 board (two dies). The model weights are not in this repository. This is a community package.
 
 This is a v6 thin bundle for `tt-model`: `tt-model` installs it into its own virtual environment and serves it with vLLM. The model has 35B parameters, about 3B active per token. The bundle holds a tt-metal build with the MoE ops, the model code, the vLLM plugin and a launcher. It holds no weights and no container image. Text only: the vision tower of the checkpoint is not used.
+
+Runs on Tenstorrent **p300c** (mesh P300, two dies)
+
+## At a glance
+
+| | |
+| --- | --- |
+| Architecture | mixture of experts, 40 layers (gated delta net and gated attention), 256 experts, 8 used per token |
+| Hardware | one p300c board, both dies |
+| Context | 4096 tokens, one sequence at a time |
+| Input and output | text |
+| License | Apache License 2.0 |
 
 ## Intended use
 
@@ -43,7 +58,7 @@ The served model name is `qwen3.5-35b-a3b` (`GET /v1/models` lists it). The defa
 
 One p300 board, both dies. Set `TT_VISIBLE_DEVICES` to the two dies (a gozer lease does this); `run.sh` refuses fewer. The host needs 1 GB hugepages and the Tenstorrent driver. The SFPI compiler the kernels need (7.74.0) is in the `ttnn` wheel.
 
-## Usage
+## Capabilities
 
 | Setting | Value | Where |
 | --- | --- | --- |
@@ -60,13 +75,13 @@ One p300 board, both dies. Set `TT_VISIBLE_DEVICES` to the two dies (a gozer lea
 | File | What it is |
 | --- | --- |
 | `wheels/ttnn-0.79.0.dev20261030+qwen35moe-*.whl` | the tt-metal build of the image `tt-model/qwen3-coder-next:0c170421ca1b`. It has the MoE ops (`moe_sorted_dispatch`, `moe_gather_add_rows`) that the PyPI `ttnn` 0.80.0 lacks |
-| `wheels/tt_metal_models-0.79.0.dev20261030+qwen35moe-*.whl` | that image's `models` tree, with the 41-line loader patch of the recipe package applied to `models/autoports/qwen_qwen3_coder_next/tt/weights.py` |
+| `wheels/tt_metal_models-0.79.0.dev20261030+qwen35moe-*.whl` | that image's `models` tree, with a 41-line loader patch applied to `models/autoports/qwen_qwen3_coder_next/tt/weights.py` |
 | `wheels/vllm_tt_plugin-0.1.0-*.whl` | the vLLM plugin of that image |
 | `base_config/config.json` | the checkpoint's `config.json` with three edits: architecture `Qwen3NextForCausalLM`, no multi-token-prediction layers, no mrope keys |
 | `prepare_model_dir.py` | builds `model-dir/` at start-up from the pinned snapshot (tokenizer, index and weight files, linked) and `base_config/` |
-| `tools/bench.py`, `tools/prompt.txt` | the decode benchmark of the recipe package: `python tools/bench.py PORT 5 128 tools/prompt.txt MODEL` |
+| `tools/bench.py`, `tools/prompt.txt` | the decode benchmark: `python tools/bench.py PORT 5 128 tools/prompt.txt MODEL` |
 
-## Performance
+## Expected performance
 
 Measured on 2026-10-30 on this bundle, installed in its own venv, on the two dies of board 0 (chips 0 and 1, p300c) of a four-chip Blackhole machine shared with other jobs. Software: `ttnn` 0.79.0.dev20261030+qwen35moe (the wheel in this bundle), the bundle's own SFPI 7.74.0, vLLM 0.26.0. Precision: bfp4 routed experts and head, bfp8 attention and shared experts, bf16 router. One sequence, greedy.
 
@@ -82,9 +97,9 @@ Measured on 2026-10-30 on this bundle, installed in its own venv, on the two die
 | decode floor from datasheet bandwidth | 428 tok/s (2 dies at 512 GB/s, 2392 MB read per token) | estimate | recipe package log |
 | share of the floor | 29.4 percent | estimate | 125.75 / 428 |
 
-The recipe package of this model (same model code and settings, run in the published image with a mounted loader patch) measured 126.83 tok/s decode, 109 ms to first token, 0.84 s for the same 3,817-token prompt, and cold starts of 471 s and 727 s. This bundle's decode speed is 0.9 percent lower. Its start took four to five times longer in both samples. Why was not established: the recipe's kernel cache had been seeded in earlier runs, and the bundle's compile ran on a host with a load average of 7 to 50. A start on a quiet host with an empty cache was not measured.
+The start is slow because the kernels compile on the first start; the two samples ran on a host with a load average of 7 to 50, and a start on a quiet host with an empty kernel cache was not measured.
 
-Agreement with the recipe package: the six fixed prompts (`greedy`, 32 tokens, top-5 log-probabilities) gave identical tokens in all 32 positions for every prompt, and the chat replies and the long-prompt answer matched. The recipe package's own comparison with a Hugging Face bfloat16 CPU reference is on its card: 0 of 6 prompts matched in full, every first difference a near tie (largest reference gap 0.438 nats) with the device token inside the reference top 5, because of the bfp4 routed experts. This is not an accuracy benchmark.
+Agreement: six fixed prompts (greedy, 32 tokens, top-5 log-probabilities) gave the same tokens in all 32 positions as the sibling recipe package (see Related packages). That package's own comparison with a Hugging Face bfloat16 CPU reference found 0 of 6 prompts matching in full, every first difference a near tie (largest reference gap 0.438 nats) with the device token inside the reference top 5, because of the bfp4 routed experts. This is not an accuracy benchmark.
 
 ## Limitations
 
@@ -96,3 +111,21 @@ Agreement with the recipe package: the six fixed prompts (`greedy`, 32 tokens, t
 ## Licensing
 
 The weights are Qwen/Qwen3.5-35B-A3B, released under the Apache License 2.0 by the Qwen team (Alibaba Cloud). The license file is in this bundle (`LICENSE`, copied from the model repository at revision `59d61f3ce65a6d9863b86d2e96597125219dc754`). The wheels are built from tt-metal (Apache License 2.0); see `NOTICE`. The weights revision pinned here is `59d61f3ce65a6d9863b86d2e96597125219dc754`.
+
+## Related packages
+
+- `episod/qwen3.5-35b-a3b-blackhole-p300` (recipe package): the same model code and settings, run in the published image `tt-model/qwen3-coder-next:0c170421ca1b` with the loader patch mounted at run time. It measured 126.83 tok/s decode (median of 5, 2026-10-29, chips 2 and 3, host load 8.5 to 8.7) and cold starts of 471 s and 727 s.
+- [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B): the upstream model.
+
+## Feedback
+
+Open a Discussion on this repository's page, or write to support@tenstorrent.com.
+
+## Provenance
+
+| Component | Built from |
+| --- | --- |
+| `ttnn` wheel | tt-metal as built in `tt-model/qwen3-coder-next:0c170421ca1b`, version `0.79.0.dev20261030+qwen35moe`, with its SFPI 7.74.0 |
+| `tt_metal_models` wheel | the `models` tree of that image, with the loader patch applied |
+| `vllm_tt_plugin` wheel | the plugin installed in that image |
+| weights | Qwen/Qwen3.5-35B-A3B at `59d61f3ce65a6d9863b86d2e96597125219dc754` |

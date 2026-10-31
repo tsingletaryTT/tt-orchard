@@ -1,0 +1,83 @@
+# The can for openbmb/MiniCPM3-4B on one Blackhole chip (orchard/can.py). Run from the repository root:
+#   tt-orchard can stage config/can.minicpm3.toml --out <new directory>/minicpm3-4b-blackhole
+# Paths are relative to the directory the command runs in (or --base).
+
+[can]
+name = "minicpm3-4b-blackhole"
+kind = "tt-dit-server"                 # the server is not a vLLM model; run.sh serves the ASGI app below with uvicorn
+app = "minicpm3_asgi:app"
+model_py = "pkgsrc/can/minicpm3_model.py"            # the runner file at the bundle root (re-exports the app; see that file)
+readme = "pkgsrc/can/minicpm3-README.md"
+arch = "blackhole"
+mesh = "P150"
+device_count = 1
+python = "3.12"
+port = 20130
+# Exact pins. ttnn 0.80.0 is the PyPI wheel; it needs numpy below 2. The CPU wheel of torch comes from the PyTorch index (the default PyPI
+# wheel pulls the CUDA libraries, several gigabytes the host does not use). transformers is here for the tokenizer and its chat template only;
+# torch is here for the one-time conversion of pytorch_model.bin and for the chip model's host-side tables.
+requirements = [
+  "ttnn==0.80.0",
+  "numpy==1.26.4",
+  "torch==2.7.0",
+  "transformers==5.19.0",
+  "safetensors==0.8.0",
+  "tokenizers==0.23.2",
+  "jinja2==3.1.6",
+  "huggingface_hub==1.33.0",
+  "fastapi==0.136.3",
+  "uvicorn==0.45.0",
+  "pydantic==2.12.5",
+  "pillow==10.4.0",
+  "loguru==0.7.3",
+  "networkx==3.6.1",
+  "graphviz==0.21",
+  "pyyaml==6.0.2",
+  "click==8.5.0",
+  "pandas==2.3.3",
+  "seaborn==0.13.2",
+  "ml_dtypes==0.5.4",
+]
+# run at the end of install.sh; a failure fails the install. None of these lines opens a device.
+verify = [
+  "import importlib.metadata as m; assert m.version('ttnn') == '0.80.0', m.version('ttnn')",
+  "import minicpm3_asgi",
+]
+
+[weights]
+repo = "openbmb/MiniCPM3-4B"
+revision = "d6b14ddaefdb11c624dd75c3c779549bc90b08cb"
+
+# the code the server runs, copied to extra_code/ (which run.sh puts on PYTHONPATH)
+[[extra_code]]
+src = "pkgsrc/server/minicpm3_asgi.py"
+dst = "minicpm3_asgi.py"
+[[extra_code]]
+src = "scripts/minicpm3/serve.py"
+dst = "minicpm3_serve.py"
+[[extra_code]]
+src = "scripts/minicpm3/chip_model.py"
+dst = "chip_model.py"
+[[extra_code]]
+src = "scripts/minicpm3/ref_model.py"
+dst = "ref_model.py"
+[[extra_code]]
+src = "scripts/minicpm3/convert_weights.py"
+dst = "convert_weights.py"
+
+[[bundle_file]]
+src = "LICENSE"
+dst = "LICENSE"
+[[bundle_file]]
+src = "pkgsrc/can/minicpm3-NOTICE"
+dst = "NOTICE"
+
+# what the boot check asks of the served bundle
+[check]
+prompt = "What is the capital of France? Answer in one word."
+expect = "Paris"
+max_tokens = 64
+stream = true
+# The recipe package measured 33.9 tok/s on a quiet host and 31.6 at a load average of 55; the floor leaves room for a loaded host.
+min_decode_tok_s = 25.0
+ready_contains = ['"traced": true', '"context": 2048']

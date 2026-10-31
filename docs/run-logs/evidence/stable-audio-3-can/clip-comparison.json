@@ -1,0 +1,122 @@
+{
+  "10 s, bundle (warm, resident) against recipe package": {
+    "a": "s2-10s.flac",
+    "b": "recipe-10s.flac",
+    "rate": [
+      44100,
+      44100
+    ],
+    "frames": [
+      441000,
+      441000
+    ],
+    "max_abs_diff": 0.0,
+    "rel_l2": 0.0,
+    "pcc": 1.0,
+    "identical_samples": true,
+    "sha256": [
+      "da0584a8bd248fc7",
+      "da0584a8bd248fc7"
+    ]
+  },
+  "10 s, bundle cold session s1 against warm session s2": {
+    "a": "s1-10s.flac",
+    "b": "s2-10s.flac",
+    "rate": [
+      44100,
+      44100
+    ],
+    "frames": [
+      441000,
+      441000
+    ],
+    "max_abs_diff": 0.0,
+    "rel_l2": 0.0,
+    "pcc": 1.0,
+    "identical_samples": true,
+    "sha256": [
+      "da0584a8bd248fc7",
+      "da0584a8bd248fc7"
+    ]
+  },
+  "120 s, bundle against recipe package": {
+    "a": "s2-120s.flac",
+    "b": "recipe-120s.flac",
+    "rate": [
+      44100,
+      44100
+    ],
+    "frames": [
+      5292000,
+      5292000
+    ],
+    "max_abs_diff": 0.0,
+    "rel_l2": 0.0,
+    "pcc": 0.9999999999999998,
+    "identical_samples": true,
+    "sha256": [
+      "2992043ec6136090",
+      "2992043ec6136090"
+    ]
+  },
+  "10 s, tt-model installer path against recipe package": {
+    "a": "ttmodel-10s.flac",
+    "b": "recipe-10s.flac",
+    "rate": [
+      44100,
+      44100
+    ],
+    "frames": [
+      441000,
+      441000
+    ],
+    "max_abs_diff": 0.0,
+    "rel_l2": 0.0,
+    "pcc": 1.0,
+    "identical_samples": true,
+    "sha256": [
+      "da0584a8bd248fc7",
+      "da0584a8bd248fc7"
+    ]
+  },
+  "120 s, tt-model installer path against recipe package": {
+    "a": "ttmodel-120s.flac",
+    "b": "recipe-120s.flac",
+    "rate": [
+      44100,
+      44100
+    ],
+    "frames": [
+      5292000,
+      5292000
+    ],
+    "max_abs_diff": 0.0,
+    "rel_l2": 0.0,
+    "pcc": 0.9999999999999998,
+    "identical_samples": true,
+    "sha256": [
+      "2992043ec6136090",
+      "2992043ec6136090"
+    ]
+  },
+  "10 s, chip (bundle) against the CPU float32 clip of the same bundle environment": {
+    "a": "audio.flac",
+    "b": "s2-10s.flac",
+    "rate": [
+      44100,
+      44100
+    ],
+    "frames": [
+      441000,
+      441000
+    ],
+    "max_abs_diff": 0.424530029296875,
+    "rel_l2": 0.2525845221158243,
+    "pcc": 0.9676213161893066,
+    "identical_samples": false,
+    "sha256": [
+      "3c715e7c4b39d975",
+      "da0584a8bd248fc7"
+    ]
+  }
+}

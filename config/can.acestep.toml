@@ -1,0 +1,121 @@
+# The can for ACE-Step 1.5 turbo (ACE-Step/Ace-Step1.5) on one Blackhole chip (orchard/can.py). Run from the repository root:
+#   tt-orchard can stage config/can.acestep.toml --out <new directory>/ace-step-1.5-turbo-blackhole
+# Paths are relative to the directory the command runs in (or --base).
+#
+# What this can needs that the Granite can did not:
+#   * the model code (sunandbean/acestep-1.5-turbo-p100a, 1,307 files) and the weights are fetched at start-up at pinned revisions, not shipped;
+#   * a boot check that asks for a WAV clip instead of a chat answer ([check] mode = "audio").
+
+[can]
+name = "ace-step-1.5-turbo-blackhole"
+kind = "tt-dit-server"                 # run.sh serves the ASGI app below with uvicorn
+app = "acestep_asgi:app"
+model_py = "pkgsrc/can/acestep_model.py"             # the runner file at the bundle root (re-exports the app; see that file)
+readme = "pkgsrc/can/acestep-README.md"
+arch = "blackhole"
+mesh = "P150"
+device_count = 1
+python = "3.12"
+port = 20140
+# Exact pins. ttnn 0.80.0 is the PyPI wheel; it needs numpy below 2 (the recipe package ran on a source build with numpy 2.5.3). torch is the CPU
+# wheel from the PyTorch index. The packages below the first block are what the bundle code imports (transformers 4.57.6 and tokenizers 0.22.2
+# are the versions in the bundle's own requirements.lock).
+requirements = [
+  "ttnn==0.80.0",
+  "numpy==1.26.4",
+  "torch==2.7.0",
+  "torchaudio==2.7.0",
+  "safetensors==0.8.0",
+  "transformers==4.57.6",
+  "tokenizers==0.22.2",
+  "einx==0.4.3",
+  "einops==0.8.2",
+  "vector-quantize-pytorch==1.31.6",
+  "torch-einops-utils==0.1.36",
+  "pytorch-wavelets==1.3.0",
+  "PyWavelets==1.10.0",
+  "modelscope==1.40.2",
+  "frozendict==2.4.7",
+  "diffusers==0.35.2",
+  "accelerate==1.12.0",
+  "peft==0.21.2",
+  "lightning==2.6.1",
+  "torchmetrics==1.0.3",
+  "diskcache==5.6.3",
+  "loguru==0.7.3",
+  "scipy==1.15.3",
+  "soundfile==0.13.1",
+  "matplotlib==3.10.9",
+  "typer-slim==0.24.0",
+  "setuptools==70.2.0",
+  "huggingface_hub==0.36.2",
+  "fastapi==0.136.3",
+  "uvicorn==0.45.0",
+  "pydantic==2.12.5",
+  "pillow==10.4.0",
+  "networkx==3.6.1",
+  "graphviz==0.21",
+  "pyyaml==6.0.2",
+  "click==8.5.0",
+  "pandas==2.3.3",
+  "seaborn==0.13.2",
+  "ml_dtypes==0.5.4",
+]
+# run at the end of install.sh; a failure fails the install. Neither line opens a device or reaches the network.
+verify = [
+  "import importlib.metadata as m; assert m.version('ttnn') == '0.80.0', m.version('ttnn')",
+  "import acestep_asgi",
+]
+
+[weights]
+repo = "ACE-Step/Ace-Step1.5"
+revision = "19671f406d603126926c1b7e2adc169acbcade22"
+
+# the code the server runs, copied to extra_code/ (which run.sh puts on PYTHONPATH)
+[[extra_code]]
+src = "pkgsrc/server/acestep_asgi.py"
+dst = "acestep_asgi.py"
+[[extra_code]]
+src = "scripts/acestep/acestep_serve.py"
+dst = "acestep_serve.py"
+[[extra_code]]
+src = "scripts/acestep/acestep_run.py"
+dst = "acestep_run.py"
+[[extra_code]]
+src = "scripts/acestep/acestep_fast.py"
+dst = "acestep_fast.py"
+[[extra_code]]
+src = "scripts/acestep/acestep_chip.py"
+dst = "acestep_chip.py"
+[[extra_code]]
+src = "pkgsrc/acestep/tools/check_bundle.py"
+dst = "check_bundle.py"
+[[extra_code]]
+src = "pkgsrc/can/acestep-pins.json"
+dst = "acestep_pins.json"
+[[extra_code]]
+src = "pkgsrc/can/acestep_orchard_init.py"
+dst = "orchard/__init__.py"
+
+[[bundle_file]]
+src = "LICENSE"
+dst = "LICENSE"
+[[bundle_file]]
+src = "pkgsrc/can/acestep-NOTICE"
+dst = "NOTICE"
+[[bundle_file]]
+src = "pkgsrc/acestep/tools/smoke.py"
+dst = "tools/smoke.py"
+
+# what the boot check asks of the served bundle: a 10 s clip, twice (the first request compiles kernels, the second is warm)
+[check]
+mode = "audio"
+path = "/v1/music"
+body = { prompt = "warm lo-fi hip hop, mellow rhodes piano, soft vinyl crackle, relaxed drums", duration = 10, seed = 42 }
+expect_seconds = 10.0
+sample_rate = 48000
+channels = 2
+min_loud_fraction = 0.4
+max_warm_s = 5.0                      # the recipe makes a warm 30 s clip in about 0.9 s; 5 s for 10 s catches a request that fell back to the CPU
+repeat_identical = true               # the same prompt and seed give the same bytes
+ready_contains = ['"event": "ready"', 'kv_on_chip', 'text_on_chip', 'lyric_on_chip']

@@ -1,0 +1,4 @@
+target = "0.9.85"
+summary = "Canning: [[extra_tree]], a music boot check (WAV sample rate, length, level) and health_path in can specs; the minimax-music3-fiona-crapple can with its Gradio page."
+kind = "feature"
+pr = 305
