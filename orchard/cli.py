@@ -410,6 +410,7 @@ def _parser() -> argparse.ArgumentParser:
     cn.add_argument("--work", help="boot: a new directory for the installed copy, the logs and boot-check.json")
     cn.add_argument("--hf-home", help="boot: HF_HOME for the served copy (a cache that already holds the pinned weights avoids a download)")
     cn.add_argument("--health-timeout", type=float, default=1800.0, help="boot: seconds to wait for /health")
+    cn.add_argument("--port", type=int, help="boot: the port to serve on (default: a free port the kernel picks)")
     cn.add_argument("--namespace", help="the Hugging Face namespace, used in the publish text and checked by the scrub")
     cn.add_argument("--run-dir", help="a run directory: write stages/7/can.json and add an evidence entry to its ledger")
     vp = sub.add_parser("verify-package", parents=[common],
