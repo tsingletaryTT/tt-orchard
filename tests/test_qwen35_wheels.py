@@ -83,3 +83,12 @@ def test_the_ttnn_build_bundles_the_images_own_sfpi_compiler():
 def test_the_recipes_pins_file_names_both_loader_hashes():
     pins = bw.pins(ROOT / "package_src" / "pins.env")
     assert len(pins["ORIG_SHA"]) == 64 and len(pins["PATCHED_SHA"]) == 64 and pins["ORIG_SHA"] != pins["PATCHED_SHA"]
+
+
+def test_the_notice_names_the_sfpi_source_tag_and_the_gnu_licences():
+    # The ttnn wheel carries a GCC/binutils build (runtime/sfpi). The NOTICE has to say which source tag it is built from
+    # and under which licences, because the bundle is distributed (7.74.0 = tag 7.74.0 of tenstorrent/sfpi, commit 6b1bd9da0963,
+    # the tag the wheel's own runtime/sfpi/README.md names).
+    notice = (ROOT / "pkgsrc" / "can" / "qwen35" / "NOTICE").read_text()
+    for needle in ("tag 7.74.0", "6b1bd9da0963", "https://github.com/tenstorrent/sfpi/tree/7.74.0", "GPL", "LGPL", "LICENSE.gcc", "LICENSE.binutils"):
+        assert needle in notice, needle

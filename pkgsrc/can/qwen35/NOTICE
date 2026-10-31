@@ -9,10 +9,18 @@ revision when the server first starts.
 The wheels in wheels/ were built from tt-metal (Apache License 2.0) as it is installed in the Tenstorrent image
 tt-model/qwen3-coder-next:0c170421ca1b, the image of the raahemnabeel/qwen3-coder-next bundle:
   - ttnn: the image's tt-metal build, packaged with the image's own setup.py. It includes the image's SFPI compiler (a Tenstorrent build of
-    GCC for the RISC-V cores, version 7.74.0, under runtime/sfpi); its source is at https://github.com/tenstorrent/sfpi and it keeps its
-    own licenses;
+    GCC and binutils for the RISC-V cores, version 7.74.0, under runtime/sfpi). See "SFPI compiler" below;
   - tt_metal_models: the image's `models` tree. One file, models/autoports/qwen_qwen3_coder_next/tt/weights.py, has the 41-line patch of
     the recipe package qwen3.5-35b-a3b-blackhole-p300 applied. The patch adds a reader for this checkpoint's tensor layout;
   - vllm_tt_plugin: the vLLM plugin installed in that image.
 config.json in base_config/ is the model repository's config.json with three edits (the architecture name, no multi-token-prediction
 layers, no mrope keys).
+
+SFPI compiler (runtime/sfpi inside the ttnn wheel)
+The compiler is a Tenstorrent build of GCC and binutils, which are free software under the GNU General Public License (GPL) and the GNU
+Lesser General Public License (LGPL); the repository's LICENSE.gcc and LICENSE.binutils point to the licence texts in the gcc and binutils
+sources, and the repository also carries LICENSE.newlib. The corresponding source is the tag 7.74.0 of https://github.com/tenstorrent/sfpi
+(commit 6b1bd9da0963, https://github.com/tenstorrent/sfpi/tree/7.74.0), with its submodules sfpi-gcc at b1a769c65bed and sfpi-binutils at
+137473a327d5. The wheel's own runtime/sfpi/README.md names the same tag and commits. The compiler binary in the wheel is byte-identical to the
+one in that tag's release asset sfpi_7.74.0_x86_64_debian.txz (compared with sha256). Anyone may build the compiler from that source
+and use it in place of the copy in the wheel.

@@ -105,7 +105,7 @@ Agreement: six fixed prompts (greedy, 32 tokens, top-5 log-probabilities) gave t
 
 - The two dies of one p300 board only. One sequence at a time and a 4096-token context; the longest prompt tested was 3,817 tokens. Concurrent requests, tool calls and sampling above temperature 0 were not tested. The vision tower and the multi-token-prediction head are not used.
 - The first start is slow (above: 2,052 to 2,334 s on a loaded host) and downloads about 72 GB. It needs that disk space plus the venv (about 3.5 GB) and the kernel cache (about 2 GB) inside the bundle directory.
-- The `ttnn` wheel is a tt-metal development build (`0.79.0.dev20261030+qwen35moe`), not a release. It carries the SFPI 7.74.0 compiler (about 240 MB wheel): the model's kernels do not compile with the newer SFPI (7.89.0) a host may have. The compiler is a Tenstorrent build of GCC; its source is at github.com/tenstorrent/sfpi.
+- The `ttnn` wheel is a tt-metal development build (`0.79.0.dev20261030+qwen35moe`), not a release. It carries the SFPI 7.74.0 compiler (about 240 MB wheel): the model's kernels do not compile with the newer SFPI (7.89.0) a host may have. The compiler is a Tenstorrent build of GCC and binutils (GPL and LGPL); its source is the tag 7.74.0 of github.com/tenstorrent/sfpi (see NOTICE).
 - Not published and not run through `tt-model pull`: tt-model installs a v6 bundle from the Hub only, so this bundle was installed with tt-model's installer function from a local directory.
 
 ## Licensing
