@@ -1,0 +1,9 @@
+Model: openbmb/MiniCPM3-4B (revision d6b14ddaefdb11c624dd75c3c779549bc90b08cb) by OpenBMB. Its repository card states the license apache-2.0. The authors' card says:
+"The usage of MiniCPM3-4B model weights must strictly follow MiniCPM Model License.md" (https://github.com/OpenBMB/MiniCPM/blob/main/MiniCPM%20Model%20License.md).
+That link returned 404 on 2026-10-29 and 2026-10-30, and the OpenBMB/MiniCPM repository holds only an Apache-2.0 LICENSE, so the weights' terms could not be read here. They are the
+model authors' to state; check their repository before use, including commercial use. The model weights are not part of this package.
+
+Runtime, server and tools in this package: Copyright 2026 Tenstorrent USA, Inc., licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Licensed under the Apache License, Version 2.0; you may not use this package except in compliance with the License. Unless required by applicable
+law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.

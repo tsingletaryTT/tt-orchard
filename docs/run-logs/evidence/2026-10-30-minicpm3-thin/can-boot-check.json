@@ -1,0 +1,49 @@
+{
+  "name": "minicpm3-4b-blackhole",
+  "checks": {
+    "bundle_copy": {
+      "ok": true,
+      "detail": "the copy matches the bundle"
+    },
+    "health": {
+      "ok": true,
+      "detail": "200 from /health"
+    },
+    "models": {
+      "ok": true
+    },
+    "chat": {
+      "ok": true,
+      "detail": "status 200; expected /Paris/"
+    },
+    "decode_rate": {
+      "ok": true,
+      "detail": "31.54 tok/s reported over None tokens; at least 25.0 wanted"
+    },
+    "stream": {
+      "ok": true,
+      "detail": "status 200; the event stream ends with [DONE]"
+    },
+    "health_after": {
+      "ok": true
+    },
+    "log contains \"traced\": true": {
+      "ok": true
+    },
+    "log contains \"context\": 2048": {
+      "ok": true
+    }
+  },
+  "passed": true,
+  "server_pid": 4070132,
+  "ready_s": 75.0,
+  "answer": "Paris",
+  "timings": {
+    "first_token_s": 0.6376,
+    "decode_tok_s": 33.35
+  },
+  "rate_timings": {
+    "first_token_s": 0.6403,
+    "decode_tok_s": 31.54
+  }
+}
