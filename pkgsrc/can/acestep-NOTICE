@@ -1,0 +1,9 @@
+ace-step-1.5-turbo-blackhole
+
+Model: ACE-Step/Ace-Step1.5 (revision 19671f406d603126926c1b7e2adc169acbcade22), licensed under the MIT License by its authors. The model weights are not part of this bundle.
+Bundle code: sunandbean/acestep-1.5-turbo-p100a (revision dabe15cd44f9fb14e948e111fb671d7ab89fda17), licensed under the Apache License, Version 2.0 by its publisher. It is not part of this bundle; the server fetches it at start-up.
+
+Server, runtime and tools in this bundle: Copyright 2026 Tenstorrent USA, Inc., licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Licensed under the Apache License, Version 2.0; you may not use this bundle except in compliance with the License. Unless required by applicable
+law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.

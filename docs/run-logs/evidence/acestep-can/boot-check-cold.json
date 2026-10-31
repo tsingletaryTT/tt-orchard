@@ -1,0 +1,77 @@
+{
+  "name": "ace-step-1.5-turbo-blackhole",
+  "checks": {
+    "bundle_copy": {
+      "ok": true,
+      "detail": "the copy matches the bundle"
+    },
+    "health": {
+      "ok": true,
+      "detail": "200 from /health"
+    },
+    "audio_request": {
+      "ok": true,
+      "detail": "200 with a clip in 93.667 s"
+    },
+    "audio_request_warm": {
+      "ok": true,
+      "detail": "200 with a clip in 1.496 s"
+    },
+    "audio_format": {
+      "ok": true,
+      "detail": "48000 Hz and 2 channels; 48000 Hz and 2 wanted"
+    },
+    "audio_length": {
+      "ok": true,
+      "detail": "10.00 s; 10.0 s wanted (within 0.50)"
+    },
+    "audio_finite": {
+      "ok": true
+    },
+    "audio_not_silent": {
+      "ok": true,
+      "detail": "89.0% of 100 ms windows are above -40 dBFS; at least 40% wanted"
+    },
+    "audio_not_clipped": {
+      "ok": true,
+      "detail": "0.00% of samples at full scale"
+    },
+    "repeat_identical": {
+      "ok": true,
+      "detail": "the same request returned the same samples"
+    },
+    "warm_time": {
+      "ok": true,
+      "detail": "1.496 s for the warm request; at most 5.0 wanted"
+    },
+    "health_after": {
+      "ok": true
+    },
+    "log contains \"event\": \"ready\"": {
+      "ok": true
+    },
+    "log contains kv_on_chip": {
+      "ok": true
+    },
+    "log contains text_on_chip": {
+      "ok": true
+    },
+    "log contains lyric_on_chip": {
+      "ok": true
+    }
+  },
+  "passed": true,
+  "server_pid": 3040390,
+  "ready_s": 306.2,
+  "first_request_s": 93.667,
+  "audio": {
+    "sample_rate": 48000,
+    "channels": 2,
+    "seconds": 10.0,
+    "loud_window_fraction": 0.89,
+    "full_scale_fraction": 0.0,
+    "finite": true,
+    "pcm_sha256": "fd9bebbf6fe1f275e54ba85eace3919c59879f4e02e1b8ff431a38a46c54cf81"
+  },
+  "warm_request_s": 1.496
+}
