@@ -1,4 +1,4 @@
-# MiniCPM3-4B as a v6 thin bundle: the second can (2026-10-30)
+# MiniCPM3-4B as a v6 thin bundle: a can after Granite (2026-10-30)
 
 Goal (operator): "v6 thin bundles for all these ... this is like the canning step." The first can was Granite (`docs/run-logs/2026-10-30-granite-thin-bundle.md`). This run cans MiniCPM3-4B by the same recipe. Code: `config/can.minicpm3.toml`, `pkgsrc/server/minicpm3_asgi.py`, `pkgsrc/can/minicpm3-*`, small changes to `scripts/minicpm3/serve.py` and `convert_weights.py`. Section for this model: `docs/canning.md`.
 

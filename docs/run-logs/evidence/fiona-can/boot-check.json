@@ -1,0 +1,58 @@
+{
+  "name": "minimax-music3-fiona-crapple-blackhole",
+  "checks": {
+    "bundle_copy": {
+      "ok": true,
+      "detail": "the copy matches the bundle"
+    },
+    "health": {
+      "ok": true,
+      "detail": "200 from /v1/health"
+    },
+    "models": {
+      "ok": true
+    },
+    "music_request": {
+      "ok": true,
+      "detail": "status 200"
+    },
+    "music_decodes": {
+      "ok": true,
+      "detail": "639056 bytes"
+    },
+    "music_sample_rate": {
+      "ok": true,
+      "detail": "32000 Hz; 32000 Hz wanted"
+    },
+    "music_length": {
+      "ok": true,
+      "detail": "4.99 s; between 4 and 5.5 s wanted"
+    },
+    "music_not_silent": {
+      "ok": true,
+      "detail": "peak 0.3565, 82% of 100 ms windows above -40 dBFS; at least 0.05 and 30% wanted"
+    },
+    "health_after": {
+      "ok": true
+    },
+    "log contains Application startup complete": {
+      "ok": true
+    },
+    "log contains warmup done": {
+      "ok": true
+    }
+  },
+  "passed": true,
+  "server_pid": 2793181,
+  "ready_s": 195.0,
+  "clip_wall_s": 29.6,
+  "audio": {
+    "sample_rate": 32000,
+    "channels": 2,
+    "seconds": 4.99228125,
+    "peak": 0.3565,
+    "loud_fraction": 0.82,
+    "requested_seconds": 5.0,
+    "seed": 11
+  }
+}
