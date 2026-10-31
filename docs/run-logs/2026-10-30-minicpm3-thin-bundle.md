@@ -43,3 +43,23 @@ Speed is within noise of the recipe package (33.3 to 33.5 against 32.7 to 32.8 t
 - Leases: the boot check ran under `gozer run --exact 2`. For the later runs I took the lease with `gozer wait` and ran the scripts with the granted `TT_VISIBLE_DEVICES`; gozer reaped that detached lease while the runs were finishing, so `gozer release` found nothing to release. The measurement script's first version left the tt-model server running after a run (tt-model starts it in its own session); the next run on the same port refused to start, and the processes were stopped by exact pid. The final script stops every descendant.
 - No upload, no `tt-model push` or `publish`, no merge. The publish text is `tt-orchard can commands config/can.minicpm3.toml --namespace ORG`.
 - The staged card was graded with `cardview --no-infer` from tt-model-ranker (local, read only): window grade B on p150 (chat B+ for speed; the card has no consistency or concurrency numbers, so B is the cap). The coding-agent tile is outside the focus. The rows are in the viewer's two layouts (the `Number | Value | Label | Evidence` table and the `profile | ISL | OSL | concurrency | N | TTFT | prefill | decode | E2EL` table).
+
+## Review of PR 308: fixes, and a rerun under a fresh lease (2026-10-31)
+
+- Copilot found two defects in the adapter; each got a failing test first. (1) `MINICPM3_MAX_LEN=129` advertised a 256-token context while the model was built with 129, so its rotary tables could be shorter than the accepted prompts. `settings()` now rounds up to a multiple of 128 once, and the model and the advertised context use that value. (2) The non-streaming answer read the token counts and the finish reason from shared state after the slot was released, so a request that took the slot next could write its values into this answer. They are now read before the release.
+- `gozer history` showed that the first lease of the measurement session (`93d4f6`, taken with `gozer wait`, detached) was reaped at 00:25:07Z. The first A run started inside it. The first B and C runs were started after the reap or after a stray server was stopped, so they cannot be shown to have run under a live lease. Those files are kept in `docs/run-logs/evidence/2026-10-30-minicpm3-thin/first-pass/`.
+- The final staged bundle was installed again (own venv, and tt-model's installer into a fresh directory, so the kernel cache was empty again) and run under one `gozer run --exact 2` lease (`3b7dba`, not detached) after merging `origin/main`:
+
+| | can boot | bundle via tt-model, empty kernel cache | bundle, warm cache | recipe package |
+| --- | --- | --- | --- | --- |
+| ready after start | 75.0 s | 68.1 s | 50.1 s | 25.0 s |
+| first request (short answer) | | 0.73 s | 0.72 s | 0.70 s |
+| time to first token, 21-token prompt | 0.64 s | 0.63, 0.64, 0.63 s | 0.63, 0.63, 0.64 s | 0.64 s (streamed) |
+| decode, 64 tokens, server-reported | 33.35 and 31.54 tok/s | 32.72, 33.35, 32.57 | 32.67, 32.65, 32.67 | not reported |
+| decode, 64 tokens streamed, client-measured | | 32.07, 32.62 | 32.80, 32.32 | 32.89, 32.87 |
+| 494-token prompt, 1 token out | | 15.4, 15.6 s | 15.1, 15.2 s | 15.2, 16.1 s |
+| host load average (start, end) | about 20 | 24, 21 | 21, 16 | 16, 22 |
+
+- All 9 boot checks passed. The earlier 340.9 s start of the recipe package was a cold kernel cache for its own build under heavy load: in this run, with that cache warm, it was ready after 25.0 s. The bundle's start is 50 to 68 s with or without a kernel cache, because loading 62 layers and capturing the trace dominate.
+- The speed of the bundle and the recipe package differ by less than the spread between runs (32.3 to 33.4 tok/s against 32.9). The earlier session measured 33.2 to 33.7 for the bundle at a similar load, and the recipe card measured 33.87 at a load average of 3.6. The host was shared with three other agents in both sessions.
+- Card wording was compared with the live `episod/audio8-asr-infinite-p150` README (read only): the card now has the same tag set style (`tt-dit-server`, `tt-model-cache`), a "Runs on **p150** (mesh `P150`)" line, an "At a glance" table (Architecture, Hardware, License, Status), "Direct use" and "Out-of-scope use" in Intended use (the out-of-scope items are a bullet list, which the ranker reads as things the model is not for), a "Quickstart" and a "Using it" section. `cardview --no-infer` still gives window B on p150.

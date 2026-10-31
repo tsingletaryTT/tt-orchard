@@ -1,69 +1,69 @@
 {
  "label": "B_ttmodel_warm",
  "load_avg_start": [
-  18.31201171875,
-  19.275390625,
-  20.197265625
+  20.6806640625,
+  28.00244140625,
+  31.24755859375
  ],
- "ready_s": 73.0,
+ "ready_s": 50.1,
  "first_request": {
   "status": 200,
-  "wall_s": 0.699,
+  "wall_s": 0.715,
   "answer": "Paris",
   "timings": {
-   "first_token_s": 0.6236,
-   "decode_tok_s": 33.69
+   "first_token_s": 0.6358,
+   "decode_tok_s": 32.18
   }
  },
  "second_request": {
   "status": 200,
-  "wall_s": 0.684,
+  "wall_s": 0.711,
   "answer": "Paris",
   "timings": {
-   "first_token_s": 0.6237,
-   "decode_tok_s": 33.72
+   "first_token_s": 0.6477,
+   "decode_tok_s": 33.32
   }
  },
  "story_64_tokens": [
   {
    "status": 200,
-   "wall_s": 2.55,
+   "wall_s": 2.588,
    "usage": {
     "prompt_tokens": 21,
     "completion_tokens": 64,
     "total_tokens": 85
    },
    "timings": {
-    "first_token_s": 0.6233,
-    "decode_tok_s": 33.24
+    "first_token_s": 0.6269,
+    "decode_tok_s": 32.67
    },
    "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
   },
   {
    "status": 200,
-   "wall_s": 2.524,
+   "wall_s": 2.595,
    "usage": {
     "prompt_tokens": 21,
     "completion_tokens": 64,
     "total_tokens": 85
    },
    "timings": {
-    "first_token_s": 0.6255,
-    "decode_tok_s": 33.74
+    "first_token_s": 0.6328,
+    "decode_tok_s": 32.65
    },
    "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
   },
   {
    "status": 200,
-   "wall_s": 2.533,
+   "wall_s": 2.602,
    "usage": {
     "prompt_tokens": 21,
     "completion_tokens": 64,
     "total_tokens": 85
    },
    "timings": {
-    "first_token_s": 0.6232,
-    "decode_tok_s": 33.55
+    "first_token_s": 0.639,
+    "decode_tok_s": 32.67
    },
    "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
   }
@@ -71,23 +71,23 @@
  "stream_story_64": [
   {
    "status": 200,
-   "wall_s": 2.529,
-   "first_content_s": 0.621,
+   "wall_s": 2.578,
+   "first_content_s": 0.628,
    "pieces": 64,
-   "decode_pieces_per_s": 33.54
+   "decode_pieces_per_s": 32.8
   },
   {
    "status": 200,
-   "wall_s": 2.548,
-   "first_content_s": 0.628,
+   "wall_s": 2.618,
+   "first_content_s": 0.639,
    "pieces": 64,
-   "decode_pieces_per_s": 33.34
+   "decode_pieces_per_s": 32.32
   }
  ],
  "long_prompt_1_token_out": [
   {
    "status": 200,
-   "wall_s": 15.094,
+   "wall_s": 15.129,
    "usage": {
     "prompt_tokens": 494,
     "completion_tokens": 1,
@@ -96,7 +96,7 @@
   },
   {
    "status": 200,
-   "wall_s": 15.468,
+   "wall_s": 15.186,
    "usage": {
     "prompt_tokens": 494,
     "completion_tokens": 1,
@@ -106,13 +106,13 @@
  ],
  "empty_messages": {
   "status": 400,
-  "wall_s": 0.002
+  "wall_s": 0.001
  },
  "health_after": 200,
  "load_avg_end": [
-  15.60400390625,
-  17.59912109375,
-  19.4599609375
+  16.3798828125,
+  25.93798828125,
+  30.2919921875
  ],
  "stopped": {
   "terminated": 2,

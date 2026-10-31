@@ -1,0 +1,107 @@
+{
+ "label": "C_recipe",
+ "load_avg_start": [
+  15.60400390625,
+  17.59912109375,
+  19.4599609375
+ ],
+ "ready_s": 340.9,
+ "first_request": {
+  "status": 200,
+  "wall_s": 0.795,
+  "answer": "Paris",
+  "timings": null
+ },
+ "second_request": {
+  "status": 200,
+  "wall_s": 0.688,
+  "answer": "Paris",
+  "timings": null
+ },
+ "story_64_tokens": [
+  {
+   "status": 200,
+   "wall_s": 2.558,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64,
+    "total_tokens": 85
+   },
+   "timings": null,
+   "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
+  },
+  {
+   "status": 200,
+   "wall_s": 2.559,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64,
+    "total_tokens": 85
+   },
+   "timings": null,
+   "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
+  },
+  {
+   "status": 200,
+   "wall_s": 2.569,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64,
+    "total_tokens": 85
+   },
+   "timings": null,
+   "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
+  }
+ ],
+ "stream_story_64": [
+  {
+   "status": 200,
+   "wall_s": 2.586,
+   "first_content_s": 0.63,
+   "pieces": 64,
+   "decode_pieces_per_s": 32.72
+  },
+  {
+   "status": 200,
+   "wall_s": 2.577,
+   "first_content_s": 0.627,
+   "pieces": 64,
+   "decode_pieces_per_s": 32.83
+  }
+ ],
+ "long_prompt_1_token_out": [
+  {
+   "status": 200,
+   "wall_s": 15.132,
+   "usage": {
+    "prompt_tokens": 494,
+    "completion_tokens": 1,
+    "total_tokens": 495
+   }
+  },
+  {
+   "status": 200,
+   "wall_s": 15.064,
+   "usage": {
+    "prompt_tokens": 494,
+    "completion_tokens": 1,
+    "total_tokens": 495
+   }
+  }
+ ],
+ "empty_messages": {
+  "status": 400,
+  "wall_s": 0.0
+ },
+ "health_after": 404,
+ "load_avg_end": [
+  19.41650390625,
+  24.38720703125,
+  22.57177734375
+ ],
+ "stopped": {
+  "terminated": 1,
+  "killed": 0
+ },
+ "exit": 0
+}

@@ -18,7 +18,7 @@
     },
     "decode_rate": {
       "ok": true,
-      "detail": "33.2 tok/s reported over None tokens; at least 25.0 wanted"
+      "detail": "31.54 tok/s reported over None tokens; at least 25.0 wanted"
     },
     "stream": {
       "ok": true,
@@ -35,15 +35,15 @@
     }
   },
   "passed": true,
-  "server_pid": 2828884,
-  "ready_s": 66.0,
+  "server_pid": 4070132,
+  "ready_s": 75.0,
   "answer": "Paris",
   "timings": {
-    "first_token_s": 0.6295,
-    "decode_tok_s": 33.46
+    "first_token_s": 0.6376,
+    "decode_tok_s": 33.35
   },
   "rate_timings": {
-    "first_token_s": 0.6279,
-    "decode_tok_s": 33.2
+    "first_token_s": 0.6403,
+    "decode_tok_s": 31.54
   }
 }

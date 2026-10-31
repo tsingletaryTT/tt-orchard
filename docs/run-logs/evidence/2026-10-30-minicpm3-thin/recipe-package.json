@@ -1,27 +1,27 @@
 {
  "label": "C_recipe",
  "load_avg_start": [
-  15.60400390625,
-  17.59912109375,
-  19.4599609375
+  16.3798828125,
+  25.93798828125,
+  30.2919921875
  ],
- "ready_s": 340.9,
+ "ready_s": 25.0,
  "first_request": {
   "status": 200,
-  "wall_s": 0.795,
+  "wall_s": 0.703,
   "answer": "Paris",
   "timings": null
  },
  "second_request": {
   "status": 200,
-  "wall_s": 0.688,
+  "wall_s": 0.687,
   "answer": "Paris",
   "timings": null
  },
  "story_64_tokens": [
   {
    "status": 200,
-   "wall_s": 2.558,
+   "wall_s": 2.58,
    "usage": {
     "prompt_tokens": 21,
     "completion_tokens": 64,
@@ -32,7 +32,7 @@
   },
   {
    "status": 200,
-   "wall_s": 2.559,
+   "wall_s": 2.58,
    "usage": {
     "prompt_tokens": 21,
     "completion_tokens": 64,
@@ -43,7 +43,7 @@
   },
   {
    "status": 200,
-   "wall_s": 2.569,
+   "wall_s": 2.573,
    "usage": {
     "prompt_tokens": 21,
     "completion_tokens": 64,
@@ -56,23 +56,23 @@
  "stream_story_64": [
   {
    "status": 200,
-   "wall_s": 2.586,
-   "first_content_s": 0.63,
+   "wall_s": 2.582,
+   "first_content_s": 0.635,
    "pieces": 64,
-   "decode_pieces_per_s": 32.72
+   "decode_pieces_per_s": 32.89
   },
   {
    "status": 200,
-   "wall_s": 2.577,
-   "first_content_s": 0.627,
+   "wall_s": 2.592,
+   "first_content_s": 0.645,
    "pieces": 64,
-   "decode_pieces_per_s": 32.83
+   "decode_pieces_per_s": 32.87
   }
  ],
  "long_prompt_1_token_out": [
   {
    "status": 200,
-   "wall_s": 15.132,
+   "wall_s": 15.174,
    "usage": {
     "prompt_tokens": 494,
     "completion_tokens": 1,
@@ -81,7 +81,7 @@
   },
   {
    "status": 200,
-   "wall_s": 15.064,
+   "wall_s": 16.054,
    "usage": {
     "prompt_tokens": 494,
     "completion_tokens": 1,
@@ -91,13 +91,13 @@
  ],
  "empty_messages": {
   "status": 400,
-  "wall_s": 0.0
+  "wall_s": 0.001
  },
  "health_after": 404,
  "load_avg_end": [
-  19.41650390625,
-  24.38720703125,
-  22.57177734375
+  21.833984375,
+  24.7138671875,
+  29.5009765625
  ],
  "stopped": {
   "terminated": 1,

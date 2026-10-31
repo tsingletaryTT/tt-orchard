@@ -1,0 +1,118 @@
+{
+ "label": "A_ttmodel_cold",
+ "load_avg_start": [
+  14.7294921875,
+  22.1142578125,
+  17.2939453125
+ ],
+ "ready_s": 61.0,
+ "first_request": {
+  "status": 200,
+  "wall_s": 0.706,
+  "answer": "Paris",
+  "timings": {
+   "first_token_s": 0.6281,
+   "decode_tok_s": 33.21
+  }
+ },
+ "second_request": {
+  "status": 200,
+  "wall_s": 0.687,
+  "answer": "Paris",
+  "timings": {
+   "first_token_s": 0.6259,
+   "decode_tok_s": 33.62
+  }
+ },
+ "story_64_tokens": [
+  {
+   "status": 200,
+   "wall_s": 2.553,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64,
+    "total_tokens": 85
+   },
+   "timings": {
+    "first_token_s": 0.6242,
+    "decode_tok_s": 33.21
+   },
+   "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
+  },
+  {
+   "status": 200,
+   "wall_s": 2.546,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64,
+    "total_tokens": 85
+   },
+   "timings": {
+    "first_token_s": 0.6225,
+    "decode_tok_s": 33.3
+   },
+   "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
+  },
+  {
+   "status": 200,
+   "wall_s": 2.548,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64,
+    "total_tokens": 85
+   },
+   "timings": {
+    "first_token_s": 0.6253,
+    "decode_tok_s": 33.31
+   },
+   "text_head": "Once upon a time, in a land far away, there lived a dragon named Dracarys. Dracarys was a magnificent creature with scal"
+  }
+ ],
+ "stream_story_64": [
+  {
+   "status": 200,
+   "wall_s": 2.546,
+   "first_content_s": 0.624,
+   "pieces": 64,
+   "decode_pieces_per_s": 33.31
+  },
+  {
+   "status": 200,
+   "wall_s": 2.552,
+   "first_content_s": 0.63,
+   "pieces": 64,
+   "decode_pieces_per_s": 33.31
+  }
+ ],
+ "long_prompt_1_token_out": [
+  {
+   "status": 200,
+   "wall_s": 15.507,
+   "usage": {
+    "prompt_tokens": 494,
+    "completion_tokens": 1,
+    "total_tokens": 495
+   }
+  },
+  {
+   "status": 200,
+   "wall_s": 15.588,
+   "usage": {
+    "prompt_tokens": 494,
+    "completion_tokens": 1,
+    "total_tokens": 495
+   }
+  }
+ ],
+ "empty_messages": {
+  "status": 400,
+  "wall_s": 0.001
+ },
+ "health_after": 200,
+ "load_avg_end": [
+  17.6044921875,
+  20.35107421875,
+  17.13818359375
+ ],
+ "exit": -15
+}
