@@ -75,6 +75,7 @@ def settings(environ=None):
         raise ValueError(f"MINICPM3_MAX_LEN is {e.get('MINICPM3_MAX_LEN')!r}; it must be a whole number") from None
     if not 128 <= max_len <= 32768:
         raise ValueError(f"MINICPM3_MAX_LEN is {max_len}; it must be from 128 to 32768")
+    max_len = -(-max_len // 128) * 128                  # rounded once here: the model builds its rotary tables from this value and the server advertises it
     return SimpleNamespace(model_dir=e.get("MINICPM3_DIR") or None, weights=e.get("MINICPM3_WEIGHTS") or None, max_len=max_len,
                            mlp_dtype=choice("MINICPM3_MLP_DTYPE", "bf16", MLP_DTYPES), mlp_fidelity=choice("MINICPM3_MLP_FIDELITY", "hifi2", MLP_FIDELITIES))
 
@@ -143,7 +144,7 @@ def startup(a):
     weights = a.weights or weights_file(a.model_dir, cache_dir())
     serve.STATE.clear()
     serve.STATE["tok"] = load_tokenizer(a.model_dir)
-    serve.STATE["max_len"] = -(-a.max_len // 128) * 128
+    serve.STATE["max_len"] = a.max_len
     serve.STATE["batched_prefill"] = False         # the batched prefill hung the chip on the second request after a trace (see serve.py)
     dev, model, load_s = load_chip(a, weights)
     serve.STATE["model"] = model
@@ -200,17 +201,19 @@ def _complete(ids, max_tokens, cid, created, cancelled):
             t_first = t_first or t_end
             pieces.append(piece)
         t_end = time.perf_counter()
+        # Read the shared state before the slot is released: the next request overwrites it as soon as it takes the slot.
+        pt, ct = serve.STATE.get("last_counts", (len(ids), 0))
+        finish = serve.STATE.get("finish", "stop")
     except Exception as exc:  # noqa: BLE001
         _mark_unusable(exc)
         raise
     finally:
         serve.LOCK.release()
-    pt, ct = serve.STATE.get("last_counts", (len(ids), 0))
     # Each answer token is followed by one chip step, so the steps after the first piece number about `ct` (a token split across pieces moves this by one).
     timings = {"first_token_s": round(t_first - t0, 4) if t_first else None,
                "decode_tok_s": round(ct / (t_end - t_first), 2) if t_first and t_end > t_first else None}
     return {"id": cid, "object": "chat.completion", "created": created, "model": serve.MODEL_ID,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(pieces)}, "finish_reason": serve.STATE.get("finish", "stop")}],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(pieces)}, "finish_reason": finish}],
             "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}, "timings": timings}
 
 

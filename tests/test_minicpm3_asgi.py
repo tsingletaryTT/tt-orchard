@@ -460,3 +460,37 @@ def test_the_minicpm3_spec_loads_and_names_files_that_exist_and_an_adapter_insid
     assert can.requirement_problems("\n".join(s.requirements)) == []
     assert "import minicpm3_asgi" in s.verify               # the install runs the import with only extra_code/ on the path
     assert s.check.min_decode_tok_s and any('"traced": true' in n for n in s.check.ready_contains)
+
+
+# ---- review of PR 308 ----------------------------------------------------------------------------------------------------------------------
+
+def test_max_len_is_rounded_up_once_so_the_model_and_the_advertised_context_agree(tmp_path, monkeypatch):
+    """The chip model builds its rotary tables from the length it is given; the server advertises STATE["max_len"]. Both must hold the rounded value."""
+    assert asgi.settings({"MINICPM3_MAX_LEN": "129"}).max_len == 256
+    assert asgi.settings({"MINICPM3_MAX_LEN": "256"}).max_len == 256 and asgi.settings({"MINICPM3_MAX_LEN": "128"}).max_len == 128
+    (tmp_path / "model.safetensors").write_bytes(b"x")
+    seen = {}
+    monkeypatch.setattr(asgi, "load_tokenizer", lambda d: FakeTok())
+    monkeypatch.setattr(asgi, "load_chip", lambda a, w: (seen.update(max_len=a.max_len), (SimpleNamespace(name="d"), FakeModel([4]), 0.1))[1])
+    asgi.startup(asgi.settings({"MINICPM3_DIR": str(tmp_path), "MINICPM3_MAX_LEN": "129"}))
+    assert seen["max_len"] == 256 == serve.STATE["max_len"]
+
+
+def test_the_answer_uses_the_counts_and_finish_of_its_own_generation_not_of_a_request_that_took_the_slot_next(monkeypatch):
+    """The slot is released in the worker; a request that takes it next overwrites STATE["last_counts"] and ["finish"]. The response must be built from values read before the release."""
+    real = serve.LOCK
+
+    class NextRequestWritesOnRelease:
+        def acquire(self, blocking=True):
+            return real.acquire(blocking=blocking)
+
+        def release(self):
+            real.release()
+            serve.STATE["last_counts"], serve.STATE["finish"] = (999, 999), "length"       # what the next request would leave behind
+
+        def locked(self):
+            return real.locked()
+    monkeypatch.setattr(serve, "LOCK", NextRequestWritesOnRelease())
+    out = json.loads(run(post(MSG))[2])
+    assert out["usage"] == {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6}
+    assert out["choices"][0]["finish_reason"] == "stop"
