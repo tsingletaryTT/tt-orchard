@@ -1,0 +1,3 @@
+target = "0.9.85"
+summary = "Can ACE-Step 1.5 turbo as a v6 thin bundle: ASGI adapter, audio boot check, spec, card"
+pr = 307
