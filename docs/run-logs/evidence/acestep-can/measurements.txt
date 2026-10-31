@@ -1,0 +1,45 @@
+ACE-Step 1.5 turbo can: request timings, as printed by the scratch driver (clips.py) that starts a package's run.sh, makes N identical requests per length
+(prompt "warm lo-fi hip hop, mellow rhodes piano, soft vinyl crackle, relaxed drums", seed 42) and stops the server. Date 2026-10-30. One chip of a p300c
+board (the lease grants the board; the server opens one chip). ttnn 0.80.0 (PyPI wheel) for the can; the recipe package ran in its own environment.
+The host was shared with other agents. Timings are in seconds.
+
+== 1. the can's bundle copy, restarted after the cold boot check (warm kernel cache), HF_HOME = an existing cache
+loadavg at start (22.3, 25.4, 21.9)
+ready after 32.0 s
+10 s request 0: 5.738 s, loadavg1 19.2, vae_s 1.8457, dit_s 1.1901
+10 s request 1: 1.128 s, loadavg1 19.2, vae_s 0.1666, dit_s 0.4734
+10 s request 2: 1.487 s, loadavg1 19.2, vae_s 0.1361, dit_s 0.5072
+10 s request 3: 1.175 s, loadavg1 19.1, vae_s 0.1375, dit_s 0.4748
+30 s request 0: 1.96 s, loadavg1 19.1, vae_s 0.579, dit_s 0.5181
+30 s request 1: 1.756 s, loadavg1 19.1, vae_s 0.6012, dit_s 0.4726
+30 s request 2: 1.806 s, loadavg1 18.7, vae_s 0.6164, dit_s 0.4428
+30 s request 3: 1.802 s, loadavg1 18.7, vae_s 0.579, dit_s 0.4685
+
+== 2. the recipe package (run.sh of ace-step-1.5-turbo-blackhole 0.2.0, its own venv with a source build of ttnn and numpy 2.5.3), same session
+loadavg at start (15.7, 22.4, 17.4)
+ready after 140.1 s
+10 s request 0: 86.772 s, loadavg1 29.9
+10 s request 1: 1.06 s, loadavg1 29.9
+10 s request 2: 1.191 s, loadavg1 29.9
+10 s request 3: 1.335 s, loadavg1 32.6
+30 s request 0: 3.426 s, loadavg1 32.6
+30 s request 1: 3.542 s, loadavg1 35.6
+30 s request 2: 2.827 s, loadavg1 36.2
+30 s request 3: 1.604 s, loadavg1 36.2
+
+== 3. tt-model's own installer (tt_kernel.cli._install_self_contained into a scratch directory and index), then `tt-model serve local/ace-step-1.5-turbo-blackhole --local-only --port 20143`; fresh install, empty kernel cache
+loadavg at start (21.6, 22.6, 21.4)
+ready after 310.1 s
+10 s request 0: 120.959 s, loadavg1 16.7, vae_s 97.8633, dit_s 16.1807
+10 s request 1: 0.92 s, loadavg1 16.0
+10 s request 2: 0.92 s, loadavg1 16.0
+30 s request 0: 1.251 s, loadavg1 16.0
+30 s request 1: 1.199 s, loadavg1 16.0
+30 s request 2: 1.851 s, loadavg1 15.3
+
+== 4. sample comparisons (same prompt, seed 42; Pearson correlation of all samples; relative L2 of the difference)
+can bundle copy request 3 against tt-model serve request 2, 10 s: pcc 1.0, rel_l2 0.0 (identical samples)
+can bundle copy request 3 against tt-model serve request 2, 30 s: pcc 1.0, rel_l2 0.0 (identical samples)
+recipe package against can bundle copy, 10 s: pcc 0.99046, rel_l2 0.14432
+recipe package against can bundle copy, 30 s: pcc 0.98279, rel_l2 0.18694
+four requests of the same 10 s clip on one server (first try, work dir 1): all four WAV files differ byte for byte, and all samples are equal (pcc 1.0, max abs difference 0.0)

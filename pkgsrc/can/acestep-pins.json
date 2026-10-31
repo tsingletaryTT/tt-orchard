@@ -1,0 +1,22 @@
+{
+ "model": "ACE-Step/Ace-Step1.5",
+ "model_revision": "19671f406d603126926c1b7e2adc169acbcade22",
+ "bundle_repo": "sunandbean/acestep-1.5-turbo-p100a",
+ "bundle_revision": "dabe15cd44f9fb14e948e111fb671d7ab89fda17",
+ "bundle_tree_sha256": "6a7373af0931b6203b2546b11cc5cc7fe7a344807a9f20153098d443d382f4bb",
+ "bundle_files": 1307,
+ "weights": {
+  "acestep-v15-turbo/model.safetensors": {
+   "size": 4787825604,
+   "sha256": "3f6e0797fad420a39bd33979eb6e840e30989e34a3794e843d23b60ec6e422d7"
+  },
+  "vae/diffusion_pytorch_model.safetensors": {
+   "size": 337431388,
+   "sha256": "da17edb604c40deaf09e9b24974e590d1ca83a374070e5d0884cfa4bed9a99b0"
+  },
+  "Qwen3-Embedding-0.6B/model.safetensors": {
+   "size": 1191586416,
+   "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+  }
+ }
+}

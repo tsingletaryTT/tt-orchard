@@ -22,10 +22,8 @@ its time includes compiling; the second is warm. Both times go in the evidence, 
 """
 from __future__ import annotations
 
-import io
 import struct
 import time
-import wave
 
 from orchard import safeio
 
@@ -45,8 +43,19 @@ def clip_seconds(data: bytes) -> float:
             raise ValueError("the FLAC header gives no sample rate or no length")
         return total / rate
     if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
-        with wave.open(io.BytesIO(data)) as w:
-            return w.getnframes() / w.getframerate()
+        pos, fmt, frames = 12, None, None
+        while pos + 8 <= len(data):
+            tag, size = data[pos:pos + 4], struct.unpack("<I", data[pos + 4:pos + 8])[0]
+            if pos + 8 + size > len(data):            # a chunk that declares more bytes than the file holds: the clip is cut short
+                raise ValueError(f"the WAV is cut short: the {tag.decode('latin-1')!r} chunk declares {size} bytes and {len(data) - pos - 8} remain")
+            if tag == b"fmt " and size >= 16:
+                fmt = struct.unpack("<HHIIHH", data[pos + 8:pos + 24])
+            elif tag == b"data":
+                frames = size
+            pos += 8 + size + (size & 1)
+        if fmt is None or frames is None or fmt[1] <= 0 or fmt[2] <= 0 or fmt[5] < 8:
+            raise ValueError("the WAV has no usable fmt chunk or no data chunk")
+        return frames / (fmt[1] * (fmt[5] // 8) * fmt[2])
     raise ValueError("not a FLAC or WAV file")
 
 

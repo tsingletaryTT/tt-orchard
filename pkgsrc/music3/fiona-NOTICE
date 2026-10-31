@@ -1,0 +1,19 @@
+minimax-music3-fiona-crapple-blackhole
+
+Weights: episod/minimax-music3-fiona-crapple (revision 53fc7557ea3101d3efbe5e50598bd0bea7f44344). They are MiniMax-Music3 (MiniMaxAI/MiniMax-Music3,
+revision fbdf52fbaaca799592917417eb05f1899f1255ec) with the language-model adapter terminusresearch/minimax-music3-lm-lora-fiona-crapple merged in.
+The weights are under the MiniMax-Music3 Community License (https://huggingface.co/MiniMaxAI/MiniMax-Music3/blob/main/LICENSE). Products built with
+them must display "MiniMax-Music3"; the page of this package does. The merged adapter is Apache-2.0. The weights are not part of this package.
+
+Code in this package: Copyright 2026 Tenstorrent USA, Inc. and Tenstorrent AI ULC, licensed under the Apache License, Version 2.0 (see LICENSE).
+- extra_code/models/ is a copy of the files the server imports from jashansinghTT/minimax-music3-blackhole (revision
+  5a789cd8099cec3a6dc4386db3b4a1ae3925504c). Each file carries its own SPDX header. The reference ports in
+  extra_code/models/autoports/minimaxai_minimax_music3/reference/ come from huggingface/diffusers (Copyright 2026 The MiniMax Team and The HuggingFace
+  Team, Apache License 2.0; see reference/PROVENANCE.md there). extra_code/models/common/LICENSE-Llama-3.1 is the license file that the source tree
+  keeps next to the Llama-derived files in models/common.
+- extra_code/music_page.py and extra_code/music_client.py are demo/app.py and demo/music_client.py of episod/minimax-music3-fiona-crapple-blackhole,
+  unchanged.
+- extra_code/fiona_asgi.py mounts the page on the server.
+
+Licensed under the Apache License, Version 2.0; you may not use this package except in compliance with the License. Unless required by applicable
+law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
