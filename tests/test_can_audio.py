@@ -273,6 +273,32 @@ def test_the_start_up_log_is_checked(tmp_path, base):
     assert not ev["passed"] and not ev["checks"]["log contains not in the log"]["ok"]
 
 
+def test_wav_facts_refuses_a_truncated_data_chunk():
+    clip = wav(1.0)
+    with pytest.raises(can.CanError, match="cut short"):
+        can.wav_facts(clip[:-1000])
+
+
+def test_a_truncated_clip_fails_the_boot_check(tmp_path, base):
+    ev = boot(tmp_path, base, clip=wav(2.0)[:-1000])
+    assert not ev["passed"] and not ev["checks"]["audio_request"]["ok"] and "cut short" in ev["checks"]["audio_request"]["detail"]
+
+
+@pytest.mark.parametrize("port", [8000, 8011, 8012, 8780, 8100, 8103, 80, 70000, "20140", True])
+def test_the_boot_port_override_follows_the_spec_port_rules(tmp_path, base, monkeypatch, port):
+    from types import SimpleNamespace
+    monkeypatch.setattr(can, "boot_check", lambda *a, **kw: pytest.fail("booted on a refused port"))
+    args = SimpleNamespace(action="boot", spec=str(base / "can.toml"), base=str(base), bundle="b", work=str(tmp_path / "w"), hf_home=None,
+                           health_timeout=5.0, port=port, run_dir=None)
+    assert can.main(args) == 2
+
+
+def test_the_spec_and_the_override_share_one_port_check():
+    assert can.check_port(20140, "x") == 20140
+    with pytest.raises(can.CanError, match="--port 8000 is not usable"):
+        can.check_port(8000, "--port")
+
+
 def test_the_boot_command_serves_on_the_port_it_is_given(tmp_path, base, monkeypatch, capsys):
     from types import SimpleNamespace
     seen = {}

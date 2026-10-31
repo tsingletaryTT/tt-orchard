@@ -142,6 +142,14 @@ class Spec:
 
 # ---- the spec ------------------------------------------------------------------------------------------------------------
 
+def check_port(port, what: str):
+    """`port` if it is a whole number from 1024 to 65535 that is not one of the ports other work on this machine owns; else raises CanError.
+    The spec's port and the `can boot --port` override both go through this."""
+    if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535 or port in FORBIDDEN_PORTS or 8100 <= port <= 8103:
+        raise CanError(f"{what} {port!r} is not usable (it must be 1024 to 65535 and not one of the ports other work on this machine owns)")
+    return port
+
+
 def _table(raw: dict, key: str, allowed: set, what: str) -> dict:
     t = raw.get(key, {})
     if not isinstance(t, dict):
@@ -209,9 +217,7 @@ def load_spec(path, *, base=None) -> Spec:
         raise CanError("[weights] revision must be a 40-character commit hash, so the bundle names one exact set of weights")
     if "/" not in str(weights["repo"]):
         raise CanError("[weights] repo must be ORG/NAME")
-    port = can.get("port", 20110)
-    if not isinstance(port, int) or not 1024 <= port <= 65535 or port in FORBIDDEN_PORTS or 8100 <= port <= 8103:
-        raise CanError(f"[can] port {port!r} is not usable (it must be 1024 to 65535 and not one of the ports other work on this machine owns)")
+    port = check_port(can.get("port", 20110), "[can] port")
     app = can.get("app")
     if can["kind"] == "tt-dit-server":
         if not isinstance(app, str) or not re.fullmatch(r"[A-Za-z_][\w.]*:[A-Za-z_]\w*", app):
@@ -656,6 +662,8 @@ def wav_facts(data: bytes) -> dict:
     pos, fmt, pcm = 12, None, None
     while pos + 8 <= len(data):
         tag, size = data[pos:pos + 4], struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        if pos + 8 + size > len(data):
+            raise CanError(f"the WAV is cut short: the {tag.decode('latin-1')!r} chunk declares {size} bytes and {len(data) - pos - 8} remain")
         chunk = data[pos + 8:pos + 8 + size]
         if tag == b"fmt " and len(chunk) >= 16:
             fmt = struct.unpack("<HHIIHH", chunk[:16])
@@ -777,6 +785,12 @@ def record(run_dir, record_: dict, evidence: dict | None = None) -> Path:
 
 # ---- command line --------------------------------------------------------------------------------------------------------
 
+def _boot_port(args):
+    """The `--port` override of `can boot`, checked by the rule the spec's port follows."""
+    port = getattr(args, "port", None)
+    return None if port is None else check_port(port, "--port")
+
+
 def main(args, out=None) -> int:
     out = out or sys.stdout
     say = lambda text: print(text, file=out)  # noqa: E731
@@ -802,7 +816,7 @@ def main(args, out=None) -> int:
             env = dict(os.environ)
             if getattr(args, "hf_home", None):
                 env["HF_HOME"] = str(args.hf_home)
-            ev = boot_check(args.bundle, args.work, spec, env=env, health_timeout=args.health_timeout, port=getattr(args, "port", None))
+            ev = boot_check(args.bundle, args.work, spec, env=env, health_timeout=args.health_timeout, port=_boot_port(args))
             for name, c in ev["checks"].items():
                 say(f"{'ok  ' if c['ok'] else 'FAIL'} {name} {c.get('detail', '')}".rstrip())
             say(f"boot check: {'passed' if ev['passed'] else 'FAILED'} (evidence: {Path(args.work) / 'boot-check.json'})")
