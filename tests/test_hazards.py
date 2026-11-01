@@ -264,7 +264,7 @@ def test_every_table_entry_can_be_hit_by_some_config():
         (cfg(num_experts=64, num_experts_per_tok=8, moe_intermediate_size=64, num_hidden_layers=4,
              layer_types=["sliding_attention", "sliding_attention", "sliding_attention", "linear_attention"],
              linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=32, linear_value_head_dim=32,
-             kv_lora_rank=8, qk_nope_head_dim=8, qk_rope_head_dim=8, v_head_dim=8, index_topk=8, hc_mult=4), CLEAN,
+             kv_lora_rank=8, qk_nope_head_dim=8, qk_rope_head_dim=8, v_head_dim=8, index_topk=8, hc_mult=4, ngram_size=3), CLEAN,
          {"limits": {"router_top_k_max": 4, "kv_heads_max": 1, "sliding_window_layers_max": 1}, "tile_multiples": {"hidden_size": 8}}),
         (cfg(num_hidden_layers=2, layer_types=["mamba", "attention"], mamba_n_heads=4, mamba_d_head=32, mamba_d_state=16), CLEAN, {}),
     ]
@@ -319,3 +319,57 @@ def test_the_real_granite_hybrid_is_scanned_and_its_mixer_named():
     granite = mc.read_model_config(FIX / "granite-4.0-h-1b.json")
     s = hz.scan_model_hazards(granite, CLEAN)
     assert "mixer_mamba_not_in_nearest" in names(s) and s.facts["mixers"] == ["attention", "mamba"]
+
+
+# ---- the Qwen4 architecture preview (Qwen/Qwen3.8-Flash-Next, model_type qwen4_exp) -------------------------------
+# Its config spells the indexer, the gated residual and the n-gram embedding with keys the first version of the scan did not read
+# (indexer_*, hc_count, ngram_size), so the scan reported only attention and linear_attention for a model with five mixers.
+
+QWEN4 = FIX / "qwen3.8-flash-next.json"
+
+
+@pytest.mark.parametrize("key, value, mixer", [
+    ("indexer_n_heads", 4, "sparse_attention"),
+    ("indexer_head_dim", 128, "sparse_attention"),
+    ("indexer_budget", 2048, "sparse_attention"),
+    ("hc_count", 4, "hyper_connections"),
+    ("hc_lowrank", 320, "hyper_connections"),
+    ("ngram_size", 3, "ngram_embedding"),
+    ("ngram_vocab_size_base", 20_000_000, "ngram_embedding"),
+])
+def test_each_qwen4_config_key_alone_names_its_mixer(key, value, mixer):
+    scan = hz.scan_model_hazards(cfg(**{key: value}), CLEAN)
+    assert names(scan) == {f"mixer_{mixer}_not_in_nearest"}
+    assert scan.facts["mixers"] == sorted({"attention", mixer})
+
+
+def test_the_real_flash_next_config_has_five_mixers_and_the_hazards_follow_from_the_nearest_bundle():
+    flash = mc.read_model_config(QWEN4)
+    nearest = mc.read_model_config(FIX / "qwen3.5-35b-a3b.json")      # the Qwen3.5 can: linear attention, 256 experts, top-8
+    s = hz.scan_model_hazards(flash, nearest, dies=4)
+    assert s.facts["mixers"] == ["attention", "hyper_connections", "linear_attention", "ngram_embedding", "sparse_attention"]
+    assert names(s) == {"routed_experts_above_256", "router_top_k_above_nearest", "mixer_sparse_attention_not_in_nearest",
+                        "mixer_hyper_connections_not_in_nearest", "mixer_ngram_embedding_not_in_nearest"}
+    assert s.facts["vocab_per_die"] == 62080 and s.facts["routed_experts"] == 512 and s.facts["router_top_k"] == 10
+    # the Qwen3.5 can already has the gated delta net, so linear attention is not a hazard here
+    assert "mixer_linear_attention_not_in_nearest" not in names(s)
+
+
+def test_flash_next_on_one_board_hits_the_vocabulary_hazard_that_four_chips_avoid():
+    flash = mc.read_model_config(QWEN4)
+    four = hz.scan_model_hazards(flash, None, dies=4)
+    two = hz.scan_model_hazards(flash, None, dies=2)
+    assert "vocab_per_die_above_65536" not in names(four) and four.facts["vocab_per_die"] == 62080
+    assert "vocab_per_die_above_65536" in names(two) and two.facts["vocab_per_die"] == 124160
+
+
+def test_the_ngram_hazard_names_its_rule_and_a_check_on_the_lookup():
+    s = hz.scan_model_hazards(cfg(ngram_size=3), CLEAN)
+    (h,) = s.hazards
+    assert "ngram_size" in h.why and "n-gram" in h.stage2_check
+
+
+def test_a_nearest_bundle_that_has_all_five_mixers_covers_flash_next():
+    flash = mc.read_model_config(QWEN4)
+    s = hz.scan_model_hazards(flash, flash, dies=4)
+    assert not [h for h in s.hazards if h.name.startswith("mixer_")]
