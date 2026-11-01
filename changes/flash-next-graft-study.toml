@@ -1,0 +1,4 @@
+target = "0.9.87"
+summary = "Hazard scan names sparse attention, gated residual and n-gram embedding from a Qwen4-style config; Flash-Next graft study with hardware shapes, packaging, fit, licence and a ranked preparation list."
+pr = 312
+kind = "feature"
