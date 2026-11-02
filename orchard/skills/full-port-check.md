@@ -28,6 +28,11 @@ four functions:
     close(model) -> None
         Release what `load` took. The check closes the device itself.
 
+`prefill` must start the request afresh. The check calls it twice on the same prompt (before the teacher-forced run and before the
+free run), and the gate refuses a record where the second call returns a different first id: the serving plugin reuses a decode slot for
+a new request and expects prefill to reset that request's state
+(`docs/superpowers/specs/2026-11-02-port-interface-vllm-plugin-mapping.md`).
+
 `port_model.py` may import other files in `stages/2/port/`. Every `.py` file there is model code, and at least one must use `ttnn`.
 No file there may read the stage 1 reference files: a model file that opens `generated-ids.json` could copy the reference, and the gate
 refuses it. A worked example of the same shape is `scripts/minicpm3/chip_model.py`.

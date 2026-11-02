@@ -1,6 +1,8 @@
 # Full port under the supervisor: design and first slice
 
-Date: 2026-11-02. Status: slice 1 (PR 331) and slice 2 (issue 325) are built; slices 3 to 6 are filed as issues.
+Date: 2026-11-02. Status: slice 1 (PR 331) and slice 2 (issue 325) are built; slices 3 to 6 are filed as issues. Since then: the rehearsal option on the stage 2 gate (issue 357) and a prefill-reset check from the plugin mapping
+(issue 363, `2026-11-02-port-interface-vllm-plugin-mapping.md`) are built. Slice 5 (issue 328) needs a layout detector in the stage 0 template, a
+class, and a converter in stage 2; none of the three exists yet.
 Nothing here ran on a chip.
 
 ## 1. The problem
