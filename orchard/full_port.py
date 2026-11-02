@@ -129,8 +129,14 @@ def agreement(reference: list, chip: list) -> float:
     return sum(1 for a, b in zip(reference, chip) if a == b) / len(reference)
 
 
-def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
-    """(reasons, evidence paths) for a stage 2 directory of a full port. No reasons means the result passes."""
+def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = None) -> tuple[list[str], list[str]]:
+    """(reasons, evidence paths) for a stage 2 directory of a full port. No reasons means the result passes.
+
+    `rehearsal` is the operator's word, given by the supervisor from the run's ledger (`--full-port-rehearsal`, issue 357). A rehearsal
+    model has random weights, so its free-run text is not readable. The option waives the `coherent` field and no other check: top-1
+    agreement, the token count, the text floor (characters and words), the provenance checks and the port sources all still apply. The
+    argument is a keyword the caller sets; nothing in the stage directory can set it. `waived`, when given, receives the name of each
+    field the option waived, taken from the same read of result.json that the checks use, so the caller never reopens the file."""
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
     reasons: list[str] = []
     seen: list[str] = []
@@ -161,7 +167,10 @@ def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
         if isinstance(failure, str) and failure.strip():
             reason += f"; the recorded failure: {failure.strip()[:500]}"
         reasons.append(reason)
-    if result.get("coherent") is not True:
+    if result.get("coherent") is not True and rehearsal:
+        if waived is not None:
+            waived.append("coherent")
+    elif result.get("coherent") is not True:
         reasons.append(f"coherent must be true (the free-run text is readable), got {result.get('coherent')!r}")
     load = result.get("load_s")
     if not _num(load) or load <= 0:
@@ -211,6 +220,17 @@ def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
             reasons.append(f"top1_agreement {top1} differs from the {got:.6f} the gate recomputed from the record's ids")
         if got < TOP1_MIN and not (_num(top1) and top1 < TOP1_MIN):
             reasons.append(f"top1_agreement recomputed from the record is {got:.4f}, below the minimum of {TOP1_MIN}")
+
+    # ---- prefill starts a request afresh (issue 363) ----
+    # The TT vLLM plugin gives a freed decode slot to a new request and expects prefill to initialise that request's state. The check
+    # calls prefill on the same prompt twice, so the two first ids must be equal. A port that keeps state across prefills would be
+    # rewritten at serving time (docs/superpowers/specs/2026-11-02-port-interface-vllm-plugin-mapping.md).
+    free_ids = record.get("free_run_ids")
+    if not _ids(free_ids) or not free_ids:
+        reasons.append("free_run_ids must be a non-empty list of whole numbers")
+    elif _ids(chip_ids) and chip_ids and free_ids[0] != chip_ids[0]:
+        reasons.append(f"the port's second prefill of the same prompt gave id {free_ids[0]} where the first gave {chip_ids[0]}: prefill must "
+                       "reset the model's state (the plugin reuses a slot for a new request and expects prefill to start it afresh)")
 
     # ---- the record against the supervisor's test ----
     if isinstance(marker, dict):

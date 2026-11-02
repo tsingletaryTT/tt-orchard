@@ -421,3 +421,10 @@ def test_full_port_is_added_only_when_the_caller_asks(tmp_path):
     argv = bc.supervisor_argv(cfg, "Cloudflare/clef", full_port=True)
     assert "--full-port" in argv and supervisor.parse(argv).full_port is True
     assert supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef")).full_port is False
+
+
+def test_full_port_rehearsal_is_added_only_when_the_caller_asks(tmp_path):
+    cfg = load(tmp_path)
+    assert "--full-port-rehearsal" not in bc.supervisor_argv(cfg, "Cloudflare/clef", full_port=True)
+    argv = bc.supervisor_argv(cfg, "Cloudflare/clef", full_port=True, full_port_rehearsal=True)
+    assert supervisor.parse(argv).full_port_rehearsal is True

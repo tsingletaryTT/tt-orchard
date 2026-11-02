@@ -306,7 +306,7 @@ def run_dir(cfg: BringupConfig, model_id: str) -> Path:
 def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = None, *,
                     inputs: dict[str, str] | None = None, accept_credentials: bool = False,
                     graft_trial: bool = True, resume_aborted: bool = False,
-                    sampling: str | None = None, full_port: bool = False) -> list[str]:
+                    sampling: str | None = None, full_port: bool = False, full_port_rehearsal: bool = False) -> list[str]:
     """The arguments after `python3 -m orchard.supervisor`. Optional flags appear only when the config
     sets them, so the supervisor's own defaults stay the defaults. `--accept-credentials-visible` is added
     only when the caller says the operator asked for it on the command line; the config cannot add it."""
@@ -354,6 +354,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         argv += ["--sampling", sampling]       # only when named: a resume then keeps the value the run recorded
     if full_port:
         argv.append("--full-port")           # only when the operator asked: a class full-port blocks otherwise
+    if full_port_rehearsal:
+        argv.append("--full-port-rehearsal")     # only when the operator asked: it waives stage 2's coherence field (issue 357)
     if resume_aborted:
         argv.append("--resume-aborted")      # only when the operator asked: an abort is terminal otherwise
     if accept_credentials:

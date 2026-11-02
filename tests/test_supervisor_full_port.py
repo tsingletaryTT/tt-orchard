@@ -400,3 +400,96 @@ def test_the_status_hint_says_a_person_decides():
 
 def test_the_older_full_port_pause_is_still_a_full_port_pause():
     assert status.classify_pause({"reason": supervisor.FULL_PORT})[0] == "full_port"
+
+
+# ---- the rehearsal option (issue 357) ---------------------------------------------------------------
+
+def incoherent(good):
+    return {"result.json": {**good, "coherent": False}}
+
+
+def test_parse_has_a_rehearsal_flag_that_defaults_off(tmp_path):
+    a = argv(tmp_path, tmp_path / "t.toml", "http://127.0.0.1:8000/v1")
+    assert parse(a).full_port_rehearsal is False and parse(a + ["--full-port", "--full-port-rehearsal"]).full_port_rehearsal is True
+
+
+def test_without_the_rehearsal_flag_an_incoherent_port_fails_stage_2(rig):
+    make(rig, over={(2, "finish"): incoherent})
+    rig.args.unattended = True
+    never_wait(rig)
+    assert rig.run() == EXIT_BLOCKED
+    assert failure(rig)["code"] == "stage-failed" and "coherent" in failure(rig)["reason"]
+    assert not any(d.get("decision") == supervisor.REHEARSAL_WAIVED for d in rig.decisions())
+
+
+def test_with_the_rehearsal_flag_stage_2_passes_and_the_ledger_says_the_field_was_waived(rig):
+    make(rig, over={(2, "finish"): incoherent})
+    rig.args.full_port_rehearsal = True
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    waived = [d for d in rig.decisions() if d.get("decision") == supervisor.REHEARSAL_WAIVED]
+    assert len(waived) == 1 and waived[0]["field"] == "coherent" and waived[0]["by"] == "--full-port-rehearsal"
+    start = next(e for e in rig.entries() if e["event"] == "run_start")
+    assert start["data"]["full_port_rehearsal"] is True
+
+
+def test_a_result_swapped_after_the_gate_read_it_still_gets_the_waiver_decision(rig, monkeypatch):
+    # A writer replaces result.json with `coherent: true` right after the gate's read. The waiver the gate applied is on its result, so the
+    # decision is written from that and the file is not opened again.
+    real = full_port.check
+
+    def swapping(stage_dir, run_dir, **kw):
+        out = real(stage_dir, run_dir, **kw)
+        path = stage_dir / "result.json"
+        path.write_text(json.dumps({**json.loads(path.read_text()), "coherent": True}))
+        return out
+    monkeypatch.setattr(full_port, "check", swapping)
+    make(rig, over={(2, "finish"): incoherent})
+    rig.args.full_port_rehearsal = True
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    assert len([d for d in rig.decisions() if d.get("decision") == supervisor.REHEARSAL_WAIVED]) == 1
+
+
+def test_the_rehearsal_flag_keeps_every_other_check(rig):
+    make(rig, over={(2, "finish"): lambda good: {"result.json": {**good, "coherent": False, "top1_agreement": 0.5}}})
+    rig.args.full_port_rehearsal = True
+    rig.args.unattended = True
+    never_wait(rig)
+    assert rig.run() == EXIT_BLOCKED
+    assert failure(rig)["code"] == "stage-failed" and "recomputed" in failure(rig)["reason"]
+
+
+def test_the_rehearsal_flag_needs_the_full_port_flag(tmp_path):
+    r = Rig(tmp_path)
+    with_snapshot(r, tmp_path)
+    try:
+        r.args.full_port_rehearsal = True
+        with pytest.raises(ValueError, match="needs --full-port"):
+            r.run()
+    finally:
+        r.close()
+
+
+def test_a_resume_keeps_the_rehearsal_the_run_started_with(rig):
+    make(rig, over={(2, "finish"): incoherent})
+    rig.args.full_port_rehearsal = True
+    never_wait(rig)
+    with pytest.raises(Stop):
+        rig.run()                                       # stage 2 passed; waiting at the pause before stage 3
+    rig.args.full_port_rehearsal = False
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    assert rig.run(pid=200) == EXIT_ABORTED
+    assert supervisor.full_port_rehearsal(rig.entries()) is True
+
+
+def test_the_rehearsal_flag_cannot_be_added_on_a_resume(rig):
+    make(rig)
+    never_wait(rig)
+    with pytest.raises(Stop):
+        rig.run()
+    rig.args.full_port_rehearsal = True
+    with pytest.raises(ValueError, match="only when the run starts"):
+        rig.run(pid=200)
