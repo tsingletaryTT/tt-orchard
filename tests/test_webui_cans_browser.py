@@ -136,6 +136,19 @@ def test_a_server_that_stops_answering_leaves_the_rows_and_says_they_may_be_old(
     ctx.close()
 
 
+def test_a_poll_that_changes_a_row_keeps_keyboard_focus_on_the_button(browser, served):
+    ctx, pg = open_cans(browser, served)
+    pg.locator("#can-toggle-clean").focus()
+    # the next answer differs (the broken can's bundle is repaired), so the table is rebuilt
+    (served.cans_dir / "broken-blackhole" / "run.sh").write_text("#!/bin/sh\n")
+    can.write_sums(served.cans_dir / "broken-blackhole")
+    served.app.cans_view()._cache = None
+    pg.evaluate("pollCans()")
+    expect(pg.locator("#cans-body tr.cans-row").first).to_contain_text("all 6 files match")
+    expect(pg.locator("#can-toggle-clean")).to_be_focused()
+    ctx.close()
+
+
 def test_the_pane_does_not_scroll_sideways_at_phone_width(browser, served):
     ctx, pg = open_cans(browser, served, "operator", width=390)
     assert pg.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")

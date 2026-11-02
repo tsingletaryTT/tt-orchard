@@ -87,7 +87,7 @@ class CansView:
                     taken += 1
                     if taken > MAX_SPEC_ENTRIES:
                         break
-                    m = SPEC_FILE.match(entry.name)
+                    m = SPEC_FILE.fullmatch(entry.name)
                     try:
                         if m and entry.is_file(follow_symlinks=False):
                             found.append((m.group(1), Path(entry.path)))
@@ -158,6 +158,9 @@ class CansView:
                     break
                 h.update(block)
                 left -= len(block)
+            after = os.fstat(fd)               # a file that grew, shrank or was rewritten while it was read has no one digest
+            if left != 0 or after.st_size != st.st_size or after.st_mtime_ns != st.st_mtime_ns:
+                return "bad", "changed while it was read"
             budget[0] -= st.st_size
             return "ok", h.hexdigest()
         except OSError:
@@ -186,7 +189,7 @@ class CansView:
         problems: list[str] = []
         listed: dict[str, str] = {}
         for n, line in enumerate(lines, 1):
-            m = _SUMS_LINE.match(line)
+            m = _SUMS_LINE.fullmatch(line)
             if not m:
                 problems.append(f"{can.SUMS_FILE} line {n} is not a digest and a path")
             elif m.group(2) in listed:
@@ -307,8 +310,10 @@ class CansView:
     # ---- one can ----
     def _row_for_spec(self, slug: str, path: Path, cans_pin) -> dict:
         try:
-            spec = can.load_spec(path, base=self.base)
-        except can.CanError as exc:
+            spec = can.load_spec(path, base=self.base, expand_trees=False)
+        except Exception as exc:                 # noqa: BLE001 - one spec that raises anything must not take the other rows down
+            if not isinstance(exc, can.CanError):
+                exc = can.CanError(f"{type(exc).__name__} while reading the spec")
             msg = str(exc).replace(str(self.base), "<checkout>").replace(str(self.specs_dir), "<specs>")
             return {"name": self._clean(slug, NAME_MAX), "slug": self._clean(slug, NAME_MAX), "kind": None, "mesh": None, "device_count": None,
                     "weights": None, "card_profile": None, "tone": "bad", "summary": "spec refused",
@@ -348,7 +353,7 @@ class CansView:
         return {"name": self._clean(name, NAME_MAX), "slug": self._clean(slug, NAME_MAX), "kind": spec.kind, "mesh": self._clean(spec.mesh, 40),
                 "device_count": spec.device_count,
                 "weights": {"repo": self._clean(repo, 200), "revision": spec.revision,
-                            "hub_url": f"https://huggingface.co/{repo}" if HUB_REPO.match(repo) else None,
+                            "hub_url": f"https://huggingface.co/{repo}" if HUB_REPO.fullmatch(repo) and self.redact(repo) == repo else None,
                             "hub_text": HUB_NOT_CHECKED},
                 "card_profile": spec.card_profile, "tone": tone, "summary": summary,
                 "spec": _piece("ok", "good", "spec loaded"), "bundle": bundle, "sums": sums, "card": card, "gate": gate, "boot": boot}

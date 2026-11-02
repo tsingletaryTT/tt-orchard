@@ -146,6 +146,12 @@ def test_the_table_scrolls_inside_its_wrapper_on_a_narrow_screen_and_the_pane_do
     assert re.search(r"\.cans-detail[^{]*\{[^}]*overflow-wrap: anywhere", css) or "overflow-wrap: anywhere" in css
 
 
+def test_a_redraw_puts_keyboard_focus_back_on_the_button_that_had_it():
+    fn = fn_body(JS(), "function renderCans")
+    assert "document.activeElement" in fn and 'startsWith("can-toggle-")' in fn
+    assert fn.index("document.activeElement") < fn.index('clear($("cans-body"))') < fn.rindex(".focus()")
+
+
 def test_the_format_helper_knows_the_hash():
     from test_webui_layout import WEB
     text = (WEB / "format.js").read_text(encoding="utf-8")

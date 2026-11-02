@@ -229,9 +229,11 @@ def _dst(rel, what: str) -> str:
     return rel
 
 
-def _tree(raw: dict, key: str, base: Path) -> tuple[tuple[Path, str], ...]:
+def _tree(raw: dict, key: str, base: Path, expand: bool = True) -> tuple[tuple[Path, str], ...]:
     """`[[extra_tree]]` entries: every regular file under the directory `src` goes to `dst/<its path under src>`. A link anywhere in it is refused,
-    and `__pycache__` directories and `.pyc` files are skipped."""
+    and `__pycache__` directories and `.pyc` files are skipped. With `expand` false the entries are checked (keys, `dst`, `src` is a directory
+    and not a link) and the directory is not walked: the result is empty. The Cans view loads specs that way, so a spec that names a large
+    subtree costs it nothing."""
     rows = raw.get(key, [])
     if not isinstance(rows, list):
         raise CanError(f"[[{key}]] must be an array of tables")
@@ -244,6 +246,8 @@ def _tree(raw: dict, key: str, base: Path) -> tuple[tuple[Path, str], ...]:
         root = _inside(base, src, f"{what} src", must_exist=False)
         if root.is_symlink() or not root.is_dir():
             raise CanError(f"{what} src: {src} is not a directory under {base} (a link to one is refused)")
+        if not expand:
+            continue
         found = []
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             dirnames[:] = sorted(d for d in dirnames if d not in TREE_SKIP_DIRS)
@@ -311,9 +315,9 @@ def _serving(can: dict, raw: dict, base: Path) -> dict:
     return out
 
 
-def _extra_code(raw: dict, base: Path) -> tuple[tuple[Path, str], ...]:
+def _extra_code(raw: dict, base: Path, expand_trees: bool = True) -> tuple[tuple[Path, str], ...]:
     """[[extra_code]] files and [[extra_tree]] directories, as (source, destination) pairs. A destination named twice is refused."""
-    pairs = _files(raw, "extra_code", base) + _tree(raw, "extra_tree", base)
+    pairs = _files(raw, "extra_code", base) + _tree(raw, "extra_tree", base, expand_trees)
     seen = set()
     for _, dst in pairs:
         if dst in seen:
@@ -322,8 +326,10 @@ def _extra_code(raw: dict, base: Path) -> tuple[tuple[Path, str], ...]:
     return pairs
 
 
-def load_spec(path, *, base=None) -> Spec:
-    """Read and check a spec. Paths in it are relative to `base` (default: the current directory). Raises CanError on any fault."""
+def load_spec(path, *, base=None, expand_trees: bool = True) -> Spec:
+    """Read and check a spec. Paths in it are relative to `base` (default: the current directory). Raises CanError on any fault. With
+    `expand_trees` false the `[[extra_tree]]` directories are checked but not walked, so `extra_code` holds only the `[[extra_code]]` files
+    (for a reader that only needs the spec's facts, such as the Cans view)."""
     base = Path(base or Path.cwd()).resolve()
     try:
         raw = tomllib.loads(safeio.read_bytes(path, max_bytes=MAX_SPEC_BYTES).decode("utf-8"))
@@ -341,11 +347,11 @@ def load_spec(path, *, base=None) -> Spec:
     for need in ("repo", "revision"):
         if need not in weights:
             raise CanError(f"[weights] needs `{need}`")
-    if not NAME.match(str(can["name"])):
+    if not NAME.fullmatch(str(can["name"])):
         raise CanError(f"[can] name {can['name']!r} is not a plain repository name")
     if can["kind"] not in KINDS:
         raise CanError(f"[can] kind must be one of {KINDS}, got {can['kind']!r}")
-    if not REVISION.match(str(weights["revision"])):
+    if not REVISION.fullmatch(str(weights["revision"])):
         raise CanError("[weights] revision must be a 40-character commit hash, so the bundle names one exact set of weights")
     if "/" not in str(weights["repo"]):
         raise CanError("[weights] repo must be ORG/NAME")
@@ -401,7 +407,7 @@ def load_spec(path, *, base=None) -> Spec:
     audio_check_problems(ck)
     try:
         re.compile(ck.expect)
-    except re.error as exc:
+    except (re.error, TypeError) as exc:          # a number or a list in `expect` raises TypeError
         raise CanError(f"[check] expect is not a regular expression: {exc}") from exc
     if not isinstance(ck.request_extra, dict):
         raise CanError("[check] request_extra must be a table")
@@ -424,7 +430,7 @@ def load_spec(path, *, base=None) -> Spec:
                 python=can.get("python", "3.12"), port=port, app=app,
                 metadata=_inside(base, can["metadata"], "[can] metadata") if can.get("metadata") else None,
                 requirements=tuple(pins), verify=tuple(verify), env=dict(env),
-                extra_code=_extra_code(raw, base), bundle_files=_files(raw, "bundle_file", base), check=ck, **optional)
+                extra_code=_extra_code(raw, base, expand_trees), bundle_files=_files(raw, "bundle_file", base), check=ck, **optional)
 
 
 # ---- staging -------------------------------------------------------------------------------------------------------------
@@ -1431,9 +1437,9 @@ def _state_part(part, what: str, fields: dict) -> None:
     for key, check in fields.items():
         check(part[key], f"{what}.{key}")
     digest = part["bundle_sums_sha256"]
-    if digest is not None and not (isinstance(digest, str) and _SHA.match(digest)):
+    if digest is not None and not (isinstance(digest, str) and _SHA.fullmatch(digest)):
         raise CanError(f"state: {what}.bundle_sums_sha256 must be 64 hex digits or null")
-    if not (isinstance(part["at"], str) and _STAMP.match(part["at"])):
+    if not (isinstance(part["at"], str) and _STAMP.fullmatch(part["at"])):
         raise CanError(f"state: {what}.at must be a UTC time like 2026-11-02T10:00:00Z")
 
 
@@ -1444,7 +1450,7 @@ def check_state(raw) -> dict:
         raise CanError("state: the file must be an object with schema, name and optionally gate and boot")
     if raw["schema"] != 1 or isinstance(raw["schema"], bool):
         raise CanError("state: schema must be 1")
-    if not (isinstance(raw["name"], str) and NAME.match(raw["name"])):
+    if not (isinstance(raw["name"], str) and NAME.fullmatch(raw["name"])):
         raise CanError("state: name must be a plain name")
     if "gate" in raw:
         _state_part(raw["gate"], "gate", {"passed": _strict_bool, "problem_count": _count, "problems": _strings})
@@ -1454,20 +1460,24 @@ def check_state(raw) -> dict:
     return raw
 
 
-def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot: dict | None = None) -> Path:
+def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot: dict | None = None, digest_of=None) -> Path:
     """Write `state_dir/<name>.can-state.json`: `gate` and `boot` replace the same part of an earlier file and the other part is kept. Each
-    part written is stamped with the digest of the bundle's SHA256SUMS as it is now. An earlier file that fails `check_state` is replaced."""
-    if not NAME.match(str(name)):
+    part written is stamped with the digest of the SHA256SUMS in `digest_of` (default: `bundle`) as it is now. A boot passes the copy it
+    booted, so the record is bound to the files that were tested even if the source bundle is rebuilt during the boot. An earlier file that
+    fails `check_state`, or that is the record of another can, is replaced."""
+    if not NAME.fullmatch(str(name)):
         raise CanError(f"the state name {name!r} is not a plain name")
     folder = Path(state_dir)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{name}{STATE_SUFFIX}"
     state = {"schema": 1, "name": name}
     try:
-        state = check_state(safeio.read_json(path, max_bytes=STATE_MAX_BYTES))
+        earlier = check_state(safeio.read_json(path, max_bytes=STATE_MAX_BYTES))
+        if earlier["name"] == name:
+            state = earlier
     except (OSError, safeio.SafeReadError, CanError):
         pass
-    digest = _sums_digest(bundle)
+    digest = _sums_digest(bundle if digest_of is None else digest_of)
     for key, part in (("gate", gate), ("boot", boot)):
         if part is not None:
             state[key] = {**part, "bundle_sums_sha256": digest}
@@ -1520,7 +1530,8 @@ def main(args, out=None) -> int:
                 say(f"{'ok  ' if c['ok'] else 'FAIL'} {name} {c.get('detail', '')}".rstrip())
             say(f"boot check: {'passed' if ev['passed'] else 'FAILED'} (evidence: {Path(args.work) / 'boot-check.json'})")
             if getattr(args, "state_dir", None):
-                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, boot=boot_record(ev, cache_state))}")
+                booted_copy = Path(args.work) / "bundle"       # the record is bound to the copy that was served, not to the source
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, boot=boot_record(ev, cache_state), digest_of=booted_copy)}")
             if getattr(args, "run_dir", None):
                 rec = {"name": spec.name, "kind": spec.kind, "weights": {"repo": spec.repo, "revision": spec.revision}}
                 say(f"recorded in {record(args.run_dir, rec, ev)}")

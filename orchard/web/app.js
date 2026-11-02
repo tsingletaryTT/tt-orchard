@@ -534,9 +534,7 @@ async function pollCans() {
 
 function toggleCan(slug) {
   if (S.cansOpen.has(slug)) S.cansOpen.delete(slug); else S.cansOpen.add(slug);
-  renderCans();
-  const button = document.getElementById(`can-toggle-${slug}`);
-  if (button) button.focus();
+  renderCans();                          // the redraw puts keyboard focus back on the button that was pressed
 }
 
 function canCell(piece, extra) {
@@ -604,6 +602,8 @@ function renderCans() {
   $("cans-hub-note").textContent = `Hub revision and published copy: ${d.hub.text}. ${d.hub.note}`;
   $("cans-empty").hidden = d.cans.length > 0;
   $("cans-table").hidden = d.cans.length === 0;
+  // A poll that changes any row rebuilds the table, so the button that has keyboard focus is found again by its id afterwards.
+  const focused = document.activeElement && document.activeElement.id && document.activeElement.id.startsWith("can-toggle-") ? document.activeElement.id : null;
   const body = clear($("cans-body"));
   for (const c of d.cans) {
     const open = S.cansOpen.has(c.slug);
@@ -619,6 +619,8 @@ function renderCans() {
       canCell(c.bundle), canCell(c.sums), canCell(c.gate), canCell(c.boot)));
     body.append(canDetail(c, open));
   }
+  const again = focused ? document.getElementById(focused) : null;
+  if (again) again.focus();
 }
 
 // ---- machine health: the scene's weather and how hard the farmer works --------------------------------
