@@ -7,6 +7,7 @@ import time
 import pytest
 
 from orchard.ledger import Ledger
+from orchard.defaults import RUN_PARK_BOOT_CAP
 from orchard.stages import (STAGES, attempt_started_ts, budget_cap, coder_state, evidence_record, open_stage_dir,
                             run_progress)
 
@@ -46,7 +47,7 @@ def test_an_escalated_stage_runs_again_and_is_counted():
 
 
 def test_a_pause_lasts_until_a_resume_and_the_resume_resets_the_caps():
-    rows = [START, ("escalate", 2, 1, {}), ("restore", 2, 2, {"step": "ready", "seconds": 1800.0}),
+    rows = [START, ("escalate", 2, 1, {}), ("decision", 2, 2, {"decision": "coder started", "ready_s": 1800.0}),
             ("restore", 3, 2, {"step": "ready", "seconds": 150.0}),     # a warm restart
             ("decision", None, 2, {"decision": "coder died; restarting it once"}),
             ("decision", 2, 3, {"decision": "pause", "reason": "watchdog: loop"})]
@@ -78,6 +79,19 @@ def test_a_restart_keeps_the_attempts_clock():
 ])
 def test_budget_caps_pause_the_run(rows, words):
     assert words in budget_cap(run_progress(entries(START, *rows)), now=T0 + 10)
+
+
+def test_park_boots_are_counted_apart_from_unplanned_boots():
+    rows = [("decision", None, 1, {"decision": "coder started", "ready_s": 700.0})]
+    rows += [("restore", n, 2 + n, {"step": "ready", "seconds": 600.0}) for n in range(5)]
+    rows += [("restore", 9, 20, {"step": "ready", "seconds": 150.0})]          # a warm restore is not counted
+    p = run_progress(entries(START, *rows))
+    assert (p.cold_boots, p.park_boots, p.park_boot_s) == (1, 5, 3000.0)
+    assert budget_cap(p, now=T0 + 30) is None                                   # five parks are under the cap
+    p = run_progress(entries(START, *rows, ("decision", None, 30, {"decision": "resume"})))
+    assert (p.cold_boots, p.park_boots, p.park_boot_s) == (0, 0, 0.0)
+    runaway = [("restore", n, 2 + n, {"step": "ready", "seconds": 600.0}) for n in range(RUN_PARK_BOOT_CAP)]
+    assert "cold park restores" in budget_cap(run_progress(entries(START, *runaway)), now=T0 + 30)
 
 
 def test_the_wall_clock_cap_counts_from_run_start_or_the_last_resume():
