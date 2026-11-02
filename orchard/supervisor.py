@@ -1335,8 +1335,9 @@ class Supervisor:
         # old lease. A container that another session runs on one of the rest is left alone. The old
         # lease itself is still released whole below.
         watched = old
-        if 0 < self.coder_chips < len(old.chips):
-            n = int(self.coder_chips)
+        # gozer grants whole boards, so a one-chip request holds a two-chip board: round up to CHIPS_PER_BOARD.
+        n = -(-int(self.coder_chips) // CHIPS_PER_BOARD) * CHIPS_PER_BOARD
+        if 0 < self.coder_chips and n < len(old.chips):
             watched = Lease(old.lease_id, old.chips[:n], old.dev_indices[:n], old.env, old.units)
             if hasattr(self.coder, "limit_devices"):
                 self.coder.limit_devices(watched.dev_indices)

@@ -1287,6 +1287,39 @@ def test_a_resume_on_a_smaller_profile_ignores_another_sessions_container_on_the
         rig.close()
 
 
+def test_a_one_chip_resume_watches_the_whole_board_gozer_grants(tmp_path):
+    """gozer grants a two-chip board for a one-chip request. A foreign container on the sibling chip is on the granted board, so the
+    relaunch blocks; one on the other board does not (the test before this one, with the profile at one chip)."""
+    class SiblingContainerCoder(ForeignContainerCoder):
+        foreign_dev = DEV[BOARDS["B0"][1]]            # the second chip of the first board
+    rig = Rig(tmp_path, chips=4)
+    rig.coder_cls = SiblingContainerCoder
+    rig.on_sleep = _stop_once_blocked(rig)
+    try:
+        with pytest.raises(Crash):
+            rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+        rig.args.coder_chips = 1
+        with pytest.raises(Stop):
+            rig.run(pid=200)
+        assert _blocked_reasons(rig) == ["the coder could not be confirmed stopped for the relaunch"]
+    finally:
+        rig.close()
+
+
+def test_a_one_chip_resume_ignores_a_container_on_the_other_board(tmp_path):
+    rig = Rig(tmp_path, chips=4)
+    rig.coder_cls, rig.adapter_cls = ForeignContainerCoder, ForeignBoardAdapter
+    rig.on_sleep = _stop_once_blocked(rig)
+    try:
+        with pytest.raises(Crash):
+            rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+        rig.args.coder_chips = 1
+        assert rig.run(pid=200) == EXIT_READY
+        assert _blocked_reasons(rig) == []
+    finally:
+        rig.close()
+
+
 def test_a_resume_on_the_same_profile_still_waits_for_every_chip_of_the_old_lease(tmp_path):
     # The check is narrowed only when the new profile is smaller. With four chips again, the foreign
     # container on the second board is on a chip the new coder needs, so the relaunch blocks.

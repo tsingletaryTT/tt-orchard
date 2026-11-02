@@ -178,6 +178,19 @@ def test_a_record_from_an_earlier_attempt_does_not_vouch_for_a_later_marker(tmp_
     assert any(e["data"].get("decision") == "marker not written by the supervisor" for e in ledger.read())
 
 
+def test_a_fresh_stage_start_is_a_boundary_when_the_move_aside_entry_was_never_written(tmp_path, ledger):
+    """A kill between the rename and the move-aside entry leaves no such entry. The next attempt finds no directory, makes a fresh one
+    and appends stage_start with resumed=False; the record of the attempt before it must not vouch for that attempt's marker."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text('{"returncode": 0}')
+    record_test(ledger, run, 2, d / "test-result.json")
+    ledger.append("stage_start", 2, escalated=False, resumed=False)       # the new attempt, whose move-aside entry was lost
+    (d / "test-result.json").write_text('{"returncode": 0}')               # same bytes, no record of its own
+    _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert not resumed
+
+
 def test_the_latest_attempts_own_record_still_vouches_after_two_restarts(tmp_path, ledger):
     """A resume appends no move-aside entry, so the record stays valid across several restarts."""
     run = tmp_path / "run"

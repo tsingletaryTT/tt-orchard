@@ -1943,10 +1943,12 @@ def _recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
     entries = ledger.read()
     # Entries from before the stage's latest "moved the partial stage directory aside" belong to an earlier attempt, whose directory is
     # gone. A later attempt can write a marker with the same bytes at the same path, so those entries cannot vouch for it. A resume
-    # appends no such entry, so the current attempt's own record stays valid across restarts. (A stage_start is not a boundary: a
-    # resumed attempt appends one after the record it resumes from.)
-    start = max((i for i, e in enumerate(entries) if e.get("event") == "decision" and e.get("stage") == n
-                 and e["data"].get("decision") == "moved the partial stage directory aside"), default=-1) + 1
+    # appends no such entry, so the current attempt's own record stays valid across restarts. A stage_start with resumed=False is a
+    # boundary too: a kill between the rename and the move-aside entry leaves no entry, and the next attempt then starts a fresh
+    # directory. A stage_start with resumed=True is not one: it comes after the record the attempt resumed from.
+    start = max((i for i, e in enumerate(entries) if e.get("stage") == n and (
+        (e.get("event") == "decision" and e["data"].get("decision") == "moved the partial stage directory aside")
+        or (e.get("event") == "stage_start" and e["data"].get("resumed") is False))), default=-1) + 1
     return any(e.get("event") == "evidence" and e.get("stage") == n and e["data"].get("path") == rec["path"]
                and e["data"].get("sha256") == rec["sha256"] and "returncode" in e["data"] and "timed_out" in e["data"]
                for e in entries[start:])
