@@ -32,6 +32,7 @@ Not checked here, and named in the study: throughput and batching (V10, V11), lo
 """
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import re
@@ -177,7 +178,7 @@ def probe_completions(base: str, model: str, *, timeout: float = PROBE_TIMEOUT_S
     for name, prompt, good, meaning in probes:
         try:
             status, body = _post(base.rstrip("/") + "/v1/completions", {"model": model, "prompt": prompt, "temperature": 0, "max_tokens": 10}, timeout)
-        except (OSError, ValueError) as exc:        # a refused connection, a timeout, a cut-off body; http.client errors are OSError subclasses here
+        except (OSError, ValueError, http.client.HTTPException) as exc:        # a refused connection, a timeout, a cut-off body (IncompleteRead is not an OSError)
             out.append(_result(name, "fail", f"no answer from /v1/completions: {type(exc).__name__}"))
             continue
         if status in ABSENT_ROUTE:
@@ -204,7 +205,9 @@ def scrape(base: str, *, timeout: float = 5.0) -> str | None:
             if r.status != 200:
                 return None
             raw = r.read(MAX_METRICS_BYTES + 1)
-    except (OSError, ValueError):
+            if r.length:              # the server promised more bytes than arrived: a cut-off page could hold half a number
+                return None
+    except (OSError, ValueError, http.client.HTTPException):
         return None
     if len(raw) > MAX_METRICS_BYTES:
         return None

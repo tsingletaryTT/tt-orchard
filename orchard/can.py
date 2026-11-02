@@ -1141,7 +1141,8 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         # A vLLM server must list the model it serves, at the context length the can declares (kind tt-dit-server serves no model list).
         probing = spec.kind != "tt-dit-server" and ck.mode == "chat"
         if probing:
-            served_verify.record(served_verify.check_listing(status, body, declared_context=spec.max_model_len), check, evidence)
+            served_verify.record(served_verify.check_listing(status, body, declared_name=(ck.request_extra.get("model") if isinstance(ck.request_extra.get("model"), str) else None),
+                                                                           declared_context=spec.max_model_len), check, evidence)
         if ck.mode == "music":
             _music_checks(base, ck, check, evidence)
             status, _ = _http("GET", f"{base}{ck.health_path}")
@@ -1168,6 +1169,8 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         try:
             answer_obj = safeio.parse_json_bytes(body, max_bytes=MAX_JSON_BYTES, expect=dict)
             answer = answer_obj["choices"][0]["message"]["content"]
+            if not isinstance(answer, str):          # a reasoning reply may carry null content; check_reply reads the body and names the cause
+                answer = ""
             timings = answer_obj.get("timings") or {}
             usage = answer_obj.get("usage")
         except (safeio.SafeReadError, KeyError, IndexError, TypeError):

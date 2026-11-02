@@ -33,6 +33,13 @@ class Fake:
                 pass
 
             def _send(self, code, data):
+                if code == 599:          # a body cut short: the header promises more bytes than are sent
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data) + 100))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    self.close_connection = True
+                    return
                 self.send_response(code)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -41,6 +48,8 @@ class Fake:
             def do_GET(self):
                 outer.log.append(("GET", self.path))
                 if self.path == "/metrics":
+                    if outer.metrics_body == "CUT":
+                        return self._send(599, b"vllm:gen")
                     if not outer.metrics:
                         return self._send(404, b"no")
                     text = outer.metrics_body or f'vllm:generation_tokens_total{{engine="0",model_name="m"}} {outer.counter}\n'
@@ -321,3 +330,19 @@ def test_a_context_value_of_the_wrong_type_or_range_is_never_taken_as_the_served
     r = sv.check_listing(200, json.dumps({"data": [{"id": "m", "max_model_len": bad}]}).encode(), declared_context=1)
     assert r["served"]["max_model_len"] is None
     assert r["state"] != "pass"
+
+
+def test_a_completion_body_cut_short_is_a_failed_probe_not_an_exception(fake):
+    fake.post["/v1/completions"] = lambda b: (599, b'{"choices": [')
+    assert [r["state"] for r in sv.probe_completions(fake.base, "m")] == ["fail", "fail"]
+
+
+def test_a_metrics_body_cut_short_is_none_not_an_exception(fake):
+    fake.metrics_body = "CUT"
+    assert sv.scrape(fake.base) is None
+
+
+def test_the_listing_is_judged_against_the_name_the_request_will_use():
+    body = json.dumps({"data": [{"id": "first", "max_model_len": 1}, {"id": "alias", "max_model_len": 4096}]}).encode()
+    assert sv.check_listing(200, body, declared_name="alias", declared_context=4096)["state"] == "pass"
+    assert sv.check_listing(200, body, declared_context=4096)["state"] == "fail"      # the first entry is judged when no name is declared

@@ -51,8 +51,8 @@ SERVER = textwrap.dedent('''
                 return self._send(200, b'data: {"choices": [{"delta": {"content": "w"}}]}\\n\\ndata: [DONE]\\n\\n', "text/event-stream")
             if FAULT != "frozen_counter":
                 TOKENS[0] += 5
-            content = "" if FAULT == "spent_budget" else "Paris"
-            finish = "length" if FAULT == "spent_budget" else "stop"
+            content = "" if FAULT == "spent_budget" else None if FAULT == "null_content" else "Paris"
+            finish = "length" if FAULT in ("spent_budget", "null_content") else "stop"
             self._send(200, {"model": "other-model" if FAULT == "wrong_echo" else req.get("model"),
                              "choices": [{"message": {"content": content}, "finish_reason": finish}], "usage": {"completion_tokens": 5}})
         def log_message(self, *a): pass
@@ -117,3 +117,17 @@ def test_a_can_that_declares_no_context_length_reports_it_was_not_compared(tmp_p
     ev = boot(tmp_path, "wrong_context", max_model_len=None)
     assert ev["checks"]["served_model"]["ok"]
     assert "not compared" in ev["checks"]["served_model"]["detail"]
+
+
+def test_null_content_with_finish_reason_length_writes_a_failed_record_and_names_the_budget(tmp_path):
+    ev = boot(tmp_path, "null_content")
+    assert not ev["passed"] and (tmp_path / "work" / "boot-check.json").is_file()
+    assert "token budget" in ev["checks"]["reply_shape"]["detail"]
+
+
+def test_a_request_extra_model_name_is_the_name_the_listing_is_checked_for(tmp_path):
+    from dataclasses import replace
+    sp = spec_of()
+    sp = replace(sp, check=replace(sp.check, request_extra={"model": "not-served"}))
+    ev = can.boot_check(bundle(tmp_path), tmp_path / "work", sp, install=False, health_timeout=30)
+    assert ev["checks"]["served_model"]["ok"] is False and "not-served" in ev["checks"]["served_model"]["detail"]
