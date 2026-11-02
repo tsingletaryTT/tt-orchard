@@ -1,0 +1,3 @@
+target = "0.9.92"
+summary = "Dense Qwen4 preparation (provisional): hazard checks at 2 and 4 dies, a dense-layer shim for the stage 1 reference and the op inventory, and a provisional fixture."
+pr = 341

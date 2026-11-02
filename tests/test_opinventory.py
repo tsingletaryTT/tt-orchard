@@ -444,3 +444,21 @@ def test_rsub_scalar_and_conv1d_are_mapped_to_names_in_the_real_dump():
     assert mapping["aten.cos.default"] == {"ttnn": "cos"} and mapping["aten.sin.default"] == {"ttnn": "sin"}
     if REAL_DUMP is not None:
         assert {"rsub", "conv1d", "cos", "sin"} <= set(REAL_DUMP["names"])
+
+
+def test_a_dense_qwen4_trace_keeps_its_provisional_note_in_the_inventory_and_the_markdown():
+    raw = json.loads((FIXTURES / "raw-qwen3-tiny.json").read_text())
+    raw["dense_layers"] = [0, 1]
+    raw["dense_note"] = "provisional: built from public readings"
+    inv = oi.build(raw, mapping=oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json"),
+                   decomps=oi.load_table(oi.DATA_DIR / "decompositions.json"), dump=None)
+    assert inv["traced"]["dense_layers"] == [0, 1] and inv["traced"]["dense_note"].startswith("provisional")
+    md = oi.render_md(inv)
+    assert "Dense layers: 2" in md and "provisional" in md
+
+
+def test_a_trace_without_dense_layers_has_no_dense_line():
+    raw = json.loads((FIXTURES / "raw-qwen3-tiny.json").read_text())
+    inv = oi.build(raw, mapping=oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json"),
+                   decomps=oi.load_table(oi.DATA_DIR / "decompositions.json"), dump=None)
+    assert inv["traced"]["dense_note"] is None and "Dense layers" not in oi.render_md(inv)

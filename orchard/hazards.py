@@ -45,6 +45,7 @@ LIMIT_NAMES = ("router_top_k_max", "kv_heads_max", "sliding_window_layers_max")
 # later model that keeps these spellings under another model_type is still seen.
 SPARSE_ATTENTION_KEYS = frozenset({"index_topk", "index_n_heads", "index_head_dim", "indexer_budget", "indexer_n_heads", "indexer_head_dim"})
 HYPER_CONNECTION_KEYS = frozenset({"hc_mult", "hc_eps", "hc_count", "hc_lowrank"})
+QWEN4_TYPES = ("qwen4_exp", "qwen4_exp_text")       # transformers' model types for the Qwen4 preview (and a dense variant, if one appears)
 NGRAM_EMBEDDING_KEYS = frozenset({"ngram_size", "ngram_vocab_size_base"})
 MIXER_RULES = {
     "multi_latent_attention": "the config has kv_lora_rank",
@@ -129,6 +130,29 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
                "from the config; check the checkpoint headers for its size and whether it fits device memory)", _NEAREST,
                "run the n-gram lookup for one token (hash the last ngram_size token ids for every head, read the rows) and the layer's "
                "gate and convolution against the CPU result, then three tokens in a row so the history carries over"),
+    TableEntry("dense_model_nearest_is_moe", "a model of the same shape as the nearest bundle (routed experts or none)",
+               "the model has no routed experts and the nearest bundle does, so the bundle's router, expert and shared-expert paths are not the model's MLP", _NEAREST,
+               "run one decoder layer's dense MLP (gate, up, down and the activation) at the model's width against the CPU result before the full model"),
+    TableEntry("dense_qwen4_not_flash_next_shape", "a Qwen4-family model with routed experts (Qwen3.8-Flash-Next has them in every layer)",
+               "a qwen4_exp config with no routed experts is a dense variant. transformers 5.19.0 builds a mixture-of-experts block in every layer of qwen4_exp, so "
+               "there is no upstream dense reference, and the Flash-Next ports have no dense MLP path. PROVISIONAL: no dense Qwen4 config or weights exist yet",
+               "transformers qwen4_exp (5.19.0) requires num_experts > 0; the dense reading comes from public reports (TensorFold issue 1244, llama.cpp issue 31072)",
+               "build the CPU reference with orchard/skills/reference-gate-templates/qwen4_dense.py, then run one dense layer with its hyper-connections against it"),
+    TableEntry("hyper_connection_width_not_divisible_by_dies", "hc_count x hidden_size divisible by the die count (checked at 2, 4 and the scan's dies)",
+               "the residual stream is hc_count copies of the hidden state; a width that does not split evenly over the dies leaves an uneven shard", _SUPPLIED,
+               "run the gated residual (norm, down projection, up projection, gate) on a tensor of the full width sharded over the dies and compare with the CPU result"),
+    TableEntry("ffn_per_die_not_whole_tiles", "a dense FFN width that splits over the dies into a multiple of 32 columns (checked at 2, 4 and the scan's dies)",
+               "a dense MLP column-sharded over the dies needs whole 32-wide tiles per die, or the shard is padded", "tile layout: every tensor on the chip is stored in 32 by 32 tiles",
+               "run the dense MLP sharded over the dies at the model's width and compare with the CPU result, looking at the last tile of each shard"),
+    TableEntry("attention_heads_not_divisible_by_dies", "query heads divisible by the die count (checked at 2, 4 and the scan's dies)",
+               "attention heads are split over the dies; a count that does not divide leaves a die with a different number of heads", _SUPPLIED,
+               "run one attention layer sharded over the dies at the model's head count and compare with the CPU result"),
+    TableEntry("kv_heads_not_divisible_by_dies", "KV heads divisible by the die count, or the die count a multiple of the KV heads (replication)",
+               "KV heads are split over the dies, or copied when there are fewer than dies; a count that does neither evenly leaves dies with different caches", _SUPPLIED,
+               "run one decode attention step sharded over the dies at the model's KV-head count and compare with the CPU result"),
+    TableEntry("qsa_heads_not_divisible_by_dies", "sparse-attention indexer heads divisible by the die count (checked at 2, 4 and the scan's dies)",
+               "the indexer scores are computed per head and summed over heads; heads that do not divide over the dies need a cross-die sum of uneven parts", _SUPPLIED,
+               "run the indexer at the model's head count sharded over the dies against the CPU result at a context longer than the top-k"),
 ] + _tile_rows())
 _BY_NAME = {e.name: e for e in HAZARD_TABLE}
 
@@ -195,6 +219,32 @@ def _dimension_values(d: mc.ModelDims) -> dict[str, int]:
     return out
 
 
+CHECKED_DIES = (2, 4)           # the die counts the division checks always cover (one board, two boards), beside the scan's own
+
+
+def _optional_whole(cfg: dict, key: str) -> int | None:
+    """A whole number of at least 1 at `key`, None when the key is absent or null (there is no default), HazardInputError otherwise."""
+    if cfg.get(key) is None:
+        return None
+    try:
+        return mc._num(cfg, key)
+    except mc.ModelConfigError as exc:
+        raise HazardInputError(str(exc)) from exc
+
+
+def _extras(config) -> dict:
+    """Config values the scan reads straight from the file with no built-in default: hc_count, hc_lowrank, the indexer's head count and
+    the model type. A missing value is None."""
+    cfg = mc.text_config(config)
+    qsa = next((k for k in ("indexer_n_heads", "index_n_heads") if cfg.get(k) is not None), None)
+    return {"hc_count": _optional_whole(cfg, "hc_count"), "hc_lowrank": _optional_whole(cfg, "hc_lowrank"),
+            "qsa_heads": _optional_whole(cfg, qsa) if qsa else None, "model_type": str(cfg.get("model_type") or "")}
+
+
+def _dies_checked(dies: int) -> list[int]:
+    return sorted({*CHECKED_DIES, dies} - {1})
+
+
 def _limits(limits) -> dict:
     if limits is None:
         return {}
@@ -221,7 +271,7 @@ def _tile_multiples(tile_multiples) -> dict:
     return dict(tile_multiples)
 
 
-def _hits(d: mc.ModelDims, dies: int, limits: dict, tile_multiples: dict) -> dict[str, tuple]:
+def _hits(d: mc.ModelDims, dies: int, limits: dict, tile_multiples: dict, x: dict | None = None) -> dict[str, tuple]:
     """The absolute checks (no nearest bundle needed) on one model: hazard name -> (value, limit, why override or None)."""
     hits: dict[str, tuple] = {}
     if d.routed_experts > EXPERT_MASK_LIMITS[0]:
@@ -248,9 +298,42 @@ def _hits(d: mc.ModelDims, dies: int, limits: dict, tile_multiples: dict) -> dic
         hits["router_top_k_above_limit"] = (d.top_k, limits["router_top_k_max"], None)
     if "kv_heads_max" in limits and d.kv_heads > limits["kv_heads_max"]:
         hits["kv_heads_above_limit"] = (d.kv_heads, limits["kv_heads_max"], None)
+    hits.update(_division_hits(d, dies, x or {}))
     sliding = sum(1 for t in d.layer_types if t == "sliding_attention")
     if "sliding_window_layers_max" in limits and sliding > limits["sliding_window_layers_max"]:
         hits["sliding_window_layers_above_limit"] = (sliding, limits["sliding_window_layers_max"], None)
+    return hits
+
+
+def _division_hits(d: mc.ModelDims, dies: int, x: dict) -> dict[str, tuple]:
+    """Checks that a width or a head count splits over the dies, at 2 and 4 dies and the scan's own count. Each hit's value is the list of
+    die counts that fail."""
+    hits: dict[str, tuple] = {}
+    checked = _dies_checked(dies)
+    stated = f"divisible by every die count checked ({', '.join(map(str, checked))})"
+    if x.get("hc_count"):
+        width = x["hc_count"] * d.hidden
+        bad = [n for n in checked if width % n]
+        if bad:
+            hits["hyper_connection_width_not_divisible_by_dies"] = (
+                bad, stated, f"the residual width hc_count x hidden_size = {x['hc_count']} x {d.hidden} = {width} does not divide evenly over {bad} dies")
+    if any(not m for m in d.moe_layers) or not d.routed_experts:       # at least one layer has a plain MLP of intermediate_size
+        bad = [n for n in checked if d.intermediate % n or (d.intermediate // n) % TILE]
+        if bad:
+            hits["ffn_per_die_not_whole_tiles"] = (
+                bad, f"intermediate_size per die a multiple of {TILE}",
+                f"the dense FFN width {d.intermediate} does not split into a multiple of {TILE} columns per die over {bad} dies")
+    bad = [n for n in checked if d.heads % n]
+    if bad:
+        hits["attention_heads_not_divisible_by_dies"] = (bad, stated, f"{d.heads} query heads do not divide evenly over {bad} dies")
+    bad = [n for n in checked if d.kv_heads % n and n % d.kv_heads]
+    if bad:
+        hits["kv_heads_not_divisible_by_dies"] = (bad, "divisible by the die count, or the die count a multiple of the KV heads",
+                                                  f"{d.kv_heads} KV heads neither divide over nor replicate across {bad} dies")
+    if x.get("qsa_heads"):
+        bad = [n for n in checked if x["qsa_heads"] % n]
+        if bad:
+            hits["qsa_heads_not_divisible_by_dies"] = (bad, stated, f"{x['qsa_heads']} indexer heads do not divide evenly over {bad} dies")
     return hits
 
 
@@ -268,14 +351,20 @@ def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, li
     lim, mult = _limits(limits), _tile_multiples(tile_multiples)
     d = _dims(model_config, "model config")
     n = _dims(nearest_bundle_config, "nearest bundle config") if nearest_bundle_config is not None else None
-    mine = _hits(d, dies, lim, mult)
-    theirs = _hits(n, dies, lim, mult) if n is not None else {}
+    xm = _extras(model_config)
+    xn = _extras(nearest_bundle_config) if nearest_bundle_config is not None else None
+    mine = _hits(d, dies, lim, mult, xm)
+    theirs = _hits(n, dies, lim, mult, xn) if n is not None else {}
     notes: list[str] = []
+    if xm["hc_count"] and xm["hc_lowrank"] is None:
+        notes.append("the config has hc_count but no hc_lowrank; the scan does not assume one (a full-size reading is 640, a TP2 shard 320)")
+    if xm["hc_lowrank"] and xm["hc_count"] is None:
+        notes.append("the config has hc_lowrank but no hc_count; the hyper-connection width was not computed")
 
     found: list[Hazard] = []
     for name, (value, limit, why) in mine.items():
         e = _BY_NAME.get(name) or _generated_entry(name, why)
-        check = e.stage2_check.replace("{last}", str(value - 1)) if isinstance(value, int) else e.stage2_check
+        check = e.stage2_check.replace("{last}", str(value - 1)) if isinstance(value, int) and not isinstance(value, bool) else e.stage2_check
         found.append(Hazard(name, value, limit, why or e.why, e.source, check, also_on_nearest=name in theirs))
 
     if n is None:
@@ -287,6 +376,9 @@ def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, li
         if d.kv_heads > n.kv_heads:
             e = _BY_NAME["kv_heads_above_nearest"]
             found.append(Hazard(e.name, d.kv_heads, n.kv_heads, e.why, e.source, e.stage2_check))
+        if not d.routed_experts and n.routed_experts:
+            e = _BY_NAME["dense_model_nearest_is_moe"]
+            found.append(Hazard(e.name, 0, n.routed_experts, e.why, e.source, e.stage2_check))
         have = set(_mixers(n))
         for mixer in _mixers(d):
             name = f"mixer_{mixer}_not_in_nearest"
@@ -297,11 +389,17 @@ def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, li
             elif mixer not in have:
                 notes.append(f"the model uses the mixer {mixer!r}, which the nearest bundle does not and the table has no row for")
 
+    if not d.routed_experts and xm["model_type"] in QWEN4_TYPES:
+        e = _BY_NAME["dense_qwen4_not_flash_next_shape"]
+        found.append(Hazard(e.name, 0, "routed experts in every layer", e.why, e.source, e.stage2_check))
+
+    hc = {"hc_count": xm["hc_count"], "hc_lowrank": xm["hc_lowrank"], "width": xm["hc_count"] * d.hidden if xm["hc_count"] else None}
     facts = {"dimensions": {"hidden_size": d.hidden, "intermediate_size": d.intermediate, "head_dim": d.head_dim,
                             "vocab_size": d.vocab, "layers": d.layers, "heads": d.heads, "kv_heads": d.kv_heads},
              "tiles": {k: {"value": v, "tiles": v / TILE, "whole": v % TILE == 0} for k, v in _dimension_values(d).items()},
              "routed_experts": d.routed_experts, "router_top_k": d.top_k, "vocab_per_die": math.ceil(d.vocab / dies),
-             "mixers": _mixers(d)}
+             "mixers": _mixers(d), "hyper_connections": hc if (hc["hc_count"] or hc["hc_lowrank"]) else None,
+             "qsa_heads": xm["qsa_heads"], "dies_checked": _dies_checked(dies), "dense": not d.routed_experts}
     return HazardScan(tuple(found), facts, tuple(notes), dies)
 
 
