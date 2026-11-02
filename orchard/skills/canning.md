@@ -21,6 +21,22 @@ Full description: `docs/canning.md` in the repository. This page is the checklis
 8. **Record.** `--run-dir RUN` writes `stages/7/can.json` and an `evidence` ledger entry. Put the boot check's numbers in the run log.
 9. **Publish commands.** `tt-orchard can commands SPEC --namespace ORG` prints them as text. Hand the text to the operator. Do not run it. You do not publish, push, upload, merge or run `tt-model push` or `publish`.
 
+## Changes to the vLLM plugin or to vLLM
+
+Source: tenstorrent/skills PR 40 (issue 362). Agents tended to edit `tenstorrent/vllm-tt-plugin` whenever a model lacked something the plugin expects, such as a new capability key or option. A change to the plugin or to vLLM is the last resort.
+
+1. Before you write one, read the plugin's interface (its README, its capability keys and its platform file) and look for an option that already does what the model needs. A model that lacks a plugin feature usually needs a different `extra_args` or `tt_config` value, or a change in the model class.
+2. When the plugin truly lacks the feature, stop and report the missing feature as the stop reason. Do not patch the plugin to get past it.
+3. When a bundle must carry such a file anyway (a path with a directory named `vllm`, `vllm_tt_plugin`, `tt_vllm_plugin`, `vllm-tt-plugin` or `vllm_tt`, or a `.py` file named like one), the spec states why. Add a table for each file, named by its path inside the bundle:
+
+   ```toml
+   [plugin_edits."extra_code/vllm_tt_plugin/patch.py"]
+   reason = "one or two sentences: what the model cannot do without this change"
+   checked = "where you looked for an existing option, and what you found"
+   ```
+
+   Both texts are 20 to 600 characters. The gate lists every such file and refuses one with no entry. It also refuses an entry for a file the bundle does not have. The wheels in `wheels/` are shipped as built and are not listed.
+
 ## Audio models
 
 A model that makes clips behind a job API (no chat endpoint) uses `[check] mode = "audio-job"` (`prompt`, `audio_seconds`, `audio_steps`, `audio_seed`, `max_rtf`). The boot check then submits two jobs and records the first (cold kernel cache) and the second (warm) separately. Files that are not in the repository (a model library, license files) go into a base directory that a small script builds, and `[[extra_tree]]` copies a directory into `extra_code/`. The card follows the tt-model conventions in `docs/can-cards.md`. The worked example is `config/can.stable-audio-3.toml`.
