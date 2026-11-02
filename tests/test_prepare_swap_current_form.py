@@ -283,6 +283,21 @@ def test_two_model_arguments_in_the_current_form_exit_2(cur):
     broken(cur, lambda s: s.replace('--max_num_seqs 4', '--model "$HERE/model-dir" --max_num_seqs 4'), ["--model", "found 2"])
 
 
+def test_another_model_option_after_the_swaps_exits_2(cur):
+    broken(cur, lambda s: s.replace('--max_num_seqs 4', '--model "Other/Model" --max_num_seqs 4'),
+           ["additional --model", "Other/Model"])
+
+
+def test_another_model_option_spelled_with_an_equals_sign_exits_2(cur):
+    broken(cur, lambda s: s.replace('--max_num_seqs 4', '--model=Other/Model --max_num_seqs 4'), ["additional --model", "Other/Model"])
+    broken(cur, lambda s: s.replace('--max_num_seqs 4', '--model="$HERE/model-dir" --max_num_seqs 4'), ["additional --model"])
+
+
+def test_a_commented_mention_of_the_model_option_is_not_another_option(cur):
+    (cur["bundle"] / "run.sh").write_text("# the command passes --model below\n" + (cur["bundle"] / "run.sh").read_text())
+    assert subprocess.run([sys.executable, str(cur["stage"] / "prepare_swap.py")], capture_output=True, text=True).returncode == 0
+
+
 def test_a_current_bundle_without_the_prepare_model_dir_line_exits_2(cur):
     broken(cur, lambda s: s.replace('"$PYBIN" "$HERE/prepare_model_dir.py"\n', ""), ["prepare_model_dir.py", "found 0"])
 

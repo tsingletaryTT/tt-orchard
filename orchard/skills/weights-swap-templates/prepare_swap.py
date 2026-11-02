@@ -601,6 +601,11 @@ def run_script_form(text: str, nearest: str, where: Path) -> str:
     n_old = len(re.findall(older_model_re(nearest), text))
     n_cur = len(re.findall(CURRENT_MODEL_RE, text))
     if n_old + n_cur == 1:
+        # Any other --model option (either spelling) could override the one this script rewrites when the server parses the command.
+        every = re.findall(r"(?<![\w-])--model(?:=\S*|\s+\S+)", "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#")))
+        if len(every) != 1:
+            fail(f"{where} has {len(every)} --model options and the swap rewrites one; an additional --model option "
+                 f"({', '.join(every)}) could override the model directory. Remove it or edit the script by hand")
         return OLDER_FORM if n_old else CURRENT_FORM
     if n_old and n_cur:
         fail(f'{where} has --model "{nearest}" ({n_old}) and --model "$HERE/model-dir" ({n_cur}), so it is in both forms; '
