@@ -433,3 +433,24 @@ def test_a_request_that_loses_the_race_to_a_failed_recapture_gets_503_before_any
         assert e.value.code == 503
     finally:
         srv.shutdown()
+
+
+def test_the_smoke_tool_records_the_host_load_with_its_measurements(tmp_path, monkeypatch):
+    """Issue 301 item 5: decode speed through the server moves with the host load (18.6 tok/s at load above 20, 33.6 at load 5), so
+    tools/smoke.py writes the load average before and after its requests next to the numbers. The fake engine does not pass the
+    content checks, so the tool exits 1; the measurements are written all the same."""
+    import sys
+    sm_spec = importlib.util.spec_from_file_location("granite_smoke", ROOT / "pkgsrc" / "tools" / "smoke.py")
+    smoke = importlib.util.module_from_spec(sm_spec)
+    sm_spec.loader.exec_module(smoke)
+    s = _Srv(FakeEngine([0, 1, 2, EOS]))
+    out = tmp_path / "smoke.json"
+    try:
+        monkeypatch.setattr(sys, "argv", ["smoke.py", "--port", s.base.rsplit(":", 1)[1], "--out", str(out)])
+        with pytest.raises(SystemExit):
+            smoke.main()
+    finally:
+        s.srv.shutdown()
+    load = json.loads(out.read_text())["host_load"]
+    assert set(load) == {"before", "after"}
+    assert all(len(load[k]) == 3 and all(isinstance(x, float) for x in load[k]) for k in load)

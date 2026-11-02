@@ -189,6 +189,44 @@ def test_a_reply_that_starts_with_a_role_header_or_a_special_token_is_a_problem(
     assert "role_header_start" in names(sc.check_replies(suite([reply(content), reply()])))
 
 
+@pytest.mark.parametrize("content", ["User: and then", "user\nand then", "System: you are", "system\nyou are", "Tool: result", "tool\nresult",
+                                     "<|im_start|>user\nhi"])
+def test_a_reply_that_starts_with_a_user_system_or_tool_header_is_a_problem(content):
+    """Issue 297 (PR 294 review): only `assistant` headers were recognised."""
+    assert "role_header_start" in names(sc.check_replies(suite([reply(content), reply()])))
+
+
+@pytest.mark.parametrize("content", ["Users like it.", "The system works.", "Systems of equations", "Tooling helps.", "tool use is fine", "User guides"])
+def test_ordinary_text_that_starts_with_a_role_word_is_not_flagged(content):
+    assert "role_header_start" not in names(sc.check_replies(suite([reply(content)])))
+
+
+def test_a_named_token_that_is_only_in_the_vocabulary_is_checked_at_the_start_of_a_reply():
+    """Issue 297: the suite's `special_tokens` holds only `added_tokens`; a named token such as `<s>` that lives in the vocabulary is passed
+    in by the file check, so a reply that starts with it is caught."""
+    entries = [reply("<s> Paris."), reply()]
+    assert "role_header_start" not in names(sc.check_replies(suite(entries)))
+    assert "role_header_start" in names(sc.check_replies(suite(entries), start_tokens=["<s>"]))
+
+
+def test_the_record_passes_the_served_named_tokens_to_the_reply_check(tmp_path):
+    tok = {**TOK, "bos_token": "<s>"}
+    new = make(tmp_path / "new", gen=GOOD_GEN, tokens=tok)
+    served = make(tmp_path / "served", gen=GOOD_GEN, tokens=tok)
+    swap = tmp_path / "swap-check.json"
+    swap.write_text(json.dumps({"prompt_suite": suite([reply("<s> Paris."), reply()])}))
+    assert "role_header_start" in names(sc.build_record(served, new, swap))
+
+
+def test_an_end_token_inside_a_tool_call_name_or_arguments_is_a_problem():
+    """Issue 297: a reply that is only a tool call was counted as checked but its name and arguments were never searched."""
+    for call in ({"function": {"name": "get<|im_end|>", "arguments": "{}"}}, {"function": {"name": "get", "arguments": '{"q": "a<|im_end|>"}'}}):
+        e = {**reply(content="", finish="tool_calls"), "tool_calls": [call]}
+        assert "stop_token_in_reply" in names(sc.check_replies(suite([e, reply()]), end_tokens=["<|im_end|>"])), call
+    clean = {**reply(content="", finish="tool_calls"), "tool_calls": [{"function": {"name": "get", "arguments": '{"q": "Paris"}'}}]}
+    assert "stop_token_in_reply" not in names(sc.check_replies(suite([clean, reply()]), end_tokens=["<|im_end|>"]))
+
+
 @pytest.mark.parametrize("content", ["Assistants help people.", "The assistant said hello.", "assist me", "Paris."])
 def test_ordinary_text_that_merely_mentions_an_assistant_is_not_flagged(content):
     assert "role_header_start" not in names(sc.check_replies(suite([reply(content)])))
