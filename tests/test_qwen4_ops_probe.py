@@ -77,8 +77,19 @@ def _reference_python():
     cand = os.environ.get("ORCHARD_REFERENCE_PYTHON")
     for py in ([cand] if cand else []):
         if py and Path(py).exists():
-            return py
+            # The interpreter must have transformers with qwen4_exp, not only exist (older transformers lack it).
+            probe = subprocess.run([py, "-c", "from transformers.models.qwen4_exp import modeling_qwen4_exp"],
+                                   capture_output=True, text=True, timeout=300)
+            if probe.returncode == 0:
+                return py
     return None
+
+
+def test_reference_python_without_qwen4_exp_is_skipped(monkeypatch):
+    """An interpreter that exists but has no transformers qwen4_exp must not be chosen (the test then skips)."""
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", sys.executable)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "no qwen4_exp"))
+    assert _reference_python() is None
 
 
 def test_copies_match_transformers_qwen4_exp():
