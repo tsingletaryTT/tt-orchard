@@ -108,7 +108,7 @@ The card is `pkgsrc/can/stable-audio-3-README.md` (a template; `scripts/can_stab
 
 `raahemnabeel/qwen3-reranker-4b` (https://huggingface.co/raahemnabeel/qwen3-reranker-4b) is a public card for a text reranker that serves through `tt serve`. This
 section describes what it contains and why each part helps a reader, as a target for a can's card. It is a description. The card was read on 2026-11-02 with
-`huggingface_hub` from an isolated interpreter (`python3 -I`), text files only, and nothing was run. The repository's `code/` folder holds the author's notes, and
+`huggingface_hub` from an isolated interpreter (`python3 -I`), text files only, and nothing was run. The repository holds the author's notes in `code/models/autoports/qwen_qwen3_reranker_4b/doc/accuracy.md`, and
 the precision table below is there and not in the README.
 
 What the card contains, in the order a reader needs it:
@@ -126,7 +126,7 @@ What the card contains, in the order a reader needs it:
 - **Where the numbers do not apply.** The same sentence says the p150 rows ran on one die of a p300c, and the Limitations section says the p150, p150x2 and p150x4 boards
   run the same per-chip code and were not measured. The card separates what was measured from what the code implies.
 - **A precision policy with the choice named.** The README gives the chosen policy in one Limitations bullet (bf16 activations, bfp8 attention, bf16 MLP weights) and the
-  score error it costs. The comparison of four policies is in `doc/accuracy.md` in the repository: for each policy the weight formats, the mean and largest score
+  score error it costs. The comparison of four policies is in that `doc/accuracy.md` file: for each policy the weight formats, the mean and largest score
   difference, the correlation, the top-1 agreement and the run time, with the selected row in bold and one policy marked as the choice of the sibling 8B model.
   Under the table, a tuning that was measured and not adopted (autotuned matmul blocking) is recorded with its reason: it changed the end-to-end time by almost nothing
   and raised the mean score error. A reader of that file learns why the shipped policy is not the fastest one, and that the author tried the obvious alternatives.
