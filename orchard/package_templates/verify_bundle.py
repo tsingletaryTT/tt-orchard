@@ -38,6 +38,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -90,6 +91,16 @@ def graft_evidence(bundle: Path, model_dir: Path) -> dict | None:
     return record
 
 
+def cache_at_start(cache: Path, launched_at: float) -> dict:
+    """The state of the tensor cache when the server was launched (issue 321): {"state": "empty" | "warm", "files": N}, N counting the
+    files below `cache` (the model marker excluded) whose modification time is before `launched_at`. run.sh chooses the directory, so
+    the caller reads it from the server's environment after the boot. Files the boot wrote are newer than the launch and are not
+    counted."""
+    files = sum(1 for f in cache.rglob("*") if f.is_file() and f.name != sac.MARKER and f.stat().st_mtime < launched_at) \
+        if cache.is_dir() else 0
+    return {"state": "warm" if files else "empty", "files": files}
+
+
 def port_answers(port: int) -> bool:
     with socket.socket() as s:
         s.settimeout(1)
@@ -131,6 +142,7 @@ def main() -> int:
     env = {k: v for k, v in os.environ.items() if k not in SCRUBBED_ENV}
     env.update(HF_HOME=str(cfg["hf_home"]), HF_HUB_OFFLINE="1")
     log = open(log_path, "wb")
+    launched_at = time.time()
     proc = subprocess.Popen(["bash", str(bundle / "run.sh"), "--port", str(port)], env=env,
                             stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                             start_new_session=True)
@@ -143,6 +155,8 @@ def main() -> int:
         if str(model_dir) not in models:
             stop(7, f"the server on port {port} serves {models}, not {model_dir}")
         seen = process_env(proc.pid)
+        cache_dir = seen.get("TT_CACHE_PATH")            # run.sh chooses it; absent from the environment means not recorded
+        cache_record = cache_at_start(Path(cache_dir), launched_at) if cache_dir else None
         weights_env = {k: seen.get(k) for k in ("MODEL_WEIGHTS_DIR", "HF_MODEL")}
         if set(weights_env.values()) != {str(model_dir)}:
             stop(8, f"the server process has {weights_env}; both must be {model_dir}")
@@ -178,6 +192,7 @@ def main() -> int:
               "n_tokens": sac.N_TOKENS, "matches": matches,
               "top1_agreement": matches / sac.N_TOKENS, **coh, "free_run_text": free_text,
               "mismatches": mismatches, **({"graft": graft} if graft is not None else {}),
+              **({"tensor_cache_at_start": cache_record} if cache_record is not None else {}),
               "evidence": [os.path.relpath(evidence / "verify.json", run_dir),
                            os.path.relpath(log_path, run_dir)]}
     (evidence / "verify.json").write_text(json.dumps(report, indent=2, ensure_ascii=False),

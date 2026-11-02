@@ -1360,3 +1360,51 @@ def test_a_resume_on_the_same_profile_still_waits_for_every_chip_of_the_old_leas
         assert _blocked_reasons(rig) == ["the coder could not be confirmed stopped for the relaunch"]
     finally:
         rig.close()
+
+
+# ---- a relaunch checks the devices of the board gozer actually granted (issue 332) --------------------
+
+class GrantsSecondBoardAdapter(MachineAdapter):
+    """gozer's first free board is not the board the stop check looked at: the first board is skipped, as if another session
+    took it between the check and the grant."""
+
+    def acquire(self, chips, who, reason, *, queue=False, exact=None):
+        if exact is None and self.m.n >= 1:
+            exact = BOARDS["B1"][0]
+        return super().acquire(chips, who, reason, queue=queue, exact=exact)
+
+
+def test_a_relaunch_blocks_on_a_foreign_container_on_the_granted_board_before_the_start(tmp_path):
+    class GrantedBoardContainerCoder(ForeignContainerCoder):
+        foreign_dev = DEV[BOARDS["B1"][0]]         # on the board gozer grants (the checked board is the first one)
+    rig = Rig(tmp_path, chips=4)
+    rig.coder_cls, rig.adapter_cls = GrantedBoardContainerCoder, GrantsSecondBoardAdapter
+    rig.on_sleep = _stop_once_blocked(rig)
+    try:
+        with pytest.raises(Crash):
+            rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+        starts_before = rig.m.coder_starts
+        rig.args.coder_chips = 2                  # narrowed to the first board, then gozer grants the second
+        with pytest.raises(Stop):
+            rig.run(pid=200)
+        reasons = _blocked_reasons(rig)
+        assert len(reasons) == 1 and "granted board" in reasons[0]
+        assert rig.m.coder_starts == starts_before          # the start never ran
+    finally:
+        rig.close()
+
+
+def test_a_relaunch_on_a_granted_board_with_no_foreign_container_starts(tmp_path):
+    rig = Rig(tmp_path, chips=4)
+    rig.coder_cls, rig.adapter_cls = ForeignContainerCoder, GrantsSecondBoardAdapter
+    rig.on_sleep = _stop_once_blocked(rig)
+    try:
+        with pytest.raises(Crash):
+            rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+        rig.args.coder_chips = 2
+        ForeignContainerCoder.foreign_dev = 99      # nothing foreign anywhere
+        assert rig.run(pid=200) == EXIT_READY
+        assert _blocked_reasons(rig) == []
+    finally:
+        ForeignContainerCoder.foreign_dev = DEV[BOARDS["B1"][0]]
+        rig.close()
