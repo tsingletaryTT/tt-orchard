@@ -174,3 +174,10 @@ def test_the_shipped_loader_returns_the_build_dated_dump_for_0_80_0():
     d = oi.load_dump("0.80.0")
     assert d["build"] == "20261030" and len(d["names"]) == 829
     assert oi.load_dump("0.80.0", build="20261030") is d or oi.load_dump("0.80.0", build="20261030") == d
+
+
+def test_a_commit_only_build_beats_a_legacy_dump_when_neither_has_a_date(tmp_path):
+    """Review of PR 346: both had an empty sort key, so the legacy file won."""
+    put(tmp_path, None, ["legacy"], legacy=True)
+    put(tmp_path, "abcdef012345", ["commit-only"])
+    assert oi.load_dump("0.80.0", data_dir=tmp_path)["names"] == ["commit-only"]

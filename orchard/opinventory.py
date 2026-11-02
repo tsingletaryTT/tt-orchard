@@ -130,7 +130,8 @@ def load_dump(version, data_dir=DATA_DIR, build=None):
         for d in found:
             if build_date(d.get("build")) == build:
                 return d
-    return max(found, key=lambda d: build_date(d.get("build")) or "")
+    # Latest build date first; a dump that names any build (a commit-only id has no date) beats a legacy dump with none.
+    return max(found, key=lambda d: (build_date(d.get("build")) or "", bool(d.get("build"))))
 
 
 def load_verified(path=None) -> dict:
