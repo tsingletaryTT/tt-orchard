@@ -59,6 +59,13 @@ def conv_args(op: str, consts) -> tuple[int, int] | None:
     ints = [c for c in consts if isinstance(c, int) and not isinstance(c, bool)]
     if len(lists) < 3 or not ints or not lists[2] or not isinstance(lists[2][0], int):
         return None
+    # aten.convolution also stands for 2D and 3D and for transposed convolutions, which issue 338 does not cover. A 1D convolution
+    # has one-value stride, padding and dilation lists, and the first bool (aten.convolution's `transposed`) is False.
+    if any(len(v) != 1 for v in lists[:3]):
+        return None
+    bools = [c for c in consts if isinstance(c, bool)]
+    if name.split(".", 1)[0] != "conv1d" and (not bools or bools[0] is not False):
+        return None
     return lists[2][0], ints[-1]
 
 

@@ -1296,7 +1296,15 @@ class Supervisor:
                               ledger=self.ledger, stage=None, wait_budget_s=COLD_BOOT_BUDGET_S,
                               clock=self.clock, sleep=self.sleep)
         self.coder_lease = lease          # known from here on, so a shutdown can release it
+        # Recorded before the start: a crash during the boot leaves the lease and server in the
+        # ledger, so the restart can stop that server and re-lease.
+        # The pending record says "unknown" for this attempt. The live value changes only when the
+        # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
+        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
+                           server={**self.coder.record(), "owned": None})
         if check_granted:
+            # After the record above, so a block here leaves the granted lease in the ledger: cleanup releases it and a
+            # resume relaunches under it. The check only reads docker; it never resets a device.
             if hasattr(self.coder, "limit_devices"):
                 self.coder.limit_devices(lease.dev_indices)        # the granted board, whichever board that is
             check = self.coder.confirm_stopped()
@@ -1304,12 +1312,6 @@ class Supervisor:
                 self._block(None, f"a container holds a device of the granted board ({', '.join(lease.chips)}); the coder was "
                                   "not started. Stop that container or wait for it, then resume",
                             checks=check.checks, evidence=check.evidence)
-        # Recorded before the start: a crash during the boot leaves the lease and server in the
-        # ledger, so the restart can stop that server and re-lease.
-        # The pending record says "unknown" for this attempt. The live value changes only when the
-        # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
-        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
-                           server={**self.coder.record(), "owned": None})
         try:
             self.coder.start(lease)
         except ServerNotOwned as exc:

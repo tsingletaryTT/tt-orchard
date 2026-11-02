@@ -1349,10 +1349,11 @@ def cache_phrase(rec) -> str:
     files = rec.get("files") if isinstance(rec, dict) else None
     state = rec.get("state") if isinstance(rec, dict) else None
     if isinstance(files, int) and not isinstance(files, bool) and files >= 0:
+        by_age = ", judged by file age" if rec.get("basis") == "file age" else ""      # stage 7 infers the state from file times
         if state == "empty" and files == 0:
-            return "empty tensor cache"
+            return f"empty tensor cache{by_age}"
         if state == "warm" and files > 0:
-            return f"warm tensor cache, {files} files at start"
+            return f"warm tensor cache, {files} files at start{by_age}"
     return "tensor cache state not recorded"
 
 

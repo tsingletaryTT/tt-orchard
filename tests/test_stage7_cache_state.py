@@ -47,16 +47,16 @@ def test_the_boot_check_counts_only_files_older_than_the_launch(tmp_path):
     new.write_text("y")
     (cache / vb.sac.MARKER).write_text("m")
     os.utime(old, (100, 100))
-    assert vb.cache_at_start(cache, launched_at=1000.0) == {"state": "warm", "files": 1}
-    assert vb.cache_at_start(cache / "missing", launched_at=1000.0) == {"state": "empty", "files": 0}
+    assert vb.cache_at_start(cache, launched_at=1000.0) == {"state": "warm", "files": 1, "basis": "file age"}
+    assert vb.cache_at_start(cache / "missing", launched_at=1000.0) == {"state": "empty", "files": 0, "basis": "file age"}
     os.utime(old, (2000, 2000))
-    assert vb.cache_at_start(cache, launched_at=1000.0) == {"state": "empty", "files": 0}
+    assert vb.cache_at_start(cache, launched_at=1000.0) == {"state": "empty", "files": 0, "basis": "file age"}
 
 
 def test_verify_json_records_an_empty_cache_for_a_fresh_install(boot):
     assert boot["check"]("perfect").returncode == 0
     v = json.loads((boot["verify"] / "evidence" / "verify.json").read_text())
-    assert v["tensor_cache_at_start"] == {"state": "empty", "files": 0}
+    assert v["tensor_cache_at_start"] == {"state": "empty", "files": 0, "basis": "file age"}
 
 
 def test_verify_json_records_a_warm_cache_the_bundle_already_had(boot):
@@ -68,7 +68,7 @@ def test_verify_json_records_a_warm_cache_the_bundle_already_had(boot):
         os.utime(f, (100, 100))
     assert boot["check"]("perfect").returncode == 0
     v = json.loads((boot["verify"] / "evidence" / "verify.json").read_text())
-    assert v["tensor_cache_at_start"] == {"state": "warm", "files": 3}
+    assert v["tensor_cache_at_start"] == {"state": "warm", "files": 3, "basis": "file age"}
 
 
 def test_verify_json_records_nothing_when_the_servers_environment_names_no_cache(boot):

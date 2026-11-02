@@ -37,6 +37,10 @@ def test_conv_args_reads_aten_convolution_and_aten_conv1d():
     assert knownwrong.conv_args("aten.convolution.default", DEPTHWISE_DILATED) == (3, 64)
     assert knownwrong.conv_args("aten.conv1d.default", [[1], [0], [3], 64]) == (3, 64)
     assert knownwrong.conv_args("aten.mm.default", DEPTHWISE_DILATED) is None
+    # 2D and transposed convolutions are other ops (review of PR 346)
+    assert knownwrong.conv_args("aten.convolution.default", [[1, 1], [0, 0], [3, 3], False, [0, 0], 64]) is None
+    assert knownwrong.conv_args("aten.convolution.default", [[1], [0], [3], True, [0], 64]) is None
+    assert knownwrong.conv_args("aten.convolution.default", [[1], [0], [3], [0], 64]) is None      # no transposed flag recorded
     assert knownwrong.conv_args("aten.convolution.default", [[1], [0]]) is None
     assert knownwrong.conv_args("aten.convolution.default", None) is None
 

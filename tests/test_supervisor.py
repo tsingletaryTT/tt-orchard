@@ -1390,6 +1390,10 @@ def test_a_relaunch_blocks_on_a_foreign_container_on_the_granted_board_before_th
         reasons = _blocked_reasons(rig)
         assert len(reasons) == 1 and "granted board" in reasons[0]
         assert rig.m.coder_starts == starts_before          # the start never ran
+        # The granted lease is in the ledger where coder_state() finds it, so cleanup and a resume use it (review of PR 346).
+        from orchard.supervisor import coder_state
+        lease_rec, _, _ = coder_state(rig.ledger.read() if hasattr(rig, "ledger") else rig.entries())
+        assert lease_rec is not None and set(lease_rec["chips"]) == set(BOARDS["B1"])
     finally:
         rig.close()
 

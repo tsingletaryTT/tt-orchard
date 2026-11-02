@@ -95,10 +95,11 @@ def cache_at_start(cache: Path, launched_at: float) -> dict:
     """The state of the tensor cache when the server was launched (issue 321): {"state": "empty" | "warm", "files": N}, N counting the
     files below `cache` (the model marker excluded) whose modification time is before `launched_at`. run.sh chooses the directory, so
     the caller reads it from the server's environment after the boot. Files the boot wrote are newer than the launch and are not
-    counted."""
+    counted. This is an inference from file age: a launcher that rewrites existing cache files hides them, and a file copied in
+    with an old timestamp counts as present, so the record says its basis and the card repeats it (review of PR 346)."""
     files = sum(1 for f in cache.rglob("*") if f.is_file() and f.name != sac.MARKER and f.stat().st_mtime < launched_at) \
         if cache.is_dir() else 0
-    return {"state": "warm" if files else "empty", "files": files}
+    return {"state": "warm" if files else "empty", "files": files, "basis": "file age"}
 
 
 def port_answers(port: int) -> bool:
