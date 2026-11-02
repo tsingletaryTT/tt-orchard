@@ -138,3 +138,13 @@ def test_a_dense_build_whose_shim_hash_differs_or_is_missing_fails_even_with_the
 
 def test_a_load_report_with_no_dense_entry_is_not_asked_for_a_shim_hash(tmp_path):
     assert gate_reference(stage(tmp_path), tmp_path).ok
+
+
+def test_a_dense_build_whose_shipped_shim_cannot_be_read_is_a_named_reason_not_an_exception(tmp_path, monkeypatch):
+    """PR 345 review: the hash helper raises SafeReadError now; a missing shipped shim used to be OSError and was skipped."""
+    from orchard import stages
+    s1 = stage(tmp_path)
+    _dense_report(s1, shim_sha256="0" * 64)
+    monkeypatch.setitem(stages.SHIPPED_TEMPLATES, "qwen4_dense.py", tmp_path / "no-such-shim.py")
+    g = gate_reference(s1, tmp_path)
+    assert not g.ok and any("shipped shim cannot be read" in r for r in g.reasons), g.reasons

@@ -20,6 +20,17 @@ needs_stack = pytest.mark.skipif(not _has_qwen4(), reason=(
     "SKIPPED: no interpreter with torch and a transformers that has qwen4_exp (5.19.0 or later; set "
     "ORCHARD_REFERENCE_PYTHON), so the indexer stub was not run end to end"))
 
+def _torch_runs_the_real_indexer() -> bool:
+    """The real Qwen4-style indexer scatters with an int32 index, which one torch build refuses ("Expected dtype int64 for index"). A test
+    that runs the real model forward needs a torch that accepts it; a trace on the meta device does not."""
+    code = "import torch; torch.zeros(2, 3, dtype=torch.bool).scatter(-1, torch.zeros(2, 1, dtype=torch.int32), True)"
+    return _has_qwen4() and subprocess.run([PY, "-c", code], capture_output=True).returncode == 0
+
+
+needs_real_forward = pytest.mark.skipif(not _torch_runs_the_real_indexer(), reason=(
+    "SKIPPED: no interpreter with a transformers that has qwen4_exp (5.19.0 or later) and a torch that accepts an int32 scatter index "
+    "(the real Qwen4-style indexer uses one); set ORCHARD_REFERENCE_PYTHON to such an interpreter, so the model forward was not run"))
+
 _TEXT = {
     "hidden_size": 64, "num_hidden_layers": 4, "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 16,
         "vocab_size": 128, "layer_types": ["linear_attention"] * 3 + ["full_attention"], "num_experts": 8,
