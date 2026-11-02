@@ -2365,7 +2365,7 @@ request and runs nothing; it shows `tt-orchard updates --refresh` as text to run
 
 To check once a day, run `tt-orchard updates --print-timer`. It prints a systemd user service and timer and a cron line as text and installs nothing.
 The scheduled command is `updates --refresh --fail-when-unknown --json`: it needs the network and no lease, and it exits 3 when every row is unknown,
-so a failed run shows in `systemctl --user status tt-orchard-updates.service` and in the journal.
+so a failed run shows in the status of the `tt-orchard-updates` service (the printed text names the command) and in the journal.
 
 ## 6. Lessons that will bite you
 
