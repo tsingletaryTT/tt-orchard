@@ -3727,10 +3727,16 @@ def main(argv=None, *, home=None) -> int:
             # Refusals happen here, before anything is recorded or started.
             try:
                 sup = build(args, ledger, home=home)
-                sup.stack_pins = stack_check_for(sup, args)
             except (TierConfigError, ValueError, LedgerCorrupt) as exc:
                 print(f"refused: {exc}", file=sys.stderr)
                 return EXIT_REFUSED
+            if isinstance(sup, Supervisor):
+                # A real Supervisor always has `paths`, `inputs` and `home`; a test may hand main a stand-in that has none. Setting up the stack
+                # check must never refuse a run or change how a mid-run error is reported: without it the record says nothing was compared.
+                try:
+                    sup.stack_pins = stack_check_for(sup, args)
+                except Exception:
+                    sup.stack_pins = None
             # From here an error is not a refusal: the run had started, and run() has already
             # tried to release the hardware.
             try:

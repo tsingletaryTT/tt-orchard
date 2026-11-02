@@ -241,6 +241,27 @@ def test_the_real_check_looks_where_the_run_says(monkeypatch, tmp_path):
     assert first.exclude_paths == (str(tmp_path / "run"),) and str(tmp_path / "ops-home") in first.homes
 
 
+def test_a_failure_in_setting_up_the_stack_check_never_refuses_or_changes_the_run(tmp_path, capsys, monkeypatch):
+    """main() sets the stack check up after build(). If that raises, the run goes on (its record then says nothing was compared) and a mid-run
+    error is still reported as an error, not as a refusal."""
+    from orchard import supervisor
+    from orchard.supervisor import EXIT_ERROR, Supervisor, main
+    from run_fakes import argv, write_tiers
+
+    class Half(Supervisor):                       # a real Supervisor class whose attributes the stack check needs are missing
+        def __init__(self):
+            self.stop_message = "stopped"
+
+        def run(self):
+            raise ValueError("no free board")
+    holder = []
+    monkeypatch.setattr(supervisor, "build", lambda args, ledger, home=None: holder.append(Half()) or holder[0])
+    tiers = write_tiers(tmp_path / "t.toml", "http://127.0.0.1:8000/v1", "http://127.0.0.1:11434/v1")
+    assert main(argv(tmp_path, tiers, "http://127.0.0.1:8000/v1"), home=tmp_path / "operator-home") == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "refused" not in err and "no free board" in err and holder[0].stack_pins is None
+
+
 def test_the_keyword_rules_still_classify_other_blocks_the_same_way():
     assert blocked.block_code({"reason": "blocked: a chip is held by another lease"}) == "hardware-unhealthy"
     assert blocked.block_code({"reason": "blocked: the model does not fit this box"}) == "model-does-not-fit"
