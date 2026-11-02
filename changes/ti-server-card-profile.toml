@@ -1,0 +1,4 @@
+target = "0.9.87"
+summary = "can gate: optional card_profile catalog requires an Expected performance row and a Limitations section; TTIS maturity study"
+kind = "feature"
+pr = 320

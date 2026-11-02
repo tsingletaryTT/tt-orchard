@@ -14,6 +14,7 @@ mesh = "P300"
 device_count = 2                                   # both dies of one board
 python = "3.12"
 port = 20160
+card_profile = "catalog"                        # the gate requires an Expected performance row and a Limitations section in the card
 vllm_version = "0.26.0"
 # Serving limits of the measured recipe (package_src/run.sh): one sequence, a 4096-token context, 64-token blocks.
 max_num_seqs = 1
