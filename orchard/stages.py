@@ -1385,7 +1385,7 @@ WEIGHTS_ONLY_STAGE_2 = dataclasses.replace(
 # stages keep the generic table; the supervisor pauses before stage 3 until the later slices of the design exist.
 FULL_PORT_STAGE_2 = dataclasses.replace(
     STAGES[2], name="full port on one board and agreement with the CPU reference", skill="full-port-check",
-    gate=gate_full_port)
+    gate=gate_full_port, draft="full_port")
 
 
 # The weights+sidecar class (orchard/classes.py): stage 2 also measures the sidecar head's parity in the same

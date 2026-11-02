@@ -418,6 +418,9 @@ def _parser() -> argparse.ArgumentParser:
     cn.add_argument("--port", type=int, help="boot: the port to serve on (default: a free port the kernel picks)")
     cn.add_argument("--namespace", help="the Hugging Face namespace, used in the publish text and checked by the scrub")
     cn.add_argument("--run-dir", help="a run directory: write stages/7/can.json and add an evidence entry to its ledger")
+    cn.add_argument("--state-dir", help="stage, gate, boot: also write <NAME>.can-state.json here, the record the Cans view of the web page reads "
+                                        "(the page's cans folder: ORCHARD_CANS_DIR, default <runs folder>/cans)")
+    cn.add_argument("--cache-state", choices=["empty", "warm"], help="boot: whether the kernel cache the boot used was empty or warm (recorded with --state-dir)")
     vp = sub.add_parser("verify-package", parents=[common],
                         help="pull a published package from the Hub into a scratch directory, run its checks and print the boot command as "
                              "text. Opens no device and publishes nothing")
