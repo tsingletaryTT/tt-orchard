@@ -3,6 +3,7 @@
 """The supervisor-owned port check (orchard/skills/full-port-templates/port_check.py, issue 325): it runs a fake port module on the CPU with
 a fake chip, writes the record itself, and the gate refuses each way a port module (or anything else the coder wrote) tries to forge it."""
 import json
+import os
 import re
 import time
 
@@ -235,3 +236,62 @@ def test_a_port_thread_that_writes_the_record_after_close_is_waited_for_and_over
     write_result(stage)
     g = gate(run, stage)
     assert g.ok, g.reasons
+
+
+# ---- review findings (PR 347) ---------------------------------------------------------------------------
+
+def test_a_link_under_the_port_directory_fails_the_run_and_the_gate(tmp_path):
+    run, stage, _ = make_run(tmp_path)
+    (tmp_path / "elsewhere.py").write_text("import ttnn\n")
+    os.symlink(tmp_path / "elsewhere.py", stage / "port" / "layers.py")
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "is a link" in done.stdout
+    # The gate refuses a record made before the link existed, too.
+    run2, stage2, _ = make_run(tmp_path / "b")
+    run_template(tmp_path / "b", run2, stage2)
+    write_result(stage2)
+    os.symlink(tmp_path / "elsewhere.py", stage2 / "port" / "layers.py")
+    assert one(gate(run2, stage2), "is a link")
+
+
+def test_a_directory_link_under_the_port_directory_is_refused_by_the_gate(tmp_path):
+    run, stage, _ = make_run(tmp_path)
+    run_template(tmp_path, run, stage)
+    write_result(stage)
+    (tmp_path / "pkg").mkdir()
+    os.symlink(tmp_path / "pkg", stage / "port" / "pkg")
+    assert one(gate(run, stage), "is a link")
+
+
+def test_a_process_the_port_starts_is_killed_before_the_run_ends(tmp_path):
+    spawn = HONEST.replace("def load(model_dir, mesh_device):", '''def load(model_dir, mesh_device):
+    import subprocess
+    p = subprocess.Popen(["sleep", "60"])
+    open("CHILD-PID", "w").write(str(p.pid))''')
+    run, stage, _ = make_run(tmp_path, spawn)
+    assert run_template(tmp_path, run, stage).returncode == 0
+    pid = int((run / "CHILD-PID").read_text())
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(pid, 9)
+        pytest.fail("a process the port started was still running after the check ended")
+
+
+def test_several_chips_get_the_fabric_turned_on_and_off_around_the_mesh_and_one_chip_gets_none(tmp_path):
+    run, stage, _ = make_run(tmp_path)
+    out = run_template(tmp_path, run, stage).stdout
+    assert out.index("port| fabric fabric-1d") < out.index("port| fabric disabled")
+    run, stage, _ = make_run(tmp_path / "one")
+    assert "fabric" not in run_template(tmp_path / "one", run, stage, chips=CHIPS[:1]).stdout
+
+
+def test_load_s_times_the_ports_load_and_not_the_device_open_or_the_module_import(tmp_path):
+    slow_import = "import time\ntime.sleep(1.5)\n" + HONEST
+    run, stage, _ = make_run(tmp_path, slow_import)
+    assert run_template(tmp_path, run, stage).returncode == 0
+    assert record(stage)["load_s"] < 1.0

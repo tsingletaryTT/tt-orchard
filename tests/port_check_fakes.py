@@ -18,6 +18,10 @@ CHIPS = ["0000:01:00.0", "0000:02:00.0"]
 
 # The stand-in for the runtime: the same names the template calls, and nothing else.
 FAKE_TTNN = '''
+class FabricConfig:
+    FABRIC_1D = "fabric-1d"
+    DISABLED = "disabled"
+def set_fabric_config(c): print("fabric", c, flush=True)
 class MeshShape:
     def __init__(self, r, c): self.shape = (r, c)
 def open_device(device_id=0): return {"device": device_id}

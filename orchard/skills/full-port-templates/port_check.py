@@ -47,6 +47,7 @@ import hashlib
 import importlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -95,8 +96,16 @@ def argmax(logits) -> int:
 
 
 def open_device(ttnn, n_chips: int):
+    """One chip: a device. Several: a mesh with the 1-D fabric on (collectives such as all_reduce need it, and the port module is imported
+    after the mesh is open, so it cannot set it up). The closer turns the fabric off again, as scripts/minicpm3/run_chip.py does."""
     if n_chips > 1:
-        return ttnn.open_mesh_device(ttnn.MeshShape(1, n_chips)), ttnn.close_mesh_device
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
+        dev = ttnn.open_mesh_device(ttnn.MeshShape(1, n_chips))
+
+        def close_mesh(d):
+            ttnn.close_mesh_device(d)
+            ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
+        return dev, close_mesh
     return ttnn.open_device(device_id=0), ttnn.close_device
 
 
@@ -115,9 +124,11 @@ def worker(read_fd: int, write_fd: int) -> int:
         try:
             req = json.loads(line)
             op = req["op"]
-            if op == "load":
+            if op == "init":             # untimed: open the device and import the port module
                 device, closer = open_device(ttnn, int(req["n_chips"]))
                 mod = importlib.import_module(PORT_MODULE)
+                reply({"ok": True})
+            elif op == "load":           # timed: only the port's own load
                 model = mod.load(req["model_dir"], device)
                 reply({"ok": True})
             elif op == "prefill":
@@ -154,7 +165,7 @@ class Worker:
         c_in, p_out = os.pipe()          # parent -> worker requests
         cmd = [sys.executable, "-u", "-P", "-s", str(Path(__file__).resolve()), "--worker", str(c_in), str(c_out)]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     pass_fds=(c_in, c_out), cwd=str(RUN_DIR))
+                                     pass_fds=(c_in, c_out), cwd=str(RUN_DIR), start_new_session=True)
         os.close(c_in)
         os.close(c_out)
         self.rd, self.wr = os.fdopen(p_in, "r", encoding="utf-8"), os.fdopen(p_out, "w", encoding="utf-8")
@@ -201,6 +212,10 @@ class Worker:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait()
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)     # whatever the port started in the worker's session goes too, before the lease is released
+        except (ProcessLookupError, PermissionError):
+            pass
         for t in self.pumps:
             t.join(10)
 
@@ -223,9 +238,16 @@ def port_sources() -> list[dict]:
     """Every .py file under the port directory with its sha256 as the worker saw it (the worker is stopped before this runs)."""
     out = []
     for f in sorted(PORT_DIR.rglob("*.py")):
-        if f.is_file() and not f.is_symlink():
-            out.append({"path": str(f.relative_to(RUN_DIR)), "sha256": sha_file(f), "role": "model"})
+        out.append({"path": str(f.relative_to(RUN_DIR)), "sha256": sha_file(f), "role": "model"})
     return out
+
+
+def refuse_links() -> None:
+    """A link under the port directory (a file or a directory) could point at code that is not hashed, so any link fails the run."""
+    for root, dirs, files in os.walk(PORT_DIR):
+        for name in dirs + files:
+            if os.path.islink(os.path.join(root, name)):
+                raise PortFailed(f"{os.path.relpath(os.path.join(root, name), RUN_DIR)} is a link: files under stages/2/port/ must be regular files")
 
 
 def main() -> int:
@@ -236,6 +258,7 @@ def main() -> int:
         raise PortFailed("TT_VISIBLE_DEVICES names no chip: this test runs only under the supervisor's lease")
     if not (PORT_DIR / f"{PORT_MODULE}.py").is_file():
         raise PortFailed(f"stages/2/port/{PORT_MODULE}.py does not exist: the port module is the file the coder writes")
+    refuse_links()
     reference, prompt = read_ids(REFERENCE, "generated_ids"), read_ids(PROMPT, "prompt_ids")
     n = min(len(reference), MAX_POSITIONS)
     ref = reference[:n]
@@ -245,8 +268,9 @@ def main() -> int:
 
     w = Worker()
     try:
+        w.ask(op="init", n_chips=len(chips))
         t0 = time.monotonic()
-        w.ask(op="load", model_dir=model_dir, n_chips=len(chips))
+        w.ask(op="load", model_dir=model_dir)
         load_s = round(time.monotonic() - t0, 3)
         print(f"loaded in {load_s}s", flush=True)
         # Teacher forced: at position i the port's argmax is taken, then the reference id i is fed in, never the port's own.
@@ -260,6 +284,7 @@ def main() -> int:
         w.ask(op="close")
     finally:
         w.stop()
+    refuse_links()                  # again: a link made while the port ran
     if FORGED.is_set():
         raise PortFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
 

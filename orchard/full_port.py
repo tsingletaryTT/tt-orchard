@@ -341,7 +341,11 @@ def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list)
         return
     if PORT_MODULE not in listed:
         reasons.append(f"port_sources does not list {PORT_MODULE}, the port module the template calls")
-    on_disk = {os.path.relpath(f, run_dir) for f in (stage_dir / "port").rglob("*.py") if f.is_file() and not f.is_symlink()}
+    links = [os.path.join(r, n) for r, ds, fs in os.walk(stage_dir / "port") for n in ds + fs if os.path.islink(os.path.join(r, n))]
+    if links:
+        reasons.append(f"{os.path.relpath(links[0], run_dir)} is a link under {PORT_DIR}: its target is not hashed or read by the checks, "
+                       "so files there must be regular files")
+    on_disk = {os.path.relpath(f, run_dir) for f in (stage_dir / "port").rglob("*.py") if f.is_file()}
     if on_disk - listed:
         reasons.append(f"{sorted(on_disk - listed)[0]} is in {PORT_DIR} but not in port_sources: it was added after the record was written")
     if not any("ttnn" in t for _, t in model_text):
