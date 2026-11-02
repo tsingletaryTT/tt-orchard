@@ -159,21 +159,22 @@ def encode_json(obj) -> bytes:
 
 def score_pairs_hf(model_dir: str, pairs: dict, yes_id: int, no_id: int, *, dtype: str = "fp32") -> list[float]:
     """Hugging Face scores, one pair at a time with no padding. Needs torch and transformers (import here, so the rest of this module
-    imports without them). The score is the hidden state at the last position, after the final norm, times the difference of the
-    yes and no rows of the output matrix: logit(yes) - logit(no) without computing the whole vocabulary."""
+    imports without them). The score is the hidden state at the last position, after the final norm, times the yes row and the no row of
+    the output matrix, in the model's dtype (so each logit is rounded as Hugging Face rounds it in bf16), and then the difference of the
+    two: logit(yes) - logit(no) without computing the whole vocabulary."""
     import torch
     from transformers import AutoModelForCausalLM
     if dtype not in DTYPES:
         raise ValueError(f"dtype must be one of {DTYPES}, got {dtype!r}")
     model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32 if dtype == "fp32" else torch.bfloat16).eval()
-    w = model.lm_head.weight
-    direction = (w[yes_id].float() - w[no_id].float())
+    rows = model.lm_head.weight[[yes_id, no_id]]            # the yes and no rows, in the model's dtype
     out = []
     with torch.no_grad():
         for p in pairs["pairs"]:
             ids = torch.tensor([p["input_ids"]], dtype=torch.long)
-            h = model.model(input_ids=ids).last_hidden_state[0, -1].float()
-            out.append(float(h @ direction))
+            h = model.model(input_ids=ids).last_hidden_state[0, -1]
+            logits = h @ rows.T                              # in the model's dtype, so each logit is rounded as Hugging Face rounds it
+            out.append(float(logits[0]) - float(logits[1]))
     return out
 
 

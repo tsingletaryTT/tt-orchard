@@ -90,7 +90,9 @@ def draft_config(model_snapshot: str) -> dict:
 
 
 def _num(x) -> bool:
-    return type(x) in (int, float) and math.isfinite(x)
+    if type(x) not in (int, float) or (type(x) is int and x.bit_length() > 64):      # an int too large for a float raises in isfinite
+        return False
+    return math.isfinite(x)
 
 
 def _score(x) -> bool:

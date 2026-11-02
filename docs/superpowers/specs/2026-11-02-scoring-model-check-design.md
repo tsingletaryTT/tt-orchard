@@ -128,6 +128,9 @@ The same limits as the full-port check. The supervisor ran a test and the record
 scores without computing them cannot be told from one that computed them. The source checks make the plain forms visible. A person who
 wants the proof replays the command on a chip.
 
+A process the port starts in a session of its own (`setsid`, a double fork) survives the supervisor's process-group kill on a timeout or
+an abort, because the template's cleanup dies in the same kill. That needs a cgroup or a PID namespace (issue 390).
+
 Parity with Hugging Face on 32 pairs is not a quality measure. The bundles also report retrieval benchmarks (NDCG@10 on subsets of MTEB
 reranking and MIRACL) as parity rows, and this slice has none.
 

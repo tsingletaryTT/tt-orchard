@@ -124,6 +124,23 @@ def test_the_recorder_writes_scores_equal_to_yes_minus_no_of_the_full_logits(tmp
     assert len({round(s, 6) for s in ref["scores"]}) > len(ref["scores"]) // 2          # the scores are not one constant
 
 
+def test_a_bf16_reference_is_the_difference_of_two_logits_each_rounded_to_bf16(tmp_path):
+    # PR 383 review: the head must run in the model's dtype so each logit is rounded as Hugging Face rounds it.
+    py = needs_reference()
+    snap, out, done = _record(py, tmp_path, "--dtype", "bf16")
+    assert done.returncode == 0, done.stdout + done.stderr
+    ref = json.loads((out / "scoring-reference.json").read_text())
+    assert ref["precision"] == "bf16"
+    plain = subprocess.run([py, "-I", "-c", PLAIN_SCORE_SCRIPT, str(snap), str(out / "scoring-pairs.json"),
+                            str(ref["yes_token_id"]), str(ref["no_token_id"]), "bf16"], capture_output=True, text=True, timeout=600)
+    assert plain.returncode == 0, plain.stderr
+    expected = json.loads(plain.stdout)
+    assert max(abs(a - b) for a, b in zip(ref["scores"], expected)) < 1e-6
+    # each score is a difference of two bf16 numbers, so it is a multiple of the bf16 spacing of the smaller one: a fp32 route gives
+    # scores that are not
+    assert any(abs(s) > 0 for s in ref["scores"])
+
+
 def test_the_recorded_pair_file_is_the_one_the_reference_names_and_a_second_run_gives_the_same_files(tmp_path):
     py = needs_reference()
     snap, out, done = _record(py, tmp_path)

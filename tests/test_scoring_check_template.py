@@ -768,6 +768,39 @@ def test_a_process_still_alive_after_the_kill_fails_the_run_instead_of_writing_a
     tpl.Worker.confirm_none_left(Stub())
 
 
+def test_a_port_score_of_four_hundred_digits_is_a_controlled_refusal_and_not_a_traceback(tmp_path):
+    big = HONEST.replace("return [(ids[-1] - 100) / 10 for ids in pairs]", "return [10 ** 400] * len(pairs)")
+    run, stage, done = honest_run(tmp_path, port_src=big)
+    assert done.returncode == 2 and "not a finite number" in done.stdout and "Traceback" not in done.stdout + done.stderr
+
+
+def test_a_reference_score_of_four_hundred_digits_is_a_controlled_refusal_in_the_template(tmp_path):
+    run, stage, _ = make_run(tmp_path)
+    ref = _stage1_ref(run)
+    doc = json.loads(ref.read_text())
+    doc["scores"][0] = 10 ** 400
+    ref.write_text(json.dumps(doc))
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "finite scores" in done.stdout and "Traceback" not in done.stdout + done.stderr
+
+
+def _stage1_ref(run):
+    return run / "stages" / "1" / "evidence" / "reference" / "scoring-reference.json"
+
+
+def test_the_gate_helpers_do_not_raise_on_an_integer_of_four_hundred_digits():
+    assert sc._num(10 ** 400) is False and sc._score(10 ** 400) is False and sc._score(-10 ** 400) is False
+    assert sc._score(5) and sc._score(1e6) and not sc._score(1e6 + 1)
+
+
+def test_a_record_with_a_four_hundred_digit_score_is_a_reason_in_the_gate(tmp_path):
+    run, stage, done = honest_run(tmp_path)
+    rec = record(stage)
+    rec["chip_scores"][0] = 10 ** 400
+    _write_record(stage, rec)
+    assert mentions(gate(run, stage), "not readable JSON")          # safeio refuses an integer of that many digits before the gate sees it
+
+
 def test_stop_calls_the_confirmation_after_it_has_killed_the_worker():
     calls = []
     sleeper = subprocess.Popen(["sleep", "60"])

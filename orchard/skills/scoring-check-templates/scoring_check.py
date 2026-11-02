@@ -30,6 +30,11 @@ What this does not prove: the worker is the coder's code on the chip, and a port
 them cannot be told from one that computed them. The gate's source checks make the plain forms visible. A person who wants the proof
 replays this command on a chip.
 
+A second limit (issue 390): the cleanup at the end of a run finds the processes below this one, including orphans (this process is a
+subreaper). If the supervisor kills the command's process group on a timeout or an abort, this file dies in the same kill and its cleanup
+does not run. A helper the port started in a session of its own (`setsid`, a double fork) is not in that group and keeps running. Stopping
+that needs kernel-level containment (a cgroup or a PID namespace), which this file cannot provide.
+
 Port module interface (stages/2/port/port_model.py):
 
     load(model_dir: str, mesh_device) -> model                   required
@@ -81,6 +86,14 @@ MIN_LOAD_S = 1e-6                # a load the clock cannot resolve is reported a
 PREFIX = "port| "
 MARK = "SCORING_CHECK"           # the start of the line the parent prints last; a port that prints it fails the run
 FORGED = threading.Event()       # set when a line from the worker mentions MARK
+
+
+def finite_score(x) -> bool:
+    """True for an int or float that is finite and at most MAX_VALUE in size. An int of more than 64 bits is refused before any float
+    conversion, because math.isfinite raises OverflowError on an int too large for a float (a 401-digit JSON integer)."""
+    if type(x) not in (int, float) or (type(x) is int and x.bit_length() > 64):
+        return False
+    return math.isfinite(x) and abs(x) <= MAX_VALUE
 
 
 def sha_bytes(data: bytes) -> str:
@@ -310,7 +323,7 @@ class Worker:
         if not isinstance(scores, list) or len(scores) != len(pairs):
             raise CheckFailed(f"the port returned {len(scores) if isinstance(scores, list) else scores!r} scores for the {len(pairs)} prompts of group {group!r}")
         for s in scores:
-            if type(s) not in (int, float) or not math.isfinite(s) or abs(s) > MAX_VALUE:
+            if not finite_score(s):
                 raise CheckFailed(f"the port returned a score that is not a finite number in group {group!r}: {s!r}")
         return [float(s) for s in scores]
 
@@ -406,7 +419,7 @@ def read_inputs() -> tuple:
             raise CheckFailed(f"{PAIRS} pair {i} needs a group name and a non-empty list of token ids")
     scores = ref_doc.get("scores") if isinstance(ref_doc, dict) else None
     if (not isinstance(scores, list) or len(scores) != len(rows)
-            or not all(type(s) in (int, float) and math.isfinite(s) and abs(s) <= MAX_VALUE for s in scores)):
+            or not all(finite_score(s) for s in scores)):
         raise CheckFailed(f"{REFERENCE} holds no list of {len(rows)} finite scores")
     named = ref_doc.get("pairs")
     if not isinstance(named, dict) or named.get("sha256") != pairs_sha:

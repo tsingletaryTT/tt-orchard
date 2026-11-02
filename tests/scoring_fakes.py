@@ -58,13 +58,14 @@ PLAIN_SCORE_SCRIPT = '''
 import json, sys, torch
 from transformers import AutoModelForCausalLM
 model_dir, pairs_file, yes, no = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
-model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32).eval()
+dtype = torch.bfloat16 if len(sys.argv) > 5 and sys.argv[5] == "bf16" else torch.float32
+model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=dtype).eval()
 pairs = json.load(open(pairs_file))["pairs"]
 out = []
 with torch.no_grad():
     for p in pairs:
         last = model(input_ids=torch.tensor([p["input_ids"]])).logits[0, -1]
-        out.append(float(last[yes] - last[no]))
+        out.append(float(last[yes]) - float(last[no]))          # two logits as the model rounds them, then the difference
 print(json.dumps(out))
 '''
 
