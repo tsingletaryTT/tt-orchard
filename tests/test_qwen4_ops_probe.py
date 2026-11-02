@@ -103,3 +103,23 @@ print('MATCH')
 """
     proc = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=300)
     assert "MATCH" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_result_line_is_strict_json_when_an_op_returns_nan_and_inf(capsys):
+    """An op result with NaN and inf must still give a result line a strict JSON parser accepts, with the count kept."""
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        import common
+        got = torch.tensor([1.0, float("nan"), float("inf"), 2.0])
+        ref = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        common.emit({"probe": "x", "o": common.error_stats(got, ref)})
+        line = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("PROBE_RESULT ")][0]
+
+        def refuse(token):
+            raise ValueError(f"non-standard JSON token {token}")
+
+        res = json.loads(line[len("PROBE_RESULT "):], parse_constant=refuse)
+        assert res["o"]["nonfinite"] == 2
+        assert res["o"]["max_abs"] is None
+    finally:
+        sys.path.remove(str(SCRIPTS))

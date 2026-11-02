@@ -14,6 +14,7 @@ Every probe prints one line `PROBE_RESULT {json}` as the last thing it does.
 from __future__ import annotations
 
 import json
+import math
 import time
 
 import torch
@@ -24,7 +25,19 @@ MARK = "PROBE_RESULT "
 
 def emit(result: dict) -> None:
     """Print the one JSON result line a probe ends with."""
-    print(MARK + json.dumps(result, sort_keys=True), flush=True)
+    print(MARK + json.dumps(_strict(result), sort_keys=True, allow_nan=False), flush=True)
+
+
+def _strict(obj):
+    """Replace every non-finite float with None, so the line is standard JSON (no NaN or Infinity tokens). The
+    `nonfinite` count in `error_stats` records that an op returned bad values."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _strict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_strict(v) for v in obj]
+    return obj
 
 
 # --------------------------------------------------------------------------------------------------------------------
