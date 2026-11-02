@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime, safeio
+from orchard import audio_decision, audio_facts, audio_runtime, full_port, safeio
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import prompt_suite, sampling_choice, sampling_probe
@@ -475,6 +475,13 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
     if d.get("argmax_match") is not True:
         reasons.append("argmax_match is not true")
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
+    return _done(reasons, seen)
+
+
+def gate_full_port(stage_dir, run_dir) -> GateResult:
+    """Stage 2 of a full port (run started with --full-port): the port ran on the leased chips and its tokens agree with the stage 1
+    reference. orchard/full_port.py holds the checks; each failing field has its own reason."""
+    reasons, seen = full_port.check(stage_dir, run_dir)
     return _done(reasons, seen)
 
 
@@ -1356,6 +1363,14 @@ WEIGHTS_ONLY_STAGE_2 = dataclasses.replace(
     gate=gate_weights_swap, draft="swap_config")
 
 
+# A full port the operator allowed (`--full-port`, class `full-port` only): stage 2 has the coder write the port under stages/2/port/ and
+# one hardware test compares the chip's tokens with the stage 1 reference (the full-port-check skill, orchard/full_port.py). The other
+# stages keep the generic table; the supervisor pauses before stage 3 until the later slices of the design exist.
+FULL_PORT_STAGE_2 = dataclasses.replace(
+    STAGES[2], name="full port on one board and agreement with the CPU reference", skill="full-port-check",
+    gate=gate_full_port)
+
+
 # The weights+sidecar class (orchard/classes.py): stage 2 also measures the sidecar head's parity in the same
 # hardware lease (the weights-sidecar-check skill), and its gate checks both. Every other stage is the
 # weights-only spec: the backbone is what those stages test.
@@ -1652,7 +1667,8 @@ def run_facts(entries: list[dict], run_dir) -> dict | None:
 
 
 def spec_for(number: int, path: str | None, package_format: str | None = None,
-             cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False, text_runtime: bool = False) -> StageSpec:
+             cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False, text_runtime: bool = False,
+             full_port: bool = False) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
@@ -1663,6 +1679,8 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         return STOCK_STAGE_0
     if audio_runtime and number in AUDIO_TABLE:
         return AUDIO_TABLE[number]
+    if full_port and number == 2 and path == "full-port" and cls == "full-port":
+        return FULL_PORT_STAGE_2          # only stage 0's own `full-port` answer: `unknown` and `restricted-head` keep their pauses
     if path == "stock-runtime":
         stock_table = {2: STOCK_STAGE_2, 3: dataclasses.replace(STAGES[3], skip=SKIP_STOCK_3),
                        4: dataclasses.replace(STAGES[4], skip=SKIP_STOCK_4), 5: dataclasses.replace(STAGES[5], skip=SKIP_STOCK_5),
@@ -1677,6 +1695,20 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         if number == 7 and package_format == "v6":
             return PACKAGE_STAGE_7
     return STAGES[number]
+
+
+FULL_PORT_ALLOWED = "full-port route allowed"
+
+
+def full_port_enabled(entries: list[dict]) -> bool:
+    """Whether the operator allowed the full-port route (`--full-port`): run_start says so, or a later decision does (the flag came on a
+    resume of a run that has not started stage 2). The ledger is the answer, so a resume without the flag keeps it."""
+    for e in entries:
+        if e["event"] == "run_start" and e["data"].get("full_port") is True:
+            return True
+        if e["event"] == "decision" and e["data"].get("decision") == FULL_PORT_ALLOWED:
+            return True
+    return False
 
 
 PACKAGE_OPTIONS_SET = "package options set"

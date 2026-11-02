@@ -1,0 +1,250 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""The full-port route, slice 1 (docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md): the stage 2 gate and its
+fabrication guards, the stage table's routing, the block code and the skill text. No test here touches a chip."""
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from orchard import defaults, full_port
+from orchard.stages import STAGES, gate_full_port, spec_for
+
+SKILLS = Path(__file__).resolve().parent.parent / "orchard" / "skills"
+CHIPS = ["0000:01:00.0", "0000:02:00.0"]
+REF_IDS = list(range(100, 132))                      # 32 reference ids
+TEXT = "The sea was calm that morning and the boat left early."
+
+
+def sha(data) -> str:
+    return hashlib.sha256(data if isinstance(data, bytes) else data.encode()).hexdigest()
+
+
+def put(run, rel, content):
+    p = Path(run) / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content if isinstance(content, str) else json.dumps(content))
+    return p
+
+
+def build(tmp_path, *, result=None, record=None, marker=None, output=None, model_src="import ttnn\n", check_src="print('check')\n",
+          ref_ids=REF_IDS):
+    """A stage 2 directory a passing full-port run would leave. Each argument replaces a part (a dict is merged over the good one)
+    so a test changes one fact and watches the gate name it."""
+    run = tmp_path / "run"
+    ref = put(run, "stages/1/evidence/reference/generated-ids.json", {"generated_ids": ref_ids, "generated_text": "x"})
+    prm = put(run, "stages/1/evidence/reference/prompt-ids.json", {"prompt_ids": [1, 2, 3], "prompt_text": "p"})
+    model = put(run, "stages/2/port/model.py", model_src)
+    check = put(run, "stages/2/port/check.py", check_src)
+    good_record = {
+        "schema": full_port.RECORD_SCHEMA,
+        "reference": {"path": "stages/1/evidence/reference/generated-ids.json", "sha256": sha(ref.read_bytes())},
+        "prompt": {"path": "stages/1/evidence/reference/prompt-ids.json", "sha256": sha(prm.read_bytes())},
+        "reference_ids": list(ref_ids), "chip_ids": list(ref_ids[:30]) + [0, 0],
+        "chips": list(CHIPS), "load_s": 120.5, "free_run_text": TEXT,
+        "port_sources": [{"path": "stages/2/port/model.py", "sha256": sha(model.read_bytes()), "role": "model"},
+                         {"path": "stages/2/port/check.py", "sha256": sha(check.read_bytes()), "role": "check"}]}
+    rec = {**good_record, **(record or {})}
+    rec_path = put(run, "stages/2/evidence/port-check.json", rec)
+    out_text = f"loading\nPORT_CHECK_SHA256 {sha(rec_path.read_bytes())}\ndone\n" if output is None else output
+    out_path = put(run, "stages/2/evidence/hw-test-output.txt", out_text)
+    good_marker = {"command": "python3 stages/2/port/check.py", "returncode": 0, "timed_out": False, "seconds": 5.0, "chips": list(CHIPS),
+                   "output": {"path": "stages/2/evidence/hw-test-output.txt", "sha256": sha(out_path.read_bytes())}}
+    put(run, "stages/2/test-result.json", {**good_marker, **(marker or {})})
+    good_result = {"runs": True, "coherent": True, "n_tokens": 32, "top1_agreement": 30 / 32, "load_s": 120.5, "free_run_text": TEXT,
+                   "evidence": ["stages/2/evidence/port-check.json", "stages/2/evidence/hw-test-output.txt"]}
+    put(run, "stages/2/result.json", {**good_result, **(result or {})})
+    return run / "stages" / "2", run
+
+
+def reasons(tmp_path, **kw):
+    stage_dir, run = build(tmp_path, **kw)
+    return gate_full_port(stage_dir, run)
+
+
+def test_a_complete_result_passes_and_lists_its_evidence(tmp_path):
+    g = reasons(tmp_path)
+    assert g.ok, g.reasons
+    assert "stages/2/evidence/port-check.json" in g.evidence and "stages/2/evidence/hw-test-output.txt" in g.evidence
+
+
+def test_the_bar_is_the_weights_only_stage_2_bar():
+    assert full_port.TOP1_MIN == defaults.SWAP_TOP1_MIN and full_port.MIN_TOKENS == defaults.SWAP_MIN_TOKENS
+
+
+# ---- each guard, one at a time ----------------------------------------------------------------------
+
+def one(g, word):
+    """The reasons of a failing gate that mention `word`."""
+    assert not g.ok, "the gate passed a result it must refuse"
+    return [r for r in g.reasons if word in r]
+
+
+def test_a_result_the_agent_inflated_is_refused_because_the_gate_recomputes_agreement(tmp_path):
+    # The chip ids match 30 of 32 reference ids (0.9375); the agent writes 1.0.
+    assert one(reasons(tmp_path, result={"top1_agreement": 1.0}), "recomputed")
+
+
+def test_agreement_below_the_bar_is_refused_even_when_reported_correctly(tmp_path):
+    bad = [0] * 32
+    g = reasons(tmp_path, record={"chip_ids": bad}, result={"top1_agreement": 0.0})
+    assert one(g, f"below the minimum of {full_port.TOP1_MIN}")
+
+
+def test_too_few_positions_are_refused(tmp_path):
+    ids = REF_IDS[:8]
+    g = reasons(tmp_path, ref_ids=ids, record={"chip_ids": list(ids), "reference_ids": list(ids)}, result={"n_tokens": 8, "top1_agreement": 1.0})
+    assert one(g, "at least")
+
+
+def test_reference_ids_that_differ_from_the_stage_1_file_are_refused(tmp_path):
+    # A port check that compares with ids it made up agrees with itself.
+    fake = [i + 1000 for i in REF_IDS]
+    g = reasons(tmp_path, record={"reference_ids": fake, "chip_ids": fake}, result={"top1_agreement": 1.0})
+    assert one(g, "stage 1")
+
+
+def test_a_reference_file_that_is_not_the_stage_1_file_is_refused(tmp_path):
+    g = reasons(tmp_path, record={"reference": {"path": "stages/2/port/model.py", "sha256": sha("import ttnn\n")}})
+    assert one(g, "reference.path")
+
+
+def test_a_reference_sha_that_does_not_match_the_file_is_refused(tmp_path):
+    g = reasons(tmp_path, record={"reference": {"path": "stages/1/evidence/reference/generated-ids.json", "sha256": "0" * 64}})
+    assert one(g, "reference.sha256")
+
+
+def test_chips_that_are_not_the_leased_chips_are_refused(tmp_path):
+    assert one(reasons(tmp_path, record={"chips": ["0000:09:00.0"]}), "chips")
+
+
+def test_a_failed_hardware_test_is_refused_and_its_failure_text_is_quoted(tmp_path):
+    g = reasons(tmp_path, marker={"returncode": 4}, result={"runs": False, "failure": "device init failed"})
+    assert one(g, "device init failed") and one(g, "exited with code 4")
+
+
+def test_a_timed_out_test_is_refused(tmp_path):
+    assert one(reasons(tmp_path, marker={"timed_out": True, "returncode": None}), "deadline")
+
+
+def test_a_record_the_test_output_does_not_name_is_refused(tmp_path):
+    # An agent that writes port-check.json by hand cannot also make the supervisor's output file carry its sha256.
+    assert one(reasons(tmp_path, output="loading\ndone\n"), "PORT_CHECK_SHA256")
+
+
+def test_an_output_file_that_is_not_the_one_the_supervisor_recorded_is_refused(tmp_path):
+    assert one(reasons(tmp_path, marker={"output": {"path": "stages/2/evidence/hw-test-output.txt", "sha256": "1" * 64}}), "hw-test-output")
+
+
+def test_port_sources_that_changed_after_the_record_are_refused(tmp_path):
+    stage_dir, run = build(tmp_path)
+    (stage_dir / "port" / "model.py").write_text("import ttnn\n# edited\n")
+    assert one(gate_full_port(stage_dir, run), "port_sources")
+
+
+def test_a_port_with_no_ttnn_is_refused(tmp_path):
+    assert one(reasons(tmp_path, model_src="import torch\n"), "ttnn")
+
+
+def test_a_model_source_that_reads_the_reference_is_refused(tmp_path):
+    src = "import ttnn\nids = open('stages/1/evidence/reference/generated-ids.json')\n"
+    assert one(reasons(tmp_path, model_src=src), "reference")
+
+
+def test_a_record_with_no_model_source_is_refused(tmp_path):
+    g = reasons(tmp_path, record={"port_sources": []})
+    assert one(g, "port_sources")
+
+
+def test_free_run_text_that_differs_from_the_record_is_refused(tmp_path):
+    assert one(reasons(tmp_path, result={"free_run_text": TEXT + " extra"}), "free_run_text")
+
+
+def test_free_run_text_that_is_one_repeated_word_is_refused(tmp_path):
+    t = "the " * 30
+    assert one(reasons(tmp_path, record={"free_run_text": t}, result={"free_run_text": t}), "free_run_text")
+
+
+def test_coherent_must_be_true(tmp_path):
+    assert one(reasons(tmp_path, result={"coherent": False}), "coherent")
+
+
+def test_a_missing_result_is_one_reason(tmp_path):
+    stage_dir, run = build(tmp_path)
+    (stage_dir / "result.json").unlink()
+    g = gate_full_port(stage_dir, run)
+    assert not g.ok and "result.json is missing" in g.reasons[0]
+
+
+def test_a_missing_record_is_a_reason_and_not_a_crash(tmp_path):
+    stage_dir, run = build(tmp_path)
+    (stage_dir / "evidence" / "port-check.json").unlink()
+    g = gate_full_port(stage_dir, run)
+    assert not g.ok and any("port-check.json" in r for r in g.reasons)
+
+
+def test_a_hostile_record_is_a_reason_and_not_a_crash(tmp_path):
+    stage_dir, run = build(tmp_path)
+    (stage_dir / "evidence" / "port-check.json").write_text('{"chip_ids": NaN}')
+    g = gate_full_port(stage_dir, run)
+    assert not g.ok
+
+
+# ---- routing ---------------------------------------------------------------------------------------
+
+def test_without_the_opt_in_the_full_port_table_is_unchanged():
+    assert spec_for(2, "full-port").skill == "functional-decoder"
+    assert spec_for(2, "full-port", None, "full-port").skill == "functional-decoder"
+
+
+def test_with_the_opt_in_a_full_port_class_gets_the_full_port_stage_2():
+    s = spec_for(2, "full-port", None, "full-port", full_port=True)
+    assert s.skill == "full-port-check" and s.gate is gate_full_port and s.boards == 1 and s.gate_file == "result.json"
+    assert s.refs == ("tt-device-usage",)
+
+
+def test_the_opt_in_changes_no_other_stage_and_no_other_class():
+    for n in (0, 1, 3, 4, 5, 6, 7, 8):
+        assert spec_for(n, "full-port", None, "full-port", full_port=True) == spec_for(n, "full-port", None, "full-port")
+    assert spec_for(2, "full-port", None, "unknown", full_port=True).skill == "functional-decoder"
+    assert spec_for(2, "weights-only", None, "weights-only", full_port=True).skill == "weights-swap-check"
+
+
+def test_the_table_still_holds_the_generic_stage_2():
+    assert STAGES[2].skill == "functional-decoder"
+
+
+# ---- the skill --------------------------------------------------------------------------------------
+
+def skill_text():
+    return (SKILLS / "full-port-check.md").read_text()
+
+
+def test_the_skill_is_a_marked_draft_with_the_name_the_table_uses():
+    front = skill_text().split("---")[1]
+    assert "\nname: full-port-check\n" in front and "\nstatus: draft." in front
+
+
+def test_the_skill_names_the_gate_file_the_bar_and_the_record():
+    flat = " ".join(skill_text().split())
+    assert "result.json" in flat and "evidence/port-check.json" in flat and "PORT_CHECK_SHA256" in flat
+    assert f"`top1_agreement` of at least {full_port.TOP1_MIN}" in flat
+    assert f"`n_tokens` of at least {full_port.MIN_TOKENS}" in flat
+    assert full_port.RECORD_SCHEMA in flat
+
+
+def test_the_skill_says_results_written_in_prepare_are_set_aside():
+    flat = " ".join(skill_text().split())
+    assert "moved aside unread" in flat and "evidence/port-check.json" in flat
+
+
+def test_the_skill_names_no_lease_tool_and_no_machine_path():
+    text = skill_text()
+    assert "gozer" not in text.lower()
+    assert "/home/" not in text and "/mnt/" not in text
+
+
+def test_the_skill_shows_how_a_failed_test_is_recorded():
+    flat = " ".join(skill_text().split())
+    assert "`runs` false" in flat and "`failure`" in flat

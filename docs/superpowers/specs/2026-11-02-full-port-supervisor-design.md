@@ -61,7 +61,7 @@ The stage keeps the shape every hardware stage already has:
 1. Prepare (agent). Writes the port under `stages/2/port/` (model code) and a check script, then `hw_test.json` and
    `handoff.json`. The coder reads the stage 0 delta, the stage 1 reference and the nearest model's TT code as examples.
 2. The supervisor sets aside any result file written during prepare (`swap_prepare.set_aside_results`, which now also covers
-   `evidence/port-check.json`), then runs the one command under a lease. It parks the coder when no board is free, as for the
+   `evidence/port-check.json`), then runs that single command under a lease. It parks the coder when no board is free, as for the
    weights-only stage 2.
 3. Finish (agent). Reads the test output and writes `result.json`.
 4. The gate decides.
@@ -101,11 +101,11 @@ slice 4.
 | Slice | Content | Issue |
 |---|---|---|
 | 1 (this PR) | Opt-in flag, route for class `full-port`, stage 2 skill and gate, pause before stage 3, block code | this PR |
-| 2 | Supervisor-owned `port_check.py` template and a port module interface (load, prefill, decode step), so the agent writes only model code | filed |
-| 3 | Stage 3 (full model on the configured chips) and stage 4 (shrink) for full ports, using the hardware test list (`hwtests.py`) | filed |
-| 4 | Residency estimator from safetensors headers, used before stage 2 to say how many chips a port needs | filed |
-| 5 | Stage 0: a weight-repack class for models like Sage-A1.5 whose only difference is the tensor layout of experts | filed |
-| 6 | Stages 5 and 6 for full ports: a serving check with a pinned acceptance corpus that the server replays at boot, then quality and benchmark with repeats | filed |
+| 2 | Supervisor-owned `port_check.py` template and a port module interface (load, prefill, decode step), so the agent writes only model code | #325 |
+| 3 | Stage 3 (full model on the configured chips) and stage 4 (shrink) for full ports, using the hardware test list (`hwtests.py`) | #326 |
+| 4 | Residency estimator from safetensors headers, used before stage 2 to say how many chips a port needs | #327 |
+| 5 | Stage 0: a weight-repack class for models like Sage-A1.5 whose only difference is the tensor layout of experts | #328 |
+| 6 | Stages 5 and 6 for full ports: a serving check with a pinned acceptance corpus that the server replays at boot, then quality and benchmark with repeats | #329 |
 
 ## 5. Not decided here
 

@@ -24,7 +24,7 @@ from orchard import narrate
 from orchard.stages import STAGES
 from orchard.status import classify_pause, stage_rows
 
-REASONS = ("needs-new-model-code", "restricted-head", "audio-path-unbuilt", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
+REASONS = ("needs-new-model-code", "full-port-stages-unbuilt", "restricted-head", "audio-path-unbuilt", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
            "hardware-unhealthy", "coder-unusable", "package-missing", "blocked", "unclassified")
 
 # Blocks that `tt-orchard bringup` retries by itself (orchard/cli.py). A retry resumes from the ledger with a fresh
@@ -59,6 +59,8 @@ def block_code(pause: dict) -> str | None:
         return None
     if kind == "full_port":
         return "needs-new-model-code"
+    if kind == "full_port_unbuilt":
+        return "full-port-stages-unbuilt"
     if kind == "restricted_head":
         return "restricted-head"
     if kind == "audio_unbuilt":
