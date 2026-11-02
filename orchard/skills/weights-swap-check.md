@@ -102,7 +102,16 @@ Four facts decide whether a swap works. Each was found by failing first.
    script refuses a non-empty cache that lacks its `.orchard-model` marker.
 3. The bundle's `run.sh` is run from a copy with these edits: `HERE=` points at the bundle,
    `--model` points at the model directory, the `--revision` flags are removed (a local
-   directory has no revision), and `HF_MODEL` is set to the model directory.
+   directory has no revision), and `HF_MODEL` is set to the model directory. Two forms of
+   `run.sh` are handled. In the older form the command has `--model "<nearest model id>"`. In the
+   current form the command has `--model "$HERE/model-dir"`, and `run.sh` builds that directory at
+   each start with the bundle's `prepare_model_dir.py`, from the weights named in
+   `tt_kernel_manifest.json`. No environment variable changes those weights. For the current form the
+   script therefore also replaces the line that runs `prepare_model_dir.py` with a comment, sets
+   `MODEL_WEIGHTS_DIR` in the copy, and copies the configuration files from the bundle's `base_config/`
+   (the configuration the bundle's model code was built for). The nearest model's snapshot supplies none of them.
+   `model-dir-sources.json` says which source was used (`config_from`). A `run.sh` in neither form
+   makes the script exit 2 and say so; report that message and do not edit `run.sh`.
 4. The server must be told where the new weights are. The TT runtime takes its weights directory
    from `MODEL_WEIGHTS_DIR`, then `HF_MODEL`, then the config path. The bundle's `run.sh` exports
    `HF_MODEL` as the nearest model's id, so `--model` alone gives vLLM the new config and tokenizer

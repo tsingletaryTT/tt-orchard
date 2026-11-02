@@ -24,13 +24,30 @@ The weights-swap-check skill copies this file into the stage directory and runs 
      model ships is always linked and never replaced. The copy also brings the base's sampling defaults
      (vLLM reads them from the model dir); the checks that use this directory send their own sampling
      settings. When neither snapshot has the file the script warns and goes on.
-2. `run.sh`, a copy of `<bundle_dir>/run.sh` with these edits:
+2. `run.sh`, a copy of `<bundle_dir>/run.sh` with these edits. Two forms of bundle run.sh are known, and the
+   `--model` argument tells them apart:
+   - OLDER form: `--model "<nearest_model_id>"` (quoted or unquoted), exactly once. The configuration files in
+     model-dir are copied from base_snapshot, as listed above.
+   - CURRENT form: `--model "$HERE/model-dir"` (also `${HERE}` or unquoted), exactly once. run.sh builds that
+     directory at each start by running the bundle's prepare_model_dir.py, which reads the weights repo and revision
+     from tt_kernel_manifest.json (HF_MODEL and TT_MODEL_WEIGHTS_REVISION feed only a download check, so no
+     variable can select other weights) and copies every file of the bundle's base_config/ into it. This script
+     then (a) copies the configuration files from `<bundle_dir>/base_config/` and none from base_snapshot, because
+     base_config/ holds the configuration the bundle's model code was built and tested with (the Qwen3.5 thin
+     bundle's has an edited architecture and no mrope keys), (b) replaces the single line that runs
+     prepare_model_dir.py with a comment, so the copy never rebuilds the bundle's own model-dir with the nearest
+     model's weights, and (c) rewrites `export MODEL_WEIGHTS_DIR=` as well as `export HF_MODEL=`. The bundle
+     needs `base_config/` with a config.json, exactly one line that runs prepare_model_dir.py, and no other
+     mention of `$HERE/model-dir`. A graft.json in the bundle is not applied: the drafter handling below decides,
+     and `graft_mtp` is the way to graft. A command that matches neither form, or both, exits 2 with a message
+     that names both forms.
+   Both forms get these edits:
    - the `HERE=...` line becomes `HERE="<bundle_dir>"` (exactly once), so the copy still finds
      the bundle's venv and model code;
-   - `--model "<nearest_model_id>"` (quoted or unquoted) becomes `--model <model-dir>` (exactly once);
    - ` --revision <40 hex>` and ` --tokenizer-revision <40 hex>` are deleted, because a local
      directory has no revision. Each may appear at most once; an absent one is reported.
-   - every `export HF_MODEL=...` line becomes `export HF_MODEL="<model-dir>"`. The TT runtime
+   - every `export HF_MODEL=...` line becomes `export HF_MODEL="<model-dir>"`, and every `export MODEL_WEIGHTS_DIR=...`
+     line becomes `export MODEL_WEIGHTS_DIR="<model-dir>"`. The TT runtime
      takes its weights directory from MODEL_WEIGHTS_DIR, then HF_MODEL, then the config path.
      The bundle sets HF_MODEL to the nearest model's id, which resolves to that model's HF cache,
      so `--model <model-dir>` alone serves the BASE weights. An absent line is reported; it is not
@@ -132,8 +149,11 @@ def load_config() -> dict:
     return cfg
 
 
-def build_model_dir(base: Path, new: Path) -> tuple[Path, list[str], list[str], list[str]]:
-    """Make model-dir from scratch. Returns (path, copied, linked, absent link names)."""
+def build_model_dir(base: Path, new: Path, config_dir: Path | None = None) -> tuple[Path, list[str], list[str], list[str]]:
+    """Make model-dir from scratch. Returns (path, copied, linked, absent link names). The configuration files are
+    COPIED from `config_dir` (every regular file in it, as the current bundles' prepare_model_dir.py does) when it is
+    given, else the COPIED names from `base`. A name that new_snapshot also has is then replaced by a link to it and
+    leaves `copied`."""
     md = HERE_DIR / "model-dir"
     if md.is_symlink():
         fail(f"{md} is a symlink; remove it so this script can build a real directory")
@@ -141,11 +161,17 @@ def build_model_dir(base: Path, new: Path) -> tuple[Path, list[str], list[str], 
         shutil.rmtree(md)      # only ever a directory this script built: copies and symlinks
     md.mkdir()
     copied = []
-    for name in COPIED:
-        src = base / name
-        if src.is_file():
-            shutil.copyfile(src, md / name)        # follows the snapshot link to the blob
-            copied.append(name)
+    if config_dir is not None:
+        for src in sorted(config_dir.iterdir()):
+            if src.is_file():
+                shutil.copyfile(src, md / src.name)
+                copied.append(src.name)
+    else:
+        for name in COPIED:
+            src = base / name
+            if src.is_file():
+                shutil.copyfile(src, md / name)        # follows the snapshot link to the blob
+                copied.append(name)
     names = list(LINKED) + sorted(p.name for p in new.glob("*.safetensors"))
     linked, absent = [], []
     for name in names:
@@ -153,12 +179,17 @@ def build_model_dir(base: Path, new: Path) -> tuple[Path, list[str], list[str], 
         if not src.exists():
             absent.append(name)
             continue
+        if os.path.lexists(md / name):      # the model's own file replaces a configuration copy of it
+            os.unlink(md / name)
+            copied.remove(name)
         os.symlink(os.path.realpath(src), md / name)
         linked.append(name)
-    if FALLBACK_COPY in absent and (base / FALLBACK_COPY).is_file():
+    if FALLBACK_COPY in absent and FALLBACK_COPY not in copied and (base / FALLBACK_COPY).is_file():
         shutil.copyfile(base / FALLBACK_COPY, md / FALLBACK_COPY)      # follows the snapshot link to the blob
         absent.remove(FALLBACK_COPY)
         copied.append(FALLBACK_COPY)
+    elif FALLBACK_COPY in absent and FALLBACK_COPY in copied:
+        absent.remove(FALLBACK_COPY)           # the bundle's base_config/ already supplied one
     for name in REQUIRED_LINKS:
         if name not in linked:
             fail(f"{name} is not in new_snapshot {new}")
@@ -268,8 +299,12 @@ def snapshot_revision(snapshot: Path) -> str | None:
     return snapshot.name if REVISION.fullmatch(snapshot.name) else None
 
 
+CONFIG_FROM_BUNDLE = "bundle base_config/"
+CONFIG_FROM_SNAPSHOT = "nearest model's snapshot"
+
+
 def sources_record(base: Path, new: Path, nearest: str, copied: list[str], linked: list[str],
-                   absent: list[str], eos: list[int]) -> dict:
+                   absent: list[str], eos: list[int], config_from: str = CONFIG_FROM_SNAPSHOT) -> dict:
     """Where each file of model-dir came from. Weights are one entry with a count."""
     files = []
     for name in copied:
@@ -286,7 +321,7 @@ def sources_record(base: Path, new: Path, nearest: str, copied: list[str], linke
     else:
         sampling = "none"
     return {"schema": 1, "base_model": nearest, "base_revision": snapshot_revision(base),
-            "model_revision": snapshot_revision(new), "files": files,
+            "model_revision": snapshot_revision(new), "config_from": config_from, "files": files,
             "weights": {"source": "model", "how": "link", "count": sum(n.endswith(".safetensors") for n in linked)},
             "absent": sorted(absent), "sampling_defaults_from": sampling, "eos_token_ids": eos}
 
@@ -548,19 +583,62 @@ def drop_device_sampling(text: str, bundle: Path) -> tuple[str, str]:
             "moves to the host; on-device sampling is certified only on 1x4, 1x8 and 1x1 meshes)")
 
 
+# The two forms of bundle run.sh. See the module docstring.
+OLDER_FORM, CURRENT_FORM = "older", "current"
+HERE_MODEL = r'"?\$(?:\{HERE\}|HERE)/model-dir"?'                         # "$HERE/model-dir", "${HERE}/model-dir", $HERE/model-dir
+CURRENT_MODEL_RE = r"--model\s+" + HERE_MODEL + r"(?=\s|$)"
+PREPARE_LINE_RE = r'^[ \t]*"?\$PYBIN"?[ \t]+"?\$(?:\{HERE\}|HERE)/prepare_model_dir\.py"?[ \t]*$'
+PREPARE_REPLACEMENT = ("# prepare_swap.py built model-dir. The bundle's prepare_model_dir.py is not run here: it would rebuild "
+                       "the bundle's own model-dir with the nearest model's weights.")
+
+
+def older_model_re(nearest: str) -> str:
+    return r'--model\s+(?:"' + re.escape(nearest) + r'"|' + re.escape(nearest) + r')(?=\s|$)'
+
+
+def run_script_form(text: str, nearest: str, where: Path) -> str:
+    """OLDER_FORM or CURRENT_FORM, by whichever `--model` argument matches. Exits 2 when none or more than one does."""
+    n_old = len(re.findall(older_model_re(nearest), text))
+    n_cur = len(re.findall(CURRENT_MODEL_RE, text))
+    if n_old + n_cur == 1:
+        # Any other --model option (either spelling) could override the one this script rewrites when the server parses the command.
+        every = re.findall(r"(?<![\w-])--model(?:=\S*|\s+\S+)", "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#")))
+        if len(every) != 1:
+            fail(f"{where} has {len(every)} --model options and the swap rewrites one; an additional --model option "
+                 f"({', '.join(every)}) could override the model directory. Remove it or edit the script by hand")
+        return OLDER_FORM if n_old else CURRENT_FORM
+    if n_old and n_cur:
+        fail(f'{where} has --model "{nearest}" ({n_old}) and --model "$HERE/model-dir" ({n_cur}), so it is in both forms; '
+             "expected one --model argument")
+    found = f"found {n_old + n_cur}" if n_old + n_cur else "found 0"
+    fail(f'expected exactly one --model argument in {where}, either --model "{nearest}" (the older form) or '
+         f'--model "$HERE/model-dir" (the current form, which builds model-dir with prepare_model_dir.py); {found}')
+
+
 def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
                     drafter_off: bool = False, explicit_drafter_off: bool = False,
                     drafter_reason: str = "the new model has no mtp.* tensors, so the speculative drafter "
-                                          "that needs the MTP head is switched off") -> tuple[str, list[str]]:
-    """Apply the edits. Returns (new text, notes about optional edits that did not apply)."""
+                                          "that needs the MTP head is switched off",
+                    form: str | None = None) -> tuple[str, list[str]]:
+    """Apply the edits. Returns (new text, notes about optional edits that did not apply). `form` is run_script_form's
+    answer; it is worked out here when not given."""
+    where = bundle / "run.sh"
+    form = form or run_script_form(text, nearest, where)
     text, n = re.subn(r"^HERE=.*$", lambda m: f'HERE="{bundle}"', text, flags=re.MULTILINE)
     if n != 1:
-        fail(f"expected exactly one HERE= line in {bundle / 'run.sh'}, found {n}")
-    model_re = r'--model\s+(?:"' + re.escape(nearest) + r'"|' + re.escape(nearest) + r')(?=\s|$)'
-    text, n = re.subn(model_re, lambda m: f"--model {shlex.quote(str(model_dir))}", text)
-    if n != 1:
-        fail(f'expected exactly one --model "{nearest}" in {bundle / "run.sh"}, found {n}')
+        fail(f"expected exactly one HERE= line in {where}, found {n}")
     notes = []
+    if form == OLDER_FORM:
+        text, n = re.subn(older_model_re(nearest), lambda m: f"--model {shlex.quote(str(model_dir))}", text)
+    else:
+        text, n = re.subn(CURRENT_MODEL_RE, lambda m: f"--model {shlex.quote(str(model_dir))}", text)
+        text, p = re.subn(PREPARE_LINE_RE, lambda m: PREPARE_REPLACEMENT, text, flags=re.MULTILINE)
+        if p != 1:
+            fail(f'expected exactly one line that runs "$HERE/prepare_model_dir.py" in {where}, found {p}. A current-form '
+                 "bundle rebuilds its own model-dir with it at each start, and the copy must not")
+        notes.append("the line that runs prepare_model_dir.py was replaced by a comment (the bundle's own model-dir is not rebuilt)")
+    if n != 1:
+        fail(f'expected exactly one --model argument in {where}, found {n}')
     text, n = re.subn(r"^([ \t]*)export[ \t]+HF_MODEL=.*$",
                       lambda m: f'{m.group(1)}export HF_MODEL="{model_dir}"', text, flags=re.MULTILINE)
     if n == 0:
@@ -568,6 +646,14 @@ def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
                      "HF_MODEL and MODEL_WEIGHTS_DIR itself)")
     else:
         notes.append(f'export HF_MODEL="{model_dir}" ({n} line(s) rewritten)')
+    # The TT runtime reads MODEL_WEIGHTS_DIR before HF_MODEL, and an export in run.sh overrides what serve_and_compare.py puts in the environment.
+    text, n = re.subn(r"^([ \t]*)export[ \t]+MODEL_WEIGHTS_DIR=.*$",
+                      lambda m: f'{m.group(1)}export MODEL_WEIGHTS_DIR="{model_dir}"', text, flags=re.MULTILINE)
+    if n:
+        notes.append(f'export MODEL_WEIGHTS_DIR="{model_dir}" ({n} line(s) rewritten)')
+    if form == CURRENT_FORM and re.search(HERE_MODEL, text):
+        fail(f"{where} mentions the bundle's own $HERE/model-dir somewhere other than the --model argument, "
+             "HF_MODEL and MODEL_WEIGHTS_DIR; a copy would still read the nearest model's weights from it")
     if drafter_off:
         text, n = re.subn(r"^([ \t]*)export[ \t]+QWEN36_DRAFTER=.*$",
                           lambda m: f'{m.group(1)}export QWEN36_DRAFTER=""', text, flags=re.MULTILINE)
@@ -604,12 +690,21 @@ def main() -> int:
             fail(f"{label} {d} is not a directory")
     model_dir = HERE_DIR / "model-dir"
     graft = cfg.get("graft_mtp") is True
-    vocab = vocab_facts(base, new)
     plan = plan_mtp_graft(base, new) if graft else None
+    config_dir, form = None, OLDER_FORM
     if bundle is not None:
         src_run = bundle / "run.sh"
         if not src_run.is_file():
             fail(f"{src_run} does not exist")
+        form = run_script_form(src_run.read_text(encoding="utf-8"), cfg["nearest_model_id"], src_run)
+        if form == CURRENT_FORM:
+            config_dir = bundle / "base_config"
+            if not (config_dir / "config.json").is_file():
+                fail(f"{src_run} is a current-form run.sh, which builds model-dir from the bundle's base_config/, and "
+                     f"{config_dir / 'config.json'} does not exist")
+    # The vocabulary is compared with the configuration that is served: the bundle's base_config/ in the current form.
+    vocab = vocab_facts(config_dir or base, new)
+    if bundle is not None:
         # Edit in memory first, so a failed edit leaves no run.sh and no half-built model-dir.
         mtp = has_mtp_tensors(new)
         no_drafter_why = None
@@ -624,14 +719,17 @@ def main() -> int:
                                       cfg["nearest_model_id"], model_dir,
                                       drafter_off=((mtp is False or bool(vocab["trimmed"]) or forced_off) and not graft),
                                       explicit_drafter_off=bool(vocab["trimmed"]) or forced_off,
-                                      **({"drafter_reason": no_drafter_why} if no_drafter_why else {}))
+                                      form=form, **({"drafter_reason": no_drafter_why} if no_drafter_why else {}))
+        if form == CURRENT_FORM and (bundle / "graft.json").is_file() and not graft:
+            notes.append("the bundle's graft.json is not applied (its prepare_model_dir.py is not run); the drafter is set by "
+                         "the rules above, and graft_mtp true in swap_config.json grafts the nearest model's mtp.* tensors")
         if graft:
             notes.append("the drafter and on-device sampling stay on: the nearest model's mtp.* tensors are "
                          "grafted into model-dir")
         elif mtp is None:
             notes.append("could not tell whether the new model has mtp.* tensors (no readable weight index or "
                          "shard headers), so the drafter setting is unchanged")
-    model_dir, copied, linked, absent = build_model_dir(base, new)
+    model_dir, copied, linked, absent = build_model_dir(base, new, config_dir)
     if vocab["trimmed"] and "config.json" in copied:
         write_vocab(model_dir, vocab["model"])
     grafted = None
@@ -641,7 +739,8 @@ def main() -> int:
         grafted = {"from": cfg["nearest_model_id"], "base_revision": snapshot_revision(base), "file": GRAFT_SHARD,
                    "source_file": plan["file"], "tensors": len(plan["entries"]), "bytes": total, "sha256": digest}
     eos = stop_token_ids(model_dir)
-    record = sources_record(base, new, cfg["nearest_model_id"], copied, linked, absent, eos)
+    record = sources_record(base, new, cfg["nearest_model_id"], copied, linked, absent, eos,
+                            CONFIG_FROM_BUNDLE if config_dir else CONFIG_FROM_SNAPSHOT)
     if grafted:
         record["mtp_graft"] = grafted
         record["files"].append({"name": GRAFT_SHARD, "source": "base", "how": "grafted",
@@ -654,7 +753,7 @@ def main() -> int:
     record["tokenizer_eos_served"] = None if tok_id is None or not eos else tok_id in eos
     (HERE_DIR / SOURCES_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"model-dir: {model_dir}")
-    print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
+    print(f"  copied from {'the bundle base_config/' if config_dir else 'base_snapshot'}: {', '.join(copied) or 'nothing'}")
     print(f"  linked from new_snapshot: {len(linked)} files ({', '.join(linked)})")
     if grafted:
         print(f"  grafted {grafted['tensors']} mtp.* tensors of {grafted['from']} as {GRAFT_SHARD} "
@@ -663,7 +762,8 @@ def main() -> int:
         print(f"  config.json: vocab_size set to the new model's {vocab['model']} (the nearest model's is {vocab['base']}); "
               "the speculative drafter is switched off because it works on the nearest model's token ids")
     if FALLBACK_COPY in copied:
-        print(f"  {FALLBACK_COPY}: new_snapshot has none; copied from base_snapshot")
+        origin = "the bundle's base_config/" if config_dir and (config_dir / FALLBACK_COPY).is_file() else "base_snapshot"
+        print(f"  {FALLBACK_COPY}: new_snapshot has none; copied from {origin}")
     origin = {"model": "the new model's", "base": "the nearest model's", "none": None}[record["sampling_defaults_from"]]
     print(f"  {SOURCES_NAME}: " + (f"sampling defaults and stop tokens are {origin} generation_config.json"
                                    if origin else "no generation_config.json, so no sampling defaults or stop tokens"))
