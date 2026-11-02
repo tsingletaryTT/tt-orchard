@@ -275,18 +275,39 @@ def as_floats(values) -> list:
     return list(values)
 
 
-def media_file(path) -> Path:
-    """The file a pair row's media entry names: under MEDIA_DIR of the run directory, a plain relative path, with no link anywhere on the way
-    (the parent directories are resolved and must stay under the media directory). Raises OSError for anything else."""
+def read_media(path, max_bytes: int = MEDIA_MAX) -> bytes:
+    """The bytes of the media file a pair row names: a plain relative path of one file directly under MEDIA_DIR, opened one component at a time
+    beneath the run directory with O_NOFOLLOW on every component (a directory or the file replaced by a link, between one read and the next,
+    is refused and nothing outside the run directory is read), no blocking, regular files only, under `max_bytes`. Raises OSError."""
     if not isinstance(path, str) or not path.startswith(MEDIA_DIR) or "\0" in path or ".." in Path(path).parts:
         raise OSError(f"media path {str(path)[:80]!r} is not a plain path under {MEDIA_DIR}")
-    full = RUN_DIR / path
-    root = (RUN_DIR / MEDIA_DIR).resolve()
-    if RUN_DIR.resolve() not in root.parents:             # the media directory itself is a link out of the run directory
-        raise OSError(f"{MEDIA_DIR} is not inside the run directory")
-    if full.parent.resolve() != root and root not in full.parent.resolve().parents:
-        raise OSError(f"media path {path} leaves {MEDIA_DIR}")
-    return full
+    name = path[len(MEDIA_DIR):]
+    if not name or "/" in name:
+        raise OSError(f"media path {path} is not a file directly under {MEDIA_DIR}")
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(RUN_DIR, os.O_RDONLY | os.O_DIRECTORY | cloexec)          # the run directory itself is the anchor
+    try:
+        for part in MEDIA_DIR.strip("/").split("/"):
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | cloexec, dir_fd=fd)
+    finally:
+        os.close(fd)
+    try:
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(file_fd, 1 << 16)
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError(f"{path} is larger than {max_bytes} bytes")
+            chunks.append(chunk)
+    finally:
+        os.close(file_fd)
 
 
 def load_media(entries: list) -> list:
@@ -294,7 +315,7 @@ def load_media(entries: list) -> list:
     checked against the sha256 the pair file names (a file changed after the parent hashed it is refused here, at the point of use)."""
     out = []
     for e in entries:
-        data = read_regular(media_file(e["path"]), MEDIA_MAX)
+        data = read_media(e["path"])
         if sha_bytes(data) != e["sha256"]:
             raise OSError(f"media file {e['path']} does not match the sha256 in the pair file")
         out.append({"kind": e["kind"], "name": Path(e["path"]).name, "sha256": e["sha256"], "data": data})
@@ -556,7 +577,7 @@ def check_media(rows: list) -> list:
             if files > MEDIA_FILES_MAX:
                 raise CheckFailed(f"{PAIRS} lists more than {MEDIA_FILES_MAX} media files")
             try:
-                data = read_regular(media_file(e["path"]), MEDIA_MAX)
+                data = read_media(e["path"])
             except OSError as exc:
                 raise CheckFailed(f"{PAIRS} row {i}: the media file {str(e['path'])[:80]!r} cannot be read: {exc}")
             total += len(data)

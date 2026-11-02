@@ -199,9 +199,9 @@ FULL_PORT_STAGES_UNBUILT = ("stage 2 of the full-port route passed; stages 3 to 
 SCORING_STAGES_UNBUILT = ("stage 2 of the scoring route passed (the model is a reranker or an embedding model: stage 1 recorded Hugging Face scores or "
                           "vectors and stage 2's check compared the port with them); stages 3 to 6 for a scoring model are not built yet "
                           "(docs/superpowers/specs/2026-11-02-scoring-model-check-design.md), so a person reviews the result and decides whether to go on")
-SCORING_NOT_ROUTED = ("stage 0 found a scoring model (a reranker or an embedding model) whose class has no scoring route yet; the route runs for "
-                      "class weights-only, and for class full-port with --full-port, and the generic stages would compare generated tokens "
-                      "that this model does not produce, so a person decides whether to go on")
+SCORING_NOT_ROUTED = ("stage 0 found a scoring model (a reranker or an embedding model) that has no scoring route yet; the route runs for "
+                      "class weights-only, and for class full-port with --full-port, when the run has a model= input and no text runtime serves it, "
+                      "and the generic stages would compare generated tokens that this model does not produce, so a person decides whether to go on")
 RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted head (its lm_head is replaced by sidecar "
                    "rows); the harness does not serve that, so a person decides whether to go on")
 AUDIO_UNBUILT = ("stage 0 found an audio model; the audio path (its stage 1 and stage 2) is not built yet, and the text stages would "
@@ -1020,17 +1020,21 @@ class Supervisor:
             e["event"] == "decision" and e["data"].get("reason") == FULL_PORT_STAGES_UNBUILT for e in entries)
 
     def _scoring_route(self) -> tuple[str, bool]:
-        """(the run's model kind, whether the scoring route takes it), read from the ledger. A generative model never takes it."""
+        """(the run's model kind, whether the scoring route takes it), read from the ledger. A generative model never takes it. A run that
+        a text runtime serves (`spec_for` gives that runtime's stages precedence) and a run with no `model=` input (the check has no snapshot
+        to load, and the operator's input is the only snapshot it trusts) are not routed either."""
         entries = self.ledger.read()
         kind = run_model_kind(entries)
-        return kind, scoring_routed(kind, run_path(entries, self.run_dir), run_class(entries, self.run_dir), full_port_enabled(entries))
+        routed = (scoring_routed(kind, run_path(entries, self.run_dir), run_class(entries, self.run_dir), full_port_enabled(entries))
+                  and text_runtime.selected(entries) is None and bool(self.inputs.get("model")))
+        return kind, routed
 
     def _scoring_unrouted(self) -> bool:
         """Stage 0 found a reranker or an embedding model whose class has no scoring route, and the run has not yet paused for it. Unattended,
-        it always blocks, as the other unbuilt routes do. A run the text runtime serves is left alone."""
+        it always blocks, as the other unbuilt routes do."""
         entries = self.ledger.read()
         kind, routed = self._scoring_route()
-        if kind not in model_kind.SCORING_KINDS or routed or text_runtime.selected(entries) is not None:
+        if kind not in model_kind.SCORING_KINDS or routed:
             return False
         return self.unattended or not any(e["event"] == "decision" and e["data"].get("reason") == SCORING_NOT_ROUTED for e in entries)
 
@@ -2258,8 +2262,10 @@ class Supervisor:
 
     def _classify_kind(self) -> dict:
         """The model kind of this run (orchard/model_kind.py): the operator's `--model-kind`, else the model card's pipeline_tag, else the
-        architecture names, else generative. The record names which one decided and goes in stage 0's `stage_end`, where a resume reads it."""
-        return model_kind.classify(self.inputs.get("model"), self.kind_override)
+        architecture names, else generative. The record names which one decided and goes in stage 0's `stage_end`, where a resume reads it.
+        The snapshot is the run's `model=` input, else the one stage 0's triage config names (the directory stage 0 itself read)."""
+        model_dir = self.inputs.get("model") or stage0_scan._triage_dirs(self.run_dir / "stages" / "0")[0]
+        return model_kind.classify(model_dir, self.kind_override)
 
     def _stage_0_hazard_scan(self, stage_dir: Path, kind: str = "generative") -> None:
         """Write stages/0/hazard-scan.json (orchard/stage0_scan.py) and record it in the ledger. The scan predicts kernel hazards from the

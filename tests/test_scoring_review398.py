@@ -114,3 +114,99 @@ def test_an_attended_full_port_scoring_run_pauses_once_before_stage_3_and_one_re
     pauses = [d["reason"] for d in rig.decisions() if d.get("decision") == "pause"]
     assert supervisor.FULL_PORT_STAGES_UNBUILT not in pauses and pauses.count(supervisor.SCORING_STAGES_UNBUILT) == 1
     assert started(rig, 3)
+
+
+# ---- review round 2 ----------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("reason", [supervisor.SCORING_STAGES_UNBUILT, supervisor.SCORING_NOT_ROUTED])
+def test_the_status_hint_for_a_scoring_pause_says_a_person_decides(reason):
+    from orchard import status
+    facts = {"state": "paused", "pause": {"kind": status.classify_pause({"reason": reason})[0]}, "control_pending": False,
+             "disk": {"run_dir_free_gb": 500}, "pauses_at_stage": 1, "quiet_s": 0}
+    hint = next(h for name, test, h in status.HINT_RULES if test(facts))
+    assert facts["pause"]["kind"] == "scoring" and "needs a decision" in hint
+
+
+def test_a_scoring_model_that_a_text_runtime_serves_pauses_before_stage_1_instead_of_comparing_tokens(rig, monkeypatch):
+    rig.args.unattended = True
+    make(rig)
+    # The text runtime is selected after stage 0 (its selection reads the ledger); spec_for gives its stages precedence over the scoring ones.
+    monkeypatch.setattr(supervisor.text_runtime, "selected", lambda entries: object() if any(e["event"] == "stage_end" and e["stage"] == 0 for e in entries) else None)
+    never_wait(rig)
+    rig.run()
+    blocks = [d for d in rig.decisions() if d["decision"] == "blocked"]
+    assert blocks and blocks[0]["code"] == "scoring-route" and "no scoring route" in blocks[0]["reason"]
+    assert not started(rig, 1)
+
+
+def test_a_run_with_no_model_input_cannot_take_the_scoring_route_and_says_so(tmp_path):
+    from run_fakes import FILES, argv
+    from test_supervisor import Rig
+    from test_supervisor_scoring import snapshot
+    snap = snapshot(tmp_path)
+    r = Rig(tmp_path)
+    try:
+        r.args = supervisor.parse(argv(tmp_path, r.tiers, r.chip_server.endpoint, chips=2))        # no --input model=
+        r.args.unattended = True
+        # stage 0 names its snapshot in its triage config, the way the template's input does; the run itself was given none
+        make(r)
+        inner = r.script
+
+        def script(request):
+            from run_fakes import where
+            if where(request) == (0, "run"):
+                (r.run_dir / "stages" / "0" / "triage_config.json").write_text('{"model_snapshot": "%s"}' % snap)
+            return inner(request)
+        r.script = script
+        never_wait(r)
+        r.run()
+        assert r.ends(0)[0]["model_kind"]["kind"] == "reranker"             # the kind came from the snapshot stage 0 named
+        blocks = [d for d in r.decisions() if d["decision"] == "blocked"]
+        assert blocks and blocks[0]["code"] == "scoring-route" and "model= input" in blocks[0]["reason"]
+        assert not started(r, 1)
+    finally:
+        r.close()
+
+
+# A port that replaces the media directory with a link to a copy while it embeds the first input: the next request reads the file by path.
+SWAP_DIR = '''
+import ttnn, random, os, shutil
+def load(model_dir, mesh_device):
+    return {}
+def embed(model, ids, media=None):
+    n = ids[0] - 1
+    if n == 0:
+        base = "stages/1/evidence/reference"
+        shutil.copytree(base + "/media", base + "/media-copy")
+        shutil.rmtree(base + "/media")
+        os.symlink("media-copy", base + "/media")
+    r = random.Random(n)
+    return [r.uniform(-1, 1) for _ in range(8)]
+def close(model):
+    pass
+'''
+
+
+def test_a_media_directory_swapped_for_a_link_while_the_port_runs_is_refused_even_with_identical_bytes(tmp_path):
+    from scoring_check_fakes import run_template
+    rows = embed_rows({0: [media_entry("a.png", PNG)], 9: [media_entry("a.png", PNG)]})
+    run, stage, _ = make_embed_run(tmp_path, SWAP_DIR, rows=rows, media_files={"a.png": PNG})
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "failed at 'embed'" in done.stdout and "a.png" not in done.stderr, done.stdout
+    assert not (stage / "evidence" / "scoring-check.json").exists()
+
+
+def test_a_link_in_any_component_of_the_media_path_is_refused_by_the_template_reader(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("scoring_check_template_review", sc.TEMPLATE)
+    tpl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tpl)
+    run, stage, _ = media_run(tmp_path)
+    monkeypatch.setattr(tpl, "RUN_DIR", run)
+    path = sc.MEDIA_DIR + "a.png"
+    assert tpl.read_media(path) == PNG
+    ev = run / "stages" / "1" / "evidence"
+    (ev).rename(run / "stages" / "1" / "evidence-real")
+    os.symlink(run / "stages" / "1" / "evidence-real", ev)             # a link in the middle of the path, to a directory inside the run
+    with pytest.raises(OSError):
+        tpl.read_media(path)
