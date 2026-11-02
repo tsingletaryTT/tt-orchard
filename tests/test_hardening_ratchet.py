@@ -75,6 +75,15 @@ def test_only_a_comment_can_mark_a_line_as_right_to_keep(tmp_path):
     assert _count(tmp_path, multi) == 0
 
 
+def test_the_marker_needs_the_word_ok_and_a_reason(tmp_path):
+    import pytest
+    for comment in ("# hardening: ok", "# hardening: okay", "# hardening: ok ", "# hardening: ok-ish", "# hardening: okay our own file",
+                    "# hardening ok our own file", "# Hardening: ok our own file"):
+        assert _count(tmp_path, f"a = p.read_text()  {comment}\n") == 1, comment
+    for comment in ("# hardening: ok our own file", "#hardening: ok state file we wrote", "# note. hardening: ok written by this program"):
+        assert _count(tmp_path, f"a = p.read_text()  {comment}\n") == 0, comment
+
+
 def test_a_file_that_does_not_parse_is_an_error_not_a_zero(tmp_path):
     import pytest
     with pytest.raises(SyntaxError):

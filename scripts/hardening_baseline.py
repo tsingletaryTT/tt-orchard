@@ -9,7 +9,7 @@ repository kept finding that such a call on a file something else controls can b
 or write through a refused path (docs/pr-hardening-checklist.md, items 1 and 2). New code should use orchard/safeio.py.
 
 Calls are found in the syntax tree, so spacing and line breaks do not hide a call, and text inside a string or a comment is not a
-call. A call is left out of the count when a comment on one of its lines says `hardening: ok <reason>`; the same words inside a
+call. A call is left out of the count when a comment on one of its lines says `hardening: ok <reason>` (the words `hardening: ok`, a space and a reason; a bare `ok` or `okay` does not count); the same words inside a
 string do not count as that comment. A file that does not parse raises `SyntaxError`.
 
     python3 scripts/hardening_baseline.py            # print the counts
@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import re
 import sys
 import tokenize
 from pathlib import Path
@@ -27,7 +28,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tests" / "hardening_baseline.json"
 EXEMPT_FILES = {"orchard/safeio.py"}          # the module that implements the guarded access
-EXEMPT_MARK = "hardening: ok"
+# `hardening: ok` as whole words, then whitespace, then a reason of at least two characters (not `okay`, not a bare `ok`)
+EXEMPT_RE = re.compile(r"hardening: ok(?=\s)\s+\S{2,}")
 RAW_METHODS = {"read_text", "read_bytes", "write_text", "write_bytes"}
 
 
@@ -35,7 +37,7 @@ def _marked_lines(source: str) -> set[int]:
     """Line numbers that carry a comment with the exemption words. Strings never count."""
     marked: set[int] = set()
     for tok in tokenize.generate_tokens(io.StringIO(source).readline):
-        if tok.type == tokenize.COMMENT and EXEMPT_MARK in tok.string:
+        if tok.type == tokenize.COMMENT and EXEMPT_RE.search(tok.string):
             marked.add(tok.start[0])
     return marked
 
