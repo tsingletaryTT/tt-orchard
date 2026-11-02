@@ -170,3 +170,32 @@ def test_a_record_for_another_stage_does_not_vouch_for_the_marker(tmp_path, ledg
     record_test(ledger, run, 3, d / "test-result.json")
     _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
     assert not resumed
+
+
+def test_an_agents_evidence_entry_for_the_marker_does_not_vouch_for_it(tmp_path, ledger):
+    """Copilot, PR 313: the agent writes test-result.json and links it from evidence/. AgentStep records that file with what='evidence file'.
+    Only the entry _run_test appends (it carries the test's returncode and timed_out) vouches for a marker."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text('{"returncode": 0}')
+    ledger.append("evidence", 2, what="evidence file", phase="prepare", **evidence_record(run, d / "test-result.json"))
+    _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert not resumed
+
+
+def test_a_symlink_from_evidence_to_the_marker_is_not_recorded_and_a_restart_reruns_the_test(tmp_path, ledger):
+    from orchard.agent import AgentStep
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text('{"returncode": 0}')
+    (d / "result.json").write_text("{}")
+    (d / "evidence" / "link.json").symlink_to("../test-result.json")
+    (d / "evidence" / "real.txt").write_text("notes")
+    step = AgentStep.__new__(AgentStep)
+    step.run_dir, step.evidence_dir, step.ledger, step.stage, step.phase = run, d / "evidence", ledger, 2, "prepare"
+    step._seen, step._event = {}, lambda *a, **k: None
+    step._record_new_evidence()
+    recorded = [e["data"]["path"] for e in ledger.read() if e["event"] == "evidence"]
+    assert recorded == ["stages/2/evidence/real.txt"]
+    again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert not resumed and not (again / "test-result.json").exists()

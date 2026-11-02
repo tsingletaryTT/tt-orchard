@@ -1938,8 +1938,11 @@ SUPERVISOR_MARKER = "test-result.json"      # written by Supervisor._run_test, w
 def _recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
     """Does the ledger hold an evidence entry for stage `n` with this file's path and sha256? Supervisor._run_test appends one right
     after it writes the file. A file an agent wrote, or one changed after the record, has none."""
+    # Only _run_test's entry has `returncode` and `timed_out`. AgentStep's "evidence file" entries (an agent can link the marker from
+    # evidence/) never do, so they do not count.
     return any(e.get("event") == "evidence" and e.get("stage") == n and e["data"].get("path") == rec["path"]
-               and e["data"].get("sha256") == rec["sha256"] for e in ledger.read())
+               and e["data"].get("sha256") == rec["sha256"] and "returncode" in e["data"] and "timed_out" in e["data"]
+               for e in ledger.read())
 
 
 def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple[Path, bool]:

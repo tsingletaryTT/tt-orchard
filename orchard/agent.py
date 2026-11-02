@@ -437,8 +437,10 @@ class AgentStep:
     def _snapshot(self) -> dict[str, tuple[int, int]]:
         out = {}
         if self.evidence_dir.is_dir():
+            root = os.path.realpath(self.evidence_dir)
             for f in sorted(self.evidence_dir.rglob("*")):
-                if f.is_file():
+                # A link that leaves evidence/ (to test-result.json, say) is not evidence the agent produced there.
+                if f.is_file() and os.path.realpath(f).startswith(root + os.sep):
                     st = f.stat()
                     out[str(f)] = (st.st_size, st.st_mtime_ns)
         return out
