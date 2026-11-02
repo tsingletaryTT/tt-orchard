@@ -569,6 +569,12 @@ def test_a_heading_inside_a_code_block_is_not_a_section():
     "# toy\n## Expected performance\n| Metric | P150 |\n| --- | --- |\n## Limitations\nOne limit.\n",
     # a numeric line that is not a table row
     "# toy\n## Expected performance\n| decode: 31.2 tok/s\n## Limitations\nOne limit.\n",
+    # a body cell past the header's width is discarded by Markdown
+    "# toy\n## Expected performance\n| Metric | Value |\n| --- | --- |\n| decode | n/a | 31.2 |\n## Limitations\nOne limit.\n",
+    # an indented code block is not a table
+    "# toy\n## Expected performance\n\n    | Metric | Value |\n    | --- | --- |\n    | decode | 31.2 |\n## Limitations\nOne limit.\n",
+    # a separator with a different cell count than the header
+    "# toy\n## Expected performance\n| Metric | Value |\n| --- |\n| decode | 31.2 |\n## Limitations\nOne limit.\n",
     # a digit only in the row label
     "# toy\n## Expected performance\n| a | b |\n| --- | --- |\n| 70B decode | n/a |\n## Limitations\nOne limit.\n",
     # a digit only in the header
@@ -576,6 +582,25 @@ def test_a_heading_inside_a_code_block_is_not_a_section():
 ])
 def test_a_card_whose_only_evidence_is_a_fence_or_a_malformed_table_fails(text):
     assert can.card_problems(text, "catalog"), text
+
+
+@pytest.mark.parametrize("text", [
+    "# toy\n<!--\n## Expected performance\n| a | b |\n| --- | --- |\n| x | 1 |\n## Limitations\nOne limit.\n-->\n",
+    "# toy\n## Expected performance\n| a | b |\n| --- | --- |\n| x | 1 |\n## Limitations\n<!-- fill in the limits -->\n",
+    "# toy\n## Expected performance\n<!-- | a | b |\n| --- | --- |\n| x | 1 | -->\n## Limitations\nOne limit.\n",
+])
+def test_html_comments_are_not_card_content(text):
+    assert can.card_problems(text, "catalog"), text
+
+
+def test_text_around_a_comment_still_counts():
+    text = GOOD_CARD.replace("Greedy decoding only.", "<!-- note --> Greedy decoding only.")
+    assert can.card_problems(text, "catalog") == []
+
+
+def test_a_table_without_outer_pipes_counts():
+    text = "# toy\n## Expected performance\nMetric | Value\n--- | ---\ndecode | 31.2\n## Limitations\nOne limit.\n"
+    assert can.card_problems(text, "catalog") == []
 
 
 def test_a_longer_fence_is_closed_only_by_an_equal_or_longer_one():

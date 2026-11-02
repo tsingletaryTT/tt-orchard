@@ -707,13 +707,35 @@ def vllm_problems(pkg: Path, spec: Spec, run_sh: str) -> list[str]:
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
+def _without_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    """`line` with its HTML comments removed, and whether a comment is still open at its end (a comment may span lines)."""
+    out = []
+    while line:
+        if in_comment:
+            end = line.find("-->")
+            if end < 0:
+                break
+            line, in_comment = line[end + 3:], False
+        else:
+            start = line.find("<!--")
+            if start < 0:
+                out.append(line)
+                break
+            out.append(line[:start])
+            line, in_comment = line[start + 4:], True
+    return "".join(out), in_comment
+
+
 def _sections(text: str) -> dict[str, list[str]]:
     """The body lines of each level-2 heading of a card, keyed by the heading text. A fenced code block (the fence's own character,
     closed by a fence of that character at least as long and with nothing after it) holds no headings and adds no lines to a section."""
     sections: dict[str, list[str]] = {}
-    current, fence = None, None
+    current, fence, in_comment = None, None, False
     for line in text.splitlines():
         m = _FENCE.match(line)
+        if fence is None:
+            line, in_comment = _without_comments(line, in_comment)
+            m = _FENCE.match(line)
         if fence is not None:
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
                 fence = None
@@ -734,23 +756,32 @@ def _sections(text: str) -> dict[str, list[str]]:
 
 
 def _cells(line: str) -> list[str]:
-    """The cells of a table row: a line that starts with a pipe, split on pipes, with the outer empty pieces dropped."""
-    parts = line.strip().split("|")
-    return [c.strip() for c in parts[1:-1]] if line.strip().endswith("|") else [c.strip() for c in parts[1:]]
+    """The cells of a table row. The outer pipes are optional in Markdown, so one leading and one trailing pipe are dropped if present."""
+    body = line.strip()
+    body = body[1:] if body.startswith("|") else body
+    body = body[:-1] if body.endswith("|") else body
+    return [c.strip() for c in body.split("|")]
+
+
+def _is_row(line: str) -> bool:
+    """A table row has a pipe and is not indented four or more spaces (that is an indented code block)."""
+    return "|" in line and not re.match(r" {4}|\t", line)
 
 
 def _has_measured_row(lines: list[str]) -> bool:
-    """True when the lines hold a table (a header row, then a separator row of dashes) with a later body row that has a cell starting
-    with a number in a cell after the first (the label). A digit in the header or a label, or a pipe-prefixed line outside a table, does not count."""
+    """True when the lines hold a table (a header row, then a separator row with one dash cell per header cell) and a later body row has
+    a cell starting with a number. Markdown drops body cells past the header's width, the first cell is the label, and a digit in the
+    header or the label does not count. Rows are the lines that follow the separator without a blank line."""
     for i in range(1, len(lines)):
-        sep = lines[i].strip()
-        if not (sep.startswith("|") and re.fullmatch(r"[|:\- ]+", sep) and "-" in sep and lines[i - 1].lstrip().startswith("|")):
+        if not (_is_row(lines[i]) and _is_row(lines[i - 1])):
+            continue
+        sep, head = _cells(lines[i]), _cells(lines[i - 1])
+        if len(sep) != len(head) or not all(re.fullmatch(r":?-+:?", c) for c in sep):
             continue
         for row in lines[i + 1:]:
-            if not row.lstrip().startswith("|"):
+            if not _is_row(row):
                 break
-            cells = _cells(row)
-            if len(cells) >= 2 and any(re.match(r"[~<>]?\d", c) for c in cells[1:]):
+            if any(re.match(r"[~<>]?\d", c) for c in _cells(row)[1:len(head)]):
                 return True
     return False
 
