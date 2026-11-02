@@ -16,7 +16,7 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
-    tt-orchard updates [--json] [--offline] [--refresh] [--tt-metal-dir DIR] [--updates-config FILE]
+    tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
@@ -327,6 +327,8 @@ def _parser() -> argparse.ArgumentParser:
     up_.add_argument("--json", action="store_true", help="print the rows as JSON")
     up_.add_argument("--offline", action="store_true", help="make no network call; show the last cached result")
     up_.add_argument("--refresh", action="store_true", help="ignore the cache (default: reuse a result under 6 hours old)")
+    up_.add_argument("--print-timer", action="store_true", help="print a systemd timer and a cron line that run the check daily, as text; installs nothing")
+    up_.add_argument("--fail-when-unknown", action="store_true", help="exit 3 when every row is unknown (for a scheduled run)")
     up_.add_argument("--tt-metal-dir", help="the host tt-metal tree, read only (default ~/tt-metal, or $ORCHARD_TT_METAL_DIR)")
     up_.add_argument("--updates-config", metavar="FILE", help="TOML with family, coder_packages, authors, repos, cache_hours "
                                                               "(default config/updates.toml when it exists)")

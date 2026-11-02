@@ -41,7 +41,9 @@ ready_contains = ['"chunked_prefill": true']
 
 Paths are relative to the directory the command runs in (`--base` changes that). A source must be a regular file inside it.
 
-Optional `[can] card_profile = "catalog"` (2026-11-01) makes the gate read the card in the bundle. It requires a `## Expected performance` section that holds a table row with a number, and a `## Limitations` section with text. These are the two sections tt-model's `card_publish_gaps()` names as required, and a graduated tt-inference-server entry carries the same two things (measured targets and stated known issues). Without the key the gate does not read the card. The Qwen3.5 can sets it. A heading inside a fenced code block does not count.
+Optional `[can] card_profile = "catalog"` (2026-11-01) makes the gate read the card in the bundle. It requires a `## Expected performance` section that holds a table row with a number, and a `## Limitations` section with text. These are the two sections tt-model's `card_publish_gaps()` names as required, and a graduated tt-inference-server entry carries the same two things (measured targets and stated known issues). Without the key the gate does not read the card. The Qwen3.5 can sets it. A heading inside a fenced code block does not count. `card_profile = "catalog-measured"` (issue 365) adds three checks: the section says whether the kernel cache was warm or cold, how many runs stand behind the numbers, and the host load during the measurement (`docs/can-cards.md`, "Review questions for a performance claim").
+
+A bundle file under a directory named `vllm`, `vllm_tt_plugin`, `tt_vllm_plugin`, `vllm-tt-plugin` or `vllm_tt` changes the vLLM plugin or vLLM (issue 362, tenstorrent/skills PR 40). The spec needs a `[plugin_edits."PATH"]` table with `reason` and `checked` for each such file, and the gate lists the files and refuses one with no entry. See `orchard/skills/canning.md`.
 
 ## The commands
 
