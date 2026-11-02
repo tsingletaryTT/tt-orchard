@@ -251,6 +251,8 @@ SERVER = textwrap.dedent('''
                 self._send(200, {"object": "list", "data": [{"id": "served-name"}]})
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0)); req = json.loads(self.rfile.read(n))
+            if self.path == "/v1/completions":       # this stand-in is chat only; the boot check records the raw-completion probes as not checked
+                self._send(404, {"error": "no such route"}); return
             open(SEEN, "a").write(json.dumps(req) + "\\n")
             if req.get("stream"):
                 self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Connection", "close"); self.end_headers()
