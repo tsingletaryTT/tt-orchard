@@ -1,0 +1,4 @@
+target = "0.9.95"
+summary = "Residency estimate reports data-parallel copies for a model that fits one chip, a stage 0 note for a small model sharded across chips, and docs/can-cards.md gains a reference card section"
+pr = 367
+kind = "feature"
