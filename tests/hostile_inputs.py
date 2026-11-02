@@ -433,9 +433,81 @@ def _stages_suite_reasons_in(base: Path):
     return stages._suite_reasons_in(base / "input.json", base)
 
 
-def _stages_read_json(base: Path):
+def _stages_read_checked(base: Path):
     from orchard import stages
-    return stages._read_json(base / "input.json")
+    reasons: list = []
+    return stages._read_checked(base / "input.json", "input.json", reasons), reasons
+
+
+def _stages_evidence_record(base: Path):
+    from orchard import stages
+    return stages.evidence_record(base, base / "input.json")
+
+
+def _stages_sha256(base: Path):
+    from orchard import stages
+    return stages._sha256(base / "input.json")
+
+
+def _stages_locate(base: Path):
+    """The gate's test of an evidence path: it never raises and gives a named reason, whatever the file is."""
+    from orchard import stages
+    return stages.locate(base, "input.json")[1]
+
+
+def _graft_trial_read_decision(base: Path):
+    from orchard import graft_trial
+    return graft_trial.read_decision(base)
+
+
+def _graft_trial_read_json(base: Path):
+    from orchard import graft_trial
+    return graft_trial._read_json(base / "input.json")
+
+
+def _graft_trial_decision_problems(base: Path):
+    from orchard import graft_trial
+    return graft_trial.decision_problems(base, base)
+
+
+def _graft_trial_refusals(base: Path):
+    from orchard import graft_trial
+    return graft_trial.refusals(base, base)
+
+
+def _sampling_choice_decision_problems(base: Path):
+    from orchard import sampling_choice
+    return sampling_choice.decision_problems(base, base)
+
+
+def _sampling_choice_refusals(base: Path):
+    from orchard import sampling_choice
+    return sampling_choice.refusals(base, base)
+
+
+def _safeio_read_json_checked(base: Path):
+    from orchard import safeio
+    return safeio.read_json_checked(base / "input.json", max_bytes=1 << 20)
+
+
+def _safeio_read_text_checked(base: Path):
+    from orchard import safeio
+    return safeio.read_text_checked(base / "input.json", max_bytes=1 << 20)
+
+
+def _safeio_sha256_file(base: Path):
+    from orchard import safeio
+    return safeio.sha256_file(base / "input.json", max_bytes=1 << 20)
+
+
+def _hwtests_load_plan(base: Path):
+    from orchard import hwtests
+    return hwtests.load_plan(base)
+
+
+def _hwtests_read_plan(base: Path):
+    from orchard import hwtests
+    return hwtests.read_plan(base, required=None, max_chips=4, budget_s=100.0, home="/nohome")
 
 
 def _stages_gate_delta(base: Path):
@@ -744,7 +816,21 @@ READERS: list[Reader] = [
     Reader("stages._evidence_json", _stages_evidence_json, rel="evidence/input.json"),
     Reader("stages.hw_record_problem", _stages_hw_record, rel="tests/2/test-result.json"),
     Reader("stages._suite_reasons_in", _stages_suite_reasons_in),
-    Reader("stages._read_json", _stages_read_json),
+    Reader("hwtests.load_plan", _hwtests_load_plan, rel="tests/plan.json"),
+    Reader("hwtests.read_plan", _hwtests_read_plan, rel="hw_tests.json"),
+    Reader("stages._read_checked", _stages_read_checked),
+    Reader("stages.evidence_record", _stages_evidence_record, documented=(_SafeReadError,)),
+    Reader("stages._sha256", _stages_sha256, documented=(_SafeReadError,)),
+    Reader("stages.locate", _stages_locate),
+    Reader("graft_trial.read_decision", _graft_trial_read_decision, rel="graft-decision.json"),
+    Reader("graft_trial._read_json", _graft_trial_read_json),
+    Reader("graft_trial.decision_problems", _graft_trial_decision_problems, rel="graft-decision.json"),
+    Reader("graft_trial.refusals", _graft_trial_refusals, rel="graft-decision.json"),
+    Reader("sampling_choice.decision_problems", _sampling_choice_decision_problems, rel="sampling-decision.json"),
+    Reader("sampling_choice.refusals", _sampling_choice_refusals, rel="sampling-decision.json"),
+    Reader("safeio.read_json_checked", _safeio_read_json_checked),
+    Reader("safeio.read_text_checked", _safeio_read_text_checked),
+    Reader("safeio.sha256_file", _safeio_sha256_file, documented=(_SafeReadError,)),
     Reader("stages.gate_delta", _stages_gate_delta, rel="stage/delta.json"),
     Reader("package.read_reported", _package_read_reported, rel="reported-results.json", documented=(_PackageError,)),
     Reader("package._json", _package_json, documented=(_PackageError,)),
@@ -901,11 +987,9 @@ UNREGISTERED_MODULES = (
     'cli.py',
     'demo_env.py',
     'fake_server.py',
-    'graft_trial.py',
     'granite_package.py',
     'handoff.py',
     'hardware_check.py',
-    'hwtests.py',
     'hwtool.py',
     'kernelladder.py',
     'lab.py',
@@ -920,7 +1004,6 @@ UNREGISTERED_MODULES = (
     'reported_cmd.py',
     'research/ports.py',
     'rolefit.py',
-    'safeio.py',
     'sizing.py',
     'suite_control.py',
     'telegraph.py',

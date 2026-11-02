@@ -46,7 +46,7 @@ from typing import Callable, Iterator, Sequence
 __all__ = [
     "SafeReadError", "ReadFailed", "PathRefused", "NotRegular", "TooLarge", "ChangedWhileReading", "NotText", "NotJson",
     "WrongType", "BadValue", "BadHeader", "IncompleteScan", "AppendBroken",
-    "read_bytes", "read_prefix", "read_json", "read_jsonl", "resolved", "parse_json_bytes", "open_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
+    "read_bytes", "read_prefix", "read_json", "Checked", "read_json_checked", "read_text_checked", "sha256_file", "read_jsonl", "resolved", "parse_json_bytes", "open_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
     "ScanResult", "atomic_write", "append_line", "finite_number", "whole_number", "bounded_str", "safetensors_header",
     "SafetensorsHeader", "TensorEntry", "DTYPE_BITS",
 ]
@@ -554,6 +554,98 @@ def resolved(path) -> str:
         return os.path.realpath(os.fspath(path))
     except (OSError, ValueError, TypeError):
         return os.fspath(path) if isinstance(path, (str, bytes)) or hasattr(path, "__fspath__") else ""
+
+
+# ------------------------------------------------------------------------------------- an outcome as a value
+
+@dataclass(frozen=True)
+class Checked:
+    """What reading one file of a run came to, for a caller that must tell an absent file from a refused one.
+
+    `value` is the parsed JSON or the text when the read worked. `missing` is True when there is no file. `reason` is the short plain
+    sentence of the refusal (a FIFO, a device, a link, a file over the cap, a path with a null byte, text that is not JSON) and is None
+    when the read worked or the file is missing. Nothing in it holds the file's content.
+
+    The point of the type: a reader that turns every failure into None makes a refused file look like no file, and a gate that
+    treats no file as "nothing to check" then passes the refused one. `problem(name)` gives the sentence a gate adds to its
+    reasons, or None when the file is read or absent."""
+    value: object = None
+    missing: bool = False
+    reason: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return not self.missing and self.reason is None
+
+    @property
+    def refused(self) -> bool:
+        return self.reason is not None
+
+    def problem(self, name: str) -> str | None:
+        """"<name> is not readable: <reason>" for a refused file, None for a file that was read or is missing."""
+        return f"{name} is not readable: {self.reason}" if self.refused else None
+
+
+def _checked(read: Callable[[], object]) -> Checked:
+    try:
+        return Checked(value=read())
+    except SafeReadError as exc:
+        if isinstance(exc, ReadFailed) and "ENOENT" in exc.reason:
+            return Checked(missing=True)
+        return Checked(reason=exc.reason)
+
+
+def read_json_checked(path, *, max_bytes: int, anchor: int | None = None, expect=None) -> Checked:
+    """`read_json` as a `Checked`: a missing file is `missing`, any other failure is a `reason`. Never raises SafeReadError."""
+    return _checked(lambda: read_json(path, max_bytes=max_bytes, anchor=anchor, expect=expect))
+
+
+def read_text_checked(path, *, max_bytes: int, anchor: int | None = None, errors: str = "strict") -> Checked:
+    """The text of the regular file at `path` (read as `read_bytes` reads) as a `Checked`. `errors` is the decoding policy; with
+    "strict", bytes that are not UTF-8 are a refusal."""
+    def read():
+        data = read_bytes(path, max_bytes=max_bytes, anchor=anchor)
+        try:
+            return data.decode("utf-8", errors=errors)
+        except UnicodeDecodeError:
+            raise NotText("the file is not UTF-8 text") from None
+    return _checked(read)
+
+
+def sha256_file(path, *, max_bytes: int, anchor: int | None = None) -> str:
+    """The sha256 (hex) of the regular file at `path`, read in chunks so a large evidence file is not held in memory.
+
+    Opens as `read_bytes` opens (`O_NOFOLLOW | O_NONBLOCK`, `fstat` on the same descriptor, regular files only). A file larger than
+    `max_bytes` is `TooLarge` before any read and is also refused if it grows past the cap while it is read. A file that changes size
+    or modification time during the read is `ChangedWhileReading`. With `anchor` (an open directory descriptor) the path is relative and every component
+    is opened beneath it with `O_NOFOLLOW` (see `read_bytes`), so a parent directory swapped for a link is refused. Raises only SafeReadError."""
+    import hashlib
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+        raise ValueError("max_bytes must be a whole number, zero or more")
+    fd = _open_for_read(path, anchor)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise NotRegular("the file is not a regular file")
+        if st.st_size > max_bytes:
+            raise TooLarge(f"the file is larger than {max_bytes} bytes")
+        digest, total = hashlib.sha256(), 0
+        while total <= max_bytes:
+            chunk = os.read(fd, min(_READ_CHUNK, max_bytes + 1 - total))
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+        if total > max_bytes:
+            raise TooLarge(f"the file is larger than {max_bytes} bytes")
+        after = os.fstat(fd)
+        if total != st.st_size or after.st_size != st.st_size or after.st_mtime_ns != st.st_mtime_ns:
+            raise ChangedWhileReading("the file changed while it was read")
+        return digest.hexdigest()
+    except OSError as exc:
+        raise _os_failure(exc) from None
+    finally:
+        os.close(fd)
 
 
 def read_jsonl(path, *, max_bytes: int, anchor: int | None = None, max_depth: int = MAX_JSON_DEPTH,

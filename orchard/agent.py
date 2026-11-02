@@ -66,6 +66,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchard import safeio
 from orchard.canary import CanaryError, post_json
 from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_TIMEOUT_S,
                               AGENT_THINKING, TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
@@ -449,7 +450,13 @@ class AgentStep:
         now = self._snapshot()
         for path, stamp in now.items():
             if self._seen.get(path) != stamp:
-                rec = evidence_record(self.run_dir, path)
+                try:
+                    rec = evidence_record(self.run_dir, path)
+                except safeio.SafeReadError as exc:
+                    # The file stays out of the ledger's evidence; the reason is named, and the stage gate refuses a path it cannot use.
+                    self.ledger.append("decision", self.stage, decision="an evidence file was refused and not recorded", phase=self.phase,
+                                       file=os.path.relpath(path, self.run_dir), reason=exc.reason)
+                    continue
                 self.ledger.append("evidence", self.stage, what="evidence file", phase=self.phase, **rec)
                 self._event("evidence", name=rec["path"])
         self._seen = now
@@ -472,8 +479,11 @@ class AgentStep:
 
     def _end(self, status: str, turns: int, final_text: str = "", detail: str = "") -> Outcome:
         if self.log_path.exists():
-            self.ledger.append("evidence", self.stage, what="transcript", phase=self.phase,
-                               status=status, turns=turns, **evidence_record(self.run_dir, self.log_path))
+            try:
+                rec = evidence_record(self.run_dir, self.log_path)
+            except safeio.SafeReadError as exc:
+                rec = {"unreadable": exc.reason}
+            self.ledger.append("evidence", self.stage, what="transcript", phase=self.phase, status=status, turns=turns, **rec)
         return Outcome(status, turns, final_text, detail)
 
     @staticmethod

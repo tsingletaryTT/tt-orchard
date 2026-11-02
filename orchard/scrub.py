@@ -20,6 +20,8 @@ import re
 import socket
 from pathlib import Path
 
+from orchard import safeio
+
 TOKEN_PATTERNS = (
     ("a Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{30,}")),
     ("a GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})")),
@@ -41,6 +43,18 @@ def scrub_text(text: str, *, hostname: str, home: str) -> list[str]:
     return hits
 
 
+SCRUB_MAX_BYTES = 256 * 1024 * 1024     # the largest text file the scrub reads; a ledger copy or a log is far smaller
+
+
+def _scrub_read(path: Path) -> tuple[str | None, str | None]:
+    """(text, None) for `path` read through the bounded reader (no link, no FIFO or device, a size cap), or (None, what) where `what` says the
+    file could not be searched. A file the scrub cannot read is reported, never skipped and never read without a bound."""
+    got = safeio.read_text_checked(path, max_bytes=SCRUB_MAX_BYTES, errors="replace")
+    if got.ok:
+        return got.value, None
+    return None, f"cannot be searched ({got.reason or 'the file is missing'})"
+
+
 def scrub_bundle(bundle, *, hostname: str | None = None, home: str | None = None) -> list[str]:
     """Every hit in the bundle's text files, as 'relative/path: what was found'."""
     hostname = socket.gethostname() if hostname is None else hostname
@@ -50,8 +64,11 @@ def scrub_bundle(bundle, *, hostname: str | None = None, home: str | None = None
     for f in sorted(root.rglob("*")):
         if not f.is_file() or f.name in SKIP_NAMES:
             continue
-        text = f.read_text(encoding="utf-8", errors="replace")
-        hits += [f"{f.relative_to(root)}: {what}" for what in scrub_text(text, hostname=hostname, home=home)]
+        text, problem = _scrub_read(f)
+        if problem:
+            hits.append(f"{f.relative_to(root)}: {problem}")
+        else:
+            hits += [f"{f.relative_to(root)}: {what}" for what in scrub_text(text, hostname=hostname, home=home)]
     return hits
 
 
@@ -107,7 +124,10 @@ def scrub_package(root, *, hostname: str | None = None, home: str | None = None,
                 continue
             if suffix in BINARY_SUFFIXES:
                 continue
-            text = f.read_text(encoding="utf-8", errors="replace")
+            text, problem = _scrub_read(f)
+            if problem:
+                hits.append((rel, problem))
+                continue
             hits += [(rel, what) for what in scrub_text(text, hostname=hostname, home=home)]
             if (namespace and rel not in NAMESPACE_FILES
                     and re.search(rf"(?<![\w.-]){re.escape(namespace)}/", text)):

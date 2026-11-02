@@ -114,16 +114,22 @@ def test_a_swap_config_that_names_neither_serving_type_is_refused_when_stage_2_r
     assert not g.ok and any("swap_config.json" in r and "how this configuration serves" in r for r in g.reasons)
 
 
-def test_an_unreadable_swap_config_passes_as_before_when_stage_2_recorded_no_decision(tmp_path):
+def test_a_swap_config_that_is_there_and_refused_is_a_reason_even_when_stage_2_recorded_no_decision(tmp_path):
+    """Issue 287: this used to pass, so a refused file read as an absent one. A swap_config.json that is missing still passes (next test)."""
     sd, run = gate(tmp_path)
     write(run, "stages/4/configs/2/swap_config.json", "not json")
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok and any("swap_config.json is not readable" in r for r in g.reasons)
+
+
+def test_a_missing_swap_config_passes_as_before_when_stage_2_recorded_no_decision(tmp_path):
+    sd, run = gate(tmp_path)
     assert gate_mesh_swap(sd, run, required=(2,)).ok
 
 
-def test_an_unreadable_swap_config_passes_as_before_when_the_decision_file_is_not_a_decision(tmp_path):
+def test_a_missing_swap_config_passes_as_before_when_the_decision_file_is_not_a_decision(tmp_path):
     sd, run = gate(tmp_path)
     write(run, f"stages/2/{DECISION_FILE}", {"choice": "maybe", "reason": "x"})
-    write(run, "stages/4/configs/2/swap_config.json", "not json")
     assert gate_mesh_swap(sd, run, required=(2,)).ok
 
 

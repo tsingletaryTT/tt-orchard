@@ -264,3 +264,25 @@ def test_a_symlink_from_evidence_to_the_marker_is_not_recorded_and_a_restart_rer
     assert recorded == ["stages/2/evidence/real.txt"]
     again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
     assert not resumed and not (again / "test-result.json").exists()
+
+
+@pytest.mark.parametrize("shape", ["oversize", "link_out"])
+def test_a_marker_the_bounded_reader_refuses_is_not_a_resume_point_and_does_not_crash_the_resume(tmp_path, ledger, monkeypatch, shape):
+    """PR 345 review: evidence_record now raises SafeReadError for a marker over the cap or a link that leaves the run directory. The resume
+    names the reason in the ledger and moves the stage directory aside, the way it does for a marker it cannot trust."""
+    from orchard import stages
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    marker = d / "test-result.json"
+    if shape == "oversize":
+        monkeypatch.setattr(stages, "EVIDENCE_HASH_MAX", 16)
+        marker.write_text('{"returncode": 0, "timed_out": false, "pad": "' + "x" * 100 + '"}')
+    else:
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}")
+        marker.symlink_to(outside)
+    again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert not resumed and not (again / "test-result.json").exists()
+    assert (run / "stages" / "2.partial-1").is_dir()
+    entry = next(e["data"] for e in ledger.read() if e["data"].get("decision") == "marker cannot be read and is not a resume point")
+    assert entry["marker"] == "test-result.json" and entry["reason"]

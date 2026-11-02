@@ -45,6 +45,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchard import safeio
 from orchard.defaults import CHIPS_PER_BOARD
 from orchard.handoff import NOTE_KEYS
 from orchard.stages import evidence_record, hw_record_path, hw_record_problem
@@ -53,6 +54,7 @@ SCRIPTS = {"serve_and_compare.py": "bundle", "serve_and_compare_container.py": "
 # Tensor caches that belong to installed packages or to hand builds, relative to the operator's
 # home. A test's tt_cache must not be inside one of them.
 SHARED_CACHE_DIRS = (".cache/tt-model", ".cache/qwen36-src-build")
+JSON_MAX = 16 * 1024 * 1024       # the largest plan, handoff note, swap config or test record the supervisor reads
 PLAN = "tests/plan.json"
 
 
@@ -80,11 +82,11 @@ def read_plan(stage_dir, *, required, max_chips: int, budget_s: float,
               home) -> tuple[list[HwTest], list[str]]:
     """The tests in hw_tests.json sorted by chip count, and every reason not to run them."""
     stage_dir = Path(stage_dir)
-    try:
-        data = json.loads((stage_dir / "hw_tests.json").read_text(encoding="utf-8"))
-        note = json.loads((stage_dir / "handoff.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return [], [f"hw_tests.json and handoff.json must exist and be JSON: {exc}"]
+    got = {name: safeio.read_json_checked(stage_dir / name, max_bytes=JSON_MAX) for name in ("hw_tests.json", "handoff.json")}
+    bad = [g.problem(name) or f"{name} is missing" for name, g in got.items() if not g.ok]
+    if bad:
+        return [], [f"hw_tests.json and handoff.json must exist and be JSON: {'; '.join(bad)}"]
+    data, note = got["hw_tests.json"].value, got["handoff.json"].value
     problems = []
     if not isinstance(note, dict) or any(note.get(k) in (None, "") for k in NOTE_KEYS):
         problems.append(f"handoff.json needs {', '.join(NOTE_KEYS)}")
@@ -114,11 +116,11 @@ def read_plan(stage_dir, *, required, max_chips: int, budget_s: float,
         if not (cdir / t["script"]).is_file():
             problems.append(f"{where}: configs/{n}/{t['script']} does not exist")
             continue
-        try:
-            cache = json.loads((cdir / "swap_config.json").read_text(encoding="utf-8")).get("tt_cache")
-        except (OSError, ValueError, AttributeError) as exc:
-            problems.append(f"{where}: configs/{n}/swap_config.json must exist and be a JSON object: {exc}")
+        cfg = safeio.read_json_checked(cdir / "swap_config.json", max_bytes=JSON_MAX, expect=dict)
+        if not cfg.ok:
+            problems.append(f"{where}: configs/{n}/swap_config.json must exist and be a JSON object: {cfg.reason or 'it is missing'}")
             continue
+        cache = cfg.value.get("tt_cache")
         if not isinstance(cache, str) or not os.path.isabs(cache):
             problems.append(f"{where}: configs/{n}/swap_config.json needs an absolute tt_cache, got {cache!r}")
             continue
@@ -148,9 +150,7 @@ def read_plan(stage_dir, *, required, max_chips: int, budget_s: float,
 def _write_json(path: Path, data) -> None:
     """Whole or not at all: a crash never leaves half a file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    safeio.atomic_write(path, json.dumps(data, indent=2).encode("utf-8"), mode=0o644)      # replaces the path; a FIFO or link there is never opened
 
 
 def write_plan(stage_dir, tests: list[HwTest]) -> Path:
@@ -161,10 +161,12 @@ def write_plan(stage_dir, tests: list[HwTest]) -> Path:
 
 def load_plan(stage_dir) -> list[HwTest] | None:
     """The validated list from tests/plan.json, or None when the file is missing or unreadable."""
+    got = safeio.read_json_checked(Path(stage_dir) / PLAN, max_bytes=JSON_MAX, expect=dict)
+    if not got.ok:
+        return None
     try:
-        data = json.loads((Path(stage_dir) / PLAN).read_text(encoding="utf-8"))
-        return [HwTest(**t) for t in data["tests"]]
-    except (OSError, ValueError, KeyError, TypeError):
+        return [HwTest(**t) for t in got.value["tests"]]
+    except (KeyError, TypeError):
         return None
 
 
@@ -184,8 +186,8 @@ def write_summary(stage_dir, tests: list[HwTest]) -> Path:
     out = []
     for t in tests:
         path = hw_record_path(stage_dir, t.chips)
-        out.append(json.loads(path.read_text(encoding="utf-8")) if path.is_file()
-                   else {"chips": t.chips, "missing": True})
+        got = safeio.read_json_checked(path, max_bytes=JSON_MAX, expect=dict)
+        out.append(got.value if got.ok else {"chips": t.chips, "missing": True, **({"unreadable": got.reason} if got.refused else {})})
     path = Path(stage_dir) / "test-result.json"
     _write_json(path, {"tests": out})
     return path
@@ -228,7 +230,12 @@ def unrecorded(entries: list[dict], stage_dir, run_dir, stage: int) -> list[str]
             latest[d.get("path")] = d.get("sha256")
     out = []
     for path in sorted(Path(stage_dir).glob("tests/*/test-result.json")):
-        rec = evidence_record(run_dir, path)
+        try:
+            rec = evidence_record(run_dir, path)
+        except safeio.SafeReadError as exc:
+            # A record the bounded reader refuses (over the cap, a link out of the run directory) is not one the supervisor wrote.
+            out.append(f"{os.path.relpath(path, run_dir)} was not written by the supervisor: it cannot be read ({exc.reason})")
+            continue
         if latest.get(rec["path"]) != rec["sha256"]:
             out.append(f"{rec['path']} was not written by the supervisor: its sha256 is not the one "
                        "the ledger recorded")
