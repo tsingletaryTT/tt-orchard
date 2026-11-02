@@ -9,7 +9,7 @@ repository kept finding that such a call on a file something else controls can b
 or write through a refused path (docs/pr-hardening-checklist.md, items 1 and 2). New code should use orchard/safeio.py.
 
 Calls are found in the syntax tree, so spacing and line breaks do not hide a call, and text inside a string or a comment is not a
-call. A call is left out of the count when a comment on one of its lines says `hardening: ok <reason>` (the words `hardening: ok`, a space and a reason; a bare `ok` or `okay` does not count); the same words inside a
+call. A call is left out of the count when a comment on one of its lines says `hardening: ok <reason>` (the words `hardening: ok`, a space and a reason of at least three characters; a bare `ok` or `okay` does not count); the same words inside a
 string do not count as that comment. A file that does not parse raises `SyntaxError`.
 
     python3 scripts/hardening_baseline.py            # print the counts
@@ -28,8 +28,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tests" / "hardening_baseline.json"
 EXEMPT_FILES = {"orchard/safeio.py"}          # the module that implements the guarded access
-# `hardening: ok` as whole words, then whitespace, then a reason of at least two characters (not `okay`, not a bare `ok`)
-EXEMPT_RE = re.compile(r"hardening: ok(?=\s)\s+\S{2,}")
+# `hardening: ok` as whole words, then whitespace, then a reason of at least three non-space characters in all (not `okay`, not a bare `ok`)
+EXEMPT_RE = re.compile(r"hardening: ok(?=\s)\s+(?=(?:\s*\S){3})")
 RAW_METHODS = {"read_text", "read_bytes", "write_text", "write_bytes"}
 
 
