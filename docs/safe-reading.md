@@ -20,6 +20,8 @@ one place with its own tests.
 | A file of JSON lines (one value per line) | `read_jsonl(path, max_bytes=..., expect=dict)` | the list of values, every line parsed with the same guards; the error names the line number and holds none of its content |
 | JSON text or bytes already in memory (a ledger line, an HTTP body) | `parse_json_bytes(data, max_bytes=...)` | the same guards without the file |
 | The raw bytes of a small file | `read_bytes(path, max_bytes=...)` | the bytes, never more than the cap |
+| A file of a run where a missing file and a refused file must give different answers | `read_json_checked(path, max_bytes=...)`, `read_text_checked(path, max_bytes=...)` | a `Checked` with `value`, `missing` and `reason`; `problem(name)` is the sentence for a gate |
+| The sha256 of a file that may be large (an evidence entry) | `sha256_file(path, max_bytes=...)` | the hex digest, read in chunks, with the same open and size guards as `read_bytes` |
 | A directory to walk | `pinned_root(dir)` then `scan_beneath(pin)` | the entries, plus a result that says whether a limit was hit |
 | A path made of parts you got from outside | `open_beneath(root_fd, parts)` | a descriptor, or a refusal of `..`, empty, absolute and linked parts |
 | A file to write that a reader must never see half written | `atomic_write(path, data)` | all or nothing, with the temporary file removed on every failure |
@@ -136,3 +138,22 @@ except safeio.SafeReadError:
 
 The cap is the largest file the writer could legitimately produce, with room to spare. The reader keeps its own meaning for a missing or bad file. Then remove the
 reader's entries from `KNOWN_DEFECTS`; the strict `xfail` marks tell you which.
+
+## A refused file is not a missing file
+
+A reader that turns every `SafeReadError` into `None` makes a FIFO, a link to a device, an oversize file or a file holding NaN look like
+a file that is not there. A gate that treats "no file" as "nothing to check" then passes the refused file (issue 287: a refused
+`swap_config.json`, sampling decision or graft decision). The readers of a run's evidence, markers and records use `read_json_checked`
+or `read_text_checked` and keep the three outcomes apart:
+
+* the file was read: use `value`;
+* the file is missing (`missing`): the caller decides whether that is a reason;
+* the file is there and refused (`reason`): a gate adds `problem(name)` to its reasons, and the supervisor writes a ledger decision that
+  names the file and the reason.
+
+`stages.locate(run_dir, rel)` does the same for an evidence path an agent wrote: it never raises, and it names a null byte, an absolute
+path, a link that leaves the run directory, a FIFO or device, a missing file and an oversize file. `stages.evidence_record` hashes through
+`sha256_file`; a refusal is a `SafeReadError`, and `Supervisor._end_stage` turns it into a failed stage with the reason (issue 335).
+`sampling_choice.refusals` and `graft_trial.refusals` list each file their module reads that is there and refused, and both modules' gate
+checks (`decision_problems`) return those reasons first. The tests are `tests/test_run_file_readers.py` (each hostile shape in a limited
+child process) and the hostile-input registry entries for these readers.

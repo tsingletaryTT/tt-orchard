@@ -55,7 +55,7 @@ from array import array
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from orchard import can_audio, safeio
+from orchard import can_audio, safeio, served_verify
 from orchard.defaults import PACKAGE_INSTALL_TIMEOUT_S, PACKAGE_THIN_TIMEOUT_S
 from orchard.package import (PackageError, TEMPLATES, assert_no_publish, run_logged, splice_extra_args, weights_wiring_problems,
                              wire_weights)
@@ -63,6 +63,7 @@ from orchard.scrub import scrub_package
 
 MAX_SPEC_BYTES = 256 * 1024         # choice: a spec is a few kilobytes
 MAX_JSON_BYTES = 4 * 1024 * 1024    # choice: the manifest and the evidence file are a few kilobytes
+MAX_LOG_BYTES = 64 * 1024 * 1024    # choice: the most of a server log the boot check reads to look for the mesh line (a larger log is not read)
 KINDS = ("vllm", "tt-dit-server")
 SUMS_FILE = "SHA256SUMS"
 REDACTED = "redacted"
@@ -1137,6 +1138,11 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         status, body = _http("GET", f"{base}/v1/models")
         check("models", status == 200)
         ck = spec.check
+        # A vLLM server must list the model it serves, at the context length the can declares (kind tt-dit-server serves no model list).
+        probing = spec.kind != "tt-dit-server" and ck.mode == "chat"
+        if probing:
+            served_verify.record(served_verify.check_listing(status, body, declared_name=(ck.request_extra.get("model") if isinstance(ck.request_extra.get("model"), str) else None),
+                                                                           declared_context=spec.max_model_len), check, evidence)
         if ck.mode == "music":
             _music_checks(base, ck, check, evidence)
             status, _ = _http("GET", f"{base}{ck.health_path}")
@@ -1156,17 +1162,34 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
             pass
         extra.update(ck.request_extra)
         chat = f"{base}/v1/chat/completions"
+        counter_before = served_verify.scrape(base) if probing else None      # the engine's own token counter, read around the first chat request
         status, body = _http("POST", chat, {"messages": [{"role": "user", "content": ck.prompt}], "max_tokens": ck.max_tokens, **extra},
                              timeout=BOOT_REQUEST_TIMEOUT_S)
-        answer, timings = "", {}
+        answer, timings, usage = "", {}, None
         try:
             answer_obj = safeio.parse_json_bytes(body, max_bytes=MAX_JSON_BYTES, expect=dict)
             answer = answer_obj["choices"][0]["message"]["content"]
+            if not isinstance(answer, str):          # a reasoning reply may carry null content; check_reply reads the body and names the cause
+                answer = ""
             timings = answer_obj.get("timings") or {}
+            usage = answer_obj.get("usage")
         except (safeio.SafeReadError, KeyError, IndexError, TypeError):
             pass
         evidence["answer"], evidence["timings"] = answer[:400], timings
         check("chat", status == 200 and re.search(ck.expect, answer) is not None, f"status {status}; expected /{ck.expect}/")
+        if probing:
+            counter_after = served_verify.scrape(base)
+            tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+            served_verify.record(served_verify.check_reply(status, body, asked_model=extra.get("model")), check, evidence)
+            served_verify.record(served_verify.check_counter(counter_before, counter_after, completion_tokens=tokens), check, evidence)
+            if extra.get("model"):
+                for probe in served_verify.probe_completions(base, extra["model"], timeout=BOOT_REQUEST_TIMEOUT_S):
+                    served_verify.record(probe, check, evidence)
+            try:
+                log_for_mesh = safeio.read_prefix(server_log, max_bytes=MAX_LOG_BYTES).decode("utf-8", errors="replace")
+            except safeio.SafeReadError:
+                log_for_mesh = None
+            served_verify.record(served_verify.check_mesh(log_for_mesh, expected_devices=spec.device_count), check, evidence)
         if ck.min_decode_tok_s is not None:
             # a separate request for a long answer, after the first one has warmed the kernels (a short answer has no decode rate)
             rate_body = {"messages": [{"role": "user", "content": ck.rate_prompt}], "max_tokens": ck.rate_max_tokens, **extra}

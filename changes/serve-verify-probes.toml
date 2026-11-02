@@ -1,0 +1,3 @@
+target = "0.9.95"
+summary = "can boot runs read-only probes of the live server (model listing, raw completions, engine counter, mesh), and a study maps the tt-serve-model verification table."
+pr = 382

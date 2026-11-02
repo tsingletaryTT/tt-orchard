@@ -1,0 +1,4 @@
+target = "0.9.93"
+summary = "Add a tiny Qwen4-shaped checkpoint generator with a CPU reference, as a rehearsal target for the full-port path."
+pr = 356
+kind = "feature"
