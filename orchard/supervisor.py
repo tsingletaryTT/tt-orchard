@@ -1576,7 +1576,7 @@ class Supervisor:
                            path=os.path.relpath(Path(stage_dir) / stack_pins_mod.FILE, self.run_dir), sha256=sha)
         if rec["hazards"]:
             why = "; ".join(f"{h['name']}: {h['reason']}" for h in rec["hazards"])
-            self._block(0, "the stack is stale for a new run (" + why[:600] + "). Update the named parts, or run the command again to go on "
+            self._block(0, "the stack is stale for a new run (" + why[:900] + "). Update the named parts, or run the command again to go on "
                            "with these as advisories", hazards=[h["name"] for h in rec["hazards"]])
 
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):

@@ -162,7 +162,7 @@ def _below(installed: tuple, required: tuple) -> bool:
 
 
 def _entry(name: str, reason: str) -> dict:
-    return {"name": name, "reason": reason[:400]}
+    return {"name": name, "reason": reason[:800]}
 
 
 # ---- the checkpoint ---------------------------------------------------------------------------------------------------
