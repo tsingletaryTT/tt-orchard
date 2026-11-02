@@ -2962,7 +2962,7 @@ class Supervisor:
         _put(tmp, json.dumps(result, indent=2))
         os.replace(tmp, marker)         # the resume marker appears whole or not at all
         self.ledger.append("evidence", n, what=what, returncode=result["returncode"],
-                           timed_out=result["timed_out"], **evidence_record(self.run_dir, marker))
+                           timed_out=result["timed_out"], **self._moved_aside_record(marker))
         return result
 
     def _spawn(self, n: int, command: str, chips, ids, deadline: float, out_path: Path,
@@ -3202,6 +3202,20 @@ class Supervisor:
         self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
 
     def _run_listed_test(self, spec, stage_dir: Path, test, leases: list[Lease]) -> None:
+        """Run one configuration's test (`_run_listed_test_body`). A run file the bounded reader refuses while the test's chips are held
+        (an oversize output, a link) ends the test as a record that says so, never as an exception: the callers go on to the sweep, the lease
+        release and the restore of the coder, and the gate reads the record."""
+        try:
+            self._run_listed_test_body(spec, stage_dir, test, leases)
+        except safeio.SafeReadError as exc:
+            n = spec.number
+            reason = f"not completed: a run file was refused: {exc.reason}"
+            path = write_record(stage_dir, test.chips, {"config": test.chips, "command": test.command(n), "returncode": None,
+                                                        "timed_out": False, "seconds": 0, "chips": [], "not_run": reason})
+            self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache, returncode=None,
+                               timed_out=False, not_run=reason, **self._moved_aside_record(path))
+
+    def _run_listed_test_body(self, spec, stage_dir: Path, test, leases: list[Lease]) -> None:
         """Run one configuration's test on the first `test.chips` chips of `leases`, in device
         order, and write its record."""
         n = spec.number
@@ -3225,7 +3239,7 @@ class Supervisor:
             os.replace(out_dir / "output.txt", first)
             self.ledger.append("decision", n, decision="test failed at startup; resetting the test chips and trying once more",
                                config=test.chips, returncode=result["returncode"], seconds=result["seconds"],
-                               first_output=evidence_record(self.run_dir, first))
+                               first_output=self._moved_aside_record(first))
             for lease in leases:
                 self._reset_test_chips(n, test, lease)
             result = spawn()

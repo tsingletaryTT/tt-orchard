@@ -634,3 +634,88 @@ def test_the_port_check_files_are_written_over_a_fifo_or_link_and_a_refused_hw_t
         report(problems=problems, regular=regular, outside=outside.read_text())
     ''')
     assert out["problems"] == [] and all(out["regular"]) and out["outside"] == "{}", out
+
+
+# ------------------------------------------------ third Copilot review of PR 345: a refusal while the test's chips are held
+
+LISTED_TEST_SETUP = '''
+    from types import SimpleNamespace
+    from orchard import supervisor
+    S = supervisor.Supervisor
+    stages.EVIDENCE_HASH_MAX = 64 if MODE == "ok" else 4096
+    entries = []
+    sd = run / "stages" / "4"
+    spawns = []
+
+    def spawn(*a, **k):
+        spawns.append(1)
+        out = a[5]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("x" * 200)
+        if MODE == "raise":
+            raise safeio.TooLarge("the file is larger than 64 bytes")
+        return {"command": "c", "returncode": 1, "timed_out": False, "seconds": 1.0, "chips": ["a"], "output": {}}
+
+    stub = SimpleNamespace(run_dir=run, _spawn=spawn, _reset_test_chips=lambda *a: None,
+                           ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
+    stub._moved_aside_record = lambda p: S._moved_aside_record(stub, p)
+    stub._run_listed_test_body = lambda *a: S._run_listed_test_body(stub, *a)
+    test = SimpleNamespace(chips=4, boards=2, command=lambda n: "cmd", deadline_s=10.0, cache="/c")
+    lease = SimpleNamespace(chips=["a", "b", "c", "d"], dev_indices=[0, 1, 2, 3], lease_id="L")
+'''
+
+
+def test_an_oversize_first_try_output_does_not_stop_the_retry_or_the_cleanup_that_follows():
+    out = run_child('MODE = "ok"\n' + textwrap.dedent(LISTED_TEST_SETUP) + textwrap.dedent('''
+    S._run_listed_test(stub, SimpleNamespace(number=4, budget_s=100.0), sd, test, [lease])
+    first = [k["first_output"] for a, k in entries if k.get("first_output")]
+    report(spawns=len(spawns), first=first, record=(sd / "tests" / "4" / "test-result.json").is_file())
+    '''))
+    assert out["spawns"] == 2 and out["record"] and out["first"][0].get("unreadable"), out
+
+
+def test_a_refusal_in_a_listed_test_is_a_record_and_returns_so_the_lease_is_released_and_the_coder_restored():
+    """_run_listed_test returns normally; its callers then run the sweep, _give_back_test_lease and _restore_coder."""
+    out = run_child('MODE = "raise"\n' + textwrap.dedent(LISTED_TEST_SETUP) + textwrap.dedent('''
+    S._run_listed_test(stub, SimpleNamespace(number=4, budget_s=100.0), sd, test, [lease])
+    rec = json.loads((sd / "tests" / "4" / "test-result.json").read_text())
+    ev = [k for a, k in entries if a[0] == "evidence"]
+    report(rec=rec, ev=ev)
+    '''))
+    assert out["rec"]["returncode"] is None and "run file was refused" in out["rec"]["not_run"]
+    assert len(out["ev"]) == 1 and out["ev"][0]["timed_out"] is False and out["ev"][0]["sha256"], out
+
+
+@pytest.mark.parametrize("shape", ["symlink_out", "fifo", "oversize", "nan"])
+def test_a_refused_bundle_manifest_is_a_named_problem_not_an_accepted_answer(shape):
+    out = run_child(f'''
+        from orchard import swap_draft
+        swap_draft.JSON_MAX = 64
+        (run / "stages" / "0").mkdir(parents=True)
+        (run / "stages" / "0" / "delta.json").write_text(json.dumps({{"nearest_model": "right/model"}}))
+        bundle = run / "bundle"
+        bundle.mkdir()
+        if {shape!r} == "symlink_out":
+            outside.write_text(json.dumps({{"weights": {{"repo_id": "wrong/model"}}}}))
+        build({shape!r}, bundle / "tt_kernel_manifest.json")
+        cfg = run / "swap_config.json"
+        cfg.write_text(json.dumps({{"nearest_model_id": "right/model", "bundle_dir": "bundle"}}))
+        report(problem=swap_draft.nearest_problem(run, cfg))
+    ''')
+    assert out["problem"] and "tt_kernel_manifest.json is not readable" in out["problem"], out
+
+
+def test_a_manifest_without_a_repo_is_a_problem_and_a_missing_manifest_is_still_no_problem(tmp_path):
+    import json as j
+    from orchard import swap_draft
+    (tmp_path / "stages" / "0").mkdir(parents=True)
+    (tmp_path / "stages" / "0" / "delta.json").write_text(j.dumps({"nearest_model": "right/model"}))
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    cfg = tmp_path / "swap_config.json"
+    cfg.write_text(j.dumps({"nearest_model_id": "right/model", "bundle_dir": str(bundle)}))
+    assert swap_draft.nearest_problem(tmp_path, cfg) is None                       # no manifest: the template refuses the missing bundle itself
+    (bundle / "tt_kernel_manifest.json").write_text("{}")
+    assert "has no weights.repo_id" in swap_draft.nearest_problem(tmp_path, cfg)
+    (bundle / "tt_kernel_manifest.json").write_text(j.dumps({"weights": {"repo_id": "wrong/model"}}))
+    assert "serves wrong/model" in swap_draft.nearest_problem(tmp_path, cfg)

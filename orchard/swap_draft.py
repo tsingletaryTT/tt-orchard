@@ -70,30 +70,39 @@ def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=N
         # the container template reads installed.json and runs tt-model under the config's operator_home, so the registry checked here has to be that one
         return (f"{Path(config_path).name} names operator_home {named_home}, but the run's is {operator_home}; the package registry the test "
                 f"reads has to be the one that was checked")
-    served, what = _served_repo(cfg, run_dir, operator_home)
+    served, what, unreadable = _served_repo(cfg, run_dir, operator_home)
+    if unreadable:
+        # A manifest that is there and refused (a link, a FIFO, an oversize file, NaN) or has no weights.repo_id is not an absent one: it could
+        # name the wrong model and pass this check unseen.
+        return f"{Path(config_path).name} names a bundle whose tt_kernel_manifest.json {unreadable}, so the model it serves cannot be checked against stage 0's nearest model {want}"
     if served is not None and _repo(served) != want:
         return (f"{Path(config_path).name} uses {what}, which serves {_repo(served)}, but stage 0's nearest model is {want}. "
                 f"Weights are swapped into an installed bundle or package of {want}")
     return None
 
 
-def _served_repo(cfg: dict, run_dir, operator_home) -> tuple[str | None, str]:
-    """The weights repository the config's container package or v6 bundle serves, read from its manifest, and a name for the message. (None, "")
-    when the config names neither or the manifest cannot be found (the template refuses a missing package itself)."""
+def _served_repo(cfg: dict, run_dir, operator_home) -> tuple[str | None, str, str]:
+    """The weights repository the config's container package or v6 bundle serves, read from its manifest, a name for the message, and why the
+    manifest could not be used ("" when it was read or is missing). (None, "", "") when the config names neither or the manifest is missing (the
+    template refuses a missing package itself)."""
     pkg = cfg.get("package")
     if isinstance(pkg, str) and pkg and operator_home is not None:
         for c in installed_containers(operator_home):
             if c["name"] == pkg:
-                return c["repo"], f"the container package {pkg}"
+                return c["repo"], f"the container package {pkg}", ""
     bundle = cfg.get("bundle_dir")
     if isinstance(bundle, str) and bundle:
+        path = Path(bundle) if Path(bundle).is_absolute() else Path(run_dir) / bundle       # the test runs from the run directory
+        got = safeio.read_json_checked(path / "tt_kernel_manifest.json", max_bytes=JSON_MAX, expect=dict)
+        if got.missing:
+            return None, "", ""
+        if got.refused:
+            return None, "", f"is not readable: {got.reason}"
         try:
-            path = Path(bundle) if Path(bundle).is_absolute() else Path(run_dir) / bundle       # the test runs from the run directory
-            m = safeio.read_json(path / "tt_kernel_manifest.json", max_bytes=JSON_MAX)
-            return str(m["weights"]["repo_id"]), f"the bundle {path.parent.name}/{path.name}"
-        except (safeio.SafeReadError, KeyError, TypeError):
-            return None, ""
-    return None, ""
+            return str(got.value["weights"]["repo_id"]), f"the bundle {path.parent.name}/{path.name}", ""
+        except (KeyError, TypeError):
+            return None, "", "has no weights.repo_id"
+    return None, "", ""
 
 
 def stage4_nearest_problems(run_dir, stage_dir, *, tt_model_root=None, operator_home=None, counts=None) -> list[str]:
