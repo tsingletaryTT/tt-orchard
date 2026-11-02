@@ -1,0 +1,2 @@
+target = "0.9.91"
+summary = "inventory --stub-data-dependent traces past the Qwen4-style sparse attention indexer; GDN gate check; new-ops write-up"

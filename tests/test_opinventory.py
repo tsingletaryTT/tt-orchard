@@ -283,6 +283,14 @@ def test_run_inventory_passes_the_class_and_sizes_to_the_template(tmp_path):
         and argv[argv.index("--seq") + 1] == "16"
 
 
+def test_run_inventory_passes_the_stub_option_only_when_asked(tmp_path):
+    for stub in (False, True):
+        run = fake_run(0)
+        oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path, stub_data_dependent=stub, run=run,
+                         dump_dir=tmp_path / "dumps", say=lambda s: None)
+        assert ("--stub-data-dependent" in run.calls[0]) is stub
+
+
 def test_a_dump_directory_with_a_dump_and_no_tables_works(tmp_path):
     """The tables always come from the package; dump_dir only says where to look for the dump."""
     dumps = tmp_path / "dumps"

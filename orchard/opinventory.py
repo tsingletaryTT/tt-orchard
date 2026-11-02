@@ -292,7 +292,7 @@ def installed_ttnn_version(run, python):
 
 
 def run_inventory(model_dir, *, python, ttnn_python, out_dir, layers=2, seq=8, cls=None, against=None,
-                  run=_real_run, dump_dir=DATA_DIR, say=print, verified_file=None) -> int:
+                  run=_real_run, dump_dir=DATA_DIR, say=print, verified_file=None, stub_data_dependent=False) -> int:
     """Trace, map, write. 0 on success (a skipped model is a success), 2 when the template could not run or a
     file it needs is unreadable. The tables always come from the package; `dump_dir` only says where the ttnn dump is.
     `verified_file` is a verified_mappings.json to read instead of the package's."""
@@ -309,7 +309,8 @@ def run_inventory(model_dir, *, python, ttnn_python, out_dir, layers=2, seq=8, c
     out.mkdir(parents=True, exist_ok=True)
     raw_path = out / "raw-ops.json"
     argv = [str(python), str(TEMPLATE), "--model-dir", str(model_dir), "--out", str(raw_path),
-            "--layers", str(layers), "--seq", str(seq)] + (["--class", cls] if cls else [])
+            "--layers", str(layers), "--seq", str(seq)] + (["--class", cls] if cls else []) \
+        + (["--stub-data-dependent"] if stub_data_dependent else [])
     rc, stdout, stderr = run(argv, 1800)
     if rc not in (0, 3) or not raw_path.is_file():
         say(f"the trace did not run (exit {rc}): {(stderr or stdout).strip()[-300:]}")
