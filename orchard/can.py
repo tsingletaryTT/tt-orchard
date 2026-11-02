@@ -1474,7 +1474,7 @@ def check_state(raw) -> dict:
     return raw
 
 
-def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot: dict | None = None, digest_of=None, spec_path=None) -> Path:
+def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot: dict | None = None, digest_of=None, spec_path=None, spec_digest=None) -> Path:
     """Write `state_dir/<name>.can-state.json`: `gate` and `boot` replace the same part of an earlier file and the other part is kept. Each
     part written is stamped with the digest of the SHA256SUMS in `digest_of` (default: `bundle`) as it is now. A boot passes the copy it
     booted, so the record is bound to the files that were tested even if the source bundle is rebuilt during the boot. Each part also
@@ -1494,7 +1494,8 @@ def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot:
     except (OSError, safeio.SafeReadError, CanError):
         pass
     digest = _sums_digest(bundle if digest_of is None else digest_of)
-    spec_digest = _file_digest(spec_path, MAX_SPEC_BYTES) if spec_path is not None else None
+    if spec_digest is None and spec_path is not None:
+        spec_digest = _file_digest(spec_path, MAX_SPEC_BYTES)
     for key, part in (("gate", gate), ("boot", boot)):
         if part is not None:
             state[key] = {**part, "bundle_sums_sha256": digest, "spec_sha256": spec_digest}
@@ -1515,14 +1516,17 @@ def main(args, out=None) -> int:
     out = out or sys.stdout
     say = lambda text: print(text, file=out)  # noqa: E731
     try:
+        before = _file_digest(args.spec, MAX_SPEC_BYTES)
         spec = load_spec(args.spec, base=getattr(args, "base", None))
+        # The fingerprint is of the spec the command ran with: taken before the long work, and dropped if the file changed while it was loaded.
+        spec_digest = before if before == _file_digest(args.spec, MAX_SPEC_BYTES) else None
         if args.action == "stage":
             if not args.out:
                 raise CanError("can stage needs --out")
             rec = stage(spec, args.out, namespace=getattr(args, "namespace", None))
             say(f"staged {rec['name']} ({len(rec['files'])} files) in {args.out}")
             if getattr(args, "state_dir", None):     # stage raises when the gate finds a problem, so reaching here means it passed
-                say(f"recorded in {write_state(args.state_dir, spec.name, args.out, gate=gate_record([]), spec_path=args.spec)}")
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.out, gate=gate_record([]), spec_digest=spec_digest)}")
             if getattr(args, "run_dir", None):
                 say(f"recorded in {record(args.run_dir, rec)}")
             return 0
@@ -1532,7 +1536,7 @@ def main(args, out=None) -> int:
                 say(f"problem: {p}")
             say("gate: " + ("passed" if not problems else f"{len(problems)} problem(s)"))
             if getattr(args, "state_dir", None):
-                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, gate=gate_record(problems), spec_path=args.spec)}")
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, gate=gate_record(problems), spec_digest=spec_digest)}")
             return 1 if problems else 0
         if args.action == "boot":
             if not args.work:
@@ -1548,7 +1552,7 @@ def main(args, out=None) -> int:
             say(f"boot check: {'passed' if ev['passed'] else 'FAILED'} (evidence: {Path(args.work) / 'boot-check.json'})")
             if getattr(args, "state_dir", None):
                 booted_copy = Path(args.work) / "bundle"       # the record is bound to the copy that was served, not to the source
-                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, boot=boot_record(ev, cache_state), digest_of=booted_copy, spec_path=args.spec)}")
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, boot=boot_record(ev, cache_state), digest_of=booted_copy, spec_digest=spec_digest)}")
             if getattr(args, "run_dir", None):
                 rec = {"name": spec.name, "kind": spec.kind, "weights": {"repo": spec.repo, "revision": spec.revision}}
                 say(f"recorded in {record(args.run_dir, rec, ev)}")

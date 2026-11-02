@@ -215,6 +215,19 @@ def test_the_command_line_records_the_spec_fingerprint(tmp_path, fake):
     assert read(tmp_path / "st")["gate"]["spec_sha256"] == hashlib.sha256(b"x = 1\n").hexdigest()
 
 
+def test_a_spec_edited_during_a_boot_does_not_get_the_boots_passing_result(tmp_path, fake, monkeypatch):
+    spec = tmp_path / "spec.toml"
+    spec.write_text("expect = 'Paris'\n")
+    original = hashlib.sha256(spec.read_bytes()).hexdigest()
+
+    def boot(*a, **k):
+        spec.write_text("expect = 'anything'\n")               # the spec changes while the long boot runs
+        return {"passed": True, "checks": {}, "ready_s": 1.0}
+    monkeypatch.setattr(can, "boot_check", boot)
+    assert can.main(args(tmp_path, "boot", spec=str(spec), state_dir=str(tmp_path / "st")), out=io.StringIO()) == 0
+    assert read(tmp_path / "st")["boot"]["spec_sha256"] == original
+
+
 def test_files_that_change_while_hashed_still_use_their_share_of_the_budget(world, monkeypatch):
     from cans_fixture import CARD
     checkout, cans = world
