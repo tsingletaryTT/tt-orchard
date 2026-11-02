@@ -3856,6 +3856,12 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Change: those four tests use `needs_real_forward` (added in PR 384) in place of `needs_stack`. The tests that only build a config or trace on the meta device keep their gate.
 - Result: default interpreter 17 passed, 4 skipped; reference interpreter 21 passed.
 
+## 2026-11-02 First chip run of the scoring check (branch `scoring-chip-run-375`, issue 375)
+- Prompt: "Take boards as needed": run the scoring-model check (PR 383) on a real chip for Qwen3-Reranker-4B.
+- Run: the stage 1 recorder ran on the CPU for the real snapshot (fp32 1,765 s, bf16 914 s). The public bundle `raahemnabeel/qwen3-reranker-4b` served the model on one chip of a leased board. A new port module (`scripts/scoring_check/port_model.py`) sends the template's prompt ids to that server as text on the loopback interface and returns its raw scores. The shipped template ran under the lease and the gate passed: Pearson 0.99940, mean/max difference 0.189/0.543 logits, top-1 8 of 8 groups, order 43 of 43 (the bundle's table on its 188-pair set: 0.9997, 0.140/0.64, 33 of 33). A second run gave bit-identical scores.
+- Decision: the default bounds are unchanged. The top-1 and order floors allow no flip on the 32-pair set, and three separated pairs are within 1.1 logits, so the order floor is the closest to failing. Lowering it to 0.97 is the operator's call. Details in the run log.
+- Not run: the supervisor path (issue 378), a port the coder writes, other weight policies, an embedding model (376), vision pairs (377). The template opens its own device, so the server held the other chip of the board and the single-chip mesh needed `TT_MESH_GRAPH_DESC_PATH`.
+- Tests: `tests/test_scoring_check_http_port.py` (26 tests, fake server on 127.0.0.1); mutation run, each of 10 guards removed in turn.
 ## 2026-11-02 Updates panel and timer, pyproject fallback, plugin-edit reasons, card conditions (branch `cluster-h-updates-cards`, cluster H)
 - Prompt: close the open issues 231, 230, 229, 232, 362 and 365 where they can be closed.
 - 231: `orchard/updates_view.py` and `GET /api/updates` read the `tt-orchard updates` cache and the Models view shows the rows (no network, no process, no write, no path, redacted, bounded). The panel shows `tt-orchard updates --refresh` as text and has no refresh button, because the page never runs a command (the Cans view rule).

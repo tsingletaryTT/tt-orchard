@@ -1,0 +1,26 @@
+port| 2026-11-02 13:15:27.586 | DEBUG    | ttnn:<module>:45 - Initial ttnn.CONFIG:
+port| Config{cache_path=$HOME/.cache/ttnn,model_cache_path=$HOME/.cache/ttnn/models,tmp_dir=/tmp/ttnn,enable_model_cache=false,enable_fast_runtime_mode=true,validate_program_args=false,throw_exception_on_fallback=false,enable_logging=false,enable_graph_report=false,enable_graph_python_stack_traces=false,enable_detailed_buffer_report=false,enable_detailed_tensor_report=false,enable_comparison_mode=false,comparison_mode_should_raise_exception=false,comparison_mode_pcc=0.9999,root_report_path=generated/ttnn/reports,report_name=std::nullopt,strict_ccl_topology=false,std::nullopt}
+port| 2026-11-02 13:15:29.417 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:251)
+port| 2026-11-02 13:15:29.417 | info     |             UMD | Cluster constructor started. (cluster.cpp:426)
+port| 2026-11-02 13:15:29.417 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:145)
+port| 2026-11-02 13:15:29.417 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:164)
+port| 2026-11-02 13:15:29.423 | info     |             UMD | Established firmware bundle version: 19.16.0 (topology_discovery.cpp:695)
+port| 2026-11-02 13:15:29.423 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:168)
+port| 2026-11-02 13:15:29.423 | warning  |             UMD | Board 0x46131924055 has 1 chips, but expected 2 chips for board type p300. (cluster_descriptor.cpp:1298)
+port| 2026-11-02 13:15:29.461 | info     |             UMD | Opening local chip ids/PCIe ids: {0}/[3] and remote chip ids {} (cluster.cpp:173)
+port| 2026-11-02 13:15:29.461 | info     |             UMD | IOMMU: enabled (cluster.cpp:147)
+port| 2026-11-02 13:15:29.461 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:150)
+port| 2026-11-02 13:15:29.461 | info     |             UMD | Cluster constructor completed. (cluster.cpp:866)
+port| 2026-11-02 13:15:29.461 | warning  |          Device | Using CUSTOM cluster type for P300 board with 1 chips (tt_cluster.cpp:225)
+port| 2026-11-02 13:15:29.465 | info     |             UMD | Starting devices in cluster (cluster.cpp:1455)
+port| 2026-11-02 13:15:29.501 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1464)
+port| 2026-11-02 13:15:29.575 | info     |     Distributed | Using custom mesh graph descriptor: $HOME/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto (metal_env.cpp:528)
+port| 2026-11-02 13:15:29.586 | warning  |          Always | Unknown motherboard 'B850M-C' for chip_id=0 (bus_id=0x4) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:160)
+port| 2026-11-02 13:15:29.588 | warning  |          Fabric | No Physical Grouping Descriptor file found; mapping without a PGD. Searched:
+port|   - ./tests/tt_metal/tt_fabric/physical_groupings/default_physical_grouping_descriptor.textproto
+port| TT_CLUSTER_NAME not set
+port|  (physical_grouping_descriptor_core.cpp:908)
+port| 2026-11-02 13:15:30.127 | warning  |       Inspector | Failed to start Inspector RPC server: ::bind(sockfd, &addr.generic, addrlen): Address already in use; toString() = 127.0.0.1:50051 (data.cpp:80)
+loaded in 0.8498590460512787s
+pearson 0.99940, mean |diff| 0.1889, max |diff| 0.5430, top-1 8/8 groups, order kept 43/43
+SCORING_CHECK_SHA256 202788783541df39f216a65fd94be2be90e1b1fdda63fe185e8e30ed10a618b5

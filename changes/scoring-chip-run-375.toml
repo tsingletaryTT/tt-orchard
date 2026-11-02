@@ -1,0 +1,3 @@
+target = "0.9.97"
+summary = "First chip run of the scoring check for Qwen3-Reranker-4B: HTTP port module, run helper, run log; the gate passed and the default bounds are unchanged."
+pr = 401
