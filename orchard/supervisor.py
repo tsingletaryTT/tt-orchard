@@ -457,8 +457,9 @@ def hardware_test_failure(stage_dir: Path) -> dict | None:
     shows the test succeeded."""
     path = stage_dir / "test-result.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        # The bounded reader refuses a FIFO or a device link instead of blocking on it (the finish step can replace this file).
+        data = safeio.read_json(path, max_bytes=1 << 20)
+    except (safeio.SafeReadError, OSError, ValueError) as exc:
         return {"returncode": None, "timed_out": None,
                 "problem": f"test-result.json could not be read: {exc}"}
     if not isinstance(data, dict):
