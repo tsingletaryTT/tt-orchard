@@ -85,6 +85,14 @@ def test_the_state_name_must_be_a_plain_name(tmp_path):
     assert not (tmp_path / "evil.can-state.json").exists()
 
 
+def test_a_bad_state_name_is_refused_before_any_file_is_read_or_made(tmp_path, monkeypatch):
+    from orchard import safeio
+    monkeypatch.setattr(safeio, "read_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read before the name was checked")))
+    with pytest.raises(can.CanError):
+        can.write_state(tmp_path / "st", "../evil", bundle(tmp_path), gate=can.gate_record([]))
+    assert not (tmp_path / "st").exists()
+
+
 def test_check_state_accepts_what_write_state_wrote_and_refuses_each_bad_field(tmp_path):
     can.write_state(tmp_path / "st", "toy", bundle(tmp_path), gate=can.gate_record(["x"]),
                     boot=can.boot_record({"passed": True, "checks": {}}, "warm"))

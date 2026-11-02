@@ -133,6 +133,17 @@ def test_a_fifo_in_place_of_a_file_never_hangs_the_build(world, which):
         assert r["sums"]["state"] == "differs" and "pipe is not a regular file or directory" in r["sums"]["problems"]
 
 
+def test_a_listed_fifo_is_not_waited_on_even_when_the_listing_could_not_tell_it_from_a_file(world, monkeypatch):
+    """With the listing cut short, a listed path is opened without the walk having classified it; a FIFO there must not block the open."""
+    root, cans, name = world
+    b = stage_bundle(cans, name)
+    (b / "run.sh").unlink()
+    os.mkfifo(b / "run.sh")
+    monkeypatch.setattr(view, "SCAN_MAX_ENTRIES", 0)
+    r = row(world)
+    assert r["sums"]["state"] == "differs" and "run.sh is not a regular file" in r["sums"]["problems"]
+
+
 def test_a_bundle_that_is_a_plain_file_is_said_not_to_be_a_directory(world):
     root, cans, name = world
     (cans / name).write_text("not a directory")

@@ -46,7 +46,7 @@ PROBLEMS_SHOWN = 10
 NAME_MAX = 120
 SPEC_FILE = re.compile(r"^can\.([A-Za-z0-9][A-Za-z0-9._-]{0,80})\.toml$")
 HUB_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")      # every control character, newline and tab included: one name is one line
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f" + chr(0x2028) + chr(0x2029) + "]")      # every control character, newline and tab included: one name is one line
 _SUMS_LINE = re.compile(r"^([0-9a-f]{64})  (.+)$")
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
 
@@ -219,8 +219,8 @@ class CansView:
                 hashed += 1
                 if got != want:
                     problems.append(f"{shown} changed after {can.SUMS_FILE} was written")
-        if not walk.incomplete:
-            problems += [f"{can.SUMS_FILE} does not list {self._clean(rel, NAME_MAX)}" for rel in sorted(on_disk - set(listed) - {can.SUMS_FILE})]
+        # A listing that was cut short still names real files, so an unlisted one it did see is a true problem.
+        problems += [f"{can.SUMS_FILE} does not list {self._clean(rel, NAME_MAX)}" for rel in sorted(on_disk - set(listed) - {can.SUMS_FILE})]
         partial = skipped or walk.incomplete
         why = []
         if skipped:

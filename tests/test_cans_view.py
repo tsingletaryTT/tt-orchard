@@ -56,6 +56,13 @@ def test_the_hub_is_a_link_and_a_not_checked_here_never_a_revision_check(world):
     assert row["weights"]["hub_text"] == "not checked here"
 
 
+def test_a_weights_repo_that_is_not_a_plain_org_slash_name_gets_no_link(world):
+    root, cans = world
+    name = add_spec(root, "toy", repo='a b/c<script>')
+    row = by_name(build(world), name)
+    assert row["weights"]["hub_url"] is None and row["weights"]["repo"] == 'a b/c<script>'
+
+
 def test_a_spec_with_no_card_profile_says_the_card_is_not_checked_and_still_shows_its_rows(world):
     root, cans = world
     name = add_spec(root, "toy", profile=None)
