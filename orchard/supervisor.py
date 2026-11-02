@@ -159,7 +159,7 @@ from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, T
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
-                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, full_port_enabled, recorded_by_supervisor)
+                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, full_port_enabled, full_port_rehearsal, recorded_by_supervisor)
 from orchard import full_port, residency
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
@@ -191,6 +191,7 @@ EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
+REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
 FULL_PORT_STAGES_UNBUILT = ("stage 2 of the full-port route passed; stages 3 to 6 for a full-port model are not built yet "
                             "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md, slices 3 to 6), so a person reviews the "
                             "result and decides whether to go on")
@@ -590,7 +591,7 @@ class Supervisor:
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
-                 stack_pins=None):
+                 full_port_rehearsal: bool = False, stack_pins=None):
         self.run_dir = Path(run_dir).resolve()
         # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
         # supplied (the tests), and the record says nothing was compared. `_run_resumed` is set when a run starts on a ledger that has begun.
@@ -599,6 +600,9 @@ class Supervisor:
         # into the full-port stage 2. The ledger holds the answer (run_start, or a decision when the flag came on a resume); this is the
         # request. `full_port_added` is set when the flag came on a resume of a run that started without it.
         self.full_port, self.full_port_added = full_port, full_port_added
+        # `--full-port-rehearsal` (issue 357): the model is a rehearsal with random weights, so stage 2's `coherent` field is waived. Recorded
+        # in run_start only; the gate reads the ledger's answer, never this request.
+        self.full_port_rehearsal = full_port_rehearsal
         # Whether the model's purpose needs sampling: "auto" reads it from stage 0's files, the others are the operator's word (orchard/sampling_choice.py).
         self.sampling = sampling
         # An abort is terminal unless the operator asks for this (`--resume-aborted`): then an operator's or a signal's abort is
@@ -867,6 +871,7 @@ class Supervisor:
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                graft_trial=self.graft_trial, sampling=self.sampling,
                                **({"full_port": True} if self.full_port else {}),
+                               **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
@@ -1522,6 +1527,8 @@ class Supervisor:
             return functools.partial(spec.gate, required=self.required_chips)
         if spec.number == 0:
             return self._with_stack_pins(spec.gate)
+        if spec.skill == "full-port-check" and full_port_rehearsal(self.ledger.read()):
+            return functools.partial(spec.gate, rehearsal=True)       # from the ledger: the coder cannot write it
         return spec.gate
 
     def _with_stack_pins(self, base):
@@ -2074,6 +2081,9 @@ class Supervisor:
                 return GateResult(False, gate.reasons + (
                     "test-result.json is not the file the supervisor recorded when the hardware test ended (the ledger holds no "
                     "matching entry), so its exit code cannot be trusted",), gate.evidence)
+            if gate.ok and "coherent" in gate.waived:      # the gate's own read: result.json is not opened again
+                self.ledger.append("decision", spec.number, decision=REHEARSAL_WAIVED, field="coherent", by="--full-port-rehearsal",
+                                   note="the model is a rehearsal with random weights; every other stage 2 check still applied")
         return gate
 
     def _copy_package(self, bundle: Path) -> None:
@@ -3490,6 +3500,10 @@ def parse(argv=None):
                         "not built yet, so the run then pauses (unattended: ends blocked, code full-port-stages-unbuilt). The ledger records "
                         "the flag and a resume keeps it. It can be added on a resume only before stage 2 has started. It changes nothing for "
                         "any other class, and `unknown` and `restricted-head` still stop")
+    r.add_argument("--full-port-rehearsal", action="store_true",
+                   help="for a rehearsal model with random weights (scripts/tiny_qwen4): stage 2 of a full port waives its `coherent` field and "
+                        "no other check, and the ledger says so. Needs --full-port, is given when the run starts, and is recorded in run_start; "
+                        "a resume keeps it and cannot add it")
     r.add_argument("--resume-aborted", action="store_true",
                    help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
@@ -3595,6 +3609,14 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
         full_port_added = True                  # recorded as a decision by the supervisor's first step
     if progress.started and full_port_enabled(entries):
         full_port_req = False                   # a resumed run keeps what the ledger holds; nothing to request again
+    rehearsal_req = bool(getattr(args, "full_port_rehearsal", False))
+    if rehearsal_req and not (full_port_enabled(entries) or getattr(args, "full_port", False)):
+        raise ValueError("--full-port-rehearsal needs --full-port: the waiver applies only to the full-port stage 2")
+    if rehearsal_req and progress.started and not full_port_rehearsal(entries):
+        raise ValueError("--full-port-rehearsal waives a stage 2 check, so it can be given only when the run starts. This run started without "
+                         "it. Move this run's directory aside and start a new run with the flag")
+    if progress.started:
+        rehearsal_req = False                   # a resumed run keeps what run_start holds
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
         graft_on = False                        # a run that opted out of the graft trial stays opted out
@@ -3665,7 +3687,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
                       sampling=sampling_mode,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
-                      full_port=full_port_req, full_port_added=full_port_added, stack_pins=stack_pins,
+                      full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req, stack_pins=stack_pins,
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
                       keep_up=bool(getattr(args, "coder_keep_up", False)),

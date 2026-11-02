@@ -1130,3 +1130,10 @@ def test_bringup_passes_full_port_to_the_supervisor_only_when_asked(conf):
     assert "--full-port" not in rec.argv
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--full-port"])
     assert code == 0 and "--full-port" in rec.argv
+
+
+def test_bringup_passes_the_rehearsal_flag_only_when_asked(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--full-port"])
+    assert "--full-port-rehearsal" not in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--full-port", "--full-port-rehearsal"])
+    assert code == 0 and "--full-port-rehearsal" in rec.argv
