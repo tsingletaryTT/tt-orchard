@@ -297,3 +297,16 @@ def test_a_run_paused_in_an_old_stage_5_attempt_resumes_into_stage_7(rig):
     assert ends == {5: ["skipped"], 6: ["skipped"], 7: ["pass"]}
     assert len([e for e in es if e["data"].get("decision") == "package options set"]) == 1
     assert not [e for e in es if e["stage"] in (5, 6) and e["data"].get("decision") == "agent step"]
+
+
+def test_stage_7_through_the_supervisor_leaves_a_hardened_package(rig):
+    """Issue 318: the package a run stages passes the canning checks, as it stands in the run directory after the stage ends."""
+    from orchard import can
+    r = rig(chips=2)
+    assert r.run() == EXIT_READY
+    pkg = r.run_dir / "stages/7/package/hemmingway-1-p300"
+    assert (pkg / "SHA256SUMS").is_file()
+    assert can.hardening_problems(pkg) == []
+    assert (pkg / "run.sh").stat().st_mode & 0o777 == 0o755
+    assert (pkg / "install.sh").stat().st_mode & 0o777 == 0o755
+    assert (pkg / "evidence").is_dir() and "evidence/" in (pkg / "SHA256SUMS").read_text()   # listed: written after finish() copied it

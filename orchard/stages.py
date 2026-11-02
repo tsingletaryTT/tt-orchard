@@ -1158,6 +1158,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                  graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
                                  sampling_summary, sampling_summary_problems, serving_problems,
                                  served_drafter_state, split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
+    from orchard.can import hardening_problems
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
@@ -1254,6 +1255,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                      model_has_mtp=model_has_mtp, graft=has_graft)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
+        reasons += [f"profile {name}: {x}" for x in hardening_problems(out)]     # the canning checks (orchard/can.py)
         if license_id:
             reasons += [f"profile {name}: card: {x}" for x in
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,

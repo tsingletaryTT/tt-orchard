@@ -307,3 +307,57 @@ def test_a_card_that_deletes_the_citation_of_the_reported_scores_fails_the_gate(
     card = stage7_reported["pkg"] / "README.md"
     card.write_text(card.read_text().replace("These scores come from the model's card. ", ""))
     assert any("card:" in r and "source" in r for r in reasons(stage7_reported))
+
+
+# ---- the canning hardening (issue 318): SHA256SUMS, file modes and the spec-free can checks ----------------
+
+def test_a_stage_7_package_carries_sums_and_executable_scripts(stage7):
+    from orchard import can
+    pkg = stage7["pkg"]
+    assert (pkg / "SHA256SUMS").is_file()
+    assert can.sums_problems(pkg) == []          # still true after finish() rewrote the card and copied evidence
+    for f in ("run.sh", "install.sh", "prepare_model_dir.py"):
+        assert os.access(pkg / f, os.X_OK), f
+        assert (pkg / f).stat().st_mode & 0o777 == 0o755, f
+
+
+def test_staging_alone_writes_sums_before_the_boot_check_copy_is_made(tmp_path, monkeypatch, stub_tools):
+    """stage_all hardens each profile before prepare_verify copies the required one, so the installed copy carries the sums."""
+    models = tmp_path / "models"
+    r = make_run(tmp_path, make_source(models))
+    fb, _ = fake_bin(tmp_path)
+    monkeypatch.setenv("PATH", f"{fb}:{os.environ['PATH']}")
+    env = dict(os.environ, FAKE_TT_MODEL_PYTHON=sys.executable, FAKE_SWAP_SERVER=str(FAKE_SERVER),
+               FAKE_SWAP_CONFIG=str(tmp_path / "server.json"))
+    stage = r["run"] / "stages/7"
+    stage.mkdir(parents=True)
+    stage_all(r["run"], stage, namespace="episod", models_root=models, env=env)
+    assert (stage / "package/hemmingway-1-p300/SHA256SUMS").is_file()
+    assert (stage / "verify/bundle/SHA256SUMS").is_file()
+
+
+def test_the_gate_refuses_a_package_without_sums(stage7):
+    (stage7["pkg"] / "SHA256SUMS").unlink()
+    assert any("SHA256SUMS is missing" in r for r in reasons(stage7)), reasons(stage7)
+
+
+def test_the_gate_refuses_a_file_changed_after_the_sums_were_written(stage7):
+    with open(stage7["pkg"] / "install.sh", "a") as f:
+        f.write("# changed\n")
+    assert any("install.sh changed after SHA256SUMS was written" in r for r in reasons(stage7)), reasons(stage7)
+
+
+@pytest.mark.parametrize("script", ["run.sh", "install.sh"])
+def test_the_gate_refuses_a_script_that_is_not_executable(stage7, script):
+    (stage7["pkg"] / script).chmod(0o664)
+    assert any(f"{script} is not executable" in r for r in reasons(stage7)), reasons(stage7)
+
+
+def test_the_gate_refuses_an_unpinned_requirement(stage7):
+    (stage7["pkg"] / "requirements.txt").write_text("ttnn>=0.79\n")
+    assert any("not an exact pin" in r for r in reasons(stage7)), reasons(stage7)
+
+
+def test_the_gate_refuses_a_ttnn_pin_that_is_not_the_shipped_wheel(stage7):
+    (stage7["pkg"] / "requirements.txt").write_text("ttnn==0.80.0\n")
+    assert any("wheels/ttnn-0.79.0" in r and "0.80.0" in r for r in reasons(stage7)), reasons(stage7)

@@ -519,6 +519,39 @@ def sums_problems(root: Path) -> list[str]:
     return problems
 
 
+SCRIPTS = ("run.sh", "install.sh", "prepare_model_dir.py")      # the files a bundle runs; package-thin leaves them without +x
+
+
+def make_executable(pkg) -> None:
+    """Mode 0755 on the scripts a bundle has (`SCRIPTS`)."""
+    for f in SCRIPTS:
+        if (Path(pkg) / f).is_file():
+            (Path(pkg) / f).chmod(0o755)
+
+
+def harden(pkg) -> None:
+    """The canning step's last edits to a vllm-kind bundle, as one call: the scripts are executable and SHA256SUMS lists every file.
+    `stage` calls it for a can and stage 7 (orchard/package.py) calls it for a run's package, so both carry the same hardening.
+    Call it again after any later write to the bundle, because the sums list the files as they are now."""
+    make_executable(pkg)
+    write_sums(Path(pkg))
+
+
+def hardening_problems(pkg) -> list[str]:
+    """What `gate` checks of a vllm-kind bundle that needs no spec: SHA256SUMS lists the files as they are, the scripts are executable,
+    every requirement is an exact pin, and a pin for a shipped wheel names that wheel's version. Stage 7's gate (orchard/stages.py)
+    runs this on each profile."""
+    pkg = Path(pkg)
+    problems = sums_problems(pkg)
+    for f in SCRIPTS:
+        if (pkg / f).is_file() and not os.access(pkg / f, os.X_OK):
+            problems.append(f"{f} is not executable")
+    req = pkg / "requirements.txt"
+    if not req.is_file():
+        return problems + ["requirements.txt is missing"]
+    return problems + requirement_problems(req.read_text(encoding="utf-8", errors="replace")) + wheel_pin_problems(pkg)
+
+
 def wire_model_dir(run_sh: str, spec: Spec, out: Path) -> str:
     """Make vLLM load the weights through `model-dir/`, which prepare_model_dir.py builds at start-up from the pinned Hugging Face snapshot
     plus the spec's base_config files (they replace the snapshot's own, for example a config.json that names the architecture the model class
@@ -577,9 +610,7 @@ def stage(spec: Spec, out, *, env: dict | None = None, hostname: str | None = No
                 text = wire_model_dir(text, spec, out)
             run_sh.write_text(text, encoding="utf-8")
         _copy_in(spec.bundle_files, out)
-        for f in ("run.sh", "install.sh", *(("prepare_model_dir.py",) if spec.base_config else ())):
-            (out / f).chmod(0o755)
-        write_sums(out)
+        harden(out)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     problems = gate(out, spec, hostname=hostname, namespace=namespace)
