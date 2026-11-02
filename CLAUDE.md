@@ -102,6 +102,7 @@ two-process lock test.
   `tt-smi -r` by hand. Do not touch ports 8000 or 8100 to 8103. Importing ttnn or ttml opens the device.
 - Never `pkill -f` or `pgrep -f`; kill by exact pid.
 - Credentials: `HF_TOKEN` is in the environment and is never printed. The public repo has no home paths, host names or tokens.
+- Before a review is requested, answer the twelve items of `docs/pr-hardening-checklist.md` in the PR body (type checks at every boundary, `safeio` for outside files, identity captured before the operation, ledger hashes for agent-written evidence, verdicts that name their evidence). `tests/test_hardening_ratchet.py` fails when raw file access grows.
 - A Copilot review is requested with the GraphQL `requestReviews` mutation and the bot id `BOT_kgDOCnlnWA`.
 
 ## Log
