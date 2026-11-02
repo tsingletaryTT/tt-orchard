@@ -43,7 +43,7 @@ def build(tmp_path, *, result=None, record=None, marker=None, output=None, model
         "prompt": {"path": "stages/1/evidence/reference/prompt-ids.json", "sha256": sha(prm.read_bytes())},
         "reference_ids": list(ref_ids), "chip_ids": list(ref_ids[:30]) + [0, 0],
         "top1_agreement": 30 / 32, "chips": list(CHIPS), "load_s": 120.5,
-        "free_run_ids": list(range(48)), "free_run_text": TEXT, "template_sha256": sha(template.read_bytes()),
+        "free_run_ids": [ref_ids[0]] + list(range(1, 48)), "free_run_text": TEXT, "template_sha256": sha(template.read_bytes()),
         "config": {"path": "stages/2/" + full_port.CONFIG_NAME, "sha256": sha(config.read_bytes())},
         "port_sources": [{"path": "stages/2/port/port_model.py", "sha256": sha(model.read_bytes()), "role": "model"}]}
     rec = {**good_record, **(record or {})}
