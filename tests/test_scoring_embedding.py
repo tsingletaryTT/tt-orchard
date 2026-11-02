@@ -356,7 +356,7 @@ def test_a_reranker_port_is_given_one_media_list_for_each_prompt(tmp_path):
 
 
 @pytest.mark.parametrize("mutate,word", [
-    (lambda e: e.update(sha256="0" * 64), "does not match the sha256"),
+    (lambda e: e.update(sha256="0" * 64), "does not match the sha256 the pair file names"),          # the parent's check, before the port runs
     (lambda e: e.update(path="stages/1/evidence/reference/media/../scoring-pairs.json"), "cannot be read"),
     (lambda e: e.update(path="/etc/passwd"), "cannot be read"),
     (lambda e: e.update(path="stages/1/evidence/reference/media/missing.png"), "cannot be read"),
