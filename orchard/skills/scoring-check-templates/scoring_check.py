@@ -418,6 +418,7 @@ def main() -> int:
     if os.path.lexists(RECORD):
         os.unlink(RECORD)
 
+    sources = port_sources()               # the files as they are before the worker starts; the record carries this manifest
     chip = [None] * len(rows)
     w = Worker()
     try:
@@ -436,6 +437,9 @@ def main() -> int:
     finally:
         w.stop()
     refuse_links()                  # again: a link made while the port ran
+    if port_sources() != sources:
+        raise CheckFailed("a file under stages/2/port/ changed, appeared or disappeared while the port ran: the code that produced the scores "
+                          "must be the code that is recorded")
     if FORGED.is_set():
         raise CheckFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
 
@@ -447,7 +451,7 @@ def main() -> int:
               "groups": groups, "pair_kinds": [p.get("kind") for p in rows],
               "reference_scores": reference, "chip_scores": chip, "metrics": numbers,
               "chips": chips, "load_s": load_s, "score_s": score_s,
-              "port_sources": port_sources(), "template_sha256": sha_file(__file__),
+              "port_sources": sources, "template_sha256": sha_file(__file__),
               "config": {"path": str(CONFIG_FILE.relative_to(RUN_DIR)), "sha256": config_sha}}
     data = (json.dumps(record, indent=2) + "\n").encode("utf-8")
     write_atomic(RECORD, data)

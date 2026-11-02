@@ -143,6 +143,20 @@ def test_a_snapshot_without_a_tokenizer_json_is_refused_with_a_message(tmp_path)
     assert done.returncode == 2 and "tokenizer.json" in done.stderr and not (tmp_path / "o").exists()
 
 
+def test_a_tokenizer_that_is_a_link_into_a_cache_blobs_directory_is_read(tmp_path):
+    # A Hugging Face cache snapshot holds tokenizer.json as a link into blobs/ (PR 383 review).
+    py = needs_reference()
+    snap = make_tiny_snapshot(py, tmp_path / "snap")
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (snap / "tokenizer.json").rename(blobs / "abc123")
+    (snap / "tokenizer.json").symlink_to(blobs / "abc123")
+    done = subprocess.run([py, "-s", "-m", "orchard.scoring_reference", "rerank", "--model-dir", str(snap), "--out", str(tmp_path / "ref")],
+                          capture_output=True, text=True, timeout=600, env=repo_env(), cwd=str(tmp_path))
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "ref" / "scoring-reference.json").is_file()
+
+
 def test_the_command_line_names_its_flags():
     done = subprocess.run([sys.executable, "-m", "orchard.scoring_reference", "rerank", "--help"], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0 and "--model-dir" in done.stdout and "--dtype" in done.stdout and "--max-length" in done.stdout

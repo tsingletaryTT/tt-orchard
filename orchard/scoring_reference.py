@@ -182,7 +182,8 @@ def record(model_dir: str, out_dir: str, *, dtype: str = "fp32", max_length: int
     from tokenizers import Tokenizer
     tok_path = Path(model_dir) / "tokenizer.json"
     try:
-        data = safeio.read_bytes(tok_path, max_bytes=FILE_MAX)
+        # A Hugging Face cache snapshot holds tokenizer.json as a link into the cache's blobs directory, which read_bytes refuses.
+        data = safeio.read_bytes(safeio.resolved(tok_path), max_bytes=FILE_MAX)
     except safeio.SafeReadError as exc:
         raise ValueError(f"{tok_path} cannot be read: {exc.reason}") from exc
     tokenizer = Tokenizer.from_str(data.decode("utf-8"))

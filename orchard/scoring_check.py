@@ -54,6 +54,8 @@ DEADLINE_S = 3600
 ORDER_GAP = 0.5                       # the same value as the template's; a test checks the two files agree
 JSON_MAX = 16 * 1024 * 1024           # choice: the pair file is a few MB at most (32 prompts of up to 8192 ids)
 SOURCE_MAX = 2 * 1024 * 1024
+MAX_PAIRS = 4096                      # the same limit as the template's: more pairs than this are not the set the recorder wrote
+MAX_VALUE = 1e6                       # the same limit as the template's, for one score
 TOLERANCE = 1e-9                      # the gate's recomputed number against the number the record reports
 
 # Bounds, with the evidence each is drawn from. The 4B reranker bundle (raahemnabeel/qwen3-reranker-4b, doc/accuracy.md) reports Pearson r
@@ -88,6 +90,11 @@ def draft_config(model_snapshot: str) -> dict:
 
 def _num(x) -> bool:
     return type(x) in (int, float) and math.isfinite(x)
+
+
+def _score(x) -> bool:
+    """A finite number no larger in size than MAX_VALUE: a logit difference. A larger one would overflow the sums in `parity`."""
+    return _num(x) and abs(x) <= MAX_VALUE
 
 
 # ---- the numbers (a second copy of the template's, so the gate does not take them from the record) ----------------------------
@@ -206,10 +213,10 @@ def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
 
     ref_scores, groups = _disk_reasons(record, run_dir, reasons)
     chip = record.get("chip_scores")
-    ok_scores = (isinstance(chip, list) and chip and all(_num(s) for s in chip) and ref_scores is not None and groups is not None
-                 and len(chip) == len(ref_scores) == len(groups))
+    ok_scores = (isinstance(chip, list) and 0 < len(chip) <= MAX_PAIRS and all(_score(s) for s in chip)
+                 and ref_scores is not None and groups is not None and len(chip) == len(ref_scores) == len(groups))
     if not ok_scores:
-        reasons.append("chip_scores must be a non-empty list of finite numbers, one for each pair of the stage 1 pair file")
+        reasons.append(f"chip_scores must be a list of 1 to {MAX_PAIRS} finite numbers of size at most {MAX_VALUE:g}, one for each pair of the stage 1 pair file")
     else:
         m = parity(ref_scores, chip, groups)
         reported = record.get("metrics")
@@ -281,24 +288,27 @@ def _disk_reasons(record: dict, run_dir: Path, reasons: list):
     scores = groups = None
     if ref_doc is not None:
         s = ref_doc.get("scores")
-        if isinstance(s, list) and s and all(_num(x) for x in s):
+        if isinstance(s, list) and 0 < len(s) <= MAX_PAIRS and all(_score(x) for x in s):
             scores = s
         else:
-            reasons.append(f"{REFERENCE_FILE} holds no list of finite scores")
+            reasons.append(f"{REFERENCE_FILE} holds no list of 1 to {MAX_PAIRS} finite scores of size at most {MAX_VALUE:g}")
         if ref_doc.get("model_kind") != KIND:
             reasons.append(f"{REFERENCE_FILE} is for kind {ref_doc.get('model_kind')!r}, not {KIND!r}")
-        if pairs_doc is not None and (ref_doc.get("pairs") or {}).get("sha256") != (record.get("pairs") or {}).get("sha256"):
+        named, used = ref_doc.get("pairs"), record.get("pairs")
+        if not isinstance(named, dict):
+            reasons.append(f"{REFERENCE_FILE} pairs must be an object that names the pair file")
+        elif pairs_doc is not None and isinstance(used, dict) and named.get("sha256") != used.get("sha256"):
             reasons.append(f"{REFERENCE_FILE} names a pair file other than the one the record used")
     if pairs_doc is not None:
         rows = pairs_doc.get("pairs")
-        if isinstance(rows, list) and rows and all(isinstance(p, dict) and isinstance(p.get("group"), str) for p in rows):
+        if isinstance(rows, list) and 0 < len(rows) <= MAX_PAIRS and all(isinstance(p, dict) and isinstance(p.get("group"), str) for p in rows):
             groups = [p["group"] for p in rows]
             if record.get("groups") != groups:
                 reasons.append(f"{RECORD_FILE} groups are not the groups of {PAIRS_FILE}: the comparison was made on another grouping")
             if scores is not None and len(scores) != len(rows):
                 reasons.append(f"{REFERENCE_FILE} has {len(scores)} scores for the {len(rows)} pairs of {PAIRS_FILE}")
         else:
-            reasons.append(f"{PAIRS_FILE} holds no list of pairs with group names")
+            reasons.append(f"{PAIRS_FILE} holds no list of 1 to {MAX_PAIRS} pairs with group names")
     if scores is not None and record.get("reference_scores") != scores:
         reasons.append(f"{RECORD_FILE} reference_scores are not the scores in {REFERENCE_FILE}: the comparison was made against numbers the reference did not produce")
     return scores, groups

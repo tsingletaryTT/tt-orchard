@@ -587,3 +587,77 @@ def test_a_record_field_of_the_wrong_type_is_a_reason_and_never_an_exception(tmp
     rec[field] = value
     (stage / "evidence" / "scoring-check.json").write_text(json.dumps(rec))
     assert gate(run, stage)
+
+
+# ---- review findings (PR 383) -------------------------------------------------------------------------------
+
+def _write_record(stage, rec):
+    (stage / "evidence" / "scoring-check.json").write_text(json.dumps(rec))
+
+
+def test_a_pair_file_over_the_pair_limit_is_refused_without_the_quadratic_work(tmp_path):
+    # 100,000 pairs in one group would be about five billion comparisons in `parity`; the limit is checked first.
+    run, stage, done = honest_run(tmp_path)
+    n = 100_000
+    f = run / "stages" / "1" / "evidence" / "reference" / "scoring-pairs.json"
+    f.write_text(json.dumps({"model_kind": "reranker", "pairs": [{"group": "g", "input_ids": [1]}] * n}))
+    ref = run / "stages" / "1" / "evidence" / "reference" / "scoring-reference.json"
+    ref.write_text(json.dumps({"model_kind": "reranker", "pairs": {"sha256": "0" * 64}, "scores": [0.0] * n}))
+    rec = record(stage)
+    rec.update(chip_scores=[0.0] * n, reference_scores=[0.0] * n, groups=["g"] * n)
+    _write_record(stage, rec)
+    t0 = time.monotonic()
+    r = gate(run, stage)
+    assert time.monotonic() - t0 < 5 and mentions(r, "1 to 4096")
+
+
+@pytest.mark.parametrize("where", ["chip", "reference"])
+def test_a_score_of_huge_size_is_a_reason_and_not_an_overflow(tmp_path, where):
+    run, stage, done = honest_run(tmp_path)
+    if where == "chip":
+        rec = record(stage)
+        rec["chip_scores"][0] = 1e200
+        _write_record(stage, rec)
+    else:
+        ref = run / "stages" / "1" / "evidence" / "reference" / "scoring-reference.json"
+        doc = json.loads(ref.read_text())
+        doc["scores"][0] = 1e200
+        ref.write_text(json.dumps(doc))
+    assert mentions(gate(run, stage), "of size at most")
+
+
+@pytest.mark.parametrize("value", [[1], "x", 5, None, True])
+def test_a_reference_whose_pairs_field_is_not_an_object_is_a_reason_and_not_an_exception(tmp_path, value):
+    run, stage, done = honest_run(tmp_path)
+    ref = run / "stages" / "1" / "evidence" / "reference" / "scoring-reference.json"
+    doc = json.loads(ref.read_text())
+    doc["pairs"] = value
+    ref.write_text(json.dumps(doc))
+    assert mentions(gate(run, stage), "pairs must be an object")
+
+
+REWRITE_SELF = '''
+def close(model):
+    import pathlib
+    p = pathlib.Path("stages/2/port/port_model.py")
+    p.write_text(p.read_text() + "\\n# swapped in by close\\n")
+'''
+ADD_FILE = '''
+def close(model):
+    import pathlib
+    pathlib.Path("stages/2/port/extra.py").write_text("import ttnn\\n")
+'''
+
+
+@pytest.mark.parametrize("src", [REWRITE_SELF, ADD_FILE])
+def test_a_port_that_changes_its_own_source_while_it_runs_fails_the_run_and_leaves_no_record(tmp_path, src):
+    run, stage, done = honest_run(tmp_path, port_src=HONEST + src)
+    assert done.returncode == 2 and "while the port ran" in done.stdout
+    assert not (stage / "evidence" / "scoring-check.json").exists()
+
+
+def test_the_record_lists_the_port_files_as_they_were_before_the_worker_started(tmp_path):
+    import hashlib
+    run, stage, done = honest_run(tmp_path)
+    listed = {s["path"]: s["sha256"] for s in record(stage)["port_sources"]}
+    assert listed == {"stages/2/port/port_model.py": hashlib.sha256((stage / "port" / "port_model.py").read_bytes()).hexdigest()}
