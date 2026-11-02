@@ -1,0 +1,3 @@
+target = "0.9.95"
+summary = "Stage 0 records a stack freshness file: tt-metal, TT vLLM plugin, skills clone and transformers against upstream; critical for a new run, advisory on resume"
+pr = 381
