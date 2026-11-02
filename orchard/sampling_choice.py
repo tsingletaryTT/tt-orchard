@@ -46,7 +46,14 @@ def _number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-MAX_JSON_BYTES = 4 << 20       # the largest file of this module's kind (a swap check or a trial result) is far smaller
+DECISION_MAX_BYTES = 4 << 20   # the size limit of every stage 2 decision file (sampling-decision.json, graft-decision.json) wherever it is read
+MAX_JSON_BYTES = DECISION_MAX_BYTES       # the largest file of this module's kind (a swap check or a trial result) is far smaller
+
+
+def read_decision_file(path) -> "safeio.Checked":
+    """A stage 2 decision file through the one reader every check uses (stage 2's own checks, stage 4's `_graft_reasons` and the package gate), with
+    the one limit `DECISION_MAX_BYTES`. A file between two different limits would be accepted by one check and refused by another."""
+    return safeio.read_json_checked(path, max_bytes=DECISION_MAX_BYTES)
 
 
 def _read_json(path):
@@ -72,7 +79,8 @@ def refusals(stage_dir, run_dir) -> list[str]:
         files.append((Path(run_dir) / "stages" / "0" / "evidence" / "genconfig-license.json", "stage 0 evidence/genconfig-license.json"))
     out = []
     for path, name in files:
-        problem = safeio.read_json_checked(path, max_bytes=MAX_JSON_BYTES).problem(name)
+        problem = (read_decision_file(path) if name in (DECISION_FILE, "graft-decision.json")
+                   else safeio.read_json_checked(path, max_bytes=MAX_JSON_BYTES)).problem(name)
         if problem:
             out.append(problem)
     return out

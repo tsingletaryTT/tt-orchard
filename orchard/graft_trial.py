@@ -153,7 +153,7 @@ def read_decision(stage_dir) -> dict | None:
     """The decision file, or None when it is missing, unreadable, not an object or names no known choice. The read is bounded and refuses a
     FIFO, a device and a link (orchard/safeio.py). A refused file is None here, so `chosen` is False; the stage 2 gate names the refusal
     (`refusals`, issue 287), so a run does not go on from a decision file that was refused."""
-    d = safeio.read_json_checked(Path(stage_dir) / DECISION_FILE, max_bytes=MAX_JSON_BYTES).value
+    d = sampling_choice.read_decision_file(Path(stage_dir) / DECISION_FILE).value
     return d if isinstance(d, dict) and d.get("choice") in CHOICES else None
 
 
@@ -163,7 +163,7 @@ def chosen(run_dir) -> bool:
     return d is not None and d["choice"] == "graft"
 
 
-MAX_JSON_BYTES = 4 << 20       # the largest file of this module's kind (a trial result or a swap check) is far smaller
+MAX_JSON_BYTES = sampling_choice.DECISION_MAX_BYTES       # one limit for the decision files of stage 2 (see sampling_choice.read_decision_file)
 
 
 def _read_json(path: Path):
@@ -181,7 +181,8 @@ def refusals(stage_dir, run_dir=None) -> list[str]:
              (sd / TRIAL_DIR / "variant" / "evidence" / "swap-check.json", f"{TRIAL_DIR}/variant/evidence/swap-check.json")]
     if run_dir is not None:
         files.append((Path(run_dir) / "stages" / "0" / "evidence" / "genconfig-license.json", "stage 0 evidence/genconfig-license.json"))
-    return [p for path, name in files if (p := safeio.read_json_checked(path, max_bytes=MAX_JSON_BYTES).problem(name))]
+    return [p for path, name in files if (p := (sampling_choice.read_decision_file(path) if name == DECISION_FILE
+                                                else safeio.read_json_checked(path, max_bytes=MAX_JSON_BYTES)).problem(name))]
 
 
 def decision_problems(stage_dir, run_dir) -> list[str]:

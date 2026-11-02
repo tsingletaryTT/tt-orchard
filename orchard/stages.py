@@ -983,6 +983,17 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
     return _done(reasons, seen)
 
 
+def decision_file_problems(run_dir) -> list[str]:
+    """One reason for each of stage 2's decision files (graft-decision.json, sampling-decision.json) that is there and refused. Stage 4's graft
+    check and the package gate both use this, with the one reader and limit of `sampling_choice.read_decision_file`; a missing file is no reason."""
+    out = []
+    for fname in (GRAFT_DECISION_FILE, sampling_choice.DECISION_FILE):
+        problem = sampling_choice.read_decision_file(Path(run_dir) / "stages" / "2" / fname).problem(f"stages/2/{fname}")
+        if problem:
+            out.append(problem)
+    return out
+
+
 def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     """A bundle configuration was built the way stage 2's graft decision says. A configuration served by the nearest model's own bundle
     has `bundle_dir` in its swap_config.json; the supervisor drafted `graft_mtp` there from the decision, and the agent's prepare step can
@@ -990,10 +1001,9 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     configuration is another server and is not held to the decision."""
     # Stage 2's two decision files decide what this configuration is held to. One that is there and refused (a link, a FIFO, an oversize file)
     # reads as no decision in `graft_chosen` and `drafter_off_chosen`, which would let an ungrafted bundle through.
-    for fname in (GRAFT_DECISION_FILE, sampling_choice.DECISION_FILE):
-        problem = safeio.read_json_checked(Path(run_dir) / "stages" / "2" / fname, max_bytes=JSON_MAX_BYTES).problem(f"stages/2/{fname}")
-        if problem:
-            return [f"{where}: {problem}, so stage 2's decision cannot be checked against this configuration"]
+    bad = decision_file_problems(run_dir)
+    if bad:
+        return [f"{where}: {bad[0]}, so stage 2's decision cannot be checked against this configuration"]
     cdir = Path(stage_dir) / "configs" / str(n)
     got = safeio.read_json_checked(cdir / "swap_config.json", max_bytes=JSON_MAX_BYTES)
     if got.refused:
@@ -1271,10 +1281,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
     reasons += sampling_summary_problems(run)
-    for fname in (GRAFT_DECISION_FILE, sampling_choice.DECISION_FILE):
-        problem = safeio.read_json_checked(run / "stages" / "2" / fname, max_bytes=JSON_MAX_BYTES).problem(f"stages/2/{fname}")
-        if problem:
-            reasons.append(f"{problem}, so the package cannot be checked against stage 2's decision")
+    reasons += [f"{p}, so the package cannot be checked against stage 2's decision" for p in decision_file_problems(run)]
     drafter_off, host_sampling = served_drafter_state(run)
     sampling_decision = sampling_choice.read_decision(run / "stages" / "2")
     model_has_mtp = delta_model_has_mtp(delta)

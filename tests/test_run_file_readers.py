@@ -25,7 +25,7 @@ CHILD_PRELUDE = textwrap.dedent('''
     from pathlib import Path
     from orchard import safeio, stages, sampling_choice, graft_trial
     for mod, name in ((stages, "JSON_MAX_BYTES"), (stages, "TEXT_MAX_BYTES"),
-                      (sampling_choice, "MAX_JSON_BYTES"), (graft_trial, "MAX_JSON_BYTES")):
+                      (sampling_choice, "MAX_JSON_BYTES"), (sampling_choice, "DECISION_MAX_BYTES"), (graft_trial, "MAX_JSON_BYTES")):
         setattr(mod, name, 64)                          # "oversize" is anything over 64 bytes here
     base = Path(tempfile.mkdtemp(prefix="run-files-"))
     run = base / "run"
@@ -750,3 +750,35 @@ def test_a_decision_recorded_with_the_old_missing_genconfig_wording_still_matche
     from orchard import sampling_choice
     need = sampling_choice.need(tmp_path, "auto")
     assert need["evidence"] == ["no evidence: stage 0's evidence/genconfig-license.json is missing or unreadable"]
+
+
+# ------------------------------------------------ fifth Copilot review of PR 345: one limit for the stage 2 decision files
+
+LIMIT = 400
+
+
+def _decision_of_size(size: int, choice: str) -> bytes:
+    base = json.dumps({"choice": choice, "reason": ""})
+    return json.dumps({"choice": choice, "reason": "x" * (size - len(base))}).encode()
+
+
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+@pytest.mark.parametrize("fname,choice", [("graft-decision.json", "safe"), ("sampling-decision.json", "keep")])
+def test_every_check_of_a_decision_file_gives_the_same_verdict_just_under_at_and_over_the_limit(tmp_path, monkeypatch, fname, choice, delta):
+    from orchard import graft_trial, sampling_choice, stages
+    monkeypatch.setattr(sampling_choice, "DECISION_MAX_BYTES", LIMIT)
+    run = tmp_path / "run"
+    sd = run / "stages" / "2"
+    sd.mkdir(parents=True)
+    data = _decision_of_size(LIMIT + delta, choice)
+    assert len(data) == LIMIT + delta
+    (sd / fname).write_bytes(data)
+    over = delta > 0
+    stage2_graft = any("is not readable" in p for p in graft_trial.refusals(sd, run))
+    stage2_sampling = any("is not readable" in p for p in sampling_choice.refusals(sd, run))
+    stage4 = any("is not readable" in r for r in stages._graft_reasons(run / "stages" / "4", run, 2, "w"))
+    package = any(fname in p for p in stages.decision_file_problems(run))
+    verdicts = {"stage 2 graft": stage2_graft, "stage 2 sampling": stage2_sampling, "stage 4": stage4, "package gate": package}
+    if fname == "graft-decision.json":
+        assert verdicts["stage 2 graft"] == over
+    assert verdicts["stage 2 sampling"] == over and verdicts["stage 4"] == over and verdicts["package gate"] == over, verdicts
