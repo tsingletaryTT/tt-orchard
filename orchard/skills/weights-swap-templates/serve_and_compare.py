@@ -386,9 +386,18 @@ def agreement_preflight(cfg: dict) -> dict | None:
         ref_raw = read_small_file(ref_path)
         ref = json.loads(ref_raw.decode("utf-8"))
         entries = ref["entries"]
+        if not isinstance(entries, list) or not entries or len(entries) > core.MAX_ENTRIES:
+            raise ValueError(f"entries must be a list of 1 to {core.MAX_ENTRIES} prompts")
         for e in entries:
-            if not (isinstance(e.get("id"), str) and isinstance(e.get("prompt_ids"), list) and isinstance(e.get("generated_ids"), list)):
-                raise ValueError("every entry needs an id, prompt_ids and generated_ids")
+            if not isinstance(e.get("id"), str):
+                raise ValueError("every entry needs a string id")
+            for key in ("prompt_ids", "generated_ids"):
+                ids = e.get(key)
+                if (not isinstance(ids, list) or not ids or len(ids) > core.MAX_IDS
+                        or not all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in ids)):
+                    raise ValueError(f"entry {e['id']!r}: {key} must be a non-empty list of whole numbers of at most {core.MAX_IDS}")
+        if len({e["id"] for e in entries}) != len(entries):
+            raise ValueError("prompt ids must be unique")
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         print(f"serve_and_compare: cannot read the agreement reference {ref_path}: {type(exc).__name__}: {exc}. Stage 1 writes it for the "
               "prompt set; without it there is nothing to compare the chip with.", file=sys.stderr)
@@ -412,17 +421,22 @@ def load_agreement_control(cfg: dict, run_dir: Path, entries: list, set_sha: str
         raw = read_small_file(path)
         record = json.loads(raw.decode("utf-8"))["agreement_set"]
         ctl = {e["id"]: e["reference_ids"] for e in record["entries"]}
+        model_id = record.get("model_id")
         mine = {e["id"]: [int(i) for i in e["generated_ids"][:len(ctl.get(e["id"], []))]] for e in entries}
         same = record["prompt_set_sha256"] == set_sha and ctl == mine
-        embedded = [{"id": e["id"], "kind": e.get("kind"), "reference_ids": e["reference_ids"], "chip_ids": e["chip_ids"]}
-                    for e in record["entries"]]
+        embedded = [{"id": e["id"], "kind": e.get("kind"), "reference_ids": e["reference_ids"], "chip_ids": e["chip_ids"],
+                     "error": e.get("error")} for e in record["entries"]]
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         print(f"serve_and_compare: cannot use the agreement control {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(2)
     if not same:
         print(f"serve_and_compare: the agreement control {path} was made from another prompt set or other reference ids.", file=sys.stderr)
         sys.exit(2)
-    return {"source": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "entries": embedded}
+    problem = control_identity_problem(cfg.get("nearest_model_id"), model_id)       # the same rule as the prompt-suite control
+    if problem:
+        print(f"serve_and_compare: the agreement control {path} is not a control of the nearest model: {problem}.", file=sys.stderr)
+        sys.exit(2)
+    return {"source": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "model_id": model_id, "entries": embedded}
 
 
 def run_agreement_set(cfg: dict, port: int, model: str, tokenizer, setup: dict) -> dict:

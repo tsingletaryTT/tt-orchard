@@ -224,6 +224,67 @@ def test_a_control_that_is_not_separated_fails_the_record():
     assert verdict["passes"] is False and any("cannot tell" in r for r in verdict["reasons"])
 
 
+def weak_control(**change):
+    entries = [entry(i, wrong_every=2) for i in range(6)]
+    for e in entries:
+        e.update(change)
+    return {"entries": entries}
+
+
+def test_a_complete_control_that_agrees_poorly_lets_the_new_model_pass():
+    assert core.judge(record(control=weak_control()))["reasons"] == []
+
+
+def test_a_control_with_failed_requests_is_never_read_as_a_weak_model():
+    ctl = weak_control()
+    for e in ctl["entries"]:
+        e["chip_ids"] = [None] * len(e["chip_ids"])          # every request of the control failed: agreement 0, a "perfect" margin
+        e["error"] = "HTTP 500"
+    v = core.judge(record(control=ctl))
+    assert v["passes"] is False and any("control cannot be used" in r and "failed request" in r for r in v["reasons"])
+
+
+def test_a_control_with_one_missing_id_or_other_reference_ids_or_other_prompts_is_refused():
+    base = weak_control()
+    missing = json.loads(json.dumps(base))
+    missing["entries"][1]["chip_ids"][5] = None
+    other_ref = json.loads(json.dumps(base))
+    other_ref["entries"][2]["reference_ids"][0] += 1
+    short = {"entries": base["entries"][:5]}
+    extra = json.loads(json.dumps(base))
+    extra["entries"].append({**extra["entries"][0], "id": "zzz"})
+    twice = {"entries": base["entries"] + [base["entries"][0]]}
+    for ctl, word in ((missing, "missing chip ids"), (other_ref, "other reference ids"), (short, "is missing"), (extra, "not in the run's set"),
+                      (twice, "more than once")):
+        v = core.judge(record(control=ctl))
+        assert v["passes"] is False and any(word in r for r in v["reasons"]), (word, v["reasons"])
+
+
+@pytest.mark.parametrize("ctl", [None, 3, "x", [], {"entries": None}, {"entries": [None]}, {"entries": [{"id": ["a"]}]}, {"entries": "abc"}])
+def test_a_hostile_control_is_a_reason_not_a_crash(ctl):
+    v = core.judge(record(control=ctl)) if ctl is not None else core.judge(record())
+    assert isinstance(v["reasons"], list)
+    if ctl is not None:
+        assert v["passes"] is False
+
+
+def test_the_prompt_ids_must_be_the_expected_set_each_once():
+    ids = [f"p{i}" for i in range(6)]
+    assert core.judge(record(), expected_ids=ids)["reasons"] == []
+    five_copies = [dict(entry(0), id="p0") for _ in range(6)]
+    v = core.judge(record(five_copies), expected_ids=ids)
+    assert any("more than once" in r for r in v["reasons"]) and any("missing" in r for r in v["reasons"])
+    assert any("not in the shipped set" in r for r in core.judge(record(), expected_ids=ids[:5])["reasons"])
+    assert core.id_problems([{"id": ["x"]}], ids) == ["every entry of the agreement set needs a string id"]
+    assert core.id_problems(None, ids)
+
+
+def test_a_prompt_with_a_recorded_error_is_a_reason():
+    entries = good_entries()
+    entries[1]["error"] = "HTTP 500"
+    assert any("failed request" in r for r in core.judge(record(entries))["reasons"])
+
+
 def test_a_record_that_asked_for_a_control_and_holds_none_fails():
     assert any("asked for a control" in r for r in core.judge(record(control_expected=True))["reasons"])
 

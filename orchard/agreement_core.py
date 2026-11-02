@@ -202,24 +202,88 @@ def control_verdict(new_summary: dict, control_summary: dict | None, *, margin: 
     return out
 
 
-def judge(record, *, vocab_size: int | None = None, **bars) -> dict:
+def id_problems(entries, expected_ids) -> list[str]:
+    """Why the entries' prompt ids are not exactly the expected ids, each once (empty when they are). Five copies of one prompt, a missing
+    long-context prompt or an extra prompt are all problems. An id that is not a string is a problem (it could not be matched)."""
+    if not isinstance(entries, list):
+        return ["the agreement set has no entries list"]
+    ids = [e.get("id") if isinstance(e, dict) else None for e in entries]
+    if not all(isinstance(i, str) for i in ids):
+        return ["every entry of the agreement set needs a string id"]
+    out = []
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:
+        out.append(f"prompt ids appear more than once: {dup}")
+    missing, extra = sorted(set(expected_ids) - set(ids)), sorted(set(ids) - set(expected_ids))
+    if missing:
+        out.append(f"prompts missing from the agreement set: {missing}")
+    if extra:
+        out.append(f"prompts that are not in the shipped set: {extra}")
+    return out
+
+
+def control_problems(control_entries, entries) -> list[str]:
+    """Why a control cannot be used for the margin (empty when it can). A control is a complete run of the same prompts against the same
+    reference ids. A control with a failed request, a missing id (`None`), another list of reference ids or another set of prompts would
+    lower its pooled agreement for reasons that say nothing about the nearest model, and the margin would pass. A complete control that
+    agrees poorly is allowed: that is what a different model looks like."""
+    if not isinstance(control_entries, list) or not isinstance(entries, list):
+        return ["the control has no entries list"]
+    mine = {e.get("id"): e.get("reference_ids") for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
+    out, seen = [], set()
+    for c in control_entries:
+        if not isinstance(c, dict) or not isinstance(c.get("id"), str):
+            out.append("a control entry has no string id")
+            continue
+        cid = c["id"]
+        if cid in seen:
+            out.append(f"control prompt {cid!r} appears more than once")
+        seen.add(cid)
+        if cid not in mine:
+            out.append(f"control prompt {cid!r} is not in the run's set")
+            continue
+        if c.get("reference_ids") != mine[cid]:
+            out.append(f"control prompt {cid!r} has other reference ids than the run")
+        chip = c.get("chip_ids")
+        if c.get("error") not in (None, ""):
+            out.append(f"control prompt {cid!r} had a failed request: {str(c['error'])[:120]}")
+        if not isinstance(chip, list) or any(x is None for x in chip):
+            out.append(f"control prompt {cid!r} has missing chip ids")
+    for cid in sorted(set(mine) - seen):
+        out.append(f"control prompt {cid!r} is missing")
+    return out
+
+
+def judge(record, *, vocab_size: int | None = None, expected_ids=None, **bars) -> dict:
     """Everything the gate needs from one `agreement_set` record, recomputed from its raw ids: {passes, reasons, summary, calibration,
-    control}. The reasons are the gate's. A record that did not run has no reasons (the set is opt-in); one that ran and holds no usable
-    entries is refused."""
+    control}. The reasons are the gate's. A record that did not run has no reasons here (the set is opt-in; the gate decides whether the
+    run asked for it). `expected_ids` is the shipped prompt set's ids: when given, the record must hold exactly those, each once. A
+    control that is incomplete is a reason and is never read as a weak model."""
     if not isinstance(record, dict) or record.get("ran") is not True:
         return {"passes": True, "reasons": [], "summary": None, "calibration": None, "control": None, "ran": False}
     entries = record.get("entries")
     summary = summarise(entries, **bars)
     reasons = list(summary["reasons"])
+    if expected_ids is not None:
+        reasons += id_problems(entries, expected_ids)
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and e.get("error") not in (None, ""):
+            reasons.append(f"prompt {e.get('id')!r} had a failed request: {str(e['error'])[:120]}")
     cal = calibrate(entries, vocab_size=vocab_size, **bars)
     if not cal["usable"]:
         reasons.append("the agreement bars are unusable: " + (cal["reason"] or "the damage control could not be scored"))
     control = record.get("control")
-    ctl_summary = summarise(control.get("entries"), **bars) if isinstance(control, dict) else None
-    verdict = control_verdict(summary, ctl_summary)
+    if control is None:
+        verdict = control_verdict(summary, None)
+    else:
+        problems = control_problems(control.get("entries") if isinstance(control, dict) else None, entries)
+        if problems:
+            verdict = {"present": True, "separates": False, "margin": CONTROL_MARGIN, "reason": "the control cannot be used: " + "; ".join(problems[:4])}
+        else:
+            verdict = control_verdict(summary, summarise(control["entries"], **bars))
     if verdict["present"] and verdict["separates"] is not True:
         reasons.append(verdict.get("reason", "the control does not separate"))
-    elif isinstance(record.get("control_expected"), bool) and record["control_expected"] and not verdict["present"]:
+    elif record.get("control_expected") is True and not verdict["present"]:
         reasons.append("the run asked for a control and the record holds none")
     return {"passes": not reasons, "reasons": reasons, "summary": summary, "calibration": cal, "control": verdict, "ran": True}
 

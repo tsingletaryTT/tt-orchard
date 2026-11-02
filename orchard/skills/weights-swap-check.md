@@ -227,10 +227,13 @@ Japanese, and one long prompt) and records the raw ids under `agreement_set`, wi
 `baseline`. The gate recomputes everything from the ids: a pooled top-1 bar of 0.85, a per-prompt floor of 0.70, a
 damage control (a run with every fourth token wrong must fail the same bars, or the bars are reported unusable),
 and, when `"agreement_control"` names the `swap-check.json` of the same set run on the nearest model, a margin of
-0.05 over that control. Every number is a provisional choice. Stage 1 does not write the reference file yet, so
-the supervisor does not turn this on. Do not edit `agreement_core.py`: a test keeps it equal to `orchard/agreement_core.py`.
+0.05 over that control. The control must be a complete run (no failed request or missing id) of the same prompts and
+reference ids, served from the nearest model (its `model_id` is checked like the prompt-suite control's). Every number is a
+provisional choice. When stage 1 has written the reference file, the supervisor sets `agreement_set` in the stage 2 config
+and records the file's sha256 in the ledger before the test; the gate compares the file with that hash, and a run whose
+config asks for the set needs a completed record. Stage 1 does not write the reference file yet, so nothing turns this on. Do not edit `agreement_core.py`: a test keeps it equal to `orchard/agreement_core.py`.
 
-`python3 -m orchard.long_sweep run --port <port> --model <name> --out sweep.json` (issue 18) measures prefill
+`python3 -m orchard.long_sweep run --port <port> --model <name> [--api chat|completions] --out sweep.json` (issue 18) measures prefill
 and decode speed over input lengths (1K to 200K tokens) and concurrency (1 and 4) on a server that is already
 running, and `compare` reads two such files side by side. It needs a board and hours; nothing has run it on one.
 
