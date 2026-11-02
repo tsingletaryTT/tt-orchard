@@ -1,0 +1,4 @@
+target = "0.9.88"
+summary = "Stage 2's prepare step runs prepare_swap.py in supervisor code when swap_config.json is drafted, and a result written before the hardware test is set aside"
+pr = 313
+kind = "fix"
