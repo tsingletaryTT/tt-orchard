@@ -108,6 +108,20 @@ class Handler(BaseHTTPRequestHandler):
         elif req["max_tokens"] > 1:
             text = " " + " ".join(vocab[i] for i in gen[:req["max_tokens"]])
         else:
+            # The agreement set (issue 15): config "agreement_sets" is a list of {prompt_ids, generated_ids, wrong_every}. A teacher-forced
+            # request whose prompt starts with one set's prompt ids is answered from that set; wrong_every N makes every Nth position wrong.
+            hit = next((s for s in cfg.get("agreement_sets", []) if prompt[:len(s["prompt_ids"])] == s["prompt_ids"]), None)
+            if hit is not None:
+                k = len(prompt) - len(hit["prompt_ids"])
+                if hit.get("fail_at") == k:                     # a refused request at this position
+                    self._send(500, b"fake failure", "text/plain")
+                    return
+                wanted = hit["generated_ids"][k]
+                every = hit.get("wrong_every")
+                if every and k % every == every - 1:
+                    wanted = (wanted + 1) % len(vocab)
+                self._send(200, json.dumps({"choices": [{"text": " " + vocab[wanted], "index": 0}]}).encode())
+                return
             k = len(prompt) - len(prompt_ids)
             wanted = gen[k]
             if cfg["mode"] == "every4" and k % 4 == 3:

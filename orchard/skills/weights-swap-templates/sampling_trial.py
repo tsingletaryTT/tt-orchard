@@ -37,6 +37,7 @@ RESULT = "trial-result.json"
 TAIL_LINES = 12
 SHIPPED = ("prepare_swap.py", "serve_and_compare.py")
 SUITE_FILE = "prompt_suite.json"
+AGREEMENT_FILES = ("agreement_core.py", "agreement_prompts.json")     # serve_and_compare.py imports these when `agreement_set` is on
 CACHE_SUFFIX = "-nodraft"          # orchard/sampling_choice.py names the same suffix when the supervisor checks free space; a test keeps them equal
 # The stage config's fields that name a path. The stage's own scripts run in the stage directory, but the helpers here run in `sampling-trial/variant`,
 # so a relative value is resolved against the run directory (the run directory is where a path written into a run's config is relative to) first.
@@ -56,7 +57,7 @@ def resolve_paths(cfg: dict, run_dir: Path) -> dict:
 
 def shipped(cfg: dict) -> tuple[str, ...]:
     """The files the variant needs next to its scripts: the two swap scripts, and the prompt suite when the stage's config asks for it."""
-    return SHIPPED + ((SUITE_FILE,) if cfg.get("prompt_suite") else ())
+    return SHIPPED + ((SUITE_FILE,) if cfg.get("prompt_suite") else ()) + (AGREEMENT_FILES if cfg.get("agreement_set") else ())
 
 
 def fail(message: str) -> None:
