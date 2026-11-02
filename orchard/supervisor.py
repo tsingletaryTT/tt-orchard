@@ -1535,6 +1535,10 @@ class Supervisor:
             return dataclasses.replace(result, ok=False, reasons=tuple(result.reasons) + tuple(extra))
         return gate
 
+    def _homes(self) -> tuple:
+        """The home directories to show as <home> in text that reaches the ledger: the run's operator home and the invoking user's."""
+        return (str(self.paths.operator_home), str(self.home))
+
     def _stack_pins_sha(self, stage_dir: Path) -> str | None:
         """The sha256 of the newest `stack pins` evidence entry the ledger holds for this stage directory's record, else None."""
         rel = os.path.relpath(Path(stage_dir) / stack_pins_mod.FILE, self.run_dir)
@@ -1569,10 +1573,11 @@ class Supervisor:
                 rec = stack_pins_mod.unchecked_record("no stack comparison was supplied to this supervisor", new_run=new_run)
                 sha = stack_pins_mod.write_record(stage_dir, rec)
         except (OSError, ValueError) as exc:        # no record: nothing may go on without one
-            self.ledger.append("decision", 0, decision="stack pins not written", reason=stack_pins_mod.redact(f"{type(exc).__name__}: {exc}"[:200]))
+            self.ledger.append("decision", 0, decision="stack pins not written", reason=stack_pins_mod.redact(f"{type(exc).__name__}: {exc}", self._homes())[:200])
             self._block(0, f"the stack freshness record could not be written ({type(exc).__name__}). Fix the stage 0 directory, then run the command again")
         self.ledger.append("evidence", 0, what="stack pins", severity=rec["severity"], mode=rec["mode"],
                            hazards=[h["name"] for h in rec["hazards"]], advisories=[a["name"] for a in rec["advisories"]],
+                           would_block=[a["name"] for a in rec["advisories"] if a.get("would_block")], blocking=bool(rec.get("blocking_requested")),
                            path=os.path.relpath(Path(stage_dir) / stack_pins_mod.FILE, self.run_dir), sha256=sha)
         if rec["hazards"]:
             why = "; ".join(f"{h['name']}: {h['reason']}" for h in rec["hazards"])
@@ -3700,7 +3705,7 @@ def stack_check_for(sup, args, environ=None):
         vllm_dir=env.get("ORCHARD_TT_VLLM_DIR"), vllm_branch=env.get("ORCHARD_TT_VLLM_BRANCH") or "main",
         skills_dirs=tuple(str(d) for d in args.skills_dir), homes=(str(sup.paths.operator_home), str(sup.home)),
         exclude_paths=(str(sup.run_dir),))
-    return stack_pins_mod.make_check(sources, probe_env=agent_env(sup.run_dir, extra=sup.extra_env))
+    return stack_pins_mod.make_check(sources, probe_env=agent_env(sup.run_dir, extra=sup.extra_env), block=env.get(stack_pins_mod.BLOCK_ENV) == "1")
 
 
 def main(argv=None, *, home=None) -> int:

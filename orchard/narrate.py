@@ -188,6 +188,14 @@ def _evidence(e: dict, d: dict) -> list[Line]:
         return [Line(o, "will test these chip counts: " + ", ".join(str(c) for c in d.get("configs") or []))]
     if what == "transcript":
         return [Line(o, f"agent step finished: {d.get('status', '?')} after {d.get('turns', '?')} turns")]
+    if what == "stack pins":
+        would = d.get("would_block") or []
+        text = f"stack freshness recorded ({d.get('severity', '?')}, {d.get('mode', '?')} run)"
+        if would:
+            text += "; would block if ORCHARD_STACK_PINS_BLOCK=1: " + ", ".join(str(n) for n in would[:6])
+        elif d.get("hazards"):
+            text += "; critical: " + ", ".join(str(n) for n in d["hazards"][:6])
+        return [Line(o, _clip(text, 240), bool(would or d.get("hazards")))]
     return []
 
 

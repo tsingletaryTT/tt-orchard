@@ -46,12 +46,25 @@ MAX_BEHIND_DAYS = 7.0           # choice: the threshold in tenstorrent/skills PR
 MAX_RECORD_BYTES = 1 << 20
 PROBE_TIMEOUT_S = 120.0         # choice: importing transformers with torch takes a few seconds; a hung import ends here
 PROBE_MAX_BYTES = 64 * 1024
-MAX_CLASSES = 8
+MAX_CLASSES = 64                # choice: no real checkpoint names this many architectures; more is an unchecked finding, never ok
 CLASS_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,100}$")
 MODEL_TYPE = re.compile(r"^[A-Za-z0-9_]{1,100}$")
 SEVERITIES = ("critical", "advisory", "ok")
 OFFLINE_ENV = "ORCHARD_STACK_PINS_OFFLINE"
+BLOCK_ENV = "ORCHARD_STACK_PINS_BLOCK"      # "1": a critical finding of a new run blocks stage 0. Without it the findings are recorded as would_block advisories.
+METAL_REPO = "tenstorrent/tt-metal"
+VLLM_REPO = "tenstorrent/vllm-tt-plugin"
+SKILLS_REPO = "tenstorrent/skills"
 
+# What the probe cannot match in the reference step, listed in every record (`probe_limits`). The probe is deliberately not the reference step:
+# it must not load files an agent can write.
+PROBE_LIMITS = (
+    "The probe sets PYTHONNOUSERSITE=1 and starts in an empty temporary directory, so a reference step that imports transformers from a user-site install can differ.",
+    "PYTHONPATH entries that are relative, the current directory, or under the run directory are dropped, and LD_LIBRARY_PATH and other import settings are not passed on.",
+    "The interpreter is the run's reference_python input or ORCHARD_REFERENCE_PYTHON; stage 1 and the text-runtime references can select another one.",
+    "On a resumed stage 0 the sources come from the inputs of the current command; the agent receives the inputs the run started with.",
+    "The class lookup uses the model_type and architectures of the checkpoint's config.json only.",
+)
 # Checkpoints whose config.json does not state the minimum transformers they need. model_type -> (minimum, source). The config's own
 # `transformers_version`, when it has one, is compared as well and the larger minimum wins.
 KNOWN_MINIMUMS = {
@@ -113,14 +126,14 @@ class Sources:
     vllm_dir: str | None = None
     vllm_branch: str = "main"
     skills_dirs: tuple = ()
+    metal_repo: str = METAL_REPO    # the repositories each origin must be (case-insensitive); another origin gives an unknown part
+    vllm_repo: str = VLLM_REPO
     exclude_paths: tuple = ()       # directories whose PYTHONPATH entries the probe drops (the run directory: an agent can write there)
     homes: tuple = ()               # home directories to show as <home> (the run's operator home); the invoking user's is always `~`
 
 
 # ---- small helpers --------------------------------------------------------------------------------------------------
 
-_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]*@")
-_TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghs_|github_pat_)[A-Za-z0-9_]{8,}")
 _OTHER_HOME = re.compile(r"(?:/home|/Users)/[^/\s'\"`]+|/root(?=/|\b)")
 
 
@@ -132,7 +145,7 @@ def _tilde(value, homes: tuple = ()):
     except (RuntimeError, KeyError):
         home = ""
     if isinstance(value, str):
-        value = _TOKEN.sub("[token removed]", _USERINFO.sub(r"\1", value))
+        value = skillsfresh.scrub_secrets(value)
         value = value.replace(home, "~") if len(home) > 1 else value
         for other in sorted((h for h in homes if isinstance(h, str) and len(h.rstrip("/")) > 1), key=len, reverse=True):
             value = value.replace(other.rstrip("/"), "<home>")
@@ -198,8 +211,16 @@ def config_facts(model_dir) -> dict:
         except safeio.BadValue:
             return None
     archs = cfg.get("architectures")
-    names = [a for a in archs if isinstance(a, str) and CLASS_NAME.match(a)][:MAX_CLASSES] if isinstance(archs, list) else []
-    return {"model_type": text("model_type", 100), "architectures": names, "transformers_version": text("transformers_version", 64)}
+    valid = [a for a in archs if isinstance(a, str) and CLASS_NAME.match(a)] if isinstance(archs, list) else []
+    problem = None
+    if archs is not None and not isinstance(archs, list):
+        problem = "architectures is not a list"
+    elif isinstance(archs, list) and len(valid) != len(archs):
+        problem = f"{len(archs) - len(valid)} of the {len(archs)} architecture entries are not plain class names"
+    if len(valid) > MAX_CLASSES:
+        problem = (problem + "; " if problem else "") + f"{len(valid)} architectures are named and only the first {MAX_CLASSES} can be checked"
+    return {"model_type": text("model_type", 100), "architectures": valid[:MAX_CLASSES], "architectures_problem": problem,
+            "transformers_version": text("transformers_version", 64)}
 
 
 def required_minimum(facts: dict) -> tuple[str | None, str | None]:
@@ -225,7 +246,8 @@ def _probe_env(base: dict | None = None, exclude: tuple = ()) -> dict:
     (`.`, an empty one) and the current directory are dropped: they would put a file of the invoking directory ahead of transformers."""
     src = os.environ if base is None else base
     env = {"PATH": src.get("PATH") or "/usr/bin:/bin", "LC_ALL": "C", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
-           "TOKENIZERS_PARALLELISM": "false"}
+           "TOKENIZERS_PARALLELISM": "false",
+           "PYTHONNOUSERSITE": "1"}     # the run's HOME is writable by an agent: no .pth file or module of its user site may start with the probe
     for name in ("HOME", "PYTHONPATH", "VIRTUAL_ENV"):
         if src.get(name):
             env[name] = src[name]
@@ -261,6 +283,8 @@ def probe_interpreter(python, classes, run: Callable | None = None, model_type=N
     unknown = lambda why: {"state": "unknown", "importable": None, "version": None, "classes": {}, "why": why}     # noqa: E731
     if not isinstance(python, str) or not python or "\0" in python:
         return unknown("no reference interpreter is named (set ORCHARD_REFERENCE_PYTHON)")
+    if not os.path.isabs(python):
+        return unknown("the reference interpreter is a relative path, and the probe starts in another directory; name it with an absolute path")
     try:
         if not (os.path.isfile(python) and os.access(python, os.X_OK)):
             return unknown("the reference interpreter is not an executable file")
@@ -313,28 +337,50 @@ def _fresh_part(f: skillsfresh.Freshness, hazard: str, new_run: bool) -> tuple[d
     return part, crit, adv
 
 
-def _branch_update(upstream: str) -> Callable:
+_HOME_PREFIX = re.compile(r"^(?:/home/[^/]+|/Users/[^/]+|/root)(?=/|$)")
+
+
+def _path_word(path, homes: tuple = ()) -> tuple[str, str]:
+    """(a shell word for `path`, a note). The home directory is replaced before quoting, so the word stays valid shell: the invoking user's home
+    is `~` (unquoted, so the shell expands it) and any other home is `<home>`, which the note tells the operator to replace."""
+    path = str(path)
+    try:
+        mine = str(Path.home())
+    except (RuntimeError, KeyError):
+        mine = ""
+    for prefix, token in sorted([(mine, "~")] + [(h, "<home>") for h in homes if isinstance(h, str)], key=lambda t: -len(t[0])):
+        prefix = prefix.rstrip("/")
+        if len(prefix) > 1 and (path == prefix or path.startswith(prefix + "/")):
+            break
+    else:
+        m = _HOME_PREFIX.match(path)
+        if not m:
+            return shlex.quote(path), ""
+        prefix, token = m.group(0), "<home>"
+    rest = path[len(prefix):].lstrip("/")
+    word = token + (("/" + shlex.quote(rest)) if rest else "")
+    return word, ("" if token == "~" else " (replace <home> with that user's home directory)")
+
+
+def _branch_update(upstream: str, homes: tuple = ()) -> Callable:
     """The update hint for a checkout compared with `upstream`: a fast-forward when that branch is checked out, else a request to switch first."""
     def hint(root, branch, remote=None):
-        root = shlex.quote(str(root))
+        word, note = _path_word(root, homes)
         if branch == upstream:
-            return f"git -C {root} pull --ff-only origin {upstream}"
-        return (f"the checkout is on {branch or 'no branch'}, and it is compared with upstream {upstream}. Commit your work, then `git -C {root} switch "
-                f"{upstream}` and update it with `git -C {root} pull --ff-only origin {upstream}`")
+            return f"git -C {word} pull --ff-only origin {upstream}{note}"
+        return (f"the checkout is on {branch or 'no branch'}, and it is compared with upstream {upstream}. Commit your work, then `git -C {word} switch "
+                f"{upstream}` and update it with `git -C {word} pull --ff-only origin {upstream}`{note}")
     return hint
 
 
-SKILLS_REPO = "tenstorrent/skills"
-
-
-def _skills_part(f: skillsfresh.Freshness, new_run: bool) -> tuple[dict, list, list]:
-    """A skills clone is compared only when its origin is tenstorrent/skills. A fork or another repository would be reported current or stale
-    against something that is not the skills the run should have, so its part is UNKNOWN."""
-    if f.state != skillsfresh.UNKNOWN and (f.repo or "").lower() != SKILLS_REPO.lower():     # GitHub names are case-insensitive
+def _repo_part(f: skillsfresh.Freshness, hazard: str, expected: str, new_run: bool) -> tuple[dict, list, list]:
+    """A checkout is compared only when its origin is the repository it should be (`expected`, case-insensitive: GitHub names are). A fork or
+    another repository would be reported current or stale against something that is not the project the run uses, so its part is UNKNOWN."""
+    if f.state != skillsfresh.UNKNOWN and (f.repo or "").lower() != expected.lower():
         part = {"state": skillsfresh.UNKNOWN, "path": f.path, "repo": f.repo,
-                "detail": f"the clone's origin is {f.repo or 'not a GitHub repository'}, not {SKILLS_REPO}, so it was not compared with the skills upstream"}
-        return part, [], [_entry(H_SKILLS + "_unchecked", f"{f.source} was not compared with upstream: {part['detail']}")]
-    return _fresh_part(f, H_SKILLS, new_run)
+                "detail": f"the checkout's origin is {f.repo or 'not a GitHub repository'}, not {expected}, so it was not compared with that upstream"}
+        return part, [], [_entry(hazard + "_unchecked", f"{f.source} was not compared with upstream: {part['detail']}")]
+    return _fresh_part(f, hazard, new_run)
 
 
 def _unnamed(source: str, hazard: str, why: str) -> tuple[dict, list, list]:
@@ -379,6 +425,9 @@ def _transformers_part(sources: Sources, run, probe_env=None) -> tuple[dict, lis
     if missing:
         state = skillsfresh.BEHIND
         crit.append(_entry(H_CLASS, f"transformers {installed} has no class {', '.join(missing)} that the checkpoint's architectures name"))
+    if facts["architectures_problem"]:
+        state = skillsfresh.UNKNOWN if state == skillsfresh.CURRENT else state
+        adv.append(_entry("transformers_architectures_unchecked", f"the checkpoint's architectures could not all be checked: {facts['architectures_problem']}"))
     if not facts["architectures"]:
         adv.append(_entry("transformers_architecture_unchecked", "the checkpoint's config.json names no architecture class, so the class check was not made"))
     if minimum is None and not facts["architectures"]:
@@ -393,7 +442,7 @@ def _transformers_part(sources: Sources, run, probe_env=None) -> tuple[dict, lis
 # ---- the record -------------------------------------------------------------------------------------------------------
 
 def build_record(sources: Sources, *, new_run: bool, run=None, probe_run=None, cache: skillsfresh.Cache | None = None,
-                 offline: bool = False, now: float | None = None, probe_env: dict | None = None) -> dict:
+                 offline: bool = False, now: float | None = None, probe_env: dict | None = None, block: bool = True) -> dict:
     """Make every comparison and return the record. Never raises for an input it cannot use: that part is UNKNOWN with a reason.
     `run` is the git and gh runner (a ReadOnlyRunner, or a function for one), `probe_run` runs the reference interpreter. No test passes
     the real ones."""
@@ -408,7 +457,7 @@ def build_record(sources: Sources, *, new_run: bool, run=None, probe_run=None, c
         crit.extend(triple[1])
         adv.extend(triple[2])
 
-    def clone(key, directory, hazard, source, update, branch="main"):
+    def clone(key, directory, hazard, source, update, branch="main", expected=""):
         if not directory:
             return take(key, _unnamed(source, hazard, "no checkout is named for it"))
         try:
@@ -417,16 +466,17 @@ def build_record(sources: Sources, *, new_run: bool, run=None, probe_run=None, c
         except (ValueError, OSError):
             return take(key, _unnamed(source, hazard, "the named directory cannot be checked"))
         f = skillsfresh.check_clone(directory, source=source, runner=runner, cache=cache, update=update, upstream_branch=branch, want_age=True)
-        take(key, _fresh_part(f, hazard, new_run))
+        take(key, _repo_part(f, hazard, expected, new_run))
 
-    clone("tt_metal", sources.tt_metal_dir, H_TT_METAL, "tt-metal", _branch_update("main"))
-    clone("tt_vllm_plugin", sources.vllm_dir, H_VLLM, "TT vLLM plugin", _branch_update(sources.vllm_branch), sources.vllm_branch)
+    clone("tt_metal", sources.tt_metal_dir, H_TT_METAL, "tt-metal", _branch_update("main", sources.homes), "main", sources.metal_repo)
+    clone("tt_vllm_plugin", sources.vllm_dir, H_VLLM, "TT vLLM plugin", _branch_update(sources.vllm_branch, sources.homes), sources.vllm_branch,
+          sources.vllm_repo)
     dirs = [d for d in sources.skills_dirs if d]
     if not dirs:
         take("skills", _unnamed("tenstorrent/skills", H_SKILLS, "no clone is named for it"))
     else:
-        results = skillsfresh.check_skills_dirs(dirs, run=runner, cache=cache, want_age=True)
-        subs = [_skills_part(f, new_run) for f in results]
+        results = skillsfresh.check_skills_dirs(dirs, run=runner, cache=cache, want_age=True, update=_branch_update("main", sources.homes))
+        subs = [_repo_part(f, H_SKILLS, SKILLS_REPO, new_run) for f in results]
         parts["skills"] = [s[0] for s in subs]
         for s in subs:
             crit.extend(s[1])
@@ -436,10 +486,14 @@ def build_record(sources: Sources, *, new_run: bool, run=None, probe_run=None, c
     if not new_run:                                 # a resume holds the same findings as notes
         adv = [dict(e, would_be_critical=True) for e in crit] + adv
         crit = []
+    elif not block:                                 # blocking is opt-in (ORCHARD_STACK_PINS_BLOCK=1): without it the findings are recorded, not enforced
+        adv = [dict(e, would_block=True) for e in crit] + adv
+        crit = []
     severity = "critical" if crit else ("advisory" if adv else "ok")
     stamp = datetime.fromtimestamp(time.time() if now is None else now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return _tilde({"schema": SCHEMA, "label": "comparison with upstream at the time of the check", "checked_at": stamp,
                    "mode": "new" if new_run else "resume", "severity": severity, "max_behind_days": MAX_BEHIND_DAYS,
+                   "blocking_requested": bool(block), "probe_limits": list(PROBE_LIMITS),
                    "hazards": crit, "advisories": adv, "parts": parts}, sources.homes)
 
 
@@ -449,7 +503,8 @@ def unchecked_record(why: str, *, new_run: bool, now: float | None = None) -> di
              "skills": [{"state": skillsfresh.UNKNOWN, "detail": why}], "transformers": {"state": skillsfresh.UNKNOWN, "detail": why}}
     stamp = datetime.fromtimestamp(time.time() if now is None else now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {"schema": SCHEMA, "label": "no comparison was made", "checked_at": stamp, "mode": "new" if new_run else "resume",
-            "severity": "advisory", "max_behind_days": MAX_BEHIND_DAYS, "hazards": [],
+            "severity": "advisory", "max_behind_days": MAX_BEHIND_DAYS, "blocking_requested": False,
+            "probe_limits": list(PROBE_LIMITS), "hazards": [],
             "advisories": [_entry("stack_unchecked", f"the stack was not compared with upstream: {why}")], "parts": parts}
 
 
@@ -461,11 +516,13 @@ def write_record(stage_dir, rec: dict) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def make_check(sources: Sources, *, offline: bool | None = None, run=None, probe_run=None, probe_env: dict | None = None) -> Callable:
+def make_check(sources: Sources, *, offline: bool | None = None, run=None, probe_run=None, probe_env: dict | None = None,
+               block: bool | None = None) -> Callable:
     """The callable the supervisor holds: (stage_dir, new_run) -> (record, sha256). `offline` None reads $ORCHARD_STACK_PINS_OFFLINE."""
     def check(stage_dir, new_run):
         off = bool(os.environ.get(OFFLINE_ENV)) if offline is None else offline
-        rec = build_record(sources, new_run=new_run, run=run, probe_run=probe_run, offline=off, probe_env=probe_env)
+        want_block = os.environ.get(BLOCK_ENV) == "1" if block is None else block
+        rec = build_record(sources, new_run=new_run, run=run, probe_run=probe_run, offline=off, probe_env=probe_env, block=want_block)
         return rec, write_record(stage_dir, rec)
     return check
 

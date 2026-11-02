@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 import json
 import os
 import sys
@@ -76,7 +77,7 @@ def test_pythonpath_entries_that_are_relative_the_current_directory_or_under_the
 # ---- (2) every home prefix is redacted in the record, the hint and the block reason ------------------------------------
 
 def test_the_operator_home_another_users_home_and_the_invoking_home_are_redacted_everywhere(tmp_path, py, monkeypatch):
-    monkeypatch.setattr(type(tmp_path), "home", classmethod(lambda cls: tmp_path / "invoker"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "invoker"))
     ops = tmp_path / "ops-home"
     other = "/home/someoneelse/tt-metal"
     mine = str(tmp_path / "invoker" / "vllm")

@@ -299,11 +299,27 @@ def _age_text(seconds: float) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
+_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]*@")
+_TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghs_|github_pat_)[A-Za-z0-9_]{8,}")
+
+
+def scrub_secrets(text: str) -> str:
+    """`text` without URL user information (`https://user:pass@host` becomes `https://host`) and without token-shaped words. Applied to a whole
+    message before it is cut to a length: a cut between a password and its `@` would hide the user information from this pattern."""
+    return _TOKEN.sub("[token removed]", _USERINFO.sub(r"\1", str(text)))
+
+
+def _err_line(err: str) -> str:
+    """The last line of a command's error output for a message: the whole text is scrubbed first, then the line is cut to 200 characters."""
+    return (scrub_secrets(err).strip().splitlines() or ["no answer"])[-1][:200]
+
+
 def _unknown(result: Freshness, why: str, cache: Cache, key: str) -> Freshness:
     """Mark `result` UNKNOWN. A cached CURRENT result for the same local state, younger than CACHE_MAX_AGE_S, is
     attached (and then the result is not stale); the detail always says the comparison was not made."""
     result.state = UNKNOWN
     result.update = None                    # nothing was found that an update would fix
+    why = scrub_secrets(why)[:300]
     result.detail = f"It could not be compared with upstream ({why})."
     entry = cache.get(key)
     age = cache.age_s(entry) if entry else None
@@ -506,7 +522,7 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
     rc, out, err = runner(["git", "-C", root, "ls-remote", "origin", f"refs/heads/{upstream_branch}"], network=True)
     remote = _ref_sha(out, f"refs/heads/{upstream_branch}") if rc == 0 else None
     if not remote or not re.fullmatch(r"[0-9a-f]{40}", remote):
-        why = (err.strip().splitlines() or ["no answer"])[-1][:200] if rc != 0 else f"origin has no {upstream_branch} branch"
+        why = _err_line(err) if rc != 0 else f"origin has no {upstream_branch} branch"
         return _unknown(result, why, cache, key)
     result.remote = remote
     if remote == result.local:
@@ -548,7 +564,7 @@ def skills_update(root: str, branch: str | None, remote: str | None = None) -> s
 
 
 def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: float = 0.0,
-                      offline: bool = False, want_age: bool = False) -> list[Freshness]:
+                      offline: bool = False, want_age: bool = False, update: Callable[..., str] | None = None) -> list[Freshness]:
     """One result per git checkout that holds a directory in `dirs` (bringup.toml's skills_dirs). Two directories in
     one clone are checked once. A directory outside any checkout is an UNKNOWN result of its own. `want_age` is passed
     to check_clone (a BEHIND result then carries `behind_days`)."""
@@ -565,7 +581,7 @@ def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: fl
         if not Path(d).is_dir():
             out.append(Freshness(SOURCE_SKILLS, str(d), UNKNOWN, f"{d} does not exist."))
             continue
-        out.append(check_clone(d, source=SOURCE_SKILLS, runner=runner, cache=cache, update=skills_update,
+        out.append(check_clone(d, source=SOURCE_SKILLS, runner=runner, cache=cache, update=update or skills_update,
                                reuse_s=reuse_s, want_age=want_age))
     return out
 
@@ -726,7 +742,7 @@ def check_ttlang_skill(skill_dir, *, run=None, cache: Cache | None = None, src_d
         return result
     rc, out, err = runner(["gh", "api", ttlang_skill_tree_path()], network=True)
     if rc != 0:
-        return _unknown(result, (err.strip().splitlines() or ["no answer"])[-1][:200], cache, key)
+        return _unknown(result, _err_line(err), cache, key)
     try:
         data = json.loads(out)
         if data.get("truncated") is not False or not isinstance(data.get("tree"), list):

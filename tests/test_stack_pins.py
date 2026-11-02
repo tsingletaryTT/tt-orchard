@@ -126,7 +126,7 @@ def full(tmp_path, py, *, metal=None, vllm=None, skills=None, model=None):
         parts[key + "_facts"] = facts
     fake = FakeUpstream({parts[k]: parts[k + "_facts"] for k in ("metal", "vllm", "skills")})
     src = sp.Sources(model_dir=model or config(tmp_path, model_type="llama", architectures=["LlamaForCausalLM"], transformers_version="4.40.0"),
-                     ref_python=py, tt_metal_dir=parts["metal"], vllm_dir=parts["vllm"], skills_dirs=(parts["skills"],))
+                     ref_python=py, tt_metal_dir=parts["metal"], vllm_dir=parts["vllm"], skills_dirs=(parts["skills"],), vllm_repo="tenstorrent/vllm")
     return src, fake
 
 
@@ -256,7 +256,7 @@ def test_fetching_the_tip_does_not_change_the_age(tmp_path, py, behind):
     locally let a blocking checkout pass. Both readings use the merge base."""
     ages = []
     for local in (False, True):
-        m = repo(tmp_path, f"tt-metal-{local}", behind=behind, days=30, local_objects=local)
+        m = repo(tmp_path, f"tt-metal-{local}", behind=behind, days=30, local_objects=local, origin="https://github.com/tenstorrent/tt-metal.git")
         src, fake = full(tmp_path, py, metal=m)
         ages.append(build(src, fake, GOOD())["parts"]["tt_metal"]["behind_days"])
     assert ages == [30.0, 30.0]
