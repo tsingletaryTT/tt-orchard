@@ -330,7 +330,7 @@ One append-only `ledger.jsonl` per run, with an `evidence/` directory beside it.
 | Chip left dirty by a fatal DRAM OOM | release through the lease tool, which resets that board; if the reset fails the stage blocks and a notice is written; nothing runs `tt-smi -r` by hand |
 | Devices missing during another agent's capture window | record an external-pause event and wait, with a limit; the stage is not failed |
 | Queued (exit 10) | wait on the ticket within the stage budget; cancel stale tickets |
-| Budget cap reached (wall clock, escalations, cold boots) | pause the run for the operator |
+| Budget cap reached (wall clock, escalations, unplanned cold boots, park restores; see the bringup-command design) | pause the run for the operator |
 
 Operator commands: `pause`, `resume`, `abort`. Abort releases the hardware and closes the ledger.
 

@@ -1332,6 +1332,24 @@ def acceptance_sources(numbers) -> tuple[str, ...]:
     return tuple(out)
 
 
+def stage2_cache_phrase(run: Path) -> str:
+    """What the card may say about the tensor cache of stage 2's start time, from `tensor_cache_at_start` in stage 2's swap-check.json
+    (written by the hardware test before the server started; issue 319). 'empty tensor cache' needs a record of zero files. A warm
+    cache gives its file count. No record, or one that contradicts itself, says the state was not recorded."""
+    try:
+        rec = json.loads((run / "stages/2/evidence/swap-check.json").read_text(encoding="utf-8")).get("tensor_cache_at_start")
+    except (OSError, ValueError, AttributeError):
+        rec = None
+    files = rec.get("files") if isinstance(rec, dict) else None
+    state = rec.get("state") if isinstance(rec, dict) else None
+    if isinstance(files, int) and not isinstance(files, bool) and files >= 0:
+        if state == "empty" and files == 0:
+            return "empty tensor cache"
+        if state == "warm" and files > 0:
+            return f"warm tensor cache, {files} files at start"
+    return "tensor cache state not recorded"
+
+
 def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Number]:
     """The numbers one package's card may show. Only the boot-checked profile shows the run's
     measurements, because they were taken on that profile's chip count."""
@@ -1343,7 +1361,7 @@ def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Nu
     ev2 = ("stages/2/result.json", *s2.get("evidence", []))
     nums = [Number(f"top1 agreement with the CPU reference, stage 2 ({profile['chips']} chips, "
                    f"bundle {profile['source']})", s2["top1_agreement"], "fraction", "measured", ev2),
-            Number("server ready after start, stage 2 (empty tensor cache)", s2["server_ready_s"],
+            Number(f"server ready after start, stage 2 ({stage2_cache_phrase(run)})", s2["server_ready_s"],
                    "s", "measured", ev2)]
     s6_path = run / "stages/6/result.json"
     if s6_path.is_file():
