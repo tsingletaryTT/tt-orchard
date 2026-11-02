@@ -1890,7 +1890,7 @@ tt-orchard can boot BUNDLE SPEC --work DIR [--hf-home DIR] [--health-timeout S] 
 tt-orchard can commands SPEC --namespace ORG                       # the publish commands, as text only
 ```
 
-`config/can.granite.toml` is the first spec. The pattern, the two kinds (`vllm`, `tt-dit-server`) and the ASGI adapter are in [docs/canning.md](docs/canning.md).
+`config/can.granite.toml` is the first spec. The pattern, the two kinds (`vllm`, `tt-dit-server`) and the ASGI adapter are in [docs/canning.md](docs/canning.md). The web page's Cans view (5.9i) shows each can's state.
 
 ### 5.9fb The audio package builder (stage a Stable Audio 3 small-music package, locally)
 
@@ -2255,6 +2255,27 @@ and a file over the read caps are counted and shown as "Left out". The reader ne
   the cost at each reference. `GET /api/virtual-spend` (with `?run=NAME`) serves both, reads only, and returns no path.
 - Checked against the kernel-probe round `rms5` (5 attempts, no kernel passed): 137 turns, 3,373,905 prompt and 78,468 completion
   tokens, which is $0.3766 at `claude-haiku-5-5` and $7.53 at `claude-sonnet-5-5`.
+
+### 5.9i The Cans view: what each can has and what it lacks (read only)
+
+`tt-orchard ui` has a Cans view (the "Cans" button next to Telegraph, address `#cans`). It lists one row per `config/can.*.toml` and shows, for each can:
+name, kind, mesh and device count, the weights repository (a link) and its pinned revision, the card profile, whether a staged bundle is on disk, the
+SHA256SUMS check, the gate result, the last boot result (decode tokens per second, start time, cache state), and the card's Expected performance and
+Limitations rows. A row opens its details with the button in the Can column (Enter or Space).
+
+The view only reads. It sends no request to the Hub, so it shows "not checked here" where a Hub revision or a published copy would be. It does not run
+`can gate`, because the gate walks and hashes without a total limit and compiles every Python file in the bundle. It recomputes SHA256SUMS with limits (at
+most 1 GiB hashed, 5,000 files, no link followed) and reads the card, and it shows the gate and boot results from an optional record.
+
+```
+tt-orchard can gate  OUT/NAME SPEC --state-dir DIR                     # also writes DIR/NAME.can-state.json
+tt-orchard can boot  OUT/NAME SPEC --work WORK --state-dir DIR --cache-state empty   # under a gozer lease, as before
+```
+
+The page looks for bundles in `<runs folder>/cans/NAME` (or in `ORCHARD_CANS_DIR` when that variable is set before `tt-orchard ui` starts) and for the
+record in `<that folder>/NAME.can-state.json`. A record names the SHA256SUMS digest it was written for. If the bundle has changed since, the page says the
+record is for an earlier bundle and does not count it as passed. A can with a missing or broken piece shows that piece in words (no staged bundle, SHA256SUMS
+missing, no gate recorded, spec refused with the loader's message). The design note is `docs/superpowers/specs/2026-11-02-canning-tab-design.md`.
 
 ### Keeping tt-orchard's tools current
 
