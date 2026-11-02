@@ -108,3 +108,33 @@ def test_an_evidence_file_that_is_not_json_fails_closed(tmp_path):
     (s1 / "evidence" / "summary.json").write_text("not json")
     g = gate_reference(s1, tmp_path)
     assert not g.ok and any("evidence/summary.json" in r and "not readable" in r for r in g.reasons)
+
+
+# ---- the dense Qwen4 shim: its hash travels in the load report (PR 341 review) -------------------------------------------------------
+
+def _dense_report(s1, **dense):
+    rep = json.loads((s1 / "evidence" / "load-report.json").read_text())
+    rep["dense_qwen4"] = {"layers": [0, 1], "note": "provisional", **dense}
+    (s1 / "evidence" / "load-report.json").write_text(json.dumps(rep))
+
+
+def _shim_sha():
+    return hashlib.sha256(SHIPPED_TEMPLATES["qwen4_dense.py"].read_bytes()).hexdigest()
+
+
+def test_a_dense_build_with_the_shipped_shim_hash_passes_even_when_the_stage_has_no_shim_copy(tmp_path):
+    s1 = stage(tmp_path)
+    _dense_report(s1, shim_sha256=_shim_sha())
+    assert gate_reference(s1, tmp_path).ok
+
+
+def test_a_dense_build_whose_shim_hash_differs_or_is_missing_fails_even_with_the_copy_deleted(tmp_path):
+    for dense in ({"shim_sha256": "0" * 64}, {}):
+        s1 = stage(tmp_path / ("a" if dense else "b"))
+        _dense_report(s1, **dense)
+        g = gate_reference(s1, tmp_path / ("a" if dense else "b"))
+        assert not g.ok and any("dense Qwen4 shim" in r for r in g.reasons), g.reasons
+
+
+def test_a_load_report_with_no_dense_entry_is_not_asked_for_a_shim_hash(tmp_path):
+    assert gate_reference(stage(tmp_path), tmp_path).ok

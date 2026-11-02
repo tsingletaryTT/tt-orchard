@@ -456,6 +456,10 @@ def _parser() -> argparse.ArgumentParser:
                      help="replace a module torch.export cannot trace (the Qwen4-style sparse attention indexer) with a static "
                           "stand-in that keeps its ops; the output says which modules were replaced")
     inv.add_argument("--out", help="output directory (default ./ops-inventory)")
+    from orchard import residency as _residency
+    sub.add_parser("residency", parents=[common, _residency.parser(add_help=False)],
+                   help="estimate how many chips a checkpoint needs from its safetensors headers (no weights are read; "
+                        "figures are labeled measured or estimated)")
     cs = sub.add_parser("coder-speed", parents=[common],
                         help="measure how fast a model server decodes and compare it with the best it has done "
                              "(read-only; it reports a slow server and never restarts one)")
@@ -1122,6 +1126,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "demo-env":
         from orchard import demo_env
         return demo_env.main(args, env=demo_env.env_from_args(args, environ=env, home=home), out=out)
+    if args.cmd == "residency":
+        from orchard import residency
+        return residency.run(args, out=out)
     if args.cmd == "inventory":
         return _inventory(args, env, home, out)
     if args.cmd == "kernel-probe":

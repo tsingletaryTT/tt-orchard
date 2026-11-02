@@ -142,3 +142,23 @@ def test_one_changed_character_is_enough(tmp_path):
 def test_the_shipped_templates_exist_where_the_gate_looks():
     for name, path in SHIPPED.items():
         assert path.is_file() and stages.SHIPPED_TEMPLATES[name] == path
+
+
+# ---- the Qwen4 dense shim that reference_gate.py loads from its own directory ------------------------------------------------------
+
+def test_a_stage_copy_of_the_dense_shim_that_differs_from_the_shipped_file_fails_the_reference_gate(tmp_path):
+    s1 = stage_with(tmp_path, 1, "reference_gate.py")
+    good_reference(s1)
+    shim = SKILLS / "reference-gate-templates" / "qwen4_dense.py"
+    (s1 / "qwen4_dense.py").write_text(shim.read_text())
+    assert gate_reference(s1, tmp_path).ok
+    (s1 / "qwen4_dense.py").write_text(shim.read_text() + "\n# edited\n")
+    g = gate_reference(s1, tmp_path)
+    assert not g.ok and any("qwen4_dense.py" in r and "differs from the shipped template" in r for r in g.reasons)
+
+
+def test_a_stage_with_no_copy_of_the_dense_shim_is_not_failed_for_it(tmp_path):
+    """Most models are not Qwen4: the shim is optional, and reference_gate.py itself stops when a dense Qwen4 config needs it."""
+    s1 = stage_with(tmp_path, 1, "reference_gate.py")
+    good_reference(s1)
+    assert gate_reference(s1, tmp_path).ok

@@ -518,6 +518,11 @@ def _opinventory_load_ignored(base: Path):
     return opinventory.load_ignored(base / "input.json")
 
 
+def _opinventory_load_notes(base: Path):
+    from orchard import opinventory
+    return opinventory.load_notes(base / "input.json")
+
+
 def _opinventory_load_dump(base: Path):
     from orchard import opinventory
     return opinventory.load_dump("2.0.0", data_dir=base)
@@ -754,6 +759,7 @@ READERS: list[Reader] = [
     Reader("bench_rerun.read_samples", _bench_rerun_read_samples, suffix=b"\n", rel="phase/results/run/samples_task.jsonl", documented=(ValueError,)),
     Reader("opinventory.load_table", _opinventory_load_table, documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("opinventory.load_ignored", _opinventory_load_ignored, documented=(ValueError,), os_error_ok=ALL_ITEMS),
+    Reader("opinventory.load_notes", _opinventory_load_notes, documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("opinventory.load_dump", _opinventory_load_dump, rel="ttnn_ops-2.0.0.json"),
     Reader("opinventory.load_verified", _opinventory_load_verified),
     Reader("opvariants.load_data", _opvariants_load_data, documented=(ValueError,), os_error_ok=ALL_ITEMS),
