@@ -445,6 +445,33 @@ def test_a_directory_named_like_a_shard_is_refused(tmp_path):
         rs.read_headers(d)
 
 
+def test_a_header_that_claims_an_absurd_tensor_is_refused_quickly(tmp_path):
+    import time
+    d = tmp_path / "huge"
+    d.mkdir()
+    n = 10 ** 20
+    _write(d / "model.safetensors", {"w": {"dtype": "BF16", "shape": [n, n], "data_offsets": [0, n * n * 2]}})
+    t0 = time.monotonic()
+    with pytest.raises(rs.ResidencyError, match="too many values"):
+        rs.read_headers(d)
+    assert time.monotonic() - t0 < 5
+
+
+def test_chips_needed_ends_in_bounded_time_for_the_largest_accepted_checkpoint(tmp_path):
+    import time
+    t = [(f"model.layers.{i}.mlp.up_proj.weight", "BF16", [1 << 25, 1 << 25]) for i in range(40)]      # 40 tensors of 2**51 bytes each
+    d = write_snapshot(tmp_path / "sum", t, shards=1)
+    t0 = time.monotonic()
+    rec = rs.estimate(rs.read_headers(d))
+    assert time.monotonic() - t0 < 5 and rec["estimated"]["chips_needed"] > 10 ** 5
+
+
+def test_host_ram_counts_the_source_and_the_larger_of_source_and_converted_size(tmp_path):
+    t = [("model.visual.blocks.0.attn.qkv.weight", "F8_E4M3", [1024, 1024])]          # 1 MiB of fp8 becomes 2 MiB of bf16 under the vision policy
+    fb = tiny(tmp_path, t)["estimated"]["first_boot"]
+    assert fb["conversion_in_flight_bytes"] == (1 << 20) + (2 << 20)
+
+
 def test_headers_are_read_one_shard_at_a_time_and_a_limit_stops_the_read_early(tmp_path, monkeypatch):
     t = [(f"model.layers.0.mlp.w{i}.weight", "BF16", [2, 2]) for i in range(12)]
     d = write_snapshot(tmp_path / "early", t, shards=6)                  # six shards of two tensors

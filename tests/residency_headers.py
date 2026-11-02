@@ -19,7 +19,7 @@ import json
 import struct
 from pathlib import Path
 
-ITEM = {"BF16": 2, "F16": 2, "F32": 4, "F64": 8, "I64": 8, "I32": 4, "U8": 1, "I8": 1}
+ITEM = {"BF16": 2, "F16": 2, "F32": 4, "F64": 8, "I64": 8, "I32": 4, "U8": 1, "I8": 1, "F8_E4M3": 1}
 
 
 def numel(shape) -> int:

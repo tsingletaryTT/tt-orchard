@@ -123,6 +123,8 @@ def _tensor(name, entry, where: str) -> Tensor:
     if (not isinstance(offsets, (list, tuple)) or len(offsets) != 2
             or not all(isinstance(o, int) and not isinstance(o, bool) and o >= 0 for o in offsets) or offsets[1] < offsets[0]):
         raise ResidencyError(f"{where}: a tensor has data offsets that are not an ordered pair of whole numbers")
+    if any(d > safeio.MAX_NUMEL for d in shape) or (0 not in shape and math.prod(shape) > safeio.MAX_NUMEL):
+        raise ResidencyError(f"{where}: a tensor claims too many values")
     elements = math.prod(shape)
     size = elements * DTYPE_WIDTH[dtype]
     if offsets[1] - offsets[0] != size:
@@ -393,12 +395,10 @@ def _fits(device: int, n: int, dram: float, reserve: float, kv: float) -> tuple[
 
 
 def _chips_needed(device: int, dram: float, reserve: float, kv: float) -> int:
-    n = max(1, math.ceil((device + kv * GIB) / ((dram - reserve) * GIB)))
-    while n > 1 and _fits(device, n - 1, dram, reserve, kv)[2]:
-        n -= 1                                   # float edge: the formula can land one above the smallest count that fits
-    while not _fits(device, n, dram, reserve, kv)[2]:
-        n += 1
-    return n
+    """The smallest chip count whose rows fit, by exact arithmetic on the floats' values (no search, so any size ends at once)."""
+    from fractions import Fraction
+    room = (Fraction(dram) - Fraction(reserve)) * GIB
+    return max(1, math.ceil((Fraction(device) + Fraction(kv) * GIB) / room))
 
 
 def _gib(n: float) -> str:
@@ -469,7 +469,7 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
         if t.dtype in FLOAT_DTYPES and len(t.shape) >= 2:
             g = _LAYER_PREFIX.match(t.name)
             key = g.group(1) if g else cat
-            layer_groups[key] = layer_groups.get(key, 0) + t.bytes
+            layer_groups[key] = layer_groups.get(key, 0) + t.bytes + max(t.bytes, _stored_bytes(t, pol[cat]))
     by_measured = {c: v for c, v in measured.items() if v["tensors"]}
     host_cats = [c for c in CATEGORIES if pol[c] == "host" and c in by_measured]
     device = sum(stored[c] for c in by_measured if pol[c] != "host")
@@ -483,7 +483,7 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
     need = _chips_needed(device, dram, reserve, kv)
     mesh = 1 << (need - 1).bit_length()
 
-    flight = 2 * max(layer_groups.values(), default=0)      # the source tensors of the largest group plus a converted copy beside them
+    flight = max(layer_groups.values(), default=0)      # the largest group: each tensor's source plus the larger of its source and converted size
     to_download = 0 if headers.local else headers.checkpoint_bytes
     first_boot = {"snapshot_local": headers.local, "checkpoint_bytes_to_download": to_download, "cache_bytes": device,
                   "disk_bytes": device + to_download, "conversion_in_flight_bytes": flight, "host_ram_bytes": host + flight}
