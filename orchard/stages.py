@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime, full_port, safeio
+from orchard import audio_decision, audio_facts, audio_runtime, full_port, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import prompt_suite, sampling_choice, sampling_probe
@@ -546,6 +546,28 @@ def gate_full_port(stage_dir, run_dir) -> GateResult:
     """Stage 2 of a full port (run started with --full-port): the port ran on the leased chips and its tokens agree with the stage 1
     reference. orchard/full_port.py holds the checks; each failing field has its own reason."""
     reasons, seen = full_port.check(stage_dir, run_dir)
+    return _done(reasons, seen)
+
+
+def gate_scoring_reference(stage_dir, run_dir) -> GateResult:
+    """Stage 1 of a scoring model (a reranker or an embedding model, issue 378): the pair set and the Hugging Face scores or vectors that
+    `python3 -m orchard.scoring_reference` writes under stages/1/evidence/reference/. The kind is the one the pair file names; the supervisor
+    checks that it is the run's kind (`Supervisor._check_gate`)."""
+    kind = None
+    try:
+        doc = _safe_json(Path(run_dir) / scoring_check.PAIRS_FILE, max_bytes=scoring_check.JSON_MAX, expect=dict)
+        kind = doc.get("model_kind")
+    except safeio.SafeReadError as exc:
+        return GateResult(False, (f"{scoring_check.PAIRS_FILE} is not readable JSON: {exc.reason}",))
+    reasons, seen = scoring_check.reference_reasons(run_dir, kind if isinstance(kind, str) else "")
+    return _done(reasons, seen)
+
+
+def gate_scoring(stage_dir, run_dir) -> GateResult:
+    """Stage 2 of a scoring model (issue 378): the supervisor's own scoring check ran the port on the leased chip and its scores or vectors
+    match the stage 1 reference within the bounds. orchard/scoring_check.py holds the checks; the kind is the config's (the supervisor
+    passes the run's kind when it checks the gate itself)."""
+    reasons, seen = scoring_check.check(stage_dir, run_dir)
     return _done(reasons, seen)
 
 
@@ -1474,6 +1496,27 @@ FULL_PORT_STAGE_2 = dataclasses.replace(
     gate=gate_full_port, draft="full_port")
 
 
+# A scoring model (a reranker or an embedding model, issue 378, docs/superpowers/specs/2026-11-02-scoring-model-check-design.md): stage 1 records
+# a pair set and the Hugging Face scores or vectors instead of generated ids, and stage 2 runs the supervisor's scoring check on the coder's port
+# module (skill scoring-check, orchard/scoring_check.py). No agent writes a finish step for stage 2: the check's own record is the result, so
+# the gate file is that record.
+SCORING_STAGE_1 = dataclasses.replace(
+    STAGES[1], name="CPU reference scores or vectors for a scoring model", skill="scoring-reference", refs=(),
+    gate_file=scoring_check.PAIRS_FILE.removeprefix("stages/1/"), gate=gate_scoring_reference)
+SCORING_STAGE_2 = dataclasses.replace(
+    STAGES[2], name="scoring model on one board and parity with the CPU reference", skill="scoring-check",
+    gate_file=scoring_check.RECORD_FILE, gate=gate_scoring, draft="scoring_check")
+
+
+def scoring_routed(kind, path, cls, full_port: bool) -> bool:
+    """Whether a run of a scoring kind takes the scoring route: class `weights-only` (the backbone is the nearest model's and a port module
+    reads its output), or class `full-port` with the operator's `--full-port` (the port also carries new model code). Any other class has
+    no scoring route yet, and the supervisor pauses (SCORING_NOT_ROUTED)."""
+    if kind not in model_kind.SCORING_KINDS:
+        return False
+    return (path == "weights-only" and cls == "weights-only") or (full_port and path == "full-port" and cls == "full-port")
+
+
 # The weights+sidecar class (orchard/classes.py): stage 2 also measures the sidecar head's parity in the same
 # hardware lease (the weights-sidecar-check skill), and its gate checks both. Every other stage is the
 # weights-only spec: the backbone is what those stages test.
@@ -1769,9 +1812,22 @@ def run_facts(entries: list[dict], run_dir) -> dict | None:
     return dict(facts) if not audio_facts.facts_problems(facts) else None
 
 
+def run_model_kind(entries: list[dict]) -> str:
+    """The model kind of the run (orchard/model_kind.py), read from stage 0's passing `stage_end` like the class: a resumed run keeps the kind
+    the first attempt decided. A ledger written before kinds, or one whose record is malformed, gives "generative", which is every run
+    before the scoring check."""
+    end = None
+    for e in entries:
+        if e["event"] == "stage_end" and e["stage"] == 0 and e["data"].get("result") == "pass":
+            end = e["data"]
+    rec = end.get("model_kind") if end is not None else None
+    kind = rec.get("kind") if isinstance(rec, dict) else None
+    return kind if kind in model_kind.KINDS else "generative"
+
+
 def spec_for(number: int, path: str | None, package_format: str | None = None,
              cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False, text_runtime: bool = False,
-             full_port: bool = False) -> StageSpec:
+             full_port: bool = False, kind: str = "generative") -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
@@ -1782,6 +1838,8 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         return STOCK_STAGE_0
     if audio_runtime and number in AUDIO_TABLE:
         return AUDIO_TABLE[number]
+    if number in (1, 2) and scoring_routed(kind, path, cls, full_port):
+        return SCORING_STAGE_1 if number == 1 else SCORING_STAGE_2       # a scoring model has no generated tokens to compare
     if full_port and number == 2 and path == "full-port" and cls == "full-port":
         return FULL_PORT_STAGE_2          # only stage 0's own `full-port` answer: `unknown` and `restricted-head` keep their pauses
     if path == "stock-runtime":

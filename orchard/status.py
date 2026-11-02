@@ -185,6 +185,8 @@ def classify_pause(data: dict) -> tuple[str, str | None]:
         return "blocked", None
     if "failed after escalation" in reason or "is not escalated" in reason:
         return "stage_failed", None
+    if "scoring route" in reason:
+        return "scoring", None
     if "audio path" in reason:
         return "audio_unbuilt", None
     if "restricted head" in reason:

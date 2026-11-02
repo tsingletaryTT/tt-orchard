@@ -1,7 +1,9 @@
 # Scoring models: a stage 2 check on score parity
 
-Date: 2026-11-02. Issue 358. Status: the first slice is built (a stage 1 recorder for a Qwen3-style reranker, a supervisor-owned check
-template, and a gate). It runs against fakes on the CPU. Nothing here ran on a chip, and nothing is wired into the stage machine yet.
+Date: 2026-11-02, updated 2026-11-03. Issue 358. Status: built and run against fakes on the CPU only. Nothing here ran on a chip.
+Slice 1 (PR 383): a stage 1 recorder for a Qwen3-style reranker, a supervisor-owned check template, and a gate. Slice 2 (issues 376 to 380):
+the embedding kind, the model kind in stage 0 and the stage machine, the stage 0 rule for a model with no output head, retrieval rows
+(NDCG and Hit@1) computed from the recorded scores, and media (image and video files) in the pair set. Section 8 lists what is left.
 
 ## 1. The problem
 
@@ -17,27 +19,39 @@ writes the model code, the supervisor writes the check and the record).
 A model has a kind: `generative` (every model before this note), `reranker` or `embedding`. The kind decides which stage 1 reference is
 recorded and which stage 2 check runs. This slice builds `reranker` only. The check template refuses `embedding` with a message.
 
-How the kind is chosen is not built. The proposal is that stage 0 reads it from the model card (`pipeline_tag` of `text-ranking`,
-`feature-extraction` or `sentence-similarity`) and the architecture name, writes `model_kind` into `delta.json`, and the operator can
-override it with a flag. The kind is a fact about how the model is used. It is not an outcome class (`classes.py`), because a reranker
+How the kind is chosen (`orchard/model_kind.py`, issue 378). The supervisor decides it when stage 0 passes, in this order: the operator's
+`--model-kind`; the model card's `pipeline_tag` (`text-ranking` is a reranker, `feature-extraction` and `sentence-similarity` are embedding
+models); an architecture name that contains `Embedding`; otherwise `generative`. The answer and its source go into stage 0's passing
+`stage_end` (`model_kind`), where a resume reads it, and into `hazard-scan.json` (`facts.model_kind`). It is not written into `delta.json`,
+which the triage template writes and an agent can edit. A bare backbone architecture alone does not make a model an embedding model,
+because vision and audio encoders are also bare backbones. Qwen3-Reranker names `Qwen3ForCausalLM`, so only the card or the operator can
+say it is a reranker. The kind is a fact about how the model is used. It is not an outcome class (`classes.py`), because a reranker
 with the same tensors as its base model is `weights-only` and one with a different encoder is `full-port`. The two choices are
 independent.
 
 ## 3. What stage 0 does for a scoring model
 
-Stage 0 is unchanged in this slice. What it would do, from reading `hazards.py`, `nearest.py` and `preflight.py`:
+The notes below were written from reading `hazards.py`, `nearest.py` and `preflight.py` before slice 2. Slice 2 builds the two changes marked
+"built".
 
 - Nearest bundle. Today stage 0 names the closest installed bundle and compares tensors and config with it. The 4B reranker is a
   Qwen3 dense decoder with tied embeddings, so a Qwen3 text bundle of similar size is its nearest bundle, and the tensor comparison
   finds no difference. Class `weights-only`: the swap path loads the new weights into that bundle. What differs is how the output is
   read, and no weights-only stage knows that. The bundles solve this with a separate serving stack (a `/v1/rerank` API over a two-row
   head). A scoring model therefore needs the check in this note and a serving route that stage 5 does not have yet (section 8).
-- The embedding model has no `lm_head` and no tied output head to compare. Stage 0 would list the nearest bundle's `lm_head` under "only
-  in the nearest model". How that should classify is an open question (section 8). The 8B VL embedding bundle is a Qwen3-VL with its text
-  tower read at the last position after the final norm, so the nearest bundle would be a Qwen3-VL one.
-- Hazard scan. The scan predicts failures from the config alone. Its vocabulary-per-die hazard (65,536 columns per die) concerns a full
-  output head, and a reranker reads two rows of it. The scan keeps running and a hit on that row needs a note for this kind: "reads two
-  rows, so the sampler limit does not apply". The tile and mixer checks apply as they are, because the backbone is the same.
+- The embedding model has no `lm_head` and no tied output head to compare. Before slice 2 stage 0 listed the nearest bundle's `lm_head`
+  under "only in the nearest model", which made the class `full-port`. Built (issue 380): the triage template reads the architecture names
+  of the new model's config. When none of them reads a vocabulary head (`ForCausalLM`, `ForConditionalGeneration`, `LMHeadModel`,
+  `ForMaskedLM`, `ForSeq2SeqLM`, `ForPreTraining`) and no tensor of the model is an `lm_head`, the model has no output head to use
+  (`head.not_used` in `delta.json`). The nearest model's `lm_head` is then not a missing tensor, the class follows the backbone (`weights-only`
+  when the backbone matches), and a hazard in `delta.json` says the generated-token check does not apply. The class says nothing about how the
+  output is read: the scoring check, chosen by the kind, does that. A `ForCausalLM` model with tied embeddings names a head architecture and is
+  unchanged. The 8B VL embedding bundle is a Qwen3-VL with its text tower read at the last position after the final norm, so the nearest bundle
+  would be a Qwen3-VL one.
+- Hazard scan. The scan predicts failures from the config alone. Its vocabulary hazards (65,536 columns per die, and a vocabulary that is not
+  whole tiles) concern a full output head. Built (issue 380): for a reranker (two rows of the head), for an embedding model (no head) and for a
+  config that describes a bare backbone, `scan_model_hazards` leaves out those two hazards and its notes say which would have hit and why they
+  do not apply. The tile, expert and mixer checks apply as they are, because the backbone is the same.
 
 ## 4. Stage 1: the reference
 
@@ -73,7 +87,8 @@ The supervisor copies `orchard/skills/scoring-check-templates/scoring_check.py` 
 |---|---|---|
 | `load(model_dir, mesh_device) -> model` | all kinds | called, timed as `load_s` |
 | `score_pairs(model, pairs: list[list[int]]) -> list[float]` | `reranker` | called, one group of prompts at a time |
-| `embed(model, ids: list[int]) -> list[float]` | `embedding` | documented, not called |
+| a `media=` argument on `score_pairs` and `embed` | rows that name files | passed only when the pair file has media (issue 377) |
+| `embed(model, ids: list[int]) -> list[float]` | `embedding` | called once for each input (issue 376) |
 | `close(model) -> None` | all kinds | called |
 
 The template runs the port in a second process and takes only a list of finite numbers per request. The parent holds the pair set, the
@@ -95,6 +110,27 @@ The numbers, computed by the parent and recomputed by the gate from the scores i
 
 These are the four measurements the 4B and 8B VL reranker bundles report.
 
+For an embedding model (issue 376) the parent computes the cosine of each chip vector to the Hugging Face vector (the last position's
+final-normed hidden state, L2 normalised, fp32, recorded by `python3 -m orchard.scoring_reference embed`), and the mean and the minimum over all
+inputs and for each input kind (text, multilingual, code, long). The check refuses a vector of the wrong length, a value that is not a finite
+number, and a vector of all zeros. The record keeps the chip's vectors, because the gate recomputes every cosine. The reference vectors stay in the
+stage 1 file, which the record names by sha256. A record of 24 inputs of 4,096 numbers is about 2 MB, and the limit is 500,000 numbers (about 10 MB).
+The shape of the bounds is the public 8B VL embedding bundle's accuracy table (section 6). The nearest-document count that bundle also reports
+(3 of 29 queries had a different nearest document) is not built.
+
+Retrieval rows (issue 379). When the pair file labels each pair relevant or not, the check computes NDCG@10 and Hit@1 of the reference ranking
+and of the chip ranking from the recorded scores, per group, and records both with their difference. The gate recomputes them and bounds how far
+the chip falls below the reference (`ndcg_drop_max`, `hit1_drop_max`). The set is the shipped 8 groups of 4 documents, so these are parity rows
+on a small set. The bundles' rows on subsets of MTEB reranking, MIRACL, ViDoRe and MMEB are not built: they need datasets whose licences and
+sizes have to be checked before any text goes into the repository.
+
+Media (issue 377). A row of the pair file may list up to 8 `media` entries (`kind` image or video, `path` under
+`stages/1/evidence/reference/media/`, `sha256`). The recorder stores a file there and the hash in the row, so the reference and the port get
+the same bytes. The check reads each file without following a link and under 16 MiB (at most 64 files and 128 MiB in all), checks the sha256,
+and hands the bytes to the port through `media=`; the worker checks the sha256 again when it reads the file. The gate reads the files again and
+refuses one that changed, was removed or became a link after the run. The record stays small because it holds hashes, not media. The recorder for
+a vision-language model (a processor that turns an image into the model's tensors on the CPU) is not built, so the interface runs against fakes only.
+
 The gate (`orchard/scoring_check.py`) refuses: a test that did not exit 0 or ran another command; an output file that is not the one the
 supervisor recorded or has other than one mark line that matches the record; a template copy that is not the shipped file; a record
 without the shipped template's sha256; a config that is not the one the record names; a record whose pair file, reference file, scores or
@@ -111,6 +147,19 @@ the leased ones; port files that changed, were added, are links, do not mention 
 | groups with the same top document at least | 0.95 | both bundles 1.0; bfp8 policy 31 of 32 |
 | order kept at least | 0.98 | both bundles 1.0 |
 | pairs, groups, separated pairs at least | 24, 6, 10 | the shipped set has 32 pairs and 8 groups |
+
+Two more reranker bounds are choices with no public table behind them: NDCG@10 of the chip may fall below the reference's by at most 0.03, and
+Hit@1 by at most 0.15 (one group in the shipped 8 is 0.125).
+
+The embedding bounds (`EMBEDDING_BOUNDS`) come from the public card of the 8B VL embedding bundle (raahemnabeel/qwen3-vl-embedding-8b,
+`doc/accuracy.md`): over 81 inputs the cosine to the Hugging Face fp32 vector is 0.9977 on average and 0.9926 at the minimum, and 0.9960 on
+average for the image and the video inputs.
+
+| Bound | Default | Evidence |
+|---|---|---|
+| mean cosine at least, overall and for each kind | 0.995 | the bundle's 0.9977 overall and 0.9960 for image and video |
+| minimum cosine at least, overall and for each kind | 0.985 | the bundle's 0.9926 |
+| inputs, kinds at least | 24, 3 | the shipped set has 24 inputs of 4 kinds |
 
 The defaults are `DEFAULT_BOUNDS` in `orchard/scoring_check.py`. The supervisor copies them into `scoring_check_config.json` under
 `bounds`. The gate applies the default for each key and replaces it with the config's value only when the config is stricter. A looser
@@ -132,15 +181,27 @@ A process the port starts in a session of its own (`setsid`, a double fork) surv
 an abort, because the template's cleanup dies in the same kill. That needs a cgroup or a PID namespace (issue 390).
 
 Parity with Hugging Face on 32 pairs is not a quality measure. The bundles also report retrieval benchmarks (NDCG@10 on subsets of MTEB
-reranking and MIRACL) as parity rows, and this slice has none.
+reranking and MIRACL) as parity rows. Slice 2 computes NDCG and Hit@1 on the shipped set only (section 5).
 
-## 8. Out of scope for this slice (filed as issues)
+## 8. What is built and what is left
 
-1. (issue 375) A real run on a board: the 4B reranker port under `--full-port` or the weights-swap path, with the recorder run on the real snapshot.
-2. (issue 376) Embedding models: `embed` in the template, cosine to the Hugging Face vector (mean and minimum) per input kind, bounds, and the
-   recorder for an embedding model (the last-token hidden state after the final norm, L2 normalised).
-3. (issue 377) Vision pairs and video inputs: the pair set carries ids only, and a vision-language reranker or embedder needs pixel inputs.
-4. (issue 378) Stage machine wiring: the `model_kind` field in stage 0, the route to this check, a finish step and `result.json`, and a stage 5
-   serving check for a `/v1/rerank` style API.
-5. (issue 379) Retrieval benchmark parity rows (NDCG, Hit@1) as an optional second stage 2 record.
-6. (issue 380) How stage 0 classifies a model with no `lm_head`.
+Built in slice 2 (CPU and fakes only):
+
+1. (issue 376) The embedding kind: the recorder (`embed`), `embed` in the template, cosine mean and minimum per input kind, bounds, the gate.
+   The embedding bounds in section 6.
+2. (issue 378) The model kind in stage 0 and the stage machine: `--model-kind`, the card and architecture rules, `stage_end` `model_kind`,
+   stage 1 (skill `scoring-reference`, gate `gate_scoring_reference`) and stage 2 (skill `scoring-check`, gate `gate_scoring`, draft
+   `scoring_check`) for class `weights-only`, or `full-port` with `--full-port`; no finish step (the check's record is the result); the
+   ledger holds the sha256 of the template and the config as copied, and stage 2 refuses a reference that is not the file stage 1's gate
+   accepted; a pause before stage 3 and a pause before stage 1 for a class with no route (block code `scoring-route`).
+3. (issue 379) NDCG@10 and Hit@1 from the recorded scores, with bounds.
+4. (issue 380) The stage 0 rule for a model with no output head, and the hazard scan's handling of it (section 3).
+5. (issue 377) Media in the pair set and in the port interface, with size bounds and hash checks, against fakes.
+
+Left, each in a public issue:
+
+1. (issue 375) A real run on a board: the 4B reranker port, the recorder on the real snapshot, the bounds checked against the run.
+2. A stage 5 serving check for a `/v1/rerank` style API, and stages 3, 4 and 6 for a scoring model (the run pauses after stage 2).
+3. A recorder for a vision-language reranker or embedding model (a processor and real image and video inputs) and a real run of one.
+4. Retrieval benchmark subsets (MTEB reranking, MIRACL, ViDoRe, MMEB) with their licences checked, and the nearest-document count.
+5. A scoring route for the classes other than `weights-only` and `full-port` (`weights+sidecar`, `vocab-trim`, `stock-runtime`).

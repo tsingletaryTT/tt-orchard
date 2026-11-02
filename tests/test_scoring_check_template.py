@@ -181,12 +181,19 @@ def test_a_looser_config_bound_does_not_loosen_the_bound_that_is_applied(tmp_pat
     assert mentions(gate(run, stage), "mean absolute score difference 0.4")        # judged against the default 0.25
 
 
-def test_the_embedding_kind_is_refused_by_the_template(tmp_path):
+def test_a_config_of_the_other_kind_than_the_stage_1_files_is_refused_by_the_template(tmp_path):
     cfg = sc.draft_config("/x")
     cfg["kind"] = "embedding"
     run, stage, done = honest_run(tmp_path, config=cfg)
-    assert done.returncode == 2 and "embedding models are a later slice" in done.stdout
+    assert done.returncode == 2 and "reference files are for kind 'reranker', and this check runs kind 'embedding'" in done.stdout
     assert not (stage / "evidence" / "scoring-check.json").exists()
+
+
+def test_a_config_with_a_kind_the_check_does_not_know_is_refused_by_the_template(tmp_path):
+    cfg = sc.draft_config("/x")
+    cfg["kind"] = "generative"
+    run, stage, done = honest_run(tmp_path, config=cfg)
+    assert done.returncode == 2 and "kind is 'generative'" in done.stdout
 
 
 # ---- the numbers: the template and the gate compute the same ----------------------------------------------

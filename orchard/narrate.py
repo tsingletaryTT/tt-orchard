@@ -689,6 +689,14 @@ UNBLOCK = {
         "yet, so the run stops here on purpose. Read the stage 2 evidence and decide: replay the check command, or continue by hand. "
         "Design and slices: docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md.",
         "Running `tt-orchard bringup <MODEL> --full-port` again blocks again until those stages exist."],
+    "scoring-route": [
+        "The model is a reranker or an embedding model (stage 0 recorded its kind in the `model_kind` of its `stage_end` ledger entry: the "
+        "operator's `--model-kind`, the model card's pipeline_tag, or the architecture names). Such a model produces scores or vectors, not "
+        "tokens, so stage 1 records Hugging Face scores or vectors and stage 2 runs the supervisor's scoring check on a port module.",
+        "Two things stop a run here. Before stage 1: the class stage 0 chose has no scoring route (the route runs for `weights-only`, and "
+        "for `full-port` with `--full-port`); read stages/0/delta.json. After stage 2: the check passed (stages/2/evidence/scoring-check.json) "
+        "and stages 3 to 6 are not built for a scoring model, so a person reviews the numbers and decides whether to go on. If stage 0 "
+        "got the kind wrong, run again with `--model-kind generative` (or the right kind) before stage 0 passes."],
     "restricted-head": [
         "The model is the nearest model's backbone with its lm_head cut down to a few sidecar rows. Stage 0 measured it: "
         "read stages/0/delta.json (`alignment` for how the names pair, `values` for whether the weights are the nearest model's, "

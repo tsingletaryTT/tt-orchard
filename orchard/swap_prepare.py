@@ -32,7 +32,8 @@ NOTE_TAIL_CHARS = 1500           # how much of the script's output the agent is 
 
 # Files only the hardware test or the finish step may write. A copy written during prepare is set aside under this suffix.
 RESULT_FILES = ("result.json", "test-result.json", "evidence/swap-check.json", "evidence/hw-test-output.txt",
-                "evidence/port-check.json")       # the last is the full-port stage 2's record (orchard/full_port.py)
+                "evidence/port-check.json",       # the full-port stage 2's record (orchard/full_port.py)
+                "evidence/scoring-check.json")    # the scoring stage 2's record (orchard/scoring_check.py)
 REJECTED_SUFFIX = ".rejected-from-prepare"
 
 
