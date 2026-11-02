@@ -1582,21 +1582,28 @@ incomplete.
 Stage 0 writes `stages/0/stack-pins.json` before its agent starts (`orchard/stack_pins.py`, from tenstorrent/skills PR 44). It compares
 four parts with upstream and uses the states of the skills check (`current`, `behind` with a count, `ahead`, `differs`, `unknown`):
 
-- the tt-metal checkout against upstream main (`$ORCHARD_TT_METAL_DIR`, else `tt-metal` under the operator's home);
+- the tt-metal checkout against upstream main (`$ORCHARD_TT_METAL_DIR`, else `tt-metal` under the run's operator home, `--operator-home`);
 - the TT vLLM plugin checkout against its upstream branch (`$ORCHARD_TT_VLLM_DIR`, branch `$ORCHARD_TT_VLLM_BRANCH`, default `main`);
-- each tenstorrent/skills clone named with `--skills-dir`, against upstream main;
-- the `transformers` installed in the reference interpreter (`$ORCHARD_REFERENCE_PYTHON`) against the checkpoint's `transformers_version`
+- each tenstorrent/skills clone named with `--skills-dir`, against upstream main. A clone whose origin is not `tenstorrent/skills` (a fork, another
+  repository) is not compared and its part is `unknown`;
+- the `transformers` installed in the reference interpreter (the run's `reference_python` input, else `$ORCHARD_REFERENCE_PYTHON`) against the checkpoint's `transformers_version`
   (the run's `model` input, its `config.json`) and the table `KNOWN_MINIMUMS` in `orchard/stack_pins.py`, and whether that `transformers`
-  has each class the checkpoint's `architectures` names. The interpreter is asked with a fixed script that imports `transformers` only.
+  has each class the checkpoint's `architectures` names, looked up the way the stage 1 reference loader does (the top level, then
+  `transformers.models.<model_type>.modeling_<model_type>`). The interpreter is asked with a fixed script that imports `transformers` only. It runs
+  in the import environment the reference step uses (`PYTHONPATH` and the user site count), with the current directory off `sys.path`.
+  Versions are compared in PEP 440 order (dev, a, b, rc, the release, post); a form the check does not know is reported as not compared.
   A checkpoint whose config names `model_type` `qwen4_exp` needs `transformers` 5.19.0 or later for `Qwen4ExpForCausalLM`.
 
 For a new run, a checkout more than 7 days behind, a `transformers` below the minimum, a `transformers` that cannot be imported and a missing
-architecture class are critical. Each writes a hazard with a named reason, and the supervisor blocks stage 0 with those reasons. Running the
+architecture class are critical. Each writes a hazard with a named reason, and the supervisor blocks stage 0 with those reasons (block code
+`stack-stale`, which `bringup` does not retry by itself, because a retry would be a resume). Running the
 command again is a resume (as is a second attempt at stage 0): the same findings are advisories in the record and the stage goes on. An
 upstream that cannot be reached, a part nobody named, a `differs` result and a gap whose age could not be told are advisories in both modes.
 Nothing in the record counts an unmade comparison as current. `$ORCHARD_STACK_PINS_OFFLINE=1` makes no network call (every upstream part is then
 `unknown`). The supervisor adds a `stack pins` evidence entry with the file's sha256, and the stage 0 gate reads the file through `safeio` and
-accepts only the file that hash names. The check changes nothing: it does not pull, install or upgrade.
+accepts only the file that hash names. The supervisor removes an earlier attempt's record before it writes a new one, and a record that cannot be
+written blocks the stage. No URL, user information or token is copied into the record. The check changes nothing: it does not pull, install or
+upgrade.
 
 ### 5.9b Op inventory
 

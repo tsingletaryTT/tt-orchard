@@ -47,6 +47,7 @@ PROBE_TIMEOUT_S = 120.0         # choice: importing transformers with torch take
 PROBE_MAX_BYTES = 64 * 1024
 MAX_CLASSES = 8
 CLASS_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,100}$")
+MODEL_TYPE = re.compile(r"^[A-Za-z0-9_]{1,100}$")
 SEVERITIES = ("critical", "advisory", "ok")
 OFFLINE_ENV = "ORCHARD_STACK_PINS_OFFLINE"
 
@@ -64,21 +65,32 @@ H_BELOW = "transformers_below_checkpoint_minimum"
 H_NOT_IMPORTABLE = "transformers_not_importable"
 H_CLASS = "transformers_missing_architecture_class"
 
-# Run by the reference interpreter. Imports transformers and nothing else of ours; the class names arrive as arguments (each already
-# checked against CLASS_NAME). Prints one JSON object on its last line.
+# Run by the reference interpreter. Imports transformers and nothing else of ours. The first argument is the checkpoint's model_type (or `-`),
+# the rest are class names, each already checked against a plain pattern. The current directory is taken off sys.path so a file there cannot
+# shadow a module. Prints one JSON object on its last line.
 PROBE_SCRIPT = r'''
-import importlib.util, json, sys
+import importlib, importlib.util, json, sys
+sys.path[:] = [p for p in sys.path if p not in ("", ".")]
 out = {"importable": False, "version": None, "classes": {}}
 try:
     if importlib.util.find_spec("transformers") is not None:
         import transformers
         out["version"] = str(transformers.__version__)
         out["importable"] = True
-        for name in sys.argv[1:]:
+        model_type = sys.argv[1]
+        for name in sys.argv[2:]:
+            found = None
             try:
-                out["classes"][name] = getattr(transformers, name, None) is not None
+                found = getattr(transformers, name, None)
             except Exception:
-                out["classes"][name] = False
+                found = None
+            if found is None and model_type != "-":
+                # The stage 1 reference loader's second lookup (reference_gate.resolve_class): many classes are not exported at the top level.
+                try:
+                    found = getattr(importlib.import_module("transformers.models.%s.modeling_%s" % (model_type, model_type)), name, None)
+                except Exception:
+                    found = None
+            out["classes"][name] = found is not None
 except Exception as exc:
     out["importable"] = False
     out["error"] = type(exc).__name__
@@ -103,13 +115,18 @@ class Sources:
 
 # ---- small helpers --------------------------------------------------------------------------------------------------
 
+_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]*@")
+_TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghs_|github_pat_)[A-Za-z0-9_]{8,}")
+
+
 def _tilde(value):
-    """`value` with the home directory shown as `~`, through lists and dicts."""
+    """`value` with the home directory shown as `~`, URL user information and token-shaped words removed, through lists and dicts."""
     try:
         home = str(Path.home())
     except (RuntimeError, KeyError):
         home = ""
     if isinstance(value, str):
+        value = _TOKEN.sub("[token removed]", _USERINFO.sub(r"\1", value))
         return value.replace(home, "~") if len(home) > 1 else value
     if isinstance(value, list):
         return [_tilde(v) for v in value]
@@ -118,19 +135,26 @@ def _tilde(value):
     return value
 
 
-_VERSION = re.compile(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?(.*)$")
+_VERSION = re.compile(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-_.]?(dev|a|alpha|b|beta|c|rc|pre|preview|post)[-_.]?(\d*))?\s*$", re.IGNORECASE)
+# PEP 440 order of the suffix kinds: X.devN < X.aN < X.bN < X.rcN < X < X.postN.
+_SUFFIX_RANK = {"dev": 0, "a": 1, "alpha": 1, "b": 2, "beta": 2, "c": 3, "rc": 3, "pre": 3, "preview": 3, "post": 5}
+_FINAL_RANK = 4
 
 
 def parse_version(text) -> tuple | None:
-    """(numbers, final) for a release such as `5.19.0`, `4.51.0.dev0` or `4.51.0rc1`, else None. `final` is 0 for a pre-release (dev, rc,
-    alpha, beta, a suffix of any other kind) and 1 for a release, so 4.51.0.dev0 sorts below 4.51.0. Local parts (`+cu121`) are dropped."""
+    """A sort key (four numbers, suffix rank, suffix number) for a version such as `5.19.0`, `4.51.0.dev0`, `5.19.0rc1` or `5.19.0.post1`,
+    else None. The order is PEP 440's: dev, a, b, rc, the release, post. A form this does not know (`5.19.0-custom`, `5.19.0.dev1.post2`)
+    gives None, and the caller reports the comparison as not made. Local parts (`+cu121`) are dropped."""
     if not isinstance(text, str) or len(text) > 64:
         return None
     m = _VERSION.match(text.split("+", 1)[0])
     if not m:
         return None
-    nums = tuple(int(g) for g in m.groups()[:4] if g is not None)
-    return (nums + (0, 0, 0, 0))[:4], (0 if m.group(5).strip() else 1)
+    nums = (tuple(int(g) for g in m.groups()[:4] if g is not None) + (0, 0, 0, 0))[:4]
+    kind = m.group(5)
+    if kind is None:
+        return nums, _FINAL_RANK, 0
+    return nums, _SUFFIX_RANK[kind.lower()], int(m.group(6) or 0)
 
 
 def _below(installed: tuple, required: tuple) -> bool:
@@ -183,8 +207,10 @@ def required_minimum(facts: dict) -> tuple[str | None, str | None]:
 def _probe_env() -> dict:
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
            "TOKENIZERS_PARALLELISM": "false"}
-    if os.environ.get("HOME"):
-        env["HOME"] = os.environ["HOME"]
+    # The reference step runs without isolated mode, so PYTHONPATH and the user site count for it; the probe sees the same.
+    for name in ("HOME", "PYTHONPATH", "VIRTUAL_ENV"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
     return env
 
 
@@ -194,7 +220,7 @@ def real_probe_run(argv, timeout, env=None):
     return skillsfresh._raw_run(argv, timeout, env)
 
 
-def probe_interpreter(python, classes, run: Callable | None = None) -> dict:
+def probe_interpreter(python, classes, run: Callable | None = None, model_type=None) -> dict:
     """Ask `python` for its transformers version and for each class in `classes`. {"state": "answered"|"unknown", "importable", "version",
     "classes": {name: bool}, "why"}. Never raises. `run` is (argv, timeout, env) -> (returncode, stdout, stderr)."""
     unknown = lambda why: {"state": "unknown", "importable": None, "version": None, "classes": {}, "why": why}     # noqa: E731
@@ -206,8 +232,9 @@ def probe_interpreter(python, classes, run: Callable | None = None) -> dict:
     except (ValueError, OSError):
         return unknown("the reference interpreter path cannot be checked")
     classes = [c for c in classes if isinstance(c, str) and CLASS_NAME.match(c)][:MAX_CLASSES]
+    mt = model_type if isinstance(model_type, str) and MODEL_TYPE.match(model_type) else "-"
     try:
-        rc, out, err = (run or real_probe_run)([python, "-I", "-c", PROBE_SCRIPT, *classes], PROBE_TIMEOUT_S, _probe_env())
+        rc, out, err = (run or real_probe_run)([python, "-c", PROBE_SCRIPT, mt, *classes], PROBE_TIMEOUT_S, _probe_env())
     except Exception as exc:                        # a broken runner is a failed probe
         return unknown(f"the interpreter could not be run ({type(exc).__name__})")
     if rc != 0:
@@ -251,6 +278,29 @@ def _fresh_part(f: skillsfresh.Freshness, hazard: str, new_run: bool) -> tuple[d
     return part, crit, adv
 
 
+def _branch_update(upstream: str) -> Callable:
+    """The update hint for a checkout compared with `upstream`: a fast-forward when that branch is checked out, else a request to switch first."""
+    def hint(root, branch, remote=None):
+        if branch == upstream:
+            return f"git -C {root} pull --ff-only origin {upstream}"
+        return (f"the checkout is on {branch or 'no branch'}, and it is compared with upstream {upstream}. Commit your work, then `git -C {root} switch "
+                f"{upstream}` and update it with `git -C {root} pull --ff-only origin {upstream}`")
+    return hint
+
+
+SKILLS_REPO = "tenstorrent/skills"
+
+
+def _skills_part(f: skillsfresh.Freshness, new_run: bool) -> tuple[dict, list, list]:
+    """A skills clone is compared only when its origin is tenstorrent/skills. A fork or another repository would be reported current or stale
+    against something that is not the skills the run should have, so its part is UNKNOWN."""
+    if f.state != skillsfresh.UNKNOWN and f.repo != SKILLS_REPO:
+        part = {"state": skillsfresh.UNKNOWN, "path": f.path, "repo": f.repo,
+                "detail": f"the clone's origin is {f.repo or 'not a GitHub repository'}, not {SKILLS_REPO}, so it was not compared with the skills upstream"}
+        return part, [], [_entry(H_SKILLS + "_unchecked", f"{f.source} was not compared with upstream: {part['detail']}")]
+    return _fresh_part(f, H_SKILLS, new_run)
+
+
 def _unnamed(source: str, hazard: str, why: str) -> tuple[dict, list, list]:
     part = {"state": skillsfresh.UNKNOWN, "path": None, "detail": why}
     return part, [], [_entry(f"{hazard}_unchecked", f"{source} was not compared with upstream: {why}")]
@@ -267,7 +317,7 @@ def _transformers_part(sources: Sources, run) -> tuple[dict, list, list]:
         return part, crit, [_entry("transformers_unchecked", f"transformers was not compared with the checkpoint: {exc}")]
     minimum, source = required_minimum(facts)
     part.update(model_type=facts["model_type"], architectures=facts["architectures"], checkpoint_minimum=minimum, minimum_source=source)
-    probe = probe_interpreter(sources.ref_python, facts["architectures"], run)
+    probe = probe_interpreter(sources.ref_python, facts["architectures"], run, facts["model_type"])
     if probe["state"] != "answered":
         part["detail"] = probe["why"]
         return part, crit, [_entry("transformers_unchecked", f"transformers was not compared with the checkpoint: {probe['why']}")]
@@ -279,10 +329,10 @@ def _transformers_part(sources: Sources, run) -> tuple[dict, list, list]:
     have, need = parse_version(installed), parse_version(minimum) if minimum else None
     state = skillsfresh.CURRENT
     if have is None:
-        part["state"], part["detail"] = skillsfresh.UNKNOWN, f"the installed version {installed!r} is not a version number"
-        adv.append(_entry("transformers_unchecked", part["detail"]))
-        return part, crit, adv
-    if need is not None and _below(have, need):
+        # The version cannot be compared, and the class check below does not depend on it, so it still runs.
+        state = skillsfresh.UNKNOWN
+        adv.append(_entry("transformers_unchecked", f"the installed version {installed!r} is not a version number this check reads, so it was not compared with the minimum"))
+    elif need is not None and _below(have, need):
         state = skillsfresh.BEHIND
         crit.append(_entry(H_BELOW, f"transformers {installed} is installed in the reference interpreter and the checkpoint needs {minimum} or later "
                                     f"({source})"))
@@ -331,13 +381,13 @@ def build_record(sources: Sources, *, new_run: bool, run=None, probe_run=None, c
         take(key, _fresh_part(f, hazard, new_run))
 
     clone("tt_metal", sources.tt_metal_dir, H_TT_METAL, "tt-metal", skillsfresh.skills_update)
-    clone("tt_vllm_plugin", sources.vllm_dir, H_VLLM, "TT vLLM plugin", skillsfresh.skills_update, sources.vllm_branch)
+    clone("tt_vllm_plugin", sources.vllm_dir, H_VLLM, "TT vLLM plugin", _branch_update(sources.vllm_branch), sources.vllm_branch)
     dirs = [d for d in sources.skills_dirs if d]
     if not dirs:
         take("skills", _unnamed("tenstorrent/skills", H_SKILLS, "no clone is named for it"))
     else:
         results = skillsfresh.check_skills_dirs(dirs, run=runner, cache=cache, want_age=True)
-        subs = [_fresh_part(f, H_SKILLS, new_run) for f in results]
+        subs = [_skills_part(f, new_run) for f in results]
         parts["skills"] = [s[0] for s in subs]
         for s in subs:
             crit.extend(s[1])

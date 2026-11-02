@@ -655,6 +655,13 @@ UNBLOCK = {
         "run `tt-orchard residency <MODEL_DIR> --chips 4 --dram-gib <N> --kv-gib <N>` and read the table.",
         "Repeating the command does not change the answer, so `bringup` does not retry it. Run it on a box with enough chips, or change the "
         "policy (a lower-precision format for the largest category) and start a new run."],
+    "stack-stale": [
+        "Stage 0 compared the tt-metal checkout, the TT vLLM plugin checkout, the skills clone and the reference interpreter's transformers with "
+        "upstream and with the checkpoint, and a new run found a critical hazard (named in the reason above and in stages/0/stack-pins.json). "
+        "No agent step ran.",
+        "Update the named part (the reason gives the command where one applies), then start a new run so the comparison is made again. Running "
+        "the command again on this run holds the same findings as advisories and goes on with the stale stack, so do that only when you accept it. "
+        "`bringup` does not retry this block by itself."],
     "package-missing": [
         "A chip count that stage 4 requires has no installed bundle or container package for the nearest model. Repeating the command "
         "does not change that, so `bringup` does not retry it.",

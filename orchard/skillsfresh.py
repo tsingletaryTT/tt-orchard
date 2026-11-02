@@ -69,7 +69,7 @@ OVERRIDE = "--allow-stale-skills"
 # git subcommands that only read. `remote` is allowed only as `remote get-url`.
 # `status` and `diff` are not here: they hash the working tree through the clone's own attributes and config, which can run a
 # clean filter or a textconv program. The dirty check reads the tree with `ls-tree` and compares file bytes in Python.
-READ_ONLY_GIT = frozenset({"rev-parse", "symbolic-ref", "ls-tree", "remote", "ls-remote", "cat-file", "rev-list"})
+READ_ONLY_GIT = frozenset({"rev-parse", "symbolic-ref", "ls-tree", "remote", "ls-remote", "cat-file", "rev-list", "merge-base"})
 GH_WRITE_OPTIONS = frozenset({"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"})
 GIT_SAFE_CONFIG = (("http.followRedirects", "false"), ("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null"),
                    ("core.attributesFile", "/dev/null"), ("core.useReplaceRefs", "false"))
@@ -257,6 +257,7 @@ class Freshness:
     update: str | None = None           # the command a person runs to update; orchard never runs it
     warnings: list[str] = field(default_factory=list)
     cached: dict | None = None          # an UNKNOWN result's last good check, when one was used
+    repo: str | None = None             # "owner/name" of the github.com origin, when it has one
     behind_days: float | None = None    # check_clone(want_age=True): days of upstream history HEAD lacks, when it could be told
 
     @property
@@ -445,14 +446,15 @@ def _commit_times(out: str) -> list[float]:
 
 def _behind_days(runner: ReadOnlyRunner, root: str, repo: str, head: str, remote: str) -> float | None:
     """How many days upstream's tip is past the point where HEAD stopped following it: the tip's commit date minus the
-    date of the oldest commit upstream has and HEAD lacks (one commit interval later than the merge base the pull
-    request this follows used). Read from the local objects when the tip is here, else from GitHub (the compare
-    answer's merge base and the tip commit). None when neither answers."""
+    commit date of the merge base of HEAD and the tip. Both ways of reading it (the local objects when the tip is here,
+    else GitHub's compare answer and the tip commit) use the merge base, so fetching the tip does not change the answer.
+    None when neither answers."""
     if runner(["git", "-C", root, "cat-file", "-e", f"{remote}^{{commit}}"], network=False)[0] == 0:
-        missing = _commit_times(_out(runner, ["git", "-C", root, "rev-list", "--format=%ct", f"{head}..{remote}"]) or "")
-        tip = _commit_times(_out(runner, ["git", "-C", root, "rev-list", "-n", "1", "--format=%ct", remote]) or "")
-        if missing and tip:
-            return max(0.0, (tip[0] - min(missing)) / 86400)
+        base = _out(runner, ["git", "-C", root, "merge-base", head, remote])
+        if base and re.fullmatch(r"[0-9a-f]{40}", base):
+            when = [_commit_times(_out(runner, ["git", "-C", root, "rev-list", "-n", "1", "--format=%ct", sha]) or "") for sha in (remote, base)]
+            if when[0] and when[1]:
+                return max(0.0, (when[0][0] - when[1][0]) / 86400)
     try:
         cmp = json.loads(_out(runner, ["gh", "api", f"repos/{repo}/compare/{head}...{remote}"], network=True) or "")
         base = _unix_time(cmp["merge_base_commit"]["commit"]["committer"]["date"])
@@ -494,9 +496,10 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
     origin = _out(runner, ["git", "-C", root, "remote", "get-url", "origin"]) or ""
     repo = github_repo(origin)
     if repo is None:
-        result.detail = (f"Its origin ({origin or 'none'}) is not a github.com repository, so it is not contacted "
+        result.detail = (f"Its origin ({'none' if not origin else 'not on github.com'}) is not a github.com repository, so it is not contacted "
                          "and cannot be compared with upstream.")
         return result
+    result.repo = repo
     result.update = update(root, result.branch)
     if _reused(result, cache, key, reuse_s):
         return result

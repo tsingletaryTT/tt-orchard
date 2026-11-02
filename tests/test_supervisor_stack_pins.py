@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from orchard import blocked, narrate
 from orchard import stack_pins as sp
 from orchard.ledger import Ledger
 from orchard.supervisor import Control, build
@@ -127,13 +128,108 @@ def test_the_stage_0_gate_refuses_a_record_rewritten_after_the_ledger_entry(rig)
     del spec
 
 
-def test_a_record_that_cannot_be_written_is_a_decision_and_the_gate_fails_the_stage(rig):
+def test_a_record_that_cannot_be_written_is_a_decision_and_blocks_stage_0_at_once(rig):
     def broken(stage_dir, new_run):
         raise OSError("disk full")
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
     run(rig, broken)
     assert any(d.get("decision") == "stack pins not written" for d in rig.decisions())
-    assert not [e for e in rig.entries() if e["event"] == "stage_end" and e["stage"] == 0 and e["data"].get("result") == "pass"]
+    pause = next(d["reason"] for d in rig.decisions() if d.get("decision") == "pause")
+    assert "could not be written" in pause and blocked.block_code({"reason": pause}) == "stack-stale"
+    assert not [e for e in rig.entries() if e["event"] == "stage_end" and e["stage"] == 0]
+
+
+def test_a_resumed_stage_does_not_keep_the_last_attempts_record_when_the_new_write_fails(rig):
+    """The stage directory survives a resume with the old record and its ledger hash. If this attempt's write fails, the gate must not
+    accept the old evidence: the old file is removed before the write, and the stage blocks."""
+    abort_when_waiting(rig)
+    run(rig, fake_check([], hazards=QWEN4_HAZARDS))
+    record = rig.run_dir / "stages" / "0" / sp.FILE
+    assert record.is_file()
+    rig.args.resume_aborted = True
+
+    def broken(stage_dir, new_run):
+        assert not record.exists()          # removed before the check ran
+        raise OSError("disk full")
+    run(rig, broken)
+    assert not record.exists()
+    assert not [e for e in rig.entries() if e["event"] == "stage_end" and e["stage"] == 0]
+    pause = [d["reason"] for d in rig.decisions() if d.get("decision") == "pause"][-1]
+    assert "could not be written" in pause
+
+
+def test_a_kept_stage_directory_with_an_old_record_and_ledger_hash_is_not_accepted_when_the_new_write_fails(rig):
+    """The case the full run above does not reach: the stage directory is kept (a stage that resumes with RESUME.md), so the old record is
+    still there and the ledger still holds its hash. The old file goes before the check, the failed write blocks, and the gate refuses."""
+    from orchard import supervisor
+    from orchard.handoff import Blocked
+    abort_when_waiting(rig)
+    run(rig, fake_check([]))
+    stage_dir = rig.run_dir / "stages" / "0"
+    assert (stage_dir / sp.FILE).is_file()
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        sup = build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=100), coder=rig.coder_cls(rig.m), home=rig.home,
+                    containers=rig.containers)
+
+        def broken(d, new_run):
+            raise OSError("disk full")
+        sup.stack_pins = broken
+        old_hash_in_ledger = sup._stack_pins_sha(stage_dir)
+        assert old_hash_in_ledger
+        with pytest.raises(Blocked):
+            sup._stage_0_stack_pins(stage_dir)
+        assert not (stage_dir / sp.FILE).exists()
+        gate = sup._with_stack_pins(lambda s, r: supervisor.GateResult(True))(stage_dir, rig.run_dir)
+        assert not gate.ok
+
+
+def test_stage_0_does_not_pass_when_the_file_is_not_the_one_the_ledger_recorded(rig):
+    """The gate is wired into the stage: a file whose hash is not the ledger's (swapped after the supervisor recorded it) fails the stage."""
+    def swapped(stage_dir, new_run):
+        rec, _ = fake_check([])(stage_dir, new_run)
+        return rec, "0" * 64
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    run(rig, swapped)
+    ends = [e["data"] for e in rig.entries() if e["event"] == "stage_end" and e["stage"] == 0]
+    assert ends and ends[0]["result"] != "pass" and any("hash changed" in r for r in ends[0]["reasons"])
+
+
+STALE_PATH_REASON = [sp._entry(sp.H_TT_METAL, "tt-metal is 65 commits and 42 days behind upstream, more than 7 days. To update: git -C /data/chips/tt-metal pull --ff-only origin main.")]
+
+
+def test_a_stack_block_has_its_own_code_even_when_its_text_holds_hardware_words(rig):
+    abort_when_waiting(rig)
+    run(rig, fake_check([], hazards=STALE_PATH_REASON))
+    pause = next(d["reason"] for d in rig.decisions() if d.get("decision") == "pause")
+    assert "chips" in pause and "tt-metal" in pause
+    code = blocked.block_code({"reason": pause})
+    assert code == "stack-stale" and code in blocked.REASONS and code not in blocked.AUTO_RETRY
+    assert not blocked.retryable(code, pause) and narrate.UNBLOCK[code]
+
+
+def test_the_real_check_looks_where_the_run_says(monkeypatch, tmp_path):
+    """PR 381 review: the tt-metal tree is under the run's operator home (as preflight reads it), and the reference interpreter is the run's
+    `reference_python` input before the environment variable."""
+    from types import SimpleNamespace
+    from orchard import supervisor
+    got = []
+    monkeypatch.setattr(sp, "make_check", lambda sources, **kw: got.append(sources))
+    sup = SimpleNamespace(paths=SimpleNamespace(operator_home=str(tmp_path / "ops-home")), home=tmp_path / "invoking-home",
+                          inputs={"model": "/m", "reference_python": "/cfg/python"})
+    args = SimpleNamespace(skills_dir=[tmp_path / "skills"])
+    monkeypatch.delenv("ORCHARD_TT_METAL_DIR", raising=False)
+    supervisor.stack_check_for(sup, args, environ={"ORCHARD_REFERENCE_PYTHON": "/env/python"})
+    sup.inputs = {"model": "/m"}
+    supervisor.stack_check_for(sup, args, environ={"ORCHARD_REFERENCE_PYTHON": "/env/python", "ORCHARD_TT_METAL_DIR": "/named/tree"})
+    first, second = got
+    assert first.tt_metal_dir == str(tmp_path / "ops-home" / "tt-metal") and first.ref_python == "/cfg/python"
+    assert second.tt_metal_dir == "/named/tree" and second.ref_python == "/env/python"
+    assert first.skills_dirs == (str(tmp_path / "skills"),) and first.model_dir == "/m"
+
+
+def test_the_keyword_rules_still_classify_other_blocks_the_same_way():
+    assert blocked.block_code({"reason": "blocked: a chip is held by another lease"}) == "hardware-unhealthy"
+    assert blocked.block_code({"reason": "blocked: the model does not fit this box"}) == "model-does-not-fit"
 
 
 def test_an_attended_run_that_the_operator_resumes_in_the_same_process_holds_the_findings_as_advisories(rig):

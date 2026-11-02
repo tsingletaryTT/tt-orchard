@@ -1512,15 +1512,24 @@ class Supervisor:
         entries = self.ledger.read()
         seen_before = any(e["event"] == "evidence" and e["stage"] == 0 and (e.get("data") or {}).get("what") == "stack pins" for e in entries)
         new_run = not (self._run_resumed or seen_before)
+        # A resumed stage keeps its directory, so the record and the ledger hash of the last attempt are still there. Remove the old file first:
+        # if this attempt cannot write a new one, the gate must not accept the old evidence.
+        try:
+            os.unlink(Path(stage_dir) / stack_pins_mod.FILE)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.ledger.append("decision", 0, decision="stack pins not written", reason=f"the old record could not be removed ({type(exc).__name__})")
+            self._block(0, "the stack record of an earlier attempt could not be removed, so this attempt cannot write its own. Fix the stage 0 directory, then run the command again")
         try:
             if self.stack_pins is not None:
                 rec, sha = self.stack_pins(stage_dir, new_run)
             else:
                 rec = stack_pins_mod.unchecked_record("no stack comparison was supplied to this supervisor", new_run=new_run)
                 sha = stack_pins_mod.write_record(stage_dir, rec)
-        except (OSError, ValueError) as exc:        # no record: the gate then fails the stage, it does not skip
+        except (OSError, ValueError) as exc:        # no record: nothing may go on without one
             self.ledger.append("decision", 0, decision="stack pins not written", reason=f"{type(exc).__name__}: {exc}"[:200])
-            return
+            self._block(0, f"the stack freshness record could not be written ({type(exc).__name__}). Fix the stage 0 directory, then run the command again")
         self.ledger.append("evidence", 0, what="stack pins", severity=rec["severity"], mode=rec["mode"],
                            hazards=[h["name"] for h in rec["hazards"]], advisories=[a["name"] for a in rec["advisories"]],
                            path=os.path.relpath(Path(stage_dir) / stack_pins_mod.FILE, self.run_dir), sha256=sha)
@@ -3623,12 +3632,12 @@ def run_paths(args, run_dir, recorded: dict | None, *, home, environ=None) -> Ru
 def stack_check_for(sup, args, environ=None):
     """The stack freshness comparison for a real run (orchard/stack_pins.py). Where each part lives: the tt-metal tree is $ORCHARD_TT_METAL_DIR
     or tt-metal under the operator's home (as preflight finds it); the TT vLLM plugin checkout is $ORCHARD_TT_VLLM_DIR (branch
-    $ORCHARD_TT_VLLM_BRANCH, default main); the reference interpreter is $ORCHARD_REFERENCE_PYTHON; the checkpoint is the run's `model` input;
+    $ORCHARD_TT_VLLM_BRANCH, default main); the reference interpreter is the run's `reference_python` input, else $ORCHARD_REFERENCE_PYTHON; the checkpoint is the run's `model` input;
     the skills clones are the --skills-dir values. $ORCHARD_STACK_PINS_OFFLINE makes no network call. A part that is not named is UNKNOWN."""
     env = os.environ if environ is None else environ
-    metal = env.get("ORCHARD_TT_METAL_DIR") or str(sup.home / "tt-metal")
+    metal = env.get("ORCHARD_TT_METAL_DIR") or str(Path(sup.paths.operator_home) / "tt-metal")      # the run's operator home, as preflight reads it
     sources = stack_pins_mod.Sources(
-        model_dir=sup.inputs.get("model"), ref_python=env.get("ORCHARD_REFERENCE_PYTHON"), tt_metal_dir=metal,
+        model_dir=sup.inputs.get("model"), ref_python=sup.inputs.get("reference_python") or env.get("ORCHARD_REFERENCE_PYTHON"), tt_metal_dir=metal,
         vllm_dir=env.get("ORCHARD_TT_VLLM_DIR"), vllm_branch=env.get("ORCHARD_TT_VLLM_BRANCH") or "main",
         skills_dirs=tuple(str(d) for d in args.skills_dir))
     return stack_pins_mod.make_check(sources)

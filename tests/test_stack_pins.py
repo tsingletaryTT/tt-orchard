@@ -4,6 +4,7 @@
 fakes. A checkout is a temporary directory; the fake answers what git and GitHub would say about it."""
 from __future__ import annotations
 
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -50,7 +51,7 @@ class FakeUpstream:
         if rest[0] == "ls-tree":
             return 0, "", ""
         if rest[:2] == ["remote", "get-url"]:
-            return 0, r.get("origin", "https://github.com/tenstorrent/repo.git") + "\n", ""
+            return 0, r.get("origin", f"https://github.com/tenstorrent/{os.path.basename(root)}.git") + "\n", ""
         if rest[0] == "ls-remote":
             if r.get("down"):
                 return 128, "", "fatal: unable to access: could not resolve host"
@@ -59,10 +60,11 @@ class FakeUpstream:
             return (0 if r.get("local_objects") else 1), "", ""
         if rest[:3] == ["rev-list", "--left-right", "--count"]:
             return 0, f"{r.get('ahead', 0)}\t{r['behind']}\n", ""
-        if rest[0] == "rev-list" and "--format=%ct" in rest and "-n" not in rest:
-            return 0, "".join(f"commit {i:040x}\n{int(t)}\n" for i, t in enumerate(r["missing_times"])), ""
+        if rest[0] == "merge-base":
+            return 0, r["base_sha"] + "\n", ""
         if rest[0] == "rev-list" and "-n" in rest:
-            return 0, f"commit {r['tip']}\n{int(r['tip_time'])}\n", ""
+            when = {r["tip"]: r["tip_time"], r["base_sha"]: r["base_time"]}.get(rest[-1])
+            return (0, f"commit {rest[-1]}\n{int(when)}\n", "") if when is not None else (128, "", "bad object")
         return 1, "", "unexpected"
 
     def _gh(self, argv):
@@ -81,11 +83,11 @@ class FakeUpstream:
 def repo(tmp_path, name, *, behind=0, days=0.0, up="main", head=None, tip=None, **kw):
     d = tmp_path / name
     d.mkdir(exist_ok=True)
-    import hashlib
     head = head or hashlib.sha1(name.encode()).hexdigest()
     tip = tip or (head if behind == 0 else hashlib.sha1((name + "-tip").encode()).hexdigest())
     base = NOW - 100 * DAY
-    return str(d), {"head": head, "tip": tip, "behind": behind, "base_time": base, "tip_time": base + days * DAY, **kw}
+    return str(d), {"head": head, "tip": tip, "behind": behind, "base_time": base, "tip_time": base + days * DAY,
+                    "base_sha": hashlib.sha1((name + "-base").encode()).hexdigest(), **kw}
 
 
 def config(tmp_path, **cfg):
@@ -241,13 +243,23 @@ def test_the_seven_day_line(tmp_path, py, days, critical):
 
 
 def test_the_age_comes_from_local_objects_when_the_tip_is_here(tmp_path, py):
-    m = repo(tmp_path, "tt-metal", behind=2, days=0, local_objects=True)
-    m[1]["missing_times"] = [NOW - 30 * DAY, NOW - 29 * DAY]
-    m[1]["tip_time"] = NOW - 10 * DAY
+    m = repo(tmp_path, "tt-metal", behind=2, days=20, local_objects=True)
     src, fake = full(tmp_path, py, metal=m)
     rec = build(src, fake, GOOD())
     assert rec["parts"]["tt_metal"]["behind_days"] == 20.0 and names(rec["hazards"]) == [sp.H_TT_METAL]
     assert not any(c[0] == "gh" for c in fake.calls)           # no GitHub call was needed
+
+
+@pytest.mark.parametrize("behind", [1, 2, 65])
+def test_fetching_the_tip_does_not_change_the_age(tmp_path, py, behind):
+    """PR 381 review: with one missing commit the local reading was zero days and GitHub's was the merge base's, so having the tip
+    locally let a blocking checkout pass. Both readings use the merge base."""
+    ages = []
+    for local in (False, True):
+        m = repo(tmp_path, f"tt-metal-{local}", behind=behind, days=30, local_objects=local)
+        src, fake = full(tmp_path, py, metal=m)
+        ages.append(build(src, fake, GOOD())["parts"]["tt_metal"]["behind_days"])
+    assert ages == [30.0, 30.0]
 
 
 def test_a_gap_whose_age_cannot_be_told_is_an_advisory_never_a_pass(tmp_path, py):
@@ -390,7 +402,7 @@ def test_warnings_before_the_answer_do_not_hide_it(py):
 
 def run_script(monkeypatch, capsys, fake_module, classes):
     monkeypatch.setitem(sys.modules, "transformers", fake_module) if fake_module is not None else monkeypatch.delitem(sys.modules, "transformers", raising=False)
-    monkeypatch.setattr(sys, "argv", ["-c", *classes])
+    monkeypatch.setattr(sys, "argv", ["-c", "-", *classes])
     exec(compile(sp.PROBE_SCRIPT, "<probe>", "exec"), {})
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
