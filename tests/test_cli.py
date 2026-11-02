@@ -855,6 +855,14 @@ def test_inventory_of_a_model_directory_uses_the_python_given(monkeypatch, tmp_p
     assert kw["ttnn_python"] == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
 
 
+def test_inventory_stub_option_reaches_the_trace(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    cli.main(["inventory", "m", "--python", "/r/py", "--stub-data-dependent"], env={"HOME": str(tmp_path)},
+             stdout=io.StringIO())
+    cli.main(["inventory", "m", "--python", "/r/py"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert [kw["stub_data_dependent"] for _, kw in calls["inv"]] == [True, False]
+
+
 def test_inventory_reads_the_interpreter_from_the_environment(monkeypatch, tmp_path):
     calls = _fake_inventory(monkeypatch)
     cli.main(["inventory", "somedir"], env={"HOME": str(tmp_path), "ORCHARD_REFERENCE_PYTHON": "/e/py"},
