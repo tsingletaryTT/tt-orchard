@@ -60,6 +60,7 @@ class Machine:
         self.sanity_answer = "42"           # what the coder says to the first-boot arithmetic question
         self.asked: list[str] = []          # every prompt put to the coder, in order
         self.never_ready = False
+        self.ready_s = 20.0                 # what a coder start or a restore reports as its wait for readiness
         self.resets: list[tuple[str, str]] = []
         self.n = 0
 
@@ -178,7 +179,7 @@ class MachineCoder:
     def wait_ready(self, budget_s):
         if self.m.never_ready:
             raise NotReady(budget_s)
-        return 20.0
+        return self.m.ready_s
 
     def ask(self, prompt):
         if not self.m.coder_running:

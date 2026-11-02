@@ -7,6 +7,7 @@ import time
 import pytest
 
 from orchard.ledger import Ledger
+from orchard.defaults import RUN_PARK_BOOT_CAP
 from orchard.stages import (STAGES, attempt_started_ts, budget_cap, coder_state, evidence_record, open_stage_dir,
                             run_progress)
 
@@ -46,7 +47,7 @@ def test_an_escalated_stage_runs_again_and_is_counted():
 
 
 def test_a_pause_lasts_until_a_resume_and_the_resume_resets_the_caps():
-    rows = [START, ("escalate", 2, 1, {}), ("restore", 2, 2, {"step": "ready", "seconds": 1800.0}),
+    rows = [START, ("escalate", 2, 1, {}), ("decision", 2, 2, {"decision": "coder started", "ready_s": 1800.0}),
             ("restore", 3, 2, {"step": "ready", "seconds": 150.0}),     # a warm restart
             ("decision", None, 2, {"decision": "coder died; restarting it once"}),
             ("decision", 2, 3, {"decision": "pause", "reason": "watchdog: loop"})]
@@ -78,6 +79,19 @@ def test_a_restart_keeps_the_attempts_clock():
 ])
 def test_budget_caps_pause_the_run(rows, words):
     assert words in budget_cap(run_progress(entries(START, *rows)), now=T0 + 10)
+
+
+def test_park_boots_are_counted_apart_from_unplanned_boots():
+    rows = [("decision", None, 1, {"decision": "coder started", "ready_s": 700.0})]
+    rows += [("restore", n, 2 + n, {"step": "ready", "seconds": 600.0}) for n in range(5)]
+    rows += [("restore", 9, 20, {"step": "ready", "seconds": 150.0})]          # a warm restore is not counted
+    p = run_progress(entries(START, *rows))
+    assert (p.cold_boots, p.park_boots, p.park_boot_s) == (1, 5, 3000.0)
+    assert budget_cap(p, now=T0 + 30) is None                                   # five parks are under the cap
+    p = run_progress(entries(START, *rows, ("decision", None, 30, {"decision": "resume"})))
+    assert (p.cold_boots, p.park_boots, p.park_boot_s) == (0, 0, 0.0)
+    runaway = [("restore", n, 2 + n, {"step": "ready", "seconds": 600.0}) for n in range(RUN_PARK_BOOT_CAP)]
+    assert "cold park restores" in budget_cap(run_progress(entries(START, *runaway)), now=T0 + 30)
 
 
 def test_the_wall_clock_cap_counts_from_run_start_or_the_last_resume():
@@ -161,6 +175,57 @@ def test_a_marker_changed_after_the_supervisor_recorded_it_is_not_a_resume_point
     (d / "test-result.json").write_text('{"returncode": 0}')
     _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
     assert not resumed
+
+
+def test_a_record_from_an_earlier_attempt_does_not_vouch_for_a_later_marker(tmp_path, ledger):
+    """Attempt 1 ran its hardware test and was retried (its directory moved aside). Attempt 2 wrote a marker with the same bytes
+    and was killed before its own test ran. The record of attempt 1 has the same path and sha256, and must not vouch for it."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text('{"returncode": 0}')
+    record_test(ledger, run, 2, d / "test-result.json")
+    d, resumed = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)     # the retry
+    assert not resumed
+    (d / "test-result.json").write_text('{"returncode": 0}')                        # same bytes, written by the new attempt
+    again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)   # a restart
+    assert not resumed and not (again / "test-result.json").exists()
+    assert any(e["data"].get("decision") == "marker not written by the supervisor" for e in ledger.read())
+
+
+def test_a_fresh_stage_start_is_a_boundary_when_the_move_aside_entry_was_never_written(tmp_path, ledger):
+    """A kill between the rename and the move-aside entry leaves no such entry. The next attempt finds no directory, makes a fresh one
+    and appends stage_start with resumed=False; the record of the attempt before it must not vouch for that attempt's marker."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text('{"returncode": 0}')
+    record_test(ledger, run, 2, d / "test-result.json")
+    ledger.append("stage_start", 2, escalated=False, resumed=False)       # the new attempt, whose move-aside entry was lost
+    (d / "test-result.json").write_text('{"returncode": 0}')               # same bytes, no record of its own
+    _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert not resumed
+
+
+def test_the_latest_attempts_own_record_still_vouches_after_two_restarts(tmp_path, ledger):
+    """A resume appends no move-aside entry, so the record stays valid across several restarts."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text("{}")
+    record_test(ledger, run, 2, d / "test-result.json")
+    for _ in range(2):
+        again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+        assert resumed and again == d
+        ledger.append("stage_start", 2, escalated=False, resumed=True)
+
+
+def test_a_move_aside_of_another_stage_does_not_hide_this_stages_record(tmp_path, ledger):
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text("{}")
+    record_test(ledger, run, 2, d / "test-result.json")
+    open_stage_dir(run, STAGES[3], resuming=False, ledger=ledger)
+    open_stage_dir(run, STAGES[3], resuming=False, ledger=ledger)                   # stage 3 moves its own directory aside
+    _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert resumed
 
 
 def test_a_record_for_another_stage_does_not_vouch_for_the_marker(tmp_path, ledger):

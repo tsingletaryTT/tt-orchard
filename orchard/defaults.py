@@ -229,7 +229,12 @@ TOOL_OUTPUT_CHARS = 12000       # choice: the head and tail of a command's outpu
 CONTEXT_FILE_CHARS = 4000       # choice: how much of each earlier stage's result file a new context holds
 SKILL_CHARS = 40000             # choice: a skill longer than this is cut, and the context says so
 RUN_ESCALATION_CAP = 3          # choice: escalations since the last operator resume before the run pauses
-RUN_COLD_BOOT_CAP = 3           # choice: cold coder boots since the last resume before the run pauses
+RUN_COLD_BOOT_CAP = 3           # choice: unplanned cold coder boots (the first start, a restart after a death)
+                                # since the last resume before the run pauses. A park restore is planned and
+                                # does not count here (issue 317).
+RUN_PARK_BOOT_CAP = 12          # choice: cold park restores since the last resume before the run pauses. A
+                                # coder that holds both boards parks at every hardware stage (about 10 minutes
+                                # each), so the normal run needs 2 to 4; this bounds a loop of parks.
 COLD_START_S = 600.0            # choice: a coder start slower than this counts as a cold boot; it sits
                                 # between the 2-3 min warm restart and the ~30 min cold boot (spec section 3)
 RUN_WALL_CLOCK_S = 259200.0     # choice: 72 h from run start or the last resume, then the run pauses

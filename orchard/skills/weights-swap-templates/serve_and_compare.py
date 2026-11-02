@@ -118,6 +118,14 @@ def load_config() -> dict:
     return json.loads((STAGE_DIR / "swap_config.json").read_text(encoding="utf-8"))
 
 
+def cache_state(cache: Path) -> dict:
+    """What the tensor cache holds right now: {"state": "empty" | "warm", "files": N}, N counting every file below `cache` except the
+    marker. Call it before guard_cache (which writes the marker) and before the server starts, and record the answer in swap-check.json:
+    a start time means nothing about the cache until the report says which cache it was taken with (issue 319)."""
+    files = sum(1 for f in cache.rglob("*") if f.is_file() and f.name != MARKER) if cache.is_dir() else 0
+    return {"state": "warm" if files else "empty", "files": files}
+
+
 def guard_cache(cache: Path, model_id: str) -> None:
     """Step (a). Exits 3 for a non-empty cache whose marker is missing or names another model."""
     if cache.is_dir() and any(cache.iterdir()):
@@ -615,9 +623,10 @@ def serving_state(run_sh_text: str) -> dict:
 
 
 def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: dict, tokenizer,
-                 reference, log_path: Path, extra: dict | None = None) -> dict:
-    """Step (g). Writes swap-check.json next to log_path and prints the result draft. `extra` adds
-    keys to the report; serve_and_compare_container.py records its docker command there."""
+                 reference, log_path: Path, *, cache_at_start: dict, extra: dict | None = None) -> dict:
+    """Step (g). Writes swap-check.json next to log_path and prints the result draft. `cache_at_start` is cache_state() taken before the
+    server started; it is required, so a caller cannot forget it (issue 319). `extra` adds keys to the report;
+    serve_and_compare_container.py records its docker command there."""
     prompt_ids, generated_ids, generated_text = reference
     top1 = m["matches"] / N_TOKENS
     coh = coherence(m["free_run_text"])
@@ -633,7 +642,7 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
     report = {"label": "measured", "new_model_id": cfg["new_model_id"],
               "model_dir": weights_env["MODEL_WEIGHTS_DIR"], "port": cfg["port"],
               "weights_dir_env": weights_env, "hf_model_env": weights_env["HF_MODEL"],
-              "server_ready_s": m["server_ready_s"], "n_tokens": N_TOKENS,
+              "server_ready_s": m["server_ready_s"], "tensor_cache_at_start": cache_at_start, "n_tokens": N_TOKENS,
               "matches": m["matches"], "top1_agreement": top1, **coh,
               "prompt_ids": prompt_ids, "reference_generated_ids": generated_ids[:N_TOKENS],
               "reference_generated_text": generated_text, "free_run_text": m["free_run_text"],
@@ -658,6 +667,7 @@ def main() -> int:
     tokenizer = Tokenizer.from_file(str(STAGE_DIR / "model-dir" / "tokenizer.json"))
     suite_setup = suite_preflight(cfg)
     cache = Path(cfg["tt_cache"])
+    cache_at_start = cache_state(cache)
     guard_cache(cache, cfg["new_model_id"])
 
     evidence = STAGE_DIR / "evidence"
@@ -680,6 +690,7 @@ def main() -> int:
         stop_server(proc)
         log.close()
     write_report(cfg, run_dir, cache, weights_env, m, tokenizer, reference, log_path,
+                 cache_at_start=cache_at_start,
                  extra={"serving": serving_state((STAGE_DIR / "run.sh").read_text(encoding="utf-8"))})
     return 0
 

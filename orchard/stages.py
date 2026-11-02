@@ -48,7 +48,7 @@ from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
 from orchard.graft_trial import decision_problems
 from orchard.defaults import (STOCK_MIN_TOKENS, STOCK_SMALL_PARAMS_MAX_B, STOCK_SMALL_TOP1_MIN,
-                              STOCK_SMALL_TOP5_MIN, STOCK_TOP1_MIN, STOCK_TOP5_MIN, SUITE_BLOCKING_KINDS, COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
+                              STOCK_SMALL_TOP5_MIN, STOCK_TOP1_MIN, STOCK_TOP5_MIN, SUITE_BLOCKING_KINDS, COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP, RUN_PARK_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
                               STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S, STAGE_DISK_GB, SWAP_MIN_TOKENS,
                               SWAP_TOP1_MIN, SIDECAR_MIN_QUESTIONS, SIDECAR_NOISE_FACTOR,
@@ -1158,6 +1158,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                  graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
                                  sampling_summary, sampling_summary_problems, serving_problems,
                                  served_drafter_state, split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
+    from orchard.can import hardening_problems
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
@@ -1254,6 +1255,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                      model_has_mtp=model_has_mtp, graft=has_graft)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
+        reasons += [f"profile {name}: {x}" for x in hardening_problems(out)]     # the canning checks (orchard/can.py)
         if license_id:
             reasons += [f"profile {name}: card: {x}" for x in
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
@@ -1813,7 +1815,9 @@ class RunProgress:
     open_stage: int | None              # a stage_start with no stage_end after it
     escalated: frozenset[int]           # stages with an escalate entry
     escalations: int                    # since the last operator resume
-    cold_boots: int                     # coder starts slower than COLD_START_S, since the last resume
+    cold_boots: int                     # unplanned coder starts slower than COLD_START_S, since the last resume
+    park_boots: int                     # park restores slower than COLD_START_S, since the last resume (planned)
+    park_boot_s: float                  # the seconds those park restores waited for the coder
     coder_deaths: int                   # since the last operator resume
     next_stage: int | None
 
@@ -1829,7 +1833,8 @@ def run_progress(entries: list[dict]) -> RunProgress:
     done: list[int] = []
     open_stage = None
     escalated: set[int] = set()
-    escalations = cold_boots = coder_deaths = 0
+    escalations = cold_boots = coder_deaths = park_boots = 0
+    park_boot_s = 0.0
     for e in entries:
         ev, stage, d = e["event"], e["stage"], e["data"]
         if ev == "run_start":
@@ -1845,13 +1850,18 @@ def run_progress(entries: list[dict]) -> RunProgress:
             escalated.add(stage)
             escalations += 1
         elif ev == "restore" and d.get("step") == "ready" and (d.get("seconds") or 0) >= COLD_START_S:
-            cold_boots += 1
+            # A restore ends a planned park (or the recovery of an interrupted one). It is counted apart
+            # from the coder starts that nobody planned, so a coder that parks at every hardware stage
+            # does not spend the cold-boot cap (issue 317).
+            park_boots += 1
+            park_boot_s += float(d["seconds"])
         elif ev == "decision":
             what = d.get("decision")
             if what == "pause":
                 paused = d.get("reason") or "paused"
             elif what == "resume":
                 paused, escalations, cold_boots, coder_deaths = None, 0, 0, 0
+                park_boots, park_boot_s = 0, 0.0
                 clock_start = ledger_ts(e)
                 if d.get("after") == "abort":
                     # The explicit transition (`--resume-aborted`, abort_can_resume). A plain operator resume
@@ -1868,7 +1878,7 @@ def run_progress(entries: list[dict]) -> RunProgress:
     next_stage = next((s.number for s in STAGES if s.number not in done), None)
     return RunProgress(run_start is not None, run_start, clock_start, finished, aborted, paused,
                        tuple(done), open_stage, frozenset(escalated), escalations, cold_boots,
-                       coder_deaths, next_stage)
+                       park_boots, park_boot_s, coder_deaths, next_stage)
 
 
 def abort_can_resume(entries: list[dict]) -> bool:
@@ -1905,6 +1915,9 @@ def budget_cap(p: RunProgress, now: float) -> str | None:
         return f"{p.escalations} escalations since the last resume (cap {RUN_ESCALATION_CAP})"
     if p.cold_boots >= RUN_COLD_BOOT_CAP:
         return f"{p.cold_boots} cold coder boots since the last resume (cap {RUN_COLD_BOOT_CAP})"
+    if p.park_boots >= RUN_PARK_BOOT_CAP:
+        return (f"{p.park_boots} cold park restores since the last resume (cap {RUN_PARK_BOOT_CAP}); "
+                f"{int(p.park_boot_s / 60)} minutes were spent waiting for the coder")
     if p.clock_start is not None and now - p.clock_start >= RUN_WALL_CLOCK_S:
         return (f"the run has lasted {int(now - p.clock_start)} s since it started or was last "
                 f"resumed (cap {int(RUN_WALL_CLOCK_S)} s)")
@@ -1940,9 +1953,18 @@ def _recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
     after it writes the file. A file an agent wrote, or one changed after the record, has none."""
     # Only _run_test's entry has `returncode` and `timed_out`. AgentStep's "evidence file" entries (an agent can link the marker from
     # evidence/) never do, so they do not count.
+    entries = ledger.read()
+    # Entries from before the stage's latest "moved the partial stage directory aside" belong to an earlier attempt, whose directory is
+    # gone. A later attempt can write a marker with the same bytes at the same path, so those entries cannot vouch for it. A resume
+    # appends no such entry, so the current attempt's own record stays valid across restarts. A stage_start with resumed=False is a
+    # boundary too: a kill between the rename and the move-aside entry leaves no entry, and the next attempt then starts a fresh
+    # directory. A stage_start with resumed=True is not one: it comes after the record the attempt resumed from.
+    start = max((i for i, e in enumerate(entries) if e.get("stage") == n and (
+        (e.get("event") == "decision" and e["data"].get("decision") == "moved the partial stage directory aside")
+        or (e.get("event") == "stage_start" and e["data"].get("resumed") is False))), default=-1) + 1
     return any(e.get("event") == "evidence" and e.get("stage") == n and e["data"].get("path") == rec["path"]
                and e["data"].get("sha256") == rec["sha256"] and "returncode" in e["data"] and "timed_out" in e["data"]
-               for e in ledger.read())
+               for e in entries[start:])
 
 
 def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple[Path, bool]:
