@@ -1563,7 +1563,7 @@ ranges; for a repo id, `huggingface_hub.get_safetensors_metadata`). It never rea
 attention, gdn, dense_mlp, routed_experts, shared_experts, ngram_ple, vision, mtp and norms_other, applies a quantization policy per
 category (bf16, bfp8, bfp4, or `host` for a category that stays in host memory, the n-gram table in the default policy), and
 prints the weights per chip for 1, 2, 4 and 8 chips (and any count given with `--chips`), the smallest chip count that fits, and
-the free disk and host RAM a first boot needs. The exit status is 1 when none of the `--chips` counts holds the model.
+the free disk and host RAM a first boot needs. The exit status is 1 when none of the `--chips` counts holds the model. The inputs are `--dram-gib`, `--reserve-gib` (per chip), `--kv-gib` (whole model), `--policy CATEGORY=DTYPE`, `--revision` and `--json`.
 
 Every figure is labeled. `measured` figures come from the headers. `estimated` figures are arithmetic on them. DRAM per chip, the
 per-chip reserve, the KV budget and the default policy are choices in `orchard/defaults.py` and `orchard/residency.py`, and the output
