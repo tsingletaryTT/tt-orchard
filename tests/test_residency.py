@@ -675,3 +675,209 @@ def test_the_command_is_wired_into_tt_orchard(flash_dir, capsys):
     from orchard import cli
     code = cli.main(["residency", str(flash_dir), "--chips", "4"])
     assert code == 0 and "routed_experts" in capsys.readouterr().out
+
+
+# ---- data-parallel replication (issue 359) --------------------------------------------------------------------------------------
+
+# A 4B dense shape (Qwen3-4B-like: 36 layers, hidden 2560, MLP 9728, 32 heads, 8 KV heads), every layer full attention.
+FOUR_B = {"hidden_size": 2560, "intermediate_size": 9728, "num_hidden_layers": 36, "num_attention_heads": 32, "num_key_value_heads": 8,
+          "head_dim": 128, "vocab_size": 151936, "full_attention_interval": 1, "linear_num_key_heads": 16, "linear_num_value_heads": 32,
+          "linear_key_head_dim": 128}
+
+
+@pytest.fixture(scope="module")
+def four_b_dir(tmp_path_factory):
+    return write_snapshot(tmp_path_factory.mktemp("fourb"), dense_tensors(FOUR_B), shards=2, config=FOUR_B)
+
+
+def dp(rec):
+    return rec["estimated"]["data_parallel"]
+
+
+def edge(tmp_path, extra_elements=0):
+    """One bf16 tensor of exactly 2 GiB (plus `extra_elements` values): with dram 3, reserve 0.5 and kv 0.5 GiB the one-chip row is full."""
+    t = [("model.layers.0.mlp.gate_proj.weight", "BF16", [1024, (1 << 20) + extra_elements])]
+    return tiny(tmp_path, t, policy={"dense_mlp": "bf16"}, dram_gib=3, reserve_gib=0.5, kv_gib=0.5, box_chips=4)
+
+
+def test_a_4b_model_that_fits_one_chip_reports_one_copy_per_configured_chip(four_b_dir):
+    rec = rs.estimate(rs.read_headers(four_b_dir), box_chips=4)
+    assert row(rec, 1)["fits"] and rec["estimated"]["chips_needed"] == 1
+    d = dp(rec)
+    assert d["applies"] is True and d["configured_chips"] == 4 and d["configured_from"] == "box"
+    assert d["copies"] == 4 and d["chips_used"] == 4                       # one copy per chip, and every copy has its own chip
+    assert "replication" in d["note"] and "no collective operations" in d["note"]
+
+
+def test_the_record_promises_no_throughput_and_cites_the_one_measured_example(four_b_dir):
+    d = dp(rs.estimate(rs.read_headers(four_b_dir), box_chips=4))
+    assert "measured scaling is needed" in d["throughput"] and "not estimated" in d["throughput"]
+    ex = d["measured_example"]
+    assert ex["model"] == "raahemnabeel/qwen3-reranker-4b" and ex["unit"] == "pairs/s" and ex["clients"] == 4
+    assert ex["by_board"] == {"p150": 21.7, "p300": 42.0, "p300x2": 83.0}
+    assert "p300c" in ex["basis"] and "author" in ex["basis"]
+    assert not any(k in d for k in ("speedup", "scaling", "pairs_per_s", "tokens_per_s", "expected_throughput"))
+
+
+def test_the_dense_27b_does_not_fit_one_chip_so_nothing_is_replicated(dense):
+    d = dp(dense)
+    assert not row(dense, 1)["fits"] and d["applies"] is False and d["copies"] == 0 and d["chips_used"] == 0
+    assert "does not fit one chip" in d["note"] and "measured_example" not in d
+
+
+def test_the_flash_next_model_does_not_replicate_either(flash):
+    assert dp(flash)["applies"] is False and dp(flash)["copies"] == 0
+
+
+def test_the_largest_stated_chip_count_sets_the_copies_when_there_is_no_box(four_b_dir):
+    d = dp(rs.estimate(rs.read_headers(four_b_dir), chips=[2, 8, 4]))
+    assert d["copies"] == 8 and d["configured_chips"] == 8 and d["configured_from"] == "stated chip counts (the largest)"
+
+
+def test_box_chips_win_over_stated_chip_counts(four_b_dir):
+    d = dp(rs.estimate(rs.read_headers(four_b_dir), chips=[8], box_chips=2))
+    assert d["copies"] == 2 and d["configured_from"] == "box"
+
+
+def test_with_no_chip_count_given_the_copies_are_unknown_not_zero(four_b_dir):
+    d = dp(rs.estimate(rs.read_headers(four_b_dir)))
+    assert d["applies"] is True and d["copies"] is None and d["configured_chips"] is None and d["configured_from"] is None
+    assert "one copy per chip" in d["note"]
+
+
+def test_a_model_exactly_at_the_one_chip_limit_replicates(tmp_path):
+    rec = edge(tmp_path)
+    assert row(rec, 1)["free_bytes_per_chip"] == 0 and row(rec, 1)["fits"] is True
+    assert dp(rec)["applies"] is True and dp(rec)["copies"] == 4
+
+
+def test_a_model_one_value_over_the_one_chip_limit_does_not_replicate(tmp_path):
+    rec = edge(tmp_path, extra_elements=1)
+    assert row(rec, 1)["free_bytes_per_chip"] < 0 and row(rec, 1)["fits"] is False
+    assert dp(rec)["applies"] is False and dp(rec)["copies"] == 0
+
+
+def test_each_copy_carries_the_whole_kv_budget_on_its_chip(tmp_path):
+    """The KV budget is for the whole model, spread over chips in a tensor-parallel layout. A copy per chip holds it all, so a budget that fits
+    when spread over four chips can still stop replication."""
+    t = [("model.layers.0.mlp.gate_proj.weight", "BF16", [1024, (1 << 20)])]
+    spread = rs.estimate(rs.read_headers(write_snapshot(tmp_path / "t", t, shards=1)), policy={"dense_mlp": "bf16"}, dram_gib=3, reserve_gib=0.5,
+                         kv_gib=0.9, box_chips=4)
+    assert row(spread, 4)["fits"] is True and row(spread, 1)["fits"] is False      # 2 + 0.5 + 0.9 is above 3 on one chip
+    assert dp(spread)["applies"] is False
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 1.5, "4"])
+def test_a_bad_box_chip_count_is_still_refused(four_b_dir, bad):
+    with pytest.raises(rs.ResidencyError):
+        rs.estimate(rs.read_headers(four_b_dir), box_chips=bad)
+
+
+def test_the_text_output_states_the_copies_and_the_measured_example(four_b_dir, capsys):
+    code, out = run_cli([str(four_b_dir), "--chips", "4"], capsys)
+    assert code == 0
+    assert "data parallel" in out and "4 copies" in out and "no collective operations" in out
+    assert "measured scaling is needed" in out and "21.7" in out and "42.0" in out and "83.0" in out and "raahemnabeel/qwen3-reranker-4b" in out
+    assert "tokens/s" not in out and "faster" not in out and "speedup" not in out
+
+
+def test_the_text_output_for_a_model_that_does_not_fit_says_so(flash_dir, capsys):
+    code, out = run_cli([str(flash_dir), "--chips", "4"], capsys)
+    assert "data parallel: not available" in out and "pairs/s" not in out
+
+
+def test_the_command_json_carries_the_data_parallel_block(four_b_dir, capsys):
+    code, out = run_cli([str(four_b_dir), "--chips", "4", "--json"], capsys)
+    assert json.loads(out)["estimated"]["data_parallel"]["copies"] == 4
+
+
+def test_stage_0_records_the_copies_for_the_box(four_b_dir, tmp_path):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    rec = rs.write_residency(stage, model_dir=four_b_dir, box_chips=4)
+    assert json.loads((stage / rs.FILE).read_text())["estimated"]["data_parallel"]["copies"] == 4 == dp(rec)["copies"]
+
+
+# ---- the stage 0 hazard: a model that fits one chip, set up for tensor parallel --------------------------------------------------
+
+def names(rec):
+    return [h["name"] for h in rec["hazards"]]
+
+
+def test_a_model_that_fits_one_chip_but_is_sharded_across_chips_gets_a_hazard_note(four_b_dir, tmp_path):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    rec = rs.write_residency(stage, model_dir=four_b_dir, box_chips=4, sharded_chips=4)
+    assert names(rec) == ["fits_one_chip_but_sharded"]
+    reason = rec["hazards"][0]["reason"]
+    assert "4 chips" in reason and "one chip" in reason and "data parallel" in reason and "collective" in reason
+    assert rec["verdict"]["fits_box"] is True                                     # a note: the model still fits and nothing is blocked
+
+
+def test_the_note_is_not_a_block(four_b_dir, tmp_path):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    rec = rs.write_residency(stage, model_dir=four_b_dir, box_chips=4, sharded_chips=4)
+    assert rs.shortfall(rec, 4) is None and rs.shortfall(rec, 2) is None and rs.usable(rec)
+
+
+@pytest.mark.parametrize("sharded", [None, 1])
+def test_no_hazard_for_a_single_chip_or_no_stated_sharding(four_b_dir, sharded):
+    assert names(rs.estimate(rs.read_headers(four_b_dir), box_chips=4, sharded_chips=sharded)) == []
+
+
+def test_no_sharding_hazard_for_a_model_that_needs_the_chips(dense_dir):
+    rec = rs.estimate(rs.read_headers(dense_dir), box_chips=4, sharded_chips=2)
+    assert names(rec) == []                                                       # a 27B model needs two chips: sharding is right
+
+
+def test_a_model_that_does_not_fit_the_box_gets_only_the_fit_hazard(flash_dir):
+    assert names(rs.estimate(rs.read_headers(flash_dir), box_chips=2, sharded_chips=2)) == ["model_does_not_fit_box"]
+
+
+def test_a_model_exactly_at_the_limit_with_sharding_gets_the_note(tmp_path):
+    t = [("model.layers.0.mlp.gate_proj.weight", "BF16", [1024, 1 << 20])]
+    kw = dict(policy={"dense_mlp": "bf16"}, dram_gib=3, reserve_gib=0.5, kv_gib=0.5, box_chips=4, sharded_chips=2)
+    assert names(rs.estimate(rs.read_headers(write_snapshot(tmp_path / "a", t, shards=1)), **kw)) == ["fits_one_chip_but_sharded"]
+    t[0] = (t[0][0], "BF16", [1024, (1 << 20) + 1])
+    assert names(rs.estimate(rs.read_headers(write_snapshot(tmp_path / "b", t, shards=1)), **kw)) == []
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 2.5, "2"])
+def test_a_bad_sharded_chip_count_is_refused(four_b_dir, bad):
+    with pytest.raises(rs.ResidencyError):
+        rs.estimate(rs.read_headers(four_b_dir), box_chips=4, sharded_chips=bad)
+
+
+def test_the_supervisor_passes_the_largest_required_chip_count_as_the_sharding(four_b_dir, tmp_path, monkeypatch):
+    """The supervisor's stage 0 hook hands the run's required chip counts to the estimate; with none it passes None."""
+    from orchard import supervisor
+    seen = {}
+    monkeypatch.setattr(supervisor.residency, "write_residency", lambda stage_dir, **kw: seen.update(kw) or {"scan": "skipped", "hazards": []})
+    monkeypatch.setattr(supervisor, "evidence_record", lambda *a, **k: {})
+    for required, want in (((1, 2, 4), 4), (None, None), ((1,), None)):
+        sup = supervisor.Supervisor.__new__(supervisor.Supervisor)
+        sup.required_chips, sup.inputs, sup.run_dir = required, {"model": str(four_b_dir)}, tmp_path
+        sup._box_chips = lambda spec=None: 4
+        sup.ledger = type("L", (), {"append": lambda self, *a, **k: None})()
+        sup._stage_0_residency(tmp_path)
+        assert seen["sharded_chips"] == want
+        assert want is None or seen["sharded_basis"] == "required chip counts"
+
+
+def test_required_chip_counts_alone_give_a_conditional_note_not_a_claim_of_sharding(four_b_dir, tmp_path):
+    """PR 367 review: `required_chips` names the counts stage 4 must test, which a data-parallel package also needs. The note then says
+    "if the model is sharded", and the record names its basis."""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    rec = rs.write_residency(stage, model_dir=four_b_dir, box_chips=4, sharded_chips=4, sharded_basis="required chip counts")
+    h = rec["hazards"][0]
+    assert h["basis"] == "required chip counts" and "required chip counts" in h["reason"] and "if the port shards" in h["reason"]
+    assert "is configured to shard" not in h["reason"]
+    stated = rs.estimate(rs.read_headers(four_b_dir), box_chips=4, sharded_chips=4)["hazards"][0]
+    assert stated["basis"] == "stated" and "is configured to shard" in stated["reason"]
+
+
+def test_a_bad_sharded_basis_is_refused(four_b_dir):
+    with pytest.raises(rs.ResidencyError):
+        rs.estimate(rs.read_headers(four_b_dir), box_chips=4, sharded_chips=4, sharded_basis="anything")
