@@ -54,6 +54,8 @@ tt-orchard can commands config/can.granite.toml --namespace ORG     # the publis
 
 Add `--run-dir RUN` to `stage` or `boot` to write `RUN/stages/7/can.json` and an `evidence` entry (`can staged`) in the run's ledger.
 
+Add `--state-dir DIR` to `stage`, `gate` or `boot` to write `DIR/NAME.can-state.json`, a small record of the gate result and the boot result (decode rate, start time, and with `--cache-state empty|warm` the cache state). The Cans view of `tt-orchard ui` (README 5.9i) reads it from `<runs folder>/cans` or `ORCHARD_CANS_DIR`, and shows each can's spec, bundle, SHA256SUMS check and card rows beside it. The format is in `docs/superpowers/specs/2026-11-02-canning-tab-design.md`. The file is optional, and the view makes no request to the Hub.
+
 `stage` runs `tt-model package-thin --out` (never with a repo id; stage 7's `assert_no_publish` refuses any upload-capable call), then:
 
 - replaces `producer.hostname` in the manifest and makes `run.sh` and `install.sh` executable;

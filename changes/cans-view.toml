@@ -1,0 +1,3 @@
+target = "0.9.92"
+summary = "A read-only Cans view in the web page: each can's spec, staged bundle, SHA256SUMS check, recorded gate and boot results and card rows. Adds an optional can-state record (--state-dir)."
+pr = 342

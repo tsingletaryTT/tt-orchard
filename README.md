@@ -1550,6 +1550,33 @@ Known limits of the pair:
   simulator venv from `tt-orchard kernel-env`.
 - One board, one seed and 20 kernels were tried. The probe's softmax, center, silu_mul and tile-scan specs were not.
 
+### 5.9a Residency estimate
+
+```bash
+tt-orchard residency /path/to/model-snapshot --chips 2 4        # a local snapshot directory
+tt-orchard residency owner/name --revision main --json          # a repo id: headers only, over the network
+tt-orchard residency DIR --dram-gib 32 --kv-gib 4 --policy routed_experts=bfp8
+```
+
+The command reads the header of each `.safetensors` file (an 8-byte length and a JSON list of tensor dtypes, shapes and byte
+ranges; for a repo id, `huggingface_hub.get_safetensors_metadata`). It never reads tensor data. It groups tensors into embedding,
+attention, gdn, dense_mlp, routed_experts, shared_experts, ngram_ple, vision, mtp and norms_other, applies a quantization policy per
+category (bf16, bfp8, bfp4, or `host` for a category that stays in host memory, the n-gram table in the default policy), and
+prints the weights per chip for 1, 2, 4 and 8 chips (and any count given with `--chips`), the smallest chip count that fits, and
+the free disk and host RAM a first boot needs. The exit status is 1 when none of the `--chips` counts holds the model. The inputs are `--dram-gib`, `--reserve-gib` (per chip), `--kv-gib` (whole model), `--policy CATEGORY=DTYPE`, `--revision` and `--json`.
+
+Every figure is labeled. `measured` figures come from the headers. `estimated` figures are arithmetic on them. DRAM per chip, the
+per-chip reserve, the KV budget and the default policy are choices in `orchard/defaults.py` and `orchard/residency.py`, and the output
+lists each with its source (`caller` or `default (choice)`). No allocator reading backs them. The record's `not_measured` list says what
+a live reading would replace.
+
+Stage 0 of a run writes the same record to `stages/0/residency.json` and adds a `residency estimate` evidence entry to the ledger.
+A model that needs more chips than the box has gets a `model_does_not_fit_box` hazard in that record. Before a full-port stage 2 the
+supervisor reads the record and, when the box (or stage 2's one-board lease, which is where the port check runs) has fewer chips
+than the estimate needs, blocks with the numbers (block code `model-does-not-fit`) and starts no prepare step. The generic stage 2
+only records the estimate. A checkpoint whose `model.safetensors.index.json` names a shard or tensor that is missing is refused as
+incomplete.
+
 ### 5.9b Op inventory
 
 ```bash
@@ -1565,6 +1592,14 @@ supports the model's shape, dtype or layout. `composable` means a decomposition 
 `mapped`. `unmapped` means neither. `ignored` marks metadata-only ops. `unchecked` means no dump exists for the
 installed ttnn version, so nothing is claimed.
 
+`host` marks an op that runs on the host by design, such as a constant built once, the preparation of an input, or a
+lookup in a table too big for the device. It makes no ttnn claim, so it holds with or without a dump. The table is
+`orchard/data/op_notes.json`: each entry has a `reason` and the `evidence` for it, and `"host": true` makes the op `host`.
+An entry without `host` adds a note to an op of any status (why an op is `composable`, or why an expert-loop op stays
+`unmapped`). The loader (`load_notes`) refuses an entry that lacks a reason or evidence, has an unknown key, or has a
+`host` that is not true or false. A table row, a decomposition, a verified mapping and `ignored` all take precedence
+over `host`. The report lists the notes under the op table. Nothing times the host path.
+
 Two more statuses are guesses and never count as `mapped`. `candidate` means the table has no row for the op, but
 `orchard/opvariants.py` found up to three ttnn names in the dump that might do the job, each with the reason it was
 proposed (`normalised-equal`, `synonym`, `token-subset`, `near` or `affix`; tables in `orchard/data/op_variants.json`).
@@ -1572,9 +1607,11 @@ proposed (`normalised-equal`, `synonym`, `token-subset`, `near` or `affix`; tabl
 (`orchard/data/verified_mappings.json`). A person still adds the table row that makes an op `mapped`.
 
 A trace also carries an ordered op list. `orchard/oppatterns.py` finds groups that one ttnn op does at once (RMSNorm,
-LayerNorm, SiLU gate multiply, an unfused attention, the Hugging Face rotary embedding). They are listed apart under
+LayerNorm, SiLU gate multiply, an unfused attention, the Hugging Face rotary embedding, and the reference expert loop
+of a routed-expert module, `moe_experts`, which maps to `experimental.moe_compute`). They are listed apart under
 `patterns` with the status `pattern` (`pattern-verified` after the simulator check), and only when the ttnn op is in
-the dump. The ops inside a group keep their own statuses.
+the dump. The ops inside a group keep their own statuses. A group can carry a note: `moe_experts` says that the
+probe did not run `moe_compute` and that a check needs 4 dies and routing at 512 experts, top 10.
 
 `refresh-ttnn` imports ttnn, which opens the device, so it runs under a one-chip gozer lease and writes
 `orchard/data/ttnn_ops-<version>.json`. Run it once per ttnn version. The supervisor never runs it.
@@ -1890,7 +1927,7 @@ tt-orchard can boot BUNDLE SPEC --work DIR [--hf-home DIR] [--health-timeout S] 
 tt-orchard can commands SPEC --namespace ORG                       # the publish commands, as text only
 ```
 
-`config/can.granite.toml` is the first spec. The pattern, the two kinds (`vllm`, `tt-dit-server`) and the ASGI adapter are in [docs/canning.md](docs/canning.md).
+`config/can.granite.toml` is the first spec. The pattern, the two kinds (`vllm`, `tt-dit-server`) and the ASGI adapter are in [docs/canning.md](docs/canning.md). The web page's Cans view (5.9i) shows each can's state.
 
 ### 5.9fb The audio package builder (stage a Stable Audio 3 small-music package, locally)
 
@@ -2255,6 +2292,27 @@ and a file over the read caps are counted and shown as "Left out". The reader ne
   the cost at each reference. `GET /api/virtual-spend` (with `?run=NAME`) serves both, reads only, and returns no path.
 - Checked against the kernel-probe round `rms5` (5 attempts, no kernel passed): 137 turns, 3,373,905 prompt and 78,468 completion
   tokens, which is $0.3766 at `claude-haiku-5-5` and $7.53 at `claude-sonnet-5-5`.
+
+### 5.9i The Cans view: what each can has and what it lacks (read only)
+
+`tt-orchard ui` has a Cans view (the "Cans" button next to Telegraph, address `#cans`). It lists one row per `config/can.*.toml` and shows, for each can:
+name, kind, mesh and device count, the weights repository (a link) and its pinned revision, the card profile, whether a staged bundle is on disk, the
+SHA256SUMS check, the gate result, the last boot result (decode tokens per second, start time, cache state), and the card's Expected performance and
+Limitations rows. A row opens its details with the button in the Can column (Enter or Space).
+
+The view only reads. It sends no request to the Hub, so it shows "not checked here" where a Hub revision or a published copy would be. It does not run
+`can gate`, because the gate walks and hashes without a total limit and compiles every Python file in the bundle. It recomputes SHA256SUMS with limits (at
+most 1 GiB hashed, 5,000 files, no link followed) and reads the card, and it shows the gate and boot results from an optional record.
+
+```
+tt-orchard can gate  OUT/NAME SPEC --state-dir DIR                     # also writes DIR/NAME.can-state.json
+tt-orchard can boot  OUT/NAME SPEC --work WORK --state-dir DIR --cache-state empty   # under a gozer lease, as before
+```
+
+The page looks for bundles in `<runs folder>/cans/NAME` (or in `ORCHARD_CANS_DIR` when that variable is set before `tt-orchard ui` starts) and for the
+record in `<that folder>/NAME.can-state.json`. A record names the SHA256SUMS digest it was written for. If the bundle has changed since, the page says the
+record is for an earlier bundle and does not count it as passed. A can with a missing or broken piece shows that piece in words (no staged bundle, SHA256SUMS
+missing, no gate recorded, spec refused with the loader's message). The design note is `docs/superpowers/specs/2026-11-02-canning-tab-design.md`.
 
 ### Keeping tt-orchard's tools current
 

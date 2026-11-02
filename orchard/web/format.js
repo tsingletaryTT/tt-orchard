@@ -82,6 +82,7 @@ function routeOf(hash) {
   if (hash === "#machine" || hash === "#hardware") return { view: "hardware" };
   if (hash === "#models" || hash === "#settings") return { view: "settings" };
   if (hash === "#telegraph") return { view: "telegraph" };
+  if (hash === "#cans") return { view: "cans" };
   const m = /^#run\/(.+)$/.exec(hash || "");
   if (!m) return null;
   try { return { run: decodeURIComponent(m[1]) }; } catch { return null; }      // a malformed escape in a pasted link

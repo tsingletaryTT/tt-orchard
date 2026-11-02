@@ -258,6 +258,11 @@ def test_every_table_entry_can_be_hit_by_some_config():
     moe = dict(num_experts=600, num_experts_per_tok=2, moe_intermediate_size=100, shared_expert_intermediate_size=100)
     probes = [
         (cfg(hidden_size=96), CLEAN, {}),
+        # the dense Qwen4 rows: dense qwen4_exp against a MoE nearest, and widths and head counts that do not divide over 2 or 4 dies
+        (cfg(model_type="qwen4_exp_text", intermediate_size=14400),
+         cfg(num_experts=8, num_experts_per_tok=2, moe_intermediate_size=64), {"dies": 4}),
+        (cfg(hidden_size=130, intermediate_size=14400, num_attention_heads=6, num_key_value_heads=3, hc_count=5, hc_lowrank=64,
+             indexer_n_heads=6), CLEAN, {"dies": 1}),
         (cfg(hidden_size=130, intermediate_size=250, head_dim=40, vocab_size=131105, **moe), CLEAN, {"dies": 1}),
         (cfg(num_experts=64, num_experts_per_tok=8, moe_intermediate_size=64, num_key_value_heads=8),
          cfg(num_experts=64, num_experts_per_tok=4, moe_intermediate_size=64, num_key_value_heads=2), {}),
@@ -384,3 +389,113 @@ def test_the_ngram_hazard_does_not_claim_a_size_or_a_placement_the_config_does_n
     text = h.why.lower()
     assert "gigabyte" not in text and "host" not in text
     assert "size not computed" in text
+
+
+# ---- a dense Qwen4 (PROVISIONAL: no weights or config exist; the fixture is dimensions from public readings) -------------------
+
+DENSE_Q4 = FIX / "qwen4-dense-provisional.json"
+
+
+def dense_q4(**text_over):
+    raw = mc.read_model_config(DENSE_Q4)
+    raw["text_config"] = dict(raw["text_config"], **text_over)
+    return raw
+
+
+def test_the_dense_fixture_is_flagged_as_a_different_shape_from_a_moe_nearest_bundle_and_from_flash_next():
+    flash = mc.read_model_config(QWEN4)
+    s = hz.scan_model_hazards(dense_q4(), flash, dies=4)
+    got = {h.name: h for h in s.hazards}
+    assert "dense_model_nearest_is_moe" in got and got["dense_model_nearest_is_moe"].value == 0 and got["dense_model_nearest_is_moe"].limit == 512
+    assert "dense_qwen4_not_flash_next_shape" in got
+    assert "no routed experts" in got["dense_qwen4_not_flash_next_shape"].why
+
+
+def test_a_dense_qwen4_is_flagged_as_not_flash_next_shaped_even_with_no_nearest_bundle():
+    assert "dense_qwen4_not_flash_next_shape" in names(hz.scan_model_hazards(dense_q4(), None))
+    assert "dense_model_nearest_is_moe" not in names(hz.scan_model_hazards(dense_q4(), None))
+
+
+def test_a_moe_flash_next_is_not_flagged_as_dense():
+    s = hz.scan_model_hazards(mc.read_model_config(QWEN4), None, dies=4)
+    assert not {n for n in names(s) if n.startswith("dense_")}
+
+
+def test_the_dense_fixture_reports_its_hyper_connection_numbers_from_the_config():
+    s = hz.scan_model_hazards(dense_q4(), None, dies=2)
+    assert s.facts["hyper_connections"] == {"hc_count": 4, "hc_lowrank": 640, "width": 20480}
+    # 320 per rank at two ranks is what a TP2 reading shows; the scan takes whatever the config says
+    assert hz.scan_model_hazards(dense_q4(hc_lowrank=320), None).facts["hyper_connections"]["hc_lowrank"] == 320
+
+
+def test_hc_lowrank_and_hc_count_have_no_built_in_default():
+    assert hz.scan_model_hazards(cfg(), None).facts["hyper_connections"] is None
+    only_count = hz.scan_model_hazards(cfg(hc_count=4), None)
+    assert only_count.facts["hyper_connections"] == {"hc_count": 4, "hc_lowrank": None, "width": 512}
+    assert any("hc_lowrank" in n for n in only_count.notes)
+    with pytest.raises(hz.HazardInputError, match="hc_lowrank"):
+        hz.scan_model_hazards(cfg(hc_count=4, hc_lowrank=0), None)
+    with pytest.raises(hz.HazardInputError, match="hc_count"):
+        hz.scan_model_hazards(cfg(hc_count="4"), None)
+
+
+def test_the_dense_fixture_passes_the_division_checks_at_one_two_and_four_dies():
+    for dies in (1, 2, 4):
+        s = hz.scan_model_hazards(dense_q4(), None, dies=dies)
+        assert not {n for n in names(s) if n.endswith("_by_dies") or n.startswith("ffn_")}, (dies, names(s))
+
+
+def test_a_hyper_connection_width_that_does_not_divide_by_the_dies_is_flagged():
+    s = hz.scan_model_hazards(cfg(hidden_size=128, hc_count=4, hc_lowrank=64), None, dies=3)      # 512 over 3 dies
+    (h,) = [h for h in s.hazards if h.name == "hyper_connection_width_not_divisible_by_dies"]
+    assert h.value == [3] and h.limit.startswith("divisible") and "512" in h.why
+    ok = hz.scan_model_hazards(cfg(hidden_size=128, hc_count=3, hc_lowrank=64), None, dies=3)    # 384 over 3, 2 and 4 dies
+    assert "hyper_connection_width_not_divisible_by_dies" not in names(ok)
+
+
+def test_the_hyper_connection_width_is_also_checked_at_two_and_four_dies_whatever_the_scan_dies():
+    s = hz.scan_model_hazards(cfg(hidden_size=130, intermediate_size=256, hc_count=5, hc_lowrank=64), None, dies=1)   # 650: by 2, not by 4
+    (h,) = [h for h in s.hazards if h.name == "hyper_connection_width_not_divisible_by_dies"]
+    assert h.value == [4]
+
+
+def test_a_dense_ffn_width_that_is_not_a_multiple_of_32_per_die_is_flagged():
+    s = hz.scan_model_hazards(cfg(intermediate_size=14336 + 64), None, dies=4)        # 14400 / 4 = 3600, not a multiple of 32
+    (h,) = [h for h in s.hazards if h.name == "ffn_per_die_not_whole_tiles"]
+    assert h.value == [4] and "14400" in h.why
+    assert "ffn_per_die_not_whole_tiles" not in names(hz.scan_model_hazards(cfg(intermediate_size=14336), None, dies=4))
+
+
+def test_the_ffn_per_die_check_is_for_dense_layers_only():
+    moe = dict(num_experts=8, num_experts_per_tok=2, moe_intermediate_size=96, intermediate_size=96)   # 96 / 4 = 24 would fail
+    assert "ffn_per_die_not_whole_tiles" not in names(hz.scan_model_hazards(cfg(**moe), None, dies=4))
+    assert "ffn_per_die_not_whole_tiles" in names(hz.scan_model_hazards(cfg(**moe, mlp_only_layers=[0]), None, dies=4))
+
+
+@pytest.mark.parametrize("over, hazard, bad", [
+    (dict(num_attention_heads=6, num_key_value_heads=2), "attention_heads_not_divisible_by_dies", [4]),
+    (dict(num_attention_heads=6, num_key_value_heads=3), "kv_heads_not_divisible_by_dies", [2, 4]),
+    (dict(indexer_n_heads=6, indexer_head_dim=128, indexer_budget=2048), "qsa_heads_not_divisible_by_dies", [4]),
+])
+def test_head_counts_that_do_not_divide_by_the_dies_are_flagged_at_two_and_four(over, hazard, bad):
+    s = hz.scan_model_hazards(cfg(**over), None, dies=1)
+    (h,) = [h for h in s.hazards if h.name == hazard]
+    assert h.value == bad
+
+
+def test_fewer_kv_heads_than_dies_is_replication_and_is_not_flagged_when_the_dies_are_a_multiple():
+    assert "kv_heads_not_divisible_by_dies" not in names(hz.scan_model_hazards(cfg(num_key_value_heads=2), None, dies=4))
+
+
+def test_the_existing_flash_next_hazards_do_not_change():
+    flash = mc.read_model_config(QWEN4)
+    nearest = mc.read_model_config(FIX / "qwen3.5-35b-a3b.json")
+    for dies in (2, 4):
+        got = names(hz.scan_model_hazards(flash, nearest, dies=dies))
+        assert not {n for n in got if n.endswith("_by_dies") or n.startswith("dense_") or n.startswith("ffn_")}, (dies, got)
+
+
+def test_a_division_hazard_the_nearest_bundle_also_has_is_marked_covered():
+    odd = cfg(num_attention_heads=6, num_key_value_heads=2)
+    (h,) = [h for h in hz.scan_model_hazards(odd, odd).hazards if h.name == "attention_heads_not_divisible_by_dies"]
+    assert h.also_on_nearest is True

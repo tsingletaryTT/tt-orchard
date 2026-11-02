@@ -492,6 +492,138 @@ function renderTelegraph() {
   if (!c.models.length) ms.append(tgRow([["", ""], ["No models: telegraph is off", "muted"], ["", ""], ["", ""]]));
 }
 
+// ---- cans: the Cans view (orchard/cans_view.py) -------------------------------------------------------------------
+// Read only. While the view is on screen the page asks GET /api/cans every POLL_CANS_MS (not in a hidden tab) and draws what the
+// server says; the server builds every sentence. Nothing here sends anything else, and every string goes in as a text node. An answer
+// that cannot be read leaves the last one on screen under a banner that says it is old. Open rows are kept in S.cansOpen, so a redraw
+// keeps them open and puts keyboard focus back on the button that was pressed.
+const POLL_CANS_MS = 15000;
+const CANS_TIMEOUT_MS = 25000;
+const CANS_MARK = { good: "●", warn: "▲", bad: "■", dim: "○" };   // a different shape for each tone: colour is never the only signal
+S.cansOpen = new Set();
+
+function stopCans() {
+  if (S.cansTimer) { clearInterval(S.cansTimer); S.cansTimer = null; }
+}
+
+function startCans() {
+  stopCans();
+  pollCans();
+  S.cansTimer = setInterval(() => { if (!document.hidden) pollCans(); }, POLL_CANS_MS);
+}
+
+async function pollCans() {
+  if (S.cansPending) return;             // one request at a time
+  S.cansPending = true;
+  const note = $("cans-stale");
+  try {
+    S.cans = await api("/api/cans", { timeout: CANS_TIMEOUT_MS });
+    S.cansOk = Date.now();
+    note.hidden = true;
+    note.textContent = "";
+    if (S.view === "cans") renderCans();
+  } catch (err) {
+    note.hidden = false;
+    note.textContent = S.cansOk
+      ? `The page cannot read the cans right now. What is shown was read ${Math.round((Date.now() - S.cansOk) / 1000)} s ago and may be out of date.`
+      : "The page cannot read the cans right now, and nothing has been read yet.";
+  } finally {
+    S.cansPending = false;
+  }
+}
+
+function toggleCan(slug) {
+  if (S.cansOpen.has(slug)) S.cansOpen.delete(slug); else S.cansOpen.add(slug);
+  renderCans();                          // the redraw puts keyboard focus back on the button that was pressed
+}
+
+function canCell(piece, extra) {
+  return h("td", { class: extra || null, dataset: { tone: piece.tone } }, piece.text);
+}
+
+function canDetail(c, open) {
+  const rowId = `can-detail-${c.slug}`;
+  const dl = h("dl", { class: "cans-facts" });
+  const fact = (k, ...v) => dl.append(h("div", { class: "tg-kv" }, h("dt", {}, k), h("dd", {}, ...v)));
+  fact("Spec", c.spec.text);
+  if (c.weights) {
+    const link = c.weights.hub_url && c.weights.hub_url.startsWith("https://huggingface.co/")
+      ? h("a", { href: c.weights.hub_url, target: "_blank", rel: "noopener noreferrer" }, c.weights.repo) : c.weights.repo;
+    fact("Weights repository", link);
+    fact("Pinned revision", h("span", { class: "mono" }, c.weights.revision), ` (on the Hub: ${c.weights.hub_text})`);
+    fact("Published copy", c.weights.hub_text);
+    fact("Card profile", c.card_profile || "none");
+  }
+  fact("Bundle", c.bundle.text);
+  fact("SHA256SUMS", c.sums.text);
+  fact("Card check", c.card.text);
+  fact("Gate", c.gate.text);
+  fact("Boot", c.boot.text);
+  const lists = [];
+  const list = (title, items) => {
+    if (items && items.length) lists.push(h("div", { class: "cans-list" }, h("h3", {}, title), h("ul", {}, ...items.map((t) => h("li", {}, t)))));
+  };
+  list("SHA256SUMS problems", c.sums.problems && c.sums.problem_count > c.sums.problems.length
+    ? [...c.sums.problems, `and ${c.sums.problem_count - c.sums.problems.length} more`] : c.sums.problems);
+  list("Recorded gate problems", c.gate.problems && c.gate.problem_count > c.gate.problems.length
+    ? [...c.gate.problems, `and ${c.gate.problem_count - c.gate.problems.length} more`] : c.gate.problems);
+  list("Boot checks that failed", c.boot.failed);
+  const perf = c.card.performance;
+  const tables = [];
+  if (perf) {
+    const t = h("table", { class: "tg-table cans-perf" },
+      h("caption", {}, "Expected performance (from the card)"),
+      h("thead", {}, h("tr", {}, ...perf.header.map((x) => h("th", { scope: "col" }, x)))),
+      h("tbody", {}, ...perf.rows.map((r) => h("tr", {}, ...r.map((x) => h("td", {}, x))))));
+    tables.push(h("div", { class: "table-wrap" }, t));
+    if (perf.more) tables.push(h("p", { class: "muted small" }, `${plural(perf.more, "more row")} not shown.`));
+    if (perf.columns_more) tables.push(h("p", { class: "muted small" }, `${plural(perf.columns_more, "more column")} not shown.`));
+  } else {
+    tables.push(h("p", { class: "muted" }, "Expected performance: missing (no table in the card, or no card)."));
+  }
+  if (c.card.limitations && c.card.limitations.length) {
+    list("Limitations (from the card)", c.card.limitations);
+    if (c.card.limitations_more) lists.push(h("p", { class: "muted small" }, `${plural(c.card.limitations_more, "more line")} not shown.`));
+  } else {
+    lists.push(h("p", { class: "muted" }, "Limitations: missing (no text in the card, or no card)."));
+  }
+  const tr = h("tr", { class: "cans-detail", id: rowId, hidden: !open }, h("td", { colspan: "9" }, dl, ...tables, ...lists));
+  return tr;
+}
+
+function renderCans() {
+  const d = S.cans;
+  if (!d) return;
+  if (!changed($("cans-view"), [d, [...S.cansOpen].sort()])) return;
+  const banner = $("cans-folder");
+  banner.dataset.tone = d.folder.state === "present" ? "dim" : "warn";
+  banner.textContent = d.folder.text + "." + (d.specs.folder_unreadable ? " The specs folder could not be listed." : "")
+    + (d.specs.more ? ` ${plural(d.specs.more, "more spec")} not shown.` : "");
+  $("cans-count").textContent = d.cans.length ? `${plural(d.cans.length, "can")}` : "";
+  $("cans-hub-note").textContent = `Hub revision and published copy: ${d.hub.text}. ${d.hub.note}`;
+  $("cans-empty").hidden = d.cans.length > 0;
+  $("cans-table").hidden = d.cans.length === 0;
+  // A poll that changes any row rebuilds the table, so the button that has keyboard focus is found again by its id afterwards.
+  const focused = document.activeElement && document.activeElement.id && document.activeElement.id.startsWith("can-toggle-") ? document.activeElement.id : null;
+  const body = clear($("cans-body"));
+  for (const c of d.cans) {
+    const open = S.cansOpen.has(c.slug);
+    const detailId = `can-detail-${c.slug}`;
+    const weights = c.weights ? [c.weights.repo, h("span", { class: "muted small" }, ` @ ${c.weights.revision.slice(0, 7)}`)] : ["unknown"];
+    body.append(h("tr", { dataset: { tone: c.tone }, class: "cans-row" },
+      h("td", { class: "cans-status" }, h("span", { class: "mark", "aria-hidden": "true" }, CANS_MARK[c.tone] || CANS_MARK.dim), " ", h("strong", {}, c.summary)),
+      h("td", { class: "wrap cans-name" }, h("button", { type: "button", class: "cans-toggle", id: `can-toggle-${c.slug}`, "aria-expanded": String(open),
+        "aria-controls": detailId, onclick: () => toggleCan(c.slug) }, c.name)),
+      h("td", {}, c.kind || "unknown"),
+      h("td", {}, c.mesh ? `${c.mesh}, ${plural(c.device_count, "device")}` : "unknown"),
+      h("td", { class: "wrap" }, ...weights),
+      canCell(c.bundle), canCell(c.sums), canCell(c.gate), canCell(c.boot)));
+    body.append(canDetail(c, open));
+  }
+  const again = focused ? document.getElementById(focused) : null;
+  if (again) again.focus();
+}
+
 // ---- machine health: the scene's weather and how hard the farmer works --------------------------------
 
 const WEATHER_WORD = { clear: "☀ clear skies", heatwave: "🔥 heatwave", overcast: "☁ overcast", storm: "⛈ storm", unknown: "· weather unknown" };
@@ -1387,6 +1519,7 @@ function wire() {
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
   $("view-telegraph-btn").addEventListener("click", () => setView("telegraph"));
+  $("view-cans-btn").addEventListener("click", () => setView("cans"));
   $("spend-meter").addEventListener("click", () => setView("telegraph"));
   $("local-meter").addEventListener("click", () => setView("telegraph"));
   $("settings-form").addEventListener("submit", saveSettings);
@@ -1472,6 +1605,9 @@ function setView(view, { push = true } = {}) {
   $("hardware-view").hidden = view !== "hardware";
   $("settings-view").hidden = view !== "settings";
   $("telegraph-view").hidden = view !== "telegraph";
+  $("view-cans-btn").setAttribute("aria-pressed", String(view === "cans"));
+  $("cans-view").hidden = view !== "cans";
+  if (view !== "cans") stopCans();
   const runShown = view === "orchard" && S.selected;
   $("run").hidden = !runShown;
   $("run-empty").hidden = view !== "orchard" || Boolean(S.selected);
@@ -1488,6 +1624,10 @@ function setView(view, { push = true } = {}) {
     if (push) history.replaceState(null, "", "#telegraph");
     renderTelegraph();
     pollTelegraph();
+  } else if (view === "cans") {
+    if (push) history.replaceState(null, "", "#cans");
+    renderCans();
+    startCans();
   } else if (view === "settings") {
     if (push) history.replaceState(null, "", "#models");
     loadSettings();
