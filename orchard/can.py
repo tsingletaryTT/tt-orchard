@@ -1344,6 +1344,138 @@ def record(run_dir, record_: dict, evidence: dict | None = None) -> Path:
     return path
 
 
+# ---- the optional recorded state ------------------------------------------------------------------------------------------
+# `--state-dir DIR` on gate, boot and stage writes DIR/<name>.can-state.json, which the Cans view of the web page reads (orchard/cans_view.py,
+# docs/superpowers/specs/2026-11-02-canning-tab-design.md). The file sits beside the staged bundle, never inside it: a file inside would be
+# one more file that SHA256SUMS does not list.
+
+STATE_SUFFIX = ".can-state.json"
+STATE_MAX_BYTES = 64 * 1024
+STATE_LIST_MAX = 10                 # problems and failed checks kept in a record
+STATE_TEXT_MAX = 300
+CACHE_STATES = ("empty", "warm")
+_SHA = re.compile(r"^[0-9a-f]{64}$")
+_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def _sums_digest(bundle) -> str | None:
+    """The sha256 of the bundle's SHA256SUMS file, or None when it cannot be read (a record then names no bundle)."""
+    try:
+        return hashlib.sha256(safeio.read_bytes(Path(bundle) / SUMS_FILE, max_bytes=1024 * 1024)).hexdigest()
+    except (OSError, safeio.SafeReadError):
+        return None
+
+
+def _stamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _short(text) -> str:
+    return str(text)[:STATE_TEXT_MAX]
+
+
+def gate_record(problems: list[str]) -> dict:
+    """What `can gate` found, as a record: passed, how many problems, the first STATE_LIST_MAX of them, and when. `write_state` adds the digest
+    of the bundle's SHA256SUMS, which lets a reader tell that the record is for another version of the bundle."""
+    return {"passed": not problems, "problem_count": len(problems), "problems": [_short(p) for p in problems[:STATE_LIST_MAX]],
+            "bundle_sums_sha256": None, "at": _stamp()}
+
+
+def _finite_rate(value):
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
+
+
+def boot_record(evidence: dict, cache_state: str | None) -> dict:
+    """What `can boot` found, as a record. The decode rate is the one the check timed (rate_timings, then timings); a value that is not a
+    finite number is dropped. `cache_state` is what the operator says about the kernel cache the boot used: "empty", "warm" or None."""
+    if cache_state is not None and cache_state not in CACHE_STATES:
+        raise CanError(f"--cache-state must be one of {CACHE_STATES}, got {cache_state!r}")
+    rate = _finite_rate((evidence.get("rate_timings") or {}).get("decode_tok_s"))
+    if rate is None:
+        rate = _finite_rate((evidence.get("timings") or {}).get("decode_tok_s"))
+    checks = evidence.get("checks") or {}
+    return {"passed": bool(evidence.get("passed")), "decode_tok_s": rate, "ready_s": _finite_rate(evidence.get("ready_s")),
+            "cache_state": cache_state, "failed": [_short(n) for n, c in checks.items() if not (c or {}).get("ok")][:STATE_LIST_MAX],
+            "bundle_sums_sha256": None, "at": _stamp()}
+
+
+def _strict_bool(x, what):
+    if not isinstance(x, bool):
+        raise CanError(f"state: {what} must be true or false")
+
+
+def _strings(x, what):
+    if not isinstance(x, list) or len(x) > STATE_LIST_MAX or not all(isinstance(i, str) and len(i) <= STATE_TEXT_MAX for i in x):
+        raise CanError(f"state: {what} must be a list of at most {STATE_LIST_MAX} strings of at most {STATE_TEXT_MAX} characters")
+
+
+def _count(x, what):
+    if isinstance(x, bool) or not isinstance(x, int) or x < 0:
+        raise CanError(f"state: {what} must be a whole number, zero or more")
+
+
+def _rate_or_none(x, what):
+    if x is not None and _finite_rate(x) is None:
+        raise CanError(f"state: {what} must be a finite number, zero or more, or null")
+
+
+def _cache_or_none(x, what):
+    if x is not None and x not in CACHE_STATES:
+        raise CanError(f"state: {what} must be one of {CACHE_STATES} or null")
+
+
+def _state_part(part, what: str, fields: dict) -> None:
+    keys = {"bundle_sums_sha256", "at", *fields}
+    if not isinstance(part, dict) or set(part) != keys:
+        raise CanError(f"state: {what} must be an object with exactly {sorted(keys)}")
+    for key, check in fields.items():
+        check(part[key], f"{what}.{key}")
+    digest = part["bundle_sums_sha256"]
+    if digest is not None and not (isinstance(digest, str) and _SHA.match(digest)):
+        raise CanError(f"state: {what}.bundle_sums_sha256 must be 64 hex digits or null")
+    if not (isinstance(part["at"], str) and _STAMP.match(part["at"])):
+        raise CanError(f"state: {what}.at must be a UTC time like 2026-11-02T10:00:00Z")
+
+
+def check_state(raw) -> dict:
+    """`raw` (a parsed state file) if every field is as the format says, else CanError naming the field. Used by the writer, to merge with
+    an earlier file, and by the Cans view, which shows nothing from a file with a bad field."""
+    if not isinstance(raw, dict) or not {"schema", "name"} <= set(raw) or set(raw) - {"schema", "name", "gate", "boot"}:
+        raise CanError("state: the file must be an object with schema, name and optionally gate and boot")
+    if raw["schema"] != 1 or isinstance(raw["schema"], bool):
+        raise CanError("state: schema must be 1")
+    if not (isinstance(raw["name"], str) and NAME.match(raw["name"])):
+        raise CanError("state: name must be a plain name")
+    if "gate" in raw:
+        _state_part(raw["gate"], "gate", {"passed": _strict_bool, "problem_count": _count, "problems": _strings})
+    if "boot" in raw:
+        _state_part(raw["boot"], "boot", {"passed": _strict_bool, "decode_tok_s": _rate_or_none, "ready_s": _rate_or_none,
+                                          "cache_state": _cache_or_none, "failed": _strings})
+    return raw
+
+
+def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot: dict | None = None) -> Path:
+    """Write `state_dir/<name>.can-state.json`: `gate` and `boot` replace the same part of an earlier file and the other part is kept. Each
+    part written is stamped with the digest of the bundle's SHA256SUMS as it is now. An earlier file that fails `check_state` is replaced."""
+    if not NAME.match(str(name)):
+        raise CanError(f"the state name {name!r} is not a plain name")
+    folder = Path(state_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{name}{STATE_SUFFIX}"
+    state = {"schema": 1, "name": name}
+    try:
+        state = check_state(safeio.read_json(path, max_bytes=STATE_MAX_BYTES))
+    except (OSError, safeio.SafeReadError, CanError):
+        pass
+    digest = _sums_digest(bundle)
+    for key, part in (("gate", gate), ("boot", boot)):
+        if part is not None:
+            state[key] = {**part, "bundle_sums_sha256": digest}
+    check_state(state)
+    safeio.atomic_write(path, json.dumps(state, indent=2) + "\n", mode=0o644)
+    return path
+
+
 # ---- command line --------------------------------------------------------------------------------------------------------
 
 def _boot_port(args):
@@ -1362,6 +1494,8 @@ def main(args, out=None) -> int:
                 raise CanError("can stage needs --out")
             rec = stage(spec, args.out, namespace=getattr(args, "namespace", None))
             say(f"staged {rec['name']} ({len(rec['files'])} files) in {args.out}")
+            if getattr(args, "state_dir", None):     # stage raises when the gate finds a problem, so reaching here means it passed
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.out, gate=gate_record([]))}")
             if getattr(args, "run_dir", None):
                 say(f"recorded in {record(args.run_dir, rec)}")
             return 0
@@ -1370,10 +1504,14 @@ def main(args, out=None) -> int:
             for p in problems:
                 say(f"problem: {p}")
             say("gate: " + ("passed" if not problems else f"{len(problems)} problem(s)"))
+            if getattr(args, "state_dir", None):
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, gate=gate_record(problems))}")
             return 1 if problems else 0
         if args.action == "boot":
             if not args.work:
                 raise CanError("can boot needs --work")
+            cache_state = getattr(args, "cache_state", None)
+            boot_record({"checks": {}}, cache_state)             # refuse a bad --cache-state before the long boot starts
             env = dict(os.environ)
             if getattr(args, "hf_home", None):
                 env["HF_HOME"] = str(args.hf_home)
@@ -1381,6 +1519,8 @@ def main(args, out=None) -> int:
             for name, c in ev["checks"].items():
                 say(f"{'ok  ' if c['ok'] else 'FAIL'} {name} {c.get('detail', '')}".rstrip())
             say(f"boot check: {'passed' if ev['passed'] else 'FAILED'} (evidence: {Path(args.work) / 'boot-check.json'})")
+            if getattr(args, "state_dir", None):
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, boot=boot_record(ev, cache_state))}")
             if getattr(args, "run_dir", None):
                 rec = {"name": spec.name, "kind": spec.kind, "weights": {"repo": spec.repo, "revision": spec.revision}}
                 say(f"recorded in {record(args.run_dir, rec, ev)}")
