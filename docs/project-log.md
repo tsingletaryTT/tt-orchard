@@ -3725,3 +3725,10 @@ A v6 package from stage 7 had no SHA256SUMS and the pins were not checked. Stage
 - Finding: a dense config that omits `num_experts` gets the transformers default of 512 and builds without error, which is the wrong model. The shim reads the raw config instead.
 - Inventory on the fixture dimensions as a flat text config (4 layers, stub): no failures, 67 ops, none of `grouped_mm_fallback`, `cummax`, `histc`, `index_put_`. Write-up and the list of what waits for the real config: `docs/run-logs/2026-11-02-dense-qwen4-prep.md`.
 - Tests: `tests/test_qwen4_dense.py` (17), new cases in `tests/test_hazards.py` and `tests/test_template_integrity.py`. Mutations: 18 on the new guards, each turned a test red (one, the placeholder expert settings, needed a new test for an explicit `num_experts: 0` first).
+
+## 2026-11-02 Classify the unmapped Qwen4 ops
+
+- Prompt: make `tt-orchard inventory` classify the ops the Qwen4-style traces leave unmapped, with evidence.
+- New `host` status (op runs on the host by design) and `orchard/data/op_notes.json` (reason and evidence per op; `load_notes` refuses malformed rows). `unflatten.int` is a decomposition to reshape (probe PCC 0.99996); `eye`, `cummax` and `diff` are host (`diff` comes from `find_packed_sequence_indices` in masking_utils, mask preparation); `histc`, `index_put_` and `grouped_mm_fallback` stay unmapped with a note and now form a `moe_experts` pattern for `experimental.moe_compute`, status `pattern`, not verified.
+- Flash-Next 4-layer trace: unmapped 7 to 3, composable 1 to 2, host 3. Write-up: `docs/run-logs/2026-11-02-unmapped-ops.md`.
+- Tests: `tests/test_opinventory_host.py` (52). Mutations: 15 on the new guards; one (a host leaf passed into decompositions) changed nothing observable and was removed.
