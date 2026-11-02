@@ -190,6 +190,16 @@ def _evidence(e: dict, d: dict) -> list[Line]:
         return [Line(o, "will test these chip counts: " + ", ".join(str(c) for c in d.get("configs") or []))]
     if what == "transcript":
         return [Line(o, f"agent step finished: {d.get('status', '?')} after {d.get('turns', '?')} turns")]
+    if what == "stack pins":
+        would = d.get("would_block") or []
+        text = f"stack freshness recorded ({d.get('severity', '?')}, {d.get('mode', '?')} run)"
+        reasons = {f.get("name"): f.get("reason") for f in d.get("findings") or [] if isinstance(f, dict)}
+        shown = ", ".join(f"{n}: {reasons[n]}" if reasons.get(n) else str(n) for n in (would or d.get("hazards") or [])[:4])
+        if would:
+            text += "; would block if ORCHARD_STACK_PINS_BLOCK=1: " + shown
+        elif d.get("hazards"):
+            text += "; critical: " + shown
+        return [Line(o, _clip(text, 700), bool(would or d.get("hazards")))]
     return []
 
 
@@ -657,6 +667,13 @@ UNBLOCK = {
         "run `tt-orchard residency <MODEL_DIR> --chips 4 --dram-gib <N> --kv-gib <N>` and read the table.",
         "Repeating the command does not change the answer, so `bringup` does not retry it. Run it on a box with enough chips, or change the "
         "policy (a lower-precision format for the largest category) and start a new run."],
+    "stack-stale": [
+        "Stage 0 compared the tt-metal checkout, the TT vLLM plugin checkout, the skills clone and the reference interpreter's transformers with "
+        "upstream and with the checkpoint, and a new run found a critical hazard (named in the reason above and in stages/0/stack-pins.json). "
+        "No agent step ran.",
+        "Update the named part (the reason gives the command where one applies), then start a new run so the comparison is made again. Running "
+        "the command again on this run holds the same findings as advisories and goes on with the stale stack, so do that only when you accept it. "
+        "`bringup` does not retry this block by itself."],
     "package-missing": [
         "A chip count that stage 4 requires has no installed bundle or container package for the nearest model. Repeating the command "
         "does not change that, so `bringup` does not retry it.",
