@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
-    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port]
+    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port] [--model-kind generative|reranker|embedding]
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
@@ -132,6 +132,11 @@ def _parser() -> argparse.ArgumentParser:
                         "compares the chip's tokens with the CPU reference. Stages 3 to 6 for a full port are not built yet, so the run ends "
                         "blocked after stage 2 (code full-port-stages-unbuilt). A run that already ran stage 2 without the flag refuses it. "
                         "No other class changes")
+    b.add_argument("--model-kind", choices=("generative", "reranker", "embedding"), default=None,
+                   help="what the model produces. Without it stage 0 reads the model card's pipeline_tag (text-ranking is a reranker; "
+                        "feature-extraction and sentence-similarity are embedding models), then the architecture names. A reranker or embedding "
+                        "model takes the scoring route (stage 1 records Hugging Face scores or vectors, stage 2 runs the scoring check on the "
+                        "coder's port); stages 3 to 6 are not built for it, so the run ends blocked after stage 2 (code scoring-route)")
     b.add_argument("--full-port-rehearsal", action="store_true",
                    help="with --full-port, for a rehearsal model with random weights: stage 2 waives its `coherent` field and no other check, "
                         "and the ledger says so. Given when the run starts; a resume keeps it and cannot add it")
@@ -1306,7 +1311,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               accept_credentials=not args.refuse_credentials_visible,
                                               graft_trial=not args.no_graft_trial,
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
-                                              full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal)
+                                              full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)
