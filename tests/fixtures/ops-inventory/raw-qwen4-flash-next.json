@@ -1,0 +1,2223 @@
+{
+ "architectures": [
+  "Qwen4ExpForCausalLM"
+ ],
+ "failures": [],
+ "higher_order_nodes": {
+  "wrap_with_set_grad_enabled": 1
+ },
+ "layers_in_config": 48,
+ "layers_traced": 4,
+ "model_dir": "qwen3.8-flash-next",
+ "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced. Bodies of higher-order operations (for example wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op",
+ "ops": [
+  {
+   "count": 800,
+   "count_in_layers": 790,
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.ple",
+    "model.layers.1.linear_attn"
+   ],
+   "op": "aten.slice.Tensor",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      3,
+      1,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 414,
+   "count_in_layers": 407,
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.select.int",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 378,
+   "count_in_layers": 378,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.clone.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      1,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 334,
+   "count_in_layers": 328,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0"
+   ],
+   "op": "aten.mul.Tensor",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      2560
+     ]
+    ]
+   }
+  },
+  {
+   "count": 272,
+   "count_in_layers": 259,
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.0",
+    "model.layers.0.mlp.experts",
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.unsqueeze.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 267,
+   "count_in_layers": 262,
+   "modules": [
+    "model",
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0"
+   ],
+   "op": "aten.add.Tensor",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 205,
+   "count_in_layers": 205,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.0.mlp.gate",
+    "model.layers.0.mlp.experts",
+    "model.layers.1.ple",
+    "model.layers.1.linear_attn"
+   ],
+   "op": "aten.sum.dim_IntList",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      64,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 196,
+   "count_in_layers": 192,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn",
+    "model.rotary_emb"
+   ],
+   "op": "aten.copy_.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      1,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 106,
+   "count_in_layers": 98,
+   "modules": [
+    "model",
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm"
+   ],
+   "op": "aten._assert_tensor_metadata.default",
+   "sample": null
+  },
+  {
+   "count": 102,
+   "count_in_layers": 97,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.0.mlp.gate"
+   ],
+   "op": "aten.to.dtype",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      10240
+     ]
+    ]
+   }
+  },
+  {
+   "count": 74,
+   "count_in_layers": 73,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.0.mlp.gate",
+    "model.layers.0.mlp.experts"
+   ],
+   "op": "aten.reshape.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      2560
+     ]
+    ]
+   }
+  },
+  {
+   "count": 69,
+   "count_in_layers": 66,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.input_mix_weight_down",
+    "model.layers.0.attn_hyper_connection.input_mix_weight_up",
+    "model.layers.0.attn_hyper_connection.block_inject_weight",
+    "model.layers.0.linear_attn.in_proj_qkv",
+    "model.layers.0.linear_attn.in_proj_z"
+   ],
+   "op": "aten.linear.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      320
+     ]
+    ]
+   }
+  },
+  {
+   "count": 49,
+   "count_in_layers": 49,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.0.mlp.experts",
+    "model.layers.1.ple",
+    "model.layers.1.linear_attn",
+    "model.layers.1.mlp.experts"
+   ],
+   "op": "aten.transpose.int",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      10240,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 29,
+   "count_in_layers": 27,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.0.mlp_hyper_connection"
+   ],
+   "op": "aten.mean.dim",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 29,
+   "count_in_layers": 28,
+   "modules": [
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection",
+    "model.layers.0.mlp"
+   ],
+   "op": "aten.sigmoid.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      10240
+     ]
+    ]
+   }
+  },
+  {
+   "count": 25,
+   "count_in_layers": 25,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn",
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.matmul.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      1,
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 25,
+   "count_in_layers": 24,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.norm_key"
+   ],
+   "op": "aten.rsqrt.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 23,
+   "count_in_layers": 22,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.ple.norm_key"
+   ],
+   "op": "aten.flatten.using_ints",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      10240
+     ]
+    ]
+   }
+  },
+  {
+   "count": 21,
+   "count_in_layers": 20,
+   "modules": [
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.linear_attn",
+    "model.layers.0.mlp_hyper_connection",
+    "model.layers.0.mlp.shared_expert.act_fn",
+    "model.layers.0.mlp.experts.act_fn"
+   ],
+   "op": "aten.silu.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      320
+     ]
+    ]
+   }
+  },
+  {
+   "count": 20,
+   "count_in_layers": 18,
+   "modules": [
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.mlp_hyper_connection",
+    "model.layers.1.ple",
+    "model.layers.1.attn_hyper_connection",
+    "model.layers.1.mlp_hyper_connection"
+   ],
+   "op": "aten.unflatten.int",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      2560
+     ]
+    ]
+   }
+  },
+  {
+   "count": 19,
+   "count_in_layers": 18,
+   "modules": [
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.mlp_hyper_connection",
+    "model.layers.1.ple",
+    "model.layers.1.attn_hyper_connection",
+    "model.layers.1.mlp_hyper_connection"
+   ],
+   "op": "aten.div.Tensor",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      320
+     ]
+    ]
+   }
+  },
+  {
+   "count": 19,
+   "count_in_layers": 18,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.norm_key",
+    "model.layers.1.ple.norm_query"
+   ],
+   "op": "aten.pow.Tensor_Scalar",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      2560
+     ]
+    ]
+   }
+  },
+  {
+   "count": 18,
+   "count_in_layers": 18,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.exp.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      48
+     ]
+    ]
+   }
+  },
+  {
+   "count": 17,
+   "count_in_layers": 16,
+   "modules": [
+    "model",
+    "model.layers.0.mlp",
+    "model.layers.0.mlp.experts",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.mlp"
+   ],
+   "op": "aten.view.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      1,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 16,
+   "count_in_layers": 14,
+   "modules": [
+    "model",
+    "model.layers.0.mlp.experts",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts",
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.index.Tensor",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      1,
+      64,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 16,
+   "count_in_layers": 16,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.pad.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      64,
+      128
+     ]
+    ]
+   }
+  },
+  {
+   "count": 16,
+   "count_in_layers": 15,
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.norm_key",
+    "model.layers.1.ple.norm_query",
+    "model.layers.1.ple.norm_conv"
+   ],
+   "op": "aten.type_as.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      10240
+     ]
+    ]
+   }
+  },
+  {
+   "count": 14,
+   "count_in_layers": 12,
+   "modules": [
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.3.self_attn.indexer",
+    "model.layers.3.self_attn",
+    "model.rotary_emb"
+   ],
+   "op": "aten.cat.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 14,
+   "count_in_layers": 13,
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.sub.Tensor",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 13,
+   "count_in_layers": 8,
+   "modules": [
+    "model",
+    "model.layers.0.mlp.experts",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts"
+   ],
+   "op": "aten.arange.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 10,
+   "count_in_layers": 10,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn",
+    "model.layers.3.self_attn.indexer",
+    "model.layers.3.self_attn"
+   ],
+   "op": "aten.neg.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      48
+     ]
+    ]
+   }
+  },
+  {
+   "count": 8,
+   "count_in_layers": 7,
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.0.mlp.experts",
+    "model.layers.1.linear_attn",
+    "model.layers.1.mlp.experts"
+   ],
+   "op": "aten.cumsum.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 8,
+   "count_in_layers": 8,
+   "modules": [
+    "model.layers.0.mlp.experts",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts",
+    "model.layers.3.mlp.experts"
+   ],
+   "op": "transformers.grouped_mm_fallback.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      640,
+      1280
+     ]
+    ]
+   }
+  },
+  {
+   "count": 7,
+   "count_in_layers": 4,
+   "modules": [
+    "model",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.3.self_attn",
+    "model.rotary_emb"
+   ],
+   "op": "aten.expand.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      4,
+      1,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 6,
+   "count_in_layers": 6,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.repeat_interleave.self_int",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      48,
+      128
+     ]
+    ]
+   }
+  },
+  {
+   "count": 5,
+   "count_in_layers": 3,
+   "modules": [
+    "model",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.3.self_attn"
+   ],
+   "op": "aten.__and__.Tensor",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      1,
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 5,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn",
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.alias.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      64,
+      128
+     ]
+    ]
+   }
+  },
+  {
+   "count": 5,
+   "count_in_layers": 5,
+   "modules": [
+    "model.layers.0.mlp.experts",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts",
+    "model.layers.3.self_attn",
+    "model.layers.3.mlp.experts"
+   ],
+   "op": "aten.chunk.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      640,
+      640
+     ],
+     [
+      640,
+      640
+     ]
+    ]
+   }
+  },
+  {
+   "count": 5,
+   "count_in_layers": 5,
+   "modules": [
+    "model.layers.0.mlp.experts",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts",
+    "model.layers.3.self_attn.indexer",
+    "model.layers.3.mlp.experts"
+   ],
+   "op": "aten.floor_divide.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      640
+     ]
+    ]
+   }
+  },
+  {
+   "count": 5,
+   "count_in_layers": 5,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.new_full.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      2
+     ]
+    ]
+   }
+  },
+  {
+   "count": 5,
+   "count_in_layers": 5,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn",
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.squeeze.dim",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      10240,
+      4
+     ]
+    ]
+   }
+  },
+  {
+   "count": 5,
+   "count_in_layers": 5,
+   "modules": [
+    "model.layers.0.mlp.gate",
+    "model.layers.1.mlp.gate",
+    "model.layers.2.mlp.gate",
+    "model.layers.3.self_attn.indexer",
+    "model.layers.3.mlp.gate"
+   ],
+   "op": "aten.topk.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      64,
+      10
+     ],
+     [
+      64,
+      10
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple.conv1d",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.conv1d.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      10240,
+      67
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.mlp.gate",
+    "model.layers.1.mlp.gate",
+    "model.layers.2.mlp.gate",
+    "model.layers.3.mlp.gate"
+   ],
+   "op": "aten.div_.Tensor",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      64,
+      10
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.mlp.experts",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts",
+    "model.layers.3.mlp.experts"
+   ],
+   "op": "aten.empty_like.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      640
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.ge.Scalar",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.mlp.experts",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts",
+    "model.layers.3.mlp.experts"
+   ],
+   "op": "aten.histc.default",
+   "sample": {
+    "dtype": "torch.int32",
+    "output_shapes": [
+     [
+      512
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.mlp.experts",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts",
+    "model.layers.3.mlp.experts"
+   ],
+   "op": "aten.index_put_.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      640
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.mlp.gate",
+    "model.layers.1.mlp.gate",
+    "model.layers.2.mlp.gate",
+    "model.layers.3.mlp.gate"
+   ],
+   "op": "aten.softmax.int",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      64,
+      512
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.mlp.experts",
+    "model.layers.1.mlp.experts",
+    "model.layers.2.mlp.experts",
+    "model.layers.3.mlp.experts"
+   ],
+   "op": "aten.sort.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      640
+     ],
+     [
+      640
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn",
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.split_with_sizes.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      2048
+     ],
+     [
+      1,
+      64,
+      2048
+     ],
+     [
+      1,
+      64,
+      6144
+     ]
+    ]
+   }
+  },
+  {
+   "count": 4,
+   "count_in_layers": 4,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn",
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.zeros.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      128,
+      128
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.bitwise_xor.Tensor",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.ple"
+   ],
+   "op": "aten.clamp_min.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.eye.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.masked_fill.Scalar",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      1,
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.ones.default",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.softplus.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      48
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 1,
+   "modules": [
+    "model",
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.to.dtype_layout",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      1,
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.tril.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      1,
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.triu.default",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 3,
+   "count_in_layers": 3,
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.layers.2.linear_attn"
+   ],
+   "op": "aten.zeros_like.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      48,
+      1,
+      64,
+      128
+     ]
+    ]
+   }
+  },
+  {
+   "count": 2,
+   "count_in_layers": 2,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.cummax.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      66
+     ],
+     [
+      1,
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 2,
+   "count_in_layers": 1,
+   "modules": [
+    "model.embed_tokens",
+    "model.layers.1.ple.ple_embedding.ngram_embedding"
+   ],
+   "op": "aten.embedding.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      2560
+     ]
+    ]
+   }
+  },
+  {
+   "count": 2,
+   "count_in_layers": 2,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.eq.Scalar",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 2,
+   "count_in_layers": 2,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.gather.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 2,
+   "count_in_layers": 2,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.remainder.Tensor",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      66,
+      8
+     ]
+    ]
+   }
+  },
+  {
+   "count": 2,
+   "count_in_layers": 2,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.where.ScalarOther",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 2,
+   "count_in_layers": 2,
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ],
+   "op": "aten.where.self",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      66
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.1.ple"
+   ],
+   "op": "aten.abs.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.clamp.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.3.self_attn"
+   ],
+   "op": "aten.contiguous.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      24,
+      256
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model.rotary_emb"
+   ],
+   "op": "aten.cos.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      3,
+      1,
+      64,
+      32
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model"
+   ],
+   "op": "aten.diff.default",
+   "sample": {
+    "dtype": "torch.int64",
+    "output_shapes": [
+     [
+      1,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model"
+   ],
+   "op": "aten.eq.Tensor",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      1,
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.index_select.default",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model"
+   ],
+   "op": "aten.le.Tensor",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      1,
+      64,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model"
+   ],
+   "op": "aten.ne.Scalar",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      64
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model"
+   ],
+   "op": "aten.new_ones.default",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     []
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.relu.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      4,
+      64,
+      16
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model"
+   ],
+   "op": "aten.repeat.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      10240
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.3.self_attn"
+   ],
+   "op": "aten.scaled_dot_product_attention.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      24,
+      64,
+      256
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.3.self_attn.indexer"
+   ],
+   "op": "aten.scatter.value",
+   "sample": {
+    "dtype": "torch.bool",
+    "output_shapes": [
+     [
+      1,
+      64,
+      16
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.1.ple"
+   ],
+   "op": "aten.sign.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model.rotary_emb"
+   ],
+   "op": "aten.sin.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      3,
+      1,
+      64,
+      32
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 1,
+   "modules": [
+    "model.layers.1.ple"
+   ],
+   "op": "aten.sqrt.default",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      1,
+      64,
+      4,
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "count": 1,
+   "count_in_layers": 0,
+   "modules": [
+    "model.rotary_emb"
+   ],
+   "op": "aten.to.device",
+   "sample": {
+    "dtype": "torch.float32",
+    "output_shapes": [
+     [
+      32
+     ]
+    ]
+   }
+  }
+ ],
+ "python_nodes": {
+  "<built-in function getitem>": 45
+ },
+ "schema": 1,
+ "seq_len": 64,
+ "sequence": [
+  {
+   "const": [
+    [
+     -1
+    ]
+   ],
+   "id": "g0:reshape_16",
+   "in": [
+    "g0:to_24"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.reshape.default",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [
+    [
+     -1
+    ]
+   ],
+   "id": "g0:reshape_17",
+   "in": [
+    "g0:topk"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.reshape.default",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:sort",
+   "in": [
+    "g0:reshape_17"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.sort.default",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [
+    10
+   ],
+   "id": "g0:floor_divide",
+   "in": [
+    "g0:sort"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.floor_divide.default",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:index_2",
+   "in": [
+    "g0:view_1",
+    "g0:floor_divide"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.index.Tensor",
+   "shape": [
+    640,
+    2560
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:index_3",
+   "in": [
+    "g0:reshape_16",
+    "g0:sort"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.index.Tensor",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:_assert_tensor_metadata_default_25",
+   "in": [
+    "g0:sort"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten._assert_tensor_metadata.default",
+   "shape": null
+  },
+  {
+   "const": [],
+   "id": "g0:to_25",
+   "in": [
+    "g0:sort"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.to.dtype",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [
+    512,
+    0,
+    511
+   ],
+   "id": "g0:histc",
+   "in": [
+    "g0:to_25"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.histc.default",
+   "shape": [
+    512
+   ]
+  },
+  {
+   "const": [
+    0
+   ],
+   "id": "g0:cumsum_2",
+   "in": [
+    "g0:histc"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.cumsum.default",
+   "shape": [
+    512
+   ]
+  },
+  {
+   "const": [
+    -2,
+    -1
+   ],
+   "id": "g0:transpose_11",
+   "in": [
+    "g0:p_model_layers_0_mlp_experts_gate_up_proj"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.transpose.int",
+   "shape": [
+    512,
+    2560,
+    1280
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:_assert_tensor_metadata_default_26",
+   "in": [
+    "g0:index_2"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten._assert_tensor_metadata.default",
+   "shape": null
+  },
+  {
+   "const": [],
+   "id": "g0:to_26",
+   "in": [
+    "g0:index_2"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.to.dtype",
+   "shape": [
+    640,
+    2560
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:grouped_mm_fallback",
+   "in": [
+    "g0:to_26",
+    "g0:transpose_11",
+    "g0:cumsum_2"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "transformers.grouped_mm_fallback.default",
+   "shape": [
+    640,
+    1280
+   ]
+  },
+  {
+   "const": [
+    2,
+    -1
+   ],
+   "id": "g0:chunk",
+   "in": [
+    "g0:grouped_mm_fallback"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.chunk.default",
+   "shape": [
+    640,
+    640
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:silu_4",
+   "in": [
+    "g0:chunk"
+   ],
+   "module": "model.layers.0.mlp.experts.act_fn",
+   "op": "aten.silu.default",
+   "shape": [
+    640,
+    640
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:mul_93",
+   "in": [
+    "g0:silu_4",
+    "g0:chunk"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.mul.Tensor",
+   "shape": [
+    640,
+    640
+   ]
+  },
+  {
+   "const": [
+    -2,
+    -1
+   ],
+   "id": "g0:transpose_12",
+   "in": [
+    "g0:p_model_layers_0_mlp_experts_down_proj"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.transpose.int",
+   "shape": [
+    512,
+    640,
+    2560
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:_assert_tensor_metadata_default_27",
+   "in": [
+    "g0:mul_93"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten._assert_tensor_metadata.default",
+   "shape": null
+  },
+  {
+   "const": [],
+   "id": "g0:to_27",
+   "in": [
+    "g0:mul_93"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.to.dtype",
+   "shape": [
+    640,
+    640
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:grouped_mm_fallback_1",
+   "in": [
+    "g0:to_27",
+    "g0:transpose_12",
+    "g0:cumsum_2"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "transformers.grouped_mm_fallback.default",
+   "shape": [
+    640,
+    2560
+   ]
+  },
+  {
+   "const": [
+    -1
+   ],
+   "id": "g0:unsqueeze_88",
+   "in": [
+    "g0:index_3"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.unsqueeze.default",
+   "shape": [
+    640,
+    1
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:mul_94",
+   "in": [
+    "g0:grouped_mm_fallback_1",
+    "g0:unsqueeze_88"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.mul.Tensor",
+   "shape": [
+    640,
+    2560
+   ]
+  },
+  {
+   "const": [
+    false
+   ],
+   "id": "g0:empty_like",
+   "in": [
+    "g0:sort"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.empty_like.default",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [
+    640,
+    false
+   ],
+   "id": "g0:arange_5",
+   "in": [],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.arange.default",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:index_put_",
+   "in": [
+    "g0:empty_like",
+    "g0:sort",
+    "g0:arange_5"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.index_put_.default",
+   "shape": [
+    640
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:index_4",
+   "in": [
+    "g0:mul_94",
+    "g0:index_put_"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.index.Tensor",
+   "shape": [
+    640,
+    2560
+   ]
+  },
+  {
+   "const": [
+    [
+     64,
+     10,
+     2560
+    ]
+   ],
+   "id": "g0:view_2",
+   "in": [
+    "g0:index_4"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.view.default",
+   "shape": [
+    64,
+    10,
+    2560
+   ]
+  },
+  {
+   "const": [
+    [
+     1
+    ]
+   ],
+   "id": "g0:sum_67",
+   "in": [
+    "g0:view_2"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.sum.dim_IntList",
+   "shape": [
+    64,
+    2560
+   ]
+  },
+  {
+   "const": [],
+   "id": "g0:_assert_tensor_metadata_default_28",
+   "in": [
+    "g0:sum_67"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten._assert_tensor_metadata.default",
+   "shape": null
+  },
+  {
+   "const": [],
+   "id": "g0:to_28",
+   "in": [
+    "g0:sum_67"
+   ],
+   "module": "model.layers.0.mlp.experts",
+   "op": "aten.to.dtype",
+   "shape": [
+    64,
+    2560
+   ]
+  }
+ ],
+ "sequence_note": "`sequence` lists the ops of the first layer and of everything outside the layers in graph order, with the ids of the nodes each one reads (a read through operator.getitem is followed to its source). A read of a weight or an input has an id that is not in the list. It is capped at 6000 records. In this fixture the sequence is cut to the records of the layer-0 mlp.experts module.",
+ "stubbed": [
+  {
+   "count": 1,
+   "module": "Qwen4ExpTextQSAIndexer",
+   "note": "static replacement with the same op mix and shapes; it does not choose tokens the way the real module does, so the stubbed module's graph is a guide to its ops and not its real graph"
+  }
+ ],
+ "torch": "2.14.1+cpu",
+ "traced_class": "Qwen4ExpForCausalLM",
+ "transformers": "5.19.0"
+}

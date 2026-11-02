@@ -292,10 +292,19 @@ def test_client_disconnect_mid_stream_frees_the_slot():
 def test_body_over_the_limit_and_bad_bodies_get_400():
     s = _Srv(FakeEngine([0, EOS]))
     try:
-        rq = urllib.request.Request(s.base + "/v1/chat/completions", b"x" * (serve.MAX_BODY + 10), {"Content-Type": "application/json"})
-        with pytest.raises(urllib.error.HTTPError) as e:
-            urllib.request.urlopen(rq)
-        assert e.value.code == 400
+        # The server judges the Content-Length header and answers without reading the body. A client that really sends
+        # MAX_BODY + 10 bytes races the server closing the connection: on a loaded host urlopen failed with a broken pipe
+        # (2 of 40 runs) before it could read the 400. So the test declares the over-limit length, sends no body, and reads
+        # the answer from a socket; the guard under test is the same one, and nothing is left for the server to discard.
+        host, port = s.base[7:].split(":")
+        with socket.create_connection((host, int(port)), timeout=30) as sock:
+            sock.sendall(f"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         f"Content-Length: {serve.MAX_BODY + 10}\r\nConnection: close\r\n\r\n".encode())
+            reply = b""
+            while chunk := sock.recv(4096):
+                reply += chunk
+        assert reply.startswith(b"HTTP/1.") and reply.split(b" ", 2)[1] == b"400", reply[:200]
+        assert b"1 byte to 1 MiB" in reply
         for raw in (b"{not json", b"[1, 2]", b'{"messages": "x"}', b'{"messages": [{"role": "user", "content": "x"}], "max_tokens": "many"}',
                     b'{"messages": [{"role": "user", "content": "x"}], "tools": [{"type": "function"}]}',
                     b'{"messages": [{"role": "user", "content": "x"}], "documents": [{"text": "d"}]}'):

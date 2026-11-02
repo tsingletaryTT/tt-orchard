@@ -22,7 +22,9 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parents[2]))      # the repo root, for orchard.knownwrong (standard library only)
 import common  # noqa: E402
+from orchard import knownwrong  # noqa: E402
 
 
 def make_case(seq, channels, kernel, seed=0):
@@ -43,10 +45,16 @@ def selftest() -> dict:
     return out
 
 
-def run_conv1d(ttnn, dev, x, w, kernel, dilation, host_pad, groups=None):
-    """ttnn.conv1d depthwise. Returns the output as torch [1, T, C] (before silu)."""
+def run_conv1d(ttnn, dev, x, w, kernel, dilation, host_pad, groups=None, allow_known_wrong=False):
+    """ttnn.conv1d depthwise. Returns the output as torch [1, T, C] (before silu).
+
+    Dilation above 1 with groups above 1 returns a wrong result and no error on the probed build (issue 338), so the call raises
+    KnownWrong before it reaches ttnn. This probe passes allow_known_wrong=True because reproducing that result is its job; a port
+    must not."""
     seq, channels = x.shape[1], x.shape[2]
     groups = channels if groups is None else groups
+    if not allow_known_wrong:
+        knownwrong.check_conv1d(dilation, groups)
     state_len = (kernel - 1) * dilation
     inp = F.pad(x, (0, 0, state_len, 0)) if host_pad else x
     tt_in = ttnn.from_torch(inp, dtype=ttnn.bfloat16)
@@ -90,8 +98,11 @@ def diagnose(ttnn, dev, seq, channels, kernel):
                            dilation=dil).transpose(1, 2)
             entry = {"dilation": dil, "groups": groups}
             try:
-                got = run_conv1d(ttnn, dev, x, w, kernel, dil, False, groups)
+                got = run_conv1d(ttnn, dev, x, w, kernel, dil, False, groups, allow_known_wrong=True)
                 entry.update(common.error_stats(got, ref))
+                hit = knownwrong.conv1d_known_wrong(dil, groups)
+                if hit:
+                    entry["known_wrong"] = {"issue": hit["issue"], "build": hit["build"]}
             except Exception as exc:
                 entry["failure"] = common.short_exc(exc)
             out.append(entry)
@@ -122,9 +133,12 @@ def main(argv=None) -> int:
         for host_pad in (False, True):
             entry = {"config": "conv1d_" + ("host_pad" if host_pad else "op_pad"), "compared": "conv before silu"}
             try:
-                got, times = common.timed(lambda: run_conv1d(ttnn, dev, x, w, args.kernel, args.dilation, host_pad),
-                                          ttnn, dev)
+                got, times = common.timed(lambda: run_conv1d(ttnn, dev, x, w, args.kernel, args.dilation, host_pad,
+                                                             allow_known_wrong=True), ttnn, dev)
                 entry.update(wall_s=times, out_shape=list(got.shape), **common.error_stats(got, ref_conv))
+                hit = knownwrong.conv1d_known_wrong(args.dilation, args.channels)
+                if hit:
+                    entry["known_wrong"] = {"issue": hit["issue"], "build": hit["build"]}
                 entry["silu_on_host_error"] = common.error_stats(F.silu(got), ref_full)
             except Exception as exc:
                 entry["failure"] = common.short_exc(exc)

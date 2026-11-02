@@ -777,3 +777,43 @@ html[data-mode="operator"] #runs { display: none; }
 .tg-how p { margin: 0; max-width: 78ch; }
 .run-spend { margin: 2px 0 0; font-size: .85rem; color: var(--muted); }
 html[data-mode="operator"] .run-head .run-spend { color: #fff; }
+
+/* ---- the Cans view: staged bundles, their checks and recorded results (read only) ----
+   Reuses the Telegraph view's banner, table and key-value rules and the tone variables, so it follows both page styles and both
+   colour schemes. A status is a shape and a word together. Rows have no tint: tone colours only text on the page paper, so a cell
+   never lands on another tone's background. */
+.cans { display: grid; gap: 20px; max-width: 1280px; min-width: 0; }
+/* The rows open in place, so the wrapper grows with them: no height limit (the Telegraph tables scroll inside 62vh), and the header is
+   not sticky. It still scrolls sideways on a narrow screen. */
+.table-wrap.cans-wrap { max-height: none; }
+.cans-table { table-layout: auto; }
+.cans-table th { position: static; }
+.cans-table td { min-width: 0; overflow-wrap: break-word; }
+.cans-table td.wrap { overflow-wrap: break-word; }
+.cans-table td.cans-name { min-width: 12rem; }
+.cans-table { width: 100%; }
+.cans-status { white-space: nowrap; }
+.cans-status .mark { display: inline-block; width: 1.1em; text-align: center; }
+.cans-table tr[data-tone="good"] .cans-status { color: var(--good); }
+.cans-table tr[data-tone="warn"] .cans-status { color: var(--warn); }
+.cans-table tr[data-tone="bad"] .cans-status { color: var(--bad); }
+.cans-table tr[data-tone="dim"] .cans-status { color: var(--muted); }
+.cans-table td[data-tone="bad"] { color: var(--bad); font-weight: 700; }
+.cans-table td[data-tone="warn"] { color: var(--warn-ink, var(--warn)); }
+.cans-table td[data-tone="good"] { color: var(--good); }
+.cans-table td[data-tone="dim"] { color: var(--muted); }
+.cans-table tr.cans-detail { background: transparent; }
+.cans-toggle { font: inherit; font-weight: 700; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 3px;
+  padding: 2px 8px; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+.cans-toggle::before { content: "+ "; }
+.cans-toggle[aria-expanded="true"]::before { content: "- "; }
+.cans-toggle:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.cans-detail > td { padding: 10px 0 16px; border-bottom: 2px solid var(--line); overflow-wrap: anywhere; }
+.cans-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 8px 18px; margin: 0 0 12px; }
+.cans-list { margin: 0 0 10px; }
+.cans-list h3 { margin: 0 0 4px; font-size: .85rem; }
+.cans-list ul { margin: 0; padding-left: 1.2em; overflow-wrap: anywhere; }
+.cans-perf { max-width: 640px; }
+html[data-mode="operator"] .cans-toggle { border-color: var(--line); }
+html[data-mode="operator"] .cans-table tr[data-tone="bad"] .cans-status, html[data-mode="operator"] .cans-table tr[data-tone="warn"] .cans-status { font-weight: 700; }
+@media (max-width: 900px) { .cans-table { font-size: .78rem; } }

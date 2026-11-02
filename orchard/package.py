@@ -1333,20 +1333,27 @@ def acceptance_sources(numbers) -> tuple[str, ...]:
 
 
 def stage2_cache_phrase(run: Path) -> str:
-    """What the card may say about the tensor cache of stage 2's start time, from `tensor_cache_at_start` in stage 2's swap-check.json
-    (written by the hardware test before the server started; issue 319). 'empty tensor cache' needs a record of zero files. A warm
-    cache gives its file count. No record, or one that contradicts itself, says the state was not recorded."""
+    """The card phrase for stage 2's start time, from `tensor_cache_at_start` in stage 2's swap-check.json (written by the hardware test
+    before the server started; issue 319)."""
     try:
         rec = json.loads((run / "stages/2/evidence/swap-check.json").read_text(encoding="utf-8")).get("tensor_cache_at_start")
     except (OSError, ValueError, AttributeError):
         rec = None
+    return cache_phrase(rec)
+
+
+def cache_phrase(rec) -> str:
+    """What the card may say about a start time's tensor cache, from a `tensor_cache_at_start` record ({"state", "files"}). 'empty tensor
+    cache' needs a record of zero files. A warm cache gives its file count. No record, or one that contradicts itself, says the state was
+    not recorded (issues 319 and 321)."""
     files = rec.get("files") if isinstance(rec, dict) else None
     state = rec.get("state") if isinstance(rec, dict) else None
     if isinstance(files, int) and not isinstance(files, bool) and files >= 0:
+        by_age = ", judged by file age" if rec.get("basis") == "file age" else ""      # stage 7 infers the state from file times
         if state == "empty" and files == 0:
-            return "empty tensor cache"
+            return f"empty tensor cache{by_age}"
         if state == "warm" and files > 0:
-            return f"warm tensor cache, {files} files at start"
+            return f"warm tensor cache, {files} files at start{by_age}"
     return "tensor cache state not recorded"
 
 
@@ -1377,8 +1384,8 @@ def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Nu
         ev7 = tuple(verify["evidence"])
         nums += [Number("top1 agreement with the CPU reference, this package (stage 7)",
                         verify["top1_agreement"], "fraction", "measured", ev7),
-                 Number("server ready after start, this package (stage 7, fresh install, empty "
-                        "tensor cache)", verify["server_ready_s"], "s", "measured", ev7)]
+                 Number(f"server ready after start, this package (stage 7, fresh install, "
+                        f"{cache_phrase(verify.get('tensor_cache_at_start'))})", verify["server_ready_s"], "s", "measured", ev7)]
     nums += graft_trial_numbers(run)
     nums += sampling_numbers(run)
     nums += read_benchmark_numbers(run)

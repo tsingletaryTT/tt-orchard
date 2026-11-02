@@ -1,0 +1,4 @@
+target = "0.9.92"
+summary = "Relaunch checks the granted board's devices, stage 7 records the tensor cache state, known-wrong conv1d is flagged, and ttnn dumps walk submodules and are keyed by build."
+pr = 346
+kind = "fix"

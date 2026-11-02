@@ -418,6 +418,9 @@ def _parser() -> argparse.ArgumentParser:
     cn.add_argument("--port", type=int, help="boot: the port to serve on (default: a free port the kernel picks)")
     cn.add_argument("--namespace", help="the Hugging Face namespace, used in the publish text and checked by the scrub")
     cn.add_argument("--run-dir", help="a run directory: write stages/7/can.json and add an evidence entry to its ledger")
+    cn.add_argument("--state-dir", help="stage, gate, boot: also write <NAME>.can-state.json here, the record the Cans view of the web page reads "
+                                        "(the page's cans folder: ORCHARD_CANS_DIR, default <runs folder>/cans)")
+    cn.add_argument("--cache-state", choices=["empty", "warm"], help="boot: whether the kernel cache the boot used was empty or warm (recorded with --state-dir)")
     vp = sub.add_parser("verify-package", parents=[common],
                         help="pull a published package from the Hub into a scratch directory, run its checks and print the boot command as "
                              "text. Opens no device and publishes nothing")
@@ -453,6 +456,10 @@ def _parser() -> argparse.ArgumentParser:
                      help="replace a module torch.export cannot trace (the Qwen4-style sparse attention indexer) with a static "
                           "stand-in that keeps its ops; the output says which modules were replaced")
     inv.add_argument("--out", help="output directory (default ./ops-inventory)")
+    from orchard import residency as _residency
+    sub.add_parser("residency", parents=[common, _residency.parser(add_help=False)],
+                   help="estimate how many chips a checkpoint needs from its safetensors headers (no weights are read; "
+                        "figures are labeled measured or estimated)")
     cs = sub.add_parser("coder-speed", parents=[common],
                         help="measure how fast a model server decodes and compare it with the best it has done "
                              "(read-only; it reports a slow server and never restarts one)")
@@ -1119,6 +1126,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "demo-env":
         from orchard import demo_env
         return demo_env.main(args, env=demo_env.env_from_args(args, environ=env, home=home), out=out)
+    if args.cmd == "residency":
+        from orchard import residency
+        return residency.run(args, out=out)
     if args.cmd == "inventory":
         return _inventory(args, env, home, out)
     if args.cmd == "kernel-probe":
