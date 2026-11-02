@@ -598,6 +598,24 @@ def test_text_around_a_comment_still_counts():
     assert can.card_problems(text, "catalog") == []
 
 
+@pytest.mark.parametrize("text", [
+    # a fence between the separator and a numeric line splits the table
+    "# toy\n## Expected performance\n| Metric | Value |\n| --- | --- |\n```\nexample\n```\n| decode | 31.2 |\n## Limitations\nOne limit.\n",
+    # an indented heading ends the section, so the table below it is in another section
+    "# toy\n## Expected performance\n ## Other results\n| a | b |\n| --- | --- |\n| x | 1 |\n## Limitations\nOne limit.\n",
+    # an escaped pipe is part of the label cell
+    "# toy\n## Expected performance\n| Metric | Value |\n| --- | --- |\n| batch\\|1 | n/a |\n## Limitations\nOne limit.\n",
+])
+def test_section_and_table_boundaries_follow_markdown(text):
+    assert can.card_problems(text, "catalog"), text
+
+
+def test_an_indented_heading_and_an_escaped_pipe_header_are_read_as_markdown():
+    text = ("# toy\n  ## Expected performance\n| Metric \\| unit | Value |\n| --- | --- |\n| decode | 31.2 |\n"
+            "   ## Limitations\nOne limit.\n")
+    assert can.card_problems(text, "catalog") == []
+
+
 def test_a_table_without_outer_pipes_counts():
     text = "# toy\n## Expected performance\nMetric | Value\n--- | ---\ndecode | 31.2\n## Limitations\nOne limit.\n"
     assert can.card_problems(text, "catalog") == []

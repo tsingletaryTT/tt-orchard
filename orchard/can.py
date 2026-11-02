@@ -742,12 +742,15 @@ def _sections(text: str) -> dict[str, list[str]]:
             continue
         if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
             fence = m.group(1)
+            if current is not None:
+                sections[current].append("")      # a fence ends any table around it
             continue
-        if line.startswith("## "):
-            current = line[3:].strip()
+        heading = re.match(r" {0,3}(#{1,2}) +(.*?)\s*$", line)
+        if heading and heading.group(1) == "##":
+            current = heading.group(2).rstrip("#").strip()
             sections.setdefault(current, [])
             continue
-        if line.startswith("# "):
+        if heading:
             current = None
             continue
         if current is not None:
@@ -759,13 +762,13 @@ def _cells(line: str) -> list[str]:
     """The cells of a table row. The outer pipes are optional in Markdown, so one leading and one trailing pipe are dropped if present."""
     body = line.strip()
     body = body[1:] if body.startswith("|") else body
-    body = body[:-1] if body.endswith("|") else body
-    return [c.strip() for c in body.split("|")]
+    body = body[:-1] if body.endswith("|") and not body.endswith("\\|") else body
+    return [c.strip() for c in re.split(r"(?<!\\)\|", body)]
 
 
 def _is_row(line: str) -> bool:
     """A table row has a pipe and is not indented four or more spaces (that is an indented code block)."""
-    return "|" in line and not re.match(r" {4}|\t", line)
+    return bool(re.search(r"(?<!\\)\|", line)) and not re.match(r" {4}|\t", line)
 
 
 def _has_measured_row(lines: list[str]) -> bool:
