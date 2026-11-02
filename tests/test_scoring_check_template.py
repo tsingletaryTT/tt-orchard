@@ -220,6 +220,10 @@ def test_scores_so_close_together_that_the_variance_product_underflows_do_not_cr
     for parity in (tpl.parity, sc.parity):
         assert parity(tiny, list(tiny), groups)["pearson"] == pytest.approx(1.0)
         assert parity(tiny, [-x for x in tiny], groups)["pearson"] == pytest.approx(-1.0)
+        big = [1e6, -1e6, 1e6, -1e6] * 8                      # the largest size a score may have
+        m = parity(big, [-x for x in big], groups)
+        assert m["pearson"] == pytest.approx(-1.0) and m["max_abs_diff"] == 2e6
+        assert parity(big, [0.0] * 32, groups)["pearson"] == 0.0
 
 
 def test_the_numbers_on_a_small_case_worked_by_hand():
@@ -752,6 +756,47 @@ def test_a_child_that_keeps_forking_is_stopped_with_everything_it_started(tmp_pa
     assert pids and _gone(pids), "a grandchild was still running after the check ended"
     time.sleep(0.2)
     assert len((run / "GRANDCHILD-PIDS").read_text().split()) == len(pids)
+
+
+def test_a_process_still_alive_after_the_kill_fails_the_run_instead_of_writing_a_record(monkeypatch):
+    class Stub:
+        descendants = staticmethod(lambda: [1])
+    monkeypatch.setattr(tpl.time, "sleep", lambda s: None)
+    with pytest.raises(tpl.CheckFailed, match="still running after the check killed"):
+        tpl.Worker.confirm_none_left(Stub())
+    Stub.descendants = staticmethod(lambda: [])
+    tpl.Worker.confirm_none_left(Stub())
+
+
+def test_stop_calls_the_confirmation_after_it_has_killed_the_worker():
+    calls = []
+    sleeper = subprocess.Popen(["sleep", "60"])
+
+    class Stub:
+        proc = sleeper
+        pumps = []
+        wr = open(os.devnull, "w")
+        descendants = staticmethod(lambda: [])
+        confirm_none_left = lambda self: calls.append(sleeper.poll())      # the worker must already be dead when the check runs
+    try:
+        tpl.Worker.stop(Stub())
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    assert calls and calls[0] is not None
+
+
+def test_a_grandchild_whose_parent_exited_before_close_is_killed_and_a_record_is_written(tmp_path):
+    # worker -> child -> grandchild; the child exits before close returns, so the grandchild is re-parented to the template.
+    grand = '''
+def close(model):
+    import subprocess, time
+    subprocess.run(["sh", "-c", "(sleep 60 & echo $! > GRANDCHILD-PID) ; exit 0"])
+    time.sleep(0.1)
+'''
+    run, stage, done = honest_run(tmp_path, port_src=HONEST + grand)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _gone([int((run / "GRANDCHILD-PID").read_text())]) and gate(run, stage) == []
 
 
 def test_a_process_whose_parent_exited_before_the_check_stopped_is_killed_too(tmp_path):

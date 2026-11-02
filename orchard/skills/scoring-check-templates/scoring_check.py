@@ -365,6 +365,21 @@ class Worker:
             pass
         for t in self.pumps:
             t.join(10)
+        self.confirm_none_left()
+
+    def confirm_none_left(self) -> None:
+        """After the kill: reap what died (a killed orphan is this process's zombie child) and scan once more. A process still there after
+        a few seconds means the port holds something this file cannot stop, so the run fails and no record is written."""
+        for _ in range(100):
+            try:
+                while os.waitpid(-1, os.WNOHANG)[0]:
+                    pass
+            except ChildProcessError:
+                pass
+            if not self.descendants():
+                return
+            time.sleep(0.05)
+        raise CheckFailed("a process the port started is still running after the check killed everything below it: no record is written")
 
 
 def load_json(rel_or_path, what: str):
