@@ -63,6 +63,9 @@ class Music3Engine:
         self.started = time.time()
         self.q: "queue.Queue[Job]" = queue.Queue(maxsize=int(os.environ.get("MUSIC3_MAX_QUEUE", 8)))
         self.jobs: Dict[str, Job] = {}
+        # LOCAL PATCH (tt-orchard issue 306, see pkgsrc/music3/PROVENANCE.md): `_lock` orders job submission against the worker's device-fault
+        # handling, so a job is either refused or ends up failed. Without it a job accepted just after the fault stayed `queued` for good.
+        self._lock = threading.Lock()
         self.max_seq_len = int(os.environ.get("MUSIC3_MAX_SEQ_LEN", 16384))
         self.max_frames = int(os.environ.get("MUSIC3_MAX_FRAMES", 9000))
         self.warmup_frames = int(os.environ.get("MUSIC3_WARMUP_FRAMES", 200))
@@ -162,8 +165,10 @@ class Music3Engine:
                 self.log(f"job {job.id} failed: {e}\n{traceback.format_exc()}")
                 job.status, job.error = "error", str(e)
                 if "TT_THROW" in str(e) or "TIMEOUT" in str(e) or "device timeout" in str(e).lower():
-                    self.dead = str(e)
-                    self.ready.clear()
+                    with self._lock:  # no submit can accept a job between the flag and the drain
+                        self.dead = str(e)
+                        self.ready.clear()
+                        self._fail_queued(f"engine stopped after a device fault: {e}")
                     self.log("device fault: engine marked dead (health -> 503)")
                     job.finished = time.time()
                     job.done.set()
@@ -173,6 +178,16 @@ class Music3Engine:
                 job.done.set()
                 self.busy = False
 
+    def _fail_queued(self, reason: str):
+        """Fail every job still waiting in the queue and wake the handlers that wait on it. Called with `_lock` held."""
+        while True:
+            try:
+                j = self.q.get_nowait()
+            except queue.Empty:
+                return
+            j.status, j.error, j.finished = "error", reason, time.time()
+            j.done.set()
+
     # ------------------------------------------------------------------ requests
     def submit(self, req: SpeechRequest) -> Job:
         if not self.ready.is_set():
@@ -180,8 +195,11 @@ class Music3Engine:
         if req.frames > self.max_frames:
             raise ValueError(f"max_new_tokens {req.frames} exceeds this server's limit {self.max_frames}")
         job = Job(req)
-        self.jobs[job.id] = job
-        self.q.put_nowait(job)  # raises queue.Full -> 429
+        with self._lock:
+            if not self.ready.is_set():
+                raise RuntimeError(self.dead or "engine not ready")
+            self.q.put_nowait(job)  # raises queue.Full -> 429; the job is registered only after it is queued
+            self.jobs[job.id] = job
         self._gc_jobs()
         return job
 

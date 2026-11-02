@@ -28,6 +28,7 @@ Timings go in `chip.json` (or `cpu.json`) beside the run, and a repeat k of a ru
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -41,6 +42,105 @@ HERE = Path(__file__).resolve().parent
 # In the repository this file is scripts/acestep/acestep_run.py and `orchard/` is two levels up; in the package it is runtime/acestep_run.py and
 # `orchard/` (the few modules it needs) sits beside it.
 REPO = HERE if (HERE / "orchard").is_dir() else HERE.parents[1]
+
+
+# sha256 of the model code files ACE-Step copies into the checkpoint directory ("Model code mismatch ... auto-syncing"), per variant, from the bundle
+# revision the package is pinned to (`orchard/acestep_package.py`, BUNDLE_REVISION). A run whose `acestep/models/turbo` differs, or whose files are
+# links, would run other model code without an error (issue 270: waveform correlation 0.65 against the run with these files).
+MODEL_CODE_SHA256 = {
+    "turbo": {
+        "configuration_acestep_v15.py": "5f15aa79fe793bba3c00b6992dd193a269954950603d5031ecd7703b0fa69da1",
+        "modeling_acestep_v15_turbo.py": "71b22e01b490bd9e149e4c0c5da2e1f512126f3ab3316e0ae97779af84d19512",
+    }
+}
+
+
+def model_code_problems(code_dir, pinned=None) -> list[str]:
+    """Every way the model code under `code_dir/acestep/models/<variant>` differs from the recorded files: a link (the code directory itself, a
+    parent directory of the variant, or a file), a file whose sha256 differs, a recorded file that is missing, a `.py` file that is not recorded.
+    An empty list means the files are the recorded ones. Nothing is executed or imported."""
+    pinned = MODEL_CODE_SHA256 if pinned is None else pinned
+    code = Path(code_dir)
+    out = []
+    if code.is_symlink():
+        out.append(f"the bundle code directory {code} is a link (a Hugging Face cache snapshot?); ACE-Step resolves its own path and would find other model code")
+    models = code / "acestep" / "models"
+    if models.is_symlink():
+        out.append("acestep/models is a link")
+    for variant, files in pinned.items():
+        d = models / variant
+        if d.is_symlink():
+            out.append(f"acestep/models/{variant} is a link")
+        if not d.is_dir():
+            out.append(f"acestep/models/{variant} is missing")
+            continue
+        for name, want in files.items():
+            f = d / name
+            if f.is_symlink():
+                out.append(f"{variant}/{name} is a link; use a real copy of the bundle")
+            elif not f.is_file():
+                out.append(f"{variant}/{name} is missing")
+            elif hashlib.sha256(f.read_bytes()).hexdigest() != want:  # hardening: ok pinned model code compared by hash, size is a few hundred KB
+                out.append(f"{variant}/{name} differs from the recorded file")
+        for f in sorted(d.glob("*.py")):
+            if f.name != "__init__.py" and f.name not in files:
+                out.append(f"{variant}/{f.name} is not recorded")
+    return out
+
+
+WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".npy", ".npz")
+
+
+def hf_cache_dirs() -> list[Path]:
+    """The Hugging Face hub cache directories this process would use (resolved), from the same variables the library reads."""
+    env = os.environ
+    cands = [env.get("HF_HUB_CACHE"), env.get("HUGGINGFACE_HUB_CACHE")]
+    home = env.get("HF_HOME") or str(Path(env.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "huggingface")
+    cands.append(str(Path(home) / "hub"))
+    return [Path(c).resolve() for c in cands if c]
+
+
+def _inside(path: Path, parent: Path) -> bool:
+    return path == parent or parent in path.parents
+
+
+def cache_write_hazards(tree, cache_dirs=None, links=True) -> list[str]:
+    """Why a directory that third-party code may write into could change files in the Hugging Face cache (issue 264). ACE-Step's handler rewrites the
+    model's `.py` files inside its checkpoint directory; through a link into the cache that replaces cached blobs (two blobs of the weights were
+    rewritten in a bring-up run). Hazards: the directory resolves into the cache, or a link under it leads into the cache and is not a weight file
+    (weight files are only read, so links to them are fine). `links=False` checks only the first: the directory itself."""
+    caches = [Path(c).resolve() for c in (hf_cache_dirs() if cache_dirs is None else cache_dirs)]
+    tree = Path(tree)
+    out = []
+    if any(_inside(tree.resolve(), c) for c in caches):
+        out.append(f"{tree} is inside the Hugging Face cache; code that writes there would change cached files. Use a private tree (copies of small files, links to weights)")
+        return out
+    for p in sorted(tree.rglob("*")) if links and tree.is_dir() else []:
+        if p.is_symlink() and any(_inside(p.resolve(), c) for c in caches) and p.suffix not in WEIGHT_SUFFIXES:
+            out.append(f"{p.relative_to(tree).as_posix()} is a link into the Hugging Face cache and is not a weight file; a write to it would change the cache")
+    return out
+
+
+def build_private_tree(snapshot, dest) -> None:
+    """Makes `dest` a private copy of a weights snapshot that ACE-Step may write into (issue 264): everything except a large weight file is a copy (the handler may
+    rewrite it; a tokenizer.json is large and is not a weight), and a large weight file is a link (only read). An old `dest` (a link or a directory) is replaced. Stops if the result still leads into the cache."""
+    snapshot, dest = Path(snapshot), Path(dest)
+    if dest.is_symlink():
+        dest.unlink()
+    elif dest.exists():
+        shutil.rmtree(dest)
+    for src in snapshot.rglob("*"):
+        if src.is_dir():
+            continue
+        dst = dest / src.relative_to(snapshot)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.suffix in WEIGHT_SUFFIXES and src.stat().st_size > (8 << 20):
+            dst.symlink_to(src)
+        else:
+            shutil.copy2(src.resolve(), dst)
+    hazards = cache_write_hazards(dest)
+    if hazards:
+        raise SystemExit("Hugging Face cache guard: " + "; ".join(hazards))
 
 
 def parse(argv=None):
@@ -283,6 +383,14 @@ class Session:
     WEIGHTS_REVISION = "19671f406d603126926c1b7e2adc169acbcade22"
 
     def __init__(self, *, device, bundle_code, snapshot, root, cpu_dtype="float32", no_vae_warm=False, force_x=None, force_z=None, fast=()):
+        # Gates first, before anything is imported or written. 270: the model code files must be the recorded ones and real files (the check uses
+        # the path as given, since resolving a link would hide it). 264: the project root, where ACE-Step may write, must not lead into the cache.
+        problems = model_code_problems(bundle_code)
+        if problems:
+            raise SystemExit("ACE-Step model code check failed: " + "; ".join(problems))
+        hazards = cache_write_hazards(root, links=False)   # an old `checkpoints` link under the root is replaced below, so only the root is judged here
+        if hazards:
+            raise SystemExit("Hugging Face cache guard: " + "; ".join(hazards))
         code = Path(bundle_code).resolve()
         snapshot = Path(snapshot).resolve()
         sys.path.insert(0, str(code))          # acestep, tt_acestep and the bundle's models/ before the host tree's
@@ -310,19 +418,7 @@ class Session:
         # through a link into the Hugging Face cache would change the cached files. So `checkpoints` is a private tree: small files are copied
         # (they may be rewritten), the large weight files are links (they are only read).
         link = root / "checkpoints"
-        if link.is_symlink():
-            link.unlink()
-        elif link.exists():
-            shutil.rmtree(link)
-        for src in snapshot.rglob("*"):
-            if src.is_dir():
-                continue
-            dst = link / src.relative_to(snapshot)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.stat().st_size > (8 << 20):
-                dst.symlink_to(src)
-            else:
-                shutil.copy2(src.resolve(), dst)
+        build_private_tree(snapshot, link)
         from acestep.handler import AceStepHandler
         required = {self.CHECKPOINT: ("config.json", "silence_latent.pt"), "vae": ("config.json",),
                     "Qwen3-Embedding-0.6B": ("config.json", "tokenizer_config.json", "tokenizer.json")}

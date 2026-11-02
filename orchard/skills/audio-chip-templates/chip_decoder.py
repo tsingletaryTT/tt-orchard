@@ -241,7 +241,8 @@ def host_layer(torch, x, p, n_real: int, cos, sin, rot, trace=None, sine=False):
     z = y @ p["ff.ff.0.proj.weight"].t() + p["ff.ff.0.proj.bias"]
     note("ff1", z)
     a2, gate = z.chunk(2, dim=-1)
-    out = x + (a2 * f.silu(gate)) @ p["ff.ff.2.weight"].t() + p["ff.ff.2.bias"]
+    act = torch.sin(SINE * gate) if sine else f.silu(gate)      # the activation follows `sine`, as in host_sliding_layer and ChipDecoder._layer (issue 220)
+    out = x + (a2 * act) @ p["ff.ff.2.weight"].t() + p["ff.ff.2.bias"]
     note("x_out", out)
     return out
 
