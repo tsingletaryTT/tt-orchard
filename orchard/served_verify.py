@@ -357,7 +357,7 @@ def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=
     if not isinstance(log_text, str):
         why = "the server log could not be read"
         return [_result("layers_loaded", "not_checked", why), _result("kv_cache", "not_checked", why)]
-    seen = [int(m) for rx in _LAYERS_LINES for m in rx.findall(log_text)]
+    seen = [int(m.group(1)) for m in sorted((m for rx in _LAYERS_LINES for m in rx.finditer(log_text)), key=lambda m: m.start())]      # log order
     if expected is None:
         out.append(_result("layers_loaded", "not_checked", "no num_hidden_layers is known (the bundle holds no config.json that states it)"))
     elif not seen:
@@ -396,8 +396,12 @@ MAX_WARNING_LINES = 20             # choice: a person reads these; more than thi
 MAX_WARNING_CHARS = 300
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # a line that every healthy run prints: the periodic engine statistics, and the import messages of backends this machine does not use
+_BACKEND = r"\b(?:cuda|libcuda|rocm|hip|xpu|nvml|pynvml|triton|flash_?attn|flashinfer|nccl|cudnn)\b"
+# a backend word with an import or start-up message (the backend is absent from this machine), and the engine statistics line. A warning that
+# names a backend and reports a fallback or a mismatch does not match the second form and stays.
 _NOISE = re.compile(r"Avg (?:prompt|generation) throughput|Engine \d+:.*(?:Running|Waiting):|\bPrefix cache hit rate\b|"
-                    r"\b(?:cuda|libcuda|rocm|hip|xpu|nvml|pynvml|triton|flash_?attn|flashinfer|nccl|cudnn)\b", re.IGNORECASE)
+                    r"(?=.*" + _BACKEND + r")(?=.*(?:failed to import|importerror|no module named|cannot open shared object|not installed|is installed but|"
+                    r"not available|no (?:cuda|rocm|xpu|gpu)|driver\(s\) found|libcuda))", re.IGNORECASE)
 _WARNING = re.compile(r"\b(?:warn(?:ing)?s?|fall(?:s|ing)?[ -]?back|fell back|unrecogni[sz]ed|unknown|unsupported|not supported|not recogni[sz]ed|"
                       r"ignor(?:e|es|ed|ing)|mismatch(?:es|ed)?|deprecat\w*|defaulting|overrid(?:e|es|ing|den)|disabled|disabling|"
                       r"not (?:found|available)|no such|cannot|could not|failed)\b", re.IGNORECASE)
@@ -510,6 +514,12 @@ def classify_reasoning(body) -> dict:
 
 
 _PARSER_LINE = re.compile(r"reasoning[_-]parser\W{0,6}([A-Za-z0-9_.-]{1,64})", re.IGNORECASE)
+
+
+def reasoning_parser_printed(log_text) -> bool:
+    """True when the log holds an engine-argument form of the parser setting (`reasoning_parser=...`, `--reasoning-parser x`), with a value or `None`.
+    The word `reasoning` alone (a model name) is not one."""
+    return isinstance(log_text, str) and _PARSER_LINE.search(log_text) is not None
 
 
 def reasoning_parser_in_log(log_text) -> str | None:

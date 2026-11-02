@@ -618,7 +618,20 @@ def declared_max_model_len(run_sh_text: str | None) -> int | None:
     return int(found[-1]) if found else None
 
 
-def run_live_probe(cfg: dict, port: int, model: str, run_sh_text: str | None) -> dict:
+def live_declared_context(proc, run_sh: Path) -> int | None:
+    """The context length the server was told to serve: the `declared_max_model_len` that a launcher put on `proc` (the container route reads it from
+    its edited `docker run` command, because it has no run.sh), else the `--max-model-len` in run.sh."""
+    declared = getattr(proc, "declared_max_model_len", None)
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared > 0:
+        return declared
+    try:
+        text = run_sh.read_text(encoding="utf-8")  # hardening: ok run.sh was written into the stage directory by prepare_swap.py; only a regex reads it
+    except (OSError, UnicodeDecodeError):
+        return None
+    return declared_max_model_len(text)
+
+
+def run_live_probe(cfg: dict, port: int, model: str, declared: int | None) -> dict:
     """Step (j): the record that goes under `live_probe` in swap-check.json. Nothing here judges."""
     listing = live_request(port, "/v1/models")
     completions, metrics = {}, {"before": counter_lines(port), "after": None}
@@ -626,7 +639,7 @@ def run_live_probe(cfg: dict, port: int, model: str, run_sh_text: str | None) ->
         completions[name] = live_request(port, "/v1/completions", {"model": model, "prompt": prompt, "temperature": 0, "max_tokens": 10})
         if i == 0:
             metrics["after"] = counter_lines(port)
-    return {"ran": True, "model_id": cfg.get("new_model_id"), "model": model, "declared_max_model_len": declared_max_model_len(run_sh_text),
+    return {"ran": True, "model_id": cfg.get("new_model_id"), "model": model, "declared_max_model_len": declared,
             "listing": listing, "completions": completions, "metrics": metrics}
 
 
@@ -668,11 +681,7 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
     if cfg.get("sampling_probe"):
         out["sampling_probe"] = run_sampling_probe(cfg, port, model, log_path, refresh=getattr(proc, "save_log", None))
     if cfg.get("live_probe", True):
-        try:
-            run_sh_text = (STAGE_DIR / "run.sh").read_text(encoding="utf-8")  # hardening: ok run.sh was written into the stage directory by prepare_swap.py; only a regex reads it
-        except (OSError, UnicodeDecodeError):
-            run_sh_text = None
-        out["live_probe"] = run_live_probe(cfg, port, model, run_sh_text)
+        out["live_probe"] = run_live_probe(cfg, port, model, live_declared_context(proc, STAGE_DIR / "run.sh"))
     return out
 
 

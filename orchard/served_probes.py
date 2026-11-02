@@ -21,6 +21,7 @@ import json
 import symtable
 import threading
 import time
+import urllib.request
 import uuid
 
 from orchard import served_verify as sv, speedwatch
@@ -60,6 +61,17 @@ def _code_of(text: str) -> str:
     body = body[newline + 1:] if newline >= 0 else ""
     end = body.find("```")
     return body if end < 0 else body[:end]
+
+
+def _own_nodes(fn):
+    """The nodes of a function's own lexical body: nested functions, lambdas and classes are not entered (their `return` and loops are theirs)."""
+    stack = list(fn.body)
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
 
 
 def _loops_forever(node: ast.While) -> bool:
@@ -131,12 +143,12 @@ def check_generated_code(text, *, function: str = "is_prime") -> dict:
     if not funcs:
         return _result(name, "fail", f"the reply parses and defines no function named {function} ({static})", static=True)
     fn = funcs[0]
-    own = [n for n in ast.walk(fn) if not (n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)))]
+    own = list(_own_nodes(fn))
     if not any(isinstance(n, ast.Return) and n.value is not None for n in own):
         return _result(name, "fail", f"{function} has no `return` with a value ({static})", static=True)
     if undefined:
         return _result(name, "fail", f"the reply reads names that are not defined anywhere: {', '.join(undefined[:5])} ({static})", static=True)
-    if any(isinstance(n, ast.While) and _loops_forever(n) for n in ast.walk(fn)):
+    if any(isinstance(n, ast.While) and _loops_forever(n) for n in own):
         return _result(name, "fail", f"{function} has a `while True` loop with no way out ({static})", static=True)
     return _result(name, "pass", f"the reply parses, defines {function}, returns a value, reads no undefined name and has no endless loop ({static})", static=True)
 
@@ -145,7 +157,7 @@ def probe_code(base: str, model: str, extra: dict | None = None, *, timeout: flo
     """Ask for a short function at temperature 0 and check it with `check_generated_code`. `extra` is the can's `request_extra` (a thinking model
     needs thinking turned off, or a small token budget ends with empty content and finish reason length)."""
     name = "code_parse"
-    body = {"model": model, "messages": [{"role": "user", "content": CODE_PROMPT}], "temperature": 0, "max_tokens": 256, **(extra or {})}
+    body = {**(extra or {}), "model": model, "messages": [{"role": "user", "content": CODE_PROMPT}], "temperature": 0, "max_tokens": 256}
     try:
         status, doc, _ = _chat(base, body, timeout)
     except (OSError, ValueError, http.client.HTTPException) as exc:
@@ -167,6 +179,15 @@ def probe_code(base: str, model: str, extra: dict | None = None, *, timeout: flo
 
 # ---- batching (verify V11, issue 371) -----------------------------------------------------------------------------------------
 
+def _metrics_text(url: str, timeout: float) -> str:
+    """GET `url` and return the text; a body over served_verify.MAX_METRICS_BYTES raises OSError (so the gauge is unavailable)."""
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        raw = resp.read(sv.MAX_METRICS_BYTES + 1)
+    if len(raw) > sv.MAX_METRICS_BYTES:
+        raise OSError("the metrics page is larger than the bound")
+    return raw.decode("utf-8", errors="replace")
+
+
 def judge_batching(*, single_rate, tokens, seconds, n, max_running) -> dict:
     """Aggregate tokens per second of `n` concurrent requests against the single-stream rate. `tokens` is the sum of the reported
     completion tokens, `seconds` the wall time of the burst and `max_running` the largest `vllm:num_requests_running` seen during it (None when
@@ -184,12 +205,11 @@ def judge_batching(*, single_rate, tokens, seconds, n, max_running) -> dict:
     where = f"{n} concurrent requests gave {aggregate:.1f} tok/s against {single_rate:.1f} tok/s for one (ratio {ratio:.2f})"
     if isinstance(max_running, int) and max_running >= 2:
         return _result(name, "pass", f"{where}; the engine ran {max_running} requests at once", **facts)
-    if isinstance(max_running, int) and max_running <= 1:
-        return _result(name, "fail", f"{where}; the engine never ran more than {max_running} request at once, so the requests were served one after another", **facts)
+    seen = "the sampled running count never rose above 1" if isinstance(max_running, int) else "no engine metrics"      # sampling every 0.2 s can miss a short burst
     if ratio >= BATCHED_RATIO:
-        return _result(name, "pass", f"{where}: batching (no engine metrics to confirm)", **facts)
+        return _result(name, "pass", f"{where}: batching ({seen})", **facts)
     if ratio < SERIAL_RATIO:
-        return _result(name, "fail", f"{where}: the requests were served one after another (no engine metrics to confirm)", **facts)
+        return _result(name, "fail", f"{where}: the requests were served one after another ({seen})", **facts)
     return _result(name, "not_checked", f"{where}: between the serialised and the batched ratio, so no verdict", **facts)
 
 
@@ -201,8 +221,8 @@ def probe_batching(base: str, model: str, extra: dict | None, *, single_rate, ma
     if isinstance(max_num_seqs, bool) or not isinstance(max_num_seqs, int) or max_num_seqs <= 1:
         return _result(name, "not_checked", "the can does not declare max_num_seqs above 1, so concurrent batching is not expected")
     n = min(max_num_seqs, MAX_BURST)
-    body = {"model": model, "messages": [{"role": "user", "content": "Count upward from one, one number per line."}], "temperature": 0,
-            "max_tokens": BURST_TOKENS, "ignore_eos": True, **(extra or {})}
+    body = {**(extra or {}), "model": model, "messages": [{"role": "user", "content": "Count upward from one, one number per line."}],
+            "temperature": 0, "max_tokens": BURST_TOKENS, "ignore_eos": True}
     results: list = [None] * n
     running = []
     stop = threading.Event()
@@ -217,7 +237,7 @@ def probe_batching(base: str, model: str, extra: dict | None, *, single_rate, ma
 
     def watch():
         while not stop.is_set():
-            v = speedwatch.running_requests(base)
+            v = speedwatch.running_requests(base, get=_metrics_text)
             if v is not None:
                 running.append(v)
             stop.wait(0.2)
@@ -259,8 +279,8 @@ def _sized_prompt(base, model, extra, target, timeout, tag="") -> tuple[str, int
     """A prompt whose measured token count (usage.prompt_tokens, never a word count) is near `target`: one small request gives the tokens per
     repetition, and the prompt is scaled from it. Returns (prompt, measured tokens of the calibration scaled) or a reason string."""
     probe_reps = 40
-    status, doc, _ = _chat(base, {"model": model, "messages": [{"role": "user", "content": _prompt_of(probe_reps, tag)}], "temperature": 0,
-                                  "max_tokens": 1, **(extra or {})}, timeout)
+    status, doc, _ = _chat(base, {**(extra or {}), "model": model, "messages": [{"role": "user", "content": _prompt_of(probe_reps, tag)}],
+                                  "temperature": 0, "max_tokens": 1}, timeout)
     n = _tokens_of(doc) if status == 200 else None
     if n is None:
         return f"the calibration request answered {status} and reported no usage.prompt_tokens"
@@ -281,8 +301,8 @@ def probe_long_prefill(base: str, model: str, extra: dict | None = None, *, max_
         if isinstance(sized, str):
             return _result(name, "not_checked", sized)
         t0 = time.monotonic()
-        status, doc, _ = _chat(base, {"model": model, "messages": [{"role": "user", "content": sized[0]}], "temperature": 0, "max_tokens": 32,
-                                      **(extra or {})}, timeout)
+        status, doc, _ = _chat(base, {**(extra or {}), "model": model, "messages": [{"role": "user", "content": sized[0]}], "temperature": 0,
+                                      "max_tokens": 32}, timeout)
         seconds = round(time.monotonic() - t0, 3)
     except (OSError, ValueError, http.client.HTTPException) as exc:
         return _result(name, "fail", f"the long prompt got no answer within {timeout:g} s per request: {type(exc).__name__}")
@@ -325,8 +345,8 @@ def probe_reasoning(base: str, model: str, extra: dict | None = None, *, log_tex
     asks = {}
     try:
         for key, tokens, more in (("small", BUDGETS[0], on), ("large", BUDGETS[1], on), ("off", BUDGETS[1], off)):
-            status, doc, _ = _chat(base, {"model": model, "messages": [{"role": "user", "content": REASONING_QUESTION}], "temperature": 0,
-                                          "max_tokens": tokens, **more}, timeout)
+            status, doc, _ = _chat(base, {**more, "model": model, "messages": [{"role": "user", "content": REASONING_QUESTION}], "temperature": 0,
+                                          "max_tokens": tokens}, timeout)
             asks[key] = (status, doc)
     except (OSError, ValueError, http.client.HTTPException) as exc:
         return [_result("reasoning_field", "fail", f"no answer from /v1/chat/completions: {type(exc).__name__}")]
@@ -343,7 +363,7 @@ def probe_reasoning(base: str, model: str, extra: dict | None = None, *, log_tex
     parser = sv.reasoning_parser_in_log(log_text)
     if not isinstance(log_text, str):
         out.append(_result("reasoning_parser", "not_checked", "the server log could not be read"))
-    elif parser is None and "reasoning" not in log_text.lower():
+    elif parser is None and not sv.reasoning_parser_printed(log_text):
         out.append(_result("reasoning_parser", "not_checked", "the server log prints no engine arguments with a reasoning parser"))
     elif parser is None:
         out.append(_result("reasoning_parser", "fail", "the engine arguments in the server log name no reasoning parser"))
@@ -363,11 +383,12 @@ def probe_reasoning(base: str, model: str, extra: dict | None = None, *, log_tex
     def answered(doc):
         c = doc.get("choices")
         m = c[0].get("message") if isinstance(c, list) and c and isinstance(c[0], dict) else None
-        return isinstance(m, dict) and isinstance(m.get("content"), str) and bool(m["content"].strip()), (c[0].get("finish_reason") if isinstance(c, list) and c and isinstance(c[0], dict) else None)
+        finish = c[0].get("finish_reason") if isinstance(c, list) and c and isinstance(c[0], dict) else None
+        return isinstance(m, dict) and isinstance(m.get("content"), str) and bool(m["content"].strip()), finish
     (small_ok, small_finish), (large_ok, large_finish) = answered(small_doc), answered(large_doc)
     sweep = {"small_budget": BUDGETS[0], "small_answered": small_ok, "small_finish": small_finish,
              "large_budget": BUDGETS[1], "large_answered": large_ok, "large_finish": large_finish}
-    if large_ok:
+    if large_ok and large_finish == "stop":
         out.append(_result("budget_sweep", "pass", f"the answer arrives at {BUDGETS[1]} tokens; at {BUDGETS[0]} it {'also arrives' if small_ok else 'does not'}", **sweep))
     else:
         out.append(_result("budget_sweep", "fail", f"no answer even at {BUDGETS[1]} tokens (finish reason {large_finish!r})", **sweep))
@@ -378,7 +399,7 @@ def probe_reasoning(base: str, model: str, extra: dict | None = None, *, log_tex
 
 def _timed_prompt(base, model, extra, prompt, timeout) -> dict | None:
     t0 = time.monotonic()
-    status, doc, _ = _chat(base, {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 1, **(extra or {})}, timeout)
+    status, doc, _ = _chat(base, {**(extra or {}), "model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 1}, timeout)
     seconds = time.monotonic() - t0
     if status != 200 or doc is None:
         return None
@@ -390,11 +411,13 @@ def _timed_prompt(base, model, extra, prompt, timeout) -> dict | None:
 
 
 def probe_prefix_reuse(base: str, model: str, extra: dict | None = None, *, declared: bool = False, tokens: int = PREFIX_TOKENS,
-                       timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
+                       max_model_len=None, timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
     """Three one-token requests with a long prompt: A (cold), a different prompt B of the same size (the control, so warm kernels are not
     mistaken for a cache), and A again. `served_verify.check_prefix_reuse` judges them. Every prompt carries its own random tag at its start only
     where it must differ, so A and its repeat are byte for byte equal."""
     name = "prefix_reuse"
+    if isinstance(max_model_len, int) and not isinstance(max_model_len, bool) and max_model_len < tokens + 128:
+        return _result(name, "not_checked", f"the declared max_model_len {max_model_len} is too small for a prefix of {tokens} tokens")
     try:
         sized = _sized_prompt(base, model, extra, tokens, timeout)
         if isinstance(sized, str):

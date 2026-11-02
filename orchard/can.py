@@ -860,6 +860,25 @@ def _plain(cell: str) -> str:
     return re.sub(r"\s*\([^)]*\)\s*$", "", re.sub(r"[*_`]", "", cell)).strip().lower()
 
 
+_REFERENCE_WORD = re.compile(r"\b(?:reference|baseline)\b", re.IGNORECASE)
+_NO_REFERENCE = re.compile(r"\b(?:tbd|tba|todo|n/?a|none|unknown|unspecified)\b", re.IGNORECASE)
+
+
+def _names_a_reference(line: str) -> bool:
+    """A line (not a heading, not a table row) that states what the reference is: it holds the word `reference` or `baseline`, no placeholder word,
+    and at least four more words (so `### Reference`, `Reference: TBD.` and `Reference.` do not count)."""
+    text = line.strip()
+    if not text or text.startswith("#") or _is_row(line) or not _REFERENCE_WORD.search(text) or _NO_REFERENCE.search(text):
+        return False
+    return len(re.findall(r"[A-Za-z0-9`][\w`./-]*", _REFERENCE_WORD.sub(" ", text))) >= 4
+
+
+def _carry(extra: dict) -> dict:
+    """The request fields the boot probes carry from the chat request: everything but the model name (each probe sets it) and `max_tokens`
+    (each probe sets its own budget, so the budget in its evidence is the one that was sent)."""
+    return {k: v for k, v in extra.items() if k not in ("model", "max_tokens")}
+
+
 def _reference_problems(lines: list[str]) -> list[str]:
     """The Expected performance rows that have a number and no reference (issue 366). A table whose header has a column headed `reference`,
     `HF reference`, `CPU reference` or `baseline` is asked for text or a number in that column on each body row that has a number in
@@ -885,7 +904,7 @@ def _reference_problems(lines: list[str]) -> list[str]:
                 bare.append(cells[0] or "(unlabelled)")
             j += 1
         if bare:
-            sentence = any(ln.strip() and not _is_row(ln) and re.search(r"\b(?:reference|baseline)\b", ln, re.IGNORECASE) for ln in lines[j:])
+            sentence = any(_names_a_reference(ln) for ln in lines[j:])
             if not sentence:
                 out.append("the `## Expected performance` table has a `" + _plain(head[refs[0]]) + "` column that is empty for " + ", ".join(repr(b[:40]) for b in bare[:5])
                            + " (add what each row was compared with, or a sentence under the table that names the reference)")
@@ -1314,13 +1333,13 @@ def _live_probes(base: str, ck: Check, spec: Spec, extra: dict, single_rate, log
     """The probes that send more than one request (orchard/served_probes.py), after the chat and rate requests. The model name and the can's
     request_extra go with every request. Each result is recorded the way served_verify.record does; a not_checked is listed with its reason."""
     model = extra["model"]
-    carry = {k: v for k, v in extra.items() if k != "model"}
+    carry = _carry(extra)
     t = BOOT_REQUEST_TIMEOUT_S
     results = [served_probes.probe_code(base, model, carry, timeout=t),
                served_probes.probe_long_prefill(base, model, carry, max_model_len=spec.max_model_len, timeout=t),
                served_probes.probe_batching(base, model, carry, single_rate=single_rate, max_num_seqs=spec.max_num_seqs, timeout=t)]
     if ck.prefix_caching:
-        results.append(served_probes.probe_prefix_reuse(base, model, carry, declared=True, timeout=t))
+        results.append(served_probes.probe_prefix_reuse(base, model, carry, declared=True, max_model_len=spec.max_model_len, timeout=t))
     if ck.reasoning:
         results += served_probes.probe_reasoning(base, model, carry, log_text=log_text, timeout=t)
     for result in results:

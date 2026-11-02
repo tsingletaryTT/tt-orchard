@@ -227,7 +227,7 @@ def server(request):
 
 def test_the_template_records_the_raw_answers_and_orchard_judges_them_as_a_pass(server):
     sac = load_template()
-    rec = sac.run_live_probe({"new_model_id": "org/new"}, server.port, MODEL, "exec vllm serve --max-model-len 4096 --port 1\n")
+    rec = sac.run_live_probe({"new_model_id": "org/new"}, server.port, MODEL, 4096)
     assert rec["ran"] is True and rec["model"] == MODEL and rec["declared_max_model_len"] == 4096
     assert rec["listing"]["status"] == 200 and set(rec["completions"]) == {"arithmetic", "sequence"}
     assert rec["metrics"] == {"before": ['vllm:generation_tokens_total{engine="0"} 0.0'], "after": ['vllm:generation_tokens_total{engine="0"} 3.0']}
