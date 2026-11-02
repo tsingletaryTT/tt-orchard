@@ -23,11 +23,21 @@ GENCONFIG_NEEDED = {"model_generation_config": {"temperature": 0.6, "top_p": 0.9
 GENCONFIG_NOT = {"model_generation_config": {}, "model_generation_config_present": False, "card_sampling_hints": {}, "card_warns_greedy": []}
 
 
+SEED_SWAP_CHECK = """import pathlib, shutil
+here = pathlib.Path(__file__).resolve().parent
+(here / "evidence").mkdir(exist_ok=True)
+shutil.copy(here / "swap-check-seed.json", here / "evidence" / "swap-check.json")
+(here / "evidence" / "devices.txt").write_text("ran")
+"""
+
+
 def overrides(*, genconfig=GENCONFIG_NEEDED, stage2_report=None, delta=None, extra2=None):
     """Stage 0 writes the genconfig evidence; stage 2's prepare step leaves a swap check (the fake hardware test does not run the real script)."""
     f0 = {**FILES[(0, "run")], "evidence/genconfig-license.json": genconfig, **({"delta.json": delta} if delta else {})}
-    prep = {**hw(2), "evidence/swap-check.json": stage2_report if stage2_report is not None else report(drafter="on (dflash2)", ignored=True, seconds=1.6),
-            **(extra2 or {})}
+    # The swap check is written by the test, as the real script does: the prepare phase may not leave one (orchard/swap_prepare.py sets it aside).
+    seed = stage2_report if stage2_report is not None else report(drafter="on (dflash2)", ignored=True, seconds=1.6)
+    prep = {**hw(2), "swap-check-seed.json": seed, "seed_swap_check.py": SEED_SWAP_CHECK,
+            "hw_test.json": {"command": "python3 stages/2/seed_swap_check.py", "deadline_s": 60}, **(extra2 or {})}
     # Stage 4's fake tests write a swap check with no `serving` record. When stage 2 chooses the drafter-off configuration, the stage 4 gate asks each
     # configuration for `serving.drafter: off`, so the fake tests say it (a keep decision asks nothing, and the extra key does no harm).
     off = FAKE_SWAP_TEST.replace('{"result_draft": {"top1_agreement": 0.94}}', '{"result_draft": {"top1_agreement": 0.94}, "serving": {"drafter": "off"}}')

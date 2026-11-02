@@ -1,7 +1,7 @@
 ---
 name: weights-swap-check
 description: Stage 2 of a tt-orchard run when stage 0 found a weights-only delta. Load the new weights into the existing TT implementation of the nearest model, serve them on one leased board, and compare the chip's output with the stage 1 CPU reference.
-status: draft. A local tt-orchard copy, written from one hand prototype on 2026-10-03 (Altworld/Hemmingway-1 on the 2-chip Qwen3.8-27B bundle). Since 2026-10-03 the work is done by two tested template scripts that you copy. It lives in tt-orchard.
+status: draft. A local tt-orchard copy, written from one hand prototype on 2026-10-03 (Altworld/Hemmingway-1 on the 2-chip Qwen3.8-27B bundle). Since 2026-10-03 the work is done by two tested template scripts. Since 2026-11-01 the supervisor runs the prepare script itself and calls you only when it fails or has no config. It lives in tt-orchard.
 ---
 
 # Weights swap check
@@ -14,9 +14,26 @@ Then no decoder needs to be written. Do not read or copy tt-metal model code. Th
 implementation loads the new weights as they are. This stage shows that it does, and that the chip's
 output agrees with the CPU reference from stage 1.
 
+## Where you come in
+
+The supervisor does the prepare step itself whenever it holds every fact. When `stages/2/swap_config.json` exists, it runs
+`python3 stages/2/prepare_swap.py` and writes `hw_test.json` and `handoff.json` from the output. You are asked to prepare only in
+two cases:
+
+1. `prepare_swap.py` exited nonzero. The task message ends with a "From the supervisor" section that holds the script's exit code
+   and output. Exit 2 means a value in `swap_config.json` is wrong or a fact does not fit, and the message names it. Fix that value,
+   run the script again, then write `hw_test.json` and `handoff.json` (see "Prepare phase: what is left"). Any other exit code means
+   the script failed for a reason the config may not explain: read the output, fix a config value only if the output shows a wrong
+   one, and otherwise say what failed and stop.
+2. `swap_config.json` does not exist (the supervisor could not draft it). Follow "When there is no swap_config.json" first.
+
+In the finish phase you read the test output and write `result.json`. Write it nowhere else: a `result.json` (or
+`test-result.json`, `evidence/swap-check.json`, `evidence/hw-test-output.txt`) found when the prepare phase ends is moved aside
+unread, and the example values below are an example only.
+
 ## Goal
 
-Write `result.json` in your stage directory:
+The finish phase writes `result.json` in your stage directory:
 
     {"serves": true,
      "server_ready_s": 280.5,
@@ -36,14 +53,9 @@ or TODO.
 Two tested scripts do all of the work. You copy them and give them one config file. You do not
 write a script.
 
-- The supervisor has usually written `swap_config.json` already, and copied `prepare_swap.py`,
-  `serve_and_compare.py` and `prompt_suite.json` into your stage directory: every fact in it is one the run already holds.
-  If `stages/2/swap_config.json` exists, read it once and use it as it is. Do not look for the
-  bundle, the snapshots or a port yourself: skip finding the facts and writing the swap config, and
-  do not copy the two swap templates again. Change a value only when `prepare_swap.py` exits 2 and
-  its message names that value.
-- If `swap_config.json` does not exist, write it FIRST, as soon as you know the facts (see
-  "When there is no swap_config.json").
+- `swap_config.json` holds facts the run already has. Do not look for the bundle, the snapshots or a port yourself, do not run
+  `tt-model list`, and do not copy the two swap templates again. Change a value only when `prepare_swap.py` exits 2 and its message
+  names that value.
 - The nearest model is a vision-language model: its bundle's `vllm_metadata.json` names
   `Qwen3_5ForConditionalGeneration`, and the new model's `config.json` may name
   `Qwen3_5ForCausalLM`. That difference is expected on this path and needs nothing from you:
@@ -90,7 +102,16 @@ Four facts decide whether a swap works. Each was found by failing first.
    script refuses a non-empty cache that lacks its `.orchard-model` marker.
 3. The bundle's `run.sh` is run from a copy with these edits: `HERE=` points at the bundle,
    `--model` points at the model directory, the `--revision` flags are removed (a local
-   directory has no revision), and `HF_MODEL` is set to the model directory.
+   directory has no revision), and `HF_MODEL` is set to the model directory. Two forms of
+   `run.sh` are handled. In the older form the command has `--model "<nearest model id>"`. In the
+   current form the command has `--model "$HERE/model-dir"`, and `run.sh` builds that directory at
+   each start with the bundle's `prepare_model_dir.py`, from the weights named in
+   `tt_kernel_manifest.json`. No environment variable changes those weights. For the current form the
+   script therefore also replaces the line that runs `prepare_model_dir.py` with a comment, sets
+   `MODEL_WEIGHTS_DIR` in the copy, and copies the configuration files from the bundle's `base_config/`
+   (the configuration the bundle's model code was built for). The nearest model's snapshot supplies none of them.
+   `model-dir-sources.json` says which source was used (`config_from`). A `run.sh` in neither form
+   makes the script exit 2 and say so; report that message and do not edit `run.sh`.
 4. The server must be told where the new weights are. The TT runtime takes its weights directory
    from `MODEL_WEIGHTS_DIR`, then `HF_MODEL`, then the config path. The bundle's `run.sh` exports
    `HF_MODEL` as the nearest model's id, so `--model` alone gives vLLM the new config and tokenizer
@@ -110,34 +131,29 @@ Four facts decide whether a swap works. Each was found by failing first.
    a config that has it, and do not touch `stages/2/graft-trial/`. The script refuses (exit 2) when the grafted head
    does not fit.
 
-## Prepare phase: the steps
+## Prepare phase: what is left
 
-1. Read `stages/2/swap_config.json`. The supervisor wrote it before you started, from facts the run
-   already holds, and copied `prepare_swap.py`, `serve_and_compare.py` and `prompt_suite.json` next to it. Use it as it
-   is: do not look for the bundle, the snapshots or a port, and do not run `tt-model list`. Only if
-   the file does not exist, do the steps under "When there is no swap_config.json" below first.
-2. Run `python3 stages/2/prepare_swap.py`. It builds `stages/2/model-dir/` and `stages/2/run.sh` and
-   prints a summary. Exit 2 means an edit of `run.sh` did not apply or a fact does not fit; its
-   message names it. Fix that value in `swap_config.json` and run it again.
-3. Check that `stages/2/model-dir` and `stages/2/run.sh` exist (`ls -l`).
-4. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600}`. When `swap_config.json`
+1. Fix the value `prepare_swap.py` named (or write `swap_config.json` and copy the templates, when it did not exist), then run
+   `python3 stages/2/prepare_swap.py`. It builds `stages/2/model-dir/` and `stages/2/run.sh` and prints a summary. Repeat until it
+   exits 0. Check that `stages/2/model-dir` and `stages/2/run.sh` exist (`ls -l`).
+2. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600}`. When `swap_config.json`
    has a `package` key (a container package, not a `bundle_dir`), the supervisor drafted it for a nearest model that is served by a
-   container package: `prepare_swap.py` builds only `model-dir/` and writes no `run.sh`, so skip the `run.sh` check in step 3, and the command
+   container package: `prepare_swap.py` builds only `model-dir/` and writes no `run.sh`, so skip the `run.sh` check in step 1, and the command
    is `python3 stages/2/serve_and_compare_container.py` with the same deadline. That script exits 6 when the container fetched a model from the
    Hugging Face Hub (it runs with the Hub switched off, so a package that ignores `MODEL_WEIGHTS_DIR` fails or leaves a fetch behind): the test then
    measured another model and the stage fails. Report that text; do not try to make it pass.
-5. Read `stages/0/hazard-scan.json` when it exists. It predicts kernel hazards from the model's config (an expert count above the
+3. Read `stages/0/hazard-scan.json` when it exists. It predicts kernel hazards from the model's config (an expert count above the
    256-bit mask, vocabulary columns per die above 65,536, a tile count a kernel rejects, a mixer the bundle lacks). A hit never stops
    the run. Each hit has a `stage2_check`: the targeted test that would show the problem first. This stage runs one hardware test and
    does not add others. If the output is wrong, look at the hit's dimension first. In your summary, list each hit by name and say that
    its check was not run, so the operator bundle does not read the hit as settled.
-6. Write `handoff.json` and reply with a short summary.
+4. Write `handoff.json` (`goal`, `stage`, `evidence`, `next_action`, `check_on_return`) and reply with a short summary.
 
 Do not run `serve_and_compare.py` yourself. The supervisor runs it on a leased board.
 
 ## When there is no swap_config.json
 
-Only then. The supervisor writes it whenever it can.
+Only then. The supervisor writes it whenever it can, so this case is rare.
 
 1. Find four facts with a few commands:
    - `bundle_dir`: the installed `tt-model` bundle that serves the nearest model. Read
@@ -214,7 +230,7 @@ test, so do not change the configuration to make it pass.
 Read `stages/2/evidence/hw-test-output.txt` and `stages/2/evidence/swap-check.json`. If the test
 measured, copy `result_draft` into `result.json`.
 
-If the test failed (`test-result.json` shows a `returncode` other than 0, or `timed_out` true),
+Write `result.json` only from those two files. If the test failed (`test-result.json` shows a `returncode` other than 0, or `timed_out` true),
 write `result.json` with `serves` false, the failure text from `hw-test-output.txt` in a `failure`
 field, `coherent`, `n_tokens`, `top1_agreement` and `server_ready_s` null, and
 `stages/2/evidence/hw-test-output.txt` in `evidence`. Then stop.
