@@ -91,6 +91,38 @@ def test_the_ngram_table_is_host_resident_and_is_not_on_any_chip(flash):
     assert est["device_bytes"] == on_chip and est["device_bytes"] < 80e9
 
 
+def test_the_ple_projection_stays_on_the_chips_while_the_table_goes_to_the_host(flash):
+    est = flash["estimated"]
+    proj = 2560 * 2560 * 2                              # ple.proj.weight in the fixture, kept at bf16 by the norms_other policy
+    assert est["by_category"]["norms_other"]["placement"] == "device" and flash["measured"]["by_category"]["norms_other"]["bytes"] >= proj
+    assert flash["measured"]["by_category"]["ngram_ple"]["tensors"] == 131       # 128 table shards and 3 index tensors; the projection is not among them
+
+
+@pytest.mark.parametrize("name,dtype,shape", [
+    ("model.layers.0.mlp.gate_proj.qweight", "I32", [8, 64]), ("model.layers.0.mlp.gate_proj.qzeros", "I32", [1, 8]),
+    ("model.layers.0.mlp.gate_proj.g_idx", "I32", [64]), ("model.layers.3.mlp.experts.gate_up_proj_blocks", "U8", [4, 16, 8]),
+    ("model.layers.0.mlp.gate_proj.weight.absmax", "F32", [64]), ("model.layers.0.mlp.gate_proj.weight.quant_state.bitsandbytes__nf4", "U8", [32]),
+    ("model.layers.0.mlp.gate_proj.weight.quant_map", "F32", [16])])
+def test_packed_quantized_weights_are_refused_with_an_unsupported_reason(tmp_path, name, dtype, shape):
+    t = [("model.layers.0.mlp.up_proj.weight", "BF16", [64, 64]), (name, dtype, shape)]
+    with pytest.raises(rs.ResidencyError, match="packed quantized weights"):
+        tiny(tmp_path, t)
+
+
+def test_ordinary_integer_tensors_are_not_taken_for_packed_weights(tmp_path):
+    t = [("model.layers.1.ple.ngram_index.0", "I64", [8]), ("model.layers.0.mlp.up_proj.weight", "BF16", [64, 64]),
+         ("model.layers.0.self_attn.rotary_ids", "I32", [32])]
+    assert tiny(tmp_path, t)["measured"]["tensors"] == 3
+
+
+def test_stage_0_skips_a_packed_checkpoint_with_the_reason(tmp_path):
+    d = write_snapshot(tmp_path / "gptq", [("model.layers.0.mlp.up_proj.qweight", "I32", [8, 64])], shards=1)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    rec = rs.write_residency(stage, model_dir=d, box_chips=4)
+    assert rec["scan"] == "skipped" and "packed quantized weights" in rec["reason"] and rec["hazards"] == []
+
+
 def test_dense_27b_fits_two_chips_and_not_one(dense):
     assert dense["measured"]["by_category"]["dense_mlp"]["bytes"] > dense["measured"]["by_category"]["attention"]["bytes"]
     assert "routed_experts" not in dense["measured"]["by_category"] and "ngram_ple" not in dense["measured"]["by_category"]
@@ -112,6 +144,9 @@ def test_dense_27b_fits_two_chips_and_not_one(dense):
     ("model.layers.3.mlp.gate_proj.weight", [4, 4], "dense_mlp"), ("model.layers.3.feed_forward.w1.weight", [4, 4], "dense_mlp"),
     ("model.layers.3.mlp.gate.weight", [8, 4], "norms_other"),                         # the router
     ("model.layers.1.ple.ngram_embeddings.5.weight", [4, 4], "ngram_ple"), ("model.embed_tokens_per_layer.weight", [4, 4], "ngram_ple"),
+    ("model.layers.1.ple.ngram_index.0", [8], "ngram_ple"), ("model.layers.1.ple.table.weight", [4, 4], "ngram_ple"),
+    ("model.layers.1.ple.proj.weight", [4, 4], "norms_other"), ("model.layers.1.ple.gate.weight", [4, 4], "norms_other"),    # PLE compute weights run on the mesh
+    ("model.layers.1.ple.conv.weight", [4, 1, 4], "norms_other"),
     ("mtp.layers.0.mlp.experts.down_proj", [2, 4, 4], "mtp"), ("model.mtp.fc.weight", [4, 4], "mtp"),
     ("model.visual.blocks.0.attn.qkv.weight", [4, 4], "vision"), ("vision_tower.encoder.layers.0.self_attn.q_proj.weight", [4, 4], "vision"),
     ("model.layers.3.input_layernorm.weight", [4], "norms_other"), ("model.layers.3.self_attn.q_norm.weight", [4], "norms_other"),
@@ -408,6 +443,35 @@ def test_a_directory_named_like_a_shard_is_refused(tmp_path):
     (d / "m.safetensors").mkdir(parents=True)
     with pytest.raises(rs.ResidencyError, match="not a regular file"):
         rs.read_headers(d)
+
+
+def test_headers_are_read_one_shard_at_a_time_and_a_limit_stops_the_read_early(tmp_path, monkeypatch):
+    t = [(f"model.layers.0.mlp.w{i}.weight", "BF16", [2, 2]) for i in range(12)]
+    d = write_snapshot(tmp_path / "early", t, shards=6)                  # six shards of two tensors
+    opened = []
+    real = rs._read_file_header
+
+    def spy(path, where, budget):
+        opened.append(where)
+        return real(path, where, budget)
+    monkeypatch.setattr(rs, "_read_file_header", spy)
+    monkeypatch.setattr(rs, "MAX_TENSORS", 3)
+    with pytest.raises(rs.ResidencyError, match="tensors"):
+        rs.read_headers(d)
+    assert len(opened) == 2                                              # the third shard was never opened
+
+
+def test_the_headers_of_a_snapshot_share_one_byte_budget(tmp_path, monkeypatch):
+    t = [(f"model.layers.0.mlp.w{i}.weight", "BF16", [2, 2]) for i in range(12)]
+    d = write_snapshot(tmp_path / "budget", t, shards=6)
+    sizes = [p.stat().st_size - 8 for p in sorted(d.glob("*.safetensors"))]               # each file holds only its header
+    monkeypatch.setattr(rs, "MAX_TOTAL_HEADER_BYTES", sum(sizes[:3]) + sizes[3] // 2)
+    opened = []
+    real = rs._read_file_header
+    monkeypatch.setattr(rs, "_read_file_header", lambda path, where, budget: (opened.append(where), real(path, where, budget))[1])
+    with pytest.raises(rs.ResidencyError, match="budget"):
+        rs.read_headers(d)
+    assert len(opened) == 4                                              # three shards fit; the fourth is refused before its body is read
 
 
 def test_too_many_shards_or_tensors_are_refused(tmp_path, monkeypatch):

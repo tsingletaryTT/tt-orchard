@@ -50,6 +50,7 @@ from orchard import decode_floor, defaults, safeio
 FILE = "residency.json"
 INDEX_FILE = "model.safetensors.index.json"
 MAX_HEADER_BYTES = 64 << 20          # the largest real headers are a few megabytes (a shard of 50,000 tensors); this bound keeps a hostile length from allocating
+MAX_TOTAL_HEADER_BYTES = 512 << 20   # header bytes held for a whole snapshot: a choice, far above any header set seen (a few megabytes per shard)
 MAX_FILES = 10_000                   # shard files in one snapshot
 MAX_TENSORS = 1_000_000              # tensors in one checkpoint
 MAX_NDIM = 8
@@ -143,8 +144,9 @@ def _read_exact(fd: int, n: int, where: str) -> bytes:
     return b"".join(chunks)
 
 
-def _read_file_header(path: str, where: str) -> dict:
-    """The JSON header object of one shard. Reads 8 bytes, then the header, and nothing else."""
+def _read_file_header(path: str, where: str, budget: list) -> dict:
+    """The JSON header object of one shard. Reads 8 bytes, then the header, and nothing else. `budget` is a one-item list holding the
+    header bytes still allowed across the whole snapshot; a header larger than what is left is refused before it is read."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except (OSError, ValueError):
@@ -158,6 +160,9 @@ def _read_file_header(path: str, where: str) -> dict:
             raise ResidencyError(f"{where}: the header is longer than the {MAX_HEADER_BYTES}-byte cap")
         if 8 + length > st.st_size:
             raise ResidencyError(f"{where}: the header is longer than the file")
+        budget[0] -= length
+        if budget[0] < 0:
+            raise ResidencyError(f"{where}: the headers of this snapshot together are longer than the {MAX_TOTAL_HEADER_BYTES}-byte budget")
         raw = _read_exact(fd, length, where)
     finally:
         os.close(fd)
@@ -181,9 +186,12 @@ def _check_coverage(weight_map, file_names, tensor_names: set) -> None:
         raise ResidencyError(f"the snapshot is incomplete: the index names {len(set(weight_map) - tensor_names)} tensor(s) that no file header lists")
 
 
-def _collect(per_file: list[tuple[str, dict]], source: str, local: bool, weight_map=None) -> HeaderSet:
-    tensors, seen = [], set()
+def _collect(per_file, source: str, local: bool, weight_map=None) -> HeaderSet:
+    """Validate the tensors of each (file name, header dict) from `per_file`, one file at a time, so a limit (tensor count, header budget)
+    stops the read before the later files are opened and no raw header is kept after its tensors are made. `per_file` may be a generator."""
+    tensors, seen, names = [], set(), []
     for where, header in per_file:
+        names.append(where)
         for name, entry in header.items():
             if name == "__metadata__":
                 continue
@@ -194,9 +202,10 @@ def _collect(per_file: list[tuple[str, dict]], source: str, local: bool, weight_
             tensors.append(t)
             if len(tensors) > MAX_TENSORS:
                 raise ResidencyError(f"the checkpoint has more than {MAX_TENSORS} tensors")
+        header = None                                  # the raw header is no longer needed
     if weight_map:
-        _check_coverage(weight_map, [w for w, _ in per_file], seen)
-    return HeaderSet(tuple(tensors), len(per_file), source, local)
+        _check_coverage(weight_map, names, seen)
+    return HeaderSet(tuple(tensors), len(names), source, local)
 
 
 def read_headers(directory) -> HeaderSet:
@@ -213,7 +222,6 @@ def read_headers(directory) -> HeaderSet:
         raise ResidencyError("the directory holds no .safetensors file")
     if len(names) > MAX_FILES:
         raise ResidencyError(f"the directory holds more than {MAX_FILES} .safetensors files")
-    per_file = [(n, _read_file_header(safeio.resolved(base / n), n)) for n in names]
     weight_map = None
     if os.path.lexists(base / INDEX_FILE):
         try:
@@ -223,24 +231,25 @@ def read_headers(directory) -> HeaderSet:
         weight_map = index.get("weight_map")
         if not isinstance(weight_map, dict):
             raise ResidencyError(f"{INDEX_FILE}: the index has no weight_map object")
+    budget = [MAX_TOTAL_HEADER_BYTES]
+    per_file = ((n, _read_file_header(safeio.resolved(base / n), n, budget)) for n in names)
     return _collect(per_file, f"local:{base.name}", True, weight_map)
 
 
 def headers_from_metadata(meta, *, source: str) -> HeaderSet:
     """A HeaderSet from a `huggingface_hub` SafetensorsRepoMetadata (or anything shaped like it)."""
-    per_file = []
     try:
-        for fname, fm in sorted(meta.files_metadata.items()):
-            per_file.append((fname, {n: {"dtype": i.dtype, "shape": list(i.shape), "data_offsets": list(i.data_offsets)}
-                                     for n, i in fm.tensors.items()}))
+        files = sorted(meta.files_metadata.items())
+        weight_map = getattr(meta, "weight_map", None)
+        if not files:
+            raise ResidencyError("the repository lists no .safetensors file")
+        if len(files) > MAX_FILES:
+            raise ResidencyError(f"the repository lists more than {MAX_FILES} .safetensors files")
+        per_file = ((fname, {n: {"dtype": i.dtype, "shape": list(i.shape), "data_offsets": list(i.data_offsets)} for n, i in fm.tensors.items()})
+                    for fname, fm in files)
+        return _collect(per_file, source, False, weight_map if isinstance(weight_map, dict) and weight_map else None)
     except (AttributeError, TypeError):
         raise ResidencyError("the Hugging Face metadata is not in the expected shape") from None
-    if not per_file:
-        raise ResidencyError("the repository lists no .safetensors file")
-    if len(per_file) > MAX_FILES:
-        raise ResidencyError(f"the repository lists more than {MAX_FILES} .safetensors files")
-    weight_map = getattr(meta, "weight_map", None)
-    return _collect(per_file, source, False, weight_map if isinstance(weight_map, dict) and weight_map else None)
 
 
 _REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -283,6 +292,15 @@ _ROUTER_PARTS = frozenset({"gate", "router"})
 _LAYER_PREFIX = re.compile(r"^(.*?\blayers\.\d+)\.")
 
 
+def _is_table(parts: list, name: str) -> bool:
+    """Whether a tensor belongs to the n-gram or per-layer embedding table: a part that starts with `ngram` or has `embed` or `table` in it,
+    inside a PLE module or anywhere, or a per-layer embedding (`..._per_layer`). The PLE module's own compute weights (projection, gate,
+    convolution) are not table tensors: they run on the mesh, and they fall through to the later rules (norms_other)."""
+    if "per_layer" in name or any(p.startswith("ngram") for p in parts):
+        return True
+    return "ple" in parts and any("embed" in p or "table" in p for p in parts)
+
+
 def categorize(name: str, shape) -> str:
     """The category of one tensor, from its name and shape. The first rule that matches wins, in the order of the module text:
     vision, MTP, n-gram or per-layer table, embedding, norms and one-dimensional tensors, shared experts, routed experts, routers,
@@ -292,7 +310,7 @@ def categorize(name: str, shape) -> str:
         return "vision"
     if "mtp" in parts or any(p.startswith("mtp_") for p in parts):
         return "mtp"
-    if "ple" in parts or any(p.startswith("ngram") for p in parts) or "per_layer" in name:
+    if _is_table(parts, name):
         return "ngram_ple"
     if _EMBED_PARTS & set(parts):
         return "embedding"
@@ -342,6 +360,23 @@ def _policy(override) -> tuple[dict, str]:
                 raise ResidencyError(f"the policy gives {cat} the dtype {dtype!r} (known: {', '.join(POLICY_DTYPES)})")
             policy[cat] = dtype
     return policy, "caller" if override else "default (choice)"
+
+
+# Name markers of packed quantized checkpoints (GPTQ and AWQ `qweight`, `qzeros`, `g_idx`; MXFP4 `..._blocks`; bitsandbytes `absmax`,
+# `quant_map`, `quant_state`). In these, one stored element holds several logical weights, so element counts and byte counts do not give
+# the weights a block format would store. The list is not exhaustive; a packed format it does not know is counted by stored elements.
+_PACKED_LAST = frozenset({"qweight", "qzeros", "g_idx", "absmax", "quant_map", "SCB"})
+
+
+def _packed_marker(t: Tensor) -> str | None:
+    parts = t.name.split(".")
+    if parts[-1] in _PACKED_LAST:
+        return parts[-1]
+    if "quant_state" in parts or any(p.startswith("quant_state") for p in parts):
+        return "quant_state"
+    if t.dtype == "U8" and (parts[-1].endswith("_blocks") or parts[-1] == "blocks"):
+        return "blocks"
+    return None
 
 
 def _stored_bytes(t: Tensor, dtype: str) -> int:
@@ -413,6 +448,10 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
     if box_chips is not None:
         box_chips = _chip_list([box_chips], "box_chips")[0]
     pol, pol_src = _policy(policy)
+    packed = [m for m in map(_packed_marker, headers.tensors) if m]
+    if packed:
+        raise ResidencyError(f"the checkpoint holds packed quantized weights ({len(packed)} tensors, such as `{packed[0]}`): the estimate counts "
+                             "logical weights from tensor shapes and cannot read packed ones, so no estimate is made")
 
     measured = {c: {"tensors": 0, "elements": 0, "bytes": 0} for c in CATEGORIES}
     stored = {c: 0 for c in CATEGORIES}
