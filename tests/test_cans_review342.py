@@ -69,7 +69,7 @@ def test_a_trailing_newline_is_not_accepted_in_a_name_a_digest_or_a_time(tmp_pat
         can.write_state(tmp_path / "st", "toy\n", bundle(tmp_path), gate=can.gate_record([]))
     with pytest.raises(can.CanError):
         can.check_state({"schema": 1, "name": "toy\n"})
-    part = {"passed": True, "problem_count": 0, "problems": [], "bundle_sums_sha256": "a" * 64, "at": "2026-11-02T10:00:00Z"}
+    part = {"passed": True, "problem_count": 0, "problems": [], "bundle_sums_sha256": "a" * 64, "spec_sha256": None, "at": "2026-11-02T10:00:00Z"}
     assert can.check_state({"schema": 1, "name": "toy", "gate": part})
     for key, value in (("bundle_sums_sha256", "a" * 64 + "\n"), ("at", "2026-11-02T10:00:00Z\n")):
         with pytest.raises(can.CanError):
@@ -181,3 +181,107 @@ def test_any_exception_from_the_loader_is_one_refused_row_with_no_detail(world, 
     answer = build(world)
     row = by_name(answer, "toy")
     assert row["spec"]["state"] == "refused" and "ValueError" in row["spec"]["text"] and "/secret/path" not in dump(answer)
+
+
+# ---- second review: records bound to the spec, budget charged on every path, card columns, quadratic scan, string fields -------------
+
+def test_changing_only_the_spec_after_a_recorded_pass_makes_the_record_stale(world):
+    from cans_fixture import passed_boot, record
+    checkout, cans = world
+    name = add_spec(checkout, "toy")
+    b = stage_bundle(cans, name)
+    record(cans, name, b, gate=can.gate_record([]), boot=passed_boot())
+    assert by_name(build(world), name)["summary"] == "booted"
+    path = checkout / "config" / "can.toy.toml"
+    path.write_text(path.read_text().replace("d18cca4c121edb87d022116d281ce212c9136f57", "e" * 40))     # a new pinned weights revision
+    row = by_name(build(world), name)
+    assert row["gate"]["state"] == "stale" and row["boot"]["state"] == "stale" and row["summary"] == "incomplete"
+    assert "spec file" in row["gate"]["text"]
+
+
+def test_a_record_with_no_spec_fingerprint_is_not_counted_as_passed(world):
+    from cans_fixture import passed_boot, record
+    checkout, cans = world
+    name = add_spec(checkout, "toy")
+    b = stage_bundle(cans, name)
+    record(cans, name, b, gate=can.gate_record([]), boot=passed_boot(), spec=None)
+    assert by_name(build(world), name)["gate"]["state"] == "stale"
+
+
+def test_the_command_line_records_the_spec_fingerprint(tmp_path, fake):
+    spec = tmp_path / "spec.toml"
+    spec.write_text("x = 1\n")
+    assert can.main(args(tmp_path, "gate", spec=str(spec), state_dir=str(tmp_path / "st")), out=io.StringIO()) == 1
+    assert read(tmp_path / "st")["gate"]["spec_sha256"] == hashlib.sha256(b"x = 1\n").hexdigest()
+
+
+def test_files_that_change_while_hashed_still_use_their_share_of_the_budget(world, monkeypatch):
+    from cans_fixture import CARD
+    checkout, cans = world
+    name = add_spec(checkout, "toy")
+    b = stage_bundle(cans, name, extra={"a-grow.bin": "x" * 61, "b-grow.bin": "y" * 61})
+    monkeypatch.setattr(view, "HASH_MAX_BYTES", len(CARD) + 100)
+    real = view.hashlib.sha256
+    grown = []
+
+    class Hasher:
+        def __init__(self):
+            self._h = real()
+
+        def update(self, data):
+            if len(data) == 61 and not grown:
+                grown.append(1)
+                with open(b / "a-grow.bin", "ab") as f:
+                    f.write(b"more")
+            self._h.update(data)
+
+        def hexdigest(self):
+            return self._h.hexdigest()
+    monkeypatch.setattr(view.hashlib, "sha256", lambda *a: real(*a) if a else Hasher())
+    text = by_name(build(world), name)["sums"]["text"]
+    # the budget after README.md is 100: a-grow (61, changed) is charged and leaves 39, so b-grow and toy_model.py are skipped
+    assert "2 files not hashed" in text
+
+
+def test_card_columns_are_capped(world):
+    checkout, cans = world
+    name = add_spec(checkout, "toy")
+    cols = view.CARD_MAX_COLS + 5
+    head = "| " + " | ".join(f"c{i}" for i in range(cols)) + " |\n| " + " | ".join("-" for _ in range(cols)) + " |\n"
+    row = "| " + " | ".join(str(i) for i in range(cols)) + " |\n"
+    stage_bundle(cans, name, card=f"## Expected performance\n\n{head}{row}\n## Limitations\n\ntext\n")
+    perf = by_name(build(world), name)["card"]["performance"]
+    assert len(perf["header"]) == view.CARD_MAX_COLS and len(perf["rows"][0]) == view.CARD_MAX_COLS and perf["columns_more"] == 5
+
+
+def test_many_separator_rows_do_not_make_the_card_check_quadratic():
+    text = "## Expected performance\n\n| a | b |\n" + "| - | - |\n" * 20000 + "\n## Limitations\n\ntext\n"
+    done = []
+    t = threading.Thread(target=lambda: done.append(can.card_problems(text, "catalog")), daemon=True)
+    t.start()
+    t.join(10)
+    assert done, "the card check did not finish in 10 s"
+    assert any("no row with a number" in p for p in done[0])
+
+
+@pytest.mark.parametrize("field", ["repo", "name", "revision"])
+def test_a_spec_field_that_is_not_a_string_is_a_refused_row_and_the_others_show(world, field):
+    checkout, cans = world
+    good = add_spec(checkout, "good")
+    add_spec(checkout, "bad")
+    path = checkout / "config" / "can.bad.toml"
+    old = {"repo": 'repo = "someone/toy-model"', "name": 'name = "bad-blackhole"',
+           "revision": 'revision = "d18cca4c121edb87d022116d281ce212c9136f57"'}[field]
+    path.write_text(path.read_text().replace(old, f'{field} = ["org/model"]'))
+    answer = build(world)
+    assert by_name(answer, "bad")["spec"]["state"] == "refused" and by_name(answer, good)["spec"]["state"] == "ok"
+    with pytest.raises(can.CanError, match="must be a string"):         # the loader itself refuses it, for the command line too
+        can.load_spec(path, base=checkout)
+
+
+def test_a_failure_while_building_a_row_is_a_refused_row_not_a_failed_page(world, monkeypatch):
+    checkout, cans = world
+    add_spec(checkout, "bad")
+    stage_bundle(cans, "bad-blackhole")
+    monkeypatch.setattr(view.CansView, "_sums", lambda self, pin: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert by_name(build(world), "bad")["spec"]["state"] == "refused"

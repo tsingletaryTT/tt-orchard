@@ -75,8 +75,20 @@ def stage_bundle(cans: Path, name: str, *, card=CARD, extra: dict | None = None)
     return b
 
 
-def record(cans: Path, name: str, bundle: Path, *, gate=None, boot=None) -> Path:
-    return can.write_state(cans, name, bundle, gate=gate, boot=boot)
+def spec_file_for(cans: Path, name: str) -> Path | None:
+    """The spec file of the can `name` made by `add_spec` (named `<slug>-blackhole`), in the checkout next to or above the cans folder."""
+    slug = name.removesuffix("-blackhole")
+    for base in (cans.parent, cans.parent.parent):
+        p = base / "checkout" / "config" / f"can.{slug}.toml"
+        if p.is_file():
+            return p
+    return None
+
+
+def record(cans: Path, name: str, bundle: Path, *, gate=None, boot=None, spec="auto") -> Path:
+    """Write the can-state record as `tt-orchard can gate --state-dir` does, bound to the spec file (found automatically, or `spec=None` for none)."""
+    spec_path = spec_file_for(cans, name) if spec == "auto" else spec
+    return can.write_state(cans, name, bundle, gate=gate, boot=boot, spec_path=spec_path)
 
 
 def passed_boot(rate=31.4, ready=212.0, cache="empty"):

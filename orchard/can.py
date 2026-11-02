@@ -347,6 +347,10 @@ def load_spec(path, *, base=None, expand_trees: bool = True) -> Spec:
     for need in ("repo", "revision"):
         if need not in weights:
             raise CanError(f"[weights] needs `{need}`")
+    for what, value in (("[can] name", can["name"]), ("[can] kind", can["kind"]), ("[weights] repo", weights["repo"]),
+                        ("[weights] revision", weights["revision"]), ("[can] mesh", can.get("mesh", "P150")), ("[can] arch", can.get("arch", "blackhole"))):
+        if not isinstance(value, str):
+            raise CanError(f"{what} must be a string")
     if not NAME.fullmatch(str(can["name"])):
         raise CanError(f"[can] name {can['name']!r} is not a plain repository name")
     if can["kind"] not in KINDS:
@@ -814,17 +818,21 @@ def _has_measured_row(lines: list[str]) -> bool:
     """True when the lines hold a table (a header row, then a separator row with one dash cell per header cell) and a later body row has
     a cell starting with a number. Markdown drops body cells past the header's width, the first cell is the label, and a digit in the
     header or the label does not count. Rows are the lines that follow the separator without a blank line."""
-    for i in range(1, len(lines)):
+    i = 1
+    while i < len(lines):
         if not (_is_row(lines[i]) and _is_row(lines[i - 1])):
+            i += 1
             continue
         sep, head = _cells(lines[i]), _cells(lines[i - 1])
         if len(sep) != len(head) or not all(re.fullmatch(r":?-+:?", c) for c in sep):
+            i += 1
             continue
-        for row in lines[i + 1:]:
-            if not _is_row(row):
-                break
-            if any(re.match(r"[~<>]?\d", c) for c in _cells(row)[1:len(head)]):
+        j = i + 1
+        while j < len(lines) and _is_row(lines[j]):
+            if any(re.match(r"[~<>]?\d", c) for c in _cells(lines[j])[1:len(head)]):
                 return True
+            j += 1
+        i = j          # a separator row inside this table's rows is a body row, so the scan goes on after them (one pass, never quadratic)
     return False
 
 
@@ -1364,12 +1372,17 @@ _SHA = re.compile(r"^[0-9a-f]{64}$")
 _STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
-def _sums_digest(bundle) -> str | None:
-    """The sha256 of the bundle's SHA256SUMS file, or None when it cannot be read (a record then names no bundle)."""
+def _file_digest(path, max_bytes: int) -> str | None:
+    """The sha256 of a regular file read with a size limit, or None when it cannot be read."""
     try:
-        return hashlib.sha256(safeio.read_bytes(Path(bundle) / SUMS_FILE, max_bytes=1024 * 1024)).hexdigest()
+        return hashlib.sha256(safeio.read_bytes(path, max_bytes=max_bytes)).hexdigest()
     except (OSError, safeio.SafeReadError):
         return None
+
+
+def _sums_digest(bundle) -> str | None:
+    """The sha256 of the bundle's SHA256SUMS file, or None when it cannot be read (a record then names no bundle)."""
+    return _file_digest(Path(bundle) / SUMS_FILE, 1024 * 1024)
 
 
 def _stamp() -> str:
@@ -1384,7 +1397,7 @@ def gate_record(problems: list[str]) -> dict:
     """What `can gate` found, as a record: passed, how many problems, the first STATE_LIST_MAX of them, and when. `write_state` adds the digest
     of the bundle's SHA256SUMS, which lets a reader tell that the record is for another version of the bundle."""
     return {"passed": not problems, "problem_count": len(problems), "problems": [_short(p) for p in problems[:STATE_LIST_MAX]],
-            "bundle_sums_sha256": None, "at": _stamp()}
+            "bundle_sums_sha256": None, "spec_sha256": None, "at": _stamp()}
 
 
 def _finite_rate(value):
@@ -1402,7 +1415,7 @@ def boot_record(evidence: dict, cache_state: str | None) -> dict:
     checks = evidence.get("checks") or {}
     return {"passed": bool(evidence.get("passed")), "decode_tok_s": rate, "ready_s": _finite_rate(evidence.get("ready_s")),
             "cache_state": cache_state, "failed": [_short(n) for n, c in checks.items() if not (c or {}).get("ok")][:STATE_LIST_MAX],
-            "bundle_sums_sha256": None, "at": _stamp()}
+            "bundle_sums_sha256": None, "spec_sha256": None, "at": _stamp()}
 
 
 def _strict_bool(x, what):
@@ -1431,14 +1444,15 @@ def _cache_or_none(x, what):
 
 
 def _state_part(part, what: str, fields: dict) -> None:
-    keys = {"bundle_sums_sha256", "at", *fields}
+    keys = {"bundle_sums_sha256", "spec_sha256", "at", *fields}
     if not isinstance(part, dict) or set(part) != keys:
         raise CanError(f"state: {what} must be an object with exactly {sorted(keys)}")
     for key, check in fields.items():
         check(part[key], f"{what}.{key}")
-    digest = part["bundle_sums_sha256"]
-    if digest is not None and not (isinstance(digest, str) and _SHA.fullmatch(digest)):
-        raise CanError(f"state: {what}.bundle_sums_sha256 must be 64 hex digits or null")
+    for key in ("bundle_sums_sha256", "spec_sha256"):
+        digest = part[key]
+        if digest is not None and not (isinstance(digest, str) and _SHA.fullmatch(digest)):
+            raise CanError(f"state: {what}.{key} must be 64 hex digits or null")
     if not (isinstance(part["at"], str) and _STAMP.fullmatch(part["at"])):
         raise CanError(f"state: {what}.at must be a UTC time like 2026-11-02T10:00:00Z")
 
@@ -1460,10 +1474,12 @@ def check_state(raw) -> dict:
     return raw
 
 
-def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot: dict | None = None, digest_of=None) -> Path:
+def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot: dict | None = None, digest_of=None, spec_path=None) -> Path:
     """Write `state_dir/<name>.can-state.json`: `gate` and `boot` replace the same part of an earlier file and the other part is kept. Each
     part written is stamped with the digest of the SHA256SUMS in `digest_of` (default: `bundle`) as it is now. A boot passes the copy it
-    booted, so the record is bound to the files that were tested even if the source bundle is rebuilt during the boot. An earlier file that
+    booted, so the record is bound to the files that were tested even if the source bundle is rebuilt during the boot. Each part also
+    carries the sha256 of the spec file (`spec_path`), because the gate and the boot depend on what the spec says (the weights revision, the
+    pins) as well as on the bundle. An earlier file that
     fails `check_state`, or that is the record of another can, is replaced."""
     if not NAME.fullmatch(str(name)):
         raise CanError(f"the state name {name!r} is not a plain name")
@@ -1478,9 +1494,10 @@ def write_state(state_dir, name: str, bundle, *, gate: dict | None = None, boot:
     except (OSError, safeio.SafeReadError, CanError):
         pass
     digest = _sums_digest(bundle if digest_of is None else digest_of)
+    spec_digest = _file_digest(spec_path, MAX_SPEC_BYTES) if spec_path is not None else None
     for key, part in (("gate", gate), ("boot", boot)):
         if part is not None:
-            state[key] = {**part, "bundle_sums_sha256": digest}
+            state[key] = {**part, "bundle_sums_sha256": digest, "spec_sha256": spec_digest}
     check_state(state)
     safeio.atomic_write(path, json.dumps(state, indent=2) + "\n", mode=0o644)
     return path
@@ -1505,7 +1522,7 @@ def main(args, out=None) -> int:
             rec = stage(spec, args.out, namespace=getattr(args, "namespace", None))
             say(f"staged {rec['name']} ({len(rec['files'])} files) in {args.out}")
             if getattr(args, "state_dir", None):     # stage raises when the gate finds a problem, so reaching here means it passed
-                say(f"recorded in {write_state(args.state_dir, spec.name, args.out, gate=gate_record([]))}")
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.out, gate=gate_record([]), spec_path=args.spec)}")
             if getattr(args, "run_dir", None):
                 say(f"recorded in {record(args.run_dir, rec)}")
             return 0
@@ -1515,7 +1532,7 @@ def main(args, out=None) -> int:
                 say(f"problem: {p}")
             say("gate: " + ("passed" if not problems else f"{len(problems)} problem(s)"))
             if getattr(args, "state_dir", None):
-                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, gate=gate_record(problems))}")
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, gate=gate_record(problems), spec_path=args.spec)}")
             return 1 if problems else 0
         if args.action == "boot":
             if not args.work:
@@ -1531,7 +1548,7 @@ def main(args, out=None) -> int:
             say(f"boot check: {'passed' if ev['passed'] else 'FAILED'} (evidence: {Path(args.work) / 'boot-check.json'})")
             if getattr(args, "state_dir", None):
                 booted_copy = Path(args.work) / "bundle"       # the record is bound to the copy that was served, not to the source
-                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, boot=boot_record(ev, cache_state), digest_of=booted_copy)}")
+                say(f"recorded in {write_state(args.state_dir, spec.name, args.bundle, boot=boot_record(ev, cache_state), digest_of=booted_copy, spec_path=args.spec)}")
             if getattr(args, "run_dir", None):
                 rec = {"name": spec.name, "kind": spec.kind, "weights": {"repo": spec.repo, "revision": spec.revision}}
                 say(f"recorded in {record(args.run_dir, rec, ev)}")

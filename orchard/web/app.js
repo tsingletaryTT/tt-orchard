@@ -577,6 +577,7 @@ function canDetail(c, open) {
       h("tbody", {}, ...perf.rows.map((r) => h("tr", {}, ...r.map((x) => h("td", {}, x))))));
     tables.push(h("div", { class: "table-wrap" }, t));
     if (perf.more) tables.push(h("p", { class: "muted small" }, `${plural(perf.more, "more row")} not shown.`));
+    if (perf.columns_more) tables.push(h("p", { class: "muted small" }, `${plural(perf.columns_more, "more column")} not shown.`));
   } else {
     tables.push(h("p", { class: "muted" }, "Expected performance: missing (no table in the card, or no card)."));
   }

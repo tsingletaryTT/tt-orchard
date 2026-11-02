@@ -41,6 +41,7 @@ SCAN_MAX_DEPTH = 8
 CARD_MAX_BYTES = 256 * 1024
 CARD_MAX_ROWS = 12
 CARD_MAX_LINES = 12
+CARD_MAX_COLS = 8
 CELL_MAX = 200
 PROBLEMS_SHOWN = 10
 NAME_MAX = 120
@@ -61,6 +62,13 @@ def _plural(n: int, word: str) -> str:
 
 def _piece(state: str, tone: str, text: str, **more) -> dict:
     return {"state": state, "tone": tone, "text": text, **more}
+
+
+def _is_stale(part: dict, bundle_digest, spec_digest) -> bool:
+    """True unless the record names the SHA256SUMS and the spec file that are on disk now. A gate or a boot depends on both: the bundle's
+    files, and what the spec says (the weights revision, the pins). A digest that could not be taken now or then is not a match."""
+    return (bundle_digest is None or part["bundle_sums_sha256"] != bundle_digest
+            or spec_digest is None or part["spec_sha256"] != spec_digest)
 
 
 class CansView:
@@ -150,6 +158,7 @@ class CansView:
                 return "bad", "is not a regular file"
             if st.st_size > budget[0]:
                 return "skipped", None
+            budget[0] -= st.st_size            # charged before the read: a file that changes or fails while it is read still used its share
             h = hashlib.sha256()
             left = st.st_size
             while left > 0:
@@ -161,7 +170,6 @@ class CansView:
             after = os.fstat(fd)               # a file that grew, shrank or was rewritten while it was read has no one digest
             if left != 0 or after.st_size != st.st_size or after.st_mtime_ns != st.st_mtime_ns:
                 return "bad", "changed while it was read"
-            budget[0] -= st.st_size
             return "ok", h.hexdigest()
         except OSError:
             return "bad", "cannot be read"
@@ -257,8 +265,9 @@ class CansView:
         rows = [can._cells(line) for line in sections.get("Expected performance", []) if can._is_row(line)]
         rows = [r for r in rows if not all(re.fullmatch(r":?-+:?", c) for c in r)]
         if rows:
-            perf = {"header": [self._clean(c) for c in rows[0]], "rows": [[self._clean(c) for c in r] for r in rows[1:1 + CARD_MAX_ROWS]],
-                    "more": max(0, len(rows) - 1 - CARD_MAX_ROWS)}
+            perf = {"header": [self._clean(c) for c in rows[0][:CARD_MAX_COLS]],
+                    "rows": [[self._clean(c) for c in r[:CARD_MAX_COLS]] for r in rows[1:1 + CARD_MAX_ROWS]],
+                    "more": max(0, len(rows) - 1 - CARD_MAX_ROWS), "columns_more": max(0, len(rows[0]) - CARD_MAX_COLS)}
         limits = [self._clean(line.strip()) for line in sections.get("Limitations", []) if line.strip()]
         problems = can.card_problems(text, profile)
         if problems:
@@ -271,14 +280,14 @@ class CansView:
                       limitations=limits[:CARD_MAX_LINES], limitations_more=max(0, len(limits) - CARD_MAX_LINES))
 
     # ---- records against the bundle ----
-    def _gate(self, state, state_problem, digest) -> dict:
+    def _gate(self, state, state_problem, digest, spec_digest) -> dict:
         if state_problem:
             return _piece("unreadable", "warn", state_problem)
         part = (state or {}).get("gate")
         if part is None:
             return _piece("none", "warn", "no gate result recorded (run tt-orchard can gate with --state-dir)")
-        if digest is None or part["bundle_sums_sha256"] != digest:
-            return _piece("stale", "warn", f"a gate result from {part['at']} is for an earlier bundle ("
+        if _is_stale(part, digest, spec_digest):
+            return _piece("stale", "warn", f"a gate result from {part['at']} is for an earlier bundle or spec file ("
                                            f"{'passed' if part['passed'] else 'failed'} then)", at=part["at"])
         if part["passed"]:
             return _piece("passed", "good", f"passed (recorded {part['at']})", at=part["at"], problems=[], problem_count=0)
@@ -286,7 +295,7 @@ class CansView:
         return _piece("failed", "bad", f"failed with {_plural(n, 'problem')} (recorded {part['at']})", at=part["at"], problem_count=n,
                       problems=[self._clean(p, 300) for p in part["problems"]])
 
-    def _boot(self, state, state_problem, digest) -> dict:
+    def _boot(self, state, state_problem, digest, spec_digest) -> dict:
         empty = {"decode_tok_s": None, "ready_s": None, "cache_state": None, "failed": []}
         if state_problem:
             return _piece("unreadable", "warn", state_problem, **empty)
@@ -295,8 +304,8 @@ class CansView:
             return _piece("none", "warn", "no boot recorded (a boot check needs a chip and a lease; run tt-orchard can boot with --state-dir)", **empty)
         facts = {"decode_tok_s": part["decode_tok_s"], "ready_s": part["ready_s"], "cache_state": part["cache_state"],
                  "failed": [self._clean(f, 300) for f in part["failed"]], "at": part["at"]}
-        if digest is None or part["bundle_sums_sha256"] != digest:
-            return _piece("stale", "warn", f"a boot from {part['at']} is for an earlier bundle ({'passed' if part['passed'] else 'failed'} then)", **facts)
+        if _is_stale(part, digest, spec_digest):
+            return _piece("stale", "warn", f"a boot from {part['at']} is for an earlier bundle or spec file ({'passed' if part['passed'] else 'failed'} then)", **facts)
         bits = []
         if part["decode_tok_s"] is not None:
             bits.append(f"decode {part['decode_tok_s']:g} tok/s")
@@ -311,6 +320,7 @@ class CansView:
     def _row_for_spec(self, slug: str, path: Path, cans_pin) -> dict:
         try:
             spec = can.load_spec(path, base=self.base, expand_trees=False)
+            return self._row(slug, path, spec, cans_pin)
         except Exception as exc:                 # noqa: BLE001 - one spec that raises anything must not take the other rows down
             if not isinstance(exc, can.CanError):
                 exc = can.CanError(f"{type(exc).__name__} while reading the spec")
@@ -322,6 +332,9 @@ class CansView:
                     "sums": _piece("none", "dim", "not checked"), "card": _piece("none", "dim", "not read", performance=None, limitations=[]),
                     "gate": _piece("none", "dim", "not looked up"), "boot": _piece("none", "dim", "not looked up", decode_tok_s=None,
                                                                                    ready_s=None, cache_state=None, failed=[])}
+
+    def _row(self, slug: str, path: Path, spec, cans_pin) -> dict:
+        """The row of a spec the loader accepted. A failure in here is caught by `_row_for_spec` and becomes a refused row."""
         name = spec.name
         pin, why = self._open_bundle(cans_pin, name)
         state, state_problem = self._state(cans_pin, name)
@@ -338,7 +351,8 @@ class CansView:
         finally:
             if pin is not None:
                 pin.close()
-        gate, boot = self._gate(state, state_problem, digest), self._boot(state, state_problem, digest)
+        spec_digest = can._file_digest(path, can.MAX_SPEC_BYTES)
+        gate, boot = self._gate(state, state_problem, digest, spec_digest), self._boot(state, state_problem, digest, spec_digest)
         pieces = (bundle, sums, card, gate, boot)
         if bundle["state"] == "not-staged":
             tone, summary = "dim", "not staged"

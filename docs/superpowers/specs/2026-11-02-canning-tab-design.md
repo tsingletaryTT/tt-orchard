@@ -56,13 +56,13 @@ Format (schema 1, JSON, under 64 KB):
 {
   "schema": 1,
   "name": "granite-4.0-h-1b-blackhole",
-  "gate": {"passed": true, "problem_count": 0, "problems": [], "bundle_sums_sha256": "<64 hex digits>", "at": "2026-11-02T10:00:00Z"},
+  "gate": {"passed": true, "problem_count": 0, "problems": [], "bundle_sums_sha256": "<64 hex digits>", "spec_sha256": "<64 hex digits>", "at": "2026-11-02T10:00:00Z"},
   "boot": {"passed": true, "decode_tok_s": 31.4, "ready_s": 212.5, "cache_state": "empty",
-           "failed": [], "bundle_sums_sha256": "<64 hex digits>", "at": "2026-11-02T10:30:00Z"}
+           "failed": [], "bundle_sums_sha256": "<64 hex digits>", "spec_sha256": "<64 hex digits>", "at": "2026-11-02T10:30:00Z"}
 }
 ```
 
-`bundle_sums_sha256` inside each part is the sha256 of the bundle's `SHA256SUMS` file when that part was written (or null when the file could not be read). It is per part because a later `can gate` keeps an older `boot`, and the two can be for different versions of the bundle. `gate` and `boot` are each optional. A later `can gate` replaces `gate` and keeps `boot`. `problems` and `failed` hold at most 10 entries of at most 300 characters. The page checks every field (types, finite numbers, bounded strings) and treats a file with any bad field as unreadable: it shows "recorded state unreadable" for the piece and nothing from the file.
+`bundle_sums_sha256` inside each part is the sha256 of the bundle's `SHA256SUMS` file when that part was written (or null when the file could not be read). `spec_sha256` is the sha256 of the spec file, because a gate or boot also depends on what the spec says (the weights revision, the pins); a record whose bundle digest or spec digest differs from the current ones is shown as for an earlier bundle or spec file and never counts as passed. Both are per part because a later `can gate` keeps an older `boot`, and the two can be for different versions of the bundle. `gate` and `boot` are each optional. A later `can gate` replaces `gate` and keeps `boot`. `problems` and `failed` hold at most 10 entries of at most 300 characters. The page checks every field (types, finite numbers, bounded strings) and treats a file with any bad field as unreadable: it shows "recorded state unreadable" for the piece and nothing from the file.
 
 ## Bounds
 

@@ -43,7 +43,7 @@ def test_a_can_with_a_bundle_and_records_shows_every_fact(world):
     assert (row["boot"]["decode_tok_s"], row["boot"]["cache_state"], row["boot"]["ready_s"]) == (31.4, "empty", 212.0)
     assert "decode 31.4 tok/s" in row["boot"]["text"] and "cache empty" in row["boot"]["text"]
     assert row["card"]["state"] == "ok"
-    assert row["card"]["performance"] == {"header": ["Metric", "Value"], "rows": [["Decode", "31.4 tok/s"], ["Start", "212 s"]], "more": 0}
+    assert row["card"]["performance"] == {"header": ["Metric", "Value"], "rows": [["Decode", "31.4 tok/s"], ["Start", "212 s"]], "more": 0, "columns_more": 0}
     assert row["card"]["limitations"] == ["Greedy decoding only.", "Context is 2048 tokens."]
     assert (row["tone"], row["summary"]) == ("good", "booted")
 
