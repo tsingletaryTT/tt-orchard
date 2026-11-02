@@ -46,6 +46,7 @@ RECORD_FILE = "evidence/scoring-check.json"
 OUTPUT_FILE = "evidence/hw-test-output.txt"
 OUTPUT_MARK = "SCORING_CHECK_SHA256"
 MODEL_ROLE = "model"
+UNHASHED_SUFFIXES = (".pyc", ".pyo", ".so", ".pyd", ".pth")      # importable and not in the manifest; the template's list is the same
 TEMPLATE = Path(__file__).resolve().parent / "skills" / "scoring-check-templates" / "scoring_check.py"
 TEMPLATE_NAME = "scoring_check.py"
 CONFIG_NAME = "scoring_check_config.json"
@@ -382,6 +383,11 @@ def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list)
     links = [os.path.join(r, n) for r, ds, fs in os.walk(stage_dir / "port") for n in ds + fs if os.path.islink(os.path.join(r, n))]
     if links:
         reasons.append(f"{os.path.relpath(links[0], run_dir)} is a link under {PORT_DIR}: its target is not hashed or read by the checks, so files there must be regular files")
+    unhashed = [os.path.join(r, n) for r, ds, fs in os.walk(stage_dir / "port") for n in ds + fs
+                if n == "__pycache__" or n.endswith(UNHASHED_SUFFIXES)]
+    if unhashed:
+        reasons.append(f"{os.path.relpath(unhashed[0], run_dir)} is importable code that port_sources does not hash (bytecode, a compiled module "
+                       "or a path file): cached bytecode could differ from the .py file the checks read")
     on_disk = {os.path.relpath(f, run_dir) for f in (stage_dir / "port").rglob("*.py") if f.is_file()}
     if on_disk - listed:
         reasons.append(f"{sorted(on_disk - listed)[0]} is in {PORT_DIR} but not in port_sources: it was added after the record was written")

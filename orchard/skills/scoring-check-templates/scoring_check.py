@@ -76,7 +76,6 @@ MAX_PAIRS = 4096                 # choice: the fixed set has a few dozen pairs; 
 MAX_IDS = 1 << 20                # choice: ids in one prompt; the model card's limit is 8192
 MAX_VALUE = 1e6                  # a score beyond this is not a logit difference
 JSON_MAX = 16 * 1024 * 1024      # choice: the pair file is a few MB at most (32 prompts of up to 8192 ids)
-EXIT_GRACE_S = 60.0
 REPLY_TIMEOUT_S = 3000.0         # the supervisor's own deadline is the limit that matters; this ends a worker that stopped answering
 MIN_LOAD_S = 1e-6                # a load the clock cannot resolve is reported as this, not as 0
 PREFIX = "port| "
@@ -256,7 +255,7 @@ class Worker:
     def __init__(self):
         p_in, c_out = os.pipe()          # worker -> parent replies
         c_in, p_out = os.pipe()          # parent -> worker requests
-        cmd = [sys.executable, "-u", "-P", "-s", str(Path(__file__).resolve()), "--worker", str(c_in), str(c_out)]
+        cmd = [sys.executable, "-u", "-B", "-P", "-s", str(Path(__file__).resolve()), "--worker", str(c_in), str(c_out)]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      pass_fds=(c_in, c_out), cwd=str(RUN_DIR))
         os.close(c_in)
@@ -305,10 +304,8 @@ class Worker:
                 raise CheckFailed(f"the port returned a score that is not a finite number in group {group!r}: {s!r}")
         return [float(s) for s in scores]
 
-    def kill_descendants(self) -> None:
-        """SIGKILL every process below the worker (children the port started), found through /proc before the worker exits and they are
-        re-parented. The worker stays in this process's own process group on purpose: the supervisor kills that group when the test times
-        out or the run is aborted, and SIGKILL skips this file's cleanup."""
+    def descendants(self) -> list:
+        """The pids of every process below the worker, found through /proc."""
         parents = {}
         for entry in os.listdir("/proc"):
             if entry.isdigit():
@@ -321,24 +318,40 @@ class Worker:
             kids = [p for p, pp in parents.items() if pp in frontier and p not in found]
             found.extend(kids)
             frontier = kids
-        for pid in reversed(found):
+        return found
+
+    def stop(self) -> None:
+        """Make sure nothing the port started is running before the record is written. The worker is frozen first (SIGSTOP stops every
+        thread in it, so no thread and no atexit callback can start a process or write a file during the scan), then every process
+        below it is frozen and the scan is repeated until it finds no new one, then all of them and the worker are killed. The worker
+        stays in this process's own process group on purpose: the supervisor kills that group when the test times out or the run is
+        aborted, and SIGKILL skips this file's cleanup. The worker's output is read to the end."""
+        try:
+            os.kill(self.proc.pid, signal.SIGSTOP)
+        except OSError:
+            pass
+        frozen: list = []
+        for _ in range(20):                              # a frozen tree gains no members; the bound only guards a scan that never settles
+            new = [p for p in self.descendants() if p not in frozen]
+            if not new:
+                break
+            for pid in new:
+                try:
+                    os.kill(pid, signal.SIGSTOP)
+                except OSError:
+                    pass
+            frozen += new
+        for pid in reversed(frozen):
             try:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
-
-    def stop(self) -> None:
-        """Make sure the worker is gone before the record is written, so nothing it runs can write after. Its output is read to the end."""
-        self.kill_descendants()
+        self.proc.kill()
+        self.proc.wait()
         try:
-            self.wr.close()                              # a worker still waiting for a request sees the end of its input and exits
+            self.wr.close()
         except OSError:
             pass
-        try:
-            self.proc.wait(timeout=EXIT_GRACE_S)         # after `close` it exits on its own and flushes what it printed
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait()
         for t in self.pumps:
             t.join(10)
 
@@ -385,10 +398,18 @@ def port_sources() -> list:
     return out
 
 
+UNHASHED_SUFFIXES = (".pyc", ".pyo", ".so", ".pyd", ".pth")
+
+
 def refuse_links() -> None:
-    """A link under the port directory (a file or a directory) could point at code that is not hashed, so any link fails the run."""
+    """A link under the port directory (a file or a directory) could point at code that is not hashed, so any link fails the run. So does
+    anything Python can import that the manifest does not hash: a `__pycache__` directory or a .pyc, .pyo, .so, .pyd or .pth file. An
+    import would otherwise load cached bytecode that differs from the .py file the gate reads."""
     for root, dirs, files in os.walk(PORT_DIR):
         for name in dirs + files:
+            if name == "__pycache__" or name.endswith(UNHASHED_SUFFIXES):
+                raise CheckFailed(f"{os.path.relpath(os.path.join(root, name), RUN_DIR)} is importable code the check does not hash "
+                                  "(bytecode, a compiled module or a path file): stages/2/port/ may hold .py files and plain data only")
             if os.path.islink(os.path.join(root, name)):
                 raise CheckFailed(f"{os.path.relpath(os.path.join(root, name), RUN_DIR)} is a link: files under stages/2/port/ must be regular files")
 

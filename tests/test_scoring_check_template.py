@@ -656,6 +656,101 @@ def test_a_port_that_changes_its_own_source_while_it_runs_fails_the_run_and_leav
     assert not (stage / "evidence" / "scoring-check.json").exists()
 
 
+@pytest.mark.parametrize("name", ["__pycache__/port_model.cpython-312.pyc", "stale.pyc", "native.so", "x.pth", "pkg/__pycache__/a.txt"])
+def test_importable_code_the_manifest_does_not_hash_fails_the_run_and_is_refused_by_the_gate(tmp_path, name):
+    # A pre-existing .pyc with a matching source stamp would be loaded in place of the .py file the gate reads (PR 383 review).
+    run, stage, _ = make_run(tmp_path, extra_files={"port/" + name: "x"})
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "importable code the check does not hash" in done.stdout
+    assert not (stage / "evidence" / "scoring-check.json").exists()
+    run2, stage2, done2 = honest_run(tmp_path / "b")
+    p = stage2 / "port" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("x")
+    assert mentions(gate(run2, stage2), "importable code that port_sources does not hash")
+
+
+ATEXIT_SPAWN = '''
+import atexit
+def _late():
+    import subprocess
+    p = subprocess.Popen(["sleep", "60"])
+    open("ATEXIT-PID", "w").write(str(p.pid))
+    open("ATEXIT-RAN", "w").write("yes")
+atexit.register(_late)
+'''
+THREAD_SPAWN = '''
+def close(model):
+    import subprocess, threading, time
+    def loop():
+        while True:
+            p = subprocess.Popen(["sleep", "60"])
+            with open("SPAWNED-PIDS", "a") as f:
+                f.write(str(p.pid) + "\\n")
+            time.sleep(0.005)
+    threading.Thread(target=loop).start()
+    time.sleep(0.2)              # the thread has started some processes by the time close returns
+'''
+
+
+FORKING_CHILD = '''
+def close(model):
+    import subprocess, sys, time
+    code = ("import subprocess, time\\n"
+            "while True:\\n"
+            "    p = subprocess.Popen(['sleep', '60'])\\n"
+            "    open('GRANDCHILD-PIDS', 'a').write(str(p.pid) + '\\\\n')\\n"
+            "    time.sleep(0.005)\\n")
+    subprocess.Popen([sys.executable, "-c", code])
+    time.sleep(0.3)              # the child has started some grandchildren by the time close returns
+'''
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+        return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (ProcessLookupError, FileNotFoundError):
+        return False
+
+
+def _gone(pids):
+    for _ in range(100):
+        if not any(_alive(p) for p in pids):
+            return True
+        time.sleep(0.05)
+    for p in pids:
+        if _alive(p):
+            os.kill(p, 9)
+    return False
+
+
+def test_a_child_that_keeps_forking_is_stopped_with_everything_it_started(tmp_path):
+    run, stage, done = honest_run(tmp_path, port_src=HONEST + FORKING_CHILD)
+    assert done.returncode == 0, done.stdout + done.stderr
+    pids = [int(x) for x in (run / "GRANDCHILD-PIDS").read_text().split()]
+    assert pids and _gone(pids), "a grandchild was still running after the check ended"
+    time.sleep(0.2)
+    assert len((run / "GRANDCHILD-PIDS").read_text().split()) == len(pids)
+
+
+def test_an_atexit_callback_in_the_worker_never_runs_and_starts_nothing(tmp_path):
+    run, stage, done = honest_run(tmp_path, port_src=HONEST + ATEXIT_SPAWN)
+    assert done.returncode == 0, done.stdout + done.stderr
+    time.sleep(0.3)
+    assert not (run / "ATEXIT-RAN").exists() and not (run / "ATEXIT-PID").exists()
+    assert gate(run, stage) == []
+
+
+def test_a_thread_that_keeps_starting_processes_after_close_leaves_none_running(tmp_path):
+    run, stage, done = honest_run(tmp_path, port_src=HONEST + THREAD_SPAWN)
+    assert done.returncode == 0, done.stdout + done.stderr
+    pids = [int(x) for x in (run / "SPAWNED-PIDS").read_text().split()]
+    assert pids and _gone(pids), "a process the port's thread started was still running after the check ended"
+    time.sleep(0.2)
+    assert len((run / "SPAWNED-PIDS").read_text().split()) == len(pids)         # nothing was started after the check stopped the worker
+
+
 def test_the_record_lists_the_port_files_as_they_were_before_the_worker_started(tmp_path):
     import hashlib
     run, stage, done = honest_run(tmp_path)

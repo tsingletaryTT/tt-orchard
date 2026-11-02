@@ -78,8 +78,11 @@ The supervisor copies `orchard/skills/scoring-check-templates/scoring_check.py` 
 
 The template runs the port in a second process and takes only a list of finite numbers per request. The parent holds the pair set, the
 reference, the numbers and the record. A port that prints a mark line, writes the record, replaces the template, patches functions or
-installs an import hook cannot reach the parent. The parent kills any process the port started and waits for the worker before it writes
-the record through a temporary file and a rename.
+installs an import hook cannot reach the parent. When the run ends the parent freezes the worker (which stops every thread and every exit
+callback in it), freezes and kills every process below it, kills the worker, and only then writes the record through a temporary file and
+a rename. The parent hashes the port's source files before the worker starts and fails the run if they differ afterwards. It refuses a
+port directory that holds a link, bytecode (`__pycache__`, `.pyc`, `.pyo`), a compiled module (`.so`, `.pyd`) or a `.pth` file, because those
+can be imported without being in the manifest. The worker runs with `-B` so it writes no bytecode.
 
 The numbers, computed by the parent and recomputed by the gate from the scores in the record:
 
