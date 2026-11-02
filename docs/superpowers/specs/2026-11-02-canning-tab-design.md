@@ -56,14 +56,13 @@ Format (schema 1, JSON, under 64 KB):
 {
   "schema": 1,
   "name": "granite-4.0-h-1b-blackhole",
-  "bundle_sums_sha256": "<sha256 of the bundle's SHA256SUMS file when the record was written, or null>",
-  "gate": {"passed": true, "problem_count": 0, "problems": [], "at": "2026-11-02T10:00:00Z"},
+  "gate": {"passed": true, "problem_count": 0, "problems": [], "bundle_sums_sha256": "<64 hex digits>", "at": "2026-11-02T10:00:00Z"},
   "boot": {"passed": true, "decode_tok_s": 31.4, "ready_s": 212.5, "cache_state": "empty",
-           "failed": [], "at": "2026-11-02T10:30:00Z"}
+           "failed": [], "bundle_sums_sha256": "<64 hex digits>", "at": "2026-11-02T10:30:00Z"}
 }
 ```
 
-`gate` and `boot` are each optional. A later `can gate` replaces `gate` and keeps `boot`. `problems` and `failed` hold at most 10 entries of at most 300 characters. The page checks every field (types, finite numbers, bounded strings) and treats a file with any bad field as unreadable: it shows "recorded state unreadable" for the piece and nothing from the file.
+`bundle_sums_sha256` inside each part is the sha256 of the bundle's `SHA256SUMS` file when that part was written (or null when the file could not be read). It is per part because a later `can gate` keeps an older `boot`, and the two can be for different versions of the bundle. `gate` and `boot` are each optional. A later `can gate` replaces `gate` and keeps `boot`. `problems` and `failed` hold at most 10 entries of at most 300 characters. The page checks every field (types, finite numbers, bounded strings) and treats a file with any bad field as unreadable: it shows "recorded state unreadable" for the piece and nothing from the file.
 
 ## Bounds
 
@@ -79,7 +78,7 @@ Format (schema 1, JSON, under 64 KB):
 
 Nothing becomes an error page. Each piece has its own state and a plain sentence: "spec refused: ...", "no staged bundle", "bundle is a link and was not read", "SHA256SUMS is missing", "no gate recorded", "no boot recorded", "recorded for an earlier bundle", "recorded state unreadable", "card has no Expected performance section". If the whole cans folder is absent, every can shows "no staged bundle" and a note names `ORCHARD_CANS_DIR`.
 
-A row's tone follows its worst piece: red for a failed gate, a sums mismatch, a failed boot or a refused spec; amber for any piece that is missing, partly checked or recorded for another bundle; green only when the bundle is staged, the sums match and a gate and a boot are recorded as passed for this bundle; grey when nothing is staged.
+A row's tone follows its worst piece: red for a failed gate, a sums mismatch, a failed boot or a refused spec; amber for any piece that is missing, partly checked or recorded for another bundle; green only when the bundle is staged, the sums match and a gate and a boot are recorded as passed for this bundle; grey when nothing is staged. Rows have no background tint: the tone colours text on the page paper, so one tone's text never sits on another tone's background, and each status is a shape plus a word.
 
 ## What is deliberately not shown
 
@@ -94,7 +93,7 @@ A row's tone follows its worst piece: red for a failed gate, a sums mismatch, a 
 ## The page
 
 - A top-level view button "Cans" after Telegraph, hash `#cans`, an `aria-pressed` toggle like the others.
-- A table with one row per can: a status mark plus the word (colour is never the only signal), name, kind, mesh and devices, weights repo with revision, card profile, bundle, sums, gate, boot. A row opens a detail block (a native `<details>`, so the keyboard and screen readers work without script) with the card rows, the first problems of each piece, the recorded times and the "not checked here" Hub line.
+- A table with one row per can: a status mark plus the word (colour is never the only signal), name, kind, mesh and devices, weights repo with revision, card profile, bundle, sums, gate, boot. A row opens a detail row with a real button in the Can column (`aria-expanded`, `aria-controls`; Enter and Space work, and keyboard focus stays on the button after a redraw) and shows the card rows, the first problems of each piece, the recorded times and the "not checked here" Hub line.
 - Playful and operator modes share the markup. Colours come from the existing tone variables, and the operator mode keeps the plain-type look of the other panes.
 - The view polls `/api/cans` while it is the visible view, every 15 seconds, and says when the last answer is old.
 
