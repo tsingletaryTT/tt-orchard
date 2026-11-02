@@ -159,7 +159,14 @@ def _tilde(value, homes: tuple = ()):
     if isinstance(value, list):
         return [_tilde(v, homes) for v in value]
     if isinstance(value, dict):
-        return {k: _tilde(v, homes) for k, v in value.items()}
+        out = {}
+        for k, v in value.items():
+            key = _tilde(k, homes)                  # a key can be a checkpoint-supplied name (parts.transformers.classes)
+            n = 2
+            while key in out and isinstance(key, str):         # two names that redact alike keep separate results
+                key, n = f"{_tilde(k, homes)}#{n}", n + 1
+            out[key] = _tilde(v, homes)
+        return out
     return value
 
 
@@ -282,7 +289,7 @@ def real_probe_run(argv, timeout, env=None):
     each call, so the test suite's guard covers this too."""
     import tempfile
     with tempfile.TemporaryDirectory(prefix="orchard-probe-") as empty:         # the child starts where no file can shadow a module
-        return skillsfresh._raw_run(argv, timeout, env, cwd=empty)
+        return skillsfresh._raw_run(argv, timeout, env, cwd=empty, max_bytes=PROBE_MAX_BYTES)
 
 
 def probe_interpreter(python, classes, run: Callable | None = None, model_type=None, env: dict | None = None, exclude: tuple = ()) -> dict:

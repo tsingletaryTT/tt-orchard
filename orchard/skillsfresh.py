@@ -90,16 +90,29 @@ def default_cache_path() -> Path:
     return Path(base) / "tt-orchard" / "skills-freshness.json"
 
 
-def _raw_run(argv, timeout, env=None, cwd=None):
+def _raw_run(argv, timeout, env=None, cwd=None, max_bytes=None):
     """(returncode, stdout, stderr), like ttlang_env.real_run. A timeout answers 124 and a missing program 127.
 
     The command runs in its own session. On a timeout the whole process group is killed, so a helper git started
-    (git-remote-https, ssh) does not outlive the call; subprocess.run would kill only the direct child."""
+    (git-remote-https, ssh) does not outlive the call; subprocess.run would kill only the direct child.
+
+    With `max_bytes`, the child's output goes to temporary files that it cannot grow past that size (RLIMIT_FSIZE: a write beyond it
+    fails in the child), and at most that many bytes of each stream are read back. A noisy interpreter then cannot fill the
+    supervisor's memory while `communicate` buffers it."""
     import signal
     import subprocess
+    sinks = None
     try:
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=env, cwd=cwd, start_new_session=True)
+        if max_bytes:
+            import resource
+            import tempfile
+            sinks = (tempfile.TemporaryFile(), tempfile.TemporaryFile())
+            limit = (int(max_bytes), int(max_bytes))
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=sinks[0], stderr=sinks[1], env=env, cwd=cwd, start_new_session=True,
+                                    preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, limit))
+        else:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, env=env, cwd=cwd, start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
     def kill_group():
@@ -121,6 +134,13 @@ def _raw_run(argv, timeout, env=None, cwd=None):
         except Exception:
             pass
         raise
+    if sinks is not None:
+        def tail(f):
+            f.seek(0)
+            return f.read(int(max_bytes)).decode("utf-8", errors="replace")
+        out, err = tail(sinks[0]), tail(sinks[1])
+        for f in sinks:
+            f.close()
     return proc.returncode, out, err
 
 

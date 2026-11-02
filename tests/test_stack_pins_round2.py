@@ -56,7 +56,7 @@ def test_the_process_runner_starts_the_child_in_the_directory_it_is_given(tmp_pa
 def test_the_probe_child_starts_in_an_empty_temporary_directory(monkeypatch):
     seen = {}
 
-    def fake_raw(argv, timeout, env=None, cwd=None):
+    def fake_raw(argv, timeout, env=None, cwd=None, max_bytes=None):
         seen["cwd"], seen["listing"] = cwd, os.listdir(cwd)
         return 1, "", ""
     monkeypatch.setattr(skillsfresh, "_raw_run", fake_raw)
