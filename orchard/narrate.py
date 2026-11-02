@@ -637,7 +637,7 @@ UNBLOCK = {
         "stages/<N>/evidence/hw-test-output.txt yourself and fix that cause.",
         "Then run `tt-orchard bringup <MODEL>` again. The same cause will stop it again."],
     "retry-budget-spent": [
-        "A cap was reached (escalations, cold coder boots or wall clock). `tt-orchard status <MODEL>` shows the counts.",
+        "A cap was reached (escalations, unplanned cold coder boots, cold park restores or wall clock). `tt-orchard status <MODEL>` shows the counts.",
         "Find the stage that keeps failing in the list above and fix its cause first; a retry with the same "
         "cause spends the budget again. Then run `tt-orchard bringup <MODEL>`."],
     "disk-full": [

@@ -101,6 +101,14 @@ design adds one budget for the whole run (wall time and cold boots, `RUN_BUDGET`
 `orchard/defaults.py`), so that a run that keeps failing in new ways ends in `blocked` with
 `retry-budget-spent` after a stated time.
 
+Cold coder boots are counted in two groups (issue 317). The cap `RUN_COLD_BOOT_CAP` (3) counts boots
+nobody planned: the first start of the run and a restart after the coder died. The cap
+`RUN_PARK_BOOT_CAP` (12) counts the restores that end a park. A coder that holds both boards (the
+p300x2 profile) parks at every hardware stage, and each restore takes about 10 minutes, so a normal
+weights-only run restores two or three times before stage 7 and must not spend the unplanned cap. Both
+counts reset at an operator resume. A restore under `COLD_START_S` (a warm restart) counts in neither.
+The pause reason for the park cap states how many minutes the run spent waiting for the coder.
+
 Faults the harness recovers from without stopping, each with an existing or new test that goes red
 when the recovery is removed:
 - supervisor killed: resume from the ledger (exists; kill-after-every-event test exists)

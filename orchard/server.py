@@ -264,6 +264,16 @@ class ServerControl:
         self.dev_indices = tuple(lease.dev_indices) if lease is not None else ()
         self.owned = True
 
+    def limit_devices(self, dev_indices) -> None:
+        """Make the stop check's device test cover only these chips.
+
+        A resume on a smaller coder profile relaunches the coder on fewer chips than the earlier
+        lease held. The adopted record lists every chip of that lease, so a container that another
+        session runs on one of the extra chips would count as holding our device. The caller names
+        the chips the relaunched coder will hold. The check for our own container (docker ps by
+        name, image and port) is not affected."""
+        self.dev_indices = tuple(int(i) for i in dev_indices)
+
     def stop(self) -> dict:
         s = self.spec
         if self.owned is False:

@@ -515,3 +515,159 @@ def test_a_transport_failure_after_readiness_writes_failed_evidence(spec, tmp_pa
     ev = can.boot_check(fake_bundle(tmp_path), work, spec, install=False, health_timeout=30)
     assert not ev["passed"] and "timed out" in str(ev["checks"]["transport"])
     assert '"passed": false' in (work / "boot-check.json").read_text()
+
+
+# ---- the card profile (a card that meets the catalog's required sections)
+# A graduated tt-inference-server entry carries measured numbers and stated limits. The catalog profile asks the same of a card:
+# an "Expected performance" section with at least one measured row, and a "Limitations" section with text.
+
+GOOD_CARD = textwrap.dedent('''
+    ---
+    tags: [blackhole]
+    ---
+    # toy on Tenstorrent P150
+    ## Expected performance
+    | Number | Value | Label | Evidence |
+    | --- | --- | --- | --- |
+    | decode tok/s | 31.2 | measured | evidence/boot.json |
+    ## Limitations
+    Greedy decoding only. Context 2048.
+''')
+
+
+def test_a_card_with_both_required_sections_has_no_gaps():
+    assert can.card_problems(GOOD_CARD, "catalog") == []
+
+
+@pytest.mark.parametrize("text,words", [
+    ("# toy\n", "Expected performance"),
+    ("# toy\n## Limitations\nOne limit.\n", "Expected performance"),
+    (GOOD_CARD.replace("## Limitations\nGreedy decoding only. Context 2048.\n", ""), "Limitations"),
+    (GOOD_CARD.replace("Greedy decoding only. Context 2048.", ""), "Limitations"),
+    (GOOD_CARD.replace("| decode tok/s | 31.2 | measured | evidence/boot.json |", ""), "no row with a number"),
+    ("# toy\n## Expected performance\nNot provided by the package author.\n## Limitations\nOne limit.\n", "no row with a number"),
+    ("# toy\n## Expected performance\n| a | b |\n| --- | --- |\n## Limitations\nOne limit.\n", "no row with a number"),
+])
+def test_a_card_gap_is_named(text, words):
+    problems = can.card_problems(text, "catalog")
+    assert any(words in p for p in problems), problems
+
+
+def test_a_heading_inside_a_code_block_is_not_a_section():
+    text = "# toy\n```\n## Expected performance\n| a | 1 |\n## Limitations\ntext\n```\n"
+    assert len(can.card_problems(text, "catalog")) == 2
+
+
+@pytest.mark.parametrize("text", [
+    # a tilde-fenced example holds the only table
+    "# toy\n## Expected performance\n~~~\n| a | b |\n| --- | --- |\n| x | 1 |\n~~~\n## Limitations\nOne limit.\n",
+    # a three-backtick line inside a four-backtick fence does not close it
+    "# toy\n## Expected performance\n````\n```\n| a | b |\n| --- | --- |\n| x | 1 |\n````\n## Limitations\nOne limit.\n",
+    # an empty fence is not limitation text
+    "# toy\n## Expected performance\n| a | b |\n| --- | --- |\n| x | 1 |\n## Limitations\n```\n```\n",
+    # a header and its separator with no body row
+    "# toy\n## Expected performance\n| Metric | P150 |\n| --- | --- |\n## Limitations\nOne limit.\n",
+    # a numeric line that is not a table row
+    "# toy\n## Expected performance\n| decode: 31.2 tok/s\n## Limitations\nOne limit.\n",
+    # a body cell past the header's width is discarded by Markdown
+    "# toy\n## Expected performance\n| Metric | Value |\n| --- | --- |\n| decode | n/a | 31.2 |\n## Limitations\nOne limit.\n",
+    # an indented code block is not a table
+    "# toy\n## Expected performance\n\n    | Metric | Value |\n    | --- | --- |\n    | decode | 31.2 |\n## Limitations\nOne limit.\n",
+    # a separator with a different cell count than the header
+    "# toy\n## Expected performance\n| Metric | Value |\n| --- |\n| decode | 31.2 |\n## Limitations\nOne limit.\n",
+    # a digit only in the row label
+    "# toy\n## Expected performance\n| a | b |\n| --- | --- |\n| 70B decode | n/a |\n## Limitations\nOne limit.\n",
+    # a digit only in the header
+    "# toy\n## Expected performance\n| P150 | 2 |\n| --- | --- |\n| decode | n/a |\n## Limitations\nOne limit.\n",
+])
+def test_a_card_whose_only_evidence_is_a_fence_or_a_malformed_table_fails(text):
+    assert can.card_problems(text, "catalog"), text
+
+
+@pytest.mark.parametrize("text", [
+    "# toy\n<!--\n## Expected performance\n| a | b |\n| --- | --- |\n| x | 1 |\n## Limitations\nOne limit.\n-->\n",
+    "# toy\n## Expected performance\n| a | b |\n| --- | --- |\n| x | 1 |\n## Limitations\n<!-- fill in the limits -->\n",
+    "# toy\n## Expected performance\n<!-- | a | b |\n| --- | --- |\n| x | 1 | -->\n## Limitations\nOne limit.\n",
+])
+def test_html_comments_are_not_card_content(text):
+    assert can.card_problems(text, "catalog"), text
+
+
+def test_text_around_a_comment_still_counts():
+    text = GOOD_CARD.replace("Greedy decoding only.", "<!-- note --> Greedy decoding only.")
+    assert can.card_problems(text, "catalog") == []
+
+
+@pytest.mark.parametrize("text", [
+    # a fence between the separator and a numeric line splits the table
+    "# toy\n## Expected performance\n| Metric | Value |\n| --- | --- |\n```\nexample\n```\n| decode | 31.2 |\n## Limitations\nOne limit.\n",
+    # an indented heading ends the section, so the table below it is in another section
+    "# toy\n## Expected performance\n ## Other results\n| a | b |\n| --- | --- |\n| x | 1 |\n## Limitations\nOne limit.\n",
+    # an escaped pipe is part of the label cell
+    "# toy\n## Expected performance\n| Metric | Value |\n| --- | --- |\n| batch\\|1 | n/a |\n## Limitations\nOne limit.\n",
+])
+def test_section_and_table_boundaries_follow_markdown(text):
+    assert can.card_problems(text, "catalog"), text
+
+
+def test_an_indented_heading_and_an_escaped_pipe_header_are_read_as_markdown():
+    text = ("# toy\n  ## Expected performance\n| Metric \\| unit | Value |\n| --- | --- |\n| decode | 31.2 |\n"
+            "   ## Limitations\nOne limit.\n")
+    assert can.card_problems(text, "catalog") == []
+
+
+def test_a_table_without_outer_pipes_counts():
+    text = "# toy\n## Expected performance\nMetric | Value\n--- | ---\ndecode | 31.2\n## Limitations\nOne limit.\n"
+    assert can.card_problems(text, "catalog") == []
+
+
+def test_a_longer_fence_is_closed_only_by_an_equal_or_longer_one():
+    text = GOOD_CARD.replace("## Limitations", "````\n```\n## Limitations\n````\n## Limitations", 1)
+    assert can.card_problems(text, "catalog") == []
+
+
+def test_no_profile_means_no_card_check():
+    assert can.card_problems("# toy\n", None) == []
+
+
+def test_an_unknown_card_profile_is_refused_when_the_spec_loads(base):
+    with pytest.raises(can.CanError, match="card_profile"):
+        edit_spec(base, 'mesh = "P150"', 'mesh = "P150"\ncard_profile = "gold"')
+
+
+def test_the_catalog_card_profile_is_read_from_the_spec(base):
+    s = edit_spec(base, 'mesh = "P150"', 'mesh = "P150"\ncard_profile = "catalog"')
+    assert s.card_profile == "catalog"
+
+
+def test_the_default_spec_has_no_card_profile(spec):
+    assert spec.card_profile is None
+
+
+@needs_tt_model
+def test_stage_runs_the_gate_with_the_card_profile_and_refuses_a_card_with_gaps(base, tmp_path):
+    s = edit_spec(base, 'mesh = "P150"', 'mesh = "P150"\ncard_profile = "catalog"')
+    # the source card is "# toy": stage ends with the gate, and the gate reads the card that package-thin put in the bundle
+    with pytest.raises(can.CanError) as err:
+        can.stage(s, tmp_path / "out" / "toy-blackhole")
+    assert "card: the card has no `## Expected performance` section" in str(err.value)
+    assert "card: the card has no `## Limitations` section" in str(err.value)
+
+
+@needs_tt_model
+def test_stage_passes_when_the_card_meets_the_profile(base, tmp_path):
+    (base / "README.src.md").write_text(GOOD_CARD)
+    s = edit_spec(base, 'mesh = "P150"', 'mesh = "P150"\ncard_profile = "catalog"')
+    pkg = tmp_path / "out" / "toy-blackhole"
+    can.stage(s, pkg)
+    assert can.gate(pkg, s) == []
+
+
+def test_the_shipped_qwen35_card_declares_the_catalog_profile_and_meets_it():
+    # (the Stable Audio 3 card is a template whose numbers table is filled in by scripts/can_stable_audio_base.py, so it is checked there)
+    # the spec names wheels that scripts/qwen35/build_wheels.py builds, so it is read as TOML here and not loaded
+    import tomllib
+    raw = tomllib.loads((ROOT / "config" / "can.qwen35.toml").read_text(encoding="utf-8"))
+    assert raw["can"]["card_profile"] == "catalog"
+    card = (ROOT / raw["can"]["readme"]).read_text(encoding="utf-8")
+    assert can.card_problems(card, raw["can"]["card_profile"]) == []

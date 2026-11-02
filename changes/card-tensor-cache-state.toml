@@ -1,0 +1,4 @@
+target = "0.9.90"
+summary = "The card says the tensor cache state the hardware test recorded at start"
+pr = 322
+kind = "fix"

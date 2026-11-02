@@ -1360,9 +1360,22 @@ class Supervisor:
             # again; a second refusal blocks with the same reason.
             self._start_coder(canary)
             return
+        # A resume may use a smaller coder profile than the old lease (four chips, now one board).
+        # The stop check then covers the chips the new coder will hold: the first `coder_chips` of the
+        # old lease. A container that another session runs on one of the rest is left alone. The old
+        # lease itself is still released whole below.
+        watched = old
+        # gozer grants whole boards, so a one-chip request holds a two-chip board: round up to CHIPS_PER_BOARD.
+        n = -(-int(self.coder_chips) // CHIPS_PER_BOARD) * CHIPS_PER_BOARD
+        if 0 < self.coder_chips and n < len(old.chips):
+            watched = Lease(old.lease_id, old.chips[:n], old.dev_indices[:n], old.env, old.units)
+            if hasattr(self.coder, "limit_devices"):
+                self.coder.limit_devices(watched.dev_indices)
+            self.ledger.append("decision", None, decision="stop check narrowed to the new coder's chips",
+                               old_chips=list(old.chips), checked_chips=list(watched.chips))
         if not self.coder.confirm_stopped().stopped:
             self.ledger.append("decision", None, decision="stopping the coder", result=self.coder.stop())
-        check = wait_stopped(self.coder, self.adapter, old, quiet_wait_s=self.budgets.quiet_wait_s,
+        check = wait_stopped(self.coder, self.adapter, watched, quiet_wait_s=self.budgets.quiet_wait_s,
                              poll_s=self.budgets.poll_s, clock=self.clock, sleep=self.sleep,
                              accept=("CLAIMED", "STALE", "FREE"))
         if not check["ok"]:

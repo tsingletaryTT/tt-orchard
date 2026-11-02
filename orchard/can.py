@@ -74,7 +74,9 @@ PORT_DEFAULT = '"${PORT:-8000}"'
 TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "extra_tree", "bundle_file", "model_dir"}
 CAN_KEYS = {"name", "kind", "app", "model_py", "metadata", "readme", "arch", "mesh", "device_count", "python", "port", "requirements",
             "verify", "max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "plugin_wheel", "ops_wheels", "models_wheels",
-            "vllm_version", "extra_args", "tt_config", "trace_region_bytes"}
+            "vllm_version", "extra_args", "tt_config", "trace_region_bytes", "card_profile"}
+# card profiles: "catalog" asks the card for the sections tt-model's card_publish_gaps() names as required, with content in them
+CARD_PROFILES = ("catalog",)
 MODEL_DIR_KEYS = {"base_config"}
 # set only by a kind vllm spec: the wheels, the serving arguments (an error names these for a tt-dit-server spec that sets one)
 VLLM_ONLY_KEYS = ("plugin_wheel", "ops_wheels", "models_wheels", "vllm_version", "extra_args", "tt_config", "trace_region_bytes")
@@ -185,6 +187,8 @@ class Spec:
     tt_config: dict = field(default_factory=dict)
     trace_region_bytes: int | None = None
     base_config: tuple[tuple[Path, str], ...] = ()
+    # None: the gate does not read the card. "catalog": the gate requires "Expected performance" with a measured row and "Limitations" with text
+    card_profile: str | None = None
 
 
 # ---- the spec ------------------------------------------------------------------------------------------------------------
@@ -401,7 +405,9 @@ def load_spec(path, *, base=None) -> Spec:
         raise CanError(f"[check] expect is not a regular expression: {exc}") from exc
     if not isinstance(ck.request_extra, dict):
         raise CanError("[check] request_extra must be a table")
-    optional = {k: can[k] for k in ("max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "vllm_version") if k in can}
+    if "card_profile" in can and can["card_profile"] not in CARD_PROFILES:
+        raise CanError(f"[can] card_profile must be one of {CARD_PROFILES}, got {can['card_profile']!r}")
+    optional = {k: can[k] for k in ("max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "vllm_version", "card_profile") if k in can}
     if can["kind"] != "vllm" and (any(k in can for k in VLLM_ONLY_KEYS) or "model_dir" in raw):
         raise CanError(f"{', '.join(VLLM_ONLY_KEYS)} and the [model_dir] table are for kind vllm")
     optional.update(_serving(can, raw, base))
@@ -519,6 +525,41 @@ def sums_problems(root: Path) -> list[str]:
     return problems
 
 
+SCRIPTS = ("run.sh", "install.sh", "prepare_model_dir.py")      # the files a bundle runs; package-thin leaves them without +x
+
+
+def make_executable(pkg) -> None:
+    """Mode 0755 on the scripts a bundle has (`SCRIPTS`)."""
+    for f in SCRIPTS:
+        if (Path(pkg) / f).is_file():
+            (Path(pkg) / f).chmod(0o755)
+
+
+def harden(pkg) -> None:
+    """The canning step's last edits to a vllm-kind bundle, as one call: the scripts are executable and SHA256SUMS lists every file.
+    `stage` calls it for a can and stage 7 (orchard/package.py) calls it for a run's package, so both carry the same hardening.
+    Call it again after any later write to the bundle, because the sums list the files as they are now."""
+    make_executable(pkg)
+    write_sums(Path(pkg))
+
+
+def hardening_problems(pkg) -> list[str]:
+    """What `gate` checks of a vllm-kind bundle that needs no spec: SHA256SUMS lists the files as they are, the scripts are executable,
+    every requirement is an exact pin, and a pin for a shipped wheel names that wheel's version. Stage 7's gate (orchard/stages.py)
+    runs this on each profile."""
+    pkg = Path(pkg)
+    problems = sums_problems(pkg)
+    for f in SCRIPTS:
+        if f in ("run.sh", "install.sh") and not (pkg / f).is_file():
+            problems.append(f"{f} is missing")       # a package with no installer or launcher must not pass on fresh sums
+        elif (pkg / f).is_file() and not os.access(pkg / f, os.X_OK):
+            problems.append(f"{f} is not executable")
+    req = pkg / "requirements.txt"
+    if not req.is_file():
+        return problems + ["requirements.txt is missing"]
+    return problems + requirement_problems(req.read_text(encoding="utf-8", errors="replace")) + wheel_pin_problems(pkg)
+
+
 def wire_model_dir(run_sh: str, spec: Spec, out: Path) -> str:
     """Make vLLM load the weights through `model-dir/`, which prepare_model_dir.py builds at start-up from the pinned Hugging Face snapshot
     plus the spec's base_config files (they replace the snapshot's own, for example a config.json that names the architecture the model class
@@ -577,9 +618,7 @@ def stage(spec: Spec, out, *, env: dict | None = None, hostname: str | None = No
                 text = wire_model_dir(text, spec, out)
             run_sh.write_text(text, encoding="utf-8")
         _copy_in(spec.bundle_files, out)
-        for f in ("run.sh", "install.sh", *(("prepare_model_dir.py",) if spec.base_config else ())):
-            (out / f).chmod(0o755)
-        write_sums(out)
+        harden(out)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     problems = gate(out, spec, hostname=hostname, namespace=namespace)
@@ -698,6 +737,112 @@ def vllm_problems(pkg: Path, spec: Spec, run_sh: str) -> list[str]:
     return problems + wheel_pin_problems(pkg)
 
 
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _without_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    """`line` with its HTML comments removed, and whether a comment is still open at its end (a comment may span lines)."""
+    out = []
+    while line:
+        if in_comment:
+            end = line.find("-->")
+            if end < 0:
+                break
+            line, in_comment = line[end + 3:], False
+        else:
+            start = line.find("<!--")
+            if start < 0:
+                out.append(line)
+                break
+            out.append(line[:start])
+            line, in_comment = line[start + 4:], True
+    return "".join(out), in_comment
+
+
+def _sections(text: str) -> dict[str, list[str]]:
+    """The body lines of each level-2 heading of a card, keyed by the heading text. A fenced code block (the fence's own character,
+    closed by a fence of that character at least as long and with nothing after it) holds no headings and adds no lines to a section."""
+    sections: dict[str, list[str]] = {}
+    current, fence, in_comment = None, None, False
+    for line in text.splitlines():
+        m = _FENCE.match(line)
+        if fence is None:
+            line, in_comment = _without_comments(line, in_comment)
+            m = _FENCE.match(line)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+            continue
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = m.group(1)
+            if current is not None:
+                sections[current].append("")      # a fence ends any table around it
+            continue
+        heading = re.match(r" {0,3}(#{1,2}) +(.*?)\s*$", line)
+        if heading and heading.group(1) == "##":
+            current = heading.group(2).rstrip("#").strip()
+            sections.setdefault(current, [])
+            continue
+        if heading:
+            current = None
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return sections
+
+
+def _cells(line: str) -> list[str]:
+    """The cells of a table row. The outer pipes are optional in Markdown, so one leading and one trailing pipe are dropped if present."""
+    body = line.strip()
+    body = body[1:] if body.startswith("|") else body
+    body = body[:-1] if body.endswith("|") and not body.endswith("\\|") else body
+    return [c.strip() for c in re.split(r"(?<!\\)\|", body)]
+
+
+def _is_row(line: str) -> bool:
+    """A table row has a pipe and is not indented four or more spaces (that is an indented code block)."""
+    return bool(re.search(r"(?<!\\)\|", line)) and not re.match(r" {4}|\t", line)
+
+
+def _has_measured_row(lines: list[str]) -> bool:
+    """True when the lines hold a table (a header row, then a separator row with one dash cell per header cell) and a later body row has
+    a cell starting with a number. Markdown drops body cells past the header's width, the first cell is the label, and a digit in the
+    header or the label does not count. Rows are the lines that follow the separator without a blank line."""
+    for i in range(1, len(lines)):
+        if not (_is_row(lines[i]) and _is_row(lines[i - 1])):
+            continue
+        sep, head = _cells(lines[i]), _cells(lines[i - 1])
+        if len(sep) != len(head) or not all(re.fullmatch(r":?-+:?", c) for c in sep):
+            continue
+        for row in lines[i + 1:]:
+            if not _is_row(row):
+                break
+            if any(re.match(r"[~<>]?\d", c) for c in _cells(row)[1:len(head)]):
+                return True
+    return False
+
+
+def card_problems(text: str, profile: str | None) -> list[str]:
+    """What the card lacks for `profile` (an empty list is a pass; `None` asks for nothing). The "catalog" profile mirrors the sections
+    tt-model's card_publish_gaps() names as required: "Expected performance" must hold a table row that has a number, and "Limitations"
+    must hold text. A graduated tt-inference-server entry carries the same two things (measured targets and stated known issues)."""
+    if profile is None:
+        return []
+    sections = _sections(text)
+    problems: list[str] = []
+    perf = sections.get("Expected performance")
+    if perf is None:
+        problems.append("the card has no `## Expected performance` section")
+    elif not _has_measured_row(perf):
+        problems.append("the card's `## Expected performance` section has no row with a number in a table")
+    limits = sections.get("Limitations")
+    if limits is None:
+        problems.append("the card has no `## Limitations` section")
+    elif not any(line.strip() for line in limits):
+        problems.append("the card's `## Limitations` section is empty")
+    return problems
+
+
 def gate(pkg, spec: Spec, *, hostname: str | None = None, namespace: str | None = None) -> list[str]:
     """Every problem in a staged bundle (an empty list is a pass). It reads the directory as it is on disk and runs nothing."""
     pkg = Path(pkg)
@@ -745,6 +890,7 @@ def gate(pkg, spec: Spec, *, hostname: str | None = None, namespace: str | None 
         if f"${{PORT:-{spec.port}}}" not in run_sh:
             problems.append(f"run.sh does not default to port {spec.port}")
     problems += requirement_problems((pkg / "requirements.txt").read_text(encoding="utf-8", errors="replace"))
+    problems += [f"card: {p}" for p in card_problems((pkg / "README.md").read_text(encoding="utf-8", errors="replace"), spec.card_profile)]
     if spec.kind == "vllm":
         problems += vllm_problems(pkg, spec, run_sh)
     # the server entry is in the bundle and the code compiles

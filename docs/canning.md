@@ -41,6 +41,8 @@ ready_contains = ['"chunked_prefill": true']
 
 Paths are relative to the directory the command runs in (`--base` changes that). A source must be a regular file inside it.
 
+Optional `[can] card_profile = "catalog"` (2026-11-01) makes the gate read the card in the bundle. It requires a `## Expected performance` section that holds a table row with a number, and a `## Limitations` section with text. These are the two sections tt-model's `card_publish_gaps()` names as required, and a graduated tt-inference-server entry carries the same two things (measured targets and stated known issues). Without the key the gate does not read the card. The Qwen3.5 can sets it. A heading inside a fenced code block does not count.
+
 ## The commands
 
 ```
@@ -58,6 +60,8 @@ Add `--run-dir RUN` to `stage` or `boot` to write `RUN/stages/7/can.json` and an
 - changes `run.sh` to bind uvicorn to 127.0.0.1 (package-thin writes 0.0.0.0) and to default to the spec's port (package-thin writes 8000); `HOST` and `PORT` still override;
 - writes `SHA256SUMS`;
 - runs the gate.
+
+Stage 7 gives every package a run stages the same hardening (issue 318). `can.harden` makes the scripts executable and writes `SHA256SUMS`, once when staging and again after the card and evidence are written. Stage 7's gate runs `can.hardening_problems` on each profile: the sums match, the scripts are executable, every requirement is an exact pin and a pin for a shipped wheel names that wheel's version. This is the spec-free part of the can gate; the checks that compare the bundle with a spec stay with `can gate`.
 
 The gate (`can gate`) reuses stage 7's package scrub. It reports any weights file, cache, venv, link, home path, host name, token or namespace outside the card; a hash in `SHA256SUMS` that no longer matches; a manifest that `tt_kernel.manifest.Manifest.from_json` refuses or that disagrees with the spec; a `requirements.txt` line that is not an exact pin; a missing server module; a Python file that does not compile.
 
