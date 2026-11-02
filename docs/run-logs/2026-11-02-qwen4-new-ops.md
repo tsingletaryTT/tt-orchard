@@ -40,7 +40,7 @@ The state dictionaries load into each other with `strict=True`. The decode path 
 | 2 layers (no QSA layer) | 36 | 1 | 10 | 25 | 7 | 2 |
 | 4 layers with the stub | 39 | 1 | 10 | 27 | 7 | 3 |
 
-The QSA layer adds `relu`, `clamp` and `scaled_dot_product_attention` (mapped), `index_select` and `scatter` (candidate), and `contiguous` (ignored). The unmapped list did not grow: `aten.cummax`, `aten.diff`, `aten.eye`, `aten.histc`, `aten.index_put_`, `aten.unflatten.int` and `transformers.grouped_mm_fallback`., the same seven as the 2-layer trace.
+The QSA layer adds `relu`, `clamp` and `scaled_dot_product_attention` (mapped), `index_select` and `scatter` (candidate), and `contiguous` (ignored). The unmapped list did not grow: `aten.cummax`, `aten.diff`, `aten.eye`, `aten.histc`, `aten.index_put_`, `aten.unflatten.int` and `transformers.grouped_mm_fallback`, the same seven as the 2-layer trace.
 
 ## Not settled
 
