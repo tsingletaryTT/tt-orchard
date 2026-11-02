@@ -9,7 +9,7 @@ status: draft. Written on 2026-11-03 for issues 376 and 378 (docs/superpowers/sp
 ## When to use this
 
 Stage 0 recorded a model kind of `reranker` or `embedding` in the ledger (`model_kind` in its `stage_end`) and the class is `weights-only`, or
-`full-port` with the operator's `--full-port`. The model produces numbers, not tokens. Stage 1 recorded a fixed set of inputs and the
+`full-port` with the operator's `--full-port`. The model produces numbers and no tokens. Stage 1 recorded a fixed set of inputs and the
 Hugging Face scores or vectors for them. This stage writes the port that produces the same numbers on one board.
 
 There is one hardware test and no retry loop of your own, and no finish phase: the check writes its own record, and that record is the

@@ -691,7 +691,7 @@ UNBLOCK = {
         "Running `tt-orchard bringup <MODEL> --full-port` again blocks again until those stages exist."],
     "scoring-route": [
         "The model is a reranker or an embedding model (stage 0 recorded its kind in the `model_kind` of its `stage_end` ledger entry: the "
-        "operator's `--model-kind`, the model card's pipeline_tag, or the architecture names). Such a model produces scores or vectors, not "
+        "operator's `--model-kind`, the model card's pipeline_tag, or the architecture names). Such a model produces scores or vectors and no "
         "tokens, so stage 1 records Hugging Face scores or vectors and stage 2 runs the supervisor's scoring check on a port module.",
         "Two things stop a run here. Before stage 1: the class stage 0 chose has no scoring route (the route runs for `weights-only`, and "
         "for `full-port` with `--full-port`); read stages/0/delta.json. After stage 2: the check passed (stages/2/evidence/scoring-check.json) "

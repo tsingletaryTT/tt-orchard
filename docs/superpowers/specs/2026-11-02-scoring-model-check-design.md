@@ -128,7 +128,7 @@ Media (issue 377). A row of the pair file may list up to 8 `media` entries (`kin
 `stages/1/evidence/reference/media/`, `sha256`). The recorder stores a file there and the hash in the row, so the reference and the port get
 the same bytes. The check reads each file without following a link and under 16 MiB (at most 64 files and 128 MiB in all), checks the sha256,
 and hands the bytes to the port through `media=`; the worker checks the sha256 again when it reads the file. The gate reads the files again and
-refuses one that changed, was removed or became a link after the run. The record stays small because it holds hashes, not media. The recorder for
+refuses one that changed, was removed or became a link after the run. The record stays small because it holds the media hashes and none of the media. The recorder for
 a vision-language model (a processor that turns an image into the model's tensors on the CPU) is not built, so the interface runs against fakes only.
 
 The gate (`orchard/scoring_check.py`) refuses: a test that did not exit 0 or ran another command; an output file that is not the one the
