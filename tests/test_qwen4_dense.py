@@ -201,6 +201,41 @@ def test_the_reference_gate_does_not_use_the_shim_for_a_moe_qwen4_config():
     assert out["pass"] is True and out["dense"] is None, out
 
 
+@needs_stack
+def test_an_all_moe_qwen4_snapshot_loads_with_the_shim_file_absent():
+    """PR 341 review: Flash-Next style configs must not gain a new mandatory file."""
+    out = load_through_gate(TINY_QWEN4, shim_present=False)
+    assert out.get("pass") is True and out["dense"] is None, out
+
+
+@needs_stack
+def test_a_mixed_schedule_snapshot_needs_the_shim_file():
+    out = load_through_gate({**TINY_QWEN4, "intermediate_size": 96, "mlp_only_layers": [0]}, shim_present=False)
+    assert "qwen4_dense.py is not next to this script" in out["error"]
+
+
+@needs_stack
+def test_the_load_report_carries_the_sha256_of_the_shim_that_built_the_model():
+    import hashlib
+    out = load_through_gate(TINY_DENSE)
+    assert out["dense"]["shim_sha256"] == hashlib.sha256(SHIM.read_bytes()).hexdigest()
+
+
+def test_the_gates_cheap_dense_test_never_says_no_when_the_shim_rule_finds_a_dense_layer():
+    """The reference gate decides whether to require the shim file without loading it. Over a grid of configs, whenever the shim's
+    rule finds a dense layer the gate's test must say True (it may say True more often)."""
+    gspec = importlib.util.spec_from_file_location("gate_under_test", REPO / "orchard" / "skills" / "reference-gate-templates" / "reference_gate.py")
+    gate = importlib.util.module_from_spec(gspec)
+    gspec.loader.exec_module(gate)
+    for experts in (None, 0, 1, 8):
+        for only in (None, [], [1], [9]):
+            for step in (None, 1, 2, 3):
+                text = {"num_hidden_layers": 4, "num_experts": experts, "mlp_only_layers": only, "decoder_sparse_step": step}
+                for raw in ({"model_type": "qwen4_exp_text", **text}, {"model_type": "qwen4_exp", "text_config": text}):
+                    if shim.needs_dense_shim(raw):
+                        assert gate.may_have_dense_layer(raw), raw
+
+
 # ---- the op inventory on a dense config -------------------------------------------------------------
 
 @needs_stack

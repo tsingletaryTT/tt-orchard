@@ -452,6 +452,17 @@ def _reference_evidence_reasons(stage_dir: Path, agent: dict) -> list[str]:
         for c in agent.get("checks") or []:
             if isinstance(c, dict) and c.get("pass") is True and measured.get(c.get("name")) is False:
                 reasons.append(f"check {c['name']!r}: evidence/summary.json says it failed, reference.json says it passed")
+    if isinstance(report, dict) and report.get("dense_qwen4") is not None:
+        # The model was built with the dense-layer shim. Its hash is in the load report whether or not the stage still has a copy.
+        dense = report["dense_qwen4"]
+        got = dense.get("shim_sha256") if isinstance(dense, dict) else None
+        try:
+            shipped = _sha256(SHIPPED_TEMPLATES["qwen4_dense.py"])
+        except OSError:
+            shipped = None
+        if shipped is not None and got != shipped:
+            reasons.append("evidence/load-report.json says the model was built with the dense Qwen4 shim, but it does not carry the shipped "
+                           "shim's sha256 (qwen4_dense.py was edited, or the report was not written by the shipped reference_gate.py)")
     if isinstance(report, dict) and isinstance(report.get("missing_keys"), list):
         ignore = []
         for pattern in report.get("ignore_patterns") or []:

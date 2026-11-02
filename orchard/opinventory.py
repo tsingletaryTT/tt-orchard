@@ -161,7 +161,9 @@ def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ign
                       "python_nodes": raw.get("python_nodes") or {},
                       "higher_order_nodes": raw.get("higher_order_nodes") or {},
                       # modules replaced by a static stand-in (--stub-data-dependent): their ops are a guide, not the real graph
-                      "stubbed": raw.get("stubbed") or []},
+                      "stubbed": raw.get("stubbed") or [],
+                      # a qwen4_exp config with dense layers was built with the provisional dense-layer shim (orchard/skills/reference-gate-templates/qwen4_dense.py)
+                      "dense_layers": raw.get("dense_layers"), "dense_note": raw.get("dense_note")},
            "failures": raw.get("failures", []), "label": LABEL,
            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     if "skipped" in raw:
@@ -238,6 +240,10 @@ def render_md(inv) -> str:
         lines += ["", f"Stand-in: {st['count']} `{st['module']}` module(s) were replaced by a static version that keeps the "
                       f"op mix and ignores which positions each query can see. Their ops are a guide to what the layer "
                       f"needs and the graph is not the real graph ({st['note']})."]
+    if inv["traced"].get("dense_note"):
+        dense = inv["traced"].get("dense_layers") or []
+        lines += ["", f"Dense layers: {len(dense)} of the traced layers use a plain MLP, built by a shim over transformers' MoE-only qwen4_exp "
+                      f"class ({inv['traced']['dense_note']})."]
     py_nodes = sum((inv["traced"].get("python_nodes") or {}).values())
     if py_nodes:
         lines += ["", f"{py_nodes} python-level nodes (getitem and similar) are not ops and are not counted."]

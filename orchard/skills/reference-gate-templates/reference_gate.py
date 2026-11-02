@@ -256,6 +256,17 @@ def remap_from_delta(run_dir) -> dict:
     return out
 
 
+def may_have_dense_layer(raw: dict) -> bool:
+    """True when a Qwen4 config could have a dense layer, decided without the shim file: no routed experts, a listed
+    `mlp_only_layers`, or a `decoder_sparse_step` above 1. Conservative on purpose (a listed index past the last layer still says
+    True; the shim then finds no dense layer and the load goes on as before). tests/test_qwen4_dense.py checks it against the shim's
+    own rule over a grid of configs."""
+    text = raw.get("text_config") if isinstance(raw.get("text_config"), dict) else raw
+    experts = text.get("num_experts")
+    return (not isinstance(experts, int) or isinstance(experts, bool) or experts <= 0
+            or bool(text.get("mlp_only_layers")) or (text.get("decoder_sparse_step") or 1) > 1)
+
+
 def dense_qwen4_shim(transformers, snapshot: Path):
     """(shim module, config) for a qwen4_exp checkpoint that has a dense layer, else (None, None). transformers 5.19.0 builds a
     mixture-of-experts block in every layer of qwen4_exp and refuses num_experts 0, so such a checkpoint has no upstream reference.
@@ -268,6 +279,8 @@ def dense_qwen4_shim(transformers, snapshot: Path):
         return None, None
     if not isinstance(raw, dict) or raw.get("model_type") not in ("qwen4_exp", "qwen4_exp_text") or "auto_map" in raw:
         return None, None
+    if not may_have_dense_layer(raw):
+        return None, None             # experts in every layer: the shim file is not needed and is not required
     path = HERE_DIR / "qwen4_dense.py"
     if not path.is_file():
         # Without the file the rule cannot be applied, and a dense config would be built as 512 experts per layer.
@@ -361,7 +374,9 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
     }
     if shim is not None:
         text = config.get_text_config() if hasattr(config, "get_text_config") else config
-        report["dense_qwen4"] = {"layers": list(text.orchard_dense_layers), "note": shim.PROVISIONAL}
+        # the sha256 of the shim that built this model: the stage gate compares it with the shipped file, so a deleted or edited copy shows
+        report["dense_qwen4"] = {"layers": list(text.orchard_dense_layers), "note": shim.PROVISIONAL,
+                                 "shim_sha256": hashlib.sha256((HERE_DIR / "qwen4_dense.py").read_bytes()).hexdigest()}
     report["pass"] = not (missing or unexpected or mismatched or errors)
     return model, report
 
