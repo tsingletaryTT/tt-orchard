@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from test_ops_inventory_stub import _has_qwen4, needs_stack, TINY_QWEN4, op_names
+from test_ops_inventory_stub import _has_qwen4, needs_real_forward, needs_stack, TINY_QWEN4, op_names
 from test_ops_inventory_template import PY, run_template
 
 REPO = Path(__file__).resolve().parent.parent
@@ -98,14 +98,14 @@ def build(raw, mode="forward"):
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
-@needs_stack
+@needs_real_forward
 def test_a_dense_config_builds_and_gives_finite_logits():
     out = build(TINY_DENSE)
     assert out["finite"] and out["shape"] == [1, 12, 128]
     assert out["mlp"] == ["Qwen4ExpTextMLP"] * 4 and out["widths"] == [96] * 4
 
 
-@needs_stack
+@needs_real_forward
 def test_a_config_that_writes_num_experts_0_builds_through_the_shim():
     out = build({**TINY_DENSE, "num_experts": 0, "num_experts_per_tok": 0})
     assert out["finite"] and out["mlp"] == ["Qwen4ExpTextMLP"] * 4
@@ -116,7 +116,7 @@ def test_dense_layers_hold_no_experts():
     assert build(TINY_DENSE, "build")["experts"] == [False] * 4
 
 
-@needs_stack
+@needs_real_forward
 def test_a_mixed_schedule_marks_the_right_layers():
     raw = {**TINY_QWEN4, "intermediate_size": 96, "mlp_only_layers": [0], "decoder_sparse_step": 2}
     out = build(raw)
@@ -125,7 +125,7 @@ def test_a_mixed_schedule_marks_the_right_layers():
     assert out["experts"] == [False, True, False, True] and out["finite"]
 
 
-@needs_stack
+@needs_real_forward
 def test_the_moe_path_is_unchanged_for_a_flash_next_style_config():
     out = build(TINY_QWEN4)
     assert out["mlp"] == ["Qwen4ExpTextSparseMoeBlock"] * 4 and out["experts"] == [True] * 4 and out["finite"]
