@@ -1570,7 +1570,17 @@ per-chip reserve, the KV budget and the default policy are choices in `orchard/d
 lists each with its source (`caller` or `default (choice)`). No allocator reading backs them. The record's `not_measured` list says what
 a live reading would replace.
 
+When the weights per chip fit one chip with the stated reserve and KV budget (the one-chip row), the output adds a data-parallel line and the
+record gets `estimated.data_parallel`: the number of copies the configured chips can hold (one per chip), the chips that gives a copy each, and
+a note that this is replication with no collective operations. The configured chips are the box's when stage 0 knows it, else the largest
+`--chips` value. Each copy carries the whole KV budget on its own chip. The line promises no throughput: it says measured scaling is needed and
+cites the one measured example, which is the author's figure for `raahemnabeel/qwen3-reranker-4b` (21.7, 42.0 and 83.0 pairs/s on a p150, a p300
+and a p300x2 with four clients, measured on p300c dies). A model that does not fit one chip reports `data parallel: not available`. The host RAM
+and disk figures stay those of one copy.
+
 Stage 0 of a run writes the same record to `stages/0/residency.json` and adds a `residency estimate` evidence entry to the ledger.
+When a model fits one chip and the run's required chip counts (`--required-chips`) ask for more than one chip, the record gets a
+`fits_one_chip_but_sharded` hazard. It is a note: nothing is blocked.
 A model that needs more chips than the box has gets a `model_does_not_fit_box` hazard in that record. Before a full-port stage 2 the
 supervisor reads the record and, when the box (or stage 2's one-board lease, which is where the port check runs) has fewer chips
 than the estimate needs, blocks with the numbers (block code `model-does-not-fit`) and starts no prepare step. The generic stage 2

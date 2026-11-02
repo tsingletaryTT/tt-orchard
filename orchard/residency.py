@@ -29,8 +29,16 @@ Where it is used: `tt-orchard residency TARGET` (a snapshot directory, or a repo
 supervisor reads that record before a full-port stage 2 (`read_record`, `shortfall`) and blocks when the box has fewer chips than the
 estimate needs.
 
-Limits. Even spread of the weights over the chips, no replication of any tensor, no padding to tiles, one reserve per chip. A
-shard whose data is shorter than its header says is not noticed, because the data is never read.
+Data parallel (issue 359). When the weights per chip fit one chip with the stated reserve and KV budget (the one-chip row of the table),
+the record's `estimated.data_parallel` block says that the configured chips can each hold a full copy: the number of copies (one per
+chip), the chips that gives a copy each, and that this is replication with no collective operations. It estimates no throughput. The one
+measured example (`MEASURED_EXAMPLE`) is the author's figure for one reranker on one kind of die; measured scaling is needed before a
+card or a plan says anything about speed. Stage 0 also notes a model that fits one chip but is configured for tensor parallel across
+several (`sharded_chips`): a hazard note, never a block.
+
+Limits. Even spread of the weights over the chips, no replication of any tensor in the table's rows, no padding to tiles, one reserve per
+chip. The data-parallel block counts the host RAM and disk of one copy. A shard whose data is shorter than its header says is not
+noticed, because the data is never read.
 """
 from __future__ import annotations
 
@@ -79,6 +87,14 @@ NOT_MEASURED = (
     "the real size of the converted cache and the first boot's peak disk and host RAM (read them from a first boot)",
     "padding to 32 by 32 tiles, replication of tensors across chips, and any tensor that is split unevenly",
     "tensor data: only headers were read, so a shard that is shorter than its header says is not noticed")
+
+# The one measured example of data-parallel scaling we have. It is the author's own measurement on p300c dies. Orchard did not measure it, and it covers one model.
+MEASURED_EXAMPLE = {
+    "model": "raahemnabeel/qwen3-reranker-4b", "unit": "pairs/s", "clients": 4, "by_board": {"p150": 21.7, "p300": 42.0, "p300x2": 83.0},
+    "basis": "the model card author's measurement on p300c dies with four clients; orchard has not measured it"}
+DP_NOTE = "replication: one full copy of the weights on each chip, with no collective operations between the chips"
+DP_THROUGHPUT = ("not estimated: measured scaling is needed. The one measured example is " + MEASURED_EXAMPLE["model"] + ": 21.7, 42.0 and 83.0 pairs/s "
+                 "on a p150, a p300 and a p300x2 with four clients (" + MEASURED_EXAMPLE["basis"] + ")")
 
 
 class ResidencyError(ValueError):
@@ -435,9 +451,29 @@ def usable(record) -> bool:
     return isinstance(a, list) and all(isinstance(x, dict) and isinstance(x.get("name"), str) for x in a)
 
 
-def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None, policy=None, chips=(), box_chips=None) -> dict:
+def _data_parallel(fits_one: bool, box_chips, extra: list) -> dict:
+    """The data-parallel block. A copy per chip needs the whole model, the reserve and the whole KV budget on one chip, which is the table's
+    one-chip row (`fits_one`). The configured chips are the box's when it is known, else the largest stated chip count, else unknown."""
+    if box_chips is not None:
+        configured, source = box_chips, "box"
+    elif extra:
+        configured, source = max(extra), "stated chip counts (the largest)"
+    else:
+        configured, source = None, None
+    if not fits_one:
+        return {"applies": False, "configured_chips": configured, "configured_from": source, "copies": 0, "chips_used": 0,
+                "note": "the weights per chip do not fit one chip with the stated reserve and KV budget, so the model does not fit one chip "
+                        "and a copy per chip is not possible"}
+    return {"applies": True, "configured_chips": configured, "configured_from": source, "copies": configured, "chips_used": configured,
+            "note": DP_NOTE + (": one copy per chip" if configured is None else f": {configured} copies, one per chip, on {configured} chips"),
+            "throughput": DP_THROUGHPUT, "measured_example": json.loads(json.dumps(MEASURED_EXAMPLE))}
+
+
+def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None, policy=None, chips=(), box_chips=None, sharded_chips=None) -> dict:
     """The residency record for `headers`. `dram_gib`, `kv_gib` and `reserve_gib` fall back to orchard/defaults.py and the record says so.
-    `chips` adds rows to the table (1, 2, 4 and 8 are always there); `box_chips` is the chip count of the machine, or None when unknown."""
+    `chips` adds rows to the table (1, 2, 4 and 8 are always there); `box_chips` is the chip count of the machine, or None when unknown.
+    `sharded_chips` is the chip count the run is configured to shard the model across (tensor parallel), or None when not stated; a model
+    that fits one chip and is sharded across more than one gets a hazard note."""
     dram_src, kv_src, res_src = ("caller" if v is not None else "default (choice)" for v in (dram_gib, kv_gib, reserve_gib))
     dram = _number(defaults.CHIP_DRAM_GIB if dram_gib is None else dram_gib, "dram_gib", lo=0, allow_equal=False)
     kv = _number(defaults.KV_BUDGET_GIB if kv_gib is None else kv_gib, "kv_gib", lo=0, allow_equal=True)
@@ -447,6 +483,8 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
     extra = _chip_list(chips, "chips")
     if box_chips is not None:
         box_chips = _chip_list([box_chips], "box_chips")[0]
+    if sharded_chips is not None:
+        sharded_chips = _chip_list([sharded_chips], "sharded_chips")[0]
     pol, pol_src = _policy(policy)
     packed = [m for m in map(_packed_marker, headers.tensors) if m]
     if packed:
@@ -494,7 +532,8 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
             "policy": pol,
             "by_category": {c: {"placement": "host" if pol[c] == "host" else "device", "stored_bytes": stored[c]} for c in by_measured},
             "host_resident_categories": host_cats, "device_bytes": device, "host_bytes": host,
-            "rows": rows, "chips_needed": need, "smallest_mesh": mesh, "first_boot": first_boot},
+            "rows": rows, "chips_needed": need, "smallest_mesh": mesh, "first_boot": first_boot,
+            "data_parallel": _data_parallel(next(r for r in rows if r["chips"] == 1)["fits"], box_chips, extra)},
         "assumptions": [
             {"name": "dram_gib_per_chip", "value": dram, "source": dram_src, "note": "DRAM per chip; usable space is lower and was not measured"},
             {"name": "reserve_gib_per_chip", "value": reserve, "source": res_src, "note": "per chip, for trace regions, binaries and circular buffers"},
@@ -507,6 +546,12 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
         why = shortfall(record, box_chips)
         if why:
             record["hazards"].append({"name": "model_does_not_fit_box", "reason": why})
+    if sharded_chips and sharded_chips > 1 and need == 1:
+        record["hazards"].append({"name": "fits_one_chip_but_sharded", "reason": (
+            f"the model fits one chip by this estimate (weights, reserve and KV budget; no allocator reading), and the run is configured to shard it "
+            f"across {sharded_chips} chips. Tensor parallel adds collective operations between the chips. A data parallel layout (a full copy on each chip,  "
+            f"no collective operations) is an option for throughput; measured scaling is needed before expecting any gain. This is a note and "
+            f"blocks nothing")})
     return record
 
 
@@ -581,6 +626,13 @@ def _text(rec: dict, stated: list[int]) -> list[str]:
     for r in e["rows"]:
         lines.append(f"  {r['chips']:>6}{_gib(r['per_chip_bytes']):>14}{_gib(r['used_bytes_per_chip']):>12}{_gib(r['free_bytes_per_chip']):>12}  {'yes' if r['fits'] else 'no'}")
     fb = e["first_boot"]
+    d = e["data_parallel"]
+    if d["applies"]:
+        copies = "the configured chip count is not known, so the number of copies is not stated" if d["copies"] is None else (
+            f"{d['copies']} copies on {d['chips_used']} chips (configured chips: {d['configured_chips']}, from {d['configured_from']})")
+        lines += ["", f"  data parallel: the model fits one chip; {copies}", f"    {d['note']}", f"    throughput: {d['throughput']}"]
+    else:
+        lines += ["", "  data parallel: not available; the model does not fit one chip with the stated reserve and KV budget"]
     lines += ["", f"  chips needed: at least {e['chips_needed']} (smallest mesh {e['smallest_mesh']})",
               f"  first boot: free disk {_gib(fb['disk_bytes'])} ({'snapshot already local' if fb['snapshot_local'] else 'includes the download'}), "
               f"host RAM {_gib(fb['host_ram_bytes'])}", "", "  assumptions:"]

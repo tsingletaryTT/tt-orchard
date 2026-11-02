@@ -103,3 +103,57 @@ The card is `pkgsrc/can/stable-audio-3-README.md` (a template; `scripts/can_stab
 - The numbers that depend on the machine (a CPU time on a loaded host) are labelled as such, with the load.
 - A model whose license is `other` quotes the agreement's paragraphs word for word and does not summarise obligations. The base-directory script refuses a card whose quotation is not in the license copy.
 - The card says nothing about quality, because the measurements do not cover it.
+
+## A reference card
+
+`raahemnabeel/qwen3-reranker-4b` (https://huggingface.co/raahemnabeel/qwen3-reranker-4b) is a public card for a text reranker that serves through `tt serve`. This
+section describes what it contains and why each part helps a reader, as a target for a can's card. It is a description. The card was read on 2026-11-02 with
+`huggingface_hub` from an isolated interpreter (`python3 -I`), text files only, and nothing was run. The repository's `code/` folder holds the author's notes, and
+the precision table below is there and not in the README.
+
+What the card contains, in the order a reader needs it:
+
+- **Parity against a reference on the same token ids.** The `Expected performance` section opens with a table whose columns are `eval`, `metric`, `this package`,
+  `HF reference` and `size`. The reference is named (the transformers implementation on CPU, in fp32 for one set and bf16 for the others). The rows give a
+  correlation of scores, the mean and the largest score difference in logits, how often the top document matches, and a ranking metric on two public benchmark subsets. The
+  `size` column says how many pairs or groups stand behind each row. A sentence under the table says the reference ran on exactly the same token ids as the
+  device, so a difference comes from the device's arithmetic and not from tokenization. It says the benchmark rows show parity and are not leaderboard numbers. It
+  also records where the package is worse (one group's top-1 flips on the multilingual subset). A reader can tell how far the device result is from the reference and how many
+  samples that rests on.
+- **Throughput per profile, with the error count.** A second table lists one row per serving profile and client count, with requests per second, tokens per second and the
+  50th and 99th percentile latency. A sentence under it states the tool (the real server, closed-loop clients), the length of each run (45 seconds per row), the
+  error count (zero), and the dies the numbers came from. A single-document latency table sits above it for the p150 profile.
+- **Where the numbers do not apply.** The same sentence says the p150 rows ran on one die of a p300c, and the Limitations section says the p150, p150x2 and p150x4 boards
+  run the same per-chip code and were not measured. The card separates what was measured from what the code implies.
+- **A precision policy with the choice named.** The README gives the chosen policy in one Limitations bullet (bf16 activations, bfp8 attention, bf16 MLP weights) and the
+  score error it costs. The comparison of four policies is in `doc/accuracy.md` in the repository: for each policy the weight formats, the mean and largest score
+  difference, the correlation, the top-1 agreement and the run time, with the selected row in bold and one policy marked as the choice of the sibling 8B model.
+  Under the table, a tuning that was measured and not adopted (autotuned matmul blocking) is recorded with its reason: it changed the end-to-end time by almost nothing
+  and raised the mean score error. A reader of that file learns why the shipped policy is not the fastest one, and that the author tried the obvious alternatives.
+- **A specific Limitations section.** Each bullet is something a user can hit: the build is a bring-up build, the score error means candidates within about 0.25 of each
+  other can swap places, the input is cut at 8192 tokens from the document side, more chips add throughput and not single-request speed, a failed chip is skipped until restart,
+  and which boards were validated. None of them is a general disclaimer.
+
+Two further things the card does that other cans can copy. It states what one chip holds ("every chip holds a full copy of the model") in the description and in the
+profile table, so the reader can see that the profiles are data parallel (see the data-parallel block of `tt-orchard residency`). It also ends with a provenance table
+that names the digest of the code in the image and says the tree was dirty.
+
+### What the `card_profile = "catalog"` gate checks today
+
+`orchard/can.py` (`card_problems`) checks two things and nothing else about the card's content:
+
+| Item on the reference card | Checked by the gate today? |
+| --- | --- |
+| An `## Expected performance` section with a table row whose cell has a number | Yes |
+| A non-empty `## Limitations` section | Yes |
+| A parity table that names its reference | No |
+| The size of the sample behind each row | No |
+| An error count with the throughput rows | No |
+| The tool, run length and dies a throughput table came from | No |
+| A precision policy with the chosen one named | No |
+| A rejected tuning recorded with its reason | No |
+| Limitations that are specific (the gate accepts any text) | No |
+
+So a card with a single row such as `| decode | 12.5 |` and a one-line Limitations section passes. The gate does what `card_publish_gaps()` does and no more. Whether a
+number is a measurement, and what it was compared with, is left to the author and the reviewer. One cheap check that fits the gate is that an Expected performance
+table with a `reference` column fills that column with text in each row that has a number; it is proposed in a public issue and not built here.

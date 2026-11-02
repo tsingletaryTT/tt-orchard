@@ -2075,7 +2075,9 @@ class Supervisor:
         headers; a model that needs more chips than the box has is a hazard in the record, and stage 2 of a full port reads it. A model
         directory without headers gives a record that says it was skipped."""
         try:
-            rec = residency.write_residency(stage_dir, model_dir=self.inputs.get("model"), box_chips=self._box_chips())
+            # the run's largest required chip count is the sharding it asks for; one chip (or none stated) is no sharding
+            sharded = max(self.required_chips) if self.required_chips and max(self.required_chips) > 1 else None
+            rec = residency.write_residency(stage_dir, model_dir=self.inputs.get("model"), box_chips=self._box_chips(), sharded_chips=sharded)
             extra = ({"chips_needed": rec["estimated"]["chips_needed"], "fits_box": rec["verdict"]["fits_box"]} if rec["scan"] == "ran" else {})
             self.ledger.append("evidence", 0, what="residency estimate", scan=rec["scan"], hazards=[h["name"] for h in rec["hazards"]], **extra,
                                **evidence_record(self.run_dir, stage_dir / residency.FILE))
