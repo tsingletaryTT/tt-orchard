@@ -2341,7 +2341,7 @@ timeout and a shared 60-second budget.
 | Coder candidates | the configured packages | repos by the same authors, and search hits, whose id contains a name in `family` (default `qwen3-coder`, `qwen3.5-coder`, `coder-next`) and that are not configured |
 | tt-lang | the pin in `orchard/ttlang_pin.py` | newest tag, newest S3 dev wheel, public PyPI |
 | tt-metal | `git describe` of the host tree | latest release |
-| tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag |
+| tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag, else the `[project] version` in `pyproject.toml` on the default branch (the row says so) |
 | Skills checkout | `orchard.skillsfresh` | upstream main |
 
 To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`. The flag `--updates-config` reads a different file.
@@ -2359,6 +2359,13 @@ The "ready to farm" line says `verified` only when `config/verifications.json` (
 whose versions equal the new combination. Otherwise it says `unverified` and points at the smoke and probe kernel run. The file is
 written by a person or a verification run after a real run, never by `updates`. Preflight prints one informational line when the
 cache shows something behind or a candidate; it reads the cache only and never blocks.
+
+The Models view of `tt-orchard ui` shows the same rows under "Updates", read from the cache file (`GET /api/updates`). The page makes no
+request and runs nothing; it shows `tt-orchard updates --refresh` as text to run in a terminal.
+
+To check once a day, run `tt-orchard updates --print-timer`. It prints a systemd user service and timer and a cron line as text and installs nothing.
+The scheduled command is `updates --refresh --fail-when-unknown --json`: it needs the network and no lease, and it exits 3 when every row is unknown,
+so a failed run shows in `systemctl --user status tt-orchard-updates.service` and in the journal.
 
 ## 6. Lessons that will bite you
 

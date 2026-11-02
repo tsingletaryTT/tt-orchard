@@ -57,6 +57,9 @@ rate gate that read the wrong field, a card line that gives an inference as a me
 
 - Every pass, label and number names what it rests on. A missing input gives "not checked" or a refusal.
 - An inference carries its basis in the record (for example "judged by file age").
+- A card or run log that states a performance number answers the review questions in `docs/can-cards.md` ("Review questions for a
+  performance claim", from `common/tt-perf-claim-review` in tenstorrent/skills): warm or cold, how many runs, the host load, device
+  time or wall time, the same harness on both sides, absolute figures, and a fixed precision policy.
 - Test: remove the input and assert the output is "not checked". The output must not be a pass.
 
 ## 6. The check looks at a different object than the action uses

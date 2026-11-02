@@ -626,6 +626,42 @@ def test_a_longer_fence_is_closed_only_by_an_equal_or_longer_one():
     assert can.card_problems(text, "catalog") == []
 
 
+# ---- issue 365: the "catalog-measured" profile asks a performance section to state its conditions
+# (questions taken from tenstorrent/skills common/tt-perf-claim-review: warm or cold, how many runs, the load during the measurement)
+
+MEASURED_CARD = GOOD_CARD.replace(
+    "## Limitations",
+    "Median of 5 runs after 1 warm-up, kernels already compiled (warm kernel cache), host load average 0.4 during the runs.\n## Limitations")
+
+
+def test_a_card_that_states_its_conditions_passes_the_measured_profile():
+    assert can.card_problems(MEASURED_CARD, "catalog-measured") == []
+
+
+def test_the_plain_catalog_profile_does_not_ask_for_conditions():
+    assert can.card_problems(GOOD_CARD, "catalog") == []
+
+
+@pytest.mark.parametrize("sentence,words", [
+    ("Median of 5 runs, host load average 0.4.", "cache"),
+    ("Warm kernel cache, host load average 0.4.", "how many runs"),
+    ("Median of 5 runs, warm kernel cache.", "load"),
+])
+def test_each_missing_condition_is_named(sentence, words):
+    text = GOOD_CARD.replace("## Limitations", sentence + "\n## Limitations")
+    problems = can.card_problems(text, "catalog-measured")
+    assert len(problems) == 1 and words in problems[0], problems
+
+
+def test_the_measured_profile_still_requires_the_catalog_sections():
+    problems = can.card_problems("# toy\n", "catalog-measured")
+    assert any("Expected performance" in p for p in problems) and any("Limitations" in p for p in problems)
+
+
+def test_the_measured_profile_is_accepted_by_the_spec_loader(base):
+    assert edit_spec(base, 'mesh = "P150"', 'mesh = "P150"\ncard_profile = "catalog-measured"').card_profile == "catalog-measured"
+
+
 def test_no_profile_means_no_card_check():
     assert can.card_problems("# toy\n", None) == []
 

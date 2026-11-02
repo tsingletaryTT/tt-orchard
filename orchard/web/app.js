@@ -1721,7 +1721,46 @@ async function loadCaches() {
   }
 }
 
+// ---- updates: the rows of `tt-orchard updates` on the Models view (orchard/updates_view.py) ------------------------
+// Read only: one GET of /api/updates when the view opens. The page never asks for a new check; it shows the command to run.
+const UPDATES_MARK = { good: "●", warn: "▲", bad: "■", dim: "○" };
+
+async function loadUpdates() {
+  try {
+    S.updates = await api("/api/updates");
+  } catch (err) {
+    $("updates-note").hidden = false;
+    $("updates-note").textContent = `The page cannot read the updates cache: ${err.message}`;
+    return;
+  }
+  renderUpdates();
+}
+
+function renderUpdates() {
+  const d = S.updates;
+  if (!d) return;
+  $("updates-cmd").textContent = d.run_command;
+  $("updates-age").textContent = d.checked_age_s === null ? "" : `checked ${Math.round(d.checked_age_s / 60)} min ago`;
+  const note = $("updates-note");
+  note.hidden = !d.note;
+  note.textContent = d.note || "";
+  $("updates-table").hidden = d.rows.length === 0;
+  const body = clear($("updates-body"));
+  for (const r of d.rows) {
+    const more = [];
+    if (r.proposal.length) more.push(h("div", { class: "muted small" }, "To upgrade, run yourself: ", ...r.proposal.map((p) => h("code", {}, p))));
+    body.append(h("tr", { dataset: { tone: r.tone } },
+      h("td", {}, h("span", { class: "mark", "aria-hidden": "true" }, UPDATES_MARK[r.tone] || UPDATES_MARK.dim), " ", h("strong", {}, r.label)),
+      h("td", { class: "wrap" }, r.item, ...more),
+      h("td", { class: "wrap" }, `${r.installed} (${r.installed_age})`),
+      h("td", { class: "wrap" }, `${r.upstream} (${r.upstream_age})`),
+      h("td", { class: "wrap" }, r.moves_with.join("; ") || "–"),
+      h("td", { class: "wrap" }, r.ready)));
+  }
+}
+
 async function loadSettings() {
+  loadUpdates();
   $("settings-error").hidden = true;
   try {
     S.settings = await api("/api/settings");

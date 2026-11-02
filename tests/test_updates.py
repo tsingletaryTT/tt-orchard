@@ -409,3 +409,93 @@ def test_dev_wheel_is_read_from_the_newest_month_directory(tmp_path):
                       (200, b"tt_lang_light-9.9.9.dev20270101-py3-none-any.whl", "") if u.endswith("2026-10/") else (404, b"", "x")))
     r = row(run(tmp_path, dev)[0], "tt-lang")
     assert r.status == CANDIDATE and "9.9.9.dev20270101" in r.upstream
+
+
+# ---- issue 230: the schedule is printed as text, never installed ------------------------------------------------
+
+def test_timer_text_has_a_service_a_timer_and_a_cron_line():
+    t = updates.timer_text()
+    assert "[Service]" in t and "[Timer]" in t and "OnCalendar=daily" in t and "Persistent=true" in t
+    assert "ExecStart=/usr/bin/env tt-orchard updates --refresh --fail-when-unknown --json" in t
+    assert "tt-orchard updates --refresh --fail-when-unknown" in t.split("cron", 1)[1]
+
+
+def test_timer_text_runs_no_lease_and_names_a_failure_report():
+    t = updates.timer_text()
+    assert "gozer" not in t                      # network only: no board, no lease
+    assert "systemctl --user status tt-orchard-updates.service" in t
+    assert "--refresh" in t                      # a daily refresh keeps the preflight line inside the 6-hour cache
+
+
+def test_timer_text_is_printed_by_the_command_and_installs_nothing(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    class A:
+        print_timer = True
+    assert updates.main(A()) == 0
+    assert "[Timer]" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_fail_when_unknown_exits_3_if_every_row_is_unknown(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setenv("ORCHARD_VERIFICATIONS", str(tmp_path / "none.json"))
+    class A:
+        fail_when_unknown = True
+        refresh = True
+        offline = True
+        json = True
+    # offline: every network row is unknown, and nothing is cached
+    no_tools = Tools(offline=True, run=lambda argv, timeout, env=None: (127, "", "none"), which=lambda name: False)
+    rc = updates.main(A(), tools=no_tools, skills=None, now=NOW)
+    assert rc == 3
+    assert "every row is unknown" in capsys.readouterr().out
+    A.fail_when_unknown = False
+    assert updates.main(A(), tools=no_tools, skills=None, now=NOW) == 0
+
+
+# ---- issue 232: a repository with no release or tag is compared by the version in its pyproject.toml on the main branch ----
+
+def _pyproject_answer(text: str):
+    import base64
+    return j({"encoding": "base64", "content": base64.b64encode(text.encode()).decode()})
+
+
+def _tm_row(pyproject, rel=(404, b"", "HTTP 404"), tags=None, local="0.1.0\n"):
+    net = Net([("https://api.github.com/repos/tenstorrent/tt-model-manager/releases/latest", rel),
+               ("https://api.github.com/repos/tenstorrent/tt-model-manager/tags", j([] if tags is None else tags)),
+               ("https://api.github.com/repos/tenstorrent/tt-model-manager/contents/pyproject.toml", pyproject)])
+    tools = Tools(net, Runs({"tt-model --version": (0, local, "")}), environ={}, which=lambda n: True)
+    return updates.check_tool(tools, updates.load_config(None), "tt-model-manager", "tt-model", "tt-model-manager", "upgrade"), net
+
+
+def test_no_tag_falls_back_to_the_pyproject_version():
+    row, net = _tm_row(_pyproject_answer('[project]\nname = "tt-model"\nversion = "0.2.0"\n'))
+    assert row.status == BEHIND and row.upstream == "0.2.0 (pyproject.toml on the default branch)"
+    row2, _ = _tm_row(_pyproject_answer('[project]\nversion = "0.1.0"\n'))
+    assert row2.status == CURRENT
+    assert all(u.startswith("https://api.github.com/") for u, _h, _t in net.seen)      # a GET to an allowed host only
+
+
+def test_a_tag_wins_over_the_pyproject():
+    row, net = _tm_row(_pyproject_answer('[project]\nversion = "9.9.9"\n'), tags=[{"name": "v0.1.0", "commit": {"sha": "d" * 40}}])
+    assert row.upstream == "v0.1.0" and row.status == CURRENT
+    assert not any("contents/pyproject" in u for u, _h, _t in net.seen)
+
+
+@pytest.mark.parametrize("text", ['[project]\ndynamic = ["version"]\n', "not = [toml", '[project]\nversion = 3\n', '[project]\nversion = "x"\n'])
+def test_a_pyproject_without_a_usable_version_stays_unknown_with_a_reason(text):
+    row, _ = _tm_row(_pyproject_answer(text))
+    assert row.status == UNKNOWN and "pyproject.toml" in row.why
+
+
+def test_a_pyproject_over_the_size_cap_is_not_read():
+    big = '[project]\nversion = "0.2.0"\n' + "# padding\n" * 12000
+    row, _ = _tm_row(_pyproject_answer(big))
+    assert row.status == UNKNOWN and "too large" in row.why
+
+
+def test_a_hostile_pyproject_answer_stays_unknown():
+    for bad in (j({"content": 5, "encoding": "base64"}), j({"content": "!!!notb64", "encoding": "base64"}), j([]),
+                j({"content": "A" * 400000, "encoding": "base64"}), (404, b"", "HTTP 404")):
+        row, _ = _tm_row(bad)
+        assert row.status == UNKNOWN

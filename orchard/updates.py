@@ -296,6 +296,32 @@ def _github_latest(tools: Tools, repo: str):
     return None, None, None, why2 or why or "no answer"
 
 
+PYPROJECT_MAX = 48 * 1024      # choice: a pyproject.toml is a few KB; the base64 text of a larger one is not read
+
+
+def _pyproject_version(tools: Tools, repo: str):
+    """(version, why) from `[project] version` of pyproject.toml on the repository's default branch, through the GitHub contents
+    API (an allowed host). Used only when the repository has no release and no tag (issue 232). A dynamic version, a bad answer or a
+    version without digits gives (None, reason)."""
+    import base64
+    import binascii
+    import tomllib
+    doc, why = tools.json(f"https://api.github.com/repos/{repo}/contents/pyproject.toml")
+    if not isinstance(doc, dict) or not isinstance(doc.get("content"), str) or doc.get("encoding") != "base64":
+        return None, f"pyproject.toml on the default branch could not be read ({why or 'unexpected answer'})"
+    if len(doc["content"]) > PYPROJECT_MAX * 2:
+        return None, "pyproject.toml on the default branch is too large to read"
+    try:
+        data = tomllib.loads(base64.b64decode(doc["content"], validate=False).decode("utf-8"))
+    except (binascii.Error, ValueError, UnicodeDecodeError, RecursionError):
+        return None, "pyproject.toml on the default branch is not valid TOML"
+    proj = data.get("project") if isinstance(data, dict) else None
+    ver = proj.get("version") if isinstance(proj, dict) else None
+    if not isinstance(ver, str) or vtuple(ver) is None:
+        return None, "pyproject.toml on the default branch has no static [project] version"
+    return clean(ver, 40), ""
+
+
 def _newest_tag(tags: list):
     best = None
     for t in tags[:LIST_MAX]:
@@ -331,11 +357,20 @@ def check_tool(tools: Tools, cfg: dict, key: str, argv0: str, label: str, upgrad
         row.why = f"{argv0} --version gave no version"
         return row
     row.installed = ".".join(map(str, local))
-    tag, _sha, date, why = _github_latest(tools, cfg["repos"].get(key, ""))
+    repo = cfg["repos"].get(key, "")
+    tag, _sha, date, why = _github_latest(tools, repo)
+    pyproject = False
+    if tag is None and why.endswith("has no release or tag with a version"):
+        # No release and no tag to compare with: use the version the default branch declares, and say so in the row.
+        ver, pwhy = _pyproject_version(tools, repo)
+        if ver is None:
+            row.why = f"upstream: {why}; {pwhy}"
+            return row
+        tag, date, pyproject = ver, None, True
     if tag is None:
         row.why = f"upstream: {why}"
         return row
-    row.upstream, row.upstream_date = tag, date
+    row.upstream, row.upstream_date = (f"{tag} (pyproject.toml on the default branch)" if pyproject else tag), date
     up = vtuple(tag)
     if up is None:
         row.why = "the upstream tag has no version number"
@@ -634,8 +669,53 @@ def hint_from_cache(path: Path | None = None) -> str | None:
     return f"updates ({'; '.join(bits)}). Run `tt-orchard updates` for details."
 
 
+UNIT = "tt-orchard-updates"
+
+
+def timer_text(exec_cmd: str = "/usr/bin/env tt-orchard") -> str:
+    """The text of a systemd user service and timer and of a cron line that run `updates --refresh` once a day (issue 230).
+    Printed for a person to install; orchard installs nothing. The check needs the network only: no lease, no chip. The preflight
+    line reads the cache, which lasts 6 hours, so a daily run keeps it from going stale only on days the box is on; `Persistent=true`
+    runs a missed run at the next start. A failed run shows in `systemctl --user status` and the journal, because
+    `--fail-when-unknown` makes the command exit 3 when every row is unknown (no network, or every call failed)."""
+    cmd = f"{exec_cmd} updates --refresh --fail-when-unknown"
+    return "\n".join([
+        f"# systemd user units. Save as ~/.config/systemd/user/{UNIT}.service and ~/.config/systemd/user/{UNIT}.timer, then run",
+        f"#   systemctl --user daemon-reload && systemctl --user enable --now {UNIT}.timer",
+        f"# Orchard does not install them. The check is read only and needs the network, not a lease.",
+        f"# A failed run shows in: systemctl --user status {UNIT}.service   (and: journalctl --user -u {UNIT}.service)",
+        "",
+        f"# {UNIT}.service",
+        "[Unit]",
+        "Description=tt-orchard updates check (read only)",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        f"ExecStart={cmd} --json",
+        "",
+        f"# {UNIT}.timer",
+        "[Unit]",
+        "Description=Run the tt-orchard updates check once a day",
+        "",
+        "[Timer]",
+        "OnCalendar=daily",
+        "Persistent=true",
+        "RandomizedDelaySec=15min",
+        "",
+        "[Install]",
+        "WantedBy=timers.target",
+        "",
+        "# cron, if you prefer it (crontab -e). cron mails a failed run's output to you when mail is set up:",
+        f"17 6 * * * {cmd} --json > /dev/null",
+        "",
+    ])
+
+
 def main(args, *, out=None, tools: Tools | None = None, skills=None, now: float | None = None) -> int:
     say = (lambda s: print(s, file=out)) if out is not None else print
+    if getattr(args, "print_timer", False):
+        say(timer_text().rstrip("\n"))
+        return 0
     try:
         cfg = load_config(getattr(args, "updates_config", None))
     except ConfigError as exc:
@@ -674,4 +754,7 @@ def main(args, *, out=None, tools: Tools | None = None, skills=None, now: float 
             say(note)
         for line in render(rows, now):
             say(line)
+    if getattr(args, "fail_when_unknown", False) and rows and all(r.status == UNKNOWN for r in rows):
+        say("updates: every row is unknown, so the check learned nothing (no network, or every call failed). Exit 3.")
+        return 3
     return 0
