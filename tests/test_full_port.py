@@ -261,6 +261,32 @@ def test_a_marker_whose_chips_are_not_a_list_is_a_reason_and_not_a_crash(tmp_pat
     assert one(reasons(tmp_path, marker={"chips": 2}), "chips")
 
 
+def test_a_nul_in_a_port_source_path_is_a_reason_and_not_a_crash(tmp_path):
+    bad = {"path": "stages/2/port/model\u0000.py", "sha256": "0" * 64, "role": "model"}
+    g = reasons(tmp_path, record={"port_sources": [bad]})
+    assert one(g, "port_sources")
+
+
+def test_a_nul_in_an_evidence_path_is_a_reason_and_not_a_crash(tmp_path):
+    g = reasons(tmp_path, result={"evidence": ["stages/2/evidence/port-check.json", "stages/2/evidence/hw-test-output.txt", "a\u0000b"]})
+    assert one(g, "evidence")
+
+
+def test_the_marker_record_is_read_with_a_bound_and_a_fifo_is_refused_without_blocking(tmp_path):
+    import os
+    run = tmp_path / "run"
+    (run / "stages" / "2").mkdir(parents=True)
+    fifo = run / "stages" / "2" / "test-result.json"
+    os.mkfifo(fifo)
+    assert full_port.file_record(run, fifo) is None          # a blocking open would hang here
+    plain = run / "stages" / "2" / "ok.json"
+    plain.write_text("{}")
+    assert full_port.file_record(run, plain) == {"path": "stages/2/ok.json", "sha256": sha("{}")}
+    link = run / "stages" / "2" / "zero.json"
+    os.symlink("/dev/zero", link)
+    assert full_port.file_record(run, link) is None
+
+
 @pytest.mark.parametrize("load", [None, "120.5", 0, -1, True])
 def test_a_record_without_a_positive_numeric_load_time_is_refused(tmp_path, load):
     # result.json carries 120.5; with no number in the record nothing supports it.

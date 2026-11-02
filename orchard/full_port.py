@@ -63,11 +63,14 @@ def _ids(x) -> bool:
 
 def _inside(run_dir, rel) -> Path | None:
     """The regular file `rel` names inside the run directory (links resolved), or None."""
-    if not isinstance(rel, str) or not rel or os.path.isabs(rel):
+    if not isinstance(rel, str) or not rel or os.path.isabs(rel) or "\0" in rel:
         return None
-    root = os.path.realpath(run_dir)
-    p = os.path.realpath(os.path.join(root, rel))
-    if os.path.commonpath([root, p]) != root or not os.path.isfile(p):
+    try:
+        root = os.path.realpath(run_dir)
+        p = os.path.realpath(os.path.join(root, rel))
+        if os.path.commonpath([root, p]) != root or not os.path.isfile(p):
+            return None
+    except (ValueError, OSError):
         return None
     return Path(p)
 
@@ -88,6 +91,17 @@ def _json(path, what: str, reasons: list):
                        else f"{what} is not readable JSON: {exc.reason}")
         return None
     return data
+
+
+def file_record(run_dir, path) -> dict | None:
+    """{"path": run-relative path, "sha256"} of the file at `path`, read through the bounded safe reader, or None when the reader refuses it
+    (a FIFO, a device, a link, a file over the cap) or it is missing. The same shape as orchard/stages.py `evidence_record`, which opens
+    the file without those limits and would block on a FIFO."""
+    try:
+        digest = hashlib.sha256(safeio.read_bytes(path, max_bytes=JSON_MAX)).hexdigest()
+        return {"path": os.path.relpath(os.path.realpath(path), os.path.realpath(run_dir)), "sha256": digest}
+    except (safeio.SafeReadError, OSError, ValueError):
+        return None
 
 
 def agreement(reference: list, chip: list) -> float:
