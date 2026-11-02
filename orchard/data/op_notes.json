@@ -1,0 +1,33 @@
+{
+ "aten.unflatten.int": {
+  "reason": "a view: it splits one dimension into several, which ttnn.reshape does (decomposed to aten.view.default, whose ttnn name is reshape)",
+  "evidence": "docs/run-logs/2026-11-02-qwen4-ops-probe.md: the gated residual (hyper-connection) built from ttnn ops with ttnn.reshape matched the reference, mixed output PCC 0.99996 and injection weights PCC 0.9995. The ops come from the attn_hyper_connection, mlp_hyper_connection and ple modules. The ple module was not run on its own"
+ },
+ "aten.eye.default": {
+  "host": true,
+  "reason": "a constant: the identity matrix that the chunked gated delta rule adds to its triangular system. ttnn.transformer.chunk_gated_delta_rule takes optional eye, tril, ones and mask constants, which the host can build once and pass in",
+  "evidence": "transformers 5.19.0 modeling_qwen4_exp.py (the GDN chunk path, torch.eye(chunk_size)); docs/run-logs/2026-11-02-qwen4-ops-probe.md ran chunk_gated_delta_rule without the constants and matched the reference (PCC at least 0.99998). Passing the constants was not tried"
+ },
+ "aten.cummax.default": {
+  "host": true,
+  "reason": "the EOS-aware shift of the n-gram embedding. ttnn 0.80.0 has no cummax. The upstream port runs the token hash, this shift and the lookup in the 102 GB embedding table on the host",
+  "evidence": "transformers 5.19.0 modeling_qwen4_exp.py (torch.cummax over EOS positions); docs/run-logs/2026-11-02-qwen4-new-ops.md (n-gram embedding row). The trace places it in the ple_embedding module"
+ },
+ "aten.diff.default": {
+  "host": true,
+  "reason": "attention-mask preparation, which is not model math. It finds the boundaries of packed sequences from position_ids, an integer input, on the host before the device runs. It is device-relevant only if serving packs several sequences into one batch row; then the host must build the mask that implies",
+  "evidence": "transformers 5.19.0 masking_utils.py, find_packed_sequence_indices (torch.diff of position_ids), reached from create_causal_mask, which Qwen4ExpModel calls at the top level. The trace places it in the top-level module"
+ },
+ "aten.histc.default": {
+  "reason": "part of the reference expert loop (count tokens per expert, sort, run grouped matmuls). The device path replaces the whole mlp.experts module with ttnn.experimental.moe_compute, so this op is not built from ttnn ops. See the moe_experts group, which is not verified",
+  "evidence": "the Qwen4Exp experts class in transformers 5.19.0; the trace places the op only inside mlp.experts. A dense Qwen4 has no mlp.experts module and none of these ops (docs/run-logs/2026-11-02-dense-qwen4-prep.md)"
+ },
+ "aten.index_put_.default": {
+  "reason": "part of the reference expert loop (it writes the sort order back). The device path replaces the whole mlp.experts module with ttnn.experimental.moe_compute, so this op is not built from ttnn ops. See the moe_experts group, which is not verified",
+  "evidence": "the Qwen4Exp experts class in transformers 5.19.0; the trace places the op only inside mlp.experts. A dense Qwen4 has no mlp.experts module and none of these ops (docs/run-logs/2026-11-02-dense-qwen4-prep.md)"
+ },
+ "transformers.grouped_mm_fallback.default": {
+  "reason": "part of the reference expert loop (the grouped matmuls of the routed experts). The device path replaces the whole mlp.experts module with ttnn.experimental.moe_compute, so this op is not built from ttnn ops. See the moe_experts group, which is not verified",
+  "evidence": "the Qwen4Exp experts class in transformers 5.19.0; the trace places the op only inside mlp.experts. A dense Qwen4 has no mlp.experts module and none of these ops (docs/run-logs/2026-11-02-dense-qwen4-prep.md)"
+ }
+}
