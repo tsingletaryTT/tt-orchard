@@ -29,9 +29,14 @@ def test_no_file_gained_raw_file_access():
           "`# hardening: ok <reason>`. See docs/pr-hardening-checklist.md.")
 
 
-def test_the_counter_counts_what_it_says(tmp_path):
+def _count(tmp_path, source: str) -> int:
     f = tmp_path / "m.py"
-    f.write_text("\n".join([
+    f.write_text(source, encoding="utf-8")
+    return hb.count_file(f)
+
+
+def test_the_counter_counts_what_it_says(tmp_path):
+    src = "\n".join([
         "a = p.read_text()",                               # 1
         "b = p.read_bytes() + q.read_bytes()",             # 2
         "p.write_text('x')",                               # 1
@@ -42,8 +47,38 @@ def test_the_counter_counts_what_it_says(tmp_path):
         "# p.read_text()",                                 # a comment
         "c = p.read_text()  # hardening: ok our own file", # marked
         "def reopen(x): pass",                             # not open(
-    ]) + "\n", encoding="utf-8")
-    assert hb.count_file(f) == 6
+    ]) + "\n"
+    assert _count(tmp_path, src) == 6
+
+
+def test_the_guarded_reader_is_not_raw_access(tmp_path):
+    src = "import safeio\nx = safeio.read_bytes(p, max_bytes=10)\ny = orchard.safeio.read_bytes(p, max_bytes=10)\n"
+    assert _count(tmp_path, src) == 0
+
+
+def test_calls_with_odd_spacing_or_line_breaks_are_counted(tmp_path):
+    src = "a = open (p)\nb = p.read_bytes ()\nc = p.read_text(\n    encoding='utf-8')\nd = (\n    open\n)(p)\n"
+    assert _count(tmp_path, src) == 4
+
+
+def test_text_inside_strings_and_trailing_comments_is_not_a_call(tmp_path):
+    src = 'doc = "use p.read_text() or open(p)"\nx = 1  # p.read_bytes() would be raw\n"""p.write_text(x)"""\n'
+    assert _count(tmp_path, src) == 0
+
+
+def test_only_a_comment_can_mark_a_line_as_right_to_keep(tmp_path):
+    marked = "a = p.read_text()  # hardening: ok our own file\n"
+    in_string = "a = p.read_text(); s = 'hardening: ok'\n"
+    multi = "a = p.read_text(\n    encoding='utf-8')  # hardening: ok our own file\n"
+    assert _count(tmp_path, marked) == 0
+    assert _count(tmp_path, in_string) == 1
+    assert _count(tmp_path, multi) == 0
+
+
+def test_a_file_that_does_not_parse_is_an_error_not_a_zero(tmp_path):
+    import pytest
+    with pytest.raises(SyntaxError):
+        _count(tmp_path, "def broken(:\n")
 
 
 def test_the_baseline_has_no_entry_for_a_missing_file():
