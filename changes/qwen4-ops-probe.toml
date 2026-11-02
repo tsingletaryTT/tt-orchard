@@ -1,0 +1,3 @@
+target = "0.9.91"
+summary = "Qwen4-style ops probed on a chip: dilated depthwise ttnn.conv1d is wrong (shifted multiply-adds match), chunk and recurrent gated delta rule and a composed gated residual match torch at Flash-Next shapes, update_padded_kv_cache runs on a 1x1 mesh; probe scripts with CPU selftests."
+pr = 337
