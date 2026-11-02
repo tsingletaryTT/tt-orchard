@@ -516,6 +516,23 @@ def _stages_gate_delta(base: Path):
     return stages.gate_delta(base / "stage", base / "run")
 
 
+def _scoring_setup(base: Path):
+    """A record that names both stage 1 files, so the check goes on to read them, the marker and the config."""
+    import json
+    rec = base / "stage" / "evidence" / "scoring-check.json"
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    named = {"path": "stages/1/evidence/reference/scoring-reference.json", "sha256": "0" * 64}
+    rec.write_text(json.dumps({"schema": "orchard-scoring-check/1", "kind": "reranker", "reference": named,
+                               "pairs": {**named, "path": "stages/1/evidence/reference/scoring-pairs.json"}}))
+    (base / "run").mkdir(exist_ok=True)
+
+
+def _scoring_check(base: Path):
+    from orchard import scoring_check
+    (base / "run").mkdir(exist_ok=True)
+    return scoring_check.check(base / "stage", base / "run")
+
+
 def _package_read_reported(base: Path):
     from orchard import package
     return package.read_reported(base)
@@ -844,6 +861,11 @@ READERS: list[Reader] = [
     Reader("safeio.read_text_checked", _safeio_read_text_checked),
     Reader("safeio.sha256_file", _safeio_sha256_file, documented=(_SafeReadError,)),
     Reader("stages.gate_delta", _stages_gate_delta, rel="stage/delta.json"),
+    Reader("scoring_check.check (hostile record)", _scoring_check, rel="stage/evidence/scoring-check.json"),
+    Reader("scoring_check.check (hostile marker)", _scoring_check, rel="stage/test-result.json", setup=_scoring_setup),
+    Reader("scoring_check.check (hostile config)", _scoring_check, rel="stage/scoring_check_config.json", setup=_scoring_setup),
+    Reader("scoring_check.check (hostile reference)", _scoring_check, rel="run/stages/1/evidence/reference/scoring-reference.json", setup=_scoring_setup),
+    Reader("scoring_check.check (hostile pair file)", _scoring_check, rel="run/stages/1/evidence/reference/scoring-pairs.json", setup=_scoring_setup),
     Reader("package.read_reported", _package_read_reported, rel="reported-results.json", documented=(_PackageError,)),
     Reader("package._json", _package_json, documented=(_PackageError,)),
     Reader("audio_package.read_json_file", _audio_package_read_json_file, documented=(_AudioPackageError,)),
