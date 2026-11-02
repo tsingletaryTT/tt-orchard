@@ -1,0 +1,3 @@
+target = "0.9.95"
+summary = "Scoring models: stage 1 reranker reference, supervisor-owned scoring check template and gate (issue 358, first slice; no hardware run)"
+pr = 383
