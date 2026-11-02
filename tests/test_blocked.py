@@ -20,6 +20,7 @@ def pause(reason, **extra):
     (pause(FULL_PORT), "needs-new-model-code"),
     (pause("3 escalations since the last resume (cap 3)"), "retry-budget-spent"),
     (pause("3 cold coder boots since the last resume (cap 3)"), "retry-budget-spent"),
+    (pause("12 cold park restores since the last resume (cap 12); 130 minutes were spent waiting for the coder"), "retry-budget-spent"),
     (pause("the run has lasted 90000 s since it started or was last resumed (cap 86400 s)"), "retry-budget-spent"),
     (pause("stage 2 failed after escalation: serves is false"), "stage-failed"),
     (pause("stage 7 (package) failed; it is supervisor code and is not escalated: x"), "stage-failed"),

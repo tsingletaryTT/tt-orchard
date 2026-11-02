@@ -58,6 +58,7 @@ def test_a_model_request_may_outlast_the_measured_prefill():
 
 def test_run_caps_allow_one_escalation_and_one_relaunch():
     assert d.RUN_ESCALATION_CAP >= 1 and d.RUN_COLD_BOOT_CAP >= 2
+    assert d.RUN_PARK_BOOT_CAP > d.RUN_COLD_BOOT_CAP        # parks are planned, so their cap is the looser one
 
 
 def test_a_cold_boot_is_told_apart_from_a_warm_restart():

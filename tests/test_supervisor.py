@@ -207,6 +207,31 @@ def test_the_escalation_cap_pauses_the_run(rig):
         (4, "3 escalations since the last resume (cap 3)")]   # before stage 4 runs again
 
 
+def test_planned_park_boots_do_not_spend_the_cold_boot_cap(rig, monkeypatch):
+    # Issue 317: a coder that holds every board parks at each hardware stage, and each restore is a cold
+    # boot. The rig parks once (stage 4), so the cap is lowered to 2: the first start plus that one park
+    # would reach it if the park counted. Every boot reports 30 minutes.
+    monkeypatch.setattr("orchard.stages.RUN_COLD_BOOT_CAP", 2)
+    rig.m.ready_s = 1800.0
+    assert rig.run() == EXIT_READY
+    restores = [e for e in rig.entries() if e["event"] == "restore" and e["data"].get("step") == "ready"]
+    assert restores and restores[0]["data"]["seconds"] == 1800.0, "the rig must park the coder with a cold boot"
+    assert not [d for d in rig.decisions() if d["decision"] == "pause"]
+
+
+def test_unplanned_cold_coder_starts_still_pause_the_run(rig):
+    # The guard that stays: starts that are not parks (the first start, a restart after a death) count.
+    from orchard.stages import budget_cap, run_progress
+    rig.m.ready_s = 1800.0
+    assert rig.run() == EXIT_READY
+    entries = rig.entries()
+    starts = [e for e in entries if e["event"] == "decision" and e["data"].get("decision") == "coder started"]
+    assert starts and starts[0]["data"]["ready_s"] == 1800.0
+    extra = [dict(starts[0]) for _ in range(2)]
+    p = run_progress(entries + extra)
+    assert "cold coder boots" in budget_cap(p, now=0.0)
+
+
 def test_a_full_port_pauses_before_stage_2(rig):
     full = {(0, "run"): {**FILES[(0, "run")], "delta.json": {**DELTA, "path": "full-port"}}}
     rig.script = lambda r: bringup(r, overrides=full)
