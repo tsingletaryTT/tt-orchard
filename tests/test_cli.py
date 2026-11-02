@@ -1115,3 +1115,10 @@ def test_bringup_passes_the_sampling_setting_to_the_supervisor_only_when_given(c
 def test_bringup_refuses_an_unknown_sampling_value(conf):
     with pytest.raises(SystemExit):
         run(conf, ["bringup", "Cloudflare/clef", "--sampling", "sometimes"])
+
+
+def test_bringup_passes_full_port_to_the_supervisor_only_when_asked(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--full-port" not in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--full-port"])
+    assert code == 0 and "--full-port" in rec.argv

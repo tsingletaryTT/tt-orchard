@@ -9,14 +9,14 @@ import pytest
 from orchard.stages import STAGES, resolve_skill, spec_for
 
 SKILLS = Path(__file__).resolve().parent.parent / "orchard" / "skills"
-LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "weights-swap-configs", "serving-check")
+LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "weights-swap-configs", "serving-check", "full-port-check")
 # Spec section 11: existing skills the stages use, referenced by name only.
 SPEC_EXISTING = {"model-bringup", "functional-decoder", "full-model", "multichip", "mesh-shrink",
                  "vllm-integration", "qualitative-check", "benchmark-model", "tt-device-usage",
                  "stage-review", "tti-release"}
 GATE_FILES = {"delta-triage": "delta.json", "reference-gate": "reference.json",
               "weights-swap-check": "result.json", "weights-swap-configs": "result.json",
-              "serving-check": "result.json"}
+              "serving-check": "result.json", "full-port-check": "result.json"}
 
 
 @pytest.mark.parametrize("name", LOCAL)
@@ -37,7 +37,8 @@ def test_no_stage_skill_names_a_lease_tool(name):
 
 def test_every_skill_the_table_names_is_local_or_named_in_the_spec():
     # Every path's table: stage 2 on the weights-only path names a different skill.
-    specs = {spec_for(s.number, path) for s in STAGES for path in ("weights-only", "full-port", None)}
+    specs = {spec_for(s.number, path, None, cls, full_port=fp) for s in STAGES for path in ("weights-only", "full-port", None)
+             for cls, fp in ((None, False), ("full-port", True))}
     for s in sorted(specs, key=lambda s: (s.number, s.skill)):
         if s.skip or s.harness:
             continue

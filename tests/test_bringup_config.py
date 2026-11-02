@@ -413,3 +413,11 @@ def test_the_sampling_setting_is_passed_only_when_the_caller_names_one(tmp_path)
         argv = bc.supervisor_argv(cfg, "Cloudflare/clef", sampling=value)
         assert argv[argv.index("--sampling") + 1] == value and supervisor.parse(argv).sampling == value
     assert supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef")).sampling is None
+
+
+def test_full_port_is_added_only_when_the_caller_asks(tmp_path):
+    cfg = load(tmp_path)
+    assert "--full-port" not in bc.supervisor_argv(cfg, "Cloudflare/clef")
+    argv = bc.supervisor_argv(cfg, "Cloudflare/clef", full_port=True)
+    assert "--full-port" in argv and supervisor.parse(argv).full_port is True
+    assert supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef")).full_port is False

@@ -125,6 +125,13 @@ def test_an_unreadable_record_counts_as_a_failure(tmp_path, data):
     assert got is not None and "test-result.json" in got["problem"]
 
 
+def test_a_fifo_in_place_of_the_record_counts_as_a_failure_and_does_not_block(tmp_path):
+    import os
+    os.mkfifo(tmp_path / "test-result.json")          # a blocking open would hang here
+    got = hardware_test_failure(tmp_path)
+    assert got is not None and "test-result.json" in got["problem"]
+
+
 def test_a_missing_record_counts_as_a_failure(tmp_path):
     got = hardware_test_failure(tmp_path)
     assert got is not None and "test-result.json" in got["problem"]

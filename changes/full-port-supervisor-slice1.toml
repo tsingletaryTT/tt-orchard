@@ -1,0 +1,4 @@
+target = "0.9.90"
+summary = "A class full-port model can go on under the supervisor with --full-port: stage 2 has the coder write the port, one hardware test compares its tokens with the CPU reference, and the gate recomputes the agreement."
+pr = 331
+kind = "feature"

@@ -157,7 +157,9 @@ from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpe
 from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
-                            resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for)
+                            resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
+                            FULL_PORT_ALLOWED, full_port_enabled, recorded_by_supervisor)
+from orchard import full_port
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -171,6 +173,9 @@ EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
+FULL_PORT_STAGES_UNBUILT = ("stage 2 of the full-port route passed; stages 3 to 6 for a full-port model are not built yet "
+                            "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md, slices 3 to 6), so a person reviews the "
+                            "result and decides whether to go on")
 RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted head (its lm_head is replaced by sidecar "
                    "rows); the harness does not serve that, so a person decides whether to go on")
 AUDIO_UNBUILT = ("stage 0 found an audio model; the audio path (its stage 1 and stage 2) is not built yet, and the text stages would "
@@ -452,8 +457,9 @@ def hardware_test_failure(stage_dir: Path) -> dict | None:
     shows the test succeeded."""
     path = stage_dir / "test-result.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        # The bounded reader refuses a FIFO or a device link instead of blocking on it (the finish step can replace this file).
+        data = safeio.read_json(path, max_bytes=1 << 20)
+    except (safeio.SafeReadError, OSError, ValueError) as exc:
         return {"returncode": None, "timed_out": None,
                 "problem": f"test-result.json could not be read: {exc}"}
     if not isinstance(data, dict):
@@ -565,8 +571,12 @@ class Supervisor:
                  package_added: bool = False, unattended: bool = False, lab=None,
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
-                 resume_aborted: bool = False, sampling: str = "auto"):
+                 resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False):
         self.run_dir = Path(run_dir).resolve()
+        # `--full-port` (docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md): the operator lets a class `full-port` model go on
+        # into the full-port stage 2. The ledger holds the answer (run_start, or a decision when the flag came on a resume); this is the
+        # request. `full_port_added` is set when the flag came on a resume of a run that started without it.
+        self.full_port, self.full_port_added = full_port, full_port_added
         # Whether the model's purpose needs sampling: "auto" reads it from stage 0's files, the others are the operator's word (orchard/sampling_choice.py).
         self.sampling = sampling
         # An abort is terminal unless the operator asks for this (`--resume-aborted`): then an operator's or a signal's abort is
@@ -833,6 +843,7 @@ class Supervisor:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                graft_trial=self.graft_trial, sampling=self.sampling,
+                               **({"full_port": True} if self.full_port else {}),
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
@@ -861,6 +872,9 @@ class Supervisor:
             # Options given on a resume of a run that started without them (build checked that
             # stage 7 has not started). Recorded once; a later resume reads them from here.
             self.ledger.append("decision", None, decision=PACKAGE_OPTIONS_SET, package=self.package)
+        if self.full_port_added and not full_port_enabled(self.ledger.read()):
+            # The flag came on a resume of a run that started without it (build checked that stage 2 has not started). Recorded once.
+            self.ledger.append("decision", None, decision=FULL_PORT_ALLOWED, by="--full-port")
         if self.credentials_visible:
             # Recorded at every start, because each start is a fresh acceptance by the operator.
             self.ledger.append("decision", None, decision="operator accepted visible credentials",
@@ -900,13 +914,16 @@ class Supervisor:
             if p.next_stage == 2 and self._full_port_unacknowledged():
                 self.ledger.append("decision", 2, decision="pause", reason=FULL_PORT)
                 continue
+            if p.next_stage == 3 and self._full_port_stages_unbuilt():
+                self.ledger.append("decision", 3, decision="pause", reason=FULL_PORT_STAGES_UNBUILT)
+                continue
             # The spec follows the path stage 0 chose, read from the ledger each time, so a
             # resumed run picks the same skill and gate as the run that crashed.
             entries = self.ledger.read()
             spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries),
                             run_class(entries, self.run_dir), stock=stock_params(entries) is not None,
                             audio_runtime=audio_runtime.selected(entries) is not None,
-                            text_runtime=text_runtime.selected(entries) is not None)
+                            text_runtime=text_runtime.selected(entries) is not None, full_port=full_port_enabled(entries))
             try:
                 if spec.needs_coder or self._coder_in_use():
                     self._ensure_coder()
@@ -934,11 +951,24 @@ class Supervisor:
             return False
         if text_runtime.selected(entries) is not None:
             return False          # the harness's text runtime is the full port for this model (orchard/text_runtime.py)
+        if full_port_enabled(entries) and run_class(entries, self.run_dir) == "full-port":
+            return False          # the operator started the run with --full-port; `unknown` and `restricted-head` keep their pauses
         # Unattended, a full port always blocks: an operator's resume is what lets an attended run go on
         # into the full-port stages, and no unattended retry may do that. A pause for a restricted head
         # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") in (FULL_PORT, RESTRICTED_HEAD) for e in entries)
+
+    def _full_port_stages_unbuilt(self) -> bool:
+        """A run the operator allowed to port (`--full-port`) has passed stage 2, and the stages after it for a full port are not built
+        (the design's slices 3 to 6). It pauses once, so one attended resume goes on into the generic stages. Unattended, it always blocks."""
+        entries = self.ledger.read()
+        if not full_port_enabled(entries) or run_class(entries, self.run_dir) != "full-port":
+            return False
+        if text_runtime.selected(entries) is not None:
+            return False
+        return self.unattended or not any(
+            e["event"] == "decision" and e["data"].get("reason") == FULL_PORT_STAGES_UNBUILT for e in entries)
 
     def _audio_unacknowledged(self) -> bool:
         """Stage 0 recorded modality audio, and the run has not yet paused for it. The audio stages are not built (plan
@@ -1904,6 +1934,14 @@ class Supervisor:
             forged = unrecorded(self.ledger.read(), stage_dir, self.run_dir, spec.number)
             if forged:
                 return GateResult(False, gate.reasons + tuple(forged), gate.evidence)
+        if spec.skill == "full-port-check":
+            # One hardware test, one marker. The finish step can write in the stage directory, so the marker has to be the file the
+            # supervisor wrote: its path and sha256 are in the ledger (`_run_test`). A marker edited after the test has no such entry.
+            found = full_port.file_record(self.run_dir, stage_dir / "test-result.json")      # bounded read: a FIFO or /dev/zero link is None
+            if found is None or not recorded_by_supervisor(self.ledger, spec.number, found):
+                return GateResult(False, gate.reasons + (
+                    "test-result.json is not the file the supervisor recorded when the hardware test ended (the ledger holds no "
+                    "matching entry), so its exit code cannot be trusted",), gate.evidence)
         return gate
 
     def _copy_package(self, bundle: Path) -> None:
@@ -3229,6 +3267,12 @@ def parse(argv=None):
                         "against greedy decoding, and for a model that needs sampling whose served configuration does not show sampling applied it "
                         "serves a drafter-off variant once and chooses by measurement. 'needed' and 'not-needed' are the operator's word. The run "
                         "records the choice and a resume keeps it")
+    r.add_argument("--full-port", action="store_true",
+                   help="let a model that stage 0 classed `full-port` go on: the local coder writes the port in stage 2 and one hardware "
+                        "test compares the chip's tokens with the CPU reference (skill full-port-check). Stages 3 to 6 for a full port are "
+                        "not built yet, so the run then pauses (unattended: ends blocked, code full-port-stages-unbuilt). The ledger records "
+                        "the flag and a resume keeps it. It can be added on a resume only before stage 2 has started. It changes nothing for "
+                        "any other class, and `unknown` and `restricted-head` still stop")
     r.add_argument("--resume-aborted", action="store_true",
                    help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
@@ -3325,6 +3369,15 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
         if given_route is not None and given_route != recorded_route:
             raise ValueError(f"this run started with text_runtime {recorded_route!r}; --input text_runtime={given_route} differs. Leave the input out to "
                              "resume with the recorded route, or move this run's directory aside and start a new run")
+    full_port_req = bool(getattr(args, "full_port", False))
+    full_port_added = False
+    if progress.started and full_port_req and not full_port_enabled(entries):
+        if any(e["event"] == "stage_start" and e["stage"] == 2 for e in entries):
+            raise ValueError("--full-port was not given when this run started, and stage 2 has begun without it. The flag can be added on a "
+                             "resume only before stage 2 starts. Move this run's directory aside and start a new run with the flag")
+        full_port_added = True                  # recorded as a decision by the supervisor's first step
+    if progress.started and full_port_enabled(entries):
+        full_port_req = False                   # a resumed run keeps what the ledger holds; nothing to request again
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
         graft_on = False                        # a run that opted out of the graft trial stays opted out
@@ -3395,6 +3448,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
                       sampling=sampling_mode,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
+                      full_port=full_port_req, full_port_added=full_port_added,
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
                       keep_up=bool(getattr(args, "coder_keep_up", False)),

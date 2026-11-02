@@ -674,6 +674,13 @@ UNBLOCK = {
         "unattended run cannot write that.",
         "Read stages/0/delta.json (`path_reasons`) for what differs. Choosing another nearest model or porting by "
         "hand is a person's decision; `tt-orchard bringup <MODEL>` blocks again until stage 0 finds weights-only."],
+    "full-port-stages-unbuilt": [
+        "The run was started with `--full-port`, stage 0 classed the model `full-port`, and stage 2 passed: the port in stages/2/port/ ran "
+        "on the leased chips and its tokens agreed with the CPU reference (stages/2/result.json and stages/2/evidence/port-check.json).",
+        "The stages after it for a full port (the full model, shrinking to fewer chips, the serving check, the benchmark) are not built "
+        "yet, so the run stops here on purpose. Read the stage 2 evidence and decide: replay the check command, or continue by hand. "
+        "Design and slices: docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md.",
+        "Running `tt-orchard bringup <MODEL> --full-port` again blocks again until those stages exist."],
     "restricted-head": [
         "The model is the nearest model's backbone with its lm_head cut down to a few sidecar rows. Stage 0 measured it: "
         "read stages/0/delta.json (`alignment` for how the names pair, `values` for whether the weights are the nearest model's, "

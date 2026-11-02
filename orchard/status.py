@@ -44,7 +44,7 @@ JSON (`--json`) is one object with these keys:
                       operator_commands is the number of control.done-* files in the run directory
     blocked          null, or {"code", "reason"} for a run that ended blocked
     pause            null, or {"reason", "kind", "detector", "stage"}; kind is watchdog, operator,
-                      stage_failed, blocked, budget, full_port or other
+                      stage_failed, blocked, budget, full_port, full_port_unbuilt or other
     last_events      the last 5 entries as {"seq", "ts", "event", "stage", "summary"}
     control_pending  the word in the `control` file, or null
     disk             {"run_dir_free_gb", "home_free_gb"} (decimal GB, as the supervisor counts)
@@ -189,6 +189,8 @@ def classify_pause(data: dict) -> tuple[str, str | None]:
         return "audio_unbuilt", None
     if "restricted head" in reason:
         return "restricted_head", None
+    if "full-port route" in reason:
+        return "full_port_unbuilt", None
     if "full port" in reason:
         return "full_port", None
     if "cap" in reason and ("since" in reason or "lasted" in reason):
@@ -316,7 +318,7 @@ HINT_RULES = (
      "a control word is waiting; wait 30 seconds and run status again."),
     ("same stage twice", lambda f: _paused(f) and f["pauses_at_stage"] >= 2,
      "the same stage has paused {pauses_at_stage} times; stop and ask a human."),
-    ("needs a human", lambda f: _paused(f, "full_port", "restricted_head", "audio_unbuilt", "blocked", "budget", "operator"),
+    ("needs a human", lambda f: _paused(f, "full_port", "full_port_unbuilt", "restricted_head", "audio_unbuilt", "blocked", "budget", "operator"),
      "this pause needs a decision; stop and ask a human."),
     ("resume once", lambda f: f["state"] == "paused",
      "resume once; if it pauses again at the same stage, stop and ask a human."),
