@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Issue 220: the chunked decoder's `host_layer` takes `sine=True` for the sine-gated feed-forward of the medium decoder's last layers. It must apply the
 sine gate, as `host_sliding_layer` and `ChipDecoder._layer` do. Nothing here uses a chip."""
-import torch  # noqa: F401  (a missing torch is a skip below)
 import pytest
 
-pytest.importorskip("torch")
+torch = pytest.importorskip("torch")
 
 import test_audio_chip_decoder as base  # noqa: E402  the module that loads chip_decoder and the library block helpers
 

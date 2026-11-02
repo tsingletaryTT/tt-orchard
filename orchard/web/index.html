@@ -142,6 +142,19 @@
           that is going keeps the models it started with.</p>
       </div>
       <p class="callout callout-warn" id="settings-running" hidden></p>
+      <section aria-labelledby="updates-h" class="tg-block" id="updates-block">
+        <h2 id="updates-h">Updates <span class="muted small" id="updates-age"></span></h2>
+        <p class="muted small">The rows of <code>tt-orchard updates</code>, read from its cache file. This page only reads: it makes no request and
+          runs nothing. To check again, run <code id="updates-cmd">tt-orchard updates --refresh</code> in a terminal and reload.</p>
+        <p class="tg-banner" id="updates-note" data-tone="warn" role="status" hidden></p>
+        <div class="table-wrap">
+          <table class="tg-table" id="updates-table" hidden>
+            <thead><tr><th scope="col">Status</th><th scope="col">Item</th><th scope="col">Installed</th><th scope="col">Newest upstream</th><th scope="col">Moves with</th><th scope="col">Ready to farm</th></tr></thead>
+            <tbody id="updates-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <form id="settings-form" class="settings-form" novalidate>
         <fieldset class="layouts">
           <legend>Chip layout <span class="muted small">the model each run boots on the chips</span></legend>

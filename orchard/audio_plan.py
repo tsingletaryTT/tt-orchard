@@ -201,7 +201,7 @@ def per_step_commands(item: dict, paths, stage_dir, reference_run_dir) -> list[d
     def run(name, device, extra):
         return [python, str(ACESTEP_RUN), "--device", device, *common, "--root", str(stage / f"acestep-root-{name}"), "--out", str(stage / name), *extra]
     return [{"name": "floor", "device": "cpu", "argv": run("floor", "cpu", ["--cpu-dtype", "bfloat16", "--teacher-forced", ref])},
-            {"name": "chip", "device": "chip", "argv": run("chip", "chip", ["--stepcheck", ref])},
+            {"name": "chip", "device": "chip", "argv": [paths.chip_python, *run("chip", "chip", ["--stepcheck", ref])[1:]]},
             {"name": "bars", "device": "cpu", "argv": [python, "-m", "orchard.step_bars", "--floor", str(stage / "floor.teacher.json"),
                                                       "--chip", str(stage / "chip.stepcheck.json"), "--run", ref, "--out", str(stage / "bars.json")]}]
 

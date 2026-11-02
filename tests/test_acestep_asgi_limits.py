@@ -59,6 +59,6 @@ def test_startup_puts_an_exact_ready_time_in_the_ready_line(tmp_path, monkeypatc
     asgi.startup(asgi.settings({"ACESTEP_WORK": str(tmp_path / "w"), "ACESTEP_FAST": "none"}))
     after = time.time()
     ready = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert before - 0.001 <= ready["ready_unix"] <= after + 0.001      # the stamp is rounded to a millisecond
+    assert before <= ready["ready_unix"] <= after
     assert 0 <= ready["since_import_s"] <= after - asgi.IMPORTED_AT + 1
     assert asgi.STATE["timeout_s"] > 0

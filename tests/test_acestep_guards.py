@@ -177,3 +177,20 @@ def test_private_tree_stops_when_the_result_would_still_lead_into_the_cache(tmp_
     monkeypatch.setenv("HF_HUB_CACHE", str(cache))
     with pytest.raises(SystemExit):
         run.build_private_tree(snap, cache / "models--x--y" / "private")     # a destination inside the cache
+
+
+def test_a_destination_inside_the_cache_is_refused_before_anything_is_deleted_or_written(tmp_path, monkeypatch):
+    """Review finding: the guard used to run after the delete and copy, so the refusal had already damaged the cache."""
+    cache = tmp_path / "hub"
+    snap = cache / "models--x--y" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    dest = cache / "models--x--y" / "private"
+    dest.mkdir()
+    (dest / "keep.json").write_text("original")
+    monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+    before = sorted(p.relative_to(cache).as_posix() for p in cache.rglob("*"))
+    with pytest.raises(SystemExit):
+        run.build_private_tree(snap, dest)
+    assert (dest / "keep.json").read_text() == "original"
+    assert sorted(p.relative_to(cache).as_posix() for p in cache.rglob("*")) == before

@@ -160,7 +160,7 @@ def startup(a):
     # `ready_unix` is the wall-clock time of this line, so whoever started the process gets the exact time to ready as `ready_unix` minus its own start time
     # instead of polling /health; `since_import_s` is the time from this module's import (after the interpreter started, before the inputs were checked).
     print(json.dumps({"event": "ready", "model": MODEL_ID, "revision": session.WEIGHTS_REVISION, "fast": list(session.fast),
-                      "load_s": round(time.perf_counter() - t0, 2), "ready_unix": round(now, 3), "since_import_s": round(now - IMPORTED_AT, 3)}), flush=True)
+                      "load_s": round(time.perf_counter() - t0, 2), "ready_unix": now, "since_import_s": round(now - IMPORTED_AT, 3)}), flush=True)
     return session.close
 
 

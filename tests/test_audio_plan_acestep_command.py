@@ -126,3 +126,10 @@ def test_run_references_gives_the_cpu_command_of_a_profile_item_absolute_out_and
     out, root = argv[argv.index("--out") + 1], argv[argv.index("--root") + 1]
     assert Path(out).is_absolute() and Path(root).is_absolute()
     assert Path(out).is_relative_to(stage) and Path(root).is_relative_to(stage)
+
+
+def test_the_chip_command_uses_the_chip_interpreter_and_the_cpu_commands_the_acestep_one(tmp_path):
+    """Review finding: with separate CPU and Tenstorrent environments the chip command must start in the one that has ttnn."""
+    item = ap.chip_plan(ACE, None)[0]
+    cmds = {c["name"]: c["argv"] for c in ap.per_step_commands(item, paths(**FULL), tmp_path / "s", tmp_path / "r")}
+    assert cmds["chip"][0] == "/c/python" and cmds["floor"][0] == "/a/python" and cmds["bars"][0] == "/a/python"

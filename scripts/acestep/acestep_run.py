@@ -125,6 +125,11 @@ def build_private_tree(snapshot, dest) -> None:
     """Makes `dest` a private copy of a weights snapshot that ACE-Step may write into (issue 264): everything except a large weight file is a copy (the handler may
     rewrite it; a tokenizer.json is large and is not a weight), and a large weight file is a link (only read). An old `dest` (a link or a directory) is replaced. Stops if the result still leads into the cache."""
     snapshot, dest = Path(snapshot), Path(dest)
+    # Judged before anything is deleted or written: the place `dest` occupies is its parent's resolved path plus its own name (a link at `dest` is
+    # replaced, not followed, so a checkpoints link that points into the cache but sits outside it is fine).
+    where = dest.parent.resolve() / dest.name
+    if any(_inside(where, c) for c in hf_cache_dirs()):
+        raise SystemExit(f"Hugging Face cache guard: {dest} is inside the Hugging Face cache; nothing was deleted or written")
     if dest.is_symlink():
         dest.unlink()
     elif dest.exists():
