@@ -129,25 +129,14 @@ def agreement(reference: list, chip: list) -> float:
     return sum(1 for a, b in zip(reference, chip) if a == b) / len(reference)
 
 
-def coherence_waived(stage_dir, *, rehearsal: bool) -> bool:
-    """True when the rehearsal option let this stage's result pass with `coherent` not true. The supervisor writes a ledger entry when it
-    is (issue 357). Only result.json is read, with the bounded reader; an unreadable file is False (the gate has already failed it)."""
-    if not rehearsal:
-        return False
-    try:
-        result = safeio.read_json(Path(stage_dir) / "result.json", max_bytes=JSON_MAX, expect=dict)
-    except safeio.SafeReadError:
-        return False
-    return result.get("coherent") is not True
-
-
-def check(stage_dir, run_dir, *, rehearsal: bool = False) -> tuple[list[str], list[str]]:
+def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = None) -> tuple[list[str], list[str]]:
     """(reasons, evidence paths) for a stage 2 directory of a full port. No reasons means the result passes.
 
     `rehearsal` is the operator's word, given by the supervisor from the run's ledger (`--full-port-rehearsal`, issue 357). A rehearsal
     model has random weights, so its free-run text is not readable. The option waives the `coherent` field and no other check: top-1
     agreement, the token count, the text floor (characters and words), the provenance checks and the port sources all still apply. The
-    argument is a keyword the caller sets; nothing in the stage directory can set it."""
+    argument is a keyword the caller sets; nothing in the stage directory can set it. `waived`, when given, receives the name of each
+    field the option waived, taken from the same read of result.json that the checks use, so the caller never reopens the file."""
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
     reasons: list[str] = []
     seen: list[str] = []
@@ -178,7 +167,10 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False) -> tuple[list[str], li
         if isinstance(failure, str) and failure.strip():
             reason += f"; the recorded failure: {failure.strip()[:500]}"
         reasons.append(reason)
-    if result.get("coherent") is not True and not rehearsal:
+    if result.get("coherent") is not True and rehearsal:
+        if waived is not None:
+            waived.append("coherent")
+    elif result.get("coherent") is not True:
         reasons.append(f"coherent must be true (the free-run text is readable), got {result.get('coherent')!r}")
     load = result.get("load_s")
     if not _num(load) or load <= 0:

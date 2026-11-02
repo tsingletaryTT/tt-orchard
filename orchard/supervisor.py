@@ -2011,8 +2011,7 @@ class Supervisor:
                 return GateResult(False, gate.reasons + (
                     "test-result.json is not the file the supervisor recorded when the hardware test ended (the ledger holds no "
                     "matching entry), so its exit code cannot be trusted",), gate.evidence)
-            rehearsal = full_port_rehearsal(self.ledger.read())
-            if gate.ok and full_port.coherence_waived(stage_dir, rehearsal=rehearsal):
+            if gate.ok and "coherent" in gate.waived:      # the gate's own read: result.json is not opened again
                 self.ledger.append("decision", spec.number, decision=REHEARSAL_WAIVED, field="coherent", by="--full-port-rehearsal",
                                    note="the model is a rehearsal with random weights; every other stage 2 check still applied")
         return gate

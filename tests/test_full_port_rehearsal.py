@@ -5,7 +5,6 @@ readable and `coherent` cannot be true. The option waives that one field. The op
 starts; the ledger holds it; nothing the coder writes can turn it on."""
 import pytest
 
-from orchard import full_port
 from orchard.stages import gate_full_port
 from test_full_port import build, one, reasons
 
@@ -52,7 +51,7 @@ def test_only_run_start_turns_the_option_on():
 
 def test_the_gate_reports_when_it_waived_the_field(tmp_path):
     stage_dir, run = build(tmp_path, result={"coherent": False})
-    assert full_port.coherence_waived(stage_dir, rehearsal=True) is True
-    assert full_port.coherence_waived(stage_dir, rehearsal=False) is False
-    good_dir, _ = build(tmp_path / "ok")
-    assert full_port.coherence_waived(good_dir, rehearsal=True) is False          # coherent was true: nothing was waived
+    assert gate_full_port(stage_dir, run, rehearsal=True).waived == ("coherent",)
+    assert gate_full_port(stage_dir, run, rehearsal=False).waived == ()
+    good_dir, good_run = build(tmp_path / "ok")
+    assert gate_full_port(good_dir, good_run, rehearsal=True).waived == ()          # coherent was true: nothing was waived

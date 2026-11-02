@@ -434,6 +434,25 @@ def test_with_the_rehearsal_flag_stage_2_passes_and_the_ledger_says_the_field_wa
     assert start["data"]["full_port_rehearsal"] is True
 
 
+def test_a_result_swapped_after_the_gate_read_it_still_gets_the_waiver_decision(rig, monkeypatch):
+    # A writer replaces result.json with `coherent: true` right after the gate's read. The waiver the gate applied is on its result, so the
+    # decision is written from that and the file is not opened again.
+    real = full_port.check
+
+    def swapping(stage_dir, run_dir, **kw):
+        out = real(stage_dir, run_dir, **kw)
+        path = stage_dir / "result.json"
+        path.write_text(json.dumps({**json.loads(path.read_text()), "coherent": True}))
+        return out
+    monkeypatch.setattr(full_port, "check", swapping)
+    make(rig, over={(2, "finish"): incoherent})
+    rig.args.full_port_rehearsal = True
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    assert len([d for d in rig.decisions() if d.get("decision") == supervisor.REHEARSAL_WAIVED]) == 1
+
+
 def test_the_rehearsal_flag_keeps_every_other_check(rig):
     make(rig, over={(2, "finish"): lambda good: {"result.json": {**good, "coherent": False, "top1_agreement": 0.5}}})
     rig.args.full_port_rehearsal = True
