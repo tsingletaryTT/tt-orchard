@@ -1417,3 +1417,19 @@ def test_a_package_that_the_graft_flags_refuse_is_a_clean_command_error(rig, mon
     monkeypatch.setattr(package_cmd.package, "stage_all", refuse)
     code, text, _ = run_cmd(rig, no_graft_mtp=True, step="stage")
     assert code == package_cmd.EXIT_REFUSED and "package: packaging: --no-graft-mtp" in text
+
+
+def test_a_refused_package_record_names_the_run_relative_file(rig, monkeypatch):
+    """Review of PR 403: the reason of a SafeReadError names no file. The command's message adds it."""
+    from orchard import safeio
+    real = package_cmd.evidence_record
+
+    def refusing(run, path):                      # only the record of package.json is refused
+        if str(path).endswith("package.json"):
+            raise safeio.TooLarge("the file is larger than 8 bytes")
+        return real(run, path)
+    monkeypatch.setattr(package_cmd, "evidence_record", refusing)
+    out = io.StringIO()
+    code = package_cmd.main(args(rig, step="stage"), out=out, extra_env=rig["extra_env"], hostname="testhost")
+    assert code == 2, out.getvalue()
+    assert "stages/7/package.json was refused" in out.getvalue() and "larger than" in out.getvalue()

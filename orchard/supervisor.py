@@ -155,7 +155,7 @@ from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (locate, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
@@ -2118,18 +2118,26 @@ class Supervisor:
         folder, so the operator reads them with the rest. Nothing is copied when no package was
         staged. The bundle scrub then searches these copies too."""
         s7 = self.run_dir / "stages" / "7"
-        # locate: a regular file inside the run directory (links resolved); a FIFO, a device or a link that leaves the run is not copied.
-        package_json = locate(self.run_dir, "stages/7/package.json")[0]
-        if package_json is None:
+        # Each file is read through a descriptor pinned on the run directory, one component at a time without following a link, with a size
+        # cap, and written with safeio.atomic_write. A file or a parent directory swapped for a link after a check, or a FIFO, is refused
+        # at the read and the file is not copied (review of PR 403). Nothing is copied when no package.json can be read.
+        wanted = [("stages/7/package.json", "package.json")]
+        wanted += [("stages/7/PUBLISH_COMMANDS.txt", "PUBLISH_COMMANDS.txt")]
+        wanted += [(os.path.relpath(card, self.run_dir), f"{card.parent.name}-README.md")
+                   for card in sorted((s7 / "package").glob("*/README.md"))]
+        got: dict[str, bytes] = {}
+        with safeio.pinned_root(self.run_dir) as pin:
+            for rel, name in wanted:
+                try:
+                    got[name] = safeio.read_bytes(rel, max_bytes=TEXT_MAX_BYTES, anchor=pin.fd)
+                except safeio.SafeReadError:
+                    continue
+        if "package.json" not in got:
             return
         dest = bundle / "package"
         dest.mkdir(exist_ok=True)
-        shutil.copyfile(package_json, dest / "package.json")
-        if (commands := locate(self.run_dir, "stages/7/PUBLISH_COMMANDS.txt")[0]) is not None:
-            shutil.copyfile(commands, dest / "PUBLISH_COMMANDS.txt")
-        for card in sorted((s7 / "package").glob("*/README.md")):
-            if (found := locate(self.run_dir, os.path.relpath(card, self.run_dir))[0]) is not None:
-                shutil.copyfile(found, dest / f"{card.parent.name}-README.md")
+        for name, data in got.items():
+            safeio.atomic_write(dest / name, data, mode=0o644)
 
     def _gate_feedback(self, spec, stage_dir: Path, step: AgentStep, gate):
         """The step ended "done" and the exit gate failed. Tell the same conversation what the gate

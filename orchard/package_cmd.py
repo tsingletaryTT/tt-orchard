@@ -61,6 +61,16 @@ class PackageCommandError(Exception):
     """The command refuses; the message says why."""
 
 
+def _record(run: Path, path) -> dict:
+    """`evidence_record`, with a refusal that names the run-relative file (review of PR 403): the reason of a SafeReadError says what was wrong
+    and not which file."""
+    try:
+        return evidence_record(run, path)
+    except safeio.SafeReadError as exc:
+        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(run))
+        raise PackageCommandError(f"{rel} was refused: {exc.reason}") from exc
+
+
 def _say(out, text: str = "") -> None:
     print(text, file=out, flush=True)
 
@@ -248,7 +258,7 @@ def _stage(run: Path, led: Ledger, args, entries, out, *, extra_env, hostname) -
         raise PackageCommandError(f"packaging: {exc}") from None
     names = [p["name"] for p in staged["profiles"]]
     led.append("evidence", 7, what="package staged", profiles=names,
-               **evidence_record(run, stage_dir / "package.json"))
+               **_record(run, stage_dir / "package.json"))
     _say(out, f"staged: {', '.join(names)}"
               + (f" (skipped: {len(staged['skipped_profiles'])})" if staged["skipped_profiles"] else ""))
     return stage_dir
@@ -431,7 +441,7 @@ def boot_step(run: Path, args, out, *, env, spawn, extra_env) -> int:
 def _finish(run: Path, led: Ledger, stage_dir: Path, out, *, hostname) -> int:
     result = stage_dir / "test-result.json"
     if result.is_file():
-        led.append("evidence", 7, what="package boot check", **evidence_record(run, result))
+        led.append("evidence", 7, what="package boot check", **_record(run, result))
     try:
         package.finish(run, stage_dir, hostname=hostname)
     except PackageError as exc:
@@ -707,7 +717,7 @@ def card_main(args, *, out=None, extra_env=None, hostname=None) -> int:
             led.append("decision", 7, decision="package card", benchmark=BENCHMARK_COPY,
                        model_key=args.model_key, base_key=args.base_key, rows=len(rows),
                        reported=bool(args.reported), identity_unverified=unverified,
-                       sha256=evidence_record(run, run / BENCHMARK_COPY)["sha256"])
+                       sha256=_record(run, run / BENCHMARK_COPY)["sha256"])
             for note in unverified:
                 _say(out, f"identity not verified (accepted by --accept-unverified-identity): {note}")
             ids = _packaged_identities(run)

@@ -2242,6 +2242,11 @@ VOUCHED_MARKERS = {
 }
 
 
+# Both entries of a move-aside are boundaries between attempts. "moving ..." is written before the rename, so a kill after the rename and a second
+# kill after the fresh directory is made still leave a boundary in the ledger (review of PR 403). "moved ..." follows the rename.
+MOVE_ASIDE_DECISIONS = ("moving the partial stage directory aside", "moved the partial stage directory aside")
+
+
 def recorded_by_supervisor(ledger, n: int, rec: dict, *, whats: tuple = ()) -> bool:
     """Does the ledger hold an evidence entry for stage `n` with this file's path and sha256? Supervisor._run_test appends one right
     after it writes the file. A file an agent wrote, or one changed after the record, has none.
@@ -2256,7 +2261,7 @@ def recorded_by_supervisor(ledger, n: int, rec: dict, *, whats: tuple = ()) -> b
     # boundary too: a kill between the rename and the move-aside entry leaves no entry, and the next attempt then starts a fresh
     # directory. A stage_start with resumed=True is not one: it comes after the record the attempt resumed from.
     start = max((i for i, e in enumerate(entries) if e.get("stage") == n and (
-        (e.get("event") == "decision" and e["data"].get("decision") == "moved the partial stage directory aside")
+        (e.get("event") == "decision" and e["data"].get("decision") in MOVE_ASIDE_DECISIONS)
         or (e.get("event") == "stage_start" and e["data"].get("resumed") is False))), default=-1) + 1
     return any(e.get("event") == "evidence" and e.get("stage") == n and e["data"].get("path") == rec["path"]
                and e["data"].get("sha256") == rec["sha256"]
@@ -2297,6 +2302,8 @@ def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple
         k = 1
         while (aside := d.with_name(f"{spec.number}.partial-{k}")).exists():
             k += 1
+        ledger.append("decision", spec.number, decision="moving the partial stage directory aside",
+                      path=os.path.relpath(aside, run_dir))
         os.rename(d, aside)
         ledger.append("decision", spec.number, decision="moved the partial stage directory aside",
                       path=os.path.relpath(aside, run_dir))
