@@ -128,6 +128,7 @@ from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
 from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, served_chat, stage0_scan
 from orchard import text_runtime
+from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
@@ -590,8 +591,11 @@ class Supervisor:
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
-                 full_port_rehearsal: bool = False):
+                 full_port_rehearsal: bool = False, stack_pins=None):
         self.run_dir = Path(run_dir).resolve()
+        # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
+        # supplied (the tests), and the record says nothing was compared. `_run_resumed` is set when a run starts on a ledger that has begun.
+        self.stack_pins, self._run_resumed = stack_pins, False
         # `--full-port` (docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md): the operator lets a class `full-port` model go on
         # into the full-port stage 2. The ledger holds the answer (run_start, or a decision when the flag came on a resume); this is the
         # request. `full_port_added` is set when the flag came on a resume of a run that started without it.
@@ -845,6 +849,7 @@ class Supervisor:
 
     def _run(self) -> int:
         p = run_progress(self.ledger.read())
+        self._run_resumed = bool(p.started)
         if p.aborted and self.resume_aborted and abort_can_resume(self.ledger.read()):
             # The operator asked to carry on after an abort. Recorded once, before any work; replay then clears the abort and any
             # pause the run was waiting in, and the run starts its coder again as after any stop.
@@ -1492,6 +1497,8 @@ class Supervisor:
             resuming = False
         stage_dir, resumed = open_stage_dir(self.run_dir, spec, resuming=resuming, ledger=self.ledger)
         self.ledger.append("stage_start", n, escalated=escalated, resumed=resumed)
+        if n == 0:
+            self._stage_0_stack_pins(stage_dir)
         self.actuator.clear()
         self.watchdog = self._watchdog(spec)
         status, reasons, gate = self._body_or_failure(spec, stage_dir, escalated, resumed)
@@ -1518,9 +1525,72 @@ class Supervisor:
         changes its call."""
         if spec.number == 4 and self.required_chips:
             return functools.partial(spec.gate, required=self.required_chips)
+        if spec.number == 0:
+            return self._with_stack_pins(spec.gate)
         if spec.skill == "full-port-check" and full_port_rehearsal(self.ledger.read()):
             return functools.partial(spec.gate, rehearsal=True)       # from the ledger: the coder cannot write it
         return spec.gate
+
+    def _with_stack_pins(self, base):
+        """Stage 0's gate plus the stack record's: the file must be the one the ledger recorded (its sha256), well formed, and hold no critical
+        hazard. A missing file or a missing ledger entry fails; it does not skip the check."""
+        def gate(stage_dir, run_dir):
+            result = base(stage_dir, run_dir)
+            extra = stack_pins_mod.gate_reasons(stage_dir, self._stack_pins_sha(stage_dir))
+            if not extra:
+                return result
+            return dataclasses.replace(result, ok=False, reasons=tuple(result.reasons) + tuple(extra))
+        return gate
+
+    def _homes(self) -> tuple:
+        """The home directories to show as <home> in text that reaches the ledger: the run's operator home and the invoking user's."""
+        return (str(self.paths.operator_home), str(self.home))
+
+    def _stack_pins_sha(self, stage_dir: Path) -> str | None:
+        """The sha256 of the newest `stack pins` evidence entry the ledger holds for this stage directory's record, else None."""
+        rel = os.path.relpath(Path(stage_dir) / stack_pins_mod.FILE, self.run_dir)
+        found = None
+        for e in self.ledger.read():
+            d = e.get("data") or {}
+            if e["event"] == "evidence" and e["stage"] == 0 and d.get("what") == "stack pins" and d.get("path") == rel:
+                found = d.get("sha256")
+        return found if isinstance(found, str) else None
+
+    def _stage_0_stack_pins(self, stage_dir: Path) -> None:
+        """Write stages/0/stack-pins.json (orchard/stack_pins.py) before the stage's agent starts, and record its hash in the ledger. A new run
+        that finds a critical hazard (a checkout more than 7 days behind, a transformers below the checkpoint's minimum or without its
+        architecture class) blocks with the named reasons. A resume, and a second attempt at this stage, hold the same findings as advisories.
+        The hash is taken from the bytes written, so a file swapped afterwards does not match it."""
+        entries = self.ledger.read()
+        seen_before = any(e["event"] == "evidence" and e["stage"] == 0 and (e.get("data") or {}).get("what") == "stack pins" for e in entries)
+        new_run = not (self._run_resumed or seen_before)
+        # A resumed stage keeps its directory, so the record and the ledger hash of the last attempt are still there. Remove the old file first:
+        # if this attempt cannot write a new one, the gate must not accept the old evidence.
+        try:
+            os.unlink(Path(stage_dir) / stack_pins_mod.FILE)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.ledger.append("decision", 0, decision="stack pins not written", reason=f"the old record could not be removed ({type(exc).__name__})")
+            self._block(0, "the stack record of an earlier attempt could not be removed, so this attempt cannot write its own. Fix the stage 0 directory, then run the command again")
+        try:
+            if self.stack_pins is not None:
+                rec, sha = self.stack_pins(stage_dir, new_run)
+            else:
+                rec = stack_pins_mod.unchecked_record("no stack comparison was supplied to this supervisor", new_run=new_run)
+                sha = stack_pins_mod.write_record(stage_dir, rec)
+        except (OSError, ValueError) as exc:        # no record: nothing may go on without one
+            self.ledger.append("decision", 0, decision="stack pins not written", reason=stack_pins_mod.redact(f"{type(exc).__name__}: {exc}", self._homes())[:200])
+            self._block(0, f"the stack freshness record could not be written ({type(exc).__name__}). Fix the stage 0 directory, then run the command again")
+        self.ledger.append("evidence", 0, what="stack pins", severity=rec["severity"], mode=rec["mode"],
+                           hazards=[h["name"] for h in rec["hazards"]], advisories=[a["name"] for a in rec["advisories"]],
+                           would_block=[a["name"] for a in rec["advisories"] if a.get("would_block")], blocking=bool(rec.get("blocking_requested")),
+                           findings=[{"name": f["name"], "reason": f["reason"][:300]} for f in rec["hazards"] + [a for a in rec["advisories"] if a.get("would_block")]],
+                           path=os.path.relpath(Path(stage_dir) / stack_pins_mod.FILE, self.run_dir), sha256=sha)
+        if rec["hazards"]:
+            why = "; ".join(f"{h['name']}: {h['reason']}" for h in rec["hazards"])
+            self._block(0, "the stack is stale for a new run (" + why[:900] + "). Update the named parts, or run the command again to go on "
+                           "with these as advisories", hazards=[h["name"] for h in rec["hazards"]])
 
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         self._wrapup_used = False           # at most one wrap-up per run of the stage body
@@ -3487,7 +3557,7 @@ def lab_problems(args, run_dir: Path, paths: RunPaths, inputs: dict) -> list[str
 
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
           probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
-          disk_usage=shutil.disk_usage, home=None, containers=None, environ=None, lab=None) -> Supervisor:
+          disk_usage=shutil.disk_usage, home=None, containers=None, environ=None, lab=None, stack_pins=None) -> Supervisor:
     """A Supervisor from parsed `run` arguments. Tests pass fakes for the machine. `environ`
     supplies $HF_HOME for the default --hf-home (default os.environ)."""
     # Everything that can be refused is checked before any external command runs.
@@ -3617,7 +3687,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
                       sampling=sampling_mode,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
-                      full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
+                      full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req, stack_pins=stack_pins,
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
                       keep_up=bool(getattr(args, "coder_keep_up", False)),
@@ -3648,6 +3718,21 @@ def run_paths(args, run_dir, recorded: dict | None, *, home, environ=None) -> Ru
     return paths
 
 
+def stack_check_for(sup, args, environ=None):
+    """The stack freshness comparison for a real run (orchard/stack_pins.py). Where each part lives: the tt-metal tree is $ORCHARD_TT_METAL_DIR
+    or tt-metal under the operator's home (as preflight finds it); the TT vLLM plugin checkout is $ORCHARD_TT_VLLM_DIR (branch
+    $ORCHARD_TT_VLLM_BRANCH, default main); the reference interpreter is the run's `reference_python` input, else $ORCHARD_REFERENCE_PYTHON; the checkpoint is the run's `model` input;
+    the skills clones are the --skills-dir values. $ORCHARD_STACK_PINS_OFFLINE makes no network call. A part that is not named is UNKNOWN."""
+    env = os.environ if environ is None else environ
+    metal = env.get("ORCHARD_TT_METAL_DIR") or str(Path(sup.paths.operator_home) / "tt-metal")      # the run's operator home, as preflight reads it
+    sources = stack_pins_mod.Sources(
+        model_dir=sup.inputs.get("model"), ref_python=sup.inputs.get("reference_python") or env.get("ORCHARD_REFERENCE_PYTHON"), tt_metal_dir=metal,
+        vllm_dir=env.get("ORCHARD_TT_VLLM_DIR"), vllm_branch=env.get("ORCHARD_TT_VLLM_BRANCH") or "main",
+        skills_dirs=tuple(str(d) for d in args.skills_dir), homes=(str(sup.paths.operator_home), str(sup.home)),
+        exclude_paths=(str(sup.run_dir),))
+    return stack_pins_mod.make_check(sources, probe_env=agent_env(sup.run_dir, extra=sup.extra_env), block=env.get(stack_pins_mod.BLOCK_ENV) == "1")
+
+
 def main(argv=None, *, home=None) -> int:
     args = parse(argv)
     if args.cmd == "control":
@@ -3668,6 +3753,13 @@ def main(argv=None, *, home=None) -> int:
             except (TierConfigError, ValueError, LedgerCorrupt) as exc:
                 print(f"refused: {exc}", file=sys.stderr)
                 return EXIT_REFUSED
+            if isinstance(sup, Supervisor):
+                # A real Supervisor always has `paths`, `inputs` and `home`; a test may hand main a stand-in that has none. Setting up the stack
+                # check must never refuse a run or change how a mid-run error is reported: without it the record says nothing was compared.
+                try:
+                    sup.stack_pins = stack_check_for(sup, args)
+                except Exception:
+                    sup.stack_pins = None
             # From here an error is not a refusal: the run had started, and run() has already
             # tried to release the hardware.
             try:
