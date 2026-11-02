@@ -525,3 +525,30 @@ def test_a_quoted_base_model_in_the_card_front_matter_matches_the_manifests_repo
     files.pop("package-record.json")
     _, text = run(FakeHub(files), tmp_path)
     assert line(text, "manifests").strip().startswith("ok"), text
+
+
+def test_a_trailing_comment_on_a_launcher_assignment_is_not_a_pin(tmp_path):
+    """Issue 288 (1): the whole-line comment was skipped, but `WEIGHTS_REVISION=<good>  # was WEIGHTS_REVISION=<old>` still scanned the comment."""
+    files = good_files()
+    files["run.sh"] = f"#!/bin/sh\nWEIGHTS_REVISION={REV}   # was WEIGHTS_REVISION={OTHER}\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert not line(text, "revision").strip().startswith("FAIL"), text
+
+
+def test_a_hash_inside_quotes_does_not_hide_a_launcher_pin(tmp_path):
+    files = good_files()
+    files["run.sh"] = f"#!/bin/sh\necho 'a # b'; WEIGHTS_REVISION={OTHER}\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "revision") and OTHER in line(text, "revision"), text
+
+
+@pytest.mark.parametrize("yaml", ["weights:\n  repo: other/model\n  revision: \"{rev}\"\n", "weights: {{repo: other/model, revision: {rev}}}\n"])
+def test_a_tt_model_yaml_weights_repo_other_than_the_model_fails(tmp_path, yaml):
+    """Issue 288 (3): only the weights revision was read from tt-model.yaml; the weights repository was not."""
+    files = good_files()
+    files["tt-model.yaml"] = (f"schema: \"5.1\"\nrepo: {REPO}\n" + yaml.format(rev=REV)).encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests") and "other/model" in line(text, "manifests"), text
