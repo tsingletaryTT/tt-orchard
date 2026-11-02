@@ -9,11 +9,12 @@ repository kept finding that such a call on a file something else controls can b
 or write through a refused path (docs/pr-hardening-checklist.md, items 1 and 2). New code should use orchard/safeio.py.
 
 Calls are found in the syntax tree, so spacing and line breaks do not hide a call, and text inside a string or a comment is not a
-call. A call is left out of the count when a comment on one of its lines says `hardening: ok <reason>` (the words `hardening: ok`, a space and a reason of at least three characters; a bare `ok` or `okay` does not count); the same words inside a
+call. A call is left out of the count when a comment on its first or last line says `hardening: ok <reason>` (the words `hardening: ok`, a space and a reason of at least three characters; a bare `ok` or `okay` does not count); the same words inside a
 string do not count as that comment. A file that does not parse raises `SyntaxError`.
 
     python3 scripts/hardening_baseline.py            # print the counts
-    python3 scripts/hardening_baseline.py --update   # rewrite tests/hardening_baseline.json (do this when you removed raw access)
+    python3 scripts/hardening_baseline.py --update   # rewrite tests/hardening_baseline.json when counts only fell (refuses growth)
+    python3 scripts/hardening_baseline.py --accept-growth   # rewrite it even when counts rose (say why in the project log)
 """
 from __future__ import annotations
 
@@ -61,7 +62,7 @@ def count_source(source: str) -> int:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _is_raw_call(node):
             end = getattr(node, "end_lineno", node.lineno) or node.lineno
-            if not any(line in marked for line in range(node.lineno, end + 1)):
+            if node.lineno not in marked and end not in marked:     # a marker between the two lines belongs to an inner call
                 n += 1
     return n
 
@@ -83,11 +84,27 @@ def count_all(root: Path = ROOT) -> dict[str, int]:
     return out
 
 
+def update_baseline(counts: dict[str, int], path: Path = BASELINE, accept_growth: bool = False) -> list[str]:
+    """Write `counts` as the baseline. When any count is above the recorded one (or a file is new), write nothing and return what grew,
+    unless `accept_growth` is true. An empty list means the baseline was written."""
+    old = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    grew = [f"{rel} {old.get(rel, 0)} -> {n}" for rel, n in sorted(counts.items()) if n > old.get(rel, 0)]
+    if grew and not accept_growth:
+        return grew
+    path.write_text(json.dumps(counts, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    return []
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     counts = count_all()
-    if "--update" in argv:
-        BASELINE.write_text(json.dumps(counts, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    if "--update" in argv or "--accept-growth" in argv:
+        grew = update_baseline(counts, BASELINE, accept_growth="--accept-growth" in argv)
+        if grew:
+            print("refused: raw file access grew (was -> now): " + ", ".join(grew) + ". Use orchard/safeio.py, mark a line that is right "
+                  "to keep with `# hardening: ok <reason>`, or, when another merged change raised the counts, run with --accept-growth "
+                  "and say why in the project log.", file=sys.stderr)
+            return 1
         print(f"wrote {BASELINE.relative_to(ROOT)}: {sum(counts.values())} raw accesses in {len(counts)} files")
         return 0
     for rel, n in sorted(counts.items(), key=lambda kv: -kv[1])[:15]:

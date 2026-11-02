@@ -122,4 +122,6 @@ fixture that is too small to show a property of scale, timing that decides a pas
 `tests/test_hardening_ratchet.py` counts raw file access in `orchard/` (`.read_text(`, `.read_bytes(`, `.write_text(`,
 `.write_bytes(` and `open(`) per file and fails when a count goes up. A line that is right to keep (a read of a file this program
 wrote itself, with a reason) carries a `# hardening: ok <reason>` comment and is not counted. When you remove raw access, lower the
-baseline with `python3 scripts/hardening_baseline.py --update` in the same change.
+baseline with `python3 scripts/hardening_baseline.py --update` in the same change. `--update` refuses to write when any count rose. When a
+merge from main brought in raw access from another change, run it with `--accept-growth` and say why in the project log. A marker
+goes on the first or last line of the call it marks.

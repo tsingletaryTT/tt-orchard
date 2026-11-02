@@ -75,6 +75,29 @@ def test_only_a_comment_can_mark_a_line_as_right_to_keep(tmp_path):
     assert _count(tmp_path, multi) == 0
 
 
+def test_a_marker_on_an_inner_call_does_not_exempt_the_call_around_it(tmp_path):
+    nested = "dst.write_text(\n    src.read_text(),  # hardening: ok source is our own file\n)\n"
+    assert _count(tmp_path, nested) == 1                  # the outer write is counted, the marked inner read is not
+    first = "a = p.read_text(  # hardening: ok our own file\n    encoding='utf-8')\n"
+    last = "a = p.read_text(\n    encoding='utf-8')  # hardening: ok our own file\n"
+    assert _count(tmp_path, first) == 0 and _count(tmp_path, last) == 0
+    middle = "a = p.read_text(\n    # hardening: ok our own file\n    encoding='utf-8')\n"
+    assert _count(tmp_path, middle) == 1                  # a marker between the first and last line marks no call
+
+
+def test_update_refuses_growth_unless_it_is_accepted(tmp_path):
+    import json
+    base = tmp_path / "b.json"
+    base.write_text(json.dumps({"a.py": 1, "d.py": 3}))
+    grew = hb.update_baseline({"a.py": 2, "b.py": 1, "d.py": 1}, base)
+    assert sorted(grew) == ["a.py 1 -> 2", "b.py 0 -> 1"]
+    assert json.loads(base.read_text()) == {"a.py": 1, "d.py": 3}        # nothing written
+    assert hb.update_baseline({"a.py": 2, "b.py": 1, "d.py": 1}, base, accept_growth=True) == []
+    assert json.loads(base.read_text()) == {"a.py": 2, "b.py": 1, "d.py": 1}
+    assert hb.update_baseline({"a.py": 1}, base) == []                  # only a decrease: written
+    assert json.loads(base.read_text()) == {"a.py": 1}
+
+
 def test_the_marker_needs_the_word_ok_and_a_reason(tmp_path):
     import pytest
     for comment in ("# hardening: ok", "# hardening: okay", "# hardening: ok ", "# hardening: ok-ish", "# hardening: okay our own file",
