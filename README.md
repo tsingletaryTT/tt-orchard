@@ -1565,6 +1565,14 @@ supports the model's shape, dtype or layout. `composable` means a decomposition 
 `mapped`. `unmapped` means neither. `ignored` marks metadata-only ops. `unchecked` means no dump exists for the
 installed ttnn version, so nothing is claimed.
 
+`host` marks an op that runs on the host by design, such as a constant built once, the preparation of an input, or a
+lookup in a table too big for the device. It makes no ttnn claim, so it holds with or without a dump. The table is
+`orchard/data/op_notes.json`: each entry has a `reason` and the `evidence` for it, and `"host": true` makes the op `host`.
+An entry without `host` adds a note to an op of any status (why an op is `composable`, or why an expert-loop op stays
+`unmapped`). The loader (`load_notes`) refuses an entry that lacks a reason or evidence, has an unknown key, or has a
+`host` that is not true or false. A table row, a decomposition, a verified mapping and `ignored` all take precedence
+over `host`. The report lists the notes under the op table. Nothing times the host path.
+
 Two more statuses are guesses and never count as `mapped`. `candidate` means the table has no row for the op, but
 `orchard/opvariants.py` found up to three ttnn names in the dump that might do the job, each with the reason it was
 proposed (`normalised-equal`, `synonym`, `token-subset`, `near` or `affix`; tables in `orchard/data/op_variants.json`).
@@ -1572,9 +1580,11 @@ proposed (`normalised-equal`, `synonym`, `token-subset`, `near` or `affix`; tabl
 (`orchard/data/verified_mappings.json`). A person still adds the table row that makes an op `mapped`.
 
 A trace also carries an ordered op list. `orchard/oppatterns.py` finds groups that one ttnn op does at once (RMSNorm,
-LayerNorm, SiLU gate multiply, an unfused attention, the Hugging Face rotary embedding). They are listed apart under
+LayerNorm, SiLU gate multiply, an unfused attention, the Hugging Face rotary embedding, and the reference expert loop
+of a routed-expert module, `moe_experts`, which maps to `experimental.moe_compute`). They are listed apart under
 `patterns` with the status `pattern` (`pattern-verified` after the simulator check), and only when the ttnn op is in
-the dump. The ops inside a group keep their own statuses.
+the dump. The ops inside a group keep their own statuses. A group can carry a note: `moe_experts` says that the
+probe did not run `moe_compute` and that a check needs 4 dies and routing at 512 experts, top 10.
 
 `refresh-ttnn` imports ttnn, which opens the device, so it runs under a one-chip gozer lease and writes
 `orchard/data/ttnn_ops-<version>.json`. Run it once per ttnn version. The supervisor never runs it.

@@ -326,4 +326,4 @@ def test_the_shipped_verified_file_is_used_by_default_and_turns_recorded_candida
     oi.run_inventory(tmp_path / "m", python="py", ttnn_python="py", out_dir=tmp_path / "out", run=run,
                      say=lambda *_: None)
     d = json.loads((tmp_path / "out" / "ops-inventory.json").read_text())["summary"]["distinct"]
-    assert d["verified"] == 5 and d["candidate"] == 0 and d["mapped"] == 26 and d["unmapped"] == 1
+    assert d["verified"] == 5 and d["candidate"] == 0 and d["mapped"] == 26 and d["unmapped"] == 0 and d["host"] == 1   # the one op left over was aten.diff, now a host op
