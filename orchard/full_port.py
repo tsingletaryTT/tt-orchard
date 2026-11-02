@@ -178,12 +178,17 @@ def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
 
     # ---- the record against the supervisor's test ----
     if isinstance(marker, dict):
-        if sorted(map(str, record.get("chips") or [])) != sorted(map(str, marker.get("chips") or [])) or not record.get("chips"):
-            reasons.append(f"{RECORD_FILE} chips {record.get('chips')!r} are not the chips the supervisor leased for the test "
-                           f"{marker.get('chips')!r}")
+        rc, mc = record.get("chips"), marker.get("chips")
+        chip_lists = all(isinstance(c, list) and c and all(isinstance(x, str) for x in c) for c in (rc, mc))
+        if not chip_lists or sorted(rc) != sorted(mc):
+            reasons.append(f"{RECORD_FILE} chips {rc!r} are not the chips the supervisor leased for the test {mc!r} "
+                           "(both must be non-empty lists of chip names)")
         _output_reasons(stage_dir, run_dir, marker, reasons)
-    if _num(load) and _num(record.get("load_s")) and abs(load - record["load_s"]) > TOLERANCE:
-        reasons.append(f"load_s {load} differs from the record's {record.get('load_s')}")
+    rec_load = record.get("load_s")
+    if not _num(rec_load) or rec_load <= 0:
+        reasons.append(f"{RECORD_FILE} load_s must be a positive number of seconds, got {rec_load!r}")
+    elif _num(load) and abs(load - rec_load) > TOLERANCE:
+        reasons.append(f"load_s {load} differs from the record's {rec_load}")
 
     # ---- the free-run text ----
     text = record.get("free_run_text")

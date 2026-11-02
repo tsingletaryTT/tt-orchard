@@ -248,3 +248,20 @@ def test_the_skill_names_no_lease_tool_and_no_machine_path():
 def test_the_skill_shows_how_a_failed_test_is_recorded():
     flat = " ".join(skill_text().split())
     assert "`runs` false" in flat and "`failure`" in flat
+
+
+# ---- review findings (PR 331) ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("chips", [2, "0000:01:00.0", [], [1, 2], None])
+def test_a_record_whose_chips_are_not_a_list_of_names_is_a_reason_and_not_a_crash(tmp_path, chips):
+    assert one(reasons(tmp_path, record={"chips": chips}), "chips")
+
+
+def test_a_marker_whose_chips_are_not_a_list_is_a_reason_and_not_a_crash(tmp_path):
+    assert one(reasons(tmp_path, marker={"chips": 2}), "chips")
+
+
+@pytest.mark.parametrize("load", [None, "120.5", 0, -1, True])
+def test_a_record_without_a_positive_numeric_load_time_is_refused(tmp_path, load):
+    # result.json carries 120.5; with no number in the record nothing supports it.
+    assert one(reasons(tmp_path, record={"load_s": load}), "load_s")

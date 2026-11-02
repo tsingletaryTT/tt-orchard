@@ -175,6 +175,18 @@ def test_a_result_written_during_prepare_is_set_aside_and_the_record_comes_from_
     assert rec["schema"] == "orchard-port-check/1" and rec["chip_ids"]          # the test's record replaced the forgery
 
 
+def test_a_marker_the_finish_step_rewrote_is_refused(rig):
+    # The finish step edits test-result.json after the test; the ledger holds the sha256 of the file the supervisor wrote.
+    marker = {"test-result.json": {"command": "x", "returncode": 0, "timed_out": False, "chips": ["c"], "output": {}}}
+    make(rig, over={(2, "finish"): {**FINISH, **marker}})
+    rig.args.unattended = True
+    never_wait(rig)
+    assert rig.run() == EXIT_BLOCKED
+    block = [d for d in rig.decisions() if d["decision"] == "blocked"][0]
+    assert block["code"] == "stage-failed" and "not the file the supervisor recorded" in block["reason"]
+    assert not started(rig, 3)
+
+
 # ---- what the flag does not change ----------------------------------------------------------------
 
 def test_the_flag_does_not_let_an_unknown_class_go_on(rig):
