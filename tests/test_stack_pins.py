@@ -342,7 +342,7 @@ def test_wrong_typed_config_fields_never_raise_and_never_reach_the_interpreter_a
     rec = build(src, fake, probe)
     assert rec["severity"] in ("advisory", "ok") and rec["hazards"] == []
     for argv in probe.calls:
-        assert all(sp.CLASS_NAME.match(a) for a in argv[4:])
+        assert all(sp.CLASS_NAME.fullmatch(a) for a in argv[4:])
 
 
 @pytest.mark.parametrize("kind", ["fifo", "zero_link", "oversize", "not_json", "list"])

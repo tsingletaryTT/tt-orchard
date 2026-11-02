@@ -47,8 +47,8 @@ MAX_RECORD_BYTES = 1 << 20
 PROBE_TIMEOUT_S = 120.0         # choice: importing transformers with torch takes a few seconds; a hung import ends here
 PROBE_MAX_BYTES = 64 * 1024
 MAX_CLASSES = 64                # choice: no real checkpoint names this many architectures; more is an unchecked finding, never ok
-CLASS_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,100}$")
-MODEL_TYPE = re.compile(r"^[A-Za-z0-9_]{1,100}$")
+CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,100}")        # used with fullmatch: `$` would also accept a final newline
+MODEL_TYPE = re.compile(r"[A-Za-z0-9_]{1,100}")
 SEVERITIES = ("critical", "advisory", "ok")
 OFFLINE_ENV = "ORCHARD_STACK_PINS_OFFLINE"
 BLOCK_ENV = "ORCHARD_STACK_PINS_BLOCK"      # "1": a critical finding of a new run blocks stage 0. Without it the findings are recorded as would_block advisories.
@@ -211,7 +211,7 @@ def config_facts(model_dir) -> dict:
         except safeio.BadValue:
             return None
     archs = cfg.get("architectures")
-    valid = [a for a in archs if isinstance(a, str) and CLASS_NAME.match(a)] if isinstance(archs, list) else []
+    valid = [a for a in archs if isinstance(a, str) and CLASS_NAME.fullmatch(a)] if isinstance(archs, list) else []
     problem = None
     if archs is not None and not isinstance(archs, list):
         problem = "architectures is not a list"
@@ -290,8 +290,8 @@ def probe_interpreter(python, classes, run: Callable | None = None, model_type=N
             return unknown("the reference interpreter is not an executable file")
     except (ValueError, OSError):
         return unknown("the reference interpreter path cannot be checked")
-    classes = [c for c in classes if isinstance(c, str) and CLASS_NAME.match(c)][:MAX_CLASSES]
-    mt = model_type if isinstance(model_type, str) and MODEL_TYPE.match(model_type) else "-"
+    classes = [c for c in classes if isinstance(c, str) and CLASS_NAME.fullmatch(c)][:MAX_CLASSES]
+    mt = model_type if isinstance(model_type, str) and MODEL_TYPE.fullmatch(model_type) else "-"
     try:
         rc, out, err = (run or real_probe_run)([python, "-c", PROBE_SCRIPT, mt, *classes], PROBE_TIMEOUT_S, _probe_env(env, exclude))
     except Exception as exc:                        # a broken runner is a failed probe

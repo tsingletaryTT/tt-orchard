@@ -300,7 +300,7 @@ def _age_text(seconds: float) -> str:
 
 
 _USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]*@")
-_TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghs_|github_pat_)[A-Za-z0-9_]{8,}")
+_TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{8,}")
 
 
 def scrub_secrets(text: str) -> str:
