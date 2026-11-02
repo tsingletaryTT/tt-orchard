@@ -408,7 +408,7 @@ def printed_command(cfg: dict, ids: list[int]) -> list[str]:
 
 def main() -> int:
     from tokenizers import Tokenizer      # imported here so a missing package fails before docker
-    from serve_and_compare import (ServerHTTPError, guard_cache, load_reference, measure,
+    from serve_and_compare import (ServerHTTPError, cache_state, guard_cache, load_reference, measure,
                                    suite_preflight, write_report)
 
     try:
@@ -441,6 +441,7 @@ def main() -> int:
     if inside(cache, shared):
         fail(f"tt_cache {cache} is inside {shared}, where the packages keep their own tensor "
              "caches. Use a new directory for this model and this configuration.", 3)
+    cache_at_start = cache_state(cache)
     guard_cache(cache, cfg["new_model_id"])
     image = package_image(cfg)
     hf_dir = STAGE_DIR / "hf-isolated"
@@ -482,6 +483,7 @@ def main() -> int:
     weights_env = {"MODEL_WEIGHTS_DIR": str(model_dir), "HF_MODEL": str(model_dir)}
     fetched = hub_fetches(hf_dir, log_path)
     write_report(cfg, run_dir, cache, weights_env, m, tokenizer, reference, log_path,
+                 cache_at_start=cache_at_start,
                  extra={"kind": "container", "package": cfg["package"], "profile": cfg["profile"],
                         "chips": int(cfg["chips"]), "device_ids": ids, "docker_argv": argv,
                         "hf_isolated": str(hf_dir), "container_stopped": stopped, "hub_fetch": fetched,
