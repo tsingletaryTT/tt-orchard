@@ -125,8 +125,8 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
                "the nearest bundle has no hyper-connection kernels", _NEAREST,
                "run one decoder layer with its hyper-connections against the CPU result before the full model"),
     TableEntry("mixer_ngram_embedding_not_in_nearest", "mixer implemented by the nearest bundle",
-               "the nearest bundle has no n-gram embedding: a table of tens of gigabytes indexed by hashes of the last few token ids, "
-               "too large for device memory, so a lookup per token has to run on the host", _NEAREST,
+               "the nearest bundle has no n-gram embedding: a table indexed by hashes of the last few token ids (table size not computed "
+               "from the config; check the checkpoint headers for its size and whether it fits device memory)", _NEAREST,
                "run the n-gram lookup for one token (hash the last ngram_size token ids for every head, read the rows) and the layer's "
                "gate and convolution against the CPU result, then three tokens in a row so the history carries over"),
 ] + _tile_rows())

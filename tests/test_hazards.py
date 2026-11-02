@@ -373,3 +373,14 @@ def test_a_nearest_bundle_that_has_all_five_mixers_covers_flash_next():
     flash = mc.read_model_config(QWEN4)
     s = hz.scan_model_hazards(flash, flash, dies=4)
     assert not [h for h in s.hazards if h.name.startswith("mixer_")]
+
+
+@pytest.mark.parametrize("over", [dict(ngram_size=3), dict(ngram_size=3, ngram_vocab_size_base=1000),
+                                  dict(ngram_size=3, ngram_vocab_size_base=20_000_000)])
+def test_the_ngram_hazard_does_not_claim_a_size_or_a_placement_the_config_does_not_show(over):
+    """Review of PR 312: the hazard fires from key presence alone, so its text must not say the table is tens of gigabytes or lives on the host.
+    A small and a large base vocabulary give the same text, and it says the size was not computed."""
+    (h,) = hz.scan_model_hazards(cfg(**over), CLEAN).hazards
+    text = h.why.lower()
+    assert "gigabyte" not in text and "host" not in text
+    assert "size not computed" in text

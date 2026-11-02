@@ -160,12 +160,12 @@ Fit, as arithmetic from the table in section 1 and the cards (all estimates):
 | Shape | Fits Flash-Next? | Reason |
 |---|---|---|
 | 1 chip, 2 chips (one P300) | No | BF4 experts alone are about 68 GB (241.59 GB x 0.28125, the BF4 tile is 576 bytes for 1,024 values); two chips hold about 58 to 64 GB with no space for dense weights, KV and traces |
-| 4 chips (P150x4, P300x2, this machine) | Yes | Every working package at this shape. The sjett card reports 1.5 to 1.7 GB free per DRAM bank after the captures at 32k, 64k and 128k; if a chip has 8 DRAM banks (my assumption; no source read) that is about 12 GB free per chip, so roughly 18 GB of each 32 GB chip is resident |
+| 4 chips (P150x4, P300x2, this machine) | Yes | Every working package at this shape. The sjett card reports 1.5 to 1.7 GB free per DRAM bank after the captures at 32k, 64k and 128k; if a chip has 8 DRAM banks (my assumption; no source read) that is about 12 GB free per chip, so roughly 18 GB of each 32 GB chip is resident (unsupported estimate) |
 | 8 chips (P150x8) | Yes | `changh95` runs TP8 and EP8 with 28 users |
 
 Per-chip memory: the cards and this repository's logs treat a Blackhole chip as 32 GB (`docs/run-logs/2026-10-29-overnight-minicpm3-4b.md`: "Blackhole p300 board has two chips with 32 GB each"), and the next-round plan says capacity "is arithmetic on parameter counts" and not stated as a measurement. The usable part is lower: a P300 board reaches `/dev/tenstorrent` as two chips, and the allocator reserves space for traces and caches. I did not read a usable figure from a live allocator.
 
-What a Qwen4 size would need on this machine, assuming the same recipe (BF4 routed experts, BF8 dense, the n-gram table on the host): about 12 GB per chip must stay free for KV, state and traces, so routed experts can use roughly 17 to 19 GB per chip on four chips, about 70 to 76 GB in all. That is Flash-Next's 68 GB with about 10 percent to spare. A Qwen4 with more routed parameters than about 135 billion at this recipe does not fit four chips and needs a lower-bit expert format or eight chips. These limits are estimates from the cards.
+What a Qwen4 size would need on this machine: the cards give no figure for the overhead (KV, state, traces, caches) that a larger model would still need, so this study states no cutoff for routed-expert size. The only supported figures are Flash-Next's own: about 68 GB of BF4 routed experts runs on four chips, with 1.5 to 1.7 GB free per DRAM bank after the captures on the sjett packages. A Qwen4 with more routed parameters needs the headroom recomputed from its own headers and a measured allocator reading (proposed issue A).
 
 The four-chip fit has a consequence for tt-orchard. A Flash-Next-class model uses both boards. While it is loaded, no board is free, so every hardware stage parks it, as the Qwen3.8-27B-on-four-chips layout already does (`config/tiers.qb2-27b.toml`).
 
