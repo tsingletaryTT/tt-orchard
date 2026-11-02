@@ -170,7 +170,9 @@ def test_the_supervisor_runs_prepare_itself_and_never_asks_the_agent_for_it(tmp_
     c = Counting()
     r.script = c
     try:
-        assert r.run() == EXIT_READY
+        code = r.run()
+        # Issue 334: this test failed once in a full run and no loop reproduced it. The message carries the ledger so the next failure shows why.
+        assert code == EXIT_READY, (code, [e for e in r.entries() if e["event"] in ("decision", "stage_end", "block")][-6:])
         assert (2, "prepare") not in stage2_phases(c) and (2, "finish") in stage2_phases(c)
         sd = r.run_dir / "stages" / "2"
         assert json.loads((sd / "hw_test.json").read_text())["command"] == "python3 stages/2/serve_and_compare.py"
@@ -186,8 +188,10 @@ def test_exit_2_asks_the_agent_with_the_scripts_message(tmp_path, monkeypatch):
     c = Counting()
     r.script = c
     try:
-        r.run()
-        [(_, user)] = [a for a in c.asked if a[0] == (2, "prepare")][:1]
+        code = r.run()
+        asked = [a for a in c.asked if a[0] == (2, "prepare")][:1]
+        assert asked, (code, c.asked and [k for k, _ in c.asked], [e for e in r.entries() if e["event"] in ("decision", "stage_end", "block")][-6:])
+        [(_, user)] = asked
         assert "tt_cache is not empty" in user and "exited 2" in user
         assert any(d.get("decision") == "prepare run by the supervisor" and d.get("returncode") == 2 for d in r.decisions())
     finally:
