@@ -40,10 +40,17 @@ TILED_DIMENSIONS = ("hidden_size", "intermediate_size", "head_dim", "moe_interme
 LIMIT_NAMES = ("router_top_k_max", "kv_heads_max", "sliding_window_layers_max")
 # Mixers: how each is detected, so the hazard can say what it saw. A model's mixer set is its layer types (full and sliding-window
 # attention both count as plain attention) plus these key-based detections.
+# Key spellings per family: the DeepSeek and GLM indexer is index_*, the Qwen4 preview (model_type qwen4_exp, Qwen3.8-Flash-Next) writes indexer_*;
+# DeepSeek hyper-connections are hc_mult and hc_eps, the Qwen4 gated residual is hc_count and hc_lowrank. Only the key names are read, so a
+# later model that keeps these spellings under another model_type is still seen.
+SPARSE_ATTENTION_KEYS = frozenset({"index_topk", "index_n_heads", "index_head_dim", "indexer_budget", "indexer_n_heads", "indexer_head_dim"})
+HYPER_CONNECTION_KEYS = frozenset({"hc_mult", "hc_eps", "hc_count", "hc_lowrank"})
+NGRAM_EMBEDDING_KEYS = frozenset({"ngram_size", "ngram_vocab_size_base"})
 MIXER_RULES = {
     "multi_latent_attention": "the config has kv_lora_rank",
-    "sparse_attention": "the config has an attention indexer key (index_topk, index_n_heads or index_head_dim)",
-    "hyper_connections": "the config has a hyper-connection key (hc_mult, hc_eps or a key starting with hyper_connection)",
+    "sparse_attention": "the config has an attention indexer key (index_topk, index_n_heads, index_head_dim, indexer_budget, indexer_n_heads or indexer_head_dim)",
+    "hyper_connections": "the config has a hyper-connection key (hc_mult, hc_eps, hc_count, hc_lowrank or a key starting with hyper_connection)",
+    "ngram_embedding": "the config has an n-gram embedding key (ngram_size or ngram_vocab_size_base)",
 }
 
 
@@ -117,6 +124,11 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
     TableEntry("mixer_hyper_connections_not_in_nearest", "mixer implemented by the nearest bundle",
                "the nearest bundle has no hyper-connection kernels", _NEAREST,
                "run one decoder layer with its hyper-connections against the CPU result before the full model"),
+    TableEntry("mixer_ngram_embedding_not_in_nearest", "mixer implemented by the nearest bundle",
+               "the nearest bundle has no n-gram embedding: a table indexed by hashes of the last few token ids (table size not computed "
+               "from the config; check the checkpoint headers for its size and whether it fits device memory)", _NEAREST,
+               "run the n-gram lookup for one token (hash the last ngram_size token ids for every head, read the rows) and the layer's "
+               "gate and convolution against the CPU result, then three tokens in a row so the history carries over"),
 ] + _tile_rows())
 _BY_NAME = {e.name: e for e in HAZARD_TABLE}
 
@@ -165,10 +177,12 @@ def _mixers(d: mc.ModelDims) -> list[str]:
     kinds = {"attention" if t in ("full_attention", "sliding_attention", "attention") else t for t in d.layer_types}
     if d.mla:
         kinds.add("multi_latent_attention")
-    if d.keys & {"index_topk", "index_n_heads", "index_head_dim"}:
+    if d.keys & SPARSE_ATTENTION_KEYS:
         kinds.add("sparse_attention")
-    if d.keys & {"hc_mult", "hc_eps"} or any(k.startswith("hyper_connection") for k in d.keys):
+    if d.keys & HYPER_CONNECTION_KEYS or any(k.startswith("hyper_connection") for k in d.keys):
         kinds.add("hyper_connections")
+    if d.keys & NGRAM_EMBEDDING_KEYS:
+        kinds.add("ngram_embedding")
     return sorted(kinds)
 
 
