@@ -66,6 +66,7 @@ SERVER = textwrap.dedent('''
                 code = "def is_prime(n" if FAULT == "bad_code" else "def is_prime(n):\\n    return n > 1 and all(n % d for d in range(2, n))\\n"
                 return self._send(200, {"choices": [{"message": {"content": code}, "finish_reason": "stop"}], "usage": {"completion_tokens": 20, "prompt_tokens": 30}})
             if "secret word" in prompt:
+                time.sleep(0.15)                           # a long prompt takes the same time every time here: no cache (the prefix probe judges by timing)
                 return self._send(200, {"choices": [{"message": {"content": "tangerine"}, "finish_reason": "stop"}],
                                         "usage": {"completion_tokens": 2, "prompt_tokens": int(len(prompt.split()) * 1.1)}})
             if req.get("max_tokens") == 1:
