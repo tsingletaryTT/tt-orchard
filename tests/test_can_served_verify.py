@@ -15,8 +15,9 @@ import pytest
 from orchard import can
 
 SERVER = textwrap.dedent('''
-    import json, os, sys
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import json, os, sys, threading, time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    LOCK = threading.Lock()
     FAULT = os.environ.get("FAULT", "")
     TOKENS = [0]
     class H(BaseHTTPRequestHandler):
@@ -48,7 +49,27 @@ SERVER = textwrap.dedent('''
                     text = " 9 9 10 10 1"
                 return self._send(200, {"choices": [{"text": text, "finish_reason": "stop"}], "usage": {"completion_tokens": 3}})
             if req.get("stream"):
-                return self._send(200, b'data: {"choices": [{"delta": {"content": "w"}}]}\\n\\ndata: [DONE]\\n\\n', "text/event-stream")
+                self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+                for i in range(40):
+                    self.wfile.write(b'data: {"choices": [{"delta": {"content": "w"}}]}\\n\\n'); self.wfile.flush(); time.sleep(0.01)
+                self.wfile.write(b'data: {"choices": [], "usage": {"completion_tokens": 40}}\\n\\ndata: [DONE]\\n\\n'); self.wfile.flush()
+                return
+            prompt = req["messages"][0]["content"]
+            if req.get("ignore_eos"):                      # the batching burst: 32 tokens at the stream's rate of about 100 tokens a second
+                if FAULT == "serialise":
+                    with LOCK:
+                        time.sleep(0.32)
+                else:
+                    time.sleep(0.32)
+                return self._send(200, {"choices": [{"message": {"content": "1 2 3"}, "finish_reason": "length"}], "usage": {"completion_tokens": 32, "prompt_tokens": 12}})
+            if "is_prime" in prompt:
+                code = "def is_prime(n" if FAULT == "bad_code" else "def is_prime(n):\\n    return n > 1 and all(n % d for d in range(2, n))\\n"
+                return self._send(200, {"choices": [{"message": {"content": code}, "finish_reason": "stop"}], "usage": {"completion_tokens": 20, "prompt_tokens": 30}})
+            if "secret word" in prompt:
+                return self._send(200, {"choices": [{"message": {"content": "tangerine"}, "finish_reason": "stop"}],
+                                        "usage": {"completion_tokens": 2, "prompt_tokens": int(len(prompt.split()) * 1.1)}})
+            if req.get("max_tokens") == 1:
+                return self._send(200, {"choices": [{"message": {"content": "x"}, "finish_reason": "length"}], "usage": {"completion_tokens": 1, "prompt_tokens": 12}})
             if FAULT != "frozen_counter":
                 TOKENS[0] += 5
             content = "" if FAULT == "spent_budget" else None if FAULT == "null_content" else "Paris"
@@ -56,9 +77,15 @@ SERVER = textwrap.dedent('''
             self._send(200, {"model": "other-model" if FAULT == "wrong_echo" else req.get("model"),
                              "choices": [{"message": {"content": content}, "finish_reason": finish}], "usage": {"completion_tokens": 5}})
         def log_message(self, *a): pass
+    print("INFO loaded %s layers on 2 devices" % ("12" if FAULT == "wrong_layers" else "36"), flush=True)
+    print("INFO GPU KV cache size: %s tokens" % ("1,024" if FAULT == "small_kv" else "100,000"), flush=True)
+    print("INFO Maximum concurrency for 4,096 tokens per request: %sx" % ("0.25" if FAULT == "small_kv" else "24.41"), flush=True)
+    print("INFO Avg generation throughput: 0.0 tokens/s, Running: 0 reqs", flush=True)
+    if FAULT == "warn":
+        print("WARNING Unrecognised device name P150b; falling back to the generic profile", flush=True)
     if FAULT != "no_mesh_line":
         print("multidevice with %s devices and grid (1, 2) is created" % ("4" if FAULT == "wrong_mesh" else "2"), flush=True)
-    HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 ''')
 
 
@@ -66,14 +93,17 @@ def bundle(tmp_path, fault=""):
     b = tmp_path / "bundle-src"
     b.mkdir()
     (b / "server.py").write_text(SERVER)
+    (b / "base_config").mkdir()
+    (b / "base_config" / "config.json").write_text('{"num_hidden_layers": 36}')
     (b / "install.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     (b / "run.sh").write_text(f'#!/usr/bin/env bash\nexport FAULT="{fault}"\nexec "{sys.executable}" "$(dirname "$0")/server.py"\n')
     return b
 
 
-def spec_of(kind="vllm", max_model_len=4096):
+def spec_of(kind="vllm", max_model_len=4096, **more):
+    check = more.pop("check", can.Check(expect="Paris", stream=False))
     return can.Spec(name="toy", kind=kind, model_py=Path("m.py"), readme=Path("r.md"), repo="someone/toy", revision="0" * 40, device_count=2,
-                    max_model_len=max_model_len, check=can.Check(expect="Paris", stream=False))
+                    max_model_len=max_model_len, check=check, **more)
 
 
 def boot(tmp_path, fault="", **kw):
@@ -84,8 +114,10 @@ def test_a_healthy_server_passes_every_probe_and_leaves_nothing_unchecked(tmp_pa
     ev = boot(tmp_path)
     assert ev["passed"], ev
     names = set(ev["checks"])
-    assert {"served_model", "reply_shape", "engine_counter", "arithmetic", "sequence", "mesh_devices"} <= names
-    assert "not_checked" not in ev, ev["not_checked"]
+    assert {"served_model", "reply_shape", "engine_counter", "arithmetic", "sequence", "mesh_devices", "code_parse", "long_prefill",
+            "layers_loaded", "kv_cache"} <= names
+    assert [n["name"] for n in ev["not_checked"]] == ["batching"], ev["not_checked"]      # the stand-in's can declares no max_num_seqs above 1
+    assert ev["log_warnings"]["lines"] == [] and ev["log_warnings"]["dropped_as_noise"] == 0 or ev["log_warnings"]["lines"] == []
 
 
 @pytest.mark.parametrize("fault,failed", [

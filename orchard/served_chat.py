@@ -20,6 +20,15 @@ A check that could not finish is not a clean one. A file that exists and cannot 
 cannot be found and a recorded digest that is missing or different go in `incomplete`, and `ok` is then false. A file the model does not
 ship is normal and is not incomplete.
 
+  * `check_live_probe(record)` (issue 368): the live-probe record that serve_and_compare.py writes under `live_probe` in swap-check.json
+    (the template cannot import orchard, so it records the raw answers and this module judges them with the rules of
+    orchard/served_verify.py): the listing (the served name must be the name the template asked for, and the context must be the
+    `--max-model-len` that run.sh passes), the two raw completions and the engine's token counter. A swap-check.json written before the
+    probe existed has no record: the result is `not_checked`, never a pass. A failed probe is a problem and makes `ok` false; a probe the
+    server does not offer (no /metrics, no completions route) is listed as not checked and does not.
+  * the token counts of the chat replies (issue 361): completion tokens, reasoning tokens and answer tokens per reply, with their
+    distribution, and the cap those counts support.
+
 What it does not check, and the record says so: whether a reply begins and ends as the model card describes (a card is prose), and
 whether a model fine-tuned on a different template answers worse. `ok` is true only when there is no problem, nothing is incomplete and
 at least one chat reply was checked.
@@ -32,13 +41,13 @@ import os
 import re
 from pathlib import Path
 
-from orchard import safeio
+from orchard import safeio, served_verify
 
 FILE = "served-chat.json"
 MAX_JSON_BYTES = 64 << 20            # a tokenizer.json is tens of megabytes
 MAX_TEMPLATE_BYTES = 1 << 20
 TOKEN_NAMES = ("eos_token", "bos_token", "pad_token", "unk_token")
-LABEL = "check of the served files and the recorded chat replies; this check sent no request to a server"
+LABEL = "check of the served files, the recorded chat replies and the recorded live probe; this check sent no request to a server"
 NOT_CHECKED = ("whether a reply begins and ends as the model's card describes (the card is prose); whether a model trained on a different "
                "template answers worse; the card of the model was not read")
 # A role header at the start of a reply: the word `assistant` followed by a colon or a line end, with an optional start-of-turn token before it.
@@ -250,6 +259,26 @@ def _texts(e: dict) -> list[str]:
     return [t for t in (e.get("content"), e.get("reasoning")) if isinstance(t, str) and t.strip()]
 
 
+CAP_MARGIN = 1.5            # choice: a generation cap set from the replies seen is the largest one used, with half again as much room
+
+
+def token_summary(totals, thinking, answers, max_tokens) -> dict:
+    """Completion, reasoning and answer tokens of the checked chat replies (issue 361) and the cap they support. `thinking` holds the tokens of the
+    reasoning text counted with the model's tokenizer (None for a reply with no count). When some reply has reasoning text, `cap_evidence` is the
+    largest completion count with CAP_MARGIN on top, and says whether the suite's own limit (`max_tokens`) is below it. It is a figure to read
+    beside the card, and nothing in the harness sets a cap from it."""
+    reasoning = [t for t in thinking if isinstance(t, int) and not isinstance(t, bool) and t > 0]
+    out = {"completion_tokens": served_verify.distribution(totals), "reasoning_tokens": served_verify.distribution(thinking),
+           "answer_tokens": served_verify.distribution(answers), "replies_with_reasoning": len(reasoning)}
+    biggest = max([t for t in totals if isinstance(t, int) and not isinstance(t, bool)], default=None)
+    if reasoning and biggest is not None:
+        cap = int(biggest * CAP_MARGIN + 0.999)
+        limit = max_tokens if isinstance(max_tokens, int) and not isinstance(max_tokens, bool) else None
+        out["cap_evidence"] = {"largest_reply_tokens": biggest, "margin": CAP_MARGIN, "supported_cap": cap, "suite_limit": limit,
+                               "suite_limit_below_supported_cap": limit is not None and limit < cap}
+    return out
+
+
 def check_replies(record, end_tokens=()) -> dict:
     """The recorded chat replies of a swap check's `prompt_suite` record, with `end_tokens` the strings of the new model's end-of-turn ids.
     Never raises."""
@@ -266,6 +295,7 @@ def check_replies(record, end_tokens=()) -> dict:
     problems: list[dict] = []
     seen = set()
     counts = {"checked": 0, "stopped": 0, "length": 0}
+    totals, thinking, answers = [], [], []
 
     def add(name, detail):
         if name not in seen:
@@ -282,6 +312,9 @@ def check_replies(record, end_tokens=()) -> dict:
         counts["checked"] += 1
         counts["stopped"] += finish in ("stop", "tool_calls")
         counts["length"] += finish == "length"
+        totals.append(e.get("completion_tokens"))
+        thinking.append(e.get("reasoning_tokens"))
+        answers.append(e.get("answer_tokens"))
         for text in texts:
             lead = text.lstrip()
             if ROLE_HEADER.match(text) or any(lead.startswith(t) for t in specials):
@@ -296,7 +329,52 @@ def check_replies(record, end_tokens=()) -> dict:
     if counts["checked"] and not counts["stopped"]:
         unseen.append("no checked chat reply was seen to stop (a stop or tool-call finish), so the replies do not show the server stopping on the end token")
     return {"mode": "chat", "checked": counts["checked"] > 0, "why_not": "" if counts["checked"] else "no chat reply was recorded without an error",
-            "counts": counts, "problems": problems, "incomplete": unseen}
+            "counts": counts, "problems": problems, "incomplete": unseen, "tokens": token_summary(totals, thinking, answers, record.get("max_tokens"))}
+
+
+def check_live_probe(record, *, native_context=None) -> dict:
+    """Judge the `live_probe` record of a swap check (issue 368) with the rules of orchard/served_verify.py. Returns `{"state", "results",
+    "problems", "not_checked"}`: `state` is `not_checked` when there is no record (a swap check from before the probe, or one that switched it off),
+    `fail` when any probe failed, else `pass`. Never raises. The record's model name is the name the template asked for, and the listing must hold it."""
+    results: list[dict] = []
+    if not isinstance(record, dict) or record.get("ran") is not True:
+        return {"state": "not_checked", "results": [], "problems": [],
+                "not_checked": ["the swap check has no live probe record (it was written before the live probe existed, or the probe was switched off)"]}
+    asked = record.get("model") if isinstance(record.get("model"), str) and record.get("model") else None
+    declared_len = record.get("declared_max_model_len")
+    declared_len = declared_len if isinstance(declared_len, int) and not isinstance(declared_len, bool) and declared_len > 0 else None
+
+    def raw(entry):
+        """(status, body bytes) of a recorded request; (None, error text) when it recorded no answer."""
+        if not isinstance(entry, dict):
+            return None, "the record has no entry for this request"
+        status = entry.get("status")
+        if status is None or isinstance(status, bool) or not isinstance(status, int):
+            return None, str(entry.get("error") or "no answer was recorded")[:200]
+        body = entry.get("body")
+        return status, (json.dumps(body).encode("utf-8") if isinstance(body, dict) else b"")
+
+    status, body = raw(record.get("listing"))
+    if status is None:
+        results.append({"name": "served_model", "state": "fail", "detail": f"GET /v1/models got no answer: {body}"})
+    elif asked is None:
+        results.append({"name": "served_model", "state": "not_checked", "detail": "the record does not say which model name the swap check asked for"})
+    else:
+        results.append(served_verify.check_listing(status, body, declared_name=asked, declared_context=declared_len, native_context=native_context))
+    completions = record.get("completions") if isinstance(record.get("completions"), dict) else {}
+    for name, _ in served_verify.COMPLETION_PROBES:
+        status, body = raw(completions.get(name))
+        results.append({"name": name, "state": "fail", "detail": f"no answer from /v1/completions: {body}"} if status is None
+                       else served_verify.judge_completion(name, status, body))
+    arithmetic = completions.get("arithmetic") if isinstance(completions.get("arithmetic"), dict) else {}
+    usage = (arithmetic.get("body") or {}).get("usage") if isinstance(arithmetic.get("body"), dict) else None
+    tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
+    text = lambda v: "\n".join(x for x in v if isinstance(x, str)) if isinstance(v, list) else None      # noqa: E731
+    results.append(served_verify.check_counter(text(metrics.get("before")), text(metrics.get("after")), completion_tokens=tokens))
+    problems = [{"name": r["name"], "detail": r["detail"]} for r in results if r["state"] == "fail"]
+    missing = [f"{r['name']}: {r['detail']}" for r in results if r["state"] == "not_checked"]
+    return {"state": "fail" if problems else "pass", "results": results, "problems": problems, "not_checked": missing}
 
 
 def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
@@ -304,16 +382,19 @@ def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
     files = check_files(served_dir, new_snapshot)
     incomplete = list(files["incomplete"])
     suite = None
+    live_record = None
     try:
         report = safeio.read_json(_real(swap_check_path), max_bytes=MAX_JSON_BYTES, expect=dict)
         suite = report.get("prompt_suite")
+        live_record = report.get("live_probe")
     except safeio.SafeReadError as exc:
         if not _absent(exc):
             incomplete.append(f"the swap check could not be read: {exc.reason}")
     replies = check_replies(suite, files["end_tokens"])
     if suite is None:
         replies = {**replies, "why_not": "the swap check could not be read"}
-    problems = files["problems"] + replies["problems"]
+    live = check_live_probe(live_record)
+    problems = files["problems"] + replies["problems"] + [{"name": f"live_probe_{p['name']}", "detail": p["detail"]} for p in live["problems"]]
     incomplete += replies.get("incomplete", [])
     if replies["mode"] == "chat":
         # tie the replies to the files: the template and the tokenizer and stop files the swap test saw when it ran must be what is compared now
@@ -340,7 +421,7 @@ def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
             if absent:
                 incomplete.append("the swap check's served_files lacks " + ", ".join(absent))
     return {"label": LABEL, "not_checked": NOT_CHECKED, "ok": not problems and not incomplete and replies["checked"], "problems": problems,
-            "incomplete": incomplete, "files": files, "replies": replies}
+            "incomplete": incomplete, "files": files, "replies": replies, "live_probe": live}
 
 
 def write_record(stage_dir, served_dir, new_snapshot, swap_check_path) -> dict:
