@@ -54,6 +54,17 @@ Steps:
     when `save_log()` runs, the probe calls it before it takes each starting offset and after each request. These requests carry `top_p` and `seed`, which
     the 32-token check does not send.
 
+(j) The agreement set (issue 15), only when swap_config.json has `"agreement_set": true`. The reference file
+    `stages/1/evidence/reference/agreement-reference.json` holds, for each prompt of `agreement_prompts.json` (copied next to this file),
+    the prompt ids and the CPU reference's greedy ids, and the sha256 of the prompt set it was made from. After the 32-token check the
+    script teacher-forces each prompt the same way (one request per position) and records the first id the chip returned at every
+    position under `agreement_set`, beside the reference ids. It judges nothing: the stage gate recomputes every number from the ids
+    with orchard/agreement_core.py (this directory's agreement_core.py is a byte-identical copy of it, so the script and the gate
+    score the same way). `agreement_control` in the config names the swap-check.json of an earlier run of the same set on the nearest
+    model; its record is embedded after a check that it used the same reference ids. A missing file, a set whose sha256 differs from the
+    reference's, or an unusable control exits 2 before any server starts. A request the server refuses becomes `None` ids for the rest of
+    that prompt (an error is recorded) and the run goes on. The 32-token result stays in the record as `baseline`.
+
 Exit codes: 0 when the measurements completed, whatever they say. 3 cache guard. 4 the server
 exited, or never became healthy. 5 the server answered a request with an HTTP error (its body is
 printed). Any other error in this script exits non-zero through Python's traceback; the finally
@@ -100,6 +111,8 @@ PROBE_HOT = {"temperature": 2.0, "top_p": 0.99, "seed": 2468}   # one hot reques
 PROBE_LOG_SETTLE_S = 0.5      # the drafter logs a session line when a request ends; wait this long before reading the log
 PROBE_LOG_LINES = 4           # keep at most this many session lines per request
 PROBE_LOG_LINE_CHARS = 600
+AGREEMENT_PROMPTS_NAME = "agreement_prompts.json"
+AGREEMENT_REFERENCE = ("stages", "1", "evidence", "reference", "agreement-reference.json")
 MARKER = ".orchard-model"
 LOG_TAIL_LINES = 60
 COHERENT_CHAR_SHARE = 0.8
@@ -319,9 +332,146 @@ def load_control(cfg: dict, run_dir: Path) -> dict | None:
     return {"source": source, "sha256": hashlib.sha256(raw).hexdigest(), "record": record}
 
 
+AGREEMENT_FILE_MAX_BYTES = 64 << 20      # the reference holds ids for a handful of prompts; the control is a swap-check.json
+
+
+def read_small_file(path: Path) -> bytes:
+    """The bytes of the regular file `path`, opened without blocking and without following a link in the last component. Raises OSError
+    for a FIFO, a device, a link or a file over AGREEMENT_FILE_MAX_BYTES, so a planted file cannot block the stage while it holds the board."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))  # hardening: ok guarded open, fstat on this descriptor
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > AGREEMENT_FILE_MAX_BYTES:
+            raise OSError(f"{path} is not a regular file of at most {AGREEMENT_FILE_MAX_BYTES} bytes")
+        data = b""
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                return data
+            data += chunk
+            if len(data) > AGREEMENT_FILE_MAX_BYTES:
+                raise OSError(f"{path} grew past {AGREEMENT_FILE_MAX_BYTES} bytes while it was read")
+    finally:
+        os.close(fd)
+
+
+def agreement_preflight(cfg: dict) -> dict | None:
+    """None when the config does not ask for the agreement set (issue 15). Otherwise the reference entries and the control, read before
+    any server starts, so a missing or mismatched file exits 2 and not after a boot. The set's sha256 in the reference has to equal the
+    sha256 of the `agreement_prompts.json` next to this script: a reference made for another prompt set says nothing about this one."""
+    if not cfg.get("agreement_set"):
+        return None
+    import agreement_core as core            # next to this script in the stage directory; it imports only the standard library
+    prompts_path = STAGE_DIR / AGREEMENT_PROMPTS_NAME
+    if not prompts_path.is_file():
+        print(f"serve_and_compare: swap_config.json asks for the agreement set, but {prompts_path} is missing. Copy {AGREEMENT_PROMPTS_NAME} "
+              "and agreement_core.py from the skill's templates directory next to this script.", file=sys.stderr)
+        sys.exit(2)
+    try:
+        raw = read_small_file(prompts_path)
+    except OSError as exc:
+        print(f"serve_and_compare: cannot read {prompts_path}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        problems = core.prompt_set_problems(json.loads(raw.decode("utf-8")))
+    except ValueError as exc:
+        problems = [f"not JSON: {exc}"]
+    if problems:
+        print(f"serve_and_compare: {prompts_path} has problems: " + "; ".join(problems), file=sys.stderr)
+        sys.exit(2)
+    set_sha = hashlib.sha256(raw).hexdigest()
+    run_dir = Path(cfg["run_dir"]).resolve()
+    ref_path = run_dir.joinpath(*AGREEMENT_REFERENCE)
+    try:
+        ref_raw = read_small_file(ref_path)
+        ref = json.loads(ref_raw.decode("utf-8"))
+        entries = ref["entries"]
+        if not isinstance(entries, list) or not entries or len(entries) > core.MAX_ENTRIES:
+            raise ValueError(f"entries must be a list of 1 to {core.MAX_ENTRIES} prompts")
+        for e in entries:
+            if not isinstance(e.get("id"), str):
+                raise ValueError("every entry needs a string id")
+            for key in ("prompt_ids", "generated_ids"):
+                ids = e.get(key)
+                if (not isinstance(ids, list) or not ids or len(ids) > core.MAX_IDS
+                        or not all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in ids)):
+                    raise ValueError(f"entry {e['id']!r}: {key} must be a non-empty list of whole numbers of at most {core.MAX_IDS}")
+        if len({e["id"] for e in entries}) != len(entries):
+            raise ValueError("prompt ids must be unique")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        print(f"serve_and_compare: cannot read the agreement reference {ref_path}: {type(exc).__name__}: {exc}. Stage 1 writes it for the "
+              "prompt set; without it there is nothing to compare the chip with.", file=sys.stderr)
+        sys.exit(2)
+    if ref.get("prompt_set_sha256") != set_sha:
+        print(f"serve_and_compare: the agreement reference was made for prompt set {ref.get('prompt_set_sha256')!r} and this stage has "
+              f"{set_sha}", file=sys.stderr)
+        sys.exit(2)
+    return {"prompt_set_sha256": set_sha, "reference_sha256": hashlib.sha256(ref_raw).hexdigest(), "entries": entries,
+            "control": load_agreement_control(cfg, run_dir, entries, set_sha)}
+
+
+def load_agreement_control(cfg: dict, run_dir: Path, entries: list, set_sha: str) -> dict | None:
+    """The control named by `agreement_control`: {source, sha256, entries}. It has to come from a run of the same prompt set with the same
+    reference ids, or this exits 2: scores against different references cannot be compared."""
+    value = cfg.get("agreement_control")
+    if not value:
+        return None
+    path = Path(value) if os.path.isabs(str(value)) else run_dir / str(value)
+    try:
+        raw = read_small_file(path)
+        record = json.loads(raw.decode("utf-8"))["agreement_set"]
+        ctl = {e["id"]: e["reference_ids"] for e in record["entries"]}
+        model_id = record.get("model_id")
+        mine = {e["id"]: [int(i) for i in e["generated_ids"][:len(ctl.get(e["id"], []))]] for e in entries}
+        same = record["prompt_set_sha256"] == set_sha and ctl == mine
+        embedded = [{"id": e["id"], "kind": e.get("kind"), "reference_ids": e["reference_ids"], "chip_ids": e["chip_ids"],
+                     "error": e.get("error")} for e in record["entries"]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        print(f"serve_and_compare: cannot use the agreement control {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if not same:
+        print(f"serve_and_compare: the agreement control {path} was made from another prompt set or other reference ids.", file=sys.stderr)
+        sys.exit(2)
+    problem = control_identity_problem(cfg.get("nearest_model_id"), model_id)       # the same rule as the prompt-suite control
+    if problem:
+        print(f"serve_and_compare: the agreement control {path} is not a control of the nearest model: {problem}.", file=sys.stderr)
+        sys.exit(2)
+    return {"source": str(path), "sha256": hashlib.sha256(raw).hexdigest(), "model_id": model_id, "entries": embedded}
+
+
+def run_agreement_set(cfg: dict, port: int, model: str, tokenizer, setup: dict) -> dict:
+    """Step (j): teacher-force every prompt of the set and return the record that goes under `agreement_set` in swap-check.json. For
+    each position k the chip gets the prompt ids plus the reference's first k tokens and returns one token; its first id is recorded."""
+    n_tokens = int(cfg.get("agreement_tokens", N_TOKENS))
+    out = []
+    for e in setup["entries"]:
+        ref_ids = [int(i) for i in e["generated_ids"][:n_tokens]]
+        chip_ids, error = [], None
+        for k in range(len(ref_ids)):
+            try:
+                text = complete(port, model, [int(i) for i in e["prompt_ids"]] + ref_ids[:k], 1)
+            except ServerHTTPError as exc:
+                error = str(exc)[:300]
+                break
+            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+                error = f"{type(exc).__name__}: {exc}"[:300]
+                break
+            ids = tokenizer.encode(text, add_special_tokens=False).ids
+            chip_ids.append(ids[0] if ids else None)
+        chip_ids += [None] * (len(ref_ids) - len(chip_ids))        # a stopped prompt counts its missing positions as mismatches
+        out.append({"id": e["id"], "kind": e.get("kind"), "prompt_tokens": len(e["prompt_ids"]), "reference_ids": ref_ids,
+                    "chip_ids": chip_ids, "error": error})
+    return {"ran": True, "model_id": cfg.get("new_model_id"), "prompt_set_sha256": setup["prompt_set_sha256"],
+            "reference_sha256": setup["reference_sha256"], "n_tokens": n_tokens, "entries": out, "control": setup["control"],
+            "control_expected": bool(cfg.get("agreement_control"))}
+
+
 def suite_preflight(cfg: dict) -> dict | None:
     """None when the config does not ask for the suite. Otherwise the suite and the control, read before any
-    server starts: a stage that lacks prompt_suite.json or names an unusable control exits 2."""
+    server starts: a stage that lacks prompt_suite.json or names an unusable control exits 2. It also reads the agreement set's
+    files (`agreement_preflight`) and leaves the result in `cfg["_agreement"]`, so serve_and_compare_container.py, which calls this function
+    and `measure` with the same `cfg`, gets the set without a change of its own."""
+    cfg["_agreement"] = agreement_preflight(cfg)
     if not cfg.get("prompt_suite"):
         return None
     path = STAGE_DIR / SUITE_FILE_NAME
@@ -578,6 +728,8 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
            "matches": matches, "forced": forced, "mismatches": mismatches}
     if suite_setup is not None:
         out["prompt_suite"] = run_suite(cfg, port, model, STAGE_DIR / "model-dir", suite_setup)
+    if cfg.get("_agreement") is not None:
+        out["agreement_set"] = run_agreement_set(cfg, port, model, tokenizer, cfg["_agreement"])
     if cfg.get("sampling_probe"):
         out["sampling_probe"] = run_sampling_probe(cfg, port, model, log_path, refresh=getattr(proc, "save_log", None))
     return out
@@ -651,6 +803,10 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
               "result_draft": draft}
     if "prompt_suite" in m:
         report["prompt_suite"] = m["prompt_suite"]
+    if "agreement_set" in m:
+        # The 32-token result stays beside the set's record (issue 15): the old bar is a recorded baseline, and the gate reads both.
+        report["agreement_set"] = {**m["agreement_set"], "baseline": {"check": "32-token teacher-forced, one prompt", "top1_agreement": top1,
+                                                                    "n_tokens": N_TOKENS}}
     if "sampling_probe" in m:
         report["sampling_probe"] = m["sampling_probe"]
     swap_json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")

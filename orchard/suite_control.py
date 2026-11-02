@@ -51,6 +51,7 @@ TEMPLATES = Path("orchard") / "skills" / "weights-swap-templates"
 CONTROL_DIR = "suite-control"
 CACHE_SUFFIX = "-control"
 SUITE_FILE = "prompt_suite.json"
+AGREEMENT_FILES = ("agreement_core.py", "agreement_prompts.json")
 QUEUED_EXIT = 10            # gozer's exit status for a request that was queued
 REQUIRED = ("run_dir", "nearest_model_id", "base_snapshot", "new_snapshot", "new_model_id", "tt_cache", "hf_home", "port")
 
@@ -69,7 +70,8 @@ def scripts_for(cfg: dict) -> tuple[str, str]:
 def files_for(cfg: dict) -> list[str]:
     """Every shipped file the control directory needs. The container script imports serve_and_compare.py, so both serving types copy it."""
     prepare_name, serve_name = scripts_for(cfg)
-    return list(dict.fromkeys([prepare_name, serve_name, "serve_and_compare.py", SUITE_FILE]))
+    extra = list(AGREEMENT_FILES) if cfg.get("agreement_set") else []       # serve_and_compare.py imports agreement_core when the flag is on
+    return list(dict.fromkeys([prepare_name, serve_name, "serve_and_compare.py", SUITE_FILE, *extra]))
 
 
 def _repo(model_id: str) -> str:

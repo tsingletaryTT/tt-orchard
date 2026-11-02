@@ -155,7 +155,7 @@ from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+from orchard.stages import (AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
@@ -580,6 +580,7 @@ def coder_tier(cfg, port: int) -> str:
 
 BUNDLE_BUILD_TIMEOUT_S = 600            # build_bundle.py reads files and copies packages; no network
 SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py", "prompt_suite.json")      # copied with a drafted swap_config.json
+AGREEMENT_TEMPLATES = ("agreement_core.py", "agreement_prompts.json")      # also copied when the config sets `agreement_set` (issue 15)
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
 GRAFT_TRIAL_ENV = "ORCHARD_TRIAL_DIR"      # in the environment of the trial's test: the trial directory, so its servers can be found
 GRAFT_TRIAL_TEMPLATE = "graft_trial.py"     # copied into stages/2/graft-trial/ when the trial starts (orchard/graft_trial.py)
@@ -2488,11 +2489,17 @@ class Supervisor:
         if cfg is None:
             self.ledger.append("decision", spec.number, decision="swap config not drafted", problems=problems)
             return
+        # Stage 1 may have written the CPU reference for the agreement set (issue 15). When it did, the run uses the set: the hash of that file goes
+        # into the ledger now, before any stage 2 test, and the gate compares the file with it later.
+        reference = agreement_reference_record(self.run_dir)
+        if reference is not None:
+            cfg["agreement_set"] = True
+            self.ledger.append("decision", spec.number, decision=AGREEMENT_LEDGER_DECISION, **reference)
         target = stage_dir / "swap_config.json"
         _put(target, json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
         copied = []
-        for name in (STAGE4_TEMPLATES if "package" in cfg else SWAP_TEMPLATES):      # a container package also needs its script
+        for name in (*(STAGE4_TEMPLATES if "package" in cfg else SWAP_TEMPLATES), *(AGREEMENT_TEMPLATES if cfg.get("agreement_set") else ())):      # a container package also needs its script
             shutil.copy2(templates / name, stage_dir / name)
             copied.append(name)
         self.ledger.append("decision", spec.number, decision="swap config drafted",
@@ -2620,7 +2627,7 @@ class Supervisor:
             cdir = stage_dir / "configs" / str(n)
             cdir.mkdir(parents=True, exist_ok=True)
             _put((cdir / "swap_config.json"), json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-            for name in STAGE4_TEMPLATES:
+            for name in (*STAGE4_TEMPLATES, *(AGREEMENT_TEMPLATES if cfg.get("agreement_set") else ())):
                 shutil.copy2(templates / name, cdir / name)
         if tests is not None:
             _put((stage_dir / "hw_tests.json"), json.dumps(tests, indent=2) + "\n", encoding="utf-8")

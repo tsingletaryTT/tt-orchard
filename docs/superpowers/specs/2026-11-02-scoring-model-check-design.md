@@ -1,6 +1,7 @@
 # Scoring models: a stage 2 check on score parity
 
-Date: 2026-11-02, updated 2026-11-03. Issue 358. Status: built and run against fakes on the CPU only. Nothing here ran on a chip.
+Date: 2026-11-02, updated 2026-11-03. Issue 358. Status: built and run against fakes on the CPU. Issue 375 ran the first slice once on a chip,
+through a model server and not through the supervisor (section 9). Nothing else here ran on a chip.
 Slice 1 (PR 383): a stage 1 recorder for a Qwen3-style reranker, a supervisor-owned check template, and a gate. Slice 2 (issues 376 to 380):
 the embedding kind, the model kind in stage 0 and the stage machine, the stage 0 rule for a model with no output head, retrieval rows
 (NDCG and Hit@1) computed from the recorded scores, and media (image and video files) in the pair set. Section 8 lists what is left.
@@ -167,7 +168,7 @@ value, a value that is not a finite number and an unknown key are each a reason.
 and an operator who wants a stricter bar for one model can set it there. Letting an operator loosen a bound for one model (for example a
 bfp8 weight policy that costs more score error) needs a ledger entry and a card line that says so. That is not built.
 
-These numbers are choices made from the public tables. They have not been compared with a run through this supervisor on a chip. The
+These numbers are choices made from the public tables. Section 9 compares them with one chip run (not run by the supervisor). The
 bundles' absolute differences depend on the score scale of their model, and a model with a different scale needs its own review of the
 two absolute bounds.
 
@@ -200,8 +201,36 @@ Built in slice 2 (CPU and fakes only):
 
 Left, each in a public issue:
 
-1. (issue 375) A real run on a board: the 4B reranker port, the recorder on the real snapshot, the bounds checked against the run.
+1. (issue 375, done in part: section 9) A real run on a board. The recorder ran on the real snapshot and the check ran against the bundle's server. What is left: the check run by the supervisor with a port the coder wrote, under `--full-port` or the weights-swap path.
 2. A stage 5 serving check for a `/v1/rerank` style API, and stages 3, 4 and 6 for a scoring model (the run pauses after stage 2).
 3. A recorder for a vision-language reranker or embedding model (a processor and real image and video inputs) and a real run of one.
 4. Retrieval benchmark subsets (MTEB reranking, MIRACL, ViDoRe, MMEB) with their licences checked, and the nearest-document count.
 5. A scoring route for the classes other than `weights-only` and `full-port` (`weights+sidecar`, `vocab-trim`, `stock-runtime`).
+
+## 9. The first chip run (issue 375, 2026-11-02)
+
+Run log: `docs/run-logs/2026-11-02-scoring-check-chip-run.md`. The recorder ran on the CPU for Qwen/Qwen3-Reranker-4B (fp32 and bf16). The
+chip scores came from the public bundle's own server (`raahemnabeel/qwen3-reranker-4b`, profile p150, one chip of a board). The port
+module `scripts/scoring_check/port_model.py` decodes the prompt ids to text, checks that the prompt built again from the texts has the
+same ids, sends the texts to the server on the loopback interface, checks the server's token count, and returns the raw scores. The
+shipped template ran under a lease and the gate passed.
+
+| number | this run (32 pairs, 8 groups) | the 4B bundle's table (188 pairs, 33 groups) | bound |
+|---|---|---|---|
+| Pearson r | 0.99940 | 0.9997 | at least 0.998 |
+| mean absolute difference | 0.189 | 0.140 | at most 0.25 |
+| max absolute difference | 0.543 | 0.64 | at most 1.0 |
+| top-1 groups | 8 of 8 | 33 of 33 | at least 0.95 |
+| order kept | 43 of 43 | 100% of 449 | at least 0.98 |
+
+The numbers were the same in a second run (the chip scores are bit-identical). Against a bf16 CPU reference they are 0.99938, 0.202, 0.474,
+8 of 8 and 43 of 43. The bounds held. No bound was too tight for the policy the bundle ships. A bound that is too loose cannot be shown
+with one passing build. Two points for the operator:
+
+- The top-1 and order floors allow no flip on this set. With 8 groups, 7 of 8 is 0.875. With 43 separated pairs, 42 of 43 is 0.977. The
+  smallest top-1 margin in the reference is 7.3 logits, so no flip is near. The smallest separated gap is 0.66 logits and three pairs
+  have a gap under 1.1, so one flip is possible from an error that the mean bound still accepts. If the operator wants the order floor to
+  allow one flip on this set, it is 0.97. Nothing here shows a build that flips, so the default is unchanged.
+- The mean difference is 1.35 times the bundle's table on a different set (long documents of about 1,400 tokens carry the largest
+  differences, 0.258 mean). The bundle's bfp8 policy (0.217 on its own set) would likely exceed 0.25 here. That is a prediction. No
+  other policy was run.

@@ -28,7 +28,8 @@ What it checks, each as a named reason:
 
 What this does not show: the same limits as the full-port check. The numbers come from a test the supervisor ran, and a port that returns
 the reference's scores without computing them looks the same as one that computed them. The bounds are choices made from two public
-bundles' accuracy tables and have not been checked against a chip run through the supervisor.
+bundles' accuracy tables. One chip run (issue 375, docs/run-logs/2026-11-02-scoring-check-chip-run.md) passed them: it was not run by the
+supervisor, and it covers the one weight policy the 4B bundle ships.
 """
 from __future__ import annotations
 
@@ -77,8 +78,10 @@ TOLERANCE = 1e-9                      # the gate's recomputed number against the
 # Bounds, with the evidence each is drawn from. The 4B reranker bundle (raahemnabeel/qwen3-reranker-4b, doc/accuracy.md) reports Pearson r
 # 0.9997, mean/max absolute difference 0.140/0.64 logits, top-1 33/33 groups and 100% of separated pairs in order; the 8B VL bundle reports
 # 0.9991, 0.107/0.39 and 41/41. Each bound below leaves room around those numbers and sits at or inside the policies the 4B bundle
-# measured and did not select (bfp8 MLP: 0.217/0.63 with top-1 31/32; MLP LoFi: 0.359/0.93 with r 0.99885). They are choices, not
-# measurements of this repository's own port runs. "min" bounds are floors, "max" bounds are ceilings.
+# measured and did not select (bfp8 MLP: 0.217/0.63 with top-1 31/32; MLP LoFi: 0.359/0.93 with r 0.99885). They are choices made from
+# those tables. The one chip run so far (issue 375: the bundle's selected policy, on the 32-pair set) measured Pearson 0.99940, mean/max
+# 0.189/0.543 logits, top-1 8/8 groups and 43/43 separated pairs in order, so it passes each bound. On a set of 8 groups and 43 separated
+# pairs the top-1 and order floors allow no flip at all (7/8 is 0.875, 42/43 is 0.977). "min" bounds are floors, "max" bounds are ceilings.
 DEFAULT_BOUNDS = {
     "pearson_min": 0.998,             # the 4B bundle's selected policy: 0.9997; its LoFi policy: 0.99885
     "mean_abs_diff_max": 0.25,        # logits; the selected policy 0.14, the bfp8 policy 0.217

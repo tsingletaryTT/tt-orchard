@@ -82,7 +82,7 @@ thin package, its boot check, card and publish commands as text) is implemented 
 
 Overnight 2 (2026-10-28, PR 210): MiniCPM3-4B (multi-latent attention) runs on one Blackhole chip through scripts in `scripts/minicpm3` (not through the supervisor): 33.7 tok/s decode, batched prefill, a chat server; log in `docs/run-logs/2026-10-29-overnight-minicpm3-4b.md`.
 
-Scoring models slice 2 (2026-11-03, issues 376 to 380, branch `scoring-slice-2`): embedding check, model kind (`orchard/model_kind.py`, `--model-kind`), the scoring route in the stage machine (stage 1 `scoring-reference`, stage 2 `scoring-check`, pause before stage 3, block code `scoring-route`), no-output-head rule in stage 0, retrieval rows, media in the pair set. CPU and fakes only; the board run is issue 375.
+Scoring models slice 2 (2026-11-03, issues 376 to 380, branch `scoring-slice-2`): embedding check, model kind (`orchard/model_kind.py`, `--model-kind`), the scoring route in the stage machine (stage 1 `scoring-reference`, stage 2 `scoring-check`, pause before stage 3, block code `scoring-route`), no-output-head rule in stage 0, retrieval rows, media in the pair set. CPU and fakes only; the first chip run (issue 375, PR 401) went through a model server and not through the supervisor.
 
 ## Open decision for the operator
 No adversarial search for bypasses of the command runner has been done. Decide before plan 4 ships:

@@ -71,7 +71,8 @@ LABEL_BENCHMARK = "benchmark"
 LABEL_SINGLE = "single sample"
 LABEL_UNWARMED = "unwarmed repeats"
 LABEL_AGREEMENT = "measured (provisional bars)"
-LABELS = (LABEL_BENCHMARK, LABEL_SINGLE, LABEL_UNWARMED, LABEL_AGREEMENT, "TODO")
+LABEL_AGREEMENT_FLOOR = "measured (bars from a measured noise floor)"
+LABELS = (LABEL_BENCHMARK, LABEL_SINGLE, LABEL_UNWARMED, LABEL_AGREEMENT, LABEL_AGREEMENT_FLOOR, "TODO")
 
 # The license's own sentences, cut from the agreement text by these markers. The card quotes them and the gate looks them up again in the
 # package's own LICENSE.md, so neither a changed agreement nor a changed quotation passes.
@@ -225,6 +226,24 @@ class Facts:
     derived: bool = False                   # the result file was derived from a newer chip run (orchard/audio_result_derive.py)
     chip_decoder: bool = False              # the benchmark and the agreement run both had the autoencoder decoder's transformer on the chip
     cpu: tuple = ()                         # (row name, seconds) of the CPU float32 clips of the result, one sample each
+    floor_sha256: str | None = None         # sha256 of the noise_floor.json that set the agreement bars (a measured floor), or None for provisional bars
+
+
+def agreement_label(f: "Facts") -> str:
+    """The label of the agreement rows: bars from a measured floor with a recorded sha256, or the provisional bars."""
+    return LABEL_AGREEMENT_FLOOR if f.floor_sha256 else LABEL_AGREEMENT
+
+
+def measured_floor_sha(result: dict, bars) -> str | None:
+    """The sha256 of the noise-floor file when the result's agreement bars came from a measured floor, else None. A result counts as measured
+    when its `noise_floor` record says `measured` with a 64-hex sha256 (stage 2 writes it from audio_bars.Floor.record) and its agreement `bars`
+    text starts with `measured:`. A record that says measured without a sha256, or bars text that says nothing about a floor, does not count."""
+    rec = result.get("noise_floor") if isinstance(result, dict) else None
+    if not (isinstance(rec, dict) and rec.get("measured") is True and isinstance(rec.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", rec["sha256"])):
+        return None
+    text = bars if isinstance(bars, str) else ""
+    return rec["sha256"] if text.startswith("measured:") else None
 
 
 MAIN_PART = "generate_and_decode_s"
@@ -361,8 +380,11 @@ def facts_from_evidence(result, bench, *, snapshot_name: str | None = None) -> F
         raise AudioPackageError("the run's control did not show that the chip served the fine-tune and not the base model; nothing to package")
     floor = _obj(_get(result, "environment_floor", what="the audio result"), "environment_floor")
     bars = agreement.get("bars")
-    if not isinstance(bars, str) or "provisional" not in bars:
-        raise AudioPackageError("the agreement record does not say its bars are provisional; this builder labels agreement by that statement")
+    floor_sha = measured_floor_sha(result, bars)
+    if floor_sha is None and (not isinstance(bars, str) or "provisional" not in bars):
+        raise AudioPackageError("the agreement record says neither that its bars are provisional nor that they came from a measured noise floor (a "
+                                "`noise_floor` record with measured true and a sha256, and bars text that starts with 'measured:'); this builder labels "
+                                "agreement by that statement")
     sizes, load = bench_sizes(_obj(bench, "the benchmark file"), settings)
     bench_decoder = any(DECODER_PART[0] in s.parts for s in sizes)
     if bench_decoder != (chip.get("chip_decoder") is True):
@@ -373,7 +395,8 @@ def facts_from_evidence(result, bench, *, snapshot_name: str | None = None) -> F
                                 "warm-up run(s) in one process); the card would have no number it may call one")
     return Facts(MODEL_ID, revision, library, {k: settings[k] for k in sorted(settings)}, str(chip.get("device", "")), _agreement(agreement, "chip_vs_reference"),
                  _agreement(floor, "environment_floor"), bars, sizes, load, BENCH_EVIDENCE, RESULT_EVIDENCE,
-                 chip_decoder=bench_decoder, cpu=cpu_timings(result, settings), derived=isinstance(result.get("derived_from"), dict))
+                 chip_decoder=bench_decoder, cpu=cpu_timings(result, settings), derived=isinstance(result.get("derived_from"), dict),
+                 floor_sha256=floor_sha)
 
 
 def read_facts(run_dir, bench_path, *, snapshot_name: str | None = None, result_path=None) -> tuple[Facts, bytes, bytes]:
@@ -534,9 +557,9 @@ def number_rows(f: Facts) -> list[tuple[str, str, str, tuple[str, ...]]]:
     a, e = f.agreement, f.floor
     for name, key, nd in (("final latent PCC", "latent_pcc", 4), ("final latent relative L2", "latent_rel_l2", 4), ("waveform PCC", "wave_pcc", 4),
                           ("waveform relative L2", "wave_rel_l2", 4), ("log-spectrum distance", "log_spectrum", 4)):
-        rows.append((f"chip against the CPU reference, {name}", f"{a[key]:.{nd}f}", LABEL_AGREEMENT, res))
+        rows.append((f"chip against the CPU reference, {name}", f"{a[key]:.{nd}f}", agreement_label(f), res))
     for name, key, nd in (("final latent PCC", "latent_pcc", 4), ("waveform PCC", "wave_pcc", 4)):
-        rows.append((f"environment floor (two CPU environments), {name}", f"{e[key]:.{nd}f}", LABEL_AGREEMENT, res))
+        rows.append((f"environment floor (two CPU environments), {name}", f"{e[key]:.{nd}f}", agreement_label(f), res))
     for name in ("boot check of this package on a chip", "download of this package from the Hub and a boot from it"):
         rows.append((name, "TODO", "TODO", ()))
     return rows
@@ -615,8 +638,11 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes, listening_not
              "`tt-model.yaml` is a draft v5.1 manifest of kind `http-server`. It has not been built into an image or booted.", "",
              NUMBERS_HEAD, "",
              "Every number is in this table and comes from a file in `evidence/`. A row labelled `benchmark` has 3 or more measured runs after a discarded warm-up "
-             "run in one process. A row labelled `single sample` has fewer runs. The agreement rows compare the chip run with the CPU reference; their pass bars "
-             "are provisional choices that were not set from a measured noise floor. `TODO` marks a measurement that was not taken.", "",
+             "run in one process. A row labelled `single sample` has fewer runs. The agreement rows compare the chip run with the CPU reference; "
+             + (f"their pass bars were set from a measured noise floor between CPU runs (`noise_floor.json`, sha256 `{f.floor_sha256}`), with a known-bad "
+                "control that the bars reject; the floor holds no chip arithmetic. " if f.floor_sha256 else
+                "their pass bars are provisional choices that were not set from a measured noise floor. ")
+             + "`TODO` marks a measurement that was not taken.", "",
              "| Number | Value | Label | Evidence |", "| --- | --- | --- | --- |"]
     lines += [_row(*r) for r in number_rows(f)]
     lines += ["", "The timings are from one process that loaded the model once. The job server in this package starts a new process for each clip, so it loads the "
@@ -653,7 +679,8 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes, listening_not
                  "The diffusion transformer and the decoder's transformer layers run on the chip."] if f.chip_decoder else
                 ["- The text encoder, the sampler and the decoder run on the host CPU. " + ONLY_DIT + "."]),
               "- The server makes one clip at a time and keeps a short queue. A request is refused when the queue is full.",
-              "- The pass bars for agreement are provisional.",
+              ("- The pass bars for agreement were set from a measured noise floor between CPU runs, which holds no chip arithmetic."
+               if f.floor_sha256 else "- The pass bars for agreement are provisional."),
               "- The server has no sign-in. Run it on a network you trust.", "",
               "## Risks and safety considerations", "",
               f"Generated audio can resemble existing recordings. Check the output before you use or share it, and follow the acceptable use policy ({AUP_LINK}).", "",
@@ -951,6 +978,8 @@ def card_problems(card: str, pkg: Path, *, license_bytes: bytes | None = None, n
                                 f"after {MIN_WARMUP} or more warm-up run(s)")
         elif label == LABEL_AGREEMENT and "provisional" not in prose.lower():
             problems.append(f"number {name!r} is an agreement number and the card does not say the bars are provisional")
+        elif label == LABEL_AGREEMENT_FLOOR and not ("noise floor" in prose.lower() and re.search(r"sha256 `[0-9a-f]{64}`", prose)):
+            problems.append(f"number {name!r} is labelled as set from a measured noise floor and the card does not name the floor and its sha256")
     if facts is not None:
         wanted = {_row_key(r): r for r in number_rows(facts)}
         names = {r[0] for r in wanted.values()}
