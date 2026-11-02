@@ -213,12 +213,18 @@ def parity(reference: list, chip: list, groups: list) -> dict:
 
 
 def cosine(a: list, b: list) -> float:
-    """Cosine of two equal-length vectors. 0.0 when either has no length (the cosine is undefined). Clamped to [-1, 1]."""
+    """Cosine of two equal-length vectors. 0.0 when either is all zeros (the cosine is undefined). Clamped to [-1, 1]. Each vector is divided by
+    its largest absolute value first, so a vector of tiny finite numbers (squares that would underflow to 0.0) has the same cosine as the same
+    vector scaled up, and one whose largest value is 1 has a norm of at least 1."""
+    ma = max((abs(x) for x in a), default=0.0)
+    mb = max((abs(y) for y in b), default=0.0)
+    if ma <= 0.0 or mb <= 0.0:
+        return 0.0
+    a = [x / ma for x in a]
+    b = [y / mb for y in b]
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
     return max(-1.0, min(1.0, dot / na / nb))
 
 

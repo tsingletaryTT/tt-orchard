@@ -168,6 +168,55 @@ def test_a_run_with_no_model_input_cannot_take_the_scoring_route_and_says_so(tmp
         r.close()
 
 
+# ---- review round 3 ----------------------------------------------------------------------------------------------------------
+
+def test_a_vector_of_tiny_numbers_does_not_pass_by_underflow_and_the_template_and_gate_agree():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("scoring_check_template_round3", sc.TEMPLATE)
+    tpl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tpl)
+    ref = [1 / 64] * 4096
+    chip = [1e-162] * 4000 + [3e-162] * 96            # the squares underflow to 0.0 in the plain formula, which then returned 1.0
+    expected = (4000 * 1 + 96 * 3) / (4096 ** 0.5 * (4000 + 96 * 9) ** 0.5)
+    assert 0.9606 < expected < 0.9607
+    for cosine in (sc.cosine, tpl.cosine):
+        assert cosine(ref, chip) == pytest.approx(expected, abs=1e-9)
+        assert cosine(chip, ref) == pytest.approx(expected, abs=1e-9)
+    assert sc.embed_numbers([ref], [chip], ["text"]) == tpl.embed_numbers([ref], [chip], ["text"])
+    assert sc.embed_bound_reasons({"count": 24, "cosine_mean": expected, "cosine_min": expected, "by_kind": {"a": {"mean": expected, "min": expected}} | {
+        "b": {"mean": 1, "min": 1}, "c": {"mean": 1, "min": 1}}}, sc.EMBEDDING_BOUNDS)
+    for cosine in (sc.cosine, tpl.cosine):
+        assert cosine([1e-300, 2e-300], [2e-300, 4e-300]) == pytest.approx(1.0)       # the same direction at any scale
+        assert cosine([1e-320, 0.0], [0.0, 1e-320]) == 0.0 and cosine([0.0, 0.0], [1e-320, 1e-320]) == 0.0
+        assert cosine([1e6, -1e6], [-1e6, 1e6]) == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize("readme", [
+    "---\nbooks:\n  pipeline_tag: text-ranking\npipeline_tag: text-generation\n---\n",
+    "---\nnote: |\n  pipeline_tag: feature-extraction\npipeline_tag: text-generation\n---\n",
+])
+def test_an_indented_pipeline_tag_inside_a_nested_mapping_does_not_set_the_kind(tmp_path, readme):
+    from orchard import model_kind
+    (tmp_path / "README.md").write_text(readme)
+    assert model_kind.pipeline_tag(tmp_path) == "text-generation"
+    (tmp_path / "README.md").write_text(readme.replace("pipeline_tag: text-generation\n", ""))
+    assert model_kind.pipeline_tag(tmp_path) is None
+
+
+def test_a_resume_without_the_model_input_after_stage_2_still_pauses_before_stage_3(rig):
+    from run_fakes import argv
+    rig.args.unattended = True
+    make(rig)
+    never_wait(rig)
+    assert rig.run() == EXIT_BLOCKED
+    assert [d["code"] for d in rig.decisions() if d["decision"] == "blocked"] == ["scoring-route"] and not started(rig, 3)
+    rig.args = supervisor.parse(argv(rig.run_dir.parent, rig.tiers, rig.chip_server.endpoint, chips=2))      # the retry names no model= input
+    rig.args.unattended = True
+    assert rig.run() == EXIT_BLOCKED
+    assert [d["code"] for d in rig.decisions() if d["decision"] == "blocked"] == ["scoring-route"] * 2
+    assert not started(rig, 3)
+
+
 # A port that replaces the media directory with a link to a copy while it embeds the first input: the next request reads the file by path.
 SWAP_DIR = '''
 import ttnn, random, os, shutil

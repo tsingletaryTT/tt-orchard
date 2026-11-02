@@ -1027,7 +1027,7 @@ class Supervisor:
         entries = self.ledger.read()
         kind = run_model_kind(entries)
         routed = (scoring_routed(kind, run_path(entries, self.run_dir), run_class(entries, self.run_dir), full_port_enabled(entries))
-                  and text_runtime.selected(entries) is None and bool(self.inputs.get("model")))
+                  and text_runtime.selected(entries) is None)
         return kind, routed
 
     def _scoring_unrouted(self) -> bool:
@@ -1035,7 +1035,9 @@ class Supervisor:
         it always blocks, as the other unbuilt routes do."""
         entries = self.ledger.read()
         kind, routed = self._scoring_route()
-        if kind not in model_kind.SCORING_KINDS or routed:
+        # Without a `model=` input the check has no snapshot to load. This is judged before stage 1 only, from this invocation's inputs: once
+        # stage 2 has passed, the route (and the pause after it) follows the ledger, so a resume that omits the input cannot skip the pause.
+        if kind not in model_kind.SCORING_KINDS or (routed and self.inputs.get("model")):
             return False
         return self.unattended or not any(e["event"] == "decision" and e["data"].get("reason") == SCORING_NOT_ROUTED for e in entries)
 

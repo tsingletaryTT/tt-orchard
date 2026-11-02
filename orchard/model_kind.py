@@ -58,9 +58,9 @@ def pipeline_tag(model_dir) -> str | None:
     if not lines or lines[0].strip() != "---":
         return None
     for line in lines[1:FRONT_MATTER_LINES]:
-        if line.strip() == "---":
+        if line.rstrip() == "---":
             return None
-        m = _TAG.match(line.strip())
+        m = _TAG.match(line.rstrip())          # not stripped at the start: an indented `pipeline_tag` belongs to a nested mapping
         if m:
             return m.group(1)
     return None
