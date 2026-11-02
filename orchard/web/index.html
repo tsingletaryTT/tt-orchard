@@ -31,6 +31,7 @@
     <button type="button" class="view-btn" id="view-hardware-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">📺 </span>Machine</button>
     <button type="button" class="view-btn" id="view-settings-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">🧰 </span>Models</button>
     <button type="button" class="view-btn" id="view-telegraph-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">📡 </span>Telegraph</button>
+    <button type="button" class="view-btn" id="view-cans-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">🥫 </span>Cans</button>
   </nav>
   <div class="topbar-right">
     <div class="meters" id="meters">
@@ -255,6 +256,35 @@
           you edit the file. The meter then shows the new state.</p>
         <p class="muted small">The meter is always on screen: in the top bar, and pinned along the bottom edge on screens up to 900 px wide. Amber means a cap is at 80 percent or more. Red means a cap
           is used up or the latest call was refused; the reason is in the meter.</p>
+      </section>
+    </section>
+
+    <section id="cans-view" class="cans" hidden aria-labelledby="cans-h">
+      <div>
+        <h1 id="cans-h"><span class="emoji" aria-hidden="true">🥫 </span>Cans</h1>
+        <p class="muted">The models packaged as v6 thin bundles (README section 5.9i, <code>docs/canning.md</code>). This page only reads: it
+          never stages, checks, boots or publishes a can, and it sends no request to the Hub.</p>
+      </div>
+      <p class="tg-banner" id="cans-stale" data-tone="bad" role="alert" hidden></p>
+      <div class="tg-banner" id="cans-folder" data-tone="dim" role="status"></div>
+
+      <section aria-labelledby="cans-list-h" class="tg-block">
+        <h2 id="cans-list-h">Cans <span class="muted small" id="cans-count"></span></h2>
+        <div class="table-wrap cans-wrap">
+          <table class="tg-table cans-table" id="cans-table">
+            <caption class="muted small">One row per spec in the checkout's <code>config</code> folder. Press the button in the Can column to open a row's details.</caption>
+            <thead><tr><th scope="col">Status</th><th scope="col">Can</th><th scope="col">Kind</th><th scope="col">Mesh</th><th scope="col">Weights</th><th scope="col">Bundle</th><th scope="col">SHA256SUMS</th><th scope="col">Gate</th><th scope="col">Boot</th></tr></thead>
+            <tbody id="cans-body"></tbody>
+          </table>
+        </div>
+        <p class="muted small" id="cans-empty" hidden>No can specs were found. A spec is a file named <code>can.NAME.toml</code> in the checkout's <code>config</code> folder.</p>
+      </section>
+
+      <section aria-labelledby="cans-hub-h" class="tg-block" id="cans-hub">
+        <h2 id="cans-hub-h">Hub state</h2>
+        <p class="muted" id="cans-hub-note"></p>
+        <p class="muted small">Gate and boot results come from the optional record that <code>tt-orchard can gate</code> and <code>can boot</code> write
+          when given <code>--state-dir</code>. The page does not run the gate itself: it checks the SHA256SUMS file and the card, and shows the recorded result.</p>
       </section>
     </section>
 

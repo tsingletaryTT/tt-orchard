@@ -67,6 +67,7 @@ from urllib.parse import parse_qs, urlsplit
 from orchard import __version__, bringup_config, caches, lexicon, machine_checks, narrate, run_view, settings, status, ui, verdict
 from orchard import telegraph as _telegraph
 from orchard import telegraph_view
+from orchard import cans_view
 from orchard import virtualspend as _virtualspend
 from orchard import virtualspend_view
 from orchard.preflight import _lab_status
@@ -401,6 +402,12 @@ class WebApp:
         self.cpu_models = cpu_models
         self.is_installed = is_installed or TtModelList()
         self.environ = os.environ if environ is None else environ     # only to see whether the helper's key variable is set
+        # The Cans view (orchard/cans_view.py): specs come from the checkout's config folder; the staged bundles and the optional state
+        # files are in the cans folder, which is ORCHARD_CANS_DIR when that is set and <runs folder>/cans otherwise.
+        self.cans_specs_dir, self.cans_base = CHECKOUT / "config", CHECKOUT
+        self.cans_dir = None
+        self._cans = None
+        self._cans_lock = threading.Lock()
 
     # ---- shared signals ----
     def _gozer(self) -> str:
@@ -506,6 +513,19 @@ class WebApp:
                 self._spender = virtualspend_view.Spender(self.runs_root, vcfg, redact=self.redact, clock=self.clock)
             spender = self._spender
         return spender.build(run)
+
+    def cans_view(self) -> "cans_view.CansView":
+        """The one Cans view of this page, built on first use (its cache is the view's, so it must be one object)."""
+        with self._cans_lock:
+            if self._cans is None:
+                folder = self.cans_dir or self.environ.get("ORCHARD_CANS_DIR") or self.runs_root / "cans"
+                self._cans = cans_view.CansView(self.cans_specs_dir, self.cans_base, folder, redact=self.redact, clock=self.clock)
+            return self._cans
+
+    def cans(self) -> dict:
+        """The Cans view: each can's spec, staged bundle, SHA256SUMS check, recorded gate and boot, and card rows. Read only: no path in
+        the answer, no write, no chip, no request to the Hub (orchard/cans_view.py)."""
+        return self.cans_view().build()
 
     def _lab_group(self) -> dict:
         """The lab's chips from its `gozer status` (over ssh), asked at most every LAB_TTL_S seconds."""
@@ -1204,6 +1224,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.machine())
         if segs == ["api", "telegraph"]:
             return self._json(200, app.telegraph())
+        if segs == ["api", "cans"]:
+            return self._json(200, app.cans())
         if segs == ["api", "virtual-spend"]:
             return self._json(200, app.virtual_spend(q.get("run")))
         if segs == ["api", "health"]:

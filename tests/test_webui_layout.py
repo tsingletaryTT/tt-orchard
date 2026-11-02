@@ -110,7 +110,7 @@ def test_the_view_tabs_are_the_only_view_buttons():
     t = page()
     views = by_id(t, "view-orchard-btn").parent
     tabs = [n for n in t.root.walk() if "view-btn" in n.classes]
-    assert {n.attrs["id"] for n in tabs} == {"view-orchard-btn", "view-hardware-btn", "view-settings-btn", "view-telegraph-btn"}
+    assert {n.attrs["id"] for n in tabs} == {"view-orchard-btn", "view-hardware-btn", "view-settings-btn", "view-telegraph-btn", "view-cans-btn"}
     assert all(n.inside(views) for n in tabs)
 
 
