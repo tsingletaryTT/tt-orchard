@@ -2076,7 +2076,7 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     for e in entries:
         d = e["data"]
         own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder adopted", "coder started",
-                                                             "coder container started", "coder not started", "coder start blocked")
+                                                             "coder container started", "coder not started", "coder start pending", "coder start blocked")
         if e["event"] in ("park", "restore") or own:
             if isinstance(d.get("lease"), dict):
                 lease = d["lease"]
@@ -2088,18 +2088,19 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
 
 
 CODER_START_DECISIONS = ("coder starting", "coder adopted", "coder started", "coder container started", "coder not started",
-                         "coder start blocked")
+                         "coder start pending", "coder start blocked")
 
 
 def coder_start_blocked(entries: list[dict]) -> bool:
-    """True when the latest coder start decision is "coder start blocked": the granted-board check blocked before `ServerControl.start` ran
+    """True when the latest coder start decision is "coder start pending" or "coder start blocked": the granted-board check was under way or
+    blocked before `ServerControl.start` ran
     (issue 351). No coder was launched, so a resume retries the check and the launch under that lease. It does not finish a boot, compare
     a canary or count a coder death: nothing of the coder's exists to compare or to have died."""
     last = None
     for e in entries:
         if e["event"] == "decision" and e["data"].get("decision") in CODER_START_DECISIONS:
             last = e["data"]["decision"]
-    return last == "coder start blocked"
+    return last in ("coder start pending", "coder start blocked")
 
 
 SUPERVISOR_MARKER = "test-result.json"      # written by Supervisor._run_test, which then appends an evidence entry with its path and sha256

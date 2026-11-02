@@ -1352,13 +1352,18 @@ class Supervisor:
         # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
         if check_granted:
             # Before "coder starting": a block here has launched nothing, and a "coder starting" record would tell a resume that a launch
-            # happened (it could take a foreign server that answers, or count the missing container as a coder death; issue 351). The
-            # "coder start blocked" record keeps the granted lease and server record in the ledger instead: cleanup releases the lease and a
-            # resume retries this check and the launch (`_retry_blocked_start`). The check only reads docker; it never resets a device.
+            # happened (it could take a foreign server that answers, or count the missing container as a coder death; issue 351).
+            # "coder start pending" is written before the check, so a signal or error during the check still leaves the granted lease in
+            # the ledger for cleanup. "coder start blocked" follows a failed check. Both carry owned=False: this attempt owns no container,
+            # so cleanup releases the lease without stopping or resetting anything (a container on the granted board is another
+            # session's). A resume retries the check and the launch (`_retry_blocked_start`). The check only reads docker.
+            unowned = {**self.coder.record(), "owned": False}
+            if hasattr(self.coder, "owned"):
+                self.coder.owned = False          # ServerControl.start sets it again for a real start
+            self.ledger.append("decision", None, decision="coder start pending", lease=lease.record(), server=unowned)
             check = self.coder.confirm_stopped()
             if not check.stopped:
-                self.ledger.append("decision", None, decision="coder start blocked", lease=lease.record(),
-                                   server={**self.coder.record(), "owned": None},
+                self.ledger.append("decision", None, decision="coder start blocked", lease=lease.record(), server=unowned,
                                    reason=f"a container holds a device of the granted board ({', '.join(lease.chips)})")
                 self._block(None, f"a container holds a device of the granted board ({', '.join(lease.chips)}); the coder was "
                                   "not started. Stop that container or wait for it, then resume",

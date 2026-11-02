@@ -98,3 +98,31 @@ def test_the_text_reference_entry_does_not_vouch_for_the_audio_marker(tmp_path, 
     vouch(ledger, run, 1, "text stage record", d / "audio_reference.json")
     _, resumed = open_stage_dir(run, AUDIO_STAGE_1, resuming=True, ledger=ledger)
     assert not resumed
+
+
+@pytest.mark.parametrize("spec,rel,n,what", CASES, ids=IDS)
+def test_a_kill_between_the_move_aside_and_its_ledger_entry_leaves_no_voucher(tmp_path, ledger, spec, rel, n, what):
+    """Kill points of the marker rule. Attempt 1 wrote its marker and the supervisor's record. The directory was renamed aside and the
+    process died before the move-aside entry. Attempt 2 starts a fresh directory (stage_start with resumed=False), an agent writes the same
+    bytes, and the process dies again. The record of attempt 1 must not vouch for the file."""
+    import os
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, spec, resuming=False, ledger=ledger)
+    write_marker(d, rel)
+    vouch(ledger, run, n, what, d / rel)
+    os.rename(d, d.with_name(f"{n}.partial-1"))                 # the rename happened, the entry did not
+    (run / "stages" / str(n) / "evidence").mkdir(parents=True)
+    ledger.append("stage_start", n, escalated=False, resumed=False)
+    write_marker(run / "stages" / str(n), rel)
+    _, resumed = open_stage_dir(run, spec, resuming=True, ledger=ledger)
+    assert not resumed
+
+
+@pytest.mark.parametrize("spec,rel,n,what", CASES, ids=IDS)
+def test_a_kill_between_the_marker_and_its_record_is_not_a_resume_point(tmp_path, ledger, spec, rel, n, what):
+    """The marker is written, then the supervisor dies before it appends the record. A resume cannot tell that file from an agent's."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, spec, resuming=False, ledger=ledger)
+    write_marker(d, rel)
+    again, resumed = open_stage_dir(run, spec, resuming=True, ledger=ledger)
+    assert not resumed and not (again / rel).exists()
