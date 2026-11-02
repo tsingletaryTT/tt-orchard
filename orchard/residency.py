@@ -1,0 +1,557 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Residency estimate from safetensors headers (issue 327): how many chips a checkpoint needs, before any boot.
+
+A port for a model that does not fit the box fails after the coder has spent a prepare step and a lease. The checkpoint already says
+how big it is: each `.safetensors` file starts with an 8-byte little-endian length and a JSON header that lists every tensor's dtype,
+shape and byte range. This module reads those headers (never the tensor data), sorts the tensors into categories by name, applies a
+quantization policy per category and divides what lands on the chips by the chip count.
+
+Two kinds of figure, kept apart in the record:
+
+  * `measured`: read from the safetensors headers. Byte counts, element counts and tensor counts per category.
+  * `estimated`: arithmetic on the measured figures and on the assumptions. Stored bytes after quantization, bytes per chip, whether a
+    row fits, chips needed, the first-boot disk and host RAM. Every assumption is listed in `assumptions` with its value and its
+    source: `caller` when the caller stated it, `default (choice)` when it comes from orchard/defaults.py. No default is an
+    allocator reading. `not_measured` says what a real reading would replace.
+
+Categories (`CATEGORIES`, decided by `categorize`): embedding (input table and LM head), attention (full attention and its indexer), gdn
+(gated delta net and other linear or state-space mixers), dense_mlp, routed_experts, shared_experts, ngram_ple (the n-gram or
+per-layer embedding table), vision, mtp (everything under the multi-token-prediction layer, its own experts included), norms_other
+(norms, one-dimensional tensors, routers and the small gated-residual modules).
+
+Quantization policy: one of bf16, bfp8, bfp4 per category, or `host` for a category that stays in host memory in its checkpoint dtype
+(the n-gram table in the default policy). A block format applies to floating-point tensors with two or more dimensions; a norm vector or
+an integer index tensor keeps the bytes it has in the checkpoint. Widths come from orchard/decode_floor.py (`DTYPE_BYTES`).
+
+Where it is used: `tt-orchard residency TARGET` (a snapshot directory, or a repo id whose headers come from
+`huggingface_hub.get_safetensors_metadata`), and stage 0 of a run (`write_residency`), which writes `stages/0/residency.json`. The
+supervisor reads that record before a full-port stage 2 (`read_record`, `shortfall`) and blocks when the box has fewer chips than the
+estimate needs.
+
+Limits. Even spread of the weights over the chips, no replication of any tensor, no padding to tiles, one reserve per chip. A
+shard whose data is shorter than its header says is not noticed, because the data is never read.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import stat
+import struct
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from orchard import decode_floor, defaults, safeio
+
+FILE = "residency.json"
+MAX_HEADER_BYTES = 64 << 20          # the largest real headers are a few megabytes (a shard of 50,000 tensors); this bound keeps a hostile length from allocating
+MAX_FILES = 10_000                   # shard files in one snapshot
+MAX_TENSORS = 1_000_000              # tensors in one checkpoint
+MAX_NDIM = 8
+MAX_RECORD_BYTES = 4 << 20
+GIB = 1 << 30
+MESH_SIZES = (1, 2, 4, 8)            # the chip counts the table always shows
+
+CATEGORIES = ("embedding", "attention", "gdn", "dense_mlp", "routed_experts", "shared_experts", "ngram_ple", "vision", "mtp", "norms_other")
+POLICY_DTYPES = ("bf16", "bfp8", "bfp4", "host")
+# Choice (nobody measured these): the Flash-Next packages store routed experts as BF4 and dense weights as BF8, and keep the vision tower in
+# BF16 and the n-gram table on the host (docs/run-logs/2026-11-01-flash-next-graft-study.md, sections 3 and 5). The embedding, MTP and
+# shared-expert rows follow "dense weights go to BF8" in the same section.
+DEFAULT_POLICY = {"embedding": "bfp8", "attention": "bfp8", "gdn": "bfp8", "dense_mlp": "bfp8", "routed_experts": "bfp4",
+                  "shared_experts": "bfp8", "ngram_ple": "host", "vision": "bf16", "mtp": "bfp8", "norms_other": "bf16"}
+
+# Bytes per value in the safetensors dtype names, and which of them are floating point (a block format can replace those).
+DTYPE_WIDTH = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
+               "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U64": 8, "U32": 4, "U16": 2, "U8": 1, "BOOL": 1}
+FLOAT_DTYPES = frozenset({"F64", "F32", "F16", "BF16", "F8_E4M3", "F8_E5M2", "F8_E8M0"})
+
+LABELS = {"measured": "read from the safetensors headers (no tensor data was read)",
+          "estimated": "arithmetic on the measured figures and the listed assumptions; not an allocator reading"}
+NOT_MEASURED = (
+    "usable DRAM per chip: an allocator reading after the runtime's own buffers (the DRAM figure here is an assumption)",
+    "the per-chip reserve for trace regions, program binaries and circular buffers, and the KV and recurrent-state budget (assumptions)",
+    "the real size of the converted cache and the first boot's peak disk and host RAM (read them from a first boot)",
+    "padding to 32 by 32 tiles, replication of tensors across chips, and any tensor that is split unevenly",
+    "tensor data: only headers were read, so a shard that is shorter than its header says is not noticed")
+
+
+class ResidencyError(ValueError):
+    """An input is unusable: a header that is malformed or too large, a bad number, a bad policy, a target that is not a snapshot or a repo id.
+    The message names the file or the option and never holds file content or a token."""
+
+
+@dataclass(frozen=True)
+class Tensor:
+    name: str
+    dtype: str
+    shape: tuple
+    bytes: int
+    elements: int
+    file: str
+
+
+@dataclass(frozen=True)
+class HeaderSet:
+    tensors: tuple
+    files: int
+    source: str
+    local: bool
+
+    @property
+    def checkpoint_bytes(self) -> int:
+        return sum(t.bytes for t in self.tensors)
+
+
+# ---- reading headers --------------------------------------------------------------------------------------------------------
+
+def _tensor(name, entry, where: str) -> Tensor:
+    """One validated header entry. `where` names the file in every message."""
+    if not isinstance(name, str) or not isinstance(entry, dict):
+        raise ResidencyError(f"{where}: a tensor entry is not an object")
+    dtype, shape, offsets = entry.get("dtype"), entry.get("shape"), entry.get("data_offsets")
+    if dtype not in DTYPE_WIDTH:
+        raise ResidencyError(f"{where}: a tensor has a dtype the estimator has no width for")
+    if (not isinstance(shape, (list, tuple)) or len(shape) > MAX_NDIM
+            or not all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in shape)):
+        raise ResidencyError(f"{where}: a tensor has a shape that is not a short list of whole numbers of at least 0")
+    if (not isinstance(offsets, (list, tuple)) or len(offsets) != 2
+            or not all(isinstance(o, int) and not isinstance(o, bool) and o >= 0 for o in offsets) or offsets[1] < offsets[0]):
+        raise ResidencyError(f"{where}: a tensor has data offsets that are not an ordered pair of whole numbers")
+    elements = math.prod(shape)
+    size = elements * DTYPE_WIDTH[dtype]
+    if offsets[1] - offsets[0] != size:
+        raise ResidencyError(f"{where}: a tensor's data offsets disagree with its shape and dtype")
+    return Tensor(name, dtype, tuple(shape), size, elements, where)
+
+
+def _read_exact(fd: int, n: int, where: str) -> bytes:
+    chunks, left = [], n
+    while left:
+        try:
+            piece = os.read(fd, min(left, 1 << 20))
+        except OSError:
+            raise ResidencyError(f"{where}: the file cannot be read") from None
+        if not piece:
+            raise ResidencyError(f"{where}: the file ended inside its header")
+        chunks.append(piece)
+        left -= len(piece)
+    return b"".join(chunks)
+
+
+def _read_file_header(path: str, where: str) -> dict:
+    """The JSON header object of one shard. Reads 8 bytes, then the header, and nothing else."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (OSError, ValueError):
+        raise ResidencyError(f"{where}: the file cannot be opened") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ResidencyError(f"{where}: not a regular file")
+        (length,) = struct.unpack("<Q", _read_exact(fd, 8, where))
+        if length > MAX_HEADER_BYTES:
+            raise ResidencyError(f"{where}: the header is longer than the {MAX_HEADER_BYTES}-byte cap")
+        if 8 + length > st.st_size:
+            raise ResidencyError(f"{where}: the header is longer than the file")
+        raw = _read_exact(fd, length, where)
+    finally:
+        os.close(fd)
+    try:
+        header = safeio.parse_json_bytes(raw, max_bytes=MAX_HEADER_BYTES, expect=dict)
+    except safeio.SafeReadError as exc:
+        raise ResidencyError(f"{where}: the header is not usable JSON ({exc.reason})") from None
+    return header
+
+
+def _collect(per_file: list[tuple[str, dict]], source: str, local: bool) -> HeaderSet:
+    tensors, seen = [], set()
+    for where, header in per_file:
+        for name, entry in header.items():
+            if name == "__metadata__":
+                continue
+            t = _tensor(name, entry, where)
+            if name in seen:
+                raise ResidencyError(f"{where}: the tensor name appears twice in the checkpoint")
+            seen.add(name)
+            tensors.append(t)
+            if len(tensors) > MAX_TENSORS:
+                raise ResidencyError(f"the checkpoint has more than {MAX_TENSORS} tensors")
+    return HeaderSet(tuple(tensors), len(per_file), source, local)
+
+
+def read_headers(directory) -> HeaderSet:
+    """The tensors in every top-level `.safetensors` file of a snapshot directory, from the headers only.
+
+    A Hugging Face cache snapshot holds each file as a link into blobs/, so each path is resolved before the guarded open. Raises
+    ResidencyError for a missing directory, no shard, too many shards or tensors, and any shard whose header is not usable."""
+    try:
+        base = Path(directory)
+        names = sorted(n for n in os.listdir(base) if n.endswith(".safetensors"))
+    except (OSError, ValueError, TypeError):
+        raise ResidencyError("the model directory cannot be listed") from None
+    if not names:
+        raise ResidencyError("the directory holds no .safetensors file")
+    if len(names) > MAX_FILES:
+        raise ResidencyError(f"the directory holds more than {MAX_FILES} .safetensors files")
+    per_file = [(n, _read_file_header(safeio.resolved(base / n), n)) for n in names]
+    return _collect(per_file, f"local:{base.name}", True)
+
+
+def headers_from_metadata(meta, *, source: str) -> HeaderSet:
+    """A HeaderSet from a `huggingface_hub` SafetensorsRepoMetadata (or anything shaped like it)."""
+    per_file = []
+    try:
+        for fname, fm in sorted(meta.files_metadata.items()):
+            per_file.append((fname, {n: {"dtype": i.dtype, "shape": list(i.shape), "data_offsets": list(i.data_offsets)}
+                                     for n, i in fm.tensors.items()}))
+    except (AttributeError, TypeError):
+        raise ResidencyError("the Hugging Face metadata is not in the expected shape") from None
+    if not per_file:
+        raise ResidencyError("the repository lists no .safetensors file")
+    if len(per_file) > MAX_FILES:
+        raise ResidencyError(f"the repository lists more than {MAX_FILES} .safetensors files")
+    return _collect(per_file, source, False)
+
+
+_REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _hub_fetch(repo_id, revision=None):
+    import huggingface_hub
+    return huggingface_hub.get_safetensors_metadata(repo_id, revision=revision)
+
+
+def read_target(target, *, revision=None, fetch=None) -> HeaderSet:
+    """Headers for a snapshot directory or a repo id. A repo id goes through `fetch(repo_id, revision)`, which defaults to
+    `huggingface_hub.get_safetensors_metadata` (headers only: it uses HTTP range requests and never downloads the weights)."""
+    if isinstance(target, (str, os.PathLike)) and os.path.isdir(target):
+        return read_headers(target)
+    if not isinstance(target, str) or not _REPO_ID.match(target) or ".." in target.split("/"):
+        raise ResidencyError("the target is neither a model directory nor a repo id like owner/name")
+    if revision is not None and not (isinstance(revision, str) and re.match(r"^[A-Za-z0-9._/-]{1,200}$", revision)):
+        raise ResidencyError("the revision is not a branch name, tag or commit hash")
+    try:
+        meta = (fetch or _hub_fetch)(target, revision)
+    except ResidencyError:
+        raise
+    except ImportError:
+        raise ResidencyError("huggingface_hub is not installed, so a repo id cannot be read") from None
+    except Exception as exc:                  # a network, auth or format failure: the type is enough, the text may hold a token
+        raise ResidencyError(f"the Hugging Face metadata call for {target} failed ({type(exc).__name__})") from None
+    return headers_from_metadata(meta, source=f"hub:{target}" + (f"@{revision}" if revision else ""))
+
+
+# ---- categories -------------------------------------------------------------------------------------------------------------
+
+_VISION_PARTS = frozenset({"visual", "vision_tower", "vision_model", "vision_encoder", "multi_modal_projector", "mm_projector", "image_encoder"})
+_EMBED_PARTS = frozenset({"embed_tokens", "lm_head", "wte", "word_embeddings", "tok_embeddings", "embed_out"})
+_GDN_PARTS = frozenset({"linear_attn", "linear_attention", "gated_delta_net", "gdn", "mamba", "ssm"})
+_ATTN_PARTS = frozenset({"self_attn", "attn", "attention", "cross_attn"})
+_MLP_PARTS = frozenset({"mlp", "feed_forward", "ffn"})
+_EXPERT_PARTS = frozenset({"experts", "routed_experts", "local_experts"})
+_ROUTER_PARTS = frozenset({"gate", "router"})
+_LAYER_PREFIX = re.compile(r"^(.*?\blayers\.\d+)\.")
+
+
+def categorize(name: str, shape) -> str:
+    """The category of one tensor, from its name and shape. The first rule that matches wins, in the order of the module text:
+    vision, MTP, n-gram or per-layer table, embedding, norms and one-dimensional tensors, shared experts, routed experts, routers,
+    gated delta net, attention, dense MLP; anything else is norms_other."""
+    parts = name.split(".")
+    if _VISION_PARTS & set(parts):
+        return "vision"
+    if "mtp" in parts or any(p.startswith("mtp_") for p in parts):
+        return "mtp"
+    if "ple" in parts or any(p.startswith("ngram") for p in parts) or "per_layer" in name:
+        return "ngram_ple"
+    if _EMBED_PARTS & set(parts):
+        return "embedding"
+    if len(shape) <= 1 or any("norm" in p for p in parts):
+        return "norms_other"
+    if any(p.startswith("shared_expert") for p in parts):
+        return "shared_experts"
+    if _EXPERT_PARTS & set(parts):
+        return "routed_experts"
+    if len(parts) >= 2 and parts[-2] in _ROUTER_PARTS:
+        return "norms_other"
+    if _GDN_PARTS & set(parts):
+        return "gdn"
+    if _ATTN_PARTS & set(parts):
+        return "attention"
+    if _MLP_PARTS & set(parts):
+        return "dense_mlp"
+    return "norms_other"
+
+
+# ---- the estimate -----------------------------------------------------------------------------------------------------------
+
+def _number(value, what: str, *, lo: float, allow_equal: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < lo or (value == lo and not allow_equal):
+        raise ResidencyError(f"{what} must be a finite number {'of at least' if allow_equal else 'above'} {lo:g}")
+    return float(value)
+
+
+def _chip_list(values, what: str) -> list[int]:
+    out = []
+    for v in values or ():
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            raise ResidencyError(f"{what} must be whole numbers of at least 1")
+        out.append(v)
+    return out
+
+
+def _policy(override) -> tuple[dict, str]:
+    policy = dict(DEFAULT_POLICY)
+    if override:
+        if not isinstance(override, dict):
+            raise ResidencyError("the policy must map a category to a dtype")
+        for cat, dtype in override.items():
+            if cat not in CATEGORIES:
+                raise ResidencyError(f"the policy names an unknown category {cat!r} (known: {', '.join(CATEGORIES)})")
+            if dtype not in POLICY_DTYPES:
+                raise ResidencyError(f"the policy gives {cat} the dtype {dtype!r} (known: {', '.join(POLICY_DTYPES)})")
+            policy[cat] = dtype
+    return policy, "caller" if override else "default (choice)"
+
+
+def _stored_bytes(t: Tensor, dtype: str) -> int:
+    """Bytes of one tensor on its way to the chips under `dtype` (a block format or bf16)."""
+    if t.dtype in FLOAT_DTYPES and len(t.shape) >= 2:
+        return int(t.elements * decode_floor.DTYPE_BYTES[dtype])
+    return t.bytes
+
+
+def _fits(device: int, n: int, dram: float, reserve: float, kv: float) -> tuple[float, float, bool]:
+    used = device / n + reserve * GIB + kv * GIB / n
+    free = dram * GIB - used
+    return used, free, free >= 0
+
+
+def _chips_needed(device: int, dram: float, reserve: float, kv: float) -> int:
+    n = max(1, math.ceil((device + kv * GIB) / ((dram - reserve) * GIB)))
+    while n > 1 and _fits(device, n - 1, dram, reserve, kv)[2]:
+        n -= 1                                   # float edge: the formula can land one above the smallest count that fits
+    while not _fits(device, n, dram, reserve, kv)[2]:
+        n += 1
+    return n
+
+
+def _gib(n: float) -> str:
+    return f"{n / GIB:.1f} GiB"
+
+
+def shortfall(record, box_chips) -> str | None:
+    """A sentence when the record's estimate needs more chips than `box_chips`, else None (also None when the box is unknown)."""
+    if not record or box_chips is None:
+        return None
+    need = record["estimated"]["chips_needed"]
+    if need <= box_chips:
+        return None
+    est = record["estimated"]
+    a = {x["name"]: x for x in record.get("assumptions", [])}
+    dram = a.get("dram_gib_per_chip", {}).get("value", "?")
+    return (f"the model does not fit this box: the estimate needs at least {need} chips and the box has {box_chips} chips "
+            f"({_gib(est.get('device_bytes', 0))} of weights on the chips under the stated policy, DRAM {dram} GiB per chip; "
+            f"the DRAM figure is a choice and no allocator reading has been taken)")
+
+
+def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None, policy=None, chips=(), box_chips=None) -> dict:
+    """The residency record for `headers`. `dram_gib`, `kv_gib` and `reserve_gib` fall back to orchard/defaults.py and the record says so.
+    `chips` adds rows to the table (1, 2, 4 and 8 are always there); `box_chips` is the chip count of the machine, or None when unknown."""
+    dram_src, kv_src, res_src = ("caller" if v is not None else "default (choice)" for v in (dram_gib, kv_gib, reserve_gib))
+    dram = _number(defaults.CHIP_DRAM_GIB if dram_gib is None else dram_gib, "dram_gib", lo=0, allow_equal=False)
+    kv = _number(defaults.KV_BUDGET_GIB if kv_gib is None else kv_gib, "kv_gib", lo=0, allow_equal=True)
+    reserve = _number(defaults.CHIP_RESERVE_GIB if reserve_gib is None else reserve_gib, "reserve_gib", lo=0, allow_equal=True)
+    if reserve >= dram:
+        raise ResidencyError(f"the reserve ({reserve:g} GiB per chip) must be below the DRAM per chip ({dram:g} GiB)")
+    extra = _chip_list(chips, "chips")
+    if box_chips is not None:
+        box_chips = _chip_list([box_chips], "box_chips")[0]
+    pol, pol_src = _policy(policy)
+
+    measured = {c: {"tensors": 0, "elements": 0, "bytes": 0} for c in CATEGORIES}
+    stored = {c: 0 for c in CATEGORIES}
+    layer_groups: dict[str, int] = {}
+    for t in headers.tensors:
+        cat = categorize(t.name, t.shape)
+        m = measured[cat]
+        m["tensors"] += 1
+        m["elements"] += t.elements
+        m["bytes"] += t.bytes
+        if pol[cat] == "host":
+            stored[cat] += t.bytes
+            continue
+        stored[cat] += _stored_bytes(t, pol[cat])
+        if t.dtype in FLOAT_DTYPES and len(t.shape) >= 2:
+            g = _LAYER_PREFIX.match(t.name)
+            key = g.group(1) if g else cat
+            layer_groups[key] = layer_groups.get(key, 0) + t.bytes
+    by_measured = {c: v for c, v in measured.items() if v["tensors"]}
+    host_cats = [c for c in CATEGORIES if pol[c] == "host" and c in by_measured]
+    device = sum(stored[c] for c in by_measured if pol[c] != "host")
+    host = sum(stored[c] for c in host_cats)
+
+    counts = sorted(set(MESH_SIZES) | set(extra) | ({box_chips} if box_chips else set()))
+    rows = []
+    for n in counts:
+        used, free, ok = _fits(device, n, dram, reserve, kv)
+        rows.append({"chips": n, "per_chip_bytes": int(device / n), "used_bytes_per_chip": int(used), "free_bytes_per_chip": int(free), "fits": ok})
+    need = _chips_needed(device, dram, reserve, kv)
+    mesh = 1 << (need - 1).bit_length()
+
+    flight = 2 * max(layer_groups.values(), default=0)      # the source tensors of the largest group plus a converted copy beside them
+    to_download = 0 if headers.local else headers.checkpoint_bytes
+    first_boot = {"snapshot_local": headers.local, "checkpoint_bytes_to_download": to_download, "cache_bytes": device,
+                  "disk_bytes": device + to_download, "conversion_in_flight_bytes": flight, "host_ram_bytes": host + flight}
+    record = {
+        "label": "estimate", "scan": "ran", "source": headers.source, "labels": dict(LABELS),
+        "measured": {"files": headers.files, "tensors": len(headers.tensors), "checkpoint_bytes": headers.checkpoint_bytes, "by_category": by_measured},
+        "estimated": {
+            "policy": pol,
+            "by_category": {c: {"placement": "host" if pol[c] == "host" else "device", "stored_bytes": stored[c]} for c in by_measured},
+            "host_resident_categories": host_cats, "device_bytes": device, "host_bytes": host,
+            "rows": rows, "chips_needed": need, "smallest_mesh": mesh, "first_boot": first_boot},
+        "assumptions": [
+            {"name": "dram_gib_per_chip", "value": dram, "source": dram_src, "note": "DRAM per chip; usable space is lower and was not measured"},
+            {"name": "reserve_gib_per_chip", "value": reserve, "source": res_src, "note": "per chip, for trace regions, binaries and circular buffers"},
+            {"name": "kv_budget_gib", "value": kv, "source": kv_src, "note": "KV cache and recurrent state for the whole model, spread evenly over the chips"},
+            {"name": "policy", "value": pol, "source": pol_src, "note": "bytes per value from orchard/decode_floor.py DTYPE_BYTES; block formats apply to floating-point tensors with two or more dimensions"},
+            {"name": "placement", "value": "even spread", "source": "default (choice)", "note": "weights are divided evenly over the chips; no replication, no tile padding"}],
+        "not_measured": list(NOT_MEASURED), "hazards": [], "verdict": {"box_chips": box_chips, "fits_box": None, "chips_needed": need}}
+    if box_chips is not None:
+        record["verdict"]["fits_box"] = need <= box_chips
+        why = shortfall(record, box_chips)
+        if why:
+            record["hazards"].append({"name": "model_does_not_fit_box", "reason": why})
+    return record
+
+
+# ---- stage 0 and the supervisor -----------------------------------------------------------------------------------------------
+
+def _skipped(why: str) -> dict:
+    return {"label": "estimate", "scan": "skipped", "reason": why, "hazards": []}
+
+
+def write_residency(stage_dir, model_dir=None, box_chips=None, **kw) -> dict:
+    """Build the record for stage 0 and write it to `stage_dir/residency.json` (all or nothing). Never raises for an input it cannot count:
+    that is a record with `scan: skipped` and the reason. Reads a local directory only; stage 0 never makes a network call here.
+    `model_dir` falls back to the stage's triage_config.json `model_snapshot`."""
+    stage_dir = Path(stage_dir)
+    if not model_dir:
+        from orchard import stage0_scan
+        model_dir = stage0_scan._triage_dirs(stage_dir)[0]
+    if not model_dir:
+        rec = _skipped("no model directory is known for this stage")
+    elif not os.path.isdir(model_dir):
+        rec = _skipped("the model path is not a directory")
+    else:
+        try:
+            rec = estimate(read_headers(model_dir), box_chips=box_chips, **kw)
+        except ResidencyError as exc:
+            rec = _skipped(f"the estimate could not be made: {exc}")
+    safeio.atomic_write(stage_dir / FILE, json.dumps(rec, indent=1, sort_keys=True) + "\n")
+    return rec
+
+
+def read_record(run_dir) -> dict | None:
+    """Stage 0's residency record when it ran and holds a usable `chips_needed`, else None."""
+    try:
+        rec = safeio.read_json(Path(run_dir) / "stages" / "0" / FILE, max_bytes=MAX_RECORD_BYTES, expect=dict)
+    except safeio.SafeReadError:
+        return None
+    est = rec.get("estimated")
+    need = est.get("chips_needed") if isinstance(est, dict) else None
+    if rec.get("scan") != "ran" or isinstance(need, bool) or not isinstance(need, int) or need < 1:
+        return None
+    if not isinstance(rec.get("assumptions", []), list):
+        return None
+    return rec
+
+
+# ---- the command ------------------------------------------------------------------------------------------------------------
+
+def parser(add_help=True) -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="tt-orchard residency", add_help=add_help,
+                                 description="Estimate how many chips a checkpoint needs from its safetensors headers (no weights are read).")
+    ap.add_argument("target", help="a model snapshot directory, or a repo id like owner/name (headers only, over the network)")
+    ap.add_argument("--revision", help="the branch, tag or commit of a repo id")
+    ap.add_argument("--chips", type=int, nargs="+", metavar="N", help="chip counts to show; the exit status is 1 when none of them holds the model")
+    ap.add_argument("--dram-gib", type=float, help=f"DRAM per chip in GiB (default {defaults.CHIP_DRAM_GIB:g}, a choice)")
+    ap.add_argument("--reserve-gib", type=float, help=f"per-chip reserve in GiB (default {defaults.CHIP_RESERVE_GIB:g}, a choice)")
+    ap.add_argument("--kv-gib", type=float, help=f"KV cache and state budget for the whole model in GiB (default {defaults.KV_BUDGET_GIB:g}, a choice)")
+    ap.add_argument("--policy", action="append", default=[], metavar="CATEGORY=DTYPE",
+                    help=f"override the quantization policy for one category; dtype is {', '.join(POLICY_DTYPES)}. Repeat for more")
+    ap.add_argument("--json", action="store_true", help="print the record as JSON")
+    return ap
+
+
+def _text(rec: dict, stated: list[int]) -> list[str]:
+    m, e = rec["measured"], rec["estimated"]
+    lines = [f"residency estimate for {rec['source']}  (label: {rec['label']})",
+             f"  measured: {m['tensors']} tensors in {m['files']} files, {_gib(m['checkpoint_bytes'])} ({LABELS['measured']})",
+             f"  estimated: {LABELS['estimated']}", "",
+             f"  {'category':<16}{'tensors':>8}{'checkpoint':>13}{'policy':>8}{'on chips':>13}{'on host':>13}"]
+    for c in CATEGORIES:
+        if c not in m["by_category"]:
+            continue
+        mc, ec = m["by_category"][c], e["by_category"][c]
+        dev, host = (ec["stored_bytes"], 0) if ec["placement"] == "device" else (0, ec["stored_bytes"])
+        lines.append(f"  {c:<16}{mc['tensors']:>8}{_gib(mc['bytes']):>13}{e['policy'][c]:>8}{_gib(dev):>13}{_gib(host):>13}")
+    lines += ["", f"  on the chips {_gib(e['device_bytes'])}; on the host {_gib(e['host_bytes'])}"
+              + (f" ({', '.join(e['host_resident_categories'])})" if e["host_resident_categories"] else ""),
+              f"  {'chips':>6}{'weights/chip':>14}{'used/chip':>12}{'free/chip':>12}  fits"]
+    for r in e["rows"]:
+        lines.append(f"  {r['chips']:>6}{_gib(r['per_chip_bytes']):>14}{_gib(r['used_bytes_per_chip']):>12}{_gib(r['free_bytes_per_chip']):>12}  {'yes' if r['fits'] else 'no'}")
+    fb = e["first_boot"]
+    lines += ["", f"  chips needed: at least {e['chips_needed']} (smallest mesh {e['smallest_mesh']})",
+              f"  first boot: free disk {_gib(fb['disk_bytes'])} ({'snapshot already local' if fb['snapshot_local'] else 'includes the download'}), "
+              f"host RAM {_gib(fb['host_ram_bytes'])}", "", "  assumptions:"]
+    for a in rec["assumptions"]:
+        value = "see the table above" if a["name"] == "policy" else a["value"]
+        lines.append(f"    {a['name']} = {value}  [{a['source']}] {a['note']}")
+    lines.append("  not measured:")
+    lines += [f"    {s}" for s in rec["not_measured"]]
+    if stated:
+        ok = [r["chips"] for r in e["rows"] if r["chips"] in stated and r["fits"]]
+        lines += ["", f"  stated chip counts {stated}: " + (f"the model fits at {ok}" if ok else "the model does not fit any of them")]
+    return lines
+
+
+def run(args, out=None) -> int:
+    """The command body. Exit 0 when it printed an estimate (and a stated chip count holds the model, if any was stated), 1 when none does,
+    2 for an input it refused."""
+    out = out or sys.stdout
+    try:
+        overrides = {}
+        for item in args.policy or []:
+            cat, sep, dtype = item.partition("=")
+            if not sep:
+                raise ResidencyError(f"--policy needs CATEGORY=DTYPE, got {item!r}")
+            overrides[cat] = dtype
+        stated = list(args.chips or [])
+        rec = estimate(read_target(args.target, revision=args.revision), dram_gib=args.dram_gib, kv_gib=args.kv_gib, reserve_gib=args.reserve_gib,
+                       policy=overrides or None, chips=stated)
+    except ResidencyError as exc:
+        print(f"residency: {exc}", file=out)
+        return 2
+    if args.json:
+        print(json.dumps(rec, indent=2, sort_keys=True), file=out)
+    else:
+        print("\n".join(_text(rec, stated)), file=out)
+    if stated and not any(r["fits"] for r in rec["estimated"]["rows"] if r["chips"] in stated):
+        if args.json:
+            print("residency: the model does not fit any stated chip count", file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv=None, out=None) -> int:
+    return run(parser().parse_args(argv), out=out)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
