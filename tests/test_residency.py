@@ -251,9 +251,14 @@ def test_only_the_header_is_read_never_the_tensor_data(tmp_path, monkeypatch):
     d = write_snapshot(tmp_path / "s", [("model.layers.0.mlp.gate_proj.weight", "BF16", [64, 64])], shards=1)
     reads = []
     real = os.read
-    monkeypatch.setattr(os, "read", lambda fd, n: (reads.append(n), real(fd, n))[1])
+
+    def spy(fd, n):
+        if os.readlink(f"/proc/self/fd/{fd}").endswith(".safetensors"):             # the index file is read whole; only the shard reads are counted
+            reads.append(n)
+        return real(fd, n)
+    monkeypatch.setattr(os, "read", spy)
     h = rs.read_headers(d)
-    assert h.checkpoint_bytes == 64 * 64 * 2 and all(n < 10_000 for n in reads)         # the file holds no data at all: a data read would come back short
+    assert h.checkpoint_bytes == 64 * 64 * 2 and reads and all(n < 10_000 for n in reads)   # the file holds no data at all: a data read would come back short
 
 
 def test_a_snapshot_link_into_blobs_is_followed_like_a_hugging_face_cache(tmp_path):
@@ -305,6 +310,63 @@ def test_a_header_length_larger_than_the_cap_is_refused_before_it_is_read(tmp_pa
     with pytest.raises(rs.ResidencyError, match="header"):
         rs.read_headers(d)
     assert max(reads) < 1000                                    # no read asked for the declared length
+
+
+@pytest.mark.parametrize("dtype", [[], {}, 5, None])
+def test_a_dtype_that_is_not_a_string_is_refused_not_a_crash(tmp_path, dtype):
+    d = tmp_path / "bad"
+    d.mkdir()
+    _write(d / "model.safetensors", {"w": {"dtype": dtype, "shape": [4, 4], "data_offsets": [0, 32]}})
+    with pytest.raises(rs.ResidencyError, match="dtype"):
+        rs.read_headers(d)
+
+
+def _snapshot_with_index(tmp_path, drop_file=False, drop_tensor=False):
+    t = [(f"model.layers.0.mlp.w{i}.weight", "BF16", [4, 4]) for i in range(6)]
+    d = write_snapshot(tmp_path / "idx", t, shards=3)
+    index = json.loads((d / "model.safetensors.index.json").read_text())
+    if drop_file:
+        (d / "model-00003-of-00003.safetensors").unlink()
+    if drop_tensor:
+        index["weight_map"]["model.layers.0.mlp.gone.weight"] = "model-00001-of-00003.safetensors"
+        (d / "model.safetensors.index.json").write_text(json.dumps(index))
+    return d
+
+
+def test_a_complete_sharded_snapshot_passes_the_index_check(tmp_path):
+    assert len(rs.read_headers(_snapshot_with_index(tmp_path)).tensors) == 6
+
+
+def test_a_snapshot_missing_a_shard_the_index_names_is_refused(tmp_path):
+    with pytest.raises(rs.ResidencyError, match="incomplete.*shard file"):
+        rs.read_headers(_snapshot_with_index(tmp_path, drop_file=True))
+
+
+def test_a_snapshot_whose_headers_lack_a_tensor_the_index_names_is_refused(tmp_path):
+    with pytest.raises(rs.ResidencyError, match="incomplete.*tensor"):
+        rs.read_headers(_snapshot_with_index(tmp_path, drop_tensor=True))
+
+
+def test_an_unusable_index_is_refused_and_a_missing_one_is_not(tmp_path):
+    d = _snapshot_with_index(tmp_path)
+    (d / "model.safetensors.index.json").write_text('{"weight_map": [1]}')
+    with pytest.raises(rs.ResidencyError, match="no weight_map object"):
+        rs.read_headers(d)
+    (d / "model.safetensors.index.json").write_text('{"weight_map": {"a": 5}}')
+    with pytest.raises(rs.ResidencyError, match="map from tensor names to file names"):
+        rs.read_headers(d)
+    (d / "model.safetensors.index.json").write_text("{nope")
+    with pytest.raises(rs.ResidencyError, match="index"):
+        rs.read_headers(d)
+    (d / "model.safetensors.index.json").unlink()
+    assert len(rs.read_headers(d).tensors) == 6                  # a single-file or index-less snapshot is read as it is
+
+
+def test_hub_metadata_with_a_weight_map_that_names_a_missing_file_is_refused():
+    meta = _hub_metadata([("model.layers.0.mlp.w.weight", "BF16", [4, 4])])
+    meta.weight_map.update({"model.layers.0.mlp.w.weight": "model.safetensors", "model.layers.0.mlp.v.weight": "model-2.safetensors"})
+    with pytest.raises(rs.ResidencyError, match="incomplete"):
+        rs.headers_from_metadata(meta, source="hub:x/y")
 
 
 def test_a_tensor_name_in_two_shards_and_an_empty_directory_are_refused(tmp_path):
@@ -416,7 +478,7 @@ def test_stage_0_writes_the_record_and_a_hazard_when_the_model_does_not_fit_the_
     assert json.loads((stage / rs.FILE).read_text()) == rec
     assert [h["name"] for h in rec["hazards"]] == ["model_does_not_fit_box"]
     reason = rec["hazards"][0]["reason"]
-    assert "2 chips" in reason and "at least 3" in reason and "estimate" in reason and "choice" in reason
+    assert "box has 2 chips" in reason and "at least 3" in reason and "estimate" in reason and "choice" in reason
     assert rec["verdict"] == {"box_chips": 2, "fits_box": False, "chips_needed": 3}
 
 
@@ -456,6 +518,26 @@ def test_read_record_returns_a_usable_record_and_none_for_a_bad_one(flash_dir, t
     assert rs.read_record(run) is None
     (stage / rs.FILE).write_text('{"scan": "skipped", "estimated": {"chips_needed": 3}}')
     assert rs.read_record(run) is None
+
+
+@pytest.mark.parametrize("damage", [
+    lambda r: r.__setitem__("assumptions", [{}]), lambda r: r.__setitem__("assumptions", ["x"]), lambda r: r["estimated"].pop("device_bytes"),
+    lambda r: r["estimated"].__setitem__("device_bytes", "big"), lambda r: r["estimated"].__setitem__("device_bytes", -1),
+    lambda r: r.__setitem__("label", 5), lambda r: r.pop("label"), lambda r: r.__setitem__("scan", "skipped")])
+def test_a_record_with_a_damaged_field_the_callers_use_is_not_usable(flash_dir, tmp_path, damage):
+    run = tmp_path / "run"
+    stage = run / "stages" / "0"
+    stage.mkdir(parents=True)
+    rec = rs.write_residency(stage, model_dir=flash_dir, box_chips=4)
+    damage(rec)
+    (stage / rs.FILE).write_text(json.dumps(rec))
+    assert rs.read_record(run) is None
+
+
+def test_shortfall_names_the_limit_it_was_given(flash_dir, tmp_path):
+    rec = rs.estimate(rs.read_headers(flash_dir))
+    assert "stage 2's lease has 2 chips" in rs.shortfall(rec, 2, what="stage 2's lease")
+    assert "this box has 2 chips" in rs.shortfall(rec, 2)
 
 
 def test_chips_needed_for_the_box_is_read_back_from_the_record(flash_dir, tmp_path):

@@ -48,6 +48,7 @@ from pathlib import Path
 from orchard import decode_floor, defaults, safeio
 
 FILE = "residency.json"
+INDEX_FILE = "model.safetensors.index.json"
 MAX_HEADER_BYTES = 64 << 20          # the largest real headers are a few megabytes (a shard of 50,000 tensors); this bound keeps a hostile length from allocating
 MAX_FILES = 10_000                   # shard files in one snapshot
 MAX_TENSORS = 1_000_000              # tensors in one checkpoint
@@ -113,7 +114,7 @@ def _tensor(name, entry, where: str) -> Tensor:
     if not isinstance(name, str) or not isinstance(entry, dict):
         raise ResidencyError(f"{where}: a tensor entry is not an object")
     dtype, shape, offsets = entry.get("dtype"), entry.get("shape"), entry.get("data_offsets")
-    if dtype not in DTYPE_WIDTH:
+    if not isinstance(dtype, str) or dtype not in DTYPE_WIDTH:
         raise ResidencyError(f"{where}: a tensor has a dtype the estimator has no width for")
     if (not isinstance(shape, (list, tuple)) or len(shape) > MAX_NDIM
             or not all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in shape)):
@@ -167,7 +168,20 @@ def _read_file_header(path: str, where: str) -> dict:
     return header
 
 
-def _collect(per_file: list[tuple[str, dict]], source: str, local: bool) -> HeaderSet:
+def _check_coverage(weight_map, file_names, tensor_names: set) -> None:
+    """Refuse a snapshot that its own index says is incomplete: a shard the index names that is not there, or a tensor it names that no
+    header lists. A missing shard would otherwise understate every figure and could give a false fit. `weight_map` is the index's
+    tensor-to-file map. Names from the index are not repeated in the message, only counted."""
+    if not isinstance(weight_map, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in weight_map.items()):
+        raise ResidencyError("the safetensors index does not hold a map from tensor names to file names")
+    files = set(weight_map.values())
+    if files - set(file_names):
+        raise ResidencyError(f"the snapshot is incomplete: the index names {len(files - set(file_names))} shard file(s) that are not here")
+    if set(weight_map) - tensor_names:
+        raise ResidencyError(f"the snapshot is incomplete: the index names {len(set(weight_map) - tensor_names)} tensor(s) that no file header lists")
+
+
+def _collect(per_file: list[tuple[str, dict]], source: str, local: bool, weight_map=None) -> HeaderSet:
     tensors, seen = [], set()
     for where, header in per_file:
         for name, entry in header.items():
@@ -180,6 +194,8 @@ def _collect(per_file: list[tuple[str, dict]], source: str, local: bool) -> Head
             tensors.append(t)
             if len(tensors) > MAX_TENSORS:
                 raise ResidencyError(f"the checkpoint has more than {MAX_TENSORS} tensors")
+    if weight_map:
+        _check_coverage(weight_map, [w for w, _ in per_file], seen)
     return HeaderSet(tuple(tensors), len(per_file), source, local)
 
 
@@ -198,7 +214,16 @@ def read_headers(directory) -> HeaderSet:
     if len(names) > MAX_FILES:
         raise ResidencyError(f"the directory holds more than {MAX_FILES} .safetensors files")
     per_file = [(n, _read_file_header(safeio.resolved(base / n), n)) for n in names]
-    return _collect(per_file, f"local:{base.name}", True)
+    weight_map = None
+    if os.path.lexists(base / INDEX_FILE):
+        try:
+            index = safeio.read_json(safeio.resolved(base / INDEX_FILE), max_bytes=MAX_HEADER_BYTES, expect=dict)
+        except safeio.SafeReadError as exc:
+            raise ResidencyError(f"{INDEX_FILE}: the index is not usable ({exc.reason})") from None
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict):
+            raise ResidencyError(f"{INDEX_FILE}: the index has no weight_map object")
+    return _collect(per_file, f"local:{base.name}", True, weight_map)
 
 
 def headers_from_metadata(meta, *, source: str) -> HeaderSet:
@@ -214,7 +239,8 @@ def headers_from_metadata(meta, *, source: str) -> HeaderSet:
         raise ResidencyError("the repository lists no .safetensors file")
     if len(per_file) > MAX_FILES:
         raise ResidencyError(f"the repository lists more than {MAX_FILES} .safetensors files")
-    return _collect(per_file, source, False)
+    weight_map = getattr(meta, "weight_map", None)
+    return _collect(per_file, source, False, weight_map if isinstance(weight_map, dict) and weight_map else None)
 
 
 _REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -344,19 +370,34 @@ def _gib(n: float) -> str:
     return f"{n / GIB:.1f} GiB"
 
 
-def shortfall(record, box_chips) -> str | None:
-    """A sentence when the record's estimate needs more chips than `box_chips`, else None (also None when the box is unknown)."""
-    if not record or box_chips is None:
+def shortfall(record, chips, what: str = "this box") -> str | None:
+    """A sentence when the record's estimate needs more chips than `chips`, else None (also None when `chips` is unknown or the record is
+    unusable). `what` names the limit in the sentence: "this box", or "stage 2's lease" when the stage gets fewer chips than the box has."""
+    if not usable(record) or chips is None:
         return None
     need = record["estimated"]["chips_needed"]
-    if need <= box_chips:
+    if need <= chips:
         return None
-    est = record["estimated"]
     a = {x["name"]: x for x in record.get("assumptions", [])}
     dram = a.get("dram_gib_per_chip", {}).get("value", "?")
-    return (f"the model does not fit this box: the estimate needs at least {need} chips and the box has {box_chips} chips "
-            f"({_gib(est.get('device_bytes', 0))} of weights on the chips under the stated policy, DRAM {dram} GiB per chip; "
+    return (f"the model does not fit {what}: the estimate needs at least {need} chips and {what} has {chips} chips "
+            f"({_gib(record['estimated']['device_bytes'])} of weights on the chips under the stated policy, DRAM {dram} GiB per chip; "
             f"the DRAM figure is a choice and no allocator reading has been taken)")
+
+
+def usable(record) -> bool:
+    """Whether `record` holds every field `shortfall` and the supervisor's check read: a ran scan, a whole `chips_needed` of at least 1, a
+    non-negative whole `device_bytes`, a text label and assumptions that are objects with a text name. A damaged record is no claim."""
+    if not isinstance(record, dict) or record.get("scan") != "ran" or not isinstance(record.get("label"), str):
+        return False
+    est = record.get("estimated")
+    if not isinstance(est, dict):
+        return False
+    whole = lambda v: isinstance(v, int) and not isinstance(v, bool)      # noqa: E731
+    if not whole(est.get("chips_needed")) or est["chips_needed"] < 1 or not whole(est.get("device_bytes")) or est["device_bytes"] < 0:
+        return False
+    a = record.get("assumptions", [])
+    return isinstance(a, list) and all(isinstance(x, dict) and isinstance(x.get("name"), str) for x in a)
 
 
 def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None, policy=None, chips=(), box_chips=None) -> dict:
@@ -463,13 +504,7 @@ def read_record(run_dir) -> dict | None:
         rec = safeio.read_json(Path(run_dir) / "stages" / "0" / FILE, max_bytes=MAX_RECORD_BYTES, expect=dict)
     except safeio.SafeReadError:
         return None
-    est = rec.get("estimated")
-    need = est.get("chips_needed") if isinstance(est, dict) else None
-    if rec.get("scan") != "ran" or isinstance(need, bool) or not isinstance(need, int) or need < 1:
-        return None
-    if not isinstance(rec.get("assumptions", []), list):
-        return None
-    return rec
+    return rec if usable(rec) else None
 
 
 # ---- the command ------------------------------------------------------------------------------------------------------------

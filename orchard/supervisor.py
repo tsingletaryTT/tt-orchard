@@ -2040,12 +2040,13 @@ class Supervisor:
             self.ledger.append("decision", 0, decision="hazard scan not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
     def _box_chips(self, spec=None) -> int | None:
-        """The chips this run's box has: the lab's, or the boards the adapter lists times CHIPS_PER_BOARD. None when it cannot be told
-        (an adapter that fails or lists nothing), and then no residency claim is made."""
+        """The chips of the machine the hardware tests run on: the lab's stated count, or the boards that machine's adapter lists times
+        CHIPS_PER_BOARD (`test_adapter` is the lab's adapter on a lab run, else the coder's). None when it cannot be told (an adapter that
+        fails or lists nothing), and then no residency claim is made."""
         if self.lab is not None and getattr(self.lab, "chips", None):
             return int(self.lab.chips)
         try:
-            boards = len({c.board for c in self.adapter.status()})
+            boards = len({c.board for c in self.test_adapter.status()})
         except Exception:                           # an adapter failure is not a residency finding
             return None
         return boards * CHIPS_PER_BOARD or None
@@ -2063,13 +2064,15 @@ class Supervisor:
             self.ledger.append("decision", 0, decision="residency estimate not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
     def _check_residency(self, spec) -> None:
-        """Before a full-port stage 2: block with the numbers when the box has fewer chips than stage 0's estimate needs. The box is read
-        again here, so the lab or board count at this point is the one judged. No record, a skipped one or an unknown box
-        is no claim and the stage goes on."""
+        """Before a full-port stage 2: block with the numbers when stage 0's estimate needs more chips than the box has, or more than the
+        stage's own lease gives the port check (`spec.boards` boards; the check runs on that lease, not on the whole box). The box is
+        read again here, so the lab or board count at this point is the one judged. No record, a damaged or skipped one, or an unknown
+        box is no claim and the stage goes on."""
         rec, box = residency.read_record(self.run_dir), self._box_chips(spec)
-        why = residency.shortfall(rec, box)
+        stage = spec.boards * CHIPS_PER_BOARD
+        why = (residency.shortfall(rec, box) or residency.shortfall(rec, stage, what=f"stage {spec.number}'s lease")) if box is not None else None
         if why:
-            self._block(spec.number, why, need_chips=rec["estimated"]["chips_needed"], box_chips=box,
+            self._block(spec.number, why, need_chips=rec["estimated"]["chips_needed"], box_chips=box, stage_chips=stage,
                         device_bytes=rec["estimated"]["device_bytes"], label=rec["label"])
 
     def _stage_0_facts(self) -> dict:

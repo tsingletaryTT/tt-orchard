@@ -45,7 +45,7 @@ def retryable(code: str, reason: str = "") -> bool:
 
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
 _BLOCKED_WORDS = (
-    ("model-does-not-fit", ("does not fit this box",)),                     # before the hardware words: its text says `chips`
+    ("model-does-not-fit", ("does not fit this box", "does not fit stage")),                     # before the hardware words: its text says `chips`
     ("package-missing", ("no installed bundle or container package",)),     # before the hardware words: its text says `chip`
     ("disk-full", ("disk", "free space", " gb free")),
     ("hardware-unhealthy", ("lease", "chip", "board", "reset", "gozer", "hardware", "device")),

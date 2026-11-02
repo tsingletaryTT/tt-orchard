@@ -1572,8 +1572,10 @@ a live reading would replace.
 
 Stage 0 of a run writes the same record to `stages/0/residency.json` and adds a `residency estimate` evidence entry to the ledger.
 A model that needs more chips than the box has gets a `model_does_not_fit_box` hazard in that record. Before a full-port stage 2 the
-supervisor reads the record and, when the box has fewer chips than the estimate needs, blocks with the numbers (block code
-`model-does-not-fit`) and starts no prepare step. The generic stage 2 only records the estimate.
+supervisor reads the record and, when the box (or stage 2's one-board lease, which is where the port check runs) has fewer chips
+than the estimate needs, blocks with the numbers (block code `model-does-not-fit`) and starts no prepare step. The generic stage 2
+only records the estimate. A checkpoint whose `model.safetensors.index.json` names a shard or tensor that is missing is refused as
+incomplete.
 
 ### 5.9b Op inventory
 

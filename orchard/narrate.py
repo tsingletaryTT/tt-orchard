@@ -648,7 +648,7 @@ UNBLOCK = {
         "`tt-orchard bringup <MODEL> --prune-caches` removes the oldest tensor caches that no unfinished run uses, just "
         "enough to fit, when a full disk is the only block (`tt-orchard caches` lists what exists)."],
     "model-does-not-fit": [
-        "Stage 0 estimated, from the model's safetensors headers, that the weights need more chips than this box has. The numbers are in the reason "
+        "Stage 0 estimated, from the model's safetensors headers, that the weights need more chips than this box has, or more than stage 2's lease (one board) gives the port check. The numbers are in the reason "
         "above and in stages/0/residency.json: bytes by category, the quantization policy, and every assumption with its source. No prepare "
         "step ran for stage 2.",
         "The DRAM per chip, the reserve and the KV budget are choices (orchard/defaults.py). No allocator reading backs them. If you know better figures, "

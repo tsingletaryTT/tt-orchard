@@ -58,7 +58,7 @@ def test_a_model_the_box_cannot_hold_blocks_stage_2_with_the_numbers_and_starts_
     rig.run()
     pauses = [d["reason"] for d in rig.decisions() if d.get("decision") == "pause"]
     assert pauses and pauses[0].startswith("blocked: the model does not fit this box")
-    assert "at least 35 chips" in pauses[0] and "the box has 4 chips" in pauses[0] and "choice" in pauses[0]
+    assert "at least 35 chips" in pauses[0] and "this box has 4 chips" in pauses[0] and "choice" in pauses[0]
     assert not started(rig, 2)                                                         # no stage 2 step started: no prepare step
     stage2 = rig.run_dir / "stages" / "2"
     assert not stage2.exists() or not any(stage2.iterdir())
@@ -66,6 +66,54 @@ def test_a_model_the_box_cannot_hold_blocks_stage_2_with_the_numbers_and_starts_
     assert notice["evidence"]["need_chips"] == 35 and notice["evidence"]["box_chips"] == 4
     (entry,) = evidence(rig, "residency estimate")
     assert entry["fits_box"] is False and entry["hazards"] == ["model_does_not_fit_box"]
+
+
+# Weights that need three chips at the defaults: 6.05e10 values at bfp8 is about 60 GiB, and (60 + 4) / 29 rounds up to 3.
+THREE_CHIPS = [("model.layers.0.mlp.gate_proj.weight", "BF16", [246_000, 246_000])]
+
+
+def test_a_model_the_box_holds_but_stage_2_s_lease_does_not_is_blocked_with_both_numbers(rig, tmp_path):
+    with_model(rig, tmp_path, THREE_CHIPS)
+    make(rig)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    rec = json.loads((rig.run_dir / "stages" / "0" / residency.FILE).read_text())
+    assert rec["estimated"]["chips_needed"] == 3 and rec["verdict"]["fits_box"] is True       # four chips hold it
+    pauses = [d["reason"] for d in rig.decisions() if d.get("decision") == "pause"]
+    assert pauses and pauses[0].startswith("blocked: the model does not fit stage 2's lease")
+    assert "at least 3 chips" in pauses[0] and "stage 2's lease has 2 chips" in pauses[0]
+    assert not started(rig, 2)
+    notice = next(e["data"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked"))
+    assert notice["evidence"]["stage_chips"] == 2 and notice["evidence"]["box_chips"] == 4
+    assert blocked.block_code({"reason": pauses[0]}) == "model-does-not-fit"
+
+
+class _Adapter:
+    def __init__(self, boards=None, fail=False):
+        self.boards, self.fail = boards, fail
+
+    def status(self):
+        if self.fail:
+            raise RuntimeError("gozer is unavailable")
+        from orchard.adapters import ChipState
+        return [ChipState(f"c{b}{i}", "FREE", None, board=f"b{b}", dev_index=2 * b + i) for b in range(self.boards) for i in range(2)]
+
+
+def _box(lab, test_adapter, adapter):
+    import types
+    from orchard.supervisor import Supervisor
+    return Supervisor._box_chips(types.SimpleNamespace(lab=lab, test_adapter=test_adapter, adapter=adapter))
+
+
+def test_the_box_is_counted_on_the_machine_the_tests_run_on():
+    import types
+    coder = _Adapter(boards=2)
+    assert _box(None, coder, coder) == 4
+    lab = types.SimpleNamespace(chips=None, adapter=_Adapter(boards=1))
+    assert _box(lab, lab.adapter, coder) == 2                       # a lab with no stated capacity is counted on the lab, not on the coder's machine
+    assert _box(types.SimpleNamespace(chips=8, adapter=_Adapter(boards=1)), None, coder) == 8
+    assert _box(lab, _Adapter(fail=True), coder) is None             # a failed query is no claim
+    assert _box(None, _Adapter(boards=0), coder) is None
 
 
 def test_unattended_the_block_has_its_own_code_and_is_not_retried(rig, tmp_path):
@@ -81,7 +129,7 @@ def test_unattended_the_block_has_its_own_code_and_is_not_retried(rig, tmp_path)
 
 
 def test_the_code_is_classified_before_the_hardware_words_and_has_an_unblock_text():
-    why = residency.shortfall({"estimated": {"chips_needed": 6, "device_bytes": 5 << 30}, "assumptions": []}, 4)
+    why = residency.shortfall({"scan": "ran", "label": "estimate", "estimated": {"chips_needed": 6, "device_bytes": 5 << 30}, "assumptions": []}, 4)
     assert status.classify_pause({"reason": f"blocked: {why}"})[0] == "blocked"
     assert blocked.block_code({"reason": f"blocked: {why}"}) == "model-does-not-fit"
     assert "model-does-not-fit" in blocked.REASONS and narrate.UNBLOCK["model-does-not-fit"]
