@@ -88,6 +88,8 @@ def _decision(e: dict, d: dict) -> list[Line]:
         s = d.get("server") or {}
         return [Line(o, f"starting the coder {s.get('target', '?')} on port {s.get('port', '?')}; a cold "
                         "boot can take 10 minutes or more")]
+    if what == "coder start blocked":
+        return [Line(o, f"the coder was not started: {d.get('reason', 'a container holds a device of the granted board')}")]
     if what == "coder started":
         return [Line(o, "the coder is ready (it answered the canary question)")]
     if what == "coder adopted":

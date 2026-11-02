@@ -997,20 +997,20 @@ def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | N
                                 graft=facts.graft is not None)
     if problems:
         raise PackageError(f"{name}: " + "; ".join(problems))
-    run_sh.write_text(text, encoding="utf-8")
+    safeio.atomic_write(run_sh, text, mode=0o755)         # 0755 as make_executable sets it; a link at the path is replaced, not followed
     mpath = out / "tt_kernel_manifest.json"
     m = _json(mpath, "the staged manifest")
     if m.get("weights", {}).get("repo_id") != facts.model_id or m["weights"].get("revision") != facts.revision:
         raise PackageError(f"the staged manifest's weights are {m.get('weights')}; expected "
                            f"{facts.model_id} at {facts.revision}")
     m.setdefault("producer", {})["hostname"] = "redacted"
-    mpath.write_text(json.dumps(m, indent=2) + "\n", encoding="utf-8")
+    safeio.atomic_write(mpath, json.dumps(m, indent=2) + "\n", mode=0o644)
     (out / "base_config").mkdir()
     for f in facts.base_config:
         shutil.copyfile(f, out / "base_config" / f.name)
     shutil.copyfile(TEMPLATES / "prepare_model_dir.py", out / "prepare_model_dir.py")
     if facts.graft:
-        (out / GRAFT_FILE).write_text(json.dumps(facts.graft, indent=2) + "\n", encoding="utf-8")
+        safeio.atomic_write(out / GRAFT_FILE, json.dumps(facts.graft, indent=2) + "\n", mode=0o644)
     from orchard.can import make_executable     # imported here: orchard.can imports this module
     make_executable(out)
     for w in sorted((out / "wheels").glob("*.whl")):
@@ -1077,10 +1077,10 @@ def prepare_verify(staged: Path, verify_dir: Path, facts: RunFacts, *, env: dict
             linked.append(facts.nearest_model)
         else:
             missing.append(facts.nearest_model)
-    (verify_dir / "verify_config.json").write_text(json.dumps({
+    safeio.atomic_write(verify_dir / "verify_config.json", json.dumps({
         "run_dir": str(facts.run_dir), "bundle": str(bundle), "port": free_port(),
         "model_id": facts.model_id, "revision": facts.revision, "hf_home": str(hub.parent),
-        "health_timeout_s": PACKAGE_HEALTH_TIMEOUT_S}, indent=2))
+        "health_timeout_s": PACKAGE_HEALTH_TIMEOUT_S}, indent=2), mode=0o644)
     shutil.copyfile(TEMPLATES / "verify_bundle.py", verify_dir / "verify_bundle.py")
     shutil.copyfile(SWAP_TEMPLATES / "serve_and_compare.py", verify_dir / "serve_and_compare.py")
     script = os.path.relpath(verify_dir / "verify_bundle.py", facts.run_dir)
@@ -1124,9 +1124,8 @@ def copy_evidence(facts: RunFacts, out: Path, card: str, *, hostname: str | None
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         text = src.read_text(encoding="utf-8", errors="replace")
-        target.write_text(redact_evidence(text, run_dir=facts.run_dir, hostname=(
-            socket.gethostname() if hostname is None else hostname), home=os.path.expanduser("~")),
-            encoding="utf-8")
+        safeio.atomic_write(target, redact_evidence(text, run_dir=facts.run_dir, hostname=(
+            socket.gethostname() if hostname is None else hostname), home=os.path.expanduser("~")), mode=0o644)
     return paths
 
 
@@ -1426,13 +1425,11 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         sampling_trial_chips=facts.source.chips,
         sampling_first_verdict=((facts.sampling_decision or {}).get("numbers") or {}).get("served_verdict"),
         stage_2_without_graft=(facts.graft is not None and not facts.stage_2_grafted and facts.graft_decision != "graft"))
-    (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
+    safeio.atomic_write(out / "README.md", render_card(facts_card), mode=0o644)
 
 
 def _write_json(path: Path, data) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    safeio.atomic_write(path, json.dumps(data, indent=2) + "\n", mode=0o644)
 
 
 def stage_all(run_dir, stage_dir, *, namespace: str, models_root, env: dict | None = None,
@@ -1488,7 +1485,7 @@ def finish(run_dir, stage_dir, *, hostname: str | None = None) -> dict:
     test = _json(stage_dir / "test-result.json", "stage 7's test-result.json")
     vpath = stage_dir / "verify" / "evidence" / "verify.json"
     verify = None
-    if test.get("returncode") == 0 and vpath.is_file():
+    if test.get("returncode") == 0 and not test.get("output_refused") and vpath.is_file():     # an output the reader refused cannot vouch for the boot
         verify = _json(vpath, "the boot check's verify.json")
     for rec in package["profiles"]:
         out = facts.run_dir / rec["dir"]
@@ -1497,7 +1494,8 @@ def finish(run_dir, stage_dir, *, hostname: str | None = None) -> dict:
             if verify is None:
                 rec["verify"] = {"failed": f"the boot check exited {test.get('returncode')} "
                                            f"(timed out: {test.get('timed_out')}); see "
-                                           f"{test.get('output', {}).get('path')}"}
+                                           f"{test.get('output', {}).get('path')}"
+                                           + (f"; its output was refused: {test['output_refused']}" if test.get("output_refused") else "")}
             else:
                 rec["verify"] = {k: verify[k] for k in ("top1_agreement", "coherent", "n_tokens",
                                                         "server_ready_s", "evidence")}
@@ -1507,8 +1505,7 @@ def finish(run_dir, stage_dir, *, hostname: str | None = None) -> dict:
                                               hostname=hostname)
         rec["scrub"] = scrub_package(out, hostname=hostname, namespace=package["namespace"])
         harden_package(out)       # last: the sums list the card and the evidence as they now are
-    (stage_dir / PUBLISH_FILE).write_text(
-        publish_commands(package["profiles"], namespace=package["namespace"],
-                         license_id=facts.license_id), encoding="utf-8")
+    safeio.atomic_write(stage_dir / PUBLISH_FILE, publish_commands(package["profiles"], namespace=package["namespace"],
+                                                                   license_id=facts.license_id), mode=0o644)
     _write_json(stage_dir / "package.json", package)
     return package

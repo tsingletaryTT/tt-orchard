@@ -20,7 +20,7 @@ import json
 import time
 from pathlib import Path
 
-from orchard import narrate
+from orchard import narrate, safeio
 from orchard.stages import STAGES
 from orchard.status import classify_pause, stage_rows
 
@@ -111,7 +111,7 @@ def write_bundle(run_dir, entries: list[dict], code: str, reason: str, *, now: f
     stage = at if at is not None else open_stage
     facts = {"code": code, "reason": reason, "model": model, "stage": stage, "stages": rows,
              "written": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
-    (run_dir / "blocked.json").write_text(json.dumps(facts, indent=2) + "\n", encoding="utf-8")
+    safeio.atomic_write(run_dir / "blocked.json", json.dumps(facts, indent=2) + "\n", mode=0o644)
     lines = [f"# Blocked: {code}", "",
              f"Model: {model or 'not recorded (the run never started)'}", "",
              f"The harness stopped at stage {stage}." if stage is not None else "The harness stopped before a stage began.",
@@ -126,4 +126,4 @@ def write_bundle(run_dir, entries: list[dict], code: str, reason: str, *, now: f
     lines += ["", f"The run resumes from its ledger when `tt-orchard bringup {model}` is run again. The ledger, each "
               "stage's evidence and the agent logs are in this run directory.",
               "Nothing was published, pushed or uploaded."]
-    (run_dir / "BLOCKED.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    safeio.atomic_write(run_dir / "BLOCKED.md", "\n".join(lines) + "\n", mode=0o644)

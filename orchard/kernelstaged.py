@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orchard import kernelprobe as kp
+from orchard import safeio
 from orchard.agent import AgentStep
 from orchard.canary import post_json
 from orchard.ledger import Ledger
@@ -138,13 +139,13 @@ def write_stage_templates(tdir, op: str, stage: Stage) -> Path:
         shutil.copy2(kp.TEMPLATES / "staged_references.py", tdir / "staged_references.py")
         refs += ("\n\n# Added by the staged probe (orchard/kernelstaged.py): the references of the intermediate stages.\n"
                  "from staged_references import STAGE_REFERENCES\nREFERENCES.update(STAGE_REFERENCES)\n")
-    (tdir / "references.py").write_text(refs, encoding="utf-8")
+    safeio.atomic_write(tdir / "references.py", refs, mode=0o644)
     spec_path = tdir / "ops" / f"{op}.json"
     if stage.reference is None and stage.inputs is None and stage.output is None:
         # The unmodified op: the shipped bytes, so a check.json that records the spec's hash matches the shipped file's.
         shutil.copyfile(kp.TEMPLATES / "ops" / f"{op}.json", spec_path)
     else:
-        spec_path.write_text(json.dumps(stage_spec(op, stage), indent=2) + "\n", encoding="utf-8")
+        safeio.atomic_write(spec_path, json.dumps(stage_spec(op, stage), indent=2) + "\n", mode=0o644)
     return tdir
 
 
@@ -361,5 +362,5 @@ def _attempt_table(rows: list[dict], op: str) -> list[str]:
 def write_staged_report(probe_dir, rows: list[dict], op: str) -> Path:
     """Write DIR/kernel-probe-staged-report.md and return its path."""
     path = Path(probe_dir) / "kernel-probe-staged-report.md"
-    path.write_text("\n".join(report_lines(rows, op) + _attempt_table(rows, op)) + "\n", encoding="utf-8")
+    safeio.atomic_write(path, "\n".join(report_lines(rows, op) + _attempt_table(rows, op)) + "\n", mode=0o644)
     return path

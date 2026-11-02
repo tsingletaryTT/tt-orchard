@@ -417,10 +417,7 @@ def find_ppl_parquet(hf_home, explicit: str | None = None) -> str | None:
 
 
 def write_json(path, value) -> None:
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(value, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    safeio.atomic_write(path, json.dumps(value, indent=1, sort_keys=True) + "\n")
 
 
 def load_json(path, what: str) -> dict:
