@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -42,7 +43,7 @@ from typing import Callable
 from orchard import audio_decision, audio_facts, audio_runtime, full_port, safeio
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import prompt_suite, sampling_choice, sampling_probe
+from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -904,13 +905,50 @@ def _hub_fetch_reasons(report, where: str = "") -> list[str]:
             f"the package ignores MODEL_WEIGHTS_DIR, and its numbers describe the fetched model"]
 
 
+AGREEMENT_PROMPTS_FILE = Path(__file__).resolve().parent / "skills" / "weights-swap-templates" / "agreement_prompts.json"
+AGREEMENT_REFERENCE_PATH = ("stages", "1", "evidence", "reference", "agreement-reference.json")
+AGREEMENT_REFERENCE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _agreement_binding_reasons(record, run_dir) -> list[str]:
+    """The agreement-set record must have been scored against the reference stage 1 wrote and the prompt set the repository ships: its
+    reference ids, the sha256 of the reference file and the sha256 of the prompt set are re-read here, whatever the template recorded."""
+    if not isinstance(record, dict) or record.get("ran") is not True:
+        return []
+    out = []
+    try:
+        shipped = safeio.sha256_file(AGREEMENT_PROMPTS_FILE, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return [f"the shipped agreement prompt set cannot be read: {exc.reason}"]
+    if record.get("prompt_set_sha256") != shipped:
+        out.append("the agreement set was run with a prompt set that is not the one the repository ships (its sha256 differs)")
+    path = Path(run_dir).joinpath(*AGREEMENT_REFERENCE_PATH)
+    try:
+        raw = safeio.read_bytes(path, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+        ref = safeio.parse_json_bytes(raw, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return out + [f"the agreement set's CPU reference (stage 1 {AGREEMENT_REFERENCE_PATH[-1]}) cannot be read: {exc.reason}"]
+    if record.get("reference_sha256") != hashlib.sha256(raw).hexdigest():
+        out.append("the agreement set was scored against a reference file other than the one stage 1 wrote (its sha256 differs)")
+    wanted = {e.get("id"): e.get("generated_ids") for e in ref.get("entries", []) if isinstance(e, dict)} if isinstance(ref, dict) else {}
+    for e in record.get("entries") if isinstance(record.get("entries"), list) else []:
+        ids = e.get("reference_ids") if isinstance(e, dict) else None
+        full = wanted.get(e.get("id")) if isinstance(e, dict) else None
+        if not isinstance(ids, list) or not isinstance(full, list) or full[:len(ids)] != ids:
+            out.append(f"the agreement set's reference ids for prompt {e.get('id') if isinstance(e, dict) else None!r} are not stage 1's")
+    return out
+
+
 def _suite_reasons(report, run_dir, where: str = "") -> list[str]:
     """The prompt-suite reasons (orchard/prompt_suite.py) in one swap-check.json report, each prefixed with `where`.
     A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
     result.json: the record holds the raw replies, and the verdict is computed here from them. A control in the record has
     to have been served from the run's nearest model (stage 0's), which is checked here again whatever the template did."""
     probe = [where + r for r in sampling_probe.problems(report.get("sampling_probe") if isinstance(report, dict) else None)]
-    return (_hub_fetch_reasons(report, where) + probe
+    # The agreement set (issue 15): every number is recomputed from the raw ids in the record, with the same file the template used.
+    record = report.get("agreement_set") if isinstance(report, dict) else None
+    agreement = [where + r for r in agreement_core.judge(record)["reasons"] + _agreement_binding_reasons(record, run_dir)]
+    return (_hub_fetch_reasons(report, where) + probe + agreement
             + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons])
 
 

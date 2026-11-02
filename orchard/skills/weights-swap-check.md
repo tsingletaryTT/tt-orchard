@@ -219,6 +219,21 @@ not served the new weights. Do not edit
 `swap_config.json` turns the suite on; the supervisor writes it. To read a control, set
 `"suite_control"` to the `swap-check.json` of a run of the same suite on the nearest model.
 
+`"agreement_set": true` (issue 15) widens the 32-token check. It needs `agreement_core.py` and
+`agreement_prompts.json` copied next to the script and a stage 1 reference file for the same prompt set
+(`stages/1/evidence/reference/agreement-reference.json`: for each prompt its ids and the CPU reference's greedy ids,
+plus the prompt set's sha256). The script teacher-forces each of the six prompts (chat, code, tool call, German,
+Japanese, and one long prompt) and records the raw ids under `agreement_set`, with the 32-token result as
+`baseline`. The gate recomputes everything from the ids: a pooled top-1 bar of 0.85, a per-prompt floor of 0.70, a
+damage control (a run with every fourth token wrong must fail the same bars, or the bars are reported unusable),
+and, when `"agreement_control"` names the `swap-check.json` of the same set run on the nearest model, a margin of
+0.05 over that control. Every number is a provisional choice. Stage 1 does not write the reference file yet, so
+the supervisor does not turn this on. Do not edit `agreement_core.py`: a test keeps it equal to `orchard/agreement_core.py`.
+
+`python3 -m orchard.long_sweep run --port <port> --model <name> --out sweep.json` (issue 18) measures prefill
+and decode speed over input lengths (1K to 200K tokens) and concurrency (1 and 4) on a server that is already
+running, and `compare` reads two such files side by side. It needs a board and hours; nothing has run it on one.
+
 `"sampling_probe": true` makes the script send one greedy and two sampled requests after the checks above
 and record them under `sampling_probe` in `swap-check.json`. It records what the server did with a request
 that has temperature above 0: accepted or refused, how fast, and whether two seeds gave different text.
