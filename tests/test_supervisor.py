@@ -1394,6 +1394,9 @@ def test_a_relaunch_blocks_on_a_foreign_container_on_the_granted_board_before_th
         from orchard.supervisor import coder_state
         lease_rec, _, _ = coder_state(rig.ledger.read() if hasattr(rig, "ledger") else rig.entries())
         assert lease_rec is not None and set(lease_rec["chips"]) == set(BOARDS["B1"])
+        # ... and the pending server record carries the granted board's devices, not the checked board's (second review).
+        _, server_rec, _ = coder_state(rig.entries())
+        assert server_rec["dev_indices"] == [DEV[c] for c in BOARDS["B1"]]
     finally:
         rig.close()
 
