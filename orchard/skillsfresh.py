@@ -102,16 +102,25 @@ def _raw_run(argv, timeout, env=None, cwd=None):
                                 text=True, env=env, cwd=cwd, start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    def kill_group():
         if proc.pid > 1:                                # its own group (start_new_session), never ours
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group()
         proc.communicate()
         return 124, "", f"timed out after {timeout:.0f} s"
+    except BaseException:                               # an interrupt (SIGINT, SIGTERM as an exception) or another failure: nothing is left running
+        kill_group()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        raise
     return proc.returncode, out, err
 
 
@@ -483,7 +492,7 @@ def _behind_days(runner: ReadOnlyRunner, root: str, repo: str, head: str, remote
 
 def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, update: Callable[..., str],
                 reuse_s: float = 0.0, branch_warning: bool = True, untracked: bool = True,
-                upstream_branch: str = "main", want_age: bool = False) -> Freshness:
+                upstream_branch: str = "main", want_age: bool = False, expected_repo: str | None = None) -> Freshness:
     """Compare a git checkout's HEAD with its origin's main branch (or `upstream_branch`). `update(root, branch, remote)`
     gives the update hint; `remote` is the upstream tip's sha once it is known, else None.
     `untracked` False leaves untracked files out of the dirty-tree warning. `want_age` True makes a BEHIND result carry
@@ -516,6 +525,9 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
                          "and cannot be compared with upstream.")
         return result
     result.repo = repo
+    if expected_repo and repo.lower() != expected_repo.lower():         # GitHub names are case-insensitive; no call is made for another project
+        result.detail = (f"Its origin is {repo}, not {expected_repo}, so it is not contacted and cannot be compared with that upstream.")
+        return result
     result.update = update(root, result.branch)
     if _reused(result, cache, key, reuse_s):
         return result
@@ -564,7 +576,8 @@ def skills_update(root: str, branch: str | None, remote: str | None = None) -> s
 
 
 def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: float = 0.0,
-                      offline: bool = False, want_age: bool = False, update: Callable[..., str] | None = None) -> list[Freshness]:
+                      offline: bool = False, want_age: bool = False, update: Callable[..., str] | None = None,
+                      expected_repo: str | None = None) -> list[Freshness]:
     """One result per git checkout that holds a directory in `dirs` (bringup.toml's skills_dirs). Two directories in
     one clone are checked once. A directory outside any checkout is an UNKNOWN result of its own. `want_age` is passed
     to check_clone (a BEHIND result then carries `behind_days`)."""
@@ -582,7 +595,7 @@ def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: fl
             out.append(Freshness(SOURCE_SKILLS, str(d), UNKNOWN, f"{d} does not exist."))
             continue
         out.append(check_clone(d, source=SOURCE_SKILLS, runner=runner, cache=cache, update=update or skills_update,
-                               reuse_s=reuse_s, want_age=want_age))
+                               reuse_s=reuse_s, want_age=want_age, expected_repo=expected_repo))
     return out
 
 

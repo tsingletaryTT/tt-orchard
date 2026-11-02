@@ -191,11 +191,13 @@ def _evidence(e: dict, d: dict) -> list[Line]:
     if what == "stack pins":
         would = d.get("would_block") or []
         text = f"stack freshness recorded ({d.get('severity', '?')}, {d.get('mode', '?')} run)"
+        reasons = {f.get("name"): f.get("reason") for f in d.get("findings") or [] if isinstance(f, dict)}
+        shown = ", ".join(f"{n}: {reasons[n]}" if reasons.get(n) else str(n) for n in (would or d.get("hazards") or [])[:4])
         if would:
-            text += "; would block if ORCHARD_STACK_PINS_BLOCK=1: " + ", ".join(str(n) for n in would[:6])
+            text += "; would block if ORCHARD_STACK_PINS_BLOCK=1: " + shown
         elif d.get("hazards"):
-            text += "; critical: " + ", ".join(str(n) for n in d["hazards"][:6])
-        return [Line(o, _clip(text, 240), bool(would or d.get("hazards")))]
+            text += "; critical: " + shown
+        return [Line(o, _clip(text, 700), bool(would or d.get("hazards")))]
     return []
 
 

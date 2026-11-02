@@ -1578,6 +1578,7 @@ class Supervisor:
         self.ledger.append("evidence", 0, what="stack pins", severity=rec["severity"], mode=rec["mode"],
                            hazards=[h["name"] for h in rec["hazards"]], advisories=[a["name"] for a in rec["advisories"]],
                            would_block=[a["name"] for a in rec["advisories"] if a.get("would_block")], blocking=bool(rec.get("blocking_requested")),
+                           findings=[{"name": f["name"], "reason": f["reason"][:300]} for f in rec["hazards"] + [a for a in rec["advisories"] if a.get("would_block")]],
                            path=os.path.relpath(Path(stage_dir) / stack_pins_mod.FILE, self.run_dir), sha256=sha)
         if rec["hazards"]:
             why = "; ".join(f"{h['name']}: {h['reason']}" for h in rec["hazards"])

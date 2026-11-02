@@ -69,6 +69,8 @@ PROBE_LIMITS = (
 # `transformers_version`, when it has one, is compared as well and the larger minimum wins.
 KNOWN_MINIMUMS = {
     "qwen4_exp": ("5.19.0", "operator, 2026-11-02: Qwen4ExpForCausalLM first appears in transformers 5.19.0"),
+    # The flat text checkpoints this repository's tiny-checkpoint script writes name the same class and carry no transformers_version.
+    "qwen4_exp_text": ("5.19.0", "operator, 2026-11-02: the flat text form of qwen4_exp names Qwen4ExpForCausalLM"),
 }
 
 # Hazard names (stable: the ledger and the bundle quote them).
@@ -99,11 +101,15 @@ try:
                 found = getattr(transformers, name, None)
             except Exception:
                 found = None
+            if not isinstance(found, type):            # a string such as __version__ is an attribute, not a model class
+                found = None
             if found is None and model_type != "-":
                 # The stage 1 reference loader's second lookup (reference_gate.resolve_class): many classes are not exported at the top level.
                 try:
                     found = getattr(importlib.import_module("transformers.models.%s.modeling_%s" % (model_type, model_type)), name, None)
                 except Exception:
+                    found = None
+                if not isinstance(found, type):
                     found = None
             out["classes"][name] = found is not None
 except Exception as exc:
@@ -212,11 +218,13 @@ def config_facts(model_dir) -> dict:
             return None
     archs = cfg.get("architectures")
     valid = [a for a in archs if isinstance(a, str) and CLASS_NAME.fullmatch(a)] if isinstance(archs, list) else []
+    valid = list(dict.fromkeys(valid))              # a name listed twice is checked once (the probe answers one value per name)
     problem = None
     if archs is not None and not isinstance(archs, list):
         problem = "architectures is not a list"
-    elif isinstance(archs, list) and len(valid) != len(archs):
-        problem = f"{len(archs) - len(valid)} of the {len(archs)} architecture entries are not plain class names"
+    elif isinstance(archs, list) and any(not (isinstance(a, str) and CLASS_NAME.fullmatch(a)) for a in archs):
+        bad = sum(1 for a in archs if not (isinstance(a, str) and CLASS_NAME.fullmatch(a)))
+        problem = f"{bad} of the {len(archs)} architecture entries are not plain class names"
     if len(valid) > MAX_CLASSES:
         problem = (problem + "; " if problem else "") + f"{len(valid)} architectures are named and only the first {MAX_CLASSES} can be checked"
     return {"model_type": text("model_type", 100), "architectures": valid[:MAX_CLASSES], "architectures_problem": problem,
@@ -290,7 +298,7 @@ def probe_interpreter(python, classes, run: Callable | None = None, model_type=N
             return unknown("the reference interpreter is not an executable file")
     except (ValueError, OSError):
         return unknown("the reference interpreter path cannot be checked")
-    classes = [c for c in classes if isinstance(c, str) and CLASS_NAME.fullmatch(c)][:MAX_CLASSES]
+    classes = list(dict.fromkeys(c for c in classes if isinstance(c, str) and CLASS_NAME.fullmatch(c)))[:MAX_CLASSES]
     mt = model_type if isinstance(model_type, str) and MODEL_TYPE.fullmatch(model_type) else "-"
     try:
         rc, out, err = (run or real_probe_run)([python, "-c", PROBE_SCRIPT, mt, *classes], PROBE_TIMEOUT_S, _probe_env(env, exclude))
@@ -321,14 +329,14 @@ def probe_interpreter(python, classes, run: Callable | None = None, model_type=N
 def _fresh_part(f: skillsfresh.Freshness, hazard: str, new_run: bool) -> tuple[dict, list, list]:
     """(part, critical entries, advisory entries) for one checkout result."""
     part = {"state": f.state, "path": f.path, "local": f.local, "remote": f.remote, "behind": f.behind, "ahead": f.ahead,
-            "behind_days": round(f.behind_days, 1) if f.behind_days is not None else None, "branch": f.branch, "dirty": f.dirty,
+            "behind_days": round(f.behind_days, 2) if f.behind_days is not None else None, "branch": f.branch, "dirty": f.dirty,
             "detail": f.detail, "warnings": list(f.warnings), "update": f.update if f.state in (skillsfresh.BEHIND, skillsfresh.DIFFERS) else None}
     crit, adv = [], []
     if f.state == skillsfresh.BEHIND:
         if f.behind_days is None:
             adv.append(_entry(f"{hazard}_age_unknown", f"{f.source} is {f.behind} commits behind upstream and the age of the gap could not be told. {f.detail}"))
         elif f.behind_days > MAX_BEHIND_DAYS:
-            crit.append(_entry(hazard, f"{f.source} is {f.behind} commits and {f.behind_days:.0f} days behind upstream, more than "
+            crit.append(_entry(hazard, f"{f.source} is {f.behind} commits and {round(f.behind_days, 2):g} days behind upstream, more than "
                                        f"{MAX_BEHIND_DAYS:g} days. {f.update_text()}"))
     elif f.state == skillsfresh.DIFFERS:
         adv.append(_entry(f"{hazard}_differs", f"{f.source} is not upstream and how far apart they are could not be counted. {f.detail}"))
@@ -465,7 +473,8 @@ def build_record(sources: Sources, *, new_run: bool, run=None, probe_run=None, c
                 return take(key, _unnamed(source, hazard, "the named directory does not exist"))
         except (ValueError, OSError):
             return take(key, _unnamed(source, hazard, "the named directory cannot be checked"))
-        f = skillsfresh.check_clone(directory, source=source, runner=runner, cache=cache, update=update, upstream_branch=branch, want_age=True)
+        f = skillsfresh.check_clone(directory, source=source, runner=runner, cache=cache, update=update, upstream_branch=branch, want_age=True,
+                                    expected_repo=expected or None)
         take(key, _repo_part(f, hazard, expected, new_run))
 
     clone("tt_metal", sources.tt_metal_dir, H_TT_METAL, "tt-metal", _branch_update("main", sources.homes), "main", sources.metal_repo)
@@ -475,7 +484,8 @@ def build_record(sources: Sources, *, new_run: bool, run=None, probe_run=None, c
     if not dirs:
         take("skills", _unnamed("tenstorrent/skills", H_SKILLS, "no clone is named for it"))
     else:
-        results = skillsfresh.check_skills_dirs(dirs, run=runner, cache=cache, want_age=True, update=_branch_update("main", sources.homes))
+        results = skillsfresh.check_skills_dirs(dirs, run=runner, cache=cache, want_age=True, update=_branch_update("main", sources.homes),
+                                               expected_repo=SKILLS_REPO)
         subs = [_repo_part(f, H_SKILLS, SKILLS_REPO, new_run) for f in results]
         parts["skills"] = [s[0] for s in subs]
         for s in subs:

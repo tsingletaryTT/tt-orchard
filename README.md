@@ -1602,7 +1602,7 @@ part `unknown`.
   `orchard/stack_pins.py`, and whether that `transformers` has each class the checkpoint's `architectures` names (up to 64; an entry that is not
   a plain class name, or more than 64, is an unchecked finding and never `ok`), looked up the way the stage 1 reference loader does (the top
   level, then `transformers.models.<model_type>.modeling_<model_type>`). Versions are compared in PEP 440 order (dev, a, b, rc, the release,
-  post); a form the check does not know is reported as not compared. A checkpoint whose config names `model_type` `qwen4_exp` needs
+  post); a form the check does not know is reported as not compared. A checkpoint whose config names `model_type` `qwen4_exp` (or the flat `qwen4_exp_text`) needs
   `transformers` 5.19.0 or later for `Qwen4ExpForCausalLM`.
 
 The interpreter is asked with a fixed script that imports `transformers` only. The probe does not load files an agent can write: it sets
