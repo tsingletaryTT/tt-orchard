@@ -28,11 +28,11 @@ from __future__ import annotations
 import argparse
 import calendar
 import dataclasses
-import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 from dataclasses import dataclass
@@ -98,30 +98,66 @@ class StageSpec:
 
 # ---- evidence and gate helpers ------------------------------------------------------------------
 
-def evidence_record(run_dir, path) -> dict:
-    """The path (relative to the run directory) and sha256 that an evidence entry records.
+EVIDENCE_HASH_MAX = 512 * 1024 * 1024    # the largest file a ledger evidence entry will hash (an agent transcript is the largest in practice)
 
-    Relative paths keep the machine's home directory out of the ledger's evidence lists.
-    """
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(run_dir))
-    return {"path": rel, "sha256": h.hexdigest()}
+
+def _within(root: str, p: str) -> bool:
+    return p == root or p.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def locate(run_dir, rel) -> tuple[Path | None, str | None]:
+    """(path, None) for the regular file `rel` names inside the run directory (links resolved), or (None, why) with a named reason.
+
+    This decides whether an evidence path an agent wrote is usable. It never raises: a path with a null byte,
+    one that cannot be resolved, a link that leaves the run directory, a FIFO or device, a missing file and a file over
+    `EVIDENCE_HASH_MAX` are each a reason a gate can show the agent (issue 335: a null byte made `os.path.realpath` raise ValueError
+    out of the gate)."""
+    if not isinstance(rel, str) or not rel:
+        return None, "the path is not a non-empty string"
+    if "\0" in rel:
+        return None, "the path holds a null byte"
+    if os.path.isabs(rel):
+        return None, "the path is absolute"
+    try:
+        root = os.path.realpath(run_dir)
+        p = os.path.realpath(os.path.join(root, rel))
+        if not _within(root, p):
+            return None, "the path leaves the run directory"
+        st = os.stat(p)
+    except FileNotFoundError:
+        return None, "the file does not exist"
+    except (OSError, ValueError):
+        return None, "the path cannot be examined"
+    if not stat.S_ISREG(st.st_mode):
+        return None, "the path is not a regular file (a directory, FIFO or device)"
+    if st.st_size > EVIDENCE_HASH_MAX:
+        return None, f"the file is larger than {EVIDENCE_HASH_MAX} bytes"
+    return Path(p), None
 
 
 def inside(run_dir, rel) -> Path | None:
-    """The file `rel` names, if it is a regular file inside the run directory (links resolved)."""
-    if not isinstance(rel, str) or not rel or os.path.isabs(rel):
-        return None
-    root = os.path.realpath(run_dir)
-    p = os.path.realpath(os.path.join(root, rel))
-    if os.path.commonpath([root, p]) != root or not os.path.isfile(p):
-        return None
-    return Path(p)
+    """The file `rel` names, if it is a regular file inside the run directory (links resolved). `locate` says why when it is not."""
+    return locate(run_dir, rel)[0]
 
 
+def evidence_record(run_dir, path) -> dict:
+    """The path (relative to the run directory) and sha256 that an evidence entry records.
+
+    Relative paths keep the machine's home directory out of the ledger's evidence lists. The file is read through
+    `safeio.sha256_file`: a FIFO, a device, an oversize file or a change during the read is a `safeio.SafeReadError` with a
+    named reason (issue 335: a plain `open()` blocked on a FIFO). A link that stays inside the run directory is followed once, as
+    the gates follow it; a link that leaves the run directory is refused. A caller records evidence only for a file its gate
+    accepted, so the refusal fails the stage (Supervisor._end_stage).
+    """
+    target = safeio.resolved(path)
+    root = safeio.resolved(run_dir)
+    if not _within(root, target):
+        raise safeio.PathRefused("the evidence file is not inside the run directory")
+    digest = safeio.sha256_file(target, max_bytes=EVIDENCE_HASH_MAX)
+    return {"path": os.path.relpath(target, root), "sha256": digest}
+
+
+TEXT_MAX_BYTES = 16 * 1024 * 1024       # the largest card, script or bundle text file a gate will read
 JSON_MAX_BYTES = 16 * 1024 * 1024       # the largest stage record or evidence file a gate will read (docs/safe-reading.md)
 
 
@@ -154,8 +190,9 @@ def _evidence(run_dir, items, where: str, reasons: list, seen: list) -> None:
         reasons.append(f"{where} lists no evidence")
         return
     for rel in items:
-        if inside(run_dir, rel) is None:
-            reasons.append(f"{where}: evidence {rel!r} is not a file inside the run directory")
+        found, why = locate(run_dir, rel)
+        if found is None:
+            reasons.append(f"{where}: evidence {rel!r} is not a file inside the run directory ({why})")
         else:
             seen.append(rel)
 
@@ -210,7 +247,7 @@ def _delta_reasons(d: dict, run_dir, reasons: list, seen: list, stage_dir: Path 
     else:
         try:
             shipped = _sha256(SHIPPED_TEMPLATES["delta_triage.py"])
-        except OSError:
+        except safeio.SafeReadError:
             shipped = None
         reasons += audio_decision.stage_problems(d, stage_dir, shipped)
     diffs = d.get("differences")
@@ -357,7 +394,8 @@ SHIPPED_TEMPLATES = {"delta_triage.py": _SKILLS_ROOT / "delta-triage-templates" 
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """The sha256 of a file through `safeio.sha256_file` (no link, no FIFO or device, a size cap). Raises only safeio.SafeReadError."""
+    return safeio.sha256_file(path, max_bytes=EVIDENCE_HASH_MAX)
 
 
 def _template_reasons(stage_dir: Path, name: str) -> list[str]:
@@ -369,14 +407,18 @@ def _template_reasons(stage_dir: Path, name: str) -> list[str]:
     (`template_sha256`); `_stamp_reasons` compares that with the shipped file."""
     copy, shipped = stage_dir / name, SHIPPED_TEMPLATES[name]
     try:
-        if not shipped.is_file():
-            return []
-        if not copy.is_file():
-            return [f"{name} is not in this stage directory. Copy it from the skill's templates directory and run it from there, "
-                    "so the gate can check that the evidence came from the shipped script."]
-        mine, theirs = _sha256(copy), _sha256(shipped)
-    except OSError:
-        return []
+        theirs = _sha256(shipped)
+    except safeio.SafeReadError:
+        return []                      # the shipped file is part of this repository; a gate cannot compare against what is not there
+    if not os.path.lexists(copy):
+        return [f"{name} is not in this stage directory. Copy it from the skill's templates directory and run it from there, "
+                "so the gate can check that the evidence came from the shipped script."]
+    try:
+        mine = _sha256(copy)
+    except safeio.SafeReadError as exc:
+        # The copy is in the agent's directory. A link, a FIFO or a file over the cap is not the template, and says so.
+        return [f"{name} in this stage cannot be compared with the shipped template: {exc.reason}. Copy {name} from the skill's "
+                "templates directory again."]
     if mine == theirs:
         return []
     return [f"{name} in this stage differs from the shipped template (sha256 {mine[:12]} against {theirs[:12]}), so the evidence it wrote "
@@ -389,7 +431,7 @@ def _stamp_reasons(data: dict, name: str, where: str) -> list[str]:
     run of an edited script under another name, and a copy deleted after the run, which the copy check alone cannot see."""
     try:
         theirs = _sha256(SHIPPED_TEMPLATES[name])
-    except OSError:
+    except safeio.SafeReadError:
         return []
     got = data.get("template_sha256")
     if got == theirs:
@@ -902,11 +944,16 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         if swap not in (c.get("evidence") if isinstance(c.get("evidence"), list) else []):
             reasons.append(f"{where}: evidence must include {swap}")
             continue
+        swap_path, swap_why = locate(run_dir, swap)
         try:
-            report = _safe_json(inside(run_dir, swap))
+            report = _safe_json(swap_path) if swap_path is not None else None
             draft = report["result_draft"]
-        except (AttributeError, safeio.SafeReadError, KeyError, TypeError):
+        except (AttributeError, safeio.SafeReadError, KeyError, TypeError) as exc:
             report, draft = None, None
+            # Say why the swap check could not be used: an agent that links it to a device or swells it needs the cause, and a bare
+            # "top1_agreement is not the result_draft's" names none.
+            cause = swap_why if swap_path is None else (exc.reason if isinstance(exc, safeio.SafeReadError) else "it has no result_draft object")
+            reasons.append(f"{where}: {swap} cannot be used ({cause})")
         if not isinstance(draft, dict) or draft.get("top1_agreement") != c.get("top1_agreement"):
             reasons.append(f"{where}: top1_agreement {c.get('top1_agreement')!r} is not the "
                            f"result_draft's in {swap}")
@@ -916,7 +963,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         reasons += _sampling_reasons(report, run_dir, where)
         if trim is not None:
             cdir = Path(stage_dir) / "configs" / str(n)
-            reasons += _trim_reasons(trim, _read_json(cdir / "model-dir-sources.json"),
+            reasons += _trim_reasons(trim, _read_checked(cdir / "model-dir-sources.json", f"configs/{n}/model-dir-sources.json", reasons),
                                      report.get("serving") if isinstance(report, dict) else None, f"{where}: ")
     return _done(reasons, seen)
 
@@ -927,7 +974,13 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     change it afterwards, so the check reads what prepare_swap.py recorded it built (`mtp_graft` in model-dir-sources.json). A container
     configuration is another server and is not held to the decision."""
     cdir = Path(stage_dir) / "configs" / str(n)
-    cfg = _read_json(cdir / "swap_config.json")
+    got = safeio.read_json_checked(cdir / "swap_config.json", max_bytes=JSON_MAX_BYTES)
+    if got.refused:
+        # A swap_config.json that is there and refused is not an absent one, with or without a recorded decision: it could name the bundle
+        # whose graft the decision did not choose (issue 287).
+        return [f"{where}: {got.problem(f'configs/{n}/swap_config.json')}, so how this configuration serves cannot be told and stage 2's "
+                "graft decision cannot be checked against it"]
+    cfg = got.value
     kind = _serving_type(cfg)
     if kind is None and read_graft_decision(Path(run_dir) / "stages" / "2") is not None:
         # Once stage 2 has recorded a decision, a config that is gone or cannot be read must not let a configuration through: it may be an
@@ -981,11 +1034,15 @@ def _serving_type(cfg) -> str | None:
     return None
 
 
-def _read_json(path: Path):
-    try:
-        return _safe_json(path)
-    except safeio.SafeReadError:
+def _read_checked(path: Path, name: str, reasons: list):
+    """The JSON in `path` (any type), or None. A missing file is None with no reason, because a caller decides whether it is required. A file
+    that is there and refused (a FIFO, a link, a device, a file over the cap, NaN, a repeated key) is None with a named reason in `reasons`
+    (issue 287: a refusal used to come back as None, which every caller read as "no file")."""
+    got = safeio.read_json_checked(path, max_bytes=JSON_MAX_BYTES)
+    if got.refused:
+        reasons.append(got.problem(name) or "")
         return None
+    return got.value if got.ok else None
 
 
 SERVING_CHECKS = ("boots", "passkey", "canary")
@@ -1057,7 +1114,10 @@ def gate_bundle(stage_dir, run_dir) -> GateResult:
     reasons, seen = [], []
     for name in BUNDLE_FILES:
         f = bundle / name
-        if not f.is_file() or not f.read_text(encoding="utf-8", errors="replace").strip():
+        got = safeio.read_text_checked(f, max_bytes=TEXT_MAX_BYTES, errors="replace")
+        if got.refused:
+            reasons.append(got.problem(f"bundle/{name}") or "")
+        elif not got.ok or not str(got.value).strip():
             reasons.append(f"bundle/{name} is missing or empty")
         else:
             seen.append(os.path.relpath(f, run_dir))
@@ -1077,8 +1137,14 @@ def gate_bundle(stage_dir, run_dir) -> GateResult:
             found.add(rel)
             if rel not in recorded:
                 reasons.append(f"{rel} was not written by build_bundle.py")
-            elif _sha256(f) != recorded[rel]:
-                reasons.append(f"{rel} changed after build_bundle.py wrote it")
+            else:
+                try:
+                    unchanged = _sha256(f) == recorded[rel]
+                except safeio.SafeReadError as exc:
+                    reasons.append(f"{rel} cannot be read to check it against build_bundle.py's record: {exc.reason}")
+                    continue
+                if not unchanged:
+                    reasons.append(f"{rel} changed after build_bundle.py wrote it")
         for rel in sorted(set(recorded) - found - {"stages/8/bundle/ledger.jsonl"}):
             reasons.append(f"{rel} was written by build_bundle.py and is gone")
     reasons += _bundle_benchmark_reasons(bundle, run_dir)
@@ -1092,10 +1158,12 @@ def _bundle_benchmark_reasons(bundle: Path, run_dir) -> list[str]:
     stage 2 repeated, counted here from `stages/2/audio_result.json` and not taken from any label. Fewer repeats are a single sample, which the bundle
     heads differently. A result file that cannot be read gives no support for the heading."""
     from orchard import resident
-    try:
-        text = (bundle / "RESULTS.md").read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    got = safeio.read_text_checked(bundle / "RESULTS.md", max_bytes=TEXT_MAX_BYTES, errors="replace")
+    if got.refused:
+        return [got.problem("bundle/RESULTS.md") or ""]        # the gate's own required-file check reports it too; here it also blocks the benchmark heading
+    if not got.ok:
         return []
+    text = got.value
     if resident.BENCH_HEADING not in text.splitlines():
         return []
     rel = f"stages/2/{audio_runtime.RESULT_FILE}"
@@ -1120,13 +1188,6 @@ def _bundle_benchmark_reasons(bundle: Path, run_dir) -> list[str]:
     return [f"RESULTS.md heads the audio timings as a benchmark, but {role} has {n} measured repeat(s) in {rel}; "
             f"{resident.MIN_REPEATS} are needed" for role, n in sorted(counts.items()) if n < resident.MIN_REPEATS]
 
-
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _inside_dir(run_dir, rel) -> Path | None:
@@ -1228,14 +1289,15 @@ def gate_package(stage_dir, run_dir) -> GateResult:
             continue
         try:
             m = _safe_json(out / "tt_kernel_manifest.json", expect=dict)
-            run_sh = (out / "run.sh").read_text(encoding="utf-8")
-            card = (out / "README.md").read_text(encoding="utf-8")
         except safeio.SafeReadError as exc:
             reasons.append(f"profile {name}: tt_kernel_manifest.json is not readable JSON: {exc.reason}")
             continue
-        except (OSError, ValueError) as exc:
-            reasons.append(f"profile {name}: {exc}")
+        texts = {fname: safeio.read_text_checked(out / fname, max_bytes=TEXT_MAX_BYTES) for fname in ("run.sh", "README.md")}
+        bad = [got.problem(f"profile {name}: {fname}") or f"profile {name}: {fname} is missing" for fname, got in texts.items() if not got.ok]
+        if bad:
+            reasons += bad
             continue
+        run_sh, card = texts["run.sh"].value, texts["README.md"].value
         w = m.get("weights") or {}
         if (w.get("repo_id"), w.get("revision")) != (new_repo, new_rev) or d.get("revision") != new_rev:
             reasons.append(f"profile {name}: the manifest's weights are {w.get('repo_id')}@"
@@ -1300,11 +1362,11 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                 reasons.append(f"profile {name}: the boot check's server did not serve its own "
                                "model-dir with MODEL_WEIGHTS_DIR and HF_MODEL set to it")
             _evidence(run_dir, v.get("evidence"), f"profile {name} boot check", reasons, seen)
-    try:
-        text = (Path(stage_dir) / PUBLISH_FILE).read_text(encoding="utf-8")
-        reasons += publish_problems(text)
-    except OSError:
-        reasons.append(f"{PUBLISH_FILE} is missing")
+    got = safeio.read_text_checked(Path(stage_dir) / PUBLISH_FILE, max_bytes=TEXT_MAX_BYTES)
+    if got.ok:
+        reasons += publish_problems(got.value)
+    else:
+        reasons.append(got.problem(PUBLISH_FILE) or f"{PUBLISH_FILE} is missing")
     return _done(reasons, seen)
 
 

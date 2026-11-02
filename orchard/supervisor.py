@@ -165,6 +165,7 @@ from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, 
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
                               TurnRepeat, Watchdog)
 
+RUN_JSON_MAX = 16 * 1024 * 1024          # the largest JSON file of a run (a marker, a record, a trial result) the supervisor reads
 MAX_SWAP_CONFIG_BYTES = 1024 * 1024    # choice: a stage's swap_config.json is a few kilobytes (issue 137)
 
 WHO = os.environ.get("ORCHARD_LEASE_WHO") or "orchard:supervisor"       # the name gozer shows for the supervisor's leases; an operator's session may set its own
@@ -1149,9 +1150,14 @@ class Supervisor:
         try:
             if self.coder.confirm_stopped().stopped:
                 return None
-            canary_text = (self.run_dir / canary["path"]).read_text(encoding="utf-8")
-        except (ServerError, OSError):
+        except ServerError:
             return None
+        read = safeio.read_text_checked(self.run_dir / canary["path"], max_bytes=RUN_JSON_MAX)
+        if not read.ok:
+            if read.refused:
+                self.ledger.append("decision", None, decision="a run file was refused and not used", file=str(canary["path"]), reason=read.reason)
+            return None
+        canary_text = read.value
         holders: list[int] = []
         kept_id = lease.lease_id
         if lease.lease_id not in self._adopted_ids(entries):
@@ -1339,7 +1345,11 @@ class Supervisor:
                         question=FIRST_BOOT_PROMPT, answer=sanity[:500], answer_file=saved)
         after = evidence_record(self.run_dir, self._evidence_file("coder-canary", answer))
         if baseline is not None:
-            before = (self.run_dir / baseline["path"]).read_text(encoding="utf-8")
+            read = safeio.read_text_checked(self.run_dir / baseline["path"], max_bytes=RUN_JSON_MAX)
+            if not read.ok:
+                self._block(None, "the coder's baseline canary answer cannot be read, so the answer after the restart cannot be compared "
+                                  f"with it ({read.reason or 'the file is missing'})", before_file=baseline)
+            before = read.value
             result = compare(before, answer)
             if not result.match:
                 self._block(None, "the coder's canary answer changed after it was started again",
@@ -1793,9 +1803,8 @@ class Supervisor:
 
     def _audio_models(self) -> tuple[str | None, str | None]:
         """The model and its base as stage 0 wrote them (`<repo>@<revision>`)."""
-        try:
-            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        delta = self._run_delta()
+        if delta is None:
             return self.model_id, None
         return delta.get("model") or self.model_id, delta.get("nearest_model")
 
@@ -2037,22 +2046,49 @@ class Supervisor:
         except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
             self.ledger.append("decision", 0, decision="hazard scan not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
+    def _run_json(self, path, what: str, n: int | None = None) -> "safeio.Checked":
+        """A JSON file of the run through the bounded safe reader (orchard/safeio.py): no FIFO or device, no link in the last component, a size
+        cap, strict JSON. A file that is there and refused is not the same as a missing one, so the refusal is written to the ledger with its
+        named reason (a later reader of the ledger, and the operator, see why the file was not used), and the caller gets the `Checked`
+        (`.value` is None for a missing or refused file; `.refused` and `.reason` say which). Issue 287."""
+        got = safeio.read_json_checked(path, max_bytes=RUN_JSON_MAX)
+        if got.refused:
+            self.ledger.append("decision", n, decision="a run file was refused and not used", file=what, reason=got.reason)
+        return got
+
+    def _run_delta(self) -> dict | None:
+        """Stage 0's delta.json as a dict, or None when it is missing, refused (named in the ledger) or not an object."""
+        value = self._run_json(self.run_dir / "stages" / "0" / "delta.json", "stages/0/delta.json").value
+        return value if isinstance(value, dict) else None
+
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
         The template decides form and modality from the files; `serving` is a property of this machine, so it comes from the
         installed bundles and container packages (orchard/audio_facts.py)."""
-        facts, delta = delta_facts(self.run_dir), None
+        facts = delta_facts(self.run_dir)
         if facts is None:
             return {}
-        try:
-            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        delta = self._run_delta()
+        if delta is None:
             return {}
         installed = nearest.read_all_installed(self.paths.tt_model_root, self.paths.operator_home)
         return {"facts": {"form": facts.get("form"), "serving": serving_of(delta.get("nearest_model"), installed),
                           "modality": facts.get("modality")}}
 
     def _end_stage(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
+        """End a stage (see `_end_stage_body`). A pass records the files the gate accepted as evidence; when one of them can no longer be
+        read through the bounded reader (swapped for a FIFO, a link or an oversize file after the gate looked, or a file the gate did not
+        read), the stage fails with the named reason, which is the retry's feedback. A crash would give none."""
+        try:
+            return self._end_stage_body(spec, stage_dir, status, reasons, gate, escalated)
+        except safeio.SafeReadError as exc:
+            if status != "pass":
+                raise
+            why = [f"stage {spec.number}: a file the gate accepted could not be read to record it as evidence: {exc.reason}"]
+            self.ledger.append("stage_end", spec.number, result="fail", reasons=why)
+            return "fail"
+
+    def _end_stage_body(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
@@ -2100,7 +2136,7 @@ class Supervisor:
         return "fail"
 
     def _record_numbers(self, stage_dir: Path) -> None:
-        data = json.loads((stage_dir / "result.json").read_text(encoding="utf-8"))
+        data = safeio.read_json(stage_dir / "result.json", max_bytes=RUN_JSON_MAX, expect=dict)
         for num in data["numbers"]:
             self.ledger.append("measurement", 6, name=num["name"], value=num.get("value"),
                                unit=num["unit"], label=num["label"], evidence=num.get("evidence"))
@@ -2192,10 +2228,7 @@ class Supervisor:
         target = stage_dir / "stock_config.json"
         if target.exists():
             return
-        try:
-            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            delta = None
+        delta = self._run_delta()
         cfg, problems = stock_runtime.draft_config(run_dir=self.run_dir, delta=delta, inputs=self.inputs,
                                                    chips=spec.boards * CHIPS_PER_BOARD, cache_root=self.paths.cache_root)
         if cfg is None:
@@ -2283,10 +2316,7 @@ class Supervisor:
         if not isinstance(want, dict):
             return
         path = stage_dir / "hw_tests.json"
-        try:
-            have = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            have = None
+        have = self._run_json(path, "hw_tests.json", spec.number).value
         if have == want:
             return
 
@@ -2311,10 +2341,7 @@ class Supervisor:
                         if e["stage"] == spec.number and e["data"].get("decision") == "stage 4 configs drafted"), {})
         for n, cache in drafted.items():
             path = stage_dir / "configs" / str(n) / "swap_config.json"
-            try:
-                cfg = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
+            cfg = self._run_json(path, f"configs/{n}/swap_config.json", spec.number).value
             if not isinstance(cfg, dict) or cfg.get("tt_cache") == cache:
                 continue
             self.ledger.append("decision", spec.number, decision="kept the drafted tensor cache", config=int(n),
@@ -2342,11 +2369,11 @@ class Supervisor:
 
     def _read_test(self, stage_dir: Path) -> tuple[dict | None, list[str]]:
         problems = []
-        try:
-            test = json.loads((stage_dir / "hw_test.json").read_text(encoding="utf-8"))
-            note = json.loads((stage_dir / "handoff.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            return None, [f"hw_test.json and handoff.json must exist and be JSON: {exc}"]
+        got = {name: safeio.read_json_checked(stage_dir / name, max_bytes=RUN_JSON_MAX) for name in ("hw_test.json", "handoff.json")}
+        bad = [g.problem(name) or f"{name} is missing" for name, g in got.items() if not g.ok]
+        if bad:
+            return None, [f"hw_test.json and handoff.json must exist and be JSON: {'; '.join(bad)}"]
+        test, note = got["hw_test.json"].value, got["handoff.json"].value
         if not isinstance(test, dict) or not isinstance(test.get("command"), str) or not test["command"].strip():
             return None, ["hw_test.json needs a command"]
         d = test.get("deadline_s")
@@ -2434,9 +2461,8 @@ class Supervisor:
         n = spec.number
         if (stage_dir / graft.DECISION_FILE).exists():
             return False
-        try:
-            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        delta = self._run_delta()
+        if delta is None:
             return False
         cand = graft.candidate(delta)
         if cand is None:
@@ -2475,20 +2501,13 @@ class Supervisor:
                                  output=f"{graft.TRIAL_DIR}/evidence/hw-test-output.txt", what="graft trial test",
                                  env_extra={GRAFT_TRIAL_ENV: str(trial_dir.resolve())},
                                  after_test=lambda: self._stop_trial_servers(n, trial_dir, "after the trial test"))
-        try:
-            record = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            record = {}
+        record = self._run_json(marker, f"{graft.TRIAL_DIR}/test-result.json", n).value
+        record = record if isinstance(record, dict) else {}
         trial = None
         if record.get("returncode") == 0 and not record.get("timed_out"):
-            try:
-                trial = json.loads((trial_dir / graft.TRIAL_RESULT).read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                trial = None
-        try:
-            safe_top1 = json.loads((stage_dir / "result.json").read_text(encoding="utf-8")).get("top1_agreement")
-        except (OSError, ValueError, AttributeError):
-            safe_top1 = None
+            trial = self._run_json(trial_dir / graft.TRIAL_RESULT, f"{graft.TRIAL_DIR}/{graft.TRIAL_RESULT}", n).value
+        result_file = self._run_json(stage_dir / "result.json", "result.json", n).value
+        safe_top1 = result_file.get("top1_agreement") if isinstance(result_file, dict) else None
         decision = graft.decide(trial, safe_top1=safe_top1, sampling=graft.sampling_input(stage_dir, self.run_dir))
         if trial is None:
             if record.get("timed_out"):
@@ -2592,9 +2611,9 @@ class Supervisor:
         the filesystem of the link's parent, not of its target. A relative `tt_cache` is taken against the run directory, before the suffix is added.
         The run directory when the config names none."""
         try:
-            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
+            cfg = safeio.read_json(stage_dir / "swap_config.json", max_bytes=RUN_JSON_MAX, expect=dict)
             value = cfg["tt_cache"]
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        except (safeio.SafeReadError, KeyError):
             return self.run_dir
         if not isinstance(value, str) or not value:
             return self.run_dir
@@ -2629,10 +2648,8 @@ class Supervisor:
                                  output=f"{sampling.TRIAL_DIR}/evidence/hw-test-output.txt", what="sampling trial test",
                                  env_extra={GRAFT_TRIAL_ENV: str(trial_dir.resolve())},
                                  after_test=lambda: self._stop_trial_servers(n, trial_dir, "after the sampling trial test"))
-        try:
-            record = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            record = {}
+        record = self._run_json(marker, f"{sampling.TRIAL_DIR}/test-result.json", n).value
+        record = record if isinstance(record, dict) else {}
         if record.get("returncode") == 0 and not record.get("timed_out"):
             variant = sampling.variant_side(stage_dir, self.run_dir)
             if variant is not None:
@@ -2668,9 +2685,9 @@ class Supervisor:
         needs more chips. Catalog container packages mostly report 2 boards (4 chips), so stage 2 serves them on that many, as
         stage 4 does for its 4-chip test (issue 60)."""
         try:
-            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
+            cfg = safeio.read_json(stage_dir / "swap_config.json", max_bytes=RUN_JSON_MAX, expect=dict)
             chips = int(cfg["chips"]) if cfg.get("package") else 0
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        except (safeio.SafeReadError, KeyError, TypeError, ValueError):
             return spec.boards
         return max(spec.boards, -(-chips // CHIPS_PER_BOARD))
 
@@ -2804,10 +2821,8 @@ class Supervisor:
             return
         path = stage_dir / "evidence" / "lab-caches.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            known = json.loads(path.read_text())
-        except (OSError, ValueError):
-            known = {}
+        known = safeio.read_json_checked(path, max_bytes=RUN_JSON_MAX, expect=dict).value
+        known = known if isinstance(known, dict) else {}
         known.update(audit)
         path.write_text(json.dumps(known, indent=2, sort_keys=True))
 

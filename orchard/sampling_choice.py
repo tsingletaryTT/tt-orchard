@@ -51,11 +51,31 @@ MAX_JSON_BYTES = 4 << 20       # the largest file of this module's kind (a swap 
 
 def _read_json(path):
     """A JSON file of the run, read through orchard/safeio.py (no link at the last component, a size cap, a regular file only, strict JSON).
-    None when it is missing, unreadable, too large or not JSON; the callers treat all of those as "no evidence"."""
-    try:
-        return safeio.read_json(path, max_bytes=MAX_JSON_BYTES)
-    except safeio.SafeReadError:
-        return None
+    None when it is missing, unreadable, too large or not JSON. The derived readers below use it where "no evidence" is the right answer to
+    any of those. A refusal must still reach the gate: `refusals` names every file of this module that is there and refused, and
+    `decision_problems` turns each into a reason (issue 287: a refused decision file used to read as no decision)."""
+    return safeio.read_json_checked(path, max_bytes=MAX_JSON_BYTES).value
+
+
+def refusals(stage_dir, run_dir) -> list[str]:
+    """One reason for each file this module reads that is there and refused (a FIFO, a link, a device, a file over the cap, NaN, a repeated
+    key, text that is not JSON). A missing file gives none. `stage_dir` is stage 2's directory; the genconfig evidence is stage 0's."""
+    sd = Path(stage_dir)
+    files = [(sd / DECISION_FILE, DECISION_FILE),
+             (sd / "graft-decision.json", "graft-decision.json"),
+             (sd / "evidence" / "swap-check.json", "evidence/swap-check.json"),
+             (sd / TRIAL_DIR / "test-result.json", f"{TRIAL_DIR}/test-result.json"),
+             (sd / TRIAL_DIR / TRIAL_RESULT, f"{TRIAL_DIR}/{TRIAL_RESULT}"),
+             (sd / TRIAL_DIR / "variant" / "evidence" / "swap-check.json", f"{TRIAL_DIR}/variant/evidence/swap-check.json"),
+             (sd / GRAFT_TRIAL_DIR / "variant" / "evidence" / "swap-check.json", f"{GRAFT_TRIAL_DIR}/variant/evidence/swap-check.json")]
+    if run_dir is not None:
+        files.append((Path(run_dir) / "stages" / "0" / "evidence" / "genconfig-license.json", "stage 0 evidence/genconfig-license.json"))
+    out = []
+    for path, name in files:
+        problem = safeio.read_json_checked(path, max_bytes=MAX_JSON_BYTES).problem(name)
+        if problem:
+            out.append(problem)
+    return out
 
 
 # ---- is sampling needed? ------------------------------------------------------------------------------------------------------
@@ -84,10 +104,12 @@ def need(run_dir, override: str = "auto") -> dict:
     if override != "auto":
         return {"needed": override == "needed", "source": "operator", "override": override,
                 "evidence": [f"the operator passed --sampling {override}"]}
-    g = _read_json(Path(run_dir) / "stages" / "0" / "evidence" / "genconfig-license.json")
+    got = safeio.read_json_checked(Path(run_dir) / "stages" / "0" / "evidence" / "genconfig-license.json", max_bytes=MAX_JSON_BYTES)
+    g = got.value
     if not isinstance(g, dict):
+        why = f"is not readable: {got.reason}" if got.refused else "is missing" if got.missing else "is not a JSON object"
         return {"needed": False, "source": "none", "override": override,
-                "evidence": ["no evidence: stage 0's evidence/genconfig-license.json is missing or unreadable"]}
+                "evidence": [f"no evidence: stage 0's evidence/genconfig-license.json {why}"]}
     warns = [w for w in g.get("card_warns_greedy") or [] if isinstance(w, dict) and isinstance(w.get("quote"), str)]
     if warns:
         w = warns[0]
@@ -448,8 +470,13 @@ def decision_problems(stage_dir, run_dir) -> list[str]:
     sides from the swap checks. A file whose choice or flag differs from the recomputation is refused."""
     sd = Path(stage_dir)
     path = sd / DECISION_FILE
-    if not path.exists():
+    if not os.path.lexists(path):
         return []
+    # A decision file, or a file it was made from, that is there and refused is a reason of its own, named. Recomputing a decision from files
+    # that read as absent would make the file look inconsistent for the wrong cause, or consistent with nothing to compare.
+    bad = refusals(sd, run_dir)
+    if bad:
+        return bad
     d = _read_json(path)
     if not isinstance(d, dict):
         return [f"{DECISION_FILE} is not a JSON object"]
