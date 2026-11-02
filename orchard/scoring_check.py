@@ -70,6 +70,8 @@ MEDIA_DIR = "stages/1/evidence/reference/media/"      # the same values as the t
 MEDIA_KINDS = ("image", "video")
 MEDIA_PER_ROW = 8
 MEDIA_FILES_MAX = 64
+MEDIA_MAX = 16 * 1024 * 1024
+MAX_IDS = 1 << 20                     # the same limit as the template's: token ids in one prompt
 TOLERANCE = 1e-9                      # the gate's recomputed number against the number the record reports
 
 # Bounds, with the evidence each is drawn from. The 4B reranker bundle (raahemnabeel/qwen3-reranker-4b, doc/accuracy.md) reports Pearson r
@@ -535,11 +537,28 @@ def _media_reasons(pairs_doc: dict, run_dir: Path, reasons: list) -> None:
                     or ".." in Path(path).parts):
                 reasons.append(f"{PAIRS_FILE} row {i} has a media entry that needs a kind {MEDIA_KINDS} and a path under {MEDIA_DIR}")
                 continue
-            f = _inside(run_dir, path)
-            if f is None or f.parent != Path(os.path.realpath(run_dir)) / MEDIA_DIR.rstrip("/"):
-                reasons.append(f"{PAIRS_FILE} row {i}: the media file {path[:80]!r} is not a regular file directly under {MEDIA_DIR} (a link or a missing file)")
-            elif e.get("sha256") != _sha(f):
+            name = path[len(MEDIA_DIR):]
+            if not name or "/" in name or "\0" in path:
+                reasons.append(f"{PAIRS_FILE} row {i}: the media path {path[:80]!r} is not a file directly under {MEDIA_DIR}")
+                continue
+            # The path as written, opened one component at a time beneath the run directory without following a link, and read under the
+            # size cap: a file replaced by a link to identical bytes, a file over the cap and a file that cannot be read are each a refusal.
+            try:
+                with safeio.pinned_root(run_dir) as pin:
+                    digest = safeio.sha256_file(path, max_bytes=MEDIA_MAX, anchor=pin.fd)
+            except (safeio.SafeReadError, OSError, ValueError) as exc:
+                why = exc.reason if isinstance(exc, safeio.SafeReadError) else type(exc).__name__
+                reasons.append(f"{PAIRS_FILE} row {i}: the media file {path[:80]!r} is not a regular file directly under {MEDIA_DIR} that can be "
+                               f"read within {MEDIA_MAX} bytes ({why})")
+                continue
+            if e.get("sha256") != digest:
                 reasons.append(f"{PAIRS_FILE} row {i}: the media file {path} does not match its sha256 as it is on disk now")
+
+
+def _ids_ok(p) -> bool:
+    """A pair row's token ids as the template reads them: a non-empty list of at most MAX_IDS non-negative ints (a bool is not an int here)."""
+    ids = p.get("input_ids") if isinstance(p, dict) else None
+    return isinstance(ids, list) and 1 <= len(ids) <= MAX_IDS and all(type(t) is int and t >= 0 for t in ids)
 
 
 def _disk_reasons(record, run_dir: Path, reasons: list):
@@ -555,8 +574,11 @@ def _disk_reasons(record, run_dir: Path, reasons: list):
             reasons.append(f"{REFERENCE_FILE} holds no list of 1 to {MAX_PAIRS} finite scores of size at most {MAX_VALUE:g}")
     if pairs_doc is not None:
         rows = pairs_doc.get("pairs")
-        if isinstance(rows, list) and 0 < len(rows) <= MAX_PAIRS and all(isinstance(p, dict) and isinstance(p.get("group"), str) for p in rows):
+        if (isinstance(rows, list) and 0 < len(rows) <= MAX_PAIRS
+                and all(isinstance(p, dict) and isinstance(p.get("group"), str) and _ids_ok(p) for p in rows)):
             groups = [p["group"] for p in rows]
+            if any("relevant" in p and type(p["relevant"]) is not bool for p in rows):
+                reasons.append(f"{PAIRS_FILE} has a pair whose relevant is not true or false")
             if all(type(p.get("relevant")) is bool for p in rows):
                 relevant = [p["relevant"] for p in rows]
             if record is not None and record.get("groups") != groups:
@@ -564,7 +586,7 @@ def _disk_reasons(record, run_dir: Path, reasons: list):
             if scores is not None and len(scores) != len(rows):
                 reasons.append(f"{REFERENCE_FILE} has {len(scores)} scores for the {len(rows)} pairs of {PAIRS_FILE}")
         else:
-            reasons.append(f"{PAIRS_FILE} holds no list of 1 to {MAX_PAIRS} pairs with group names")
+            reasons.append(f"{PAIRS_FILE} holds no list of 1 to {MAX_PAIRS} pairs, each with a group name and a non-empty list of token ids")
     if record is not None and scores is not None and record.get("reference_scores") != scores:
         reasons.append(f"{RECORD_FILE} reference_scores are not the scores in {REFERENCE_FILE}: the comparison was made against numbers the reference did not produce")
     return scores, groups, relevant
@@ -586,14 +608,15 @@ def _disk_embed_reasons(record, run_dir: Path, reasons: list):
                            f"all) of finite numbers of size at most {MAX_VALUE:g}, none all zero")
     if pairs_doc is not None:
         rows = pairs_doc.get("pairs")
-        if isinstance(rows, list) and 0 < len(rows) <= MAX_PAIRS and all(isinstance(p, dict) and isinstance(p.get("kind"), str) for p in rows):
+        if (isinstance(rows, list) and 0 < len(rows) <= MAX_PAIRS
+                and all(isinstance(p, dict) and isinstance(p.get("kind"), str) and _ids_ok(p) for p in rows)):
             kinds = [p["kind"] for p in rows]
             if record is not None and record.get("input_kinds") != kinds:
                 reasons.append(f"{RECORD_FILE} input_kinds are not the input kinds of {PAIRS_FILE}: the comparison was made on another grouping")
             if vectors is not None and len(vectors) != len(rows):
                 reasons.append(f"{REFERENCE_FILE} has {len(vectors)} vectors for the {len(rows)} inputs of {PAIRS_FILE}")
         else:
-            reasons.append(f"{PAIRS_FILE} holds no list of 1 to {MAX_PAIRS} inputs with a kind name")
+            reasons.append(f"{PAIRS_FILE} holds no list of 1 to {MAX_PAIRS} inputs, each with a kind name and a non-empty list of token ids")
     return vectors, kinds
 
 

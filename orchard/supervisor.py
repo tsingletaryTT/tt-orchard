@@ -1014,6 +1014,8 @@ class Supervisor:
             return False
         if text_runtime.selected(entries) is not None:
             return False
+        if self._scoring_route()[1]:
+            return False          # a scoring model of class full-port has its own pause after stage 2 (`_scoring_stages_unbuilt`, code scoring-route)
         return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") == FULL_PORT_STAGES_UNBUILT for e in entries)
 
