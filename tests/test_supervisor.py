@@ -16,7 +16,7 @@ from orchard.adapters import AdapterError
 from orchard.ledger import Ledger, LedgerCorrupt
 from orchard.supervisor import (EXIT_ABORTED, EXIT_ERROR, EXIT_READY, EXIT_REFUSED, Control, build,
                                 main, parse)
-from run_fakes import (BOARDS, DELTA, FEEDBACK_HEAD, FILES, SWAP_LOW, CrashingLedger, FakeContainers,
+from run_fakes import (BOARDS, DELTA, DEV, FEEDBACK_HEAD, FILES, SWAP_LOW, CrashingLedger, FakeContainers,
                        Machine, MachineAdapter, MachineCoder, argv, bringup, clock, feedback_aware,
                        plenty, swap_entry, test_fails_until_escalated, where, write_tiers)
 
@@ -1217,3 +1217,88 @@ def test_keep_up_is_for_lab_mode_only(rig):
     assert rig.run() == EXIT_READY
     assert not rig.m.coder_running and rig.m.leases == {}
     assert not [d for d in rig.decisions() if d.get("decision") == "coder left up"]
+
+
+# ---- a resume on a smaller coder profile checks only the chips the new coder will hold ---------------
+
+class ForeignContainerCoder(MachineCoder):
+    """A container coder whose stop check also sees another session's container on `foreign_dev`,
+    the way ServerControl's docker check does: it counts only devices of the adopted record."""
+    foreign_dev = DEV[BOARDS["B1"][0]]      # a chip of the second board
+
+    def __init__(self, machine):
+        super().__init__(machine)
+        self.dev_indices = None
+
+    def adopt(self, record):
+        devs = record.get("dev_indices")
+        self.dev_indices = None if devs is None else tuple(devs)
+
+    def start(self, lease):
+        super().start(lease)
+        self.dev_indices = tuple(lease.dev_indices)      # ServerControl.start does the same
+
+    def record(self):
+        return {**super().record(), "dev_indices": None if self.dev_indices is None else list(self.dev_indices)}
+
+    def limit_devices(self, dev_indices):
+        self.dev_indices = tuple(dev_indices)
+
+    def confirm_stopped(self):
+        check = super().confirm_stopped()
+        held = self.dev_indices is None or self.foreign_dev in self.dev_indices
+        return type(check)(check.stopped and not held, {**check.checks, "docker_devices": not held}, {})
+
+
+class ForeignBoardAdapter(MachineAdapter):
+    """Another session's lease holds the second board: gozer shows its chips HELD-FOREIGN."""
+
+    def status(self):
+        from orchard.adapters import ChipState
+        return [ChipState(c.bdf, "HELD-FOREIGN", "other", board=c.board, dev_index=c.dev_index, lease_pid=1)
+                if c.bdf in BOARDS["B1"] else c for c in super().status()]
+
+
+def _stop_once_blocked(rig):
+    """on_sleep for a rig: end the test when the run pauses for the operator, whom nobody plays."""
+    def hook():
+        if '"blocked":true' in (rig.run_dir / "ledger.jsonl").read_text():
+            raise Stop()
+    return hook
+
+
+def _blocked_reasons(rig):
+    return [e["data"]["reason"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+
+
+def test_a_resume_on_a_smaller_profile_ignores_another_sessions_container_on_the_other_board(tmp_path):
+    rig = Rig(tmp_path, chips=4)
+    rig.coder_cls, rig.adapter_cls = ForeignContainerCoder, ForeignBoardAdapter
+    rig.on_sleep = _stop_once_blocked(rig)
+    try:
+        with pytest.raises(Crash):
+            rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+        rig.args.coder_chips = 2                  # the operator resumes on the one-board profile
+        assert rig.run(pid=200) == EXIT_READY
+        assert _blocked_reasons(rig) == []
+        started = [x for x in rig.decisions() if x["decision"] == "coder started"][-1]
+        assert len(started["lease"]["chips"]) == 2           # relaunched on the one-board profile
+    finally:
+        rig.close()
+
+
+def test_a_resume_on_the_same_profile_still_waits_for_every_chip_of_the_old_lease(tmp_path):
+    # The check is narrowed only when the new profile is smaller. With four chips again, the foreign
+    # container on the second board is on a chip the new coder needs, so the relaunch blocks.
+    rig = Rig(tmp_path, chips=4)
+    rig.coder_cls = ForeignContainerCoder
+
+    try:
+        with pytest.raises(Crash):
+            rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+        rig.on_sleep = _stop_once_blocked(rig)
+        with pytest.raises(Stop):
+            rig.run(pid=200)
+        assert _blocked_reasons(rig) == ["the coder could not be confirmed stopped for the relaunch"]
+    finally:
+        rig.close()

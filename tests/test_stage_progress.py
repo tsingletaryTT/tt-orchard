@@ -163,6 +163,44 @@ def test_a_marker_changed_after_the_supervisor_recorded_it_is_not_a_resume_point
     assert not resumed
 
 
+def test_a_record_from_an_earlier_attempt_does_not_vouch_for_a_later_marker(tmp_path, ledger):
+    """Attempt 1 ran its hardware test and was retried (its directory moved aside). Attempt 2 wrote a marker with the same bytes
+    and was killed before its own test ran. The record of attempt 1 has the same path and sha256, and must not vouch for it."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text('{"returncode": 0}')
+    record_test(ledger, run, 2, d / "test-result.json")
+    d, resumed = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)     # the retry
+    assert not resumed
+    (d / "test-result.json").write_text('{"returncode": 0}')                        # same bytes, written by the new attempt
+    again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)   # a restart
+    assert not resumed and not (again / "test-result.json").exists()
+    assert any(e["data"].get("decision") == "marker not written by the supervisor" for e in ledger.read())
+
+
+def test_the_latest_attempts_own_record_still_vouches_after_two_restarts(tmp_path, ledger):
+    """A resume appends no move-aside entry, so the record stays valid across several restarts."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text("{}")
+    record_test(ledger, run, 2, d / "test-result.json")
+    for _ in range(2):
+        again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+        assert resumed and again == d
+        ledger.append("stage_start", 2, escalated=False, resumed=True)
+
+
+def test_a_move_aside_of_another_stage_does_not_hide_this_stages_record(tmp_path, ledger):
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text("{}")
+    record_test(ledger, run, 2, d / "test-result.json")
+    open_stage_dir(run, STAGES[3], resuming=False, ledger=ledger)
+    open_stage_dir(run, STAGES[3], resuming=False, ledger=ledger)                   # stage 3 moves its own directory aside
+    _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert resumed
+
+
 def test_a_record_for_another_stage_does_not_vouch_for_the_marker(tmp_path, ledger):
     run = tmp_path / "run"
     d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)

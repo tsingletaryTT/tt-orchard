@@ -1940,9 +1940,16 @@ def _recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
     after it writes the file. A file an agent wrote, or one changed after the record, has none."""
     # Only _run_test's entry has `returncode` and `timed_out`. AgentStep's "evidence file" entries (an agent can link the marker from
     # evidence/) never do, so they do not count.
+    entries = ledger.read()
+    # Entries from before the stage's latest "moved the partial stage directory aside" belong to an earlier attempt, whose directory is
+    # gone. A later attempt can write a marker with the same bytes at the same path, so those entries cannot vouch for it. A resume
+    # appends no such entry, so the current attempt's own record stays valid across restarts. (A stage_start is not a boundary: a
+    # resumed attempt appends one after the record it resumes from.)
+    start = max((i for i, e in enumerate(entries) if e.get("event") == "decision" and e.get("stage") == n
+                 and e["data"].get("decision") == "moved the partial stage directory aside"), default=-1) + 1
     return any(e.get("event") == "evidence" and e.get("stage") == n and e["data"].get("path") == rec["path"]
                and e["data"].get("sha256") == rec["sha256"] and "returncode" in e["data"] and "timed_out" in e["data"]
-               for e in ledger.read())
+               for e in entries[start:])
 
 
 def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple[Path, bool]:
