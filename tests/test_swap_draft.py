@@ -104,14 +104,17 @@ def test_a_snapshot_input_that_does_not_exist_is_a_problem(run):
     assert cfg is None and any("does not exist" in p for p in problems)
 
 
-def test_the_port_is_one_nothing_listens_on(run):
+def test_the_port_is_one_nothing_listens_on(run, monkeypatch):
+    """The test holds a port the OS gave it and makes that port the first one tried. It does not bind the skills' fixed port
+    (8100): a live server on a shared host can hold that one, and then the bind in the test failed with an OS error."""
     bundle(run["tt_model_root"], "episod/qwen3.8-27b-dflash2-p300", NEAREST, 2)
     with socket.socket() as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("127.0.0.1", sd.FIRST_PORT))
+        s.bind(("127.0.0.1", 0))                         # an unused port, held from here on, so nothing else can take it
         s.listen()
+        held = s.getsockname()[1]
+        monkeypatch.setattr(sd, "FIRST_PORT", held)
         cfg, _ = sd.draft(**run)
-    assert cfg["port"] != sd.FIRST_PORT
+    assert cfg["port"] != held and cfg["port"] > held    # skipped the held port and took a later free one
 
 
 

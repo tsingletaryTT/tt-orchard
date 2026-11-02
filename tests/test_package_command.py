@@ -977,7 +977,11 @@ def test_a_record_naming_the_commands_own_process_or_group_signals_nothing(rig, 
     """The step runs inside its own process group. A record that names it would have the step signal itself."""
     own = os.getpid() if which == "pid" else os.getpgrp()
     def spawn(command, run_dir, env, timeout, stdout):
-        boot_id, start = proc_identity(own)
+        # The group id is its leader's pid. When pytest was started by a shell that has since exited (a background
+        # run, a CI wrapper), the leader is gone and has no /proc entry; the group still exists because pytest is in
+        # it. The record then carries a made-up identity. The guard looks only at the pid and group, so the test
+        # still has teeth: without it the step would find live group members and signal its own group.
+        boot_id, start = proc_identity(own) or ("no-leader", 1)
         write(rig["stage"] / RECORD, {"pid": own, "boot_id": boot_id, "start_time": start})
         return 0, False
     code, text = boot_with(rig, monkeypatch, spawn)                      # still here: nothing signalled this process
