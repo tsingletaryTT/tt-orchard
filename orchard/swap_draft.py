@@ -23,6 +23,8 @@ from orchard import graft_trial, safeio, sampling_choice
 from orchard.bringup_config import slug
 from orchard.nearest import read_installed
 
+JSON_MAX = 16 * 1024 * 1024       # the largest swap config, manifest or delta.json the draft reads
+
 KEYS = ("run_dir", "bundle_dir", "nearest_model_id", "base_snapshot", "new_snapshot", "new_model_id",
         "tt_cache", "hf_home", "port", "prompt_suite", "sampling_probe")
 FIRST_PORT = 8100            # the skills' example port; the next free one is used when it is taken
@@ -37,13 +39,18 @@ def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=N
     """Why an agent-written swap config does not serve stage 0's nearest model, or None. The weights are swapped into a bundle or package of
     the nearest model; a config that names another model serves the wrong architecture (issue 67: a Qwen3.8-27B bundle for a Qwen3-Coder model).
     Repository ids are compared exactly, without any `@revision`. A missing config, a config with no nearest_model_id (prepare_swap.py refuses that itself) or a run with no stage 0 record is no problem here."""
-    try:
-        cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    got = safeio.read_json_checked(config_path, max_bytes=JSON_MAX)
+    if got.refused:
+        return got.problem(Path(config_path).name)      # a config that is there and refused is a problem, not an absent config
+    if not got.ok:
         return None
+    cfg = got.value
+    delta = safeio.read_json_checked(Path(run_dir) / "stages" / "0" / "delta.json", max_bytes=JSON_MAX)
     try:
-        want = _repo(json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))["nearest_model"])
-    except (OSError, ValueError, KeyError, TypeError):
+        want = _repo(delta.value["nearest_model"]) if delta.ok else None
+    except (KeyError, TypeError):
+        want = None
+    if want is None:
         return None
     named = cfg.get("nearest_model_id") if isinstance(cfg, dict) else None
     if not isinstance(named, str) or not named:
@@ -82,9 +89,9 @@ def _served_repo(cfg: dict, run_dir, operator_home) -> tuple[str | None, str]:
     if isinstance(bundle, str) and bundle:
         try:
             path = Path(bundle) if Path(bundle).is_absolute() else Path(run_dir) / bundle       # the test runs from the run directory
-            m = json.loads((path / "tt_kernel_manifest.json").read_text(encoding="utf-8"))
+            m = safeio.read_json(path / "tt_kernel_manifest.json", max_bytes=JSON_MAX)
             return str(m["weights"]["repo_id"]), f"the bundle {path.parent.name}/{path.name}"
-        except (OSError, ValueError, KeyError, TypeError):
+        except (safeio.SafeReadError, KeyError, TypeError):
             return None, ""
     return None, ""
 
@@ -116,9 +123,9 @@ def _free_port() -> int | None:
 def _facts(run_dir: Path, inputs: dict) -> tuple[str | None, str | None, dict, list[str]]:
     """The new model (stage 0's id, with its revision), the nearest model, and both snapshots."""
     try:
-        delta = json.loads((run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+        delta = safeio.read_json(run_dir / "stages" / "0" / "delta.json", max_bytes=JSON_MAX, expect=dict)
         model, nearest = str(delta["model"]), str(delta["nearest_model"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (safeio.SafeReadError, KeyError, TypeError) as exc:
         return None, None, {}, [f"stages/0/delta.json has no model and nearest_model to draft from ({exc})"]
     problems, snapshots = [], {}
     for key, what in (("base", "the nearest model's snapshot"), ("model", "the new model's snapshot")):

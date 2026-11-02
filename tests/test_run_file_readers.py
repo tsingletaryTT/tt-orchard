@@ -442,3 +442,173 @@ def test_a_failed_marker_that_can_be_read_is_recorded_with_its_hash(tmp_path):
     (tmp_path / "stages" / "2" / "test-result.json").write_text("{}")
     rec = Supervisor._moved_aside_record(SimpleNamespace(run_dir=tmp_path), tmp_path / "stages" / "2" / "test-result.json")
     assert rec["path"] == "stages/2/test-result.json" and len(rec["sha256"]) == 64
+
+
+# ------------------------------------------------ second Copilot review of PR 345: a refusal followed by a write to the same path
+
+@pytest.mark.parametrize("shape", ["fifo", "symlink_out", "dev_zero"])
+def test_a_write_of_a_run_file_replaces_a_fifo_or_link_and_never_opens_it(shape):
+    out = run_child(f'''
+        from orchard import supervisor
+        target = run / "stages" / "2" / "hw_tests.json"
+        build({shape!r}, target)
+        supervisor._put(target, '{{"ok": true}}')
+        report(regular=target.is_file() and not target.is_symlink(), text=target.read_text(), outside=outside.read_text())
+    ''')
+    assert out["regular"] and out["text"] == '{"ok": true}' and out["outside"] == "{}", out
+
+
+@pytest.mark.parametrize("shape", ["fifo", "symlink_out", "dev_zero"])
+def test_the_hardware_output_file_is_opened_fresh_not_through_what_stands_there(shape):
+    out = run_child(f'''
+        from orchard import supervisor
+        target = run / "stages" / "2" / "out.txt"
+        build({shape!r}, target)
+        with supervisor._open_fresh(target) as f:
+            f.write(b"output")
+        report(regular=target.is_file() and not target.is_symlink(), text=target.read_text(), outside=outside.read_text())
+    ''')
+    assert out["regular"] and out["text"] == "output" and out["outside"] == "{}", out
+
+
+def test_a_fifo_at_hw_tests_json_does_not_block_the_drafted_list_going_back():
+    out = run_child('''
+        from types import SimpleNamespace
+        from orchard import supervisor
+        S = supervisor.Supervisor
+        entries = []
+        ledger = SimpleNamespace(read=lambda: [{"stage": 4, "data": {"decision": "stage 4 configs drafted", "tests": {"tests": [{"chips": 1}]}}}],
+                                 append=lambda *a, **k: entries.append((a, k)))
+        stub = SimpleNamespace(ledger=ledger, lab=None, _chip_cap=lambda spec: 2)
+        stub._run_json = lambda *a: S._run_json(stub, *a)
+        sd = run / "stages" / "4"
+        build("fifo", sd / "hw_tests.json")
+        S._keep_drafted_tests(stub, SimpleNamespace(number=4), sd)
+        report(regular=(sd / "hw_tests.json").is_file(), text=(sd / "hw_tests.json").read_text(), refused=[a[1].get("decision") for a in entries])
+    ''')
+    assert out["regular"] and '"chips": 1' in out["text"] and "a run file was refused and not used" in out["refused"], out
+
+
+@pytest.mark.parametrize("shape", ["fifo", "symlink_out", "dev_zero"])
+def test_the_lab_cache_audit_does_not_block_on_a_fifo_so_the_lease_is_released(shape):
+    """Both lab hardware-test paths call _audit_lab_caches before they release their leases; a block here would hold the hardware."""
+    out = run_child(f'''
+        from types import SimpleNamespace
+        from orchard import supervisor
+        S = supervisor.Supervisor
+        stub = SimpleNamespace(lab=SimpleNamespace(cache_audit=lambda caches: {{"c": {{"files": 1}}}}),
+                               ledger=SimpleNamespace(append=lambda *a, **k: None))
+        stub._run_json = lambda *a: S._run_json(stub, *a)
+        sd = run / "stages" / "4"
+        build({shape!r}, sd / "evidence" / "lab-caches.json")
+        S._audit_lab_caches(stub, 4, sd, ["/c"])
+        p = sd / "evidence" / "lab-caches.json"
+        report(regular=p.is_file() and not p.is_symlink(), text=p.read_text(), outside=outside.read_text())
+    ''')
+    assert out["regular"] and '"files": 1' in out["text"] and out["outside"] == "{}", out
+
+
+@pytest.mark.parametrize("shape", ["fifo", "dev_zero", "oversize", "nan"])
+def test_the_hardware_test_plan_readers_are_bounded(shape):
+    out = run_child(f'''
+        from orchard import hwtests
+        hwtests.JSON_MAX = 64
+        sd = run / "stages" / "4"
+        build({shape!r}, sd / "hw_tests.json")
+        build({shape!r}, sd / "handoff.json")
+        tests, problems = hwtests.read_plan(sd, required=None, max_chips=4, budget_s=100, home="/h")
+        build({shape!r}, sd / "tests" / "plan.json")
+        report(tests=tests, problems=problems, plan=hwtests.load_plan(sd))
+    ''')
+    assert out["tests"] == [] and out["plan"] is None
+    assert len(out["problems"]) == 1 and "hw_tests.json is not readable" in out["problems"][0] and "handoff.json is not readable" in out["problems"][0], out
+
+
+@pytest.mark.parametrize("shape", ["fifo", "dev_zero", "oversize"])
+def test_a_refused_test_record_is_a_reason_in_unrecorded_and_a_marked_entry_in_the_summary(shape):
+    out = run_child(f'''
+        from orchard import hwtests
+        hwtests.JSON_MAX = 64
+        stages.EVIDENCE_HASH_MAX = 64
+        sd = run / "stages" / "4"
+        build({shape!r}, sd / "tests" / "2" / "test-result.json")
+        reasons = hwtests.unrecorded([], sd, run, 4) if {shape!r} == "oversize" else []
+        summary = hwtests.write_summary(sd, [hwtests.HwTest(2, "serve_and_compare.py", 10.0, "/c")])
+        report(reasons=reasons, summary=json.loads(summary.read_text()))
+    ''')
+    entry = out["summary"]["tests"][0]
+    assert entry["missing"] is True and entry["unreadable"], out
+    if shape == "oversize":
+        assert len(out["reasons"]) == 1 and "cannot be read" in out["reasons"][0], out
+
+
+@pytest.mark.parametrize("shape", ["fifo", "symlink_out"])
+def test_the_nearest_model_check_names_a_refused_swap_config(shape):
+    out = run_child(f'''
+        from orchard import swap_draft
+        cfg = run / "stages" / "2" / "swap_config.json"
+        build({shape!r}, cfg)
+        report(problem=swap_draft.nearest_problem(run, cfg), missing=swap_draft.nearest_problem(run, run / "none.json"))
+    ''')
+    assert out["problem"] and "swap_config.json is not readable" in out["problem"] and out["missing"] is None, out
+
+
+@pytest.mark.parametrize("shape", ["fifo", "dev_zero", "oversize"])
+def test_a_refused_delta_does_not_block_the_nearest_model_check_or_the_draft(shape):
+    out = run_child(f'''
+        from orchard import swap_draft
+        swap_draft.JSON_MAX = 64
+        (run / "stages" / "2").mkdir(parents=True)
+        cfg = run / "stages" / "2" / "swap_config.json"
+        cfg.write_text(json.dumps({{"nearest_model_id": "a/b"}}))
+        build({shape!r}, run / "stages" / "0" / "delta.json")
+        facts = swap_draft._facts(run, {{}})
+        report(problem=swap_draft.nearest_problem(run, cfg), facts_problems=facts[3])
+    ''')
+    assert out["problem"] is None and out["facts_problems"], out
+
+
+def test_an_evidence_file_the_agent_step_cannot_hash_is_named_in_the_ledger_and_the_step_goes_on():
+    out = run_child('''
+        from types import SimpleNamespace
+        from orchard.agent import AgentStep
+        stages.EVIDENCE_HASH_MAX = 64
+        big = run / "evidence" / "big.txt"
+        big.parent.mkdir(parents=True)
+        big.write_text("x" * 200)
+        ok = run / "evidence" / "ok.txt"
+        ok.write_text("ok")
+        entries = []
+        stub = SimpleNamespace(_snapshot=lambda: {str(big): (200, 1), str(ok): (2, 1)}, _seen={}, run_dir=run, stage=2, phase="work",
+                               ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))), _event=lambda *a, **k: None)
+        AgentStep._record_new_evidence(stub)
+        report(kinds=[k.get("decision") or k.get("what") for a, k in entries])
+    ''')
+    assert "an evidence file was refused and not recorded" in out["kinds"] and "evidence file" in out["kinds"], out
+
+
+def test_a_refusal_inside_a_stage_body_is_a_failed_attempt_with_the_reason():
+    from types import SimpleNamespace
+    from orchard import safeio
+    from orchard.supervisor import Supervisor
+
+    def body(*a):
+        raise safeio.TooLarge("the file is larger than 5 bytes")
+
+    stub = SimpleNamespace(_stage_body=body)
+    status, reasons, gate = Supervisor._body_or_failure(stub, SimpleNamespace(number=4), Path("."), False, False)
+    assert status == "fail" and gate is None and "larger than 5 bytes" in reasons[0] and "stage 4" in reasons[0]
+
+
+@pytest.mark.parametrize("shape", ["fifo", "symlink_out"])
+def test_the_test_record_writer_replaces_a_fifo_or_link_at_the_record_and_at_its_temporary_name(shape):
+    out = run_child(f'''
+        from orchard import hwtests
+        sd = run / "stages" / "4"
+        rec = hwtests.hw_record_path(sd, 2)
+        build({shape!r}, rec)
+        build({shape!r}, rec.with_name(rec.name + ".tmp"))
+        hwtests.write_record(sd, 2, {{"returncode": 0}})
+        report(regular=rec.is_file() and not rec.is_symlink(), text=rec.read_text(), outside=outside.read_text())
+    ''')
+    assert out["regular"] and '"returncode": 0' in out["text"] and out["outside"] == "{}", out

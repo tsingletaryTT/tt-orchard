@@ -165,6 +165,22 @@ from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, 
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
                               TurnRepeat, Watchdog)
 
+def _put(path, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` by replacing the path atomically (a temporary file beside it, then `os.replace`). A stage directory is
+    writable by the agent, so a FIFO or a link may stand where the supervisor writes. `Path.write_text` opens that path and blocks on the
+    FIFO or follows the link and truncates its target; this never opens the path, so a FIFO or link there is replaced by the file."""
+    safeio.atomic_write(path, text.encode(encoding), mode=0o644)
+
+
+def _open_fresh(path):
+    """Open `path` for writing as a new regular file: whatever stands there (a FIFO, a link) is removed first, never opened."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    return open(path, "xb")
+
+
 RUN_JSON_MAX = 16 * 1024 * 1024          # the largest JSON file of a run (a marker, a record, a trial result) the supervisor reads
 MAX_SWAP_CONFIG_BYTES = 1024 * 1024    # choice: a stage's swap_config.json is a few kilobytes (issue 137)
 
@@ -1455,8 +1471,16 @@ class Supervisor:
         self.ledger.append("stage_start", n, escalated=escalated, resumed=resumed)
         self.actuator.clear()
         self.watchdog = self._watchdog(spec)
-        status, reasons, gate = self._stage_body(spec, stage_dir, escalated, resumed)
+        status, reasons, gate = self._body_or_failure(spec, stage_dir, escalated, resumed)
         return self._end_stage(spec, stage_dir, status, reasons, gate, escalated)
+
+    def _body_or_failure(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
+        """`_stage_body`, with a run file the bounded reader refused in the middle of a stage (a FIFO, a link, an oversize file, NaN) turned into a
+        failed attempt that names the reason. It goes through the escalation and pause rules like a failed gate; the run does not abort."""
+        try:
+            return self._stage_body(spec, stage_dir, escalated, resumed)
+        except safeio.SafeReadError as exc:
+            return "fail", [f"stage {spec.number}: a run file was refused: {exc.reason}"], None
 
     def _moved_aside_record(self, marker) -> dict:
         """The ledger record of a marker that is about to be moved aside: its path and sha256, or its path and the named reason when the
@@ -1727,8 +1751,8 @@ class Supervisor:
                         return "fail", [f"the test command is refused: {exc}"], None
                     deadline = text_runtime.CHIP_DEADLINE_S if n == 2 else text_runtime.BENCH_DEADLINE_S
                     test = {"command": command, "deadline_s": deadline}
-                    (stage_dir / "hw_test.json").write_text(json.dumps(test) + "\n", encoding="utf-8")
-                    (stage_dir / "handoff.json").write_text(json.dumps({
+                    _put((stage_dir / "hw_test.json"), json.dumps(test) + "\n", encoding="utf-8")
+                    _put((stage_dir / "handoff.json"), json.dumps({
                         "goal": f"run the {rtm.name} text model on one chip: " + ("teacher-forced agreement and perplexity" if n == 2 else "benchmark with repeats"),
                         "stage": n, "evidence": f"stages/{n}/{text_runtime.CHIP_CONFIG_FILE}", "next_action": "the supervisor runs the chip commands under its own lease",
                         "check_on_return": f"stages/{n}/test-result.json"}) + "\n", encoding="utf-8")
@@ -1762,7 +1786,7 @@ class Supervisor:
             return "fail", [f"the model directory cannot be read: {exc}"], None
         (stage_dir / "evidence").mkdir(exist_ok=True)
         evidence = {"runtime": rtm.name, "model": self.model_id, "snapshot": Path(model_dir).resolve().name, "facts": facts, "scripts": text_runtime.script_hashes(rtm), "context_limit_measured": rtm.context_limit}
-        (stage_dir / "evidence" / "triage.json").write_text(json.dumps(evidence, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        _put((stage_dir / "evidence" / "triage.json"), json.dumps(evidence, indent=1, sort_keys=True) + "\n", encoding="utf-8")
         delta = {"model": self.model_id, "nearest_model": f"none: the {rtm.name} runtime (scripts in this repository) serves it",
                  "path": "full-port", "class": "full-port",
                  "path_reasons": [f"the harness's {rtm.name} text runtime implements this architecture; no installed bundle or container package serves it"],
@@ -1774,7 +1798,7 @@ class Supervisor:
         if facts["card_license"] and facts["card_license"] != rtm.license_id:
             delta["hazards"].append({"area": "license", "evidence": ["stages/0/evidence/triage.json"],
                                      "finding": f"the card says license {facts['card_license']}; the adapter expects {rtm.license_id}"})
-        (stage_dir / "delta.json").write_text(json.dumps(delta, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        _put((stage_dir / "delta.json"), json.dumps(delta, indent=1, sort_keys=True) + "\n", encoding="utf-8")
         self.ledger.append("decision", n, decision=text_runtime.TEXT_RUNTIME_SELECTED, runtime=rtm.name, paths=paths.record(),
                            scripts=text_runtime.script_hashes(rtm), model=self.model_id)
         self.ledger.append("evidence", n, what="text triage", **evidence_record(self.run_dir, stage_dir / "delta.json"))
@@ -1790,7 +1814,7 @@ class Supervisor:
         if not ctx.ppl_parquet:
             raise text_runtime.TextStageError("no WikiText-2 test parquet was found for the perplexity window; give --input text_ppl_parquet=<file> or put the "
                                               "dataset in the Hugging Face cache")
-        (stage_dir / "prompt.txt").write_text(text_runtime.DEFAULT_PROMPT + "\n", encoding="utf-8")
+        _put((stage_dir / "prompt.txt"), text_runtime.DEFAULT_PROMPT + "\n", encoding="utf-8")
         try:
             ppl_sha = hashlib.sha256(Path(ctx.ppl_parquet).read_bytes()).hexdigest()
         except OSError as exc:
@@ -1866,8 +1890,8 @@ class Supervisor:
                     except Denied as exc:
                         return "fail", [f"the test command is refused: {exc}"], None
                     test = {"command": command, "deadline_s": AUDIO_CHIP_DEADLINE_S}
-                    (stage_dir / "hw_test.json").write_text(json.dumps(test) + "\n", encoding="utf-8")
-                    (stage_dir / "handoff.json").write_text(json.dumps({
+                    _put((stage_dir / "hw_test.json"), json.dumps(test) + "\n", encoding="utf-8")
+                    _put((stage_dir / "handoff.json"), json.dumps({
                         "goal": "make one Stable Audio 3 clip with the diffusion transformer on one chip", "stage": 2,
                         "evidence": "stages/2/audio_chip_config.json", "next_action": "the supervisor runs the clip test under its own lease",
                         "check_on_return": "stages/2/test-result.json"}) + "\n", encoding="utf-8")
@@ -1917,7 +1941,7 @@ class Supervisor:
                        if (audio_runtime.selected(self.ledger.read()) is not None or text_runtime.selected(self.ledger.read()) is not None)
                        else Path(self.paths.orchard_dir))
         shutil.copyfile(orchard_dir / "orchard" / "skills" / "operator-bundle-templates" / "build_bundle.py", script)
-        (stage_dir / "bundle_config.json").write_text(
+        _put((stage_dir / "bundle_config.json"), 
             json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(orchard_dir)}, indent=2)
             + "\n", encoding="utf-8")
         (stage_dir / "log").mkdir(exist_ok=True)
@@ -1928,7 +1952,7 @@ class Supervisor:
                                   env=agent_env(self.run_dir, extra=self.extra_env))
         except (OSError, subprocess.TimeoutExpired) as exc:
             return "fail", [f"build_bundle.py did not finish: {exc}"], None
-        log.write_text(proc.stdout + proc.stderr, encoding="utf-8")
+        _put(log, proc.stdout + proc.stderr, encoding="utf-8")
         if proc.returncode != 0:
             last = (proc.stderr.strip() or proc.stdout.strip() or "no output").splitlines()[-1]
             return "fail", [f"build_bundle.py exited {proc.returncode}: {last}"[:500]], None
@@ -2220,7 +2244,7 @@ class Supervisor:
             self.ledger.append("decision", spec.number, decision="swap config not drafted", problems=problems)
             return
         target = stage_dir / "swap_config.json"
-        target.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        _put(target, json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
         copied = []
         for name in (STAGE4_TEMPLATES if "package" in cfg else SWAP_TEMPLATES):      # a container package also needs its script
@@ -2242,7 +2266,7 @@ class Supervisor:
         if cfg is None:
             self.ledger.append("decision", spec.number, decision="stock config not drafted", problems=problems)
             return
-        target.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        _put(target, json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         shutil.copy2(Path(self.paths.orchard_dir) / "orchard" / "skills" / "stock-runtime-templates" / "stock_check.py",
                      stage_dir / "stock_check.py")
         self.ledger.append("decision", spec.number, decision="stock config drafted", config=evidence_record(self.run_dir, target),
@@ -2298,11 +2322,11 @@ class Supervisor:
         for n, cfg in configs.items():
             cdir = stage_dir / "configs" / str(n)
             cdir.mkdir(parents=True, exist_ok=True)
-            (cdir / "swap_config.json").write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+            _put((cdir / "swap_config.json"), json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
             for name in STAGE4_TEMPLATES:
                 shutil.copy2(templates / name, cdir / name)
         if tests is not None:
-            (stage_dir / "hw_tests.json").write_text(json.dumps(tests, indent=2) + "\n", encoding="utf-8")
+            _put((stage_dir / "hw_tests.json"), json.dumps(tests, indent=2) + "\n", encoding="utf-8")
         self.ledger.append("decision", spec.number, decision="stage 4 configs drafted", counts=counts,
                            configs={str(n): c.get("bundle_dir") or c.get("package") for n, c in configs.items()},
                            caches={str(n): c["tt_cache"] for n, c in configs.items()},
@@ -2338,7 +2362,7 @@ class Supervisor:
                            drafted=kept, dropped=[n for n in agent if n not in kept],
                            reason=f"{where} has {self._chip_cap(spec)} chips for a test; the supervisor "
                                   f"drafted {kept}")
-        path.write_text(json.dumps(want, indent=2) + "\n", encoding="utf-8")
+        _put(path, json.dumps(want, indent=2) + "\n", encoding="utf-8")
 
     def _keep_drafted_caches(self, spec, stage_dir: Path) -> None:
         """The tensor cache of a configuration the supervisor drafted is the drafted one. On the first run
@@ -2355,7 +2379,7 @@ class Supervisor:
             self.ledger.append("decision", spec.number, decision="kept the drafted tensor cache", config=int(n),
                                agent=cfg.get("tt_cache"), drafted=cache)
             cfg["tt_cache"] = cache
-            path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+            _put(path, json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
 
     def _read_plan(self, spec, stage_dir: Path):
         tests, problems = read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
@@ -2500,7 +2524,7 @@ class Supervisor:
         if not marker.is_file():
             shutil.copy2(Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates" / GRAFT_TRIAL_TEMPLATE,
                          trial_dir / GRAFT_TRIAL_TEMPLATE)
-            (trial_dir / "trial_config.json").write_text(
+            _put((trial_dir / "trial_config.json"), 
                 json.dumps({"stage_dir": str(stage_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2) + "\n", encoding="utf-8")
             self.ledger.append("decision", n, decision="graft trial started", candidate=cand,
                                note="serving the nearest model's mtp.* head grafted onto this model, beside the safe configuration")
@@ -2645,7 +2669,7 @@ class Supervisor:
         if not marker.is_file():
             shutil.copy2(Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates" / SAMPLING_TRIAL_TEMPLATE,
                          trial_dir / SAMPLING_TRIAL_TEMPLATE)
-            (trial_dir / "trial_config.json").write_text(
+            _put((trial_dir / "trial_config.json"), 
                 json.dumps({"stage_dir": str(stage_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2) + "\n", encoding="utf-8")
             self.ledger.append("decision", n, decision="sampling trial started", needed=need["needed"], need_source=need["source"],
                                served_verdict=current.get("verdict"),
@@ -2832,7 +2856,7 @@ class Supervisor:
         known = safeio.read_json_checked(path, max_bytes=RUN_JSON_MAX, expect=dict).value
         known = known if isinstance(known, dict) else {}
         known.update(audit)
-        path.write_text(json.dumps(known, indent=2, sort_keys=True))
+        _put(path, json.dumps(known, indent=2, sort_keys=True))
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
                   output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,
@@ -2852,7 +2876,7 @@ class Supervisor:
                                  env_extra=env_extra, lease_ids=[lease.lease_id, extra.lease_id])
         marker = stage_dir / record
         tmp = marker.with_name(marker.name + ".tmp")
-        tmp.write_text(json.dumps(result, indent=2))
+        _put(tmp, json.dumps(result, indent=2))
         os.replace(tmp, marker)         # the resume marker appears whole or not at all
         self.ledger.append("evidence", n, what=what, returncode=result["returncode"],
                            timed_out=result["timed_out"], **evidence_record(self.run_dir, marker))
@@ -2881,7 +2905,7 @@ class Supervisor:
                            deadline_s=deadline, chips=list(chips), **record,
                            **({"where": self._where()} if self.lab is not None else {}))
         t0 = self.clock()
-        with open(out_path, "wb") as out:
+        with _open_fresh(out_path) as out:
             try:
                 if self.lab is not None:
                     code, timed_out = self._spawn_on_lab(n, command, env, deadline, out)
@@ -2897,7 +2921,7 @@ class Supervisor:
             self._block_if_off_bus(n, f"the hardware test {how}", chips)
         return {"command": command, "returncode": code, "timed_out": timed_out,
                 "seconds": round(self.clock() - t0, 3), "chips": list(chips),
-                "output": evidence_record(self.run_dir, out_path)}
+                "output": self._moved_aside_record(out_path)}
 
     def _kernel_cache(self) -> Path:
         return Path(self.paths.cache_root) / "kernels"
