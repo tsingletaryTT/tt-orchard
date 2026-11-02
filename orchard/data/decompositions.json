@@ -1,1 +1,2 @@
-{"aten.select.int": ["aten.slice.Tensor", "aten.squeeze.dim"]}
+{"aten.select.int": ["aten.slice.Tensor", "aten.squeeze.dim"],
+ "aten.unflatten.int": ["aten.view.default"]}

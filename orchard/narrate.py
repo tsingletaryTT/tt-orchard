@@ -647,6 +647,14 @@ UNBLOCK = {
         "abandoned attempts, then run `tt-orchard bringup <MODEL>` again.",
         "`tt-orchard bringup <MODEL> --prune-caches` removes the oldest tensor caches that no unfinished run uses, just "
         "enough to fit, when a full disk is the only block (`tt-orchard caches` lists what exists)."],
+    "model-does-not-fit": [
+        "Stage 0 estimated, from the model's safetensors headers, that the weights need more chips than this box has, or more than stage 2's lease (one board) gives the port check. The numbers are in the reason "
+        "above and in stages/0/residency.json: bytes by category, the quantization policy, and every assumption with its source. No prepare "
+        "step ran for stage 2.",
+        "The DRAM per chip, the reserve and the KV budget are choices (orchard/defaults.py). No allocator reading backs them. If you know better figures, "
+        "run `tt-orchard residency <MODEL_DIR> --chips 4 --dram-gib <N> --kv-gib <N>` and read the table.",
+        "Repeating the command does not change the answer, so `bringup` does not retry it. Run it on a box with enough chips, or change the "
+        "policy (a lower-precision format for the largest category) and start a new run."],
     "package-missing": [
         "A chip count that stage 4 requires has no installed bundle or container package for the nearest model. Repeating the command "
         "does not change that, so `bringup` does not retry it.",

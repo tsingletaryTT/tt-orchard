@@ -32,6 +32,8 @@ is written with the failure), 4 torch or transformers does not import.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import importlib.util
 import json
 import re
 import sys
@@ -105,6 +107,29 @@ def apply_stubs(model) -> list:
             module.forward = types.MethodType(stub, module)
             counts[type(module).__name__] = counts.get(type(module).__name__, 0) + 1
     return [{"module": name, "count": n, "note": STUB_NOTE} for name, n in sorted(counts.items())]
+
+
+def load_dense_shim():
+    """The Qwen4 dense-layer shim (reference-gate-templates/qwen4_dense.py), loaded by path. None when the file is missing."""
+    path = Path(__file__).resolve().parent.parent / "reference-gate-templates" / "qwen4_dense.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("qwen4_dense", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def needs_dense(raw_cfg) -> bool:
+    """True for a qwen4_exp config with a dense layer (no routed experts, or a layer outside the MoE schedule). The check is on
+    the raw config.json so the shim can supply what transformers' config validation refuses (num_experts 0 or absent)."""
+    if raw_cfg.get("model_type") not in ("qwen4_exp", "qwen4_exp_text"):
+        return False
+    shim = load_dense_shim()
+    try:
+        return shim is not None and shim.needs_dense_shim(raw_cfg)
+    except ValueError:
+        return False
 
 
 def write(path, data) -> None:
@@ -301,9 +326,17 @@ def main(argv=None) -> int:
         return 0
     base["traced_class"] = name
     try:
-        config = transformers.AutoConfig.from_pretrained(str(mdir), trust_remote_code=False)
+        shim = load_dense_shim() if needs_dense(raw_cfg) else None
+        if shim is not None:
+            config = shim.prepare_config(transformers, raw_cfg)
+        else:
+            config = transformers.AutoConfig.from_pretrained(str(mdir), trust_remote_code=False)
         base["layers_in_config"], base["layers_traced"] = reduce_layers(config, a.layers)
-        with torch.device("meta"):
+        if shim is not None:
+            text = config.get_text_config() if hasattr(config, "get_text_config") else config
+            base["dense_layers"] = [i for i in text.orchard_dense_layers if i < (base["layers_traced"] or i + 1)]
+            base["dense_note"] = shim.PROVISIONAL
+        with torch.device("meta"), (shim.dense_layers() if shim is not None else contextlib.nullcontext()):
             model = cls(config).eval()
         if a.stub_data_dependent:
             base["stubbed"] = apply_stubs(model)

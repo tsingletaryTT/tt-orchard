@@ -51,6 +51,12 @@ fact needs explaining. You do not write a script.
 
        cp {{ORCHARD_DIR}}/orchard/skills/reference-gate-templates/reference_gate.py stages/1/
 
+   If the snapshot's `config.json` has `model_type` `qwen4_exp` or `qwen4_exp_text`, copy the dense-layer shim as well
+   (`cp {{ORCHARD_DIR}}/orchard/skills/reference-gate-templates/qwen4_dense.py stages/1/`). transformers builds a mixture-of-experts
+   block in every layer of that model type and refuses `num_experts` 0, so a dense checkpoint cannot load without it. The script
+   uses the shim only when at least one layer is dense, and stops with a message if it needs the file and cannot find it. The
+   shim is provisional (no Qwen4 weights existed when it was written); see `docs/run-logs/2026-11-02-dense-qwen4-prep.md`.
+
    Do not edit the script. The gate compares its sha256 with the shipped template and fails the stage if they differ,
    because the evidence it writes is only the template's if the script is. Change only `reference_config.json`. If the
    script fails, read its message and fix the config or the interpreter; do not change how it loads the model.

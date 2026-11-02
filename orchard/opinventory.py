@@ -15,7 +15,14 @@ Statuses, and what each claims:
     unmapped    none of the above.
     ignored     the op is listed in ignored_ops.json: pure metadata that needs no ttnn op. It makes no ttnn claim,
                 so it is `ignored` with or without a dump.
+    host        the op is listed in op_notes.json with `host: true`: it runs on the host by design (a constant built
+                once, preparation of an input, a lookup in a table too big for the device). The entry carries a reason
+                and the evidence for it. It makes no ttnn claim, so it is `host` with or without a dump. A table row,
+                a decomposition, a verified mapping or `ignored` takes precedence.
     unchecked   there is no dump for the installed ttnn version, so nothing is claimed.
+
+op_notes.json also holds notes for ops of any status (why an op is `composable`, or why an expert-loop op stays
+`unmapped`). A note never changes a status unless it says `host: true`.
 
 A trace that carries an ordered op list (`sequence`) is also searched for groups of ops that one ttnn op does at once
 (orchard/oppatterns.py). Those are listed apart, in `patterns`, with status `pattern` (or `pattern-verified` after
@@ -45,7 +52,7 @@ MAX_DATA_BYTES = 16 * 1024 * 1024       # choice: a dump or a table is tens of k
 DATA_DIR = Path(__file__).resolve().parent / "data"
 TEMPLATE = Path(__file__).resolve().parent / "skills" / "ops-inventory-templates" / "ops_inventory.py"
 SCHEMA = 1
-STATUSES = ("mapped", "composable", "verified", "candidate", "unmapped", "unchecked", "ignored")
+STATUSES = ("mapped", "composable", "verified", "candidate", "unmapped", "unchecked", "ignored", "host")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 LABEL = {
     "traced": "measured: the op names, counts and one sample shape per op come from torch.export on the meta device",
@@ -56,6 +63,8 @@ LABEL = {
     "pattern": "recognised from the order and data flow of the traced ops; the ttnn op exists in the dump, and nothing "
                "says it takes this model's shapes, dtype or layout",
     "verified": "one small shape on the ttsim simulator against a torch reference; not run on a chip",
+    "host": "a table entry in op_notes.json says the op runs on the host by design; the entry gives the reason and the "
+            "evidence, and nothing was run to time the host path",
 }
 
 
@@ -90,6 +99,36 @@ def load_ignored(path) -> frozenset:
     return frozenset(data)
 
 
+NOTE_KEYS = frozenset({"reason", "evidence", "host"})
+
+
+def load_notes(path) -> dict:
+    """Read the op notes table: aten op name to {"reason": str, "evidence": str, "host": bool (optional)}.
+    Every entry needs a non-empty reason and a non-empty evidence string; `host` must be a boolean when present and
+    defaults to False; any other key is refused, as is an empty op name. Returns {op: {reason, evidence, host}}."""
+    data = _read(path)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a JSON object")
+    out = {}
+    for key, entry in data.items():
+        if not key.strip():
+            raise ValueError(f"{path}: an entry has an empty op name")
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: {key!r} must be an object with `reason` and `evidence`")
+        extra = sorted(set(entry) - NOTE_KEYS)
+        if extra:
+            raise ValueError(f"{path}: {key!r} has unknown keys {extra}")
+        for field in ("reason", "evidence"):
+            v = entry.get(field)
+            if not isinstance(v, str) or not v.strip():
+                raise ValueError(f"{path}: {key!r} needs a non-empty string `{field}`")
+        host = entry.get("host", False)
+        if not isinstance(host, bool):
+            raise ValueError(f"{path}: {key!r} has a `host` that is not true or false")
+        out[key] = {"reason": entry["reason"], "evidence": entry["evidence"], "host": host}
+    return out
+
+
 def load_dump(version, data_dir=DATA_DIR):
     """The recorded dump for exactly this ttnn version, or None. A version that is not a plain token is refused,
     so it cannot name a file outside data_dir."""
@@ -117,14 +156,20 @@ def load_verified(path=None) -> dict:
         if isinstance(ents, dict) else {}
 
 
-def status_of(op, mapping, decomps, names, seen=(), ignored=frozenset(), verified=None):
+def status_of(op, mapping, decomps, names, seen=(), ignored=frozenset(), verified=None, host=None):
     """(status, ttnn name, leaves). `names` is the set of names in the dump, or None for no usable dump.
     `ignored` is the set of metadata-only ops; they are checked first because they make no ttnn claim.
-    `verified` is {op: entry} from verified_mappings.json; an entry counts only while its ttnn name is in the dump."""
+    `verified` is {op: entry} from verified_mappings.json; an entry counts only while its ttnn name is in the dump.
+    `host` is {op: note} from load_notes; only entries with `host: true` count. A host op makes no ttnn claim, so it is
+    `host` with or without a dump; a table row whose name is in the dump, a decomposition and a verified mapping take
+    precedence."""
     if op in ignored:
         return "ignored", None, []
     entry = mapping.get(op)
+    is_host = bool((host or {}).get(op, {}).get("host"))
     if names is None:
+        if is_host and entry is None:
+            return "host", None, []
         return "unchecked", (entry or {}).get("ttnn"), []
     if entry and entry["ttnn"] in names:
         return "mapped", entry["ttnn"], []
@@ -146,13 +191,18 @@ def status_of(op, mapping, decomps, names, seen=(), ignored=frozenset(), verifie
     v = (verified or {}).get(op)
     if v and v["ttnn"] in names:
         return "verified", v["ttnn"], []
+    if is_host:
+        return "host", None, []
     return "unmapped", (entry or {}).get("ttnn"), []
 
 
 def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ignored=frozenset(), verified=None,
-          variants=True) -> dict:
+          variants=True, notes=None) -> dict:
     """The inventory dict for one raw trace. `against` is another inventory (the base model's) to compare with.
-    `variants` turns on the search for candidate ttnn names for ops with no table row."""
+    `variants` turns on the search for candidate ttnn names for ops with no table row.
+    `notes` is {op: note} from load_notes: a note with `host: true` makes the op `host`, and every note is attached to
+    its row as `note` ({reason, evidence})."""
+    notes = notes or {}
     inv = {"schema": SCHEMA, "model_dir": raw.get("model_dir"), "architectures": raw.get("architectures", []),
            "traced_class": raw.get("traced_class"), "torch": raw.get("torch"), "transformers": raw.get("transformers"),
            "traced": {"graph": "prefill", "seq_len": raw.get("seq_len"), "layers_in_config": raw.get("layers_in_config"),
@@ -161,7 +211,9 @@ def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ign
                       "python_nodes": raw.get("python_nodes") or {},
                       "higher_order_nodes": raw.get("higher_order_nodes") or {},
                       # modules replaced by a static stand-in (--stub-data-dependent): their ops are a guide, not the real graph
-                      "stubbed": raw.get("stubbed") or []},
+                      "stubbed": raw.get("stubbed") or [],
+                      # a qwen4_exp config with dense layers was built with the provisional dense-layer shim (orchard/skills/reference-gate-templates/qwen4_dense.py)
+                      "dense_layers": raw.get("dense_layers"), "dense_note": raw.get("dense_note")},
            "failures": raw.get("failures", []), "label": LABEL,
            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     if "skipped" in raw:
@@ -190,7 +242,7 @@ def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ign
     index = opvariants.Index(names) if (variants and names is not None) else None
     rows, distinct, scaled_total = [], {s: 0 for s in STATUSES}, {s: 0 for s in STATUSES}
     for o in raw["ops"]:
-        status, ttnn_name, leaves = status_of(o["op"], mapping, decomps, names, ignored=ignored, verified=verified)
+        status, ttnn_name, leaves = status_of(o["op"], mapping, decomps, names, ignored=ignored, verified=verified, host=notes)
         cands = opvariants.candidates(o["op"], index) if (index is not None and status == "unmapped") else []
         if cands:
             status = "candidate"
@@ -198,6 +250,8 @@ def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ign
         scaled = round(inl * factor + max(o["count"] - inl, 0)) if factor else o["count"]
         row = {"op": o["op"], "count": o["count"], "scaled_count": scaled, "status": status, "ttnn": ttnn_name,
                "leaves": leaves, "sample": o.get("sample"), "modules": o.get("modules", []), "candidates": cands}
+        if o["op"] in notes:
+            row["note"] = {"reason": notes[o["op"]]["reason"], "evidence": notes[o["op"]]["evidence"]}
         if status == "verified":
             row["verified"] = {k: v for k, v in (verified or {}).get(o["op"], {}).items() if k != "ttnn"}
         if base_ops is not None:
@@ -231,13 +285,19 @@ def render_md(inv) -> str:
                      "supports the shape, dtype or layout this model needs.")
     else:
         lines.append(f"Nothing is claimed as mapped: {inv['ttnn_dump_note']}.")
-    lines += ["", "Ignored ops are metadata only (views of a tensor that is already there) and need no ttnn op.",
+    lines += ["", "Ignored ops are metadata only (views of a tensor that is already there) and need no ttnn op. "
+                  "`host` ops run on the host by design (a constant built once, preparation of an input, a table lookup); "
+                  "the reason and the evidence are in the notes below the op table, and nothing was run to time the host path.",
               "", "| status | distinct ops |", "| --- | --- |"]
     lines += [f"| {s} | {n} |" for s, n in inv["summary"]["distinct"].items()]
     for st in inv["traced"].get("stubbed") or []:
         lines += ["", f"Stand-in: {st['count']} `{st['module']}` module(s) were replaced by a static version that keeps the "
                       f"op mix and ignores which positions each query can see. Their ops are a guide to what the layer "
                       f"needs and the graph is not the real graph ({st['note']})."]
+    if inv["traced"].get("dense_note"):
+        dense = inv["traced"].get("dense_layers") or []
+        lines += ["", f"Dense layers: {len(dense)} of the traced layers use a plain MLP, built by a shim over transformers' MoE-only qwen4_exp "
+                      f"class ({inv['traced']['dense_note']})."]
     py_nodes = sum((inv["traced"].get("python_nodes") or {}).values())
     if py_nodes:
         lines += ["", f"{py_nodes} python-level nodes (getitem and similar) are not ops and are not counted."]
@@ -251,12 +311,18 @@ def render_md(inv) -> str:
                   "shape. Neither is `mapped`.",
               "", "| op | count | scaled | status | ttnn |", "| --- | --- | --- | --- | --- |"]
     order = {s: i for i, s in enumerate(("unmapped", "unchecked", "candidate", "verified", "composable", "mapped",
-                                         "ignored"))}
+                                         "host", "ignored"))}
     for r in sorted(inv["ops"], key=lambda r: (order[r["status"]], -r["scaled_count"], r["op"])):
         shown = r["ttnn"] or ""
         if r["status"] == "candidate":
             shown = ", ".join(f"{c['ttnn']} ({c['why']})" for c in r.get("candidates") or [])
         lines.append(f"| `{r['op']}` | {r['count']} | {r['scaled_count']} | {r['status']} | {shown} |")
+    noted = [r for r in inv["ops"] if r.get("note")]
+    if noted:
+        lines += ["", "Notes on ops (`op_notes.json`): why an op has its status, and the evidence.", "",
+                  "| op | status | reason | evidence |", "| --- | --- | --- | --- |"]
+        for r in sorted(noted, key=lambda r: (order[r["status"]], r["op"])):
+            lines.append(f"| `{r['op']}` | {r['status']} | {r['note']['reason']} | {r['note']['evidence']} |")
     pats = inv.get("patterns") or []
     if pats or inv.get("patterns_unavailable"):
         lines += ["", "Groups of ops that one ttnn op does at once, recognised from the order and data flow of the trace "
@@ -269,6 +335,9 @@ def render_md(inv) -> str:
         for u in inv.get("patterns_unavailable") or []:
             lines.append(f"| {u['pattern']} | none of {', '.join(u['wanted'])} is in the dump | not claimed | | "
                          f"{u['occurrences']} | |")
+    for f in pats:
+        if f.get("note"):
+            lines += ["", f"`{f['pattern']}`: {f['note']}"]
     return "\n".join(lines) + "\n"
 
 
@@ -332,7 +401,8 @@ def run_inventory(model_dir, *, python, ttnn_python, out_dir, layers=2, seq=8, c
     inv = build(raw, mapping=load_table(DATA_DIR / "aten_to_ttnn.json"),
                 decomps=load_table(DATA_DIR / "decompositions.json"), dump=load_dump(version, dump_dir),
                 installed_ttnn=version, against=base, ignored=load_ignored(DATA_DIR / "ignored_ops.json"),
-                verified=load_verified(verified_file))
+                verified=load_verified(verified_file),
+                notes=load_notes(DATA_DIR / "op_notes.json"))
     j, m = write_outputs(inv, out)
     say(f"wrote {j} and {m}")
     if inv.get("skipped"):
