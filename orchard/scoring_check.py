@@ -108,7 +108,8 @@ def pearson(a, b) -> float:
     sbb = sum((y - mb) ** 2 for y in b)
     if saa <= 0.0 or sbb <= 0.0:
         return 0.0
-    return sab / math.sqrt(saa * sbb)
+    den = math.sqrt(saa) * math.sqrt(sbb)         # not sqrt(saa * sbb): the product of two small variances can underflow to 0
+    return sab / den if den > 0.0 else 0.0
 
 
 def _first_max(values, idx):

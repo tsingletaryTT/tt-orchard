@@ -142,7 +142,8 @@ def pearson(a: list, b: list) -> float:
     sbb = sum((y - mb) ** 2 for y in b)
     if saa <= 0.0 or sbb <= 0.0:
         return 0.0
-    return sab / math.sqrt(saa * sbb)
+    den = math.sqrt(saa) * math.sqrt(sbb)         # not sqrt(saa * sbb): the product of two small variances can underflow to 0
+    return sab / den if den > 0.0 else 0.0
 
 
 def first_max(values: list, idx: list) -> int:
@@ -200,6 +201,15 @@ def open_device(ttnn, n_chips: int):
             ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
         return dev, close_mesh
     return ttnn.open_device(device_id=0), ttnn.close_device
+
+
+def become_subreaper() -> None:
+    """Make this process the parent of any orphaned descendant (Linux PR_SET_CHILD_SUBREAPER). A child of the port that exits leaves its own
+    children running; without this they would belong to init and a scan below the worker could not find them."""
+    import ctypes
+    if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+        raise CheckFailed("this process cannot become a subreaper (prctl PR_SET_CHILD_SUBREAPER failed), so it cannot be sure no process "
+                          "the port started is left running")
 
 
 def worker(read_fd: int, write_fd: int) -> int:
@@ -305,7 +315,8 @@ class Worker:
         return [float(s) for s in scores]
 
     def descendants(self) -> list:
-        """The pids of every process below the worker, found through /proc."""
+        """The pids of every process below this one, found through /proc: the worker, what it started, and what its children left behind
+        when they exited (this process is a subreaper, so an orphan is re-parented to it and not to init)."""
         parents = {}
         for entry in os.listdir("/proc"):
             if entry.isdigit():
@@ -313,7 +324,7 @@ class Worker:
                     parents[int(entry)] = int(read_regular(f"/proc/{entry}/stat", 1 << 16).rsplit(b")", 1)[1].split()[1])
                 except (OSError, ValueError, IndexError):
                     continue
-        found, frontier = [], [self.proc.pid]
+        found, frontier = [], [os.getpid()]
         while frontier:
             kids = [p for p, pp in parents.items() if pp in frontier and p not in found]
             found.extend(kids)
@@ -439,6 +450,7 @@ def main() -> int:
     if os.path.lexists(RECORD):
         os.unlink(RECORD)
 
+    become_subreaper()
     sources = port_sources()               # the files as they are before the worker starts; the record carries this manifest
     chip = [None] * len(rows)
     w = Worker()

@@ -202,6 +202,9 @@ def _cases():
     yield base, [2.0] * 24, groups                             # a constant chip
     yield [0.0, 0.5, 1.0, 1.0], [1.0, 1.0, 0.0, 0.5], ["a", "a", "b", "b"]
     yield [3.0], [3.0], ["a"]
+    tiny = [0.0, 1e-160, 2e-160, 3e-160] * 8                    # the variance sums are positive and their product underflows to 0
+    yield tiny, list(tiny), [f"g{i // 4}" for i in range(32)]
+    yield tiny, [3e-160 - x for x in tiny], [f"g{i // 4}" for i in range(32)]
 
 
 @pytest.mark.parametrize("case", list(_cases()))
@@ -209,6 +212,14 @@ def test_the_templates_numbers_and_the_gates_numbers_are_the_same(case):
     ref, chip, groups = case
     assert tpl.parity(ref, chip, groups) == sc.parity(ref, chip, groups)
     assert tpl.ORDER_GAP == sc.ORDER_GAP
+
+
+def test_scores_so_close_together_that_the_variance_product_underflows_do_not_crash_the_numbers():
+    tiny = [0.0, 1e-160, 2e-160, 3e-160] * 8
+    groups = [f"g{i // 4}" for i in range(32)]
+    for parity in (tpl.parity, sc.parity):
+        assert parity(tiny, list(tiny), groups)["pearson"] == pytest.approx(1.0)
+        assert parity(tiny, [-x for x in tiny], groups)["pearson"] == pytest.approx(-1.0)
 
 
 def test_the_numbers_on_a_small_case_worked_by_hand():
@@ -706,6 +717,15 @@ def close(model):
 '''
 
 
+ORPHAN = '''
+def close(model):
+    import subprocess, time
+    # the shell starts a sleeper and exits at once: the sleeper is re-parented, and its parent is gone before close returns
+    subprocess.run(["sh", "-c", "sleep 60 & echo $! > ORPHAN-PID"])
+    time.sleep(0.1)
+'''
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)
@@ -732,6 +752,13 @@ def test_a_child_that_keeps_forking_is_stopped_with_everything_it_started(tmp_pa
     assert pids and _gone(pids), "a grandchild was still running after the check ended"
     time.sleep(0.2)
     assert len((run / "GRANDCHILD-PIDS").read_text().split()) == len(pids)
+
+
+def test_a_process_whose_parent_exited_before_the_check_stopped_is_killed_too(tmp_path):
+    run, stage, done = honest_run(tmp_path, port_src=HONEST + ORPHAN)
+    assert done.returncode == 0, done.stdout + done.stderr
+    pid = int((run / "ORPHAN-PID").read_text())
+    assert _gone([pid]), "an orphaned process the port started was still running after the check ended"
 
 
 def test_an_atexit_callback_in_the_worker_never_runs_and_starts_nothing(tmp_path):
