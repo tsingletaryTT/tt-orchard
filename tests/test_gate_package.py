@@ -361,3 +361,10 @@ def test_the_gate_refuses_an_unpinned_requirement(stage7):
 def test_the_gate_refuses_a_ttnn_pin_that_is_not_the_shipped_wheel(stage7):
     (stage7["pkg"] / "requirements.txt").write_text("ttnn==0.80.0\n")
     assert any("wheels/ttnn-0.79.0" in r and "0.80.0" in r for r in reasons(stage7)), reasons(stage7)
+
+
+def test_the_gate_refuses_a_package_missing_install_sh_even_with_fresh_sums(stage7):
+    from orchard import can
+    (stage7["pkg"] / "install.sh").unlink()
+    can.write_sums(stage7["pkg"])          # the sums are fresh; only the missing file can fail the gate
+    assert any("install.sh is missing" in r for r in reasons(stage7)), reasons(stage7)

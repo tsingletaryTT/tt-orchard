@@ -544,7 +544,9 @@ def hardening_problems(pkg) -> list[str]:
     pkg = Path(pkg)
     problems = sums_problems(pkg)
     for f in SCRIPTS:
-        if (pkg / f).is_file() and not os.access(pkg / f, os.X_OK):
+        if f in ("run.sh", "install.sh") and not (pkg / f).is_file():
+            problems.append(f"{f} is missing")       # a package with no installer or launcher must not pass on fresh sums
+        elif (pkg / f).is_file() and not os.access(pkg / f, os.X_OK):
             problems.append(f"{f} is not executable")
     req = pkg / "requirements.txt"
     if not req.is_file():
