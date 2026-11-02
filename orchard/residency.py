@@ -92,6 +92,7 @@ NOT_MEASURED = (
 MEASURED_EXAMPLE = {
     "model": "raahemnabeel/qwen3-reranker-4b", "unit": "pairs/s", "clients": 4, "by_board": {"p150": 21.7, "p300": 42.0, "p300x2": 83.0},
     "basis": "the model card author's measurement on p300c dies with four clients; orchard has not measured it"}
+SHARDED_BASES = ("stated", "required chip counts")
 DP_NOTE = "replication: one full copy of the weights on each chip, with no collective operations between the chips"
 DP_THROUGHPUT = ("not estimated: measured scaling is needed. The one measured example is " + MEASURED_EXAMPLE["model"] + ": 21.7, 42.0 and 83.0 pairs/s "
                  "on a p150, a p300 and a p300x2 with four clients (" + MEASURED_EXAMPLE["basis"] + ")")
@@ -469,11 +470,15 @@ def _data_parallel(fits_one: bool, box_chips, extra: list) -> dict:
             "throughput": DP_THROUGHPUT, "measured_example": json.loads(json.dumps(MEASURED_EXAMPLE))}
 
 
-def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None, policy=None, chips=(), box_chips=None, sharded_chips=None) -> dict:
+def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None, policy=None, chips=(), box_chips=None, sharded_chips=None, sharded_basis="stated") -> dict:
     """The residency record for `headers`. `dram_gib`, `kv_gib` and `reserve_gib` fall back to orchard/defaults.py and the record says so.
     `chips` adds rows to the table (1, 2, 4 and 8 are always there); `box_chips` is the chip count of the machine, or None when unknown.
     `sharded_chips` is the chip count the run is configured to shard the model across (tensor parallel), or None when not stated; a model
-    that fits one chip and is sharded across more than one gets a hazard note."""
+    that fits one chip and is sharded across more than one gets a hazard note. `sharded_basis` is "stated" when the caller knows the layout
+    is tensor parallel, or "required chip counts" when only the counts a run must test are known (a data-parallel run needs those too, so
+    the note is then conditional)."""
+    if sharded_basis not in SHARDED_BASES:
+        raise ResidencyError(f"sharded_basis must be one of {', '.join(SHARDED_BASES)}")
     dram_src, kv_src, res_src = ("caller" if v is not None else "default (choice)" for v in (dram_gib, kv_gib, reserve_gib))
     dram = _number(defaults.CHIP_DRAM_GIB if dram_gib is None else dram_gib, "dram_gib", lo=0, allow_equal=False)
     kv = _number(defaults.KV_BUDGET_GIB if kv_gib is None else kv_gib, "kv_gib", lo=0, allow_equal=True)
@@ -547,9 +552,11 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
         if why:
             record["hazards"].append({"name": "model_does_not_fit_box", "reason": why})
     if sharded_chips and sharded_chips > 1 and need == 1:
-        record["hazards"].append({"name": "fits_one_chip_but_sharded", "reason": (
-            f"the model fits one chip by this estimate (weights, reserve and KV budget; no allocator reading), and the run is configured to shard it "
-            f"across {sharded_chips} chips. Tensor parallel adds collective operations between the chips. A data parallel layout (a full copy on each chip,  "
+        asks = (f"the run is configured to shard it across {sharded_chips} chips" if sharded_basis == "stated" else
+                f"the run's required chip counts ask for {sharded_chips} chips, and if the port shards the model across them (tensor parallel)")
+        record["hazards"].append({"name": "fits_one_chip_but_sharded", "basis": sharded_basis, "reason": (
+            f"the model fits one chip by this estimate (weights, reserve and KV budget; no allocator reading), and {asks}. "
+            f"Tensor parallel adds collective operations between the chips. A data parallel layout (a full copy on each chip, "
             f"no collective operations) is an option for throughput; measured scaling is needed before expecting any gain. This is a note and "
             f"blocks nothing")})
     return record

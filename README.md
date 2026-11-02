@@ -1580,7 +1580,7 @@ and disk figures stay those of one copy.
 
 Stage 0 of a run writes the same record to `stages/0/residency.json` and adds a `residency estimate` evidence entry to the ledger.
 When a model fits one chip and the run's required chip counts (`--required-chips`) ask for more than one chip, the record gets a
-`fits_one_chip_but_sharded` hazard. It is a note: nothing is blocked.
+`fits_one_chip_but_sharded` hazard. The required counts do not prove tensor parallel (a data-parallel run needs them too), so the note says "if the port shards the model" and the record names its `basis`. It is a note: nothing is blocked.
 A model that needs more chips than the box has gets a `model_does_not_fit_box` hazard in that record. Before a full-port stage 2 the
 supervisor reads the record and, when the box (or stage 2's one-board lease, which is where the port check runs) has fewer chips
 than the estimate needs, blocks with the numbers (block code `model-does-not-fit`) and starts no prepare step. The generic stage 2

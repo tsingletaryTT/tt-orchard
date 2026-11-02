@@ -862,3 +862,22 @@ def test_the_supervisor_passes_the_largest_required_chip_count_as_the_sharding(f
         sup.ledger = type("L", (), {"append": lambda self, *a, **k: None})()
         sup._stage_0_residency(tmp_path)
         assert seen["sharded_chips"] == want
+        assert want is None or seen["sharded_basis"] == "required chip counts"
+
+
+def test_required_chip_counts_alone_give_a_conditional_note_not_a_claim_of_sharding(four_b_dir, tmp_path):
+    """PR 367 review: `required_chips` names the counts stage 4 must test, which a data-parallel package also needs. The note then says
+    "if the model is sharded", and the record names its basis."""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    rec = rs.write_residency(stage, model_dir=four_b_dir, box_chips=4, sharded_chips=4, sharded_basis="required chip counts")
+    h = rec["hazards"][0]
+    assert h["basis"] == "required chip counts" and "required chip counts" in h["reason"] and "if the port shards" in h["reason"]
+    assert "is configured to shard" not in h["reason"]
+    stated = rs.estimate(rs.read_headers(four_b_dir), box_chips=4, sharded_chips=4)["hazards"][0]
+    assert stated["basis"] == "stated" and "is configured to shard" in stated["reason"]
+
+
+def test_a_bad_sharded_basis_is_refused(four_b_dir):
+    with pytest.raises(rs.ResidencyError):
+        rs.estimate(rs.read_headers(four_b_dir), box_chips=4, sharded_chips=4, sharded_basis="anything")
