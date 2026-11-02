@@ -85,6 +85,11 @@ def test_a_marker_on_an_inner_call_does_not_exempt_the_call_around_it(tmp_path):
     assert _count(tmp_path, middle) == 1                  # a marker between the first and last line marks no call
 
 
+def test_open_reached_through_builtins_io_or_codecs_is_counted(tmp_path):
+    src = "a = builtins.open(p)\nb = io.open(p)\nc = codecs.open(p, 'r')\nd = webbrowser.open(u)\ne = tarfile.open(p)\nf = Image.open(p)\n"
+    assert _count(tmp_path, src) == 3                       # webbrowser, tarfile and Image open something else
+
+
 def test_update_refuses_growth_unless_it_is_accepted(tmp_path):
     import json
     base = tmp_path / "b.json"

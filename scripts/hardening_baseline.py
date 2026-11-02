@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Count raw file access in orchard/ per file, for the ratchet in tests/test_hardening_ratchet.py.
 
-Raw access is a call to the builtin `open`, or to `.read_text`, `.read_bytes`, `.write_text` or `.write_bytes` on anything other than
+Raw access is a call to the builtin `open` (also `builtins.open`, `io.open` and `codecs.open`), or to `.read_text`, `.read_bytes`, `.write_text` or `.write_bytes` on anything other than
 `safeio` (`safeio.read_bytes(...)` and `orchard.safeio.read_bytes(...)` are the guarded readers and are not counted). Reviews of this
 repository kept finding that such a call on a file something else controls can block (a FIFO), follow a link, read without a bound
 or write through a refused path (docs/pr-hardening-checklist.md, items 1 and 2). New code should use orchard/safeio.py.
@@ -32,6 +32,7 @@ EXEMPT_FILES = {"orchard/safeio.py"}          # the module that implements the g
 # `hardening: ok` as whole words, then whitespace, then a reason of at least three non-space characters in all (not `okay`, not a bare `ok`)
 EXEMPT_RE = re.compile(r"hardening: ok(?=\s)\s+(?=(?:\s*\S){3})")
 RAW_METHODS = {"read_text", "read_bytes", "write_text", "write_bytes"}
+OPEN_MODULES = {"builtins", "io", "codecs"}      # modules whose `open` is the plain file open (a bare `.open(` on any object is too broad: webbrowser, tarfile, Image)
 
 
 def _marked_lines(source: str) -> set[int]:
@@ -52,6 +53,8 @@ def _is_raw_call(node: ast.Call) -> bool:
     f = node.func
     if isinstance(f, ast.Name):
         return f.id == "open"
+    if isinstance(f, ast.Attribute) and f.attr == "open" and isinstance(f.value, ast.Name) and f.value.id in OPEN_MODULES:
+        return True
     return isinstance(f, ast.Attribute) and f.attr in RAW_METHODS and not _is_safeio(f.value)
 
 

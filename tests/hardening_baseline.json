@@ -113,7 +113,7 @@
  "orchard/transcripts.py": 1,
  "orchard/ttlang_env.py": 2,
  "orchard/ttlang_pair.py": 3,
- "orchard/ttnn_dump.py": 1,
+ "orchard/ttnn_dump.py": 2,
  "orchard/updates.py": 1,
  "orchard/verify_package.py": 8,
  "orchard/version.py": 1,
