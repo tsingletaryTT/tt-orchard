@@ -152,25 +152,6 @@ def test_evidence_record_follows_a_link_that_stays_inside_the_run_directory(tmp_
     assert rec["path"] == "real.json" and len(rec["sha256"]) == 64
 
 
-def test_a_stage_whose_evidence_cannot_be_recorded_fails_with_the_reason_instead_of_crashing():
-    """Supervisor._end_stage: the gate passed, then evidence_record refused a file. The ledger gets stage_end fail with the named reason."""
-    from types import SimpleNamespace
-    from orchard import safeio
-    from orchard.supervisor import Supervisor
-    entries = []
-
-    def body(*a, **k):
-        raise safeio.NotRegular("the file is not a regular file")
-
-    sup = SimpleNamespace(ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))), _end_stage_body=body)
-    spec = SimpleNamespace(number=3)
-    assert Supervisor._end_stage(sup, spec, Path("."), "pass", [], None, False) == "fail"
-    (args, kw), = entries
-    assert args[0] == "stage_end" and kw["result"] == "fail" and "not a regular file" in kw["reasons"][0]
-    with pytest.raises(safeio.NotRegular):                    # a refusal on a path that is not a pass is not hidden
-        Supervisor._end_stage(sup, spec, Path("."), "fail", [], None, False)
-
-
 # ------------------------------------------------------------------------------------------ the graft check (issue 287)
 
 @pytest.mark.parametrize("shape", SHAPES + ["nan"])
@@ -382,3 +363,82 @@ def test_the_gate_reader_gives_none_and_a_named_reason_for_a_refused_file_and_no
     ''')
     assert out["value"] is None and len(out["reasons"]) == 1 and "r.json is not readable" in out["reasons"][0]
     assert out["missing"] is None and out["none"] == []
+
+
+# ------------------------------------------------------------------------------------- PR 345 review: scrub and stage end
+
+@pytest.mark.parametrize("shape", ["oversize", "symlink_out"])
+def test_the_bundle_scrub_names_a_file_it_cannot_search_and_reads_no_more_than_the_cap(shape):
+    out = run_child(f'''
+        from orchard import scrub
+        scrub.SCRUB_MAX_BYTES = 64
+        bundle = run / "bundle"
+        build({shape!r}, bundle / "notes.txt")
+        report(hits=scrub.scrub_bundle(bundle, hostname="nohost", home="/nohome"))
+    ''')
+    assert out["hits"] == [out["hits"][0]] and out["hits"][0].startswith("notes.txt: cannot be searched (")
+
+
+def test_the_package_scrub_does_not_block_on_a_fifo():
+    out = run_child('''
+        from orchard import scrub
+        build("fifo", run / "pkg" / "run.sh")
+        report(hits=scrub.scrub_package(run / "pkg", hostname="nohost", home="/nohome"))
+    ''')
+    assert out["hits"] and "run.sh: cannot be searched (" in out["hits"][0]
+
+
+@pytest.mark.parametrize("shape", ["fifo", "dev_zero", "oversize"])
+def test_the_whole_bundle_gate_survives_a_hostile_bundle_file(shape):
+    """The complete gate, not one helper: gate_bundle reads each bundle file, the build record and then runs the scrub."""
+    out = run_child(f'''
+        from orchard import scrub
+        scrub.SCRUB_MAX_BYTES = 64
+        sd = run / "stages" / "8"
+        build({shape!r}, sd / "bundle" / "RESULTS.md")
+        g = stages.gate_bundle(sd, run)
+        report(ok=g.ok, reasons=list(g.reasons))
+    ''')
+    assert not out["ok"] and any("RESULTS.md" in r for r in out["reasons"]), out
+
+
+def test_an_evidence_refusal_goes_through_the_failure_path_so_escalation_and_pause_apply():
+    """PR 345 review: the refusal must reach _end_stage_body with status "fail" and the reason, not write a bare stage_end."""
+    from types import SimpleNamespace
+    from orchard import safeio
+    from orchard.supervisor import Supervisor
+    calls = []
+
+    def body(spec, stage_dir, status, reasons, gate, escalated):
+        calls.append((status, reasons, escalated))
+        if status == "pass":
+            raise safeio.TooLarge("the file is larger than 5 bytes")
+        return "escalate"
+
+    sup = SimpleNamespace(_end_stage_body=body)
+    spec = SimpleNamespace(number=3)
+    assert Supervisor._end_stage(sup, spec, Path("."), "pass", [], None, False) == "escalate"
+    assert [c[0] for c in calls] == ["pass", "fail"] and "larger than 5 bytes" in calls[1][1][0] and calls[1][2] is False
+
+
+@pytest.mark.parametrize("shape", ["oversize", "symlink_out"])
+def test_a_failed_marker_that_is_refused_is_recorded_with_the_reason_before_it_is_moved_aside(shape):
+    """Supervisor._run_stage hashes the failed marker for its ledger entry; a refusal must not stop the resume."""
+    out = run_child(f'''
+        from types import SimpleNamespace
+        from orchard import supervisor
+        stages.EVIDENCE_HASH_MAX = 64
+        build({shape!r}, run / "stages" / "2" / "test-result.json")
+        sup = SimpleNamespace(run_dir=run)
+        report(rec=supervisor.Supervisor._moved_aside_record(sup, run / "stages" / "2" / "test-result.json"))
+    ''')
+    assert out["rec"]["path"] == "stages/2/test-result.json" and out["rec"]["unreadable"], out
+
+
+def test_a_failed_marker_that_can_be_read_is_recorded_with_its_hash(tmp_path):
+    from types import SimpleNamespace
+    from orchard.supervisor import Supervisor
+    (tmp_path / "stages" / "2").mkdir(parents=True)
+    (tmp_path / "stages" / "2" / "test-result.json").write_text("{}")
+    rec = Supervisor._moved_aside_record(SimpleNamespace(run_dir=tmp_path), tmp_path / "stages" / "2" / "test-result.json")
+    assert rec["path"] == "stages/2/test-result.json" and len(rec["sha256"]) == 64

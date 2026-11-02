@@ -2071,8 +2071,17 @@ def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple
     if d.exists():
         marker = d / spec.marker if spec.marker else None
         if resuming and marker is not None and marker.is_file():
-            rec = evidence_record(run_dir, marker)
-            if marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, spec.number, rec):
+            try:
+                rec = evidence_record(run_dir, marker)
+            except safeio.SafeReadError as exc:
+                # A marker that the bounded reader refuses (over the cap, a link that leaves the run directory, changed during the read) is not
+                # a resume point. The reason is in the ledger, and the directory is moved aside below as for any marker that cannot be used.
+                rec = None
+                ledger.append("decision", spec.number, decision="marker cannot be read and is not a resume point",
+                              marker=spec.marker, reason=exc.reason)
+            if rec is None:
+                pass
+            elif marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, spec.number, rec):
                 # An agent can write this file. Only the supervisor's own record of its hardware test vouches for it.
                 ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
             else:

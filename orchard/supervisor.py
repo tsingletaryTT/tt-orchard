@@ -1449,8 +1449,7 @@ class Supervisor:
             # must run a fresh prepare and hardware test: its finish step cannot pass on a test
             # that failed, and it gets no gate feedback for one. So the failed record is not a
             # resume point, and open_stage_dir moves the directory aside.
-            self.ledger.append("decision", n, decision="not resuming from a failed hardware test",
-                               marker=evidence_record(self.run_dir, marker))
+            self.ledger.append("decision", n, decision="not resuming from a failed hardware test", marker=self._moved_aside_record(marker))
             resuming = False
         stage_dir, resumed = open_stage_dir(self.run_dir, spec, resuming=resuming, ledger=self.ledger)
         self.ledger.append("stage_start", n, escalated=escalated, resumed=resumed)
@@ -1458,6 +1457,14 @@ class Supervisor:
         self.watchdog = self._watchdog(spec)
         status, reasons, gate = self._stage_body(spec, stage_dir, escalated, resumed)
         return self._end_stage(spec, stage_dir, status, reasons, gate, escalated)
+
+    def _moved_aside_record(self, marker) -> dict:
+        """The ledger record of a marker that is about to be moved aside: its path and sha256, or its path and the named reason when the
+        bounded reader refuses it (over the cap, a link that leaves the run directory). The directory is moved aside either way."""
+        try:
+            return evidence_record(self.run_dir, marker)
+        except safeio.SafeReadError as exc:
+            return {"path": os.path.relpath(os.path.abspath(marker), os.path.abspath(self.run_dir)), "unreadable": exc.reason}
 
     def _gate(self, spec):
         """The stage's gate. Stage 4's also gets the run's required chip counts; no other gate
@@ -2084,9 +2091,10 @@ class Supervisor:
         except safeio.SafeReadError as exc:
             if status != "pass":
                 raise
+            # The refusal is a failed attempt like any other: it goes through the same path as a gate that failed, so the escalation and the
+            # pause rules apply and a refusal that repeats does not rerun the stage without end.
             why = [f"stage {spec.number}: a file the gate accepted could not be read to record it as evidence: {exc.reason}"]
-            self.ledger.append("stage_end", spec.number, result="fail", reasons=why)
-            return "fail"
+            return self._end_stage_body(spec, stage_dir, "fail", why, gate, escalated)
 
     def _end_stage_body(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
