@@ -1569,7 +1569,7 @@ class Supervisor:
                 rec = stack_pins_mod.unchecked_record("no stack comparison was supplied to this supervisor", new_run=new_run)
                 sha = stack_pins_mod.write_record(stage_dir, rec)
         except (OSError, ValueError) as exc:        # no record: nothing may go on without one
-            self.ledger.append("decision", 0, decision="stack pins not written", reason=f"{type(exc).__name__}: {exc}"[:200])
+            self.ledger.append("decision", 0, decision="stack pins not written", reason=stack_pins_mod.redact(f"{type(exc).__name__}: {exc}"[:200]))
             self._block(0, f"the stack freshness record could not be written ({type(exc).__name__}). Fix the stage 0 directory, then run the command again")
         self.ledger.append("evidence", 0, what="stack pins", severity=rec["severity"], mode=rec["mode"],
                            hazards=[h["name"] for h in rec["hazards"]], advisories=[a["name"] for a in rec["advisories"]],
@@ -3698,8 +3698,9 @@ def stack_check_for(sup, args, environ=None):
     sources = stack_pins_mod.Sources(
         model_dir=sup.inputs.get("model"), ref_python=sup.inputs.get("reference_python") or env.get("ORCHARD_REFERENCE_PYTHON"), tt_metal_dir=metal,
         vllm_dir=env.get("ORCHARD_TT_VLLM_DIR"), vllm_branch=env.get("ORCHARD_TT_VLLM_BRANCH") or "main",
-        skills_dirs=tuple(str(d) for d in args.skills_dir))
-    return stack_pins_mod.make_check(sources)
+        skills_dirs=tuple(str(d) for d in args.skills_dir), homes=(str(sup.paths.operator_home), str(sup.home)),
+        exclude_paths=(str(sup.run_dir),))
+    return stack_pins_mod.make_check(sources, probe_env=agent_env(sup.run_dir, extra=sup.extra_env))
 
 
 def main(argv=None, *, home=None) -> int:

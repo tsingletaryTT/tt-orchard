@@ -139,6 +139,15 @@ def test_a_record_that_cannot_be_written_is_a_decision_and_blocks_stage_0_at_onc
     assert not [e for e in rig.entries() if e["event"] == "stage_end" and e["stage"] == 0]
 
 
+def test_an_error_message_with_a_credential_is_scrubbed_before_it_reaches_the_ledger(rig):
+    def broken(stage_dir, new_run):
+        raise OSError("cannot reach https://user:realtoken123@github.com/x/y.git with hf_abcdefgh12345678")
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    run(rig, broken)
+    ledger_text = (rig.run_dir / "ledger.jsonl").read_text()
+    assert "stack pins not written" in ledger_text and "realtoken123" not in ledger_text and "hf_abcdefgh12345678" not in ledger_text
+
+
 def test_a_resumed_stage_does_not_keep_the_last_attempts_record_when_the_new_write_fails(rig):
     """The stage directory survives a resume with the old record and its ledger hash. If this attempt's write fails, the gate must not
     accept the old evidence: the old file is removed before the write, and the stage blocks."""
@@ -213,9 +222,10 @@ def test_the_real_check_looks_where_the_run_says(monkeypatch, tmp_path):
     from types import SimpleNamespace
     from orchard import supervisor
     got = []
-    monkeypatch.setattr(sp, "make_check", lambda sources, **kw: got.append(sources))
+    kws = []
+    monkeypatch.setattr(sp, "make_check", lambda sources, **kw: (got.append(sources), kws.append(kw)))
     sup = SimpleNamespace(paths=SimpleNamespace(operator_home=str(tmp_path / "ops-home")), home=tmp_path / "invoking-home",
-                          inputs={"model": "/m", "reference_python": "/cfg/python"})
+                          inputs={"model": "/m", "reference_python": "/cfg/python"}, run_dir=tmp_path / "run", extra_env={"FOO": "bar"})
     args = SimpleNamespace(skills_dir=[tmp_path / "skills"])
     monkeypatch.delenv("ORCHARD_TT_METAL_DIR", raising=False)
     supervisor.stack_check_for(sup, args, environ={"ORCHARD_REFERENCE_PYTHON": "/env/python"})
@@ -225,6 +235,10 @@ def test_the_real_check_looks_where_the_run_says(monkeypatch, tmp_path):
     assert first.tt_metal_dir == str(tmp_path / "ops-home" / "tt-metal") and first.ref_python == "/cfg/python"
     assert second.tt_metal_dir == "/named/tree" and second.ref_python == "/env/python"
     assert first.skills_dirs == (str(tmp_path / "skills"),) and first.model_dir == "/m"
+    # the probe runs under the environment the reference step uses (agent_env, reused: HOME inside the run directory, the run's --env values)
+    from orchard.agent import agent_env
+    assert kws[0]["probe_env"] == agent_env(tmp_path / "run", extra={"FOO": "bar"}) and kws[0]["probe_env"]["HOME"].startswith(str(tmp_path / "run"))
+    assert first.exclude_paths == (str(tmp_path / "run"),) and str(tmp_path / "ops-home") in first.homes
 
 
 def test_the_keyword_rules_still_classify_other_blocks_the_same_way():

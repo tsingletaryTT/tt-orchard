@@ -90,7 +90,7 @@ def default_cache_path() -> Path:
     return Path(base) / "tt-orchard" / "skills-freshness.json"
 
 
-def _raw_run(argv, timeout, env=None):
+def _raw_run(argv, timeout, env=None, cwd=None):
     """(returncode, stdout, stderr), like ttlang_env.real_run. A timeout answers 124 and a missing program 127.
 
     The command runs in its own session. On a timeout the whole process group is killed, so a helper git started
@@ -99,7 +99,7 @@ def _raw_run(argv, timeout, env=None):
     import subprocess
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=env, start_new_session=True)
+                                text=True, env=env, cwd=cwd, start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
     try:
@@ -539,6 +539,8 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
 def skills_update(root: str, branch: str | None, remote: str | None = None) -> str:
     """How to bring a tenstorrent/skills clone up to date. On a branch other than main a pull would merge main into
     that branch, so the hint says what to do and leaves the choice to the operator."""
+    import shlex
+    root = shlex.quote(root)                    # a path with a space or a shell character still gives a command that works when copied
     if branch in (None, "main"):
         return f"git -C {root} pull --ff-only origin main"
     return (f"the clone is on branch {branch}. Commit your work there, then `git -C {root} switch main` and update "
