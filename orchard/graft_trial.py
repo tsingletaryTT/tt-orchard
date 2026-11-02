@@ -22,7 +22,7 @@ import math
 import os
 from pathlib import Path
 
-from orchard import sampling_choice
+from orchard import safeio, sampling_choice
 from orchard.defaults import GRAFT_MIN_SPEEDUP, GRAFT_TOP1_MARGIN, SWAP_TOP1_MIN
 
 DECISION_FILE = "graft-decision.json"        # in stages/2/
@@ -150,11 +150,10 @@ def write_decision(stage_dir, decision: dict, *, candidate: dict | None, trial: 
 
 
 def read_decision(stage_dir) -> dict | None:
-    """The decision file, or None when it is missing, unreadable, not an object or names no known choice."""
-    try:
-        d = json.loads((Path(stage_dir) / DECISION_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    """The decision file, or None when it is missing, unreadable, not an object or names no known choice. The read is bounded and refuses a
+    FIFO, a device and a link (orchard/safeio.py). A refused file is None here, so `chosen` is False; the stage 2 gate names the refusal
+    (`refusals`, issue 287), so a run does not go on from a decision file that was refused."""
+    d = sampling_choice.read_decision_file(Path(stage_dir) / DECISION_FILE).value
     return d if isinstance(d, dict) and d.get("choice") in CHOICES else None
 
 
@@ -164,11 +163,26 @@ def chosen(run_dir) -> bool:
     return d is not None and d["choice"] == "graft"
 
 
+MAX_JSON_BYTES = sampling_choice.DECISION_MAX_BYTES       # one limit for the decision files of stage 2 (see sampling_choice.read_decision_file)
+
+
 def _read_json(path: Path):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    """A JSON file of the run through orchard/safeio.py, None when it is missing or refused. `refusals` reports the refused ones."""
+    return safeio.read_json_checked(path, max_bytes=MAX_JSON_BYTES).value
+
+
+def refusals(stage_dir, run_dir=None) -> list[str]:
+    """One reason for each file this module reads that is there and refused (a FIFO, a link, a device, a file over the cap, NaN, a repeated key,
+    text that is not JSON). A missing file gives none. `stage_dir` is stage 2's directory."""
+    sd = Path(stage_dir)
+    files = [(sd / DECISION_FILE, DECISION_FILE),
+             (sd / TRIAL_DIR / TRIAL_RESULT, f"{TRIAL_DIR}/{TRIAL_RESULT}"),
+             (sd / "result.json", "result.json"),
+             (sd / TRIAL_DIR / "variant" / "evidence" / "swap-check.json", f"{TRIAL_DIR}/variant/evidence/swap-check.json")]
+    if run_dir is not None:
+        files.append((Path(run_dir) / "stages" / "0" / "evidence" / "genconfig-license.json", "stage 0 evidence/genconfig-license.json"))
+    return [p for path, name in files if (p := (sampling_choice.read_decision_file(path) if name == DECISION_FILE
+                                                else safeio.read_json_checked(path, max_bytes=MAX_JSON_BYTES)).problem(name))]
 
 
 def decision_problems(stage_dir, run_dir) -> list[str]:
@@ -177,8 +191,11 @@ def decision_problems(stage_dir, run_dir) -> list[str]:
     result.json, so a file that says graft while its numbers say otherwise is refused. A kept-safe decision needs a reason."""
     sd = Path(stage_dir)
     path = sd / DECISION_FILE
-    if not path.exists():
+    if not os.path.lexists(path):
         return []
+    bad = refusals(sd, run_dir)          # a decision, or a file it was recomputed from, that is there and refused is named and is not read as absent
+    if bad:
+        return bad
     d = _read_json(path)
     if not isinstance(d, dict):
         return [f"{DECISION_FILE} is not a JSON object"]
