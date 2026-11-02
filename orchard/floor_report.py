@@ -41,10 +41,16 @@ MAX_RECORD_BYTES = 32 << 20          # a swap check holds reply texts; a megabyt
 MAX_SMALL_BYTES = 1 << 20
 
 _DTYPES = {"bfloat16": "bf16", "float16": "fp16", "float32": "fp32"}
-PROBE_BASIS = ("completion tokens over request seconds for a 96-token greedy request: it includes prefill and HTTP time, so the share is "
-               "too low")
-GRAFT_BASIS = "the graft trial's decode speed, median of four prompts"
+# Each row's basis states both biases (issue 297): a smaller weight dtype on the chip than the stored one raises the true floor (the share
+# shown is too high), and prefill and HTTP time in a whole-request speed lower the measured speed (the share shown is too low).
+BOTH_BIASES = ("; a smaller weight dtype on the chip than the stored one raises the true floor, so the share shown is too high; "
+               "prefill and HTTP time lower a whole-request speed, so the share shown is too low")
+PROBE_BASIS = "completion tokens over request seconds for a 96-token greedy request, which includes prefill and HTTP time" + BOTH_BIASES
+DRAFTER_ON_BASIS = ("; the server ran with a speculative drafter on (swap check `serving.drafter` {drafter}), which can emit several tokens per "
+                    "weight read, so a share above or near 100 percent does not mean an input is wrong")
+GRAFT_BASIS = "the graft trial's decode speed, median of four prompts" + BOTH_BIASES
 GRAFT_DRAFTER_BASIS = GRAFT_BASIS + "; the grafted variant keeps the drafter on, which can emit several tokens per weight read"
+GRAFT_TRIAL_FILE = "stages/2/graft-trial/trial-result.json"      # where the template script wrote each variant's decode speed
 
 
 # ---- the dtype policy ------------------------------------------------------------------------------------------------------
@@ -165,6 +171,19 @@ def _probe_speed(path: Path):
     return v if _good(v) else None
 
 
+def _drafter(path: Path) -> str | None:
+    """The swap check's `serving.drafter` text when it says a drafter was on, else None."""
+    report = _json(path)
+    serving = report.get("serving") if report else None
+    d = serving.get("drafter") if isinstance(serving, dict) else None
+    return d if isinstance(d, str) and d.startswith("on") else None
+
+
+def _probe_basis(path: Path) -> str:
+    d = _drafter(path)
+    return PROBE_BASIS + (DRAFTER_ON_BASIS.format(drafter=d[:60]) if d else "")
+
+
 def measured(run_dir) -> list[dict]:
     """Every decode speed the run measured that has a floor to compare with: stage, source, evidence path, dies, tok/s and what the speed is."""
     run = Path(run_dir)
@@ -173,7 +192,8 @@ def measured(run_dir) -> list[dict]:
     v = _probe_speed(run / rel)
     dies2 = _chips(run / "stages/2/swap_config.json", defaults.CHIPS_PER_BOARD)
     if v:
-        out.append({"stage": 2, "source": "stage 2 sampling probe, greedy request", "evidence": rel, "dies": dies2, "tok_s": v, "basis": PROBE_BASIS})
+        out.append({"stage": 2, "source": "stage 2 sampling probe, greedy request", "evidence": rel, "dies": dies2, "tok_s": v,
+                    "basis": _probe_basis(run / rel)})
     configs = run / "stages" / "4" / "configs"
     try:
         names = sorted((p.name for p in configs.iterdir() if p.name.isdigit()), key=int) if configs.is_dir() else []
@@ -184,13 +204,14 @@ def measured(run_dir) -> list[dict]:
         v = _probe_speed(run / rel)
         if v:
             out.append({"stage": 4, "source": f"stage 4 sampling probe, greedy request, {int(name)} chips", "evidence": rel,
-                        "dies": int(name), "tok_s": v, "basis": PROBE_BASIS})
-    decision = _json(run / "stages/2/graft-decision.json")
-    nums = decision.get("numbers") if decision and isinstance(decision.get("numbers"), dict) else {}
-    for key, label, basis in (("safe_decode_tok_s", "stage 2 graft trial, safe configuration", GRAFT_BASIS),
-                              ("variant_decode_tok_s", "stage 2 graft trial, grafted variant", GRAFT_DRAFTER_BASIS)):
-        if _good(nums.get(key)):
-            out.append({"stage": 2, "source": label, "evidence": "stages/2/graft-decision.json", "dies": dies2, "tok_s": nums[key], "basis": basis})
+                        "dies": int(name), "tok_s": v, "basis": _probe_basis(run / rel)})
+    # The decision file's `numbers` are not checked against the trial by the stage gate, so the speeds come from the trial's own record.
+    trial = _json(run / GRAFT_TRIAL_FILE) or {}
+    for side, label, basis in (("safe", "stage 2 graft trial, safe configuration", GRAFT_BASIS),
+                               ("variant", "stage 2 graft trial, grafted variant", GRAFT_DRAFTER_BASIS)):
+        part = trial.get(side) if isinstance(trial.get(side), dict) else {}
+        if _good(part.get("decode_tok_s")):
+            out.append({"stage": 2, "source": label, "evidence": GRAFT_TRIAL_FILE, "dies": dies2, "tok_s": part["decode_tok_s"], "basis": basis})
     return out
 
 

@@ -1165,14 +1165,40 @@ def test_extra_body_nested_to_twenty_levels_is_accepted():
 
 # ------------------------------------------------------------------------------------------------ review of PR 106, round 6
 
-@pytest.mark.parametrize("secret", ["abc\ndef", "abc\r\ndef", "abc\x00def", "abc\x1fdef", "café中"])
+# The fragments are not hex digits: a random call id in the ledger can hold "abc" or "def" (issue 353).
+@pytest.mark.parametrize("secret", ["qzv\nwxj", "qzv\r\nwxj", "qzv\x00wxj", "qzv\x1fwxj", "café中"])
 def test_a_key_that_cannot_be_sent_in_a_header_is_refused_without_echoing_it(tmp_path, secret):
     tel, wire = make(tmp_path, environ={"TG_KEY": secret}, wire=Wire(status=401))
     got = tel.ask("p", "t", "f")
     assert not got.ok and wire.requests == [] and "header" in got.reason
-    for fragment in ("abc", "def"):
+    for fragment in ("qzv", "wxj"):
         assert fragment not in got.reason
-    assert "abc" not in tree_text(tmp_path / "tg")
+    assert "qzv" not in tree_text(tmp_path / "tg")
+
+
+def test_the_header_key_check_does_not_depend_on_the_random_call_id(tmp_path, monkeypatch):
+    """Issue 353: the ledger records a random 12-hex-digit call id, and "abc" or "def" is a run of hex digits, so the old fragments
+    matched an id about once in 200 runs. Force the worst id and the check must still pass."""
+    class Worst:
+        hex = "abcdefabcdef0123456789abcdef0123"
+    monkeypatch.setattr(tg.uuid, "uuid4", lambda: Worst())
+    tel, wire = make(tmp_path, environ={"TG_KEY": "qzv\r\nwxj"}, wire=Wire(status=401))
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and wire.requests == [] and "header" in got.reason
+    for fragment in ("qzv", "wxj"):
+        assert fragment not in got.reason
+    assert "qzv" not in tree_text(tmp_path / "tg")
+    assert "abcdefabcdef" in tree_text(tmp_path / "tg")          # the forced id really is in the tree the check reads
+
+
+def test_the_old_fragments_do_match_a_hex_call_id(tmp_path, monkeypatch):
+    """The cause of issue 353 in one test: with a call id that holds "abc", the old check's tree search finds it."""
+    class Worst:
+        hex = "abcdefabcdef0123456789abcdef0123"
+    monkeypatch.setattr(tg.uuid, "uuid4", lambda: Worst())
+    tel, _ = make(tmp_path, environ={"TG_KEY": "qzv\r\nwxj"}, wire=Wire(status=401))
+    tel.ask("p", "t", "f")
+    assert "abc" in tree_text(tmp_path / "tg")
 
 
 def test_a_key_with_a_trailing_newline_from_a_file_is_still_fine(tmp_path):
@@ -1184,9 +1210,9 @@ def test_a_key_with_a_trailing_newline_from_a_file_is_still_fine(tmp_path):
 
 def test_check_ping_of_a_bad_key_does_not_print_it(tmp_path):
     from orchard import telegraph_cmd as cmd_mod                     # the key check is shared with ask
-    tel, _ = make(tmp_path, environ={"TG_KEY": "abc\ndef"})
+    tel, _ = make(tmp_path, environ={"TG_KEY": "qzv\nwxj"})
     key, why = tel._key()
-    assert key is None and "header" in why and "abc" not in why
+    assert key is None and "header" in why and "qzv" not in why
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, 0.0])

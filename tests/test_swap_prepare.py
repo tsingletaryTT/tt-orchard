@@ -164,6 +164,19 @@ def stage2_phases(counting):
     return [key for key, _ in counting.asked if key[0] == 2]
 
 
+def forensics(r, c, code) -> str:
+    """Everything a failure of these two tests needs (issue 334): the exit code, each request the scripted model saw (stage, phase and the
+    start and end of the task text), every ledger event of stage 2, the files in stage 2's directory and the output of the supervisor's
+    prepare run. The assertion message is cut by pytest, so this is one short string."""
+    sd = r.run_dir / "stages" / "2"
+    out = sd / "evidence" / "prepare-swap-output.txt"
+    events = [(e["event"], {k: v for k, v in e["data"].items() if k in ("decision", "returncode", "done", "phase", "result", "reasons", "reason")})
+              for e in r.entries() if e["stage"] == 2]
+    return json.dumps({"code": code, "asked": [(k, u[-160:]) for k, u in c.asked if k[0] == 2], "events": events,
+                       "files": sorted(p.relative_to(sd).as_posix() for p in sd.rglob("*")) if sd.is_dir() else None,
+                       "prepare_output": out.read_text(errors="replace")[-300:] if out.is_file() else None}, default=str)[:3500]
+
+
 def test_the_supervisor_runs_prepare_itself_and_never_asks_the_agent_for_it(tmp_path, monkeypatch):
     drafting(monkeypatch, BUILDS)
     r = Rig(tmp_path)
@@ -173,7 +186,7 @@ def test_the_supervisor_runs_prepare_itself_and_never_asks_the_agent_for_it(tmp_
         code = r.run()
         # Issue 334: this test failed once in a full run and no loop reproduced it. The message carries the ledger so the next failure shows why.
         assert code == EXIT_READY, (code, [e for e in r.entries() if e["event"] in ("decision", "stage_end", "block")][-6:])
-        assert (2, "prepare") not in stage2_phases(c) and (2, "finish") in stage2_phases(c)
+        assert (2, "prepare") not in stage2_phases(c) and (2, "finish") in stage2_phases(c), forensics(r, c, code)
         sd = r.run_dir / "stages" / "2"
         assert json.loads((sd / "hw_test.json").read_text())["command"] == "python3 stages/2/serve_and_compare.py"
         assert (sd / "evidence" / "devices.txt").read_text() == "ran"          # the hardware test ran what the supervisor wrote
@@ -192,7 +205,7 @@ def test_exit_2_asks_the_agent_with_the_scripts_message(tmp_path, monkeypatch):
         asked = [a for a in c.asked if a[0] == (2, "prepare")][:1]
         assert asked, (code, c.asked and [k for k, _ in c.asked], [e for e in r.entries() if e["event"] in ("decision", "stage_end", "block")][-6:])
         [(_, user)] = asked
-        assert "tt_cache is not empty" in user and "exited 2" in user
+        assert "tt_cache is not empty" in user and "exited 2" in user, forensics(r, c, code)
         assert any(d.get("decision") == "prepare run by the supervisor" and d.get("returncode") == 2 for d in r.decisions())
     finally:
         r.close()

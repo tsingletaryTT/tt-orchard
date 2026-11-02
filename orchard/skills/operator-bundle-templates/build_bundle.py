@@ -1008,7 +1008,7 @@ def summary(run: Run, n_todo: int, n_hazards: int) -> str:
         text += f"Stage 7 staged {len(profiles)} package(s); {ok} passed its boot check. "
     else:
         text += "No package was staged. "
-    text += f"RISKS.md lists {n_todo} TODO item(s) and {n_hazards} stage 0 hazard(s)."
+    text += f"RISKS.md lists {n_todo} TODO item(s) and {n_hazards} stage 0 delta-triage hazard(s) (a kernel hazard scan, when the run has one, is counted in the stage 0 section)."
     return text
 
 
@@ -2172,7 +2172,7 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
         lines += [f"### {heading}", "", finding, "", f"- Evidence: {ev(evidence)}.",
                   f"- Dealt with: {'yes' if ok else 'Not shown'}. {' '.join(why)}", ""]
     if not hazards:
-        lines += ["Stage 0 listed no hazards.", ""]
+        lines += ["Stage 0's delta triage listed no hazards.", ""]
     lines += scan_risks(run, redact)
     d = run.sampling_decision
     if d is not None and d.get("flag"):
