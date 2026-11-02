@@ -185,6 +185,15 @@ SUITE_READABLE_MIN_CHARS = 20   # choice: shorter replies are not judged on that
 SUITE_NO_VOWEL_WORD_CHARS = 5   # choice: a Latin word this long with no vowel (y counts) is suspect ...
 SUITE_NO_VOWEL_MIN_WORDS = 8    # choice: ... when at least this many such words are in the reply ...
 SUITE_NO_VOWEL_SHARE_MAX = 0.25  # choice: ... and more than this share of the words that long have none
+# The agreement set (issue 15, orchard/agreement_core.py): several fixed prompts, each with its own CPU reference, scored teacher-forced after the
+# 32-token check. orchard/agreement_core.py repeats these numbers because the stage templates cannot import orchard; tests/test_agreement_core.py
+# keeps the two equal. All are provisional choices: no fine-tune has run through the set against a measured control yet, and the 32-token
+# baseline bar (SWAP_TOP1_MIN) stays beside the set's verdict.
+AGREEMENT_POOLED_MIN = 0.85     # choice: pooled top-1 agreement over every token of every prompt (the baseline bar, over more text)
+AGREEMENT_PROMPT_MIN = 0.70     # choice: no single prompt below this; the damage control's 0.75 passes it, so the pooled bar is what rejects damage
+AGREEMENT_MIN_PROMPTS = 5       # choice: issue 15 asks for at least five prompts
+AGREEMENT_MIN_TOKENS = 32       # choice: tokens compared per prompt
+AGREEMENT_CONTROL_MARGIN = 0.05  # choice: the new model's pooled agreement must exceed the nearest model's control by this much
 # The graft trial (orchard/graft_trial.py). Stage 2 serves the nearest model's mtp.* head grafted onto a model that has none, once, beside the
 # safe configuration, and ships the graft only when these hold. All three are provisional choices from one measurement: BAAI/AREX-2 on 2 chips,
 # 2026-10-23, decode 44 to 68 tokens/s with the graft against about 20 without, top-1 agreement 0.96875 both ways. Replace them with a

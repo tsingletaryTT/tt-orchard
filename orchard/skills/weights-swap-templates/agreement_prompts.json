@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "note": "The fixed agreement prompt set for the stage 1 CPU reference and the stage 2 and 4 chip check (issue 15). Stage 1 renders each prompt through the chat template, runs the CPU reference for the new tokens, and records the ids; the chip check compares its own tokens with those. The prompts are committed so a model and its control see the same text, and the set's sha256 is recorded with every result. The long prompt is made by orchard/agreement_core.py long_prompt_text(approx_tokens); a test keeps the file equal to it.",
+  "prompts": [
+    {
+      "id": "chat-explain",
+      "kind": "chat",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Explain in three sentences why the sky is blue."
+        }
+      ]
+    },
+    {
+      "id": "code-reverse",
+      "kind": "code",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write a Python function reverse_words(s) that reverses the order of the words in a string. Reply with the code only."
+        }
+      ]
+    },
+    {
+      "id": "tool-call-json",
+      "kind": "tool-call",
+      "messages": [
+        {
+          "role": "user",
+          "content": "You can call get_weather(city: string). The user asks: What is the weather in Lisbon? Reply with only a JSON object of the form {\"name\": ..., \"arguments\": {...}}."
+        }
+      ]
+    },
+    {
+      "id": "non-english-german",
+      "kind": "non-english",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Erkläre in zwei Sätzen, was eine Primzahl ist, und nenne drei Beispiele."
+        }
+      ]
+    },
+    {
+      "id": "non-english-japanese",
+      "kind": "non-english",
+      "messages": [
+        {
+          "role": "user",
+          "content": "日本の首都はどこですか。一文で答えてください。"
+        }
+      ]
+    },
+    {
+      "id": "long-context-needle",
+      "kind": "long-context",
+      "approx_tokens": 2000,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Read the log below. It has one entry that names the access code for the archive room.\nEntry 0: the access code for the archive room is violet-4417.\nEntry 1: the visitor desk logged 2 deliveries and 2 visitors before noon on day 1.\nEntry 2: the visitor desk logged 3 deliveries and 3 visitors before noon on day 2.\nEntry 3: the visitor desk logged 4 deliveries and 4 visitors before noon on day 3.\nEntry 4: the visitor desk logged 5 deliveries and 5 visitors before noon on day 4.\nEntry 5: the visitor desk logged 6 deliveries and 1 visitors before noon on day 5.\nEntry 6: the visitor desk logged 7 deliveries and 2 visitors before noon on day 6.\nEntry 7: the visitor desk logged 1 deliveries and 3 visitors before noon on day 7.\nEntry 8: the visitor desk logged 2 deliveries and 4 visitors before noon on day 8.\nEntry 9: the visitor desk logged 3 deliveries and 5 visitors before noon on day 9.\nEntry 10: the visitor desk logged 4 deliveries and 1 visitors before noon on day 10.\nEntry 11: the visitor desk logged 5 deliveries and 2 visitors before noon on day 11.\nEntry 12: the visitor desk logged 6 deliveries and 3 visitors before noon on day 12.\nEntry 13: the visitor desk logged 7 deliveries and 4 visitors before noon on day 13.\nEntry 14: the visitor desk logged 1 deliveries and 5 visitors before noon on day 14.\nEntry 15: the visitor desk logged 2 deliveries and 1 visitors before noon on day 15.\nEntry 16: the visitor desk logged 3 deliveries and 2 visitors before noon on day 16.\nEntry 17: the visitor desk logged 4 deliveries and 3 visitors before noon on day 17.\nEntry 18: the visitor desk logged 5 deliveries and 4 visitors before noon on day 18.\nEntry 19: the visitor desk logged 6 deliveries and 5 visitors before noon on day 19.\nEntry 20: the visitor desk logged 7 deliveries and 1 visitors before noon on day 20.\nEntry 21: the visitor desk logged 1 deliveries and 2 visitors before noon on day 21.\nEntry 22: the visitor desk logged 2 deliveries and 3 visitors before noon on day 22.\nEntry 23: the visitor desk logged 3 deliveries and 4 visitors before noon on day 23.\nEntry 24: the visitor desk logged 4 deliveries and 5 visitors before noon on day 24.\nEntry 25: the visitor desk logged 5 deliveries and 1 visitors before noon on day 25.\nEntry 26: the visitor desk logged 6 deliveries and 2 visitors before noon on day 26.\nEntry 27: the visitor desk logged 7 deliveries and 3 visitors before noon on day 27.\nEntry 28: the visitor desk logged 1 deliveries and 4 visitors before noon on day 28.\nEntry 29: the visitor desk logged 2 deliveries and 5 visitors before noon on day 29.\nEntry 30: the visitor desk logged 3 deliveries and 1 visitors before noon on day 30.\nEntry 31: the visitor desk logged 4 deliveries and 2 visitors before noon on day 31.\nEntry 32: the visitor desk logged 5 deliveries and 3 visitors before noon on day 32.\nEntry 33: the visitor desk logged 6 deliveries and 4 visitors before noon on day 33.\nEntry 34: the visitor desk logged 7 deliveries and 5 visitors before noon on day 34.\nEntry 35: the visitor desk logged 1 deliveries and 1 visitors before noon on day 35.\nEntry 36: the visitor desk logged 2 deliveries and 2 visitors before noon on day 36.\nEntry 37: the visitor desk logged 3 deliveries and 3 visitors before noon on day 37.\nEntry 38: the visitor desk logged 4 deliveries and 4 visitors before noon on day 38.\nEntry 39: the visitor desk logged 5 deliveries and 5 visitors before noon on day 39.\nEntry 40: the visitor desk logged 6 deliveries and 1 visitors before noon on day 40.\nEntry 41: the visitor desk logged 7 deliveries and 2 visitors before noon on day 41.\nEntry 42: the visitor desk logged 1 deliveries and 3 visitors before noon on day 42.\nEntry 43: the visitor desk logged 2 deliveries and 4 visitors before noon on day 43.\nEntry 44: the visitor desk logged 3 deliveries and 5 visitors before noon on day 44.\nEntry 45: the visitor desk logged 4 deliveries and 1 visitors before noon on day 45.\nEntry 46: the visitor desk logged 5 deliveries and 2 visitors before noon on day 46.\nEntry 47: the visitor desk logged 6 deliveries and 3 visitors before noon on day 47.\nEntry 48: the visitor desk logged 7 deliveries and 4 visitors before noon on day 48.\nEntry 49: the visitor desk logged 1 deliveries and 5 visitors before noon on day 49.\nEntry 50: the visitor desk logged 2 deliveries and 1 visitors before noon on day 50.\nEntry 51: the visitor desk logged 3 deliveries and 2 visitors before noon on day 51.\nEntry 52: the visitor desk logged 4 deliveries and 3 visitors before noon on day 52.\nEntry 53: the visitor desk logged 5 deliveries and 4 visitors before noon on day 53.\nEntry 54: the visitor desk logged 6 deliveries and 5 visitors before noon on day 54.\nEntry 55: the visitor desk logged 7 deliveries and 1 visitors before noon on day 55.\nEntry 56: the visitor desk logged 1 deliveries and 2 visitors before noon on day 56.\nEntry 57: the visitor desk logged 2 deliveries and 3 visitors before noon on day 57.\nEntry 58: the visitor desk logged 3 deliveries and 4 visitors before noon on day 58.\nEntry 59: the visitor desk logged 4 deliveries and 5 visitors before noon on day 59.\nEntry 60: the visitor desk logged 5 deliveries and 1 visitors before noon on day 60.\nEntry 61: the visitor desk logged 6 deliveries and 2 visitors before noon on day 61.\nEntry 62: the visitor desk logged 7 deliveries and 3 visitors before noon on day 62.\nEntry 63: the visitor desk logged 1 deliveries and 4 visitors before noon on day 63.\nEntry 64: the visitor desk logged 2 deliveries and 5 visitors before noon on day 64.\nEntry 65: the visitor desk logged 3 deliveries and 1 visitors before noon on day 65.\nEntry 66: the visitor desk logged 4 deliveries and 2 visitors before noon on day 66.\nEntry 67: the visitor desk logged 5 deliveries and 3 visitors before noon on day 67.\nEntry 68: the visitor desk logged 6 deliveries and 4 visitors before noon on day 68.\nEntry 69: the visitor desk logged 7 deliveries and 5 visitors before noon on day 69.\nEntry 70: the visitor desk logged 1 deliveries and 1 visitors before noon on day 70.\nEntry 71: the visitor desk logged 2 deliveries and 2 visitors before noon on day 71.\nEntry 72: the visitor desk logged 3 deliveries and 3 visitors before noon on day 72.\nEntry 73: the visitor desk logged 4 deliveries and 4 visitors before noon on day 73.\nEntry 74: the visitor desk logged 5 deliveries and 5 visitors before noon on day 74.\nEntry 75: the visitor desk logged 6 deliveries and 1 visitors before noon on day 75.\nEntry 76: the visitor desk logged 7 deliveries and 2 visitors before noon on day 76.\nEntry 77: the visitor desk logged 1 deliveries and 3 visitors before noon on day 77.\nEntry 78: the visitor desk logged 2 deliveries and 4 visitors before noon on day 78.\nEntry 79: the visitor desk logged 3 deliveries and 5 visitors before noon on day 79.\nEntry 80: the visitor desk logged 4 deliveries and 1 visitors before noon on day 80.\nEntry 81: the visitor desk logged 5 deliveries and 2 visitors before noon on day 81.\nEntry 82: the visitor desk logged 6 deliveries and 3 visitors before noon on day 82.\nEntry 83: the visitor desk logged 7 deliveries and 4 visitors before noon on day 83.\nEntry 84: the visitor desk logged 1 deliveries and 5 visitors before noon on day 84.\nEntry 85: the visitor desk logged 2 deliveries and 1 visitors before noon on day 85.\nEntry 86: the visitor desk logged 3 deliveries and 2 visitors before noon on day 86.\nEntry 87: the visitor desk logged 4 deliveries and 3 visitors before noon on day 87.\nEntry 88: the visitor desk logged 5 deliveries and 4 visitors before noon on day 88.\nEntry 89: the visitor desk logged 6 deliveries and 5 visitors before noon on day 89.\nEntry 90: the visitor desk logged 7 deliveries and 1 visitors before noon on day 90.\nEntry 91: the visitor desk logged 1 deliveries and 2 visitors before noon on day 91.\nEntry 92: the visitor desk logged 2 deliveries and 3 visitors before noon on day 92.\nEntry 93: the visitor desk logged 3 deliveries and 4 visitors before noon on day 93.\nEntry 94: the visitor desk logged 4 deliveries and 5 visitors before noon on day 94.\nEntry 95: the visitor desk logged 5 deliveries and 1 visitors before noon on day 95.\nWhat is the access code for the archive room? Answer with the code only."
+        }
+      ]
+    }
+  ]
+}

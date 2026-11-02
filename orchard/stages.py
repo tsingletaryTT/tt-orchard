@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -42,7 +43,7 @@ from typing import Callable
 from orchard import audio_decision, audio_facts, audio_runtime, full_port, safeio
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import prompt_suite, sampling_choice, sampling_probe
+from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -65,6 +66,7 @@ class GateResult:
     ok: bool
     reasons: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()      # run-directory-relative paths the gate relied on
+    waived: tuple[str, ...] = ()        # fields an operator option waived, from the gate's own read (full-port rehearsal, issue 357)
 
 
 @dataclass(frozen=True)
@@ -542,11 +544,13 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
-def gate_full_port(stage_dir, run_dir) -> GateResult:
+def gate_full_port(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
     """Stage 2 of a full port (run started with --full-port): the port ran on the leased chips and its tokens agree with the stage 1
-    reference. orchard/full_port.py holds the checks; each failing field has its own reason."""
-    reasons, seen = full_port.check(stage_dir, run_dir)
-    return _done(reasons, seen)
+    reference. orchard/full_port.py holds the checks; each failing field has its own reason. `rehearsal` (the run's --full-port-rehearsal,
+    read from the ledger by the supervisor) waives the `coherent` field only."""
+    waived: list[str] = []
+    reasons, seen = full_port.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived)
+    return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
 
 
 def _delta_refusal(run_dir) -> str | None:
@@ -904,13 +908,128 @@ def _hub_fetch_reasons(report, where: str = "") -> list[str]:
             f"the package ignores MODEL_WEIGHTS_DIR, and its numbers describe the fetched model"]
 
 
-def _suite_reasons(report, run_dir, where: str = "") -> list[str]:
+AGREEMENT_PROMPTS_FILE = Path(__file__).resolve().parent / "skills" / "weights-swap-templates" / "agreement_prompts.json"
+AGREEMENT_REFERENCE_PATH = ("stages", "1", "evidence", "reference", "agreement-reference.json")
+AGREEMENT_REFERENCE_MAX_BYTES = 8 * 1024 * 1024
+AGREEMENT_LEDGER_DECISION = "agreement reference recorded"     # the supervisor writes it when it drafts stage 2's config (Supervisor._record_agreement_reference)
+
+
+def _shipped_agreement_ids() -> list[str] | None:
+    """The prompt ids of the shipped agreement set, or None when the file cannot be read."""
+    try:
+        data = safeio.read_json(AGREEMENT_PROMPTS_FILE, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError:
+        return None
+    prompts = data.get("prompts") if isinstance(data, dict) else None
+    ids = [p.get("id") for p in prompts if isinstance(p, dict)] if isinstance(prompts, list) else []
+    return ids if ids and all(isinstance(i, str) for i in ids) else None
+
+
+def _ledger_reference_sha(run_dir) -> str | None:
+    """The sha256 of stage 1's agreement reference file as the supervisor recorded it in the ledger before any stage 2 test ran, or None
+    when no such entry exists (or the ledger cannot be read). The last entry wins."""
+    from orchard.ledger import LedgerCorrupt, read_entries
+    try:
+        entries = read_entries(Path(run_dir) / "ledger.jsonl")
+    except (LedgerCorrupt, OSError):
+        return None
+    found = None
+    for e in entries:
+        data = e.get("data")
+        if e.get("event") == "decision" and isinstance(data, dict) and data.get("decision") == AGREEMENT_LEDGER_DECISION \
+                and isinstance(data.get("sha256"), str):
+            found = data["sha256"]
+    return found
+
+
+def agreement_reference_record(run_dir) -> dict | None:
+    """{path, sha256} of stage 1's agreement reference file when it exists and can be hashed, else None. The supervisor calls this when it
+    drafts stage 2's config: a record means the run can use the agreement set, and the sha256 goes into the ledger as the trusted value
+    the gate compares the file with later."""
+    path = Path(run_dir).joinpath(*AGREEMENT_REFERENCE_PATH)
+    if not os.path.lexists(path):
+        return None
+    try:
+        return evidence_record(run_dir, path)
+    except safeio.SafeReadError:
+        return None
+
+
+def _agreement_binding_reasons(record, run_dir) -> list[str]:
+    """The agreement-set record must have been scored against the reference stage 1 wrote and the prompt set the repository ships. The
+    reference file's sha256 is checked against the one the supervisor put in the ledger, so a file replaced after stage 1 (together with the
+    hash the template recorded) is refused. The prompt ids must be the shipped ids, each once, in the reference, the record and the control;
+    every reference id list is compared with stage 1's, and the control must have been served from the nearest model."""
+    if not isinstance(record, dict) or record.get("ran") is not True:
+        return []
+    out = []
+    shipped_ids = _shipped_agreement_ids()
+    try:
+        shipped = safeio.sha256_file(AGREEMENT_PROMPTS_FILE, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return [f"the shipped agreement prompt set cannot be read: {exc.reason}"]
+    if shipped_ids is None:
+        return ["the shipped agreement prompt set has no usable prompt ids"]
+    if record.get("prompt_set_sha256") != shipped:
+        out.append("the agreement set was run with a prompt set that is not the one the repository ships (its sha256 differs)")
+    path = Path(run_dir).joinpath(*AGREEMENT_REFERENCE_PATH)
+    try:
+        raw = safeio.read_bytes(path, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+        ref = safeio.parse_json_bytes(raw, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return out + [f"the agreement set's CPU reference (stage 1 {AGREEMENT_REFERENCE_PATH[-1]}) cannot be read: {exc.reason}"]
+    actual = hashlib.sha256(raw).hexdigest()
+    recorded = _ledger_reference_sha(run_dir)
+    if recorded is None:
+        out.append("the ledger has no record of stage 1's agreement reference (the supervisor writes it before stage 2's test), so the file cannot be trusted")
+    elif recorded != actual:
+        out.append("stage 1's agreement reference file is not the one the supervisor recorded in the ledger (its sha256 differs)")
+    if record.get("reference_sha256") != actual:
+        out.append("the agreement set was scored against a reference file other than the one stage 1 wrote (its sha256 differs)")
+    entries = ref.get("entries") if isinstance(ref, dict) else None
+    out += [f"stage 1's agreement reference: {r}" for r in agreement_core.id_problems(entries, shipped_ids)]
+    wanted = ({e["id"]: e.get("generated_ids") for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
+              if isinstance(entries, list) else {})
+
+    def check(rows, label):
+        for e in rows if isinstance(rows, list) else []:
+            pid = e.get("id") if isinstance(e, dict) else None
+            ids = e.get("reference_ids") if isinstance(e, dict) else None
+            full = wanted.get(pid) if isinstance(pid, str) else None
+            if not isinstance(ids, list) or not isinstance(full, list) or full[:len(ids)] != ids:
+                out.append(f"the {label}'s reference ids for prompt {pid if isinstance(pid, str) else None!r} are not stage 1's")
+
+    check(record.get("entries"), "agreement set")
+    control = record.get("control")
+    if isinstance(control, dict):
+        check(control.get("entries"), "control")
+        problem = prompt_suite.control_identity_problem(_nearest_model_of(run_dir), control.get("model_id"))
+        if problem:
+            out.append(f"the agreement control is not a control of the nearest model: {problem}")
+    return out
+
+
+def _agreement_reasons(record, run_dir, requested: bool) -> list[str]:
+    """All gate reasons for one swap-check.json's `agreement_set`. A run whose swap_config.json asked for the set (`requested`) needs a
+    completed record; a run that did not ask has none unless a record is present, in which case it is judged like any other."""
+    ran = isinstance(record, dict) and record.get("ran") is True
+    if requested and not ran:
+        return ["swap_config.json asks for the agreement set and swap-check.json holds no completed agreement_set record (missing, malformed or ran false)"]
+    if not ran:
+        return []
+    return agreement_core.judge(record, expected_ids=_shipped_agreement_ids() or [])["reasons"] + _agreement_binding_reasons(record, run_dir)
+
+
+def _suite_reasons(report, run_dir, where: str = "", agreement_requested: bool = False) -> list[str]:
     """The prompt-suite reasons (orchard/prompt_suite.py) in one swap-check.json report, each prefixed with `where`.
     A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
     result.json: the record holds the raw replies, and the verdict is computed here from them. A control in the record has
     to have been served from the run's nearest model (stage 0's), which is checked here again whatever the template did."""
     probe = [where + r for r in sampling_probe.problems(report.get("sampling_probe") if isinstance(report, dict) else None)]
-    return (_hub_fetch_reasons(report, where) + probe
+    # The agreement set (issue 15): every number is recomputed from the raw ids in the record, with the same file the template used.
+    record = report.get("agreement_set") if isinstance(report, dict) else None
+    agreement = [where + r for r in _agreement_reasons(record, run_dir, agreement_requested)]
+    return (_hub_fetch_reasons(report, where) + probe + agreement
             + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons])
 
 
@@ -919,13 +1038,23 @@ def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
     is not an object: the other checks of the gate already say what they need of those. A file that is there and that the safe
     reader refuses (not JSON, NaN, over the size cap, a link, a FIFO) is a reason: the report could have held a failing record
     (a non-empty hub_fetch, a suite finding), and a refused read must not drop it."""
+    # Whether the run asked for the agreement set is read from the swap_config.json beside the evidence directory, which the supervisor
+    # drafts; a config that cannot be read counts as not asking.
+    requested = False
+    try:
+        cfg = _safe_json(Path(path).parent.parent / "swap_config.json")
+        requested = isinstance(cfg, dict) and cfg.get("agreement_set") is True
+    except safeio.SafeReadError:
+        pass
     try:
         report = _safe_json(path)
     except safeio.SafeReadError as exc:
         if _is_missing(exc):
-            return []
+            return [f"{where}swap_config.json asks for the agreement set and swap-check.json is missing"] if requested else []
         return [f"{where}swap-check.json is not readable JSON: {exc.reason}"]
-    return _suite_reasons(report, run_dir, where) if isinstance(report, dict) else []
+    if not isinstance(report, dict):
+        return [f"{where}swap_config.json asks for the agreement set and swap-check.json is not an object"] if requested else []
+    return _suite_reasons(report, run_dir, where, requested)
 
 
 def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
@@ -1812,6 +1941,12 @@ def full_port_enabled(entries: list[dict]) -> bool:
         if e["event"] == "decision" and e["data"].get("decision") == FULL_PORT_ALLOWED:
             return True
     return False
+
+
+def full_port_rehearsal(entries: list[dict]) -> bool:
+    """Whether the operator started the run with `--full-port-rehearsal` (issue 357). Only run_start counts: the option waives a gate field,
+    so it cannot be added later by a decision, and nothing the coder writes is read."""
+    return any(e["event"] == "run_start" and e["data"].get("full_port_rehearsal") is True for e in entries)
 
 
 PACKAGE_OPTIONS_SET = "package options set"

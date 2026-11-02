@@ -69,7 +69,7 @@ OVERRIDE = "--allow-stale-skills"
 # git subcommands that only read. `remote` is allowed only as `remote get-url`.
 # `status` and `diff` are not here: they hash the working tree through the clone's own attributes and config, which can run a
 # clean filter or a textconv program. The dirty check reads the tree with `ls-tree` and compares file bytes in Python.
-READ_ONLY_GIT = frozenset({"rev-parse", "symbolic-ref", "ls-tree", "remote", "ls-remote", "cat-file", "rev-list"})
+READ_ONLY_GIT = frozenset({"rev-parse", "symbolic-ref", "ls-tree", "remote", "ls-remote", "cat-file", "rev-list", "merge-base"})
 GH_WRITE_OPTIONS = frozenset({"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"})
 GIT_SAFE_CONFIG = (("http.followRedirects", "false"), ("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null"),
                    ("core.attributesFile", "/dev/null"), ("core.useReplaceRefs", "false"))
@@ -90,28 +90,57 @@ def default_cache_path() -> Path:
     return Path(base) / "tt-orchard" / "skills-freshness.json"
 
 
-def _raw_run(argv, timeout, env=None):
+def _raw_run(argv, timeout, env=None, cwd=None, max_bytes=None):
     """(returncode, stdout, stderr), like ttlang_env.real_run. A timeout answers 124 and a missing program 127.
 
     The command runs in its own session. On a timeout the whole process group is killed, so a helper git started
-    (git-remote-https, ssh) does not outlive the call; subprocess.run would kill only the direct child."""
+    (git-remote-https, ssh) does not outlive the call; subprocess.run would kill only the direct child.
+
+    With `max_bytes`, the child's output goes to temporary files that it cannot grow past that size (RLIMIT_FSIZE: a write beyond it
+    fails in the child), and at most that many bytes of each stream are read back. A noisy interpreter then cannot fill the
+    supervisor's memory while `communicate` buffers it."""
     import signal
     import subprocess
+    sinks = None
     try:
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=env, start_new_session=True)
+        if max_bytes:
+            import resource
+            import tempfile
+            sinks = (tempfile.TemporaryFile(), tempfile.TemporaryFile())
+            limit = (int(max_bytes), int(max_bytes))
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=sinks[0], stderr=sinks[1], env=env, cwd=cwd, start_new_session=True,
+                                    preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, limit))
+        else:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, env=env, cwd=cwd, start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    def kill_group():
         if proc.pid > 1:                                # its own group (start_new_session), never ours
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group()
         proc.communicate()
         return 124, "", f"timed out after {timeout:.0f} s"
+    except BaseException:                               # an interrupt (SIGINT, SIGTERM as an exception) or another failure: nothing is left running
+        kill_group()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        raise
+    if sinks is not None:
+        def tail(f):
+            f.seek(0)
+            return f.read(int(max_bytes)).decode("utf-8", errors="replace")
+        out, err = tail(sinks[0]), tail(sinks[1])
+        for f in sinks:
+            f.close()
     return proc.returncode, out, err
 
 
@@ -257,6 +286,8 @@ class Freshness:
     update: str | None = None           # the command a person runs to update; orchard never runs it
     warnings: list[str] = field(default_factory=list)
     cached: dict | None = None          # an UNKNOWN result's last good check, when one was used
+    repo: str | None = None             # "owner/name" of the github.com origin, when it has one
+    behind_days: float | None = None    # check_clone(want_age=True): days of upstream history HEAD lacks, when it could be told
 
     @property
     def stale(self) -> bool:
@@ -297,11 +328,27 @@ def _age_text(seconds: float) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
+_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]*@")
+_TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{8,}")
+
+
+def scrub_secrets(text: str) -> str:
+    """`text` without URL user information (`https://user:pass@host` becomes `https://host`) and without token-shaped words. Applied to a whole
+    message before it is cut to a length: a cut between a password and its `@` would hide the user information from this pattern."""
+    return _TOKEN.sub("[token removed]", _USERINFO.sub(r"\1", str(text)))
+
+
+def _err_line(err: str) -> str:
+    """The last line of a command's error output for a message: the whole text is scrubbed first, then the line is cut to 200 characters."""
+    return (scrub_secrets(err).strip().splitlines() or ["no answer"])[-1][:200]
+
+
 def _unknown(result: Freshness, why: str, cache: Cache, key: str) -> Freshness:
     """Mark `result` UNKNOWN. A cached CURRENT result for the same local state, younger than CACHE_MAX_AGE_S, is
     attached (and then the result is not stale); the detail always says the comparison was not made."""
     result.state = UNKNOWN
     result.update = None                    # nothing was found that an update would fix
+    why = scrub_secrets(why)[:300]
     result.detail = f"It could not be compared with upstream ({why})."
     entry = cache.get(key)
     age = cache.age_s(entry) if entry else None
@@ -421,14 +468,62 @@ def _dirty(runner: ReadOnlyRunner, root: str, untracked: bool) -> bool | None:
     return any(w != "unchecked" and (untracked or w != "untracked") for w in dirty.values())
 
 
+_UPSTREAM_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
+
+
+def _unix_time(text) -> float | None:
+    """Seconds since the epoch for a commit time (digits, as `%ct` prints it) or a GitHub ISO 8601 date, else None."""
+    from datetime import datetime
+    t = str(text).strip()
+    try:
+        if t.isdigit() and len(t) <= 12:
+            return float(t)
+        return datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp() if len(t) <= 40 else None
+    except ValueError:
+        return None
+
+
+def _commit_times(out: str) -> list[float]:
+    """The commit times in `rev-list --format=%ct` output: every line that is not a `commit <sha>` header."""
+    times = [_unix_time(line) for line in out.splitlines() if line.strip() and not line.startswith("commit ")]
+    return [t for t in times if t is not None]
+
+
+def _behind_days(runner: ReadOnlyRunner, root: str, repo: str, head: str, remote: str) -> float | None:
+    """How many days upstream's tip is past the point where HEAD stopped following it: the tip's commit date minus the
+    commit date of the merge base of HEAD and the tip. Both ways of reading it (the local objects when the tip is here,
+    else GitHub's compare answer and the tip commit) use the merge base, so fetching the tip does not change the answer.
+    None when neither answers."""
+    if runner(["git", "-C", root, "cat-file", "-e", f"{remote}^{{commit}}"], network=False)[0] == 0:
+        base = _out(runner, ["git", "-C", root, "merge-base", head, remote])
+        if base and re.fullmatch(r"[0-9a-f]{40}", base):
+            when = [_commit_times(_out(runner, ["git", "-C", root, "rev-list", "-n", "1", "--format=%ct", sha]) or "") for sha in (remote, base)]
+            if when[0] and when[1]:
+                return max(0.0, (when[0][0] - when[1][0]) / 86400)
+    try:
+        cmp = json.loads(_out(runner, ["gh", "api", f"repos/{repo}/compare/{head}...{remote}"], network=True) or "")
+        base = _unix_time(cmp["merge_base_commit"]["commit"]["committer"]["date"])
+        tip = _unix_time(json.loads(_out(runner, ["gh", "api", f"repos/{repo}/commits/{remote}"], network=True) or "")
+                         ["commit"]["committer"]["date"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return max(0.0, (tip - base) / 86400) if base is not None and tip is not None else None
+
+
 def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, update: Callable[..., str],
-                reuse_s: float = 0.0, branch_warning: bool = True, untracked: bool = True) -> Freshness:
-    """Compare a git checkout's HEAD with its origin's main branch. `update(root, branch, remote)` gives the update
-    hint; `remote` is upstream main's sha once it is known, else None.
-    `untracked` False leaves untracked files out of the dirty-tree warning."""
+                reuse_s: float = 0.0, branch_warning: bool = True, untracked: bool = True,
+                upstream_branch: str = "main", want_age: bool = False, expected_repo: str | None = None) -> Freshness:
+    """Compare a git checkout's HEAD with its origin's main branch (or `upstream_branch`). `update(root, branch, remote)`
+    gives the update hint; `remote` is the upstream tip's sha once it is known, else None.
+    `untracked` False leaves untracked files out of the dirty-tree warning. `want_age` True makes a BEHIND result carry
+    `behind_days` (see _behind_days); it costs up to two more GitHub calls, so the callers that do not use it leave it off."""
     path = str(path)
+    up = f"upstream {upstream_branch}"
     root = _out(runner, ["git", "-C", path, "rev-parse", "--show-toplevel"])
     result = Freshness(source=source, path=root or path, state=UNKNOWN, detail="")
+    if not _UPSTREAM_BRANCH.match(upstream_branch) or ".." in upstream_branch or upstream_branch.endswith(("/", ".lock")):
+        result.detail = f"{upstream_branch!r} is not a branch name orchard will ask upstream about."
+        return result
     key = f"{source}:{root or path}"
     if not root:
         result.detail = f"{path} is not in a git checkout, so it cannot be compared with upstream."
@@ -438,29 +533,33 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
     result.dirty = _dirty(runner, root, untracked)
     if result.dirty:
         result.warnings.append(f"{root} has uncommitted changes.")
-    if branch_warning and result.branch and result.branch != "main":
-        result.warnings.append(f"{root} is on branch {result.branch}; it is compared with upstream main.")
+    if branch_warning and result.branch and result.branch != upstream_branch:
+        result.warnings.append(f"{root} is on branch {result.branch}; it is compared with {up}.")
     if not result.local:
         result.detail = f"HEAD could not be read in {root}."
         return result
     origin = _out(runner, ["git", "-C", root, "remote", "get-url", "origin"]) or ""
     repo = github_repo(origin)
     if repo is None:
-        result.detail = (f"Its origin ({origin or 'none'}) is not a github.com repository, so it is not contacted "
+        result.detail = (f"Its origin ({'none' if not origin else 'not on github.com'}) is not a github.com repository, so it is not contacted "
                          "and cannot be compared with upstream.")
+        return result
+    result.repo = repo
+    if expected_repo and repo.lower() != expected_repo.lower():         # GitHub names are case-insensitive; no call is made for another project
+        result.detail = (f"Its origin is {repo}, not {expected_repo}, so it is not contacted and cannot be compared with that upstream.")
         return result
     result.update = update(root, result.branch)
     if _reused(result, cache, key, reuse_s):
         return result
-    rc, out, err = runner(["git", "-C", root, "ls-remote", "origin", "refs/heads/main"], network=True)
-    remote = _ref_sha(out, "refs/heads/main") if rc == 0 else None
+    rc, out, err = runner(["git", "-C", root, "ls-remote", "origin", f"refs/heads/{upstream_branch}"], network=True)
+    remote = _ref_sha(out, f"refs/heads/{upstream_branch}") if rc == 0 else None
     if not remote or not re.fullmatch(r"[0-9a-f]{40}", remote):
-        why = (err.strip().splitlines() or ["no answer"])[-1][:200] if rc != 0 else "origin has no main branch"
+        why = _err_line(err) if rc != 0 else f"origin has no {upstream_branch} branch"
         return _unknown(result, why, cache, key)
     result.remote = remote
     if remote == result.local:
         result.state, result.behind, result.ahead = CURRENT, 0, 0
-        result.detail = f"HEAD {result.local[:9]} is upstream main ({repo})."
+        result.detail = f"HEAD {result.local[:9]} is {up} ({repo})."
         result.update = None
     else:
         ahead, behind = _count(runner, root, repo, result.local, remote)
@@ -468,16 +567,18 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
         result.update = update(root, result.branch, remote)
         if behind is None:
             result.state = DIFFERS
-            result.detail = (f"HEAD {result.local[:9]} is not upstream main {remote[:9]} ({repo}); how far apart they "
+            result.detail = (f"HEAD {result.local[:9]} is not {up} {remote[:9]} ({repo}); how far apart they "
                              "are could not be counted.")
         elif behind > 0:
             result.state = BEHIND
+            if want_age:
+                result.behind_days = _behind_days(runner, root, repo, result.local, remote)
             more = f" and has {_commits(ahead)} of its own" if ahead else ""
-            result.detail = (f"HEAD {result.local[:9]} is {_commits(behind)} behind upstream main {remote[:9]} "
+            result.detail = (f"HEAD {result.local[:9]} is {_commits(behind)} behind {up} {remote[:9]} "
                              f"({repo}){more}.")
         else:
             result.state = AHEAD
-            result.detail = f"HEAD {result.local[:9]} is {_commits(ahead)} ahead of upstream main {remote[:9]} ({repo})."
+            result.detail = f"HEAD {result.local[:9]} is {_commits(ahead)} ahead of {up} {remote[:9]} ({repo})."
             result.update = None
     _remember(result, cache, key)
     return result
@@ -486,6 +587,8 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
 def skills_update(root: str, branch: str | None, remote: str | None = None) -> str:
     """How to bring a tenstorrent/skills clone up to date. On a branch other than main a pull would merge main into
     that branch, so the hint says what to do and leaves the choice to the operator."""
+    import shlex
+    root = shlex.quote(root)                    # a path with a space or a shell character still gives a command that works when copied
     if branch in (None, "main"):
         return f"git -C {root} pull --ff-only origin main"
     return (f"the clone is on branch {branch}. Commit your work there, then `git -C {root} switch main` and update "
@@ -493,9 +596,11 @@ def skills_update(root: str, branch: str | None, remote: str | None = None) -> s
 
 
 def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: float = 0.0,
-                      offline: bool = False) -> list[Freshness]:
+                      offline: bool = False, want_age: bool = False, update: Callable[..., str] | None = None,
+                      expected_repo: str | None = None) -> list[Freshness]:
     """One result per git checkout that holds a directory in `dirs` (bringup.toml's skills_dirs). Two directories in
-    one clone are checked once. A directory outside any checkout is an UNKNOWN result of its own."""
+    one clone are checked once. A directory outside any checkout is an UNKNOWN result of its own. `want_age` is passed
+    to check_clone (a BEHIND result then carries `behind_days`)."""
     runner = run if isinstance(run, ReadOnlyRunner) else ReadOnlyRunner(run or _raw_run, offline=offline)
     cache = cache if cache is not None else Cache()
     out: list[Freshness] = []
@@ -509,8 +614,8 @@ def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: fl
         if not Path(d).is_dir():
             out.append(Freshness(SOURCE_SKILLS, str(d), UNKNOWN, f"{d} does not exist."))
             continue
-        out.append(check_clone(d, source=SOURCE_SKILLS, runner=runner, cache=cache, update=skills_update,
-                               reuse_s=reuse_s))
+        out.append(check_clone(d, source=SOURCE_SKILLS, runner=runner, cache=cache, update=update or skills_update,
+                               reuse_s=reuse_s, want_age=want_age, expected_repo=expected_repo))
     return out
 
 
@@ -670,7 +775,7 @@ def check_ttlang_skill(skill_dir, *, run=None, cache: Cache | None = None, src_d
         return result
     rc, out, err = runner(["gh", "api", ttlang_skill_tree_path()], network=True)
     if rc != 0:
-        return _unknown(result, (err.strip().splitlines() or ["no answer"])[-1][:200], cache, key)
+        return _unknown(result, _err_line(err), cache, key)
     try:
         data = json.loads(out)
         if data.get("truncated") is not False or not isinstance(data.get("tree"), list):

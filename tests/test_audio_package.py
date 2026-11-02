@@ -252,6 +252,53 @@ def test_a_run_that_cannot_back_a_package_is_refused(world, change, message):
         world.stage()
 
 
+FLOOR_SHA = "ab" * 32
+
+
+def measured(result, sha=FLOOR_SHA, bars="measured: 3.0 times the worst CPU-environment spread, checked against a known-bad control"):
+    """The result a stage 2 run makes with a usable noise_floor.json (orchard/audio_bars.py): bars text from the floor and the floor's record."""
+    result["agreement"]["chip_vs_reference"]["bars"] = bars
+    result["noise_floor"] = {"measured": True, "label": bars, "file": "noise_floor.json", "sha256": sha}
+    return result
+
+
+def test_a_result_made_with_a_measured_floor_builds_a_package_labelled_by_the_floor(world):
+    world.write_result(measured(audio_result()))
+    world.stage()
+    card = card_of(world.pkg)
+    assert "| chip against the CPU reference, final latent PCC | 0.9905 | measured (bars from a measured noise floor) |" in card
+    assert f"sha256 `{FLOOR_SHA}`" in card and "provisional" not in card.lower()
+    assert gate(world.pkg) == []
+
+
+def test_the_provisional_result_keeps_its_label_and_prose(staged):
+    card = card_of(staged)
+    assert "measured (provisional bars)" in card and "noise floor between CPU runs" not in card
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: r["noise_floor"].update(sha256="short"),                          # no usable sha256: no provenance
+    lambda r: r["noise_floor"].update(sha256=None),
+    lambda r: r["noise_floor"].update(measured=False),                          # the record says the floor was not used
+    lambda r: r.pop("noise_floor"),                                             # bars text claims a floor and nothing records it
+    lambda r: r["agreement"]["chip_vs_reference"].update(bars="informational"),
+    lambda r: r.update(noise_floor="measured"),
+])
+def test_a_measured_claim_without_a_recorded_floor_is_refused(world, change):
+    result = measured(audio_result())
+    change(result)
+    world.write_result(result)
+    with pytest.raises(ap.AudioPackageError, match="neither that its bars are provisional nor"):
+        world.stage()
+
+
+def test_the_gate_refuses_a_floor_label_on_a_card_that_does_not_name_the_floor(world):
+    world.write_result(measured(audio_result()))
+    world.stage()
+    problems = edited(world.pkg, f"sha256 `{FLOOR_SHA}`", "sha256 unknown")
+    assert any("does not name the floor and its sha256" in p for p in problems)
+
+
 def test_a_snapshot_of_another_revision_is_refused(world, tmp_path):
     other = tmp_path / "snapshots" / ("9" * 40)
     other.mkdir()

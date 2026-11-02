@@ -58,7 +58,7 @@ def no_skills_network(monkeypatch, tmp_path):
     from orchard import skillsfresh
     calls = []
 
-    def refused(argv, timeout, env=None):
+    def refused(argv, timeout, env=None, cwd=None, max_bytes=None):
         calls.append(list(argv))
         return 127, "", "the test suite makes no git or gh call"
     monkeypatch.setattr(skillsfresh, "_raw_run", refused)

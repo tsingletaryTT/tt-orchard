@@ -157,3 +157,24 @@ that names the digest of the code in the image and says the tree was dirty.
 So a card with a single row such as `| decode | 12.5 |` and a one-line Limitations section passes. The gate does what `card_publish_gaps()` does and no more. Whether a
 number is a measurement, and what it was compared with, is left to the author and the reviewer. One cheap check that fits the gate is that an Expected performance
 table with a `reference` column fills that column with text in each row that has a number; it is proposed in a public issue and not built here.
+
+## Review questions for a performance claim
+
+Source: `common/tt-perf-claim-review` in tenstorrent/skills (read only, issue 365). That skill asks whether the measurement shown supports the claim made. A card number is a claim,
+so a reviewer asks these questions of each row in `Expected performance`. The right column says what this repository checks today.
+
+| Question | Checked by the card gate? |
+| --- | --- |
+| Is the number warm or cold? A first run includes kernel compilation. A speedup that compares a warm run with a cold baseline is the most common bad claim. | The `catalog-measured` profile requires the section to say whether the kernel cache was warm or cold. It cannot tell whether the statement is true. |
+| How many runs stand behind the number? One sample of each side does not measure a small difference. | The `catalog-measured` profile requires the section to say how many runs or samples. A reviewer checks that a small difference has repeats. |
+| What else ran on the host? | The `catalog-measured` profile requires a load average or a statement that the host was idle. |
+| Is it device time or wall time? Op-level claims use device duration. A served number (tokens per second through the server) is wall time and says so. | No. The reviewer reads the row's label and evidence. A serving-stage card rests on serving-level metrics, and the tt-perf-claim-review skill says not to ask for device profiles there. |
+| Is the baseline the same harness? Same warmed path, context length, precision and correctness checks on both sides. | No. A comparison row names its baseline and the setup shared with it. |
+| Are the figures absolute? A share of a total falls when something else gets slower. | No. State tokens per second or seconds, and give a share only next to its total. |
+| Is the number a layer or path total, or one row? A faster projection can hide a slower attention step. | No. |
+| Does the claim agree with the bound? A decode rate above the memory-bandwidth floor of the board needs an explanation. | No. `decode_floor.py` computes the floor; a reviewer compares. |
+| Did the precision policy stay fixed across the compared rows? | No. |
+
+When the evidence does not support a claim, the review finding says which piece is missing (for example "the baseline ran cold; rerun it warm"). It does not state a number the reviewer did not measure.
+
+To turn the cheap checks on, set `card_profile = "catalog-measured"` in the can spec. `config/can.qwen35.toml` uses `catalog`; its card already states all three conditions.
