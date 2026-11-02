@@ -60,7 +60,7 @@ Result: no failures, 67 ATen ops, the QSA indexer stubbed (3 GDN layers and 1 QS
 - Gone: `transformers.grouped_mm_fallback`, `aten.cummax`, `aten.histc`, `aten.index_put_`. That trace had a MoE router, experts and an n-gram embedding. This trace has none of the three. Which of them used which op was not traced one by one.
 - Still present from the old unmapped list: `aten.diff`, `aten.eye`, `aten.unflatten.int` (the gated delta net).
 - The `topk` in the trace belongs to the stubbed indexer. The dense MLP's own ops are `linear`, `silu` and `mul`.
-- The op classes (`mapped`, `candidate`, `unmapped`) were not computed for this run, because the inventory command does not yet pass `--stub-data-dependent` through. The counts above are from the raw template output.
+- The op classes (`mapped`, `candidate`, `unmapped`) were not computed for this run, because `tt-orchard inventory` asks the shared venv's interpreter for the installed ttnn version, and this task imported no ttnn. The counts above are from the raw template output. Run `tt-orchard inventory <dir> --stub-data-dependent` to get the classes.
 
 ## What waits for the real config.json
 
