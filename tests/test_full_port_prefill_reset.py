@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-"""Issue 363: the one serving-time gap the stage 2 check can see. The TT vLLM plugin reuses a decode slot for a new request and expects
+"""Issue 363: a serving-time gap the stage 2 check can see. The TT vLLM plugin reuses a decode slot for a new request and expects
 prefill to initialise that request's model state (docs/superpowers/specs/2026-11-02-port-interface-vllm-plugin-mapping.md). The check
 calls `prefill` on the same prompt twice, once before the teacher-forced run and once before the free run. A port whose prefill does not
 reset its state gives a different first id the second time. The record holds both ids, so the gate compares them."""

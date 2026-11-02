@@ -26,7 +26,7 @@ the device.
 | `load(model_dir, mesh_device)` | `initialize_vllm_model(hf_config, mesh_device, max_batch_size, ...)` | The weights load onto an open device. The mesh is opened by the caller, as the plugin does. | The adapter reads `hf_config` and the batch size and builds the same model. |
 | `prefill(model, ids)` | `prefill_forward(tokens, page_table, kv_cache, prompt_lens, start_pos, empty_slots, ...)` | One prompt in, logits for the next token out. Since issue 363 the check refuses a port whose second prefill of the same prompt differs from its first (section 3). | Batches, `empty_slots`, and a vLLM-owned paged KV cache in place of the port's own cache. |
 | `decode_step(model, token_id, position)` | `decode_forward(tokens, start_pos, page_table, kv_cache, reload_inputs, reload_page_table, reload_sampling_params, reset_sampling_state, slot_remap, ...)` | Token and absolute position arrive on every call, so the port keeps no resident token or position state. The teacher-forced run feeds reference ids, not the port's own, so a port that ignored `token_id` and used its own previous output would disagree with the reference after its first wrong token. That equals `reload_inputs=True` on every step, which is the contract's host-sampling and teacher-forcing mode. | The four commands, `slot_remap`, and the page table. A port with full reload on every step can leave `supports_async_decode` false and the plugin then reloads on every decode. |
-| logits returned to the host | `read_decode_output`, `process_decode_output_host`, `supports_sample_on_device` | Logits on the host are what host sampling needs. | Device sampling and async readback are optional. They are speed work (stage 6), not a rewrite. |
+| logits returned to the host | `read_decode_output`, `process_decode_output_host`, `supports_sample_on_device` | Logits on the host are what host sampling needs. | Device sampling and async readback are optional. They are speed work (stage 6) and need no rewrite of the port. |
 | `close(model)` | none in the protocol | Resources are released. | None. |
 
 ## 3. What a stage 2 port must already satisfy
@@ -59,5 +59,5 @@ These are properties the port needs now. A port that lacks one has to be rewritt
 ## 5. Next steps (not done here)
 
 - When PR 34 merges, re-read the contract text and the plugin's `docs/DECODE_RELOAD_CONTRACT.md` against section 2.
-- Slice 6 (issue 329) should boot the port behind the plugin's adapter, not only the harness's chat server, once a port has passed stage 2 on a
+- Slice 6 (issue 329) should boot the port behind the plugin's adapter as well as the harness's chat server, once a port has passed stage 2 on a
   board. The first adapter written for a port is the real test of this mapping.
