@@ -11,7 +11,7 @@ import pytest
 
 from orchard import full_port
 from orchard.stages import gate_full_port
-from port_check_fakes import CHIPS, HONEST, REF_IDS, WRONG, make_run, run_template, write_result
+from port_check_fakes import CHIPS, HONEST, REF_IDS, WRONG, make_run, python_path, run_template, write_result
 
 MARK = re.compile(r"^PORT_CHECK_SHA256 ([0-9a-f]{64})$", re.M)
 
@@ -295,3 +295,53 @@ def test_load_s_times_the_ports_load_and_not_the_device_open_or_the_module_impor
     run, stage, _ = make_run(tmp_path, slow_import)
     assert run_template(tmp_path, run, stage).returncode == 0
     assert record(stage)["load_s"] < 1.0
+
+
+# ---- review round 2 (PR 347) ----------------------------------------------------------------------------
+
+def test_an_instant_load_still_has_a_positive_load_s(tmp_path):
+    # The CPU fake's load takes microseconds; the record keeps full precision and never reports 0.
+    run, stage, _ = make_run(tmp_path)
+    assert run_template(tmp_path, run, stage).returncode == 0
+    load_s = record(stage)["load_s"]
+    assert 0 < load_s < 1.0 and load_s != round(load_s, 3)          # a value rounded to 3 places could be 0.0
+    write_result(stage)
+    assert gate(run, stage).ok
+
+
+HANG = '''
+def load(model_dir, mesh_device):
+    import os, time
+    open("WORKER-PID", "w").write(str(os.getpid()))
+    time.sleep(120)
+'''
+
+
+def test_the_worker_does_not_survive_when_the_outer_command_is_killed(tmp_path):
+    # The supervisor kills the outer command's process group on a timeout or an abort (orchard/agent.py spawn_checked). The worker must be
+    # in that group, so a hung port cannot keep the chips open into the lease handoff.
+    import signal
+    import subprocess
+    import sys
+    run, stage, _ = make_run(tmp_path, HONEST.replace("def load(model_dir, mesh_device):\n    return {\"dir\": model_dir, \"device\": mesh_device}\n", "") + HANG)
+    env = {"PATH": os.environ.get("PATH", ""), "TT_VISIBLE_DEVICES": ",".join(CHIPS), "PYTHONPATH": python_path(tmp_path)}
+    cmd = [sys.executable, *full_port.COMMAND.split()[1:]]
+    outer = subprocess.Popen(cmd, cwd=run, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(200):
+        if (run / "WORKER-PID").exists() and (run / "WORKER-PID").read_text():
+            break
+        time.sleep(0.05)
+    pid = int((run / "WORKER-PID").read_text())
+    os.killpg(outer.pid, signal.SIGKILL)               # what spawn_checked does; the template's own cleanup never runs
+    outer.wait()
+    alive = True
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.05)
+        except ProcessLookupError:
+            alive = False
+            break
+    if alive:
+        os.kill(pid, 9)
+    assert not alive, "the worker outlived the killed outer command"

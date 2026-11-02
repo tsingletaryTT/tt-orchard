@@ -67,6 +67,7 @@ MAX_POSITIONS = 64               # choice: enough to give the agreement a spread
 FREE_RUN_TOKENS = 48             # choice: a few sentences of text for the person who reads it
 EXIT_GRACE_S = 60.0              # how long a worker that was asked to close may take to exit before it is killed
 REPLY_TIMEOUT_S = 3000.0         # the supervisor's own deadline is the limit that matters; this ends a worker that stopped answering
+MIN_LOAD_S = 1e-6                # a load the clock cannot resolve is reported as this, not as 0
 PREFIX = "port| "
 MARK = "PORT_CHECK"              # the start of the line the parent prints last; a port that prints it fails the run
 FORGED = threading.Event()       # set when a line from the worker mentions MARK
@@ -140,8 +141,9 @@ def worker(read_fd: int, write_fd: int) -> int:
                     mod.close(model)
                 if closer is not None and device is not None:
                     closer(device)
+                model = device = None
                 reply({"ok": True})
-                return 0
+                # Stay up until the parent closes the pipe: the parent looks for the port's child processes while this one is alive.
             else:
                 reply({"ok": False, "error": f"unknown op {op!r}"})
         except BaseException as exc:             # the port's failure goes back as text; the parent decides what it means
@@ -165,7 +167,7 @@ class Worker:
         c_in, p_out = os.pipe()          # parent -> worker requests
         cmd = [sys.executable, "-u", "-P", "-s", str(Path(__file__).resolve()), "--worker", str(c_in), str(c_out)]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     pass_fds=(c_in, c_out), cwd=str(RUN_DIR), start_new_session=True)
+                                     pass_fds=(c_in, c_out), cwd=str(RUN_DIR))
         os.close(c_in)
         os.close(c_out)
         self.rd, self.wr = os.fdopen(p_in, "r", encoding="utf-8"), os.fdopen(p_out, "w", encoding="utf-8")
@@ -201,8 +203,33 @@ class Worker:
             raise PortFailed(f"the port returned an id that is not a whole number at {req['op']!r}: {answer['id']!r}")
         return answer.get("id")
 
+    def kill_descendants(self) -> None:
+        """SIGKILL every process below the worker (children the port started), found through /proc before the worker exits and they are
+        re-parented. The worker stays in this process's own process group on purpose: the supervisor kills that group when the test times
+        out or the run is aborted, and SIGKILL skips this file's cleanup, so a worker in a group of its own would survive it. Processes that
+        detach themselves with a new session or a double fork are not reached here; they are in the supervisor's group kill or they are not."""
+        parents = {}
+        for entry in os.listdir("/proc"):
+            if entry.isdigit():
+                try:
+                    with open(f"/proc/{entry}/stat", "rb") as f:
+                        parents[int(entry)] = int(f.read().rsplit(b")", 1)[1].split()[1])
+                except (OSError, ValueError, IndexError):
+                    continue
+        found, frontier = [], [self.proc.pid]
+        while frontier:
+            kids = [p for p, pp in parents.items() if pp in frontier and p not in found]
+            found.extend(kids)
+            frontier = kids
+        for pid in reversed(found):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
     def stop(self) -> None:
         """Make sure the worker is gone before the record is written, so nothing it runs can write after. Its output is read to the end."""
+        self.kill_descendants()
         try:
             self.wr.close()                              # a worker still waiting for a request sees the end of its input and exits
         except OSError:
@@ -212,10 +239,6 @@ class Worker:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait()
-        try:
-            os.killpg(self.proc.pid, signal.SIGKILL)     # whatever the port started in the worker's session goes too, before the lease is released
-        except (ProcessLookupError, PermissionError):
-            pass
         for t in self.pumps:
             t.join(10)
 
@@ -271,7 +294,7 @@ def main() -> int:
         w.ask(op="init", n_chips=len(chips))
         t0 = time.monotonic()
         w.ask(op="load", model_dir=model_dir)
-        load_s = round(time.monotonic() - t0, 3)
+        load_s = max(time.monotonic() - t0, MIN_LOAD_S)     # full precision; a rounded value could be 0.0, which the gate refuses
         print(f"loaded in {load_s}s", flush=True)
         # Teacher forced: at position i the port's argmax is taken, then the reference id i is fed in, never the port's own.
         chip = [w.ask(op="prefill", ids=prompt)]
