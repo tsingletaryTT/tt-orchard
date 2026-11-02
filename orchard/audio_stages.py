@@ -400,6 +400,8 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, expected: dict, l
         else:
             argv, env = reference_command(item, paths, rel_stage, script)
             argv[argv.index("--out") + 1] = str(out)
+            if "--root" in argv:                       # an ACE-Step run also writes a project root; the runner does not start in the run directory
+                argv[argv.index("--root") + 1] = str(stage_dir.resolve() / "acestep-root")
             say(f"{item['role']}: running {item['name']} on the CPU")
             code = runner(argv, env, timeout_s, stage_dir / "log" / f"{item['role']}.log")
             if code != 0:

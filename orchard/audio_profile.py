@@ -17,8 +17,11 @@ This module imports nothing outside the standard library, so the supervisor and 
 against a profile; `sound_problems` (numpy) checks the waveform at the profile's rate. A model with no profile has no stage 2 here: `for_model` returns None
 and the caller must say so.
 
-What it does not do: wire the profiles into `audio_plan.reference_plan` and the supervisor's stage commands (those still name the Stable Audio library);
-that is left as an issue. The profile is the data those changes will read.
+Wired so far (issue 269): `audio_plan` chooses the family from the profile (plan items carry its key), builds the CPU command of a profile item
+(`audio_plan.acestep_reference_command`, from the `acestep_*` fields of `audio_runtime.AudioPaths`) and the three per-step stage 2 commands
+(`audio_plan.per_step_commands`: teacher-forced bfloat16 floor, chip step check, `orchard.step_bars`). Not wired: the supervisor does not run the per-step
+commands or read their result, and the stage gates still apply Stable Audio's identity checks (model_config.json hash, library commit) to every run; the
+issue lists what is left.
 """
 from __future__ import annotations
 
