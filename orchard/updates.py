@@ -24,6 +24,7 @@ import copy
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -707,6 +708,7 @@ def timer_text(exec_cmd: str = "/usr/bin/env tt-orchard") -> str:
         "",
         "# cron, if you prefer it (crontab -e). cron mails a failed run's output to you when mail is set up:",
         f"17 6 * * * {cmd} --json > /dev/null",
+        "# The line sends stdout away and keeps stderr: a failed check prints its reason to stderr, so cron mails it. A good run is silent.",
         "",
     ])
 
@@ -755,6 +757,7 @@ def main(args, *, out=None, tools: Tools | None = None, skills=None, now: float 
         for line in render(rows, now):
             say(line)
     if getattr(args, "fail_when_unknown", False) and rows and all(r.status == UNKNOWN for r in rows):
-        say("updates: every row is unknown, so the check learned nothing (no network, or every call failed). Exit 3.")
+        # stderr, so a --json run keeps stdout as one JSON document and a cron job mails the reason
+        print("updates: every row is unknown, so the check learned nothing (no network, or every call failed). Exit 3.", file=sys.stderr)
         return 3
     return 0

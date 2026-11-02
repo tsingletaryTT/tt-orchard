@@ -83,3 +83,10 @@ def test_the_route_serves_the_view_and_returns_no_path(tmp_path, monkeypatch):
     assert code == 200 and json.loads(text)["rows"][0]["item"] == "tt-metal"
     assert str(tmp_path) not in text
     assert code2 >= 400
+
+
+def test_a_status_that_is_not_a_string_is_an_unknown_row_not_a_500(tmp_path):
+    p = tmp_path / "u.json"
+    write_cache(p, [dict(ROW, status=[]), dict(ROW, status={}), dict(ROW, status=None), dict(ROW, status=3)], time.time())
+    d = updates_view.build(p)
+    assert [r["status"] for r in d["rows"]] == ["unknown"] * 4

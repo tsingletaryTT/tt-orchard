@@ -81,9 +81,10 @@ CARD_PROFILES = ("catalog", "catalog-measured")
 # "catalog-measured" (issue 365) adds the conditions a performance claim needs, from tenstorrent/skills common/tt-perf-claim-review: whether the
 # kernel cache was warm or cold, how many runs stand behind a number, and the load on the host during the measurement. The gate checks that the
 # section says each one. It cannot check that what it says is true; a reviewer reads the evidence (docs/can-cards.md).
-_COND_CACHE = re.compile(r"\b(warm|cold)\b|kernel cache|kernels? (?:already )?compiled", re.I)
-_COND_RUNS = re.compile(r"\b(?:runs?|samples?|repetitions?|repeated|trials?)\b|\bN\b|\bone request\b", re.I)
-_COND_LOAD = re.compile(r"load average|host load|\bidle\b|\bquiet\b|\bloaded host\b|\bshared with\b", re.I)
+_COND_CACHE = re.compile(r"\b(?:warm|cold)\b|\bempty (?:kernel )?cache\b|\bkernels? (?:already )?compiled\b", re.I)
+_COND_RUNS = re.compile(r"\b[1-9]\d*\s+(?:runs?|samples?|repetitions?|trials?)\b|\b(?:runs?|samples?|repetitions?|trials?|N)\s*[:=]?\s*[1-9]\d*\b"
+                        r"|\b(?:one|single|a single)\s+(?:run|sample|request)\b", re.I)
+_COND_LOAD = re.compile(r"\bload(?: average)?\b\W{0,4}(?:of |was |about )?\d|\b(?:host|machine|box)(?: was)? (?:idle|quiet)\b|\bidle (?:host|machine|box)\b", re.I)
 MODEL_DIR_KEYS = {"base_config"}
 # set only by a kind vllm spec: the wheels, the serving arguments (an error names these for a tt-dit-server spec that sets one)
 VLLM_ONLY_KEYS = ("plugin_wheel", "ops_wheels", "models_wheels", "vllm_version", "extra_args", "tt_config", "trace_region_bytes")

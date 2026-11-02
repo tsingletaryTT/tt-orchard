@@ -653,6 +653,31 @@ def test_each_missing_condition_is_named(sentence, words):
     assert len(problems) == 1 and words in problems[0], problems
 
 
+@pytest.mark.parametrize("sentence,words", [
+    ("Kernel cache: unknown; runs: unknown; host load: unknown", "cache"),
+    ("Kernel cache: n/a. Runs: none. Host load: n/a.", "cache"),
+    ("Warm kernel cache. Runs: unknown. Load average: 0.4.", "how many runs"),
+    ("Warm kernel cache. Runs: 0. Load average: 0.4.", "how many runs"),
+    ("Warm kernel cache, 0 runs, load average 0.4.", "how many runs"),
+    ("Warm kernel cache. 5 runs. Host load: unknown.", "load"),
+    ("Warm kernel cache. 5 runs. Load average: n/a.", "load"),
+])
+def test_a_field_name_with_no_value_is_not_a_stated_condition(sentence, words):
+    text = GOOD_CARD.replace("## Limitations", sentence + "\n## Limitations")
+    problems = can.card_problems(text, "catalog-measured")
+    assert any(words in p for p in problems), problems
+
+
+@pytest.mark.parametrize("sentence", [
+    "Cold kernel cache, 1 run, host idle.",
+    "Warm kernel cache. Runs: 5. Host load average 0.4.",
+    "Kernels already compiled; single sample; the host was idle.",
+    "Empty kernel cache, N = 3, load average 12.",
+])
+def test_real_values_pass(sentence):
+    assert can.card_problems(GOOD_CARD.replace("## Limitations", sentence + "\n## Limitations"), "catalog-measured") == []
+
+
 def test_the_measured_profile_still_requires_the_catalog_sections():
     problems = can.card_problems("# toy\n", "catalog-measured")
     assert any("Expected performance" in p for p in problems) and any("Limitations" in p for p in problems)

@@ -448,7 +448,7 @@ def test_fail_when_unknown_exits_3_if_every_row_is_unknown(tmp_path, capsys, mon
     no_tools = Tools(offline=True, run=lambda argv, timeout, env=None: (127, "", "none"), which=lambda name: False)
     rc = updates.main(A(), tools=no_tools, skills=None, now=NOW)
     assert rc == 3
-    assert "every row is unknown" in capsys.readouterr().out
+    assert "every row is unknown" in capsys.readouterr().err
     A.fail_when_unknown = False
     assert updates.main(A(), tools=no_tools, skills=None, now=NOW) == 0
 
@@ -499,3 +499,26 @@ def test_a_hostile_pyproject_answer_stays_unknown():
                 j({"content": "A" * 400000, "encoding": "base64"}), (404, b"", "HTTP 404")):
         row, _ = _tm_row(bad)
         assert row.status == UNKNOWN
+
+
+# ---- PR 392 review: the failure report stays visible and stdout stays one JSON document
+
+def test_the_cron_line_keeps_stderr_so_cron_mails_a_failure():
+    line = [ln for ln in updates.timer_text().splitlines() if ln.startswith("17 6")][0]
+    assert "> /dev/null" in line and "2>&1" not in line and "2> /dev/null" not in line
+    assert "stderr" in updates.timer_text()
+
+
+def test_an_all_unknown_json_run_keeps_stdout_one_json_document(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setenv("ORCHARD_VERIFICATIONS", str(tmp_path / "none.json"))
+    class A:
+        fail_when_unknown = True
+        refresh = True
+        offline = True
+        json = True
+    no_tools = Tools(offline=True, run=lambda argv, timeout, env=None: (127, "", "none"), which=lambda name: False)
+    assert updates.main(A(), tools=no_tools, skills=None, now=NOW) == 3
+    cap = capsys.readouterr()
+    json.loads(cap.out)                                   # the whole of stdout is one document
+    assert "every row is unknown" in cap.err

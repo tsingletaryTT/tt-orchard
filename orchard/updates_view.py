@@ -56,7 +56,8 @@ def build(cache_file: Path | None = None, *, redact=lambda t: t, clock=time.time
     for r in rows[:MAX_ROWS]:
         if not isinstance(r, dict):
             continue
-        status = r.get("status") if r.get("status") in STATUS_TONE else updates.UNKNOWN
+        raw = r.get("status")
+        status = raw if isinstance(raw, str) and raw in STATUS_TONE else updates.UNKNOWN
         why = _text(r.get("why"), redact, 200) if r.get("why") else ""
         out["rows"].append({
             "item": _text(r.get("item"), redact), "installed": _text(r.get("installed"), redact),
