@@ -25,6 +25,8 @@ model at its pinned revision. Three edits follow, each found by failing first on
 3. Provenance. The manifest's `producer.hostname` is replaced, run.sh and install.sh are made
    executable (package-thin leaves them without +x), and every wheel must be byte-identical to
    the source bundle's, because wheels are binary and the scrub does not read them.
+4. Canning hardening (issue 318). After the last write, `harden_package` runs the canning step's `can.harden`: scripts executable and
+   a SHA256SUMS that lists every file. Stage 7's gate runs `can.hardening_problems` on each profile (sums, modes, exact pins).
 
 Stage 7 ships no tensor cache and no weights (orchard/scrub.py, scrub_package). The boot check
 (`prepare_verify`, package_templates/verify_bundle.py) installs and serves a copy, so the staged
@@ -957,6 +959,14 @@ def _tail(log: Path, n: int = 20) -> str:
         return ""
 
 
+def harden_package(out: Path) -> None:
+    """Give a staged package the canning step's hardening (orchard/can.py, `harden`): executable scripts and a SHA256SUMS that lists every
+    file. Stage 7 calls it after the last write to the package, once when staging and again after `finish` rewrites the card and
+    copies the evidence, so the sums match what the operator publishes. Imported here because orchard.can imports this module."""
+    from orchard.can import harden
+    harden(out)
+
+
 def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | None = None) -> dict:
     """Run package-thin for one profile into `out` (which must not exist) and apply the edits."""
     src = profile.source
@@ -1001,8 +1011,8 @@ def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | N
     shutil.copyfile(TEMPLATES / "prepare_model_dir.py", out / "prepare_model_dir.py")
     if facts.graft:
         (out / GRAFT_FILE).write_text(json.dumps(facts.graft, indent=2) + "\n", encoding="utf-8")
-    for f in ("run.sh", "install.sh", "prepare_model_dir.py"):
-        (out / f).chmod(0o755)
+    from orchard.can import make_executable     # imported here: orchard.can imports this module
+    make_executable(out)
     for w in sorted((out / "wheels").glob("*.whl")):
         theirs = src.path / "wheels" / w.name
         if not theirs.is_file() or sha256(theirs) != sha256(w):
@@ -1440,6 +1450,7 @@ def stage_all(run_dir, stage_dir, *, namespace: str, models_root, env: dict | No
         hits = scrub_package(out, hostname=hostname, namespace=namespace)
         if hits:
             raise PackageError(f"scrub of {rec['name']}: " + "; ".join(hits))
+        harden_package(out)
         records.append({**rec, "dir": _rel(facts.run_dir, out), "verified": False})
     req = next(r for r in records if r["required"])
     test = prepare_verify(facts.run_dir / req["dir"], stage_dir / "verify", facts, env=env)
@@ -1488,6 +1499,7 @@ def finish(run_dir, stage_dir, *, hostname: str | None = None) -> dict:
         rec["evidence_files"] = copy_evidence(facts, out, (out / "README.md").read_text(encoding="utf-8"),
                                               hostname=hostname)
         rec["scrub"] = scrub_package(out, hostname=hostname, namespace=package["namespace"])
+        harden_package(out)       # last: the sums list the card and the evidence as they now are
     (stage_dir / PUBLISH_FILE).write_text(
         publish_commands(package["profiles"], namespace=package["namespace"],
                          license_id=facts.license_id), encoding="utf-8")

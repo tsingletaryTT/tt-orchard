@@ -1,0 +1,3 @@
+target = "0.9.90"
+summary = "Stage 7 packages get SHA256SUMS, executable scripts and the can pin checks"
+pr = 330
