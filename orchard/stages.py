@@ -65,6 +65,7 @@ class GateResult:
     ok: bool
     reasons: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()      # run-directory-relative paths the gate relied on
+    waived: tuple[str, ...] = ()        # fields an operator option waived, from the gate's own read (full-port rehearsal, issue 357)
 
 
 @dataclass(frozen=True)
@@ -542,11 +543,13 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
-def gate_full_port(stage_dir, run_dir) -> GateResult:
+def gate_full_port(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
     """Stage 2 of a full port (run started with --full-port): the port ran on the leased chips and its tokens agree with the stage 1
-    reference. orchard/full_port.py holds the checks; each failing field has its own reason."""
-    reasons, seen = full_port.check(stage_dir, run_dir)
-    return _done(reasons, seen)
+    reference. orchard/full_port.py holds the checks; each failing field has its own reason. `rehearsal` (the run's --full-port-rehearsal,
+    read from the ledger by the supervisor) waives the `coherent` field only."""
+    waived: list[str] = []
+    reasons, seen = full_port.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived)
+    return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
 
 
 def gate_scoring_reference(stage_dir, run_dir) -> GateResult:
@@ -1870,6 +1873,12 @@ def full_port_enabled(entries: list[dict]) -> bool:
         if e["event"] == "decision" and e["data"].get("decision") == FULL_PORT_ALLOWED:
             return True
     return False
+
+
+def full_port_rehearsal(entries: list[dict]) -> bool:
+    """Whether the operator started the run with `--full-port-rehearsal` (issue 357). Only run_start counts: the option waives a gate field,
+    so it cannot be added later by a decision, and nothing the coder writes is read."""
+    return any(e["event"] == "run_start" and e["data"].get("full_port_rehearsal") is True for e in entries)
 
 
 PACKAGE_OPTIONS_SET = "package options set"

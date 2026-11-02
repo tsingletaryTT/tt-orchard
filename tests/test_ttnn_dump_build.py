@@ -169,10 +169,11 @@ def test_the_installed_build_is_read_without_importing_ttnn():
 
 
 def test_the_shipped_loader_returns_the_build_dated_dump_for_0_80_0():
-    """The shipped file for the 2026-10-30 build now names its build. It still lacks the nested experimental ops: they need a real
-    refresh on a device with the new walk (issue 339), which this change does not run."""
+    """The shipped file for the 2026-10-30 build was refreshed on a device with the submodule walk (issue 339): 1,995 names, the 829 of
+    the first dump all still present, and the nested experimental ops such as the padded KV cache write now listed."""
     d = oi.load_dump("0.80.0")
-    assert d["build"] == "20261030" and len(d["names"]) == 829
+    assert d["build"] == "20261030" and len(d["names"]) == 1995
+    assert "experimental.deepseek_prefill.update_padded_kv_cache" in d["names"]
     assert oi.load_dump("0.80.0", build="20261030") is d or oi.load_dump("0.80.0", build="20261030") == d
 
 

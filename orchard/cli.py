@@ -137,6 +137,9 @@ def _parser() -> argparse.ArgumentParser:
                         "feature-extraction and sentence-similarity are embedding models), then the architecture names. A reranker or embedding "
                         "model takes the scoring route (stage 1 records Hugging Face scores or vectors, stage 2 runs the scoring check on the "
                         "coder's port); stages 3 to 6 are not built for it, so the run ends blocked after stage 2 (code scoring-route)")
+    b.add_argument("--full-port-rehearsal", action="store_true",
+                   help="with --full-port, for a rehearsal model with random weights: stage 2 waives its `coherent` field and no other check, "
+                        "and the ledger says so. Given when the run starts; a resume keeps it and cannot add it")
     b.add_argument("--prune-caches", action="store_true",
                    help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
                         "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
@@ -1306,7 +1309,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               accept_credentials=not args.refuse_credentials_visible,
                                               graft_trial=not args.no_graft_trial,
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
-                                              full_port=args.full_port, model_kind=args.model_kind)
+                                              full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)
