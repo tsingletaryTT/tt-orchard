@@ -1,0 +1,3 @@
+target = "0.9.93"
+summary = "The inventory classifies the Qwen4 ops it left unmapped: a host status, an op notes table with evidence, and a routed-expert group."
+pr = 348

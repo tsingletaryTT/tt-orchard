@@ -1,7 +1,7 @@
 ---
 name: full-port-check
-description: Stage 2 of a tt-orchard run started with --full-port, when stage 0 found that the model needs new model code. Write the port, run it on one leased board, and compare the chip's greedy tokens with the stage 1 CPU reference.
-status: draft. Written on 2026-11-02 for slice 1 of the full-port route (docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md) from the hand port of MiniCPM3-4B, which has not been repeated under the supervisor. Nothing here has run on a chip through the supervisor.
+description: Stage 2 of a tt-orchard run started with --full-port, when stage 0 found that the model needs new model code. Write the port module (load, prefill, decode step, close); the supervisor's own check runs it on one leased board and compares the chip's greedy tokens with the stage 1 CPU reference.
+status: draft. Written on 2026-11-02 for slices 1 and 2 of the full-port route (docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md) from the hand port of MiniCPM3-4B, which has not been repeated under the supervisor. Nothing here has run on a chip through the supervisor.
 ---
 
 # Full port check
@@ -16,17 +16,34 @@ The stage has one hardware test and no retry loop of its own. If the port does n
 
 ## What the stage produces
 
-Under `stages/2/port/`: the port's source. Mark each file with one of two roles in the record:
+Under `stages/2/port/`: the port's source, and nothing else. The one file the check calls is `stages/2/port/port_model.py`. It defines
+four functions:
 
-- `model`: the model code (weight loading, layers, prefill, decode step). It must use `ttnn`. It must not read the stage 1 reference
-  files: a model file that opens `generated-ids.json` could copy the reference into the record, and the gate refuses it.
-- `check`: the script the hardware test runs. It loads the model code, runs the teacher-forced comparison and writes the record.
+    load(model_dir, mesh_device) -> model
+        Load the weights from the snapshot directory onto the open device. The time this takes is the record's `load_s`.
+    prefill(model, ids) -> logits_last
+        Reset the cache, run the prompt (a list of ints), return the logits for the next token.
+    decode_step(model, token_id, position) -> logits
+        Append `token_id` at `position` (its index in the whole sequence, prompt included), return the logits for the token after it.
+    close(model) -> None
+        Release what `load` took. The check closes the device itself.
 
-The check script writes `evidence/port-check.json` and, as its last act, prints one line to its output:
+`port_model.py` may import other files in `stages/2/port/`. Every `.py` file there is model code, and at least one must use `ttnn`.
+No file there may read the stage 1 reference files: a model file that opens `generated-ids.json` could copy the reference, and the gate
+refuses it. A worked example of the same shape is `scripts/minicpm3/chip_model.py`.
 
-    PORT_CHECK_SHA256 <the sha256 of evidence/port-check.json, 64 hex digits>
+You do not write the check. The supervisor owns it. It copies `stages/2/port_check.py` and `stages/2/port_check_config.json` into the stage
+directory (read them if you want to see what calls your code) and runs `python3 -P -s stages/2/port_check.py` under the lease. The check
+starts your port in a second process, so nothing your module does can change the check's own code, record or output. It does the following:
 
-The supervisor writes the output file itself, so a record that the output does not name did not come from the test the supervisor ran.
+1. Reads the prompt ids and the reference ids from stage 1 and calls `load`, timing it.
+2. Teacher forced: calls `prefill` on the prompt, takes the argmax, then for position `i` feeds reference id `i - 1` through
+   `decode_step` and takes the argmax again. It uses up to 64 positions. The port's own id is never fed back, so one wrong token does not
+   change the later positions.
+3. Free run: calls `prefill` again and decodes 48 tokens greedily from the port's own ids, then decodes them to text with the model's
+   `tokenizer.json`.
+4. Writes `evidence/port-check.json` itself and prints `PORT_CHECK_SHA256 <the sha256 of that file>` as its last line. The supervisor
+   writes the output file. Everything your port prints appears in that output with the prefix `port| `.
 
 The record has this shape (`orchard-port-check/1`):
 
@@ -34,36 +51,39 @@ The record has this shape (`orchard-port-check/1`):
      "reference": {"path": "stages/1/evidence/reference/generated-ids.json", "sha256": "<of that file as it is on disk>"},
      "prompt": {"path": "stages/1/evidence/reference/prompt-ids.json", "sha256": "<of that file>"},
      "reference_ids": [<the first N generated ids of the reference file>],
-     "chip_ids": [<the chip's argmax id at each of those N positions>],
+     "chip_ids": [<the port's argmax id at each of those N positions>],
+     "top1_agreement": 0.94,
      "chips": ["<each chip the test ran on, from TT_VISIBLE_DEVICES>"],
      "load_s": 120.5,
-     "free_run_text": "<the text the port produced when it ran free from the prompt>",
-     "port_sources": [{"path": "stages/2/port/model.py", "sha256": "<of the file>", "role": "model"},
-                      {"path": "stages/2/port/check.py", "sha256": "<of the file>", "role": "check"}]}
+     "free_run_ids": [<the port's own greedy ids>],
+     "free_run_text": "<those ids decoded>",
+     "port_sources": [{"path": "stages/2/port/port_model.py", "sha256": "<of the file>", "role": "model"}],
+     "template_sha256": "<of the shipped port_check.py>",
+     "config": {"path": "stages/2/port_check_config.json", "sha256": "<of that file>"}}
 
-How `chip_ids` is made: teacher-forced. Feed the prompt ids from `prompt-ids.json`, then at position `i` take the chip's argmax and
-append the reference id `i` (the chip's own id is never appended), so one wrong token does not change the later positions. Use at least 32 positions
-when the reference has them. Read the reference ids from `generated-ids.json` (key `generated_ids`) in the check script and never in the
-model code.
+Do not edit `port_check.py` or `port_check_config.json`. The supervisor puts both back as shipped after your prepare step, and the gate
+compares the copy and the record's `template_sha256` with the shipped file. A port that prints a line mentioning `PORT_CHECK` fails the
+run. A port that writes `evidence/port-check.json` has it deleted before the check and replaced after it.
 
 ## Where you come in
 
-The prepare phase writes the port, the check script, `hw_test.json` and `handoff.json`. The finish phase reads the test output and
-writes `result.json`. Write `result.json` nowhere else. A `result.json`, `test-result.json`, `evidence/port-check.json` or
+The prepare phase writes the port and `hw_test.json`, then `handoff.json`. The finish phase reads the test output and writes
+`result.json`. Write `result.json` nowhere else. A `result.json`, `test-result.json`, `evidence/port-check.json` or
 `evidence/hw-test-output.txt` found when the prepare phase ends is moved aside unread, and the values below are an example only.
 
 ## Prepare phase
 
-1. Read `stages/0/delta.json` (`path_reasons`, `differences`, `hazards`, `alignment`) and the stage 1 evidence. They say what differs from
-   the nearest model and what the reference produced. Read the nearest model's TT code only as an example of how a layer is written
+1. Read `stages/0/delta.json` (`path_reasons`, `differences`, `hazards`, `alignment`) and the stage 1 evidence. They say what differs
+   from the nearest model and what the reference produced. Read the nearest model's TT code only as an example of how a layer is written
    in ttnn. Do not edit files outside `stages/2/`.
 2. Write the port under `stages/2/port/` and test the parts that need no chip (weight names, shapes, a CPU run of your own layer
    code against the reference layer) with ordinary shell commands. Do not import `ttnn` in your own shell: importing it opens the
-   device, and only the supervisor's test holds a lease. The harness runs the check script on a leased board.
-3. Write `hw_test.json`: `{"command": "python3 stages/2/port/check.py", "deadline_s": 3600}`.
+   device, and only the supervisor's test holds a lease.
+3. Write `hw_test.json`: `{"command": "python3 -P -s stages/2/port_check.py", "deadline_s": 3600}`. The supervisor runs that command
+   whatever the file says; it keeps your `deadline_s` when it is a positive number up to 3600.
 4. Write `handoff.json` (`goal`, `stage`, `evidence`, `next_action`, `check_on_return`) and reply with a short summary.
 
-Do not run `check.py` yourself.
+Do not run `port_check.py` yourself.
 
 ## Goal
 
@@ -80,7 +100,7 @@ The finish phase writes `result.json` in your stage directory:
 The gate needs `runs` true, `coherent` true, `n_tokens` of at least 16, `top1_agreement` of at least 0.85, a positive `load_s`, and both
 evidence files. The gate does not take your numbers. It recomputes `top1_agreement` from `reference_ids` and `chip_ids` in the record,
 checks the reference ids against the stage 1 file on disk, checks that the record's chips are the chips the supervisor leased, that the
-output carries the record's sha256 and that the port's source files are the ones the record names. Copy the numbers from the record.
+output carries the record's sha256 once, that the record and the check script are the shipped template's and that the port's source files match the files the record names. Copy the numbers from the record.
 A number you cannot copy from the record is not measured: write null and say why in your summary.
 
 ## Finish phase
@@ -94,7 +114,7 @@ A number you cannot copy from the record is not measured: write null and say why
 
 ## Do not
 
-- Do not write or edit `port-check.json`, `hw-test-output.txt` or `test-result.json`. The test writes them.
+- Do not write or edit `port-check.json`, `hw-test-output.txt`, `test-result.json`, `port_check.py` or `port_check_config.json`. The supervisor and its check write them.
 - Do not change a model source after the test has run. The record holds each file's sha256.
 - Do not publish, push or write outside your stage directory.
 - Do not investigate anything this skill does not list.

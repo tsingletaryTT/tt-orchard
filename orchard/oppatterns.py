@@ -12,6 +12,9 @@ groups in the table below. A recognised group is labelled `pattern`:
     silu_mul     silu(a) -> mul(., b)                                   ttnn.swiglu takes a and b joined on the last dim
     sdpa         matmul -> [mul or div] -> [add mask] -> softmax -> matmul   (an unfused attention)
     rotary       add(mul(x, cos), mul(cat(neg(x_hi), x_lo), sin))        the Hugging Face rotate_half form
+    moe_experts  histc, index_put_ and transformers.grouped_mm_fallback in one `mlp.experts` module (the reference
+                 expert loop). ttnn.experimental.moe_compute replaces the whole module. The group carries a `note`:
+                 the probe did not run moe_compute, so the group says what a check needs and claims nothing more
 
 A group needs its ttnn op to exist in the dump; when none of the listed names does, the group is reported under
 `unavailable` and nothing is claimed. A recognised group says the shapes of ops match a known composite. It does not
@@ -32,7 +35,16 @@ PATTERN_TTNN = {
     "sdpa": ["transformer.scaled_dot_product_attention"],
     "rotary": ["experimental.rotary_embedding_hf", "experimental.rotary_embedding_llama",
                "experimental.rotary_embedding"],
+    "moe_experts": ["experimental.moe_compute"],
 }
+# groups that carry a note into the report (what is not known about the ttnn op)
+PATTERN_NOTES = {
+    "moe_experts": "recognised from the three ops of the reference expert loop (histc, index_put_, grouped_mm_fallback) in "
+                   "one mlp.experts module. Not verified: the probe did not run experimental.moe_compute. A check needs "
+                   "4 dies and routing at 512 experts, top 10 (the Flash-Next config)",
+}
+MOE_MODULE_RE = re.compile(r"(?:^|\.)mlp\.experts$")
+MOE_OPS = frozenset({"histc", "index_put_", "grouped_mm_fallback"})
 CAST = frozenset({"to", "_to_copy", "type_as", "contiguous", "alias", "clone", "detach"})
 SHAPE = CAST | {"view", "reshape", "unsqueeze", "expand", "transpose", "permute", "squeeze", "_unsafe_view"}
 LAYER_RE = re.compile(r"(?:^|\.)(?:layers|blocks|h)\.\d+(?:\.|$)")
@@ -41,9 +53,12 @@ MODULES_SHOWN = 3
 
 
 def base(op: str) -> str:
-    """`aten.mul.Tensor` -> `mul`."""
-    s = op[5:] if op.startswith("aten.") else op
-    return s.split(".", 1)[0]
+    """`aten.mul.Tensor` -> `mul`; `transformers.grouped_mm_fallback.default` -> `grouped_mm_fallback`."""
+    for prefix in ("aten.", "transformers."):
+        if op.startswith(prefix):
+            op = op[len(prefix):]
+            break
+    return op.split(".", 1)[0]
 
 
 class Graph:
@@ -268,6 +283,24 @@ def _rotary(g):
     return found
 
 
+def _moe_experts(g):
+    """The reference expert loop: [("moe_experts", anchor, node ids)], one per `mlp.experts` module that holds all of
+    histc, index_put_ and grouped_mm_fallback. The group is every node of that module and of its child modules."""
+    mods: dict = {}
+    for n in g.nodes:
+        m = n.get("module")
+        if isinstance(m, str) and MOE_MODULE_RE.search(m) and base(n["op"]) in MOE_OPS:
+            mods.setdefault(m, set()).add(base(n["op"]))
+    found = []
+    for m, ops in mods.items():
+        if ops != MOE_OPS:
+            continue
+        members = [n for n in g.nodes if isinstance(n.get("module"), str)
+                   and (n["module"] == m or n["module"].startswith(m + "."))]
+        found.append(("moe_experts", members[0], [n["id"] for n in members]))
+    return found
+
+
 def recognise(sequence, names, layers_in_config=None) -> dict:
     """The groups found in `sequence`, those whose ttnn op is in `names`, and those whose ttnn op is not.
 
@@ -277,7 +310,7 @@ def recognise(sequence, names, layers_in_config=None) -> dict:
     `in_layer` the groups inside the first layer (the only layer the sequence holds). A group
     inside the layers counts `layers_in_config` times in `scaled_count`; the number is an estimate."""
     g = Graph(sequence or [])
-    hits = _norms(g) + _silu_mul(g) + _sdpa(g) + _rotary(g)
+    hits = _norms(g) + _silu_mul(g) + _sdpa(g) + _rotary(g) + _moe_experts(g)
     names = set(names or ())
     by_kind: dict = {}
     for kind, anchor, ids in hits:
@@ -302,7 +335,8 @@ def recognise(sequence, names, layers_in_config=None) -> dict:
         first = occ[0][1]
         eps = next((c for i in first if base(g.by_id[i]["op"]) == "add" and _is_eps(g.by_id[i])
                     for c in _consts(g.by_id[i]) if isinstance(c, float) and 0 < c <= MAX_EPS), None)
-        found.append({"pattern": kind, "ttnn": ttnn, "why": "pattern", "occurrences": len(occ),
+        note = PATTERN_NOTES.get(kind)
+        found.append({"pattern": kind, "ttnn": ttnn, "why": "pattern", "occurrences": len(occ), "note": note,
                       "in_layer": in_layer, "outside": outside, "scaled_count": in_layer * scale + outside,
                       "nodes": len(first), "ops": sorted({g.by_id[i]["op"] for i in first}), "modules": mods,
                       "shape": occ[0][0].get("shape"), "eps": eps})

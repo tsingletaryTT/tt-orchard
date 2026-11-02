@@ -104,7 +104,7 @@ def test_against_marks_ops_the_base_model_also_uses():
 def test_the_summary_counts_ops_by_status():
     inv = oi.build(raw(), mapping=MAPPING, decomps=DECOMPS, dump=DUMP, installed_ttnn="0.65.1")
     assert inv["summary"]["distinct"] == {"mapped": 2, "composable": 1, "verified": 0, "candidate": 0, "unmapped": 2, "unchecked": 0,
-                                           "ignored": 0}
+                                           "ignored": 0, "host": 0}
 
 
 def test_a_nested_decomposition_is_composable_and_lists_the_final_leaves():
@@ -261,7 +261,7 @@ def test_run_inventory_writes_both_files(tmp_path):
     assert rc == 0
     assert (tmp_path / "o" / "ops-inventory.json").is_file() and (tmp_path / "o" / "ops-inventory.md").is_file()
     inv = json.loads((tmp_path / "o" / "ops-inventory.json").read_text())
-    assert {r["status"] for r in inv["ops"]} <= {"unchecked", "ignored"} and "unchecked" in {
+    assert {r["status"] for r in inv["ops"]} <= {"unchecked", "ignored", "host"} and "unchecked" in {
         r["status"] for r in inv["ops"]}                                 # no dump in dump_dir
     assert any("distinct ops by status" in s for s in said)
 
@@ -444,3 +444,21 @@ def test_rsub_scalar_and_conv1d_are_mapped_to_names_in_the_real_dump():
     assert mapping["aten.cos.default"] == {"ttnn": "cos"} and mapping["aten.sin.default"] == {"ttnn": "sin"}
     if REAL_DUMP is not None:
         assert {"rsub", "conv1d", "cos", "sin"} <= set(REAL_DUMP["names"])
+
+
+def test_a_dense_qwen4_trace_keeps_its_provisional_note_in_the_inventory_and_the_markdown():
+    raw = json.loads((FIXTURES / "raw-qwen3-tiny.json").read_text())
+    raw["dense_layers"] = [0, 1]
+    raw["dense_note"] = "provisional: built from public readings"
+    inv = oi.build(raw, mapping=oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json"),
+                   decomps=oi.load_table(oi.DATA_DIR / "decompositions.json"), dump=None)
+    assert inv["traced"]["dense_layers"] == [0, 1] and inv["traced"]["dense_note"].startswith("provisional")
+    md = oi.render_md(inv)
+    assert "Dense layers: 2" in md and "provisional" in md
+
+
+def test_a_trace_without_dense_layers_has_no_dense_line():
+    raw = json.loads((FIXTURES / "raw-qwen3-tiny.json").read_text())
+    inv = oi.build(raw, mapping=oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json"),
+                   decomps=oi.load_table(oi.DATA_DIR / "decompositions.json"), dump=None)
+    assert inv["traced"]["dense_note"] is None and "Dense layers" not in oi.render_md(inv)

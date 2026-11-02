@@ -612,3 +612,25 @@ def test_the_test_record_writer_replaces_a_fifo_or_link_at_the_record_and_at_its
         report(regular=rec.is_file() and not rec.is_symlink(), text=rec.read_text(), outside=outside.read_text())
     ''')
     assert out["regular"] and '"returncode": 0' in out["text"] and out["outside"] == "{}", out
+
+
+@pytest.mark.parametrize("shape", ["fifo", "symlink_out", "dev_zero"])
+def test_the_port_check_files_are_written_over_a_fifo_or_link_and_a_refused_hw_test_does_not_block(shape):
+    """PR 347 added the full-port check: the supervisor copies the template, writes its config and rewrites hw_test.json in the stage directory."""
+    out = run_child(f'''
+        from types import SimpleNamespace
+        from orchard import full_port, supervisor
+        S = supervisor.Supervisor
+        sd = run / "stages" / "2"
+        sd.mkdir(parents=True)
+        for name in (full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, "hw_test.json"):
+            build({shape!r}, sd / name)
+        entries = []
+        stub = SimpleNamespace(inputs={{"model": str(run)}}, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
+                               ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
+        stub._run_json = lambda *a: S._run_json(stub, *a)
+        problems = S._pin_full_port(stub, SimpleNamespace(number=2), sd, command=True)
+        regular = [(sd / n).is_file() and not (sd / n).is_symlink() for n in (full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, "hw_test.json")]
+        report(problems=problems, regular=regular, outside=outside.read_text())
+    ''')
+    assert out["problems"] == [] and all(out["regular"]) and out["outside"] == "{}", out

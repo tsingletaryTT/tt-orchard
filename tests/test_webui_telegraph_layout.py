@@ -83,7 +83,7 @@ def test_the_meter_is_redrawn_on_every_poll_and_says_unknown_after_an_outage():
 def test_the_view_never_sends_anything_and_builds_text_with_text_nodes():
     js = JS()
     start = js.index("// ---- telegraph: the spend meter")
-    block = js[start:js.index("// ---- machine health")]
+    block = js[start:js.index("// ---- cans:")]
     assert "body:" not in block and "method" not in block and "POST" not in block
     assert "innerHTML" not in block and "insertAdjacentHTML" not in block and "eval(" not in block
     assert block.count('api("') == 1 and 'api("/api/telegraph", { timeout: TG_TIMEOUT_MS })' in block
@@ -91,7 +91,7 @@ def test_the_view_never_sends_anything_and_builds_text_with_text_nodes():
 
 def test_every_emoji_the_telegraph_script_adds_is_none():
     js = JS()
-    block = js[js.index("// ---- telegraph: the spend meter"):js.index("// ---- machine health")]
+    block = js[js.index("// ---- telegraph: the spend meter"):js.index("// ---- cans:")]
     assert not re.search("[\U0001F300-\U0001FAFF☀-➿]", block)
 
 
