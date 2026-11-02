@@ -24,7 +24,7 @@ from orchard import narrate
 from orchard.stages import STAGES
 from orchard.status import classify_pause, stage_rows
 
-REASONS = ("needs-new-model-code", "full-port-stages-unbuilt", "restricted-head", "audio-path-unbuilt", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
+REASONS = ("needs-new-model-code", "model-does-not-fit", "full-port-stages-unbuilt", "restricted-head", "audio-path-unbuilt", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
            "hardware-unhealthy", "coder-unusable", "package-missing", "blocked", "unclassified")
 
 # Blocks that `tt-orchard bringup` retries by itself (orchard/cli.py). A retry resumes from the ledger with a fresh
@@ -45,6 +45,7 @@ def retryable(code: str, reason: str = "") -> bool:
 
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
 _BLOCKED_WORDS = (
+    ("model-does-not-fit", ("does not fit this box", "does not fit stage")),                     # before the hardware words: its text says `chips`
     ("package-missing", ("no installed bundle or container package",)),     # before the hardware words: its text says `chip`
     ("disk-full", ("disk", "free space", " gb free")),
     ("hardware-unhealthy", ("lease", "chip", "board", "reset", "gozer", "hardware", "device")),
