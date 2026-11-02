@@ -558,6 +558,31 @@ def test_a_heading_inside_a_code_block_is_not_a_section():
     assert len(can.card_problems(text, "catalog")) == 2
 
 
+@pytest.mark.parametrize("text", [
+    # a tilde-fenced example holds the only table
+    "# toy\n## Expected performance\n~~~\n| a | b |\n| --- | --- |\n| x | 1 |\n~~~\n## Limitations\nOne limit.\n",
+    # a three-backtick line inside a four-backtick fence does not close it
+    "# toy\n## Expected performance\n````\n```\n| a | b |\n| --- | --- |\n| x | 1 |\n````\n## Limitations\nOne limit.\n",
+    # an empty fence is not limitation text
+    "# toy\n## Expected performance\n| a | b |\n| --- | --- |\n| x | 1 |\n## Limitations\n```\n```\n",
+    # a header and its separator with no body row
+    "# toy\n## Expected performance\n| Metric | P150 |\n| --- | --- |\n## Limitations\nOne limit.\n",
+    # a numeric line that is not a table row
+    "# toy\n## Expected performance\n| decode: 31.2 tok/s\n## Limitations\nOne limit.\n",
+    # a digit only in the row label
+    "# toy\n## Expected performance\n| a | b |\n| --- | --- |\n| 70B decode | n/a |\n## Limitations\nOne limit.\n",
+    # a digit only in the header
+    "# toy\n## Expected performance\n| P150 | 2 |\n| --- | --- |\n| decode | n/a |\n## Limitations\nOne limit.\n",
+])
+def test_a_card_whose_only_evidence_is_a_fence_or_a_malformed_table_fails(text):
+    assert can.card_problems(text, "catalog"), text
+
+
+def test_a_longer_fence_is_closed_only_by_an_equal_or_longer_one():
+    text = GOOD_CARD.replace("## Limitations", "````\n```\n## Limitations\n````\n## Limitations", 1)
+    assert can.card_problems(text, "catalog") == []
+
+
 def test_no_profile_means_no_card_check():
     assert can.card_problems("# toy\n", None) == []
 

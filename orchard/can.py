@@ -704,23 +704,55 @@ def vllm_problems(pkg: Path, spec: Spec, run_sh: str) -> list[str]:
     return problems + wheel_pin_problems(pkg)
 
 
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
 def _sections(text: str) -> dict[str, list[str]]:
-    """The body lines of each level-2 heading of a card, keyed by the heading text. Lines inside a fenced code block are not headings."""
+    """The body lines of each level-2 heading of a card, keyed by the heading text. A fenced code block (the fence's own character,
+    closed by a fence of that character at least as long and with nothing after it) holds no headings and adds no lines to a section."""
     sections: dict[str, list[str]] = {}
-    current, fenced = None, False
+    current, fence = None, None
     for line in text.splitlines():
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-        elif not fenced and line.startswith("## "):
+        m = _FENCE.match(line)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+            continue
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = m.group(1)
+            continue
+        if line.startswith("## "):
             current = line[3:].strip()
             sections.setdefault(current, [])
             continue
-        elif not fenced and line.startswith("# "):
+        if line.startswith("# "):
             current = None
             continue
         if current is not None:
             sections[current].append(line)
     return sections
+
+
+def _cells(line: str) -> list[str]:
+    """The cells of a table row: a line that starts with a pipe, split on pipes, with the outer empty pieces dropped."""
+    parts = line.strip().split("|")
+    return [c.strip() for c in parts[1:-1]] if line.strip().endswith("|") else [c.strip() for c in parts[1:]]
+
+
+def _has_measured_row(lines: list[str]) -> bool:
+    """True when the lines hold a table (a header row, then a separator row of dashes) with a later body row that has a cell starting
+    with a number in a cell after the first (the label). A digit in the header or a label, or a pipe-prefixed line outside a table, does not count."""
+    for i in range(1, len(lines)):
+        sep = lines[i].strip()
+        if not (sep.startswith("|") and re.fullmatch(r"[|:\- ]+", sep) and "-" in sep and lines[i - 1].lstrip().startswith("|")):
+            continue
+        for row in lines[i + 1:]:
+            if not row.lstrip().startswith("|"):
+                break
+            cells = _cells(row)
+            if len(cells) >= 2 and any(re.match(r"[~<>]?\d", c) for c in cells[1:]):
+                return True
+    return False
 
 
 def card_problems(text: str, profile: str | None) -> list[str]:
@@ -734,7 +766,7 @@ def card_problems(text: str, profile: str | None) -> list[str]:
     perf = sections.get("Expected performance")
     if perf is None:
         problems.append("the card has no `## Expected performance` section")
-    elif not any(line.lstrip().startswith("|") and re.search(r"\d", line) and not re.fullmatch(r"[\s|:-]*", line) for line in perf):
+    elif not _has_measured_row(perf):
         problems.append("the card's `## Expected performance` section has no row with a number in a table")
     limits = sections.get("Limitations")
     if limits is None:
