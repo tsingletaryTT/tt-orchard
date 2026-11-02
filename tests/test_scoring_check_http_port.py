@@ -275,3 +275,41 @@ def test_run_gate_refuses_an_existing_run_directory(tmp_path, snapshot):
     (tmp_path / "run").mkdir()
     with pytest.raises(SystemExit):
         run_gate.setup(tmp_path / "run", tmp_path, snapshot[0])
+
+
+def test_a_timeout_stops_the_whole_process_group_including_the_worker(tmp_path, snapshot):
+    """The template's worker is a child that opens the device. A timeout must stop it too, or the chip stays open."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    for n in run_gate.FILES:
+        (ref / n).write_text("{}")
+    run = tmp_path / "run"
+    stage = run_gate.setup(run, ref, snapshot[0])
+    pidfile = tmp_path / "child.pid"
+    (stage / "scoring_check.py").write_text(
+        "import os, subprocess, sys, time\n"
+        f"c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(c.pid))\n"
+        "time.sleep(600)\n")
+    done, reasons = run_gate.run(run, CHIPS[1:], "http://127.0.0.1:9", timeout_s=2, env={"PATH": os.environ.get("PATH", "")})
+    assert done.returncode is None and reasons
+    child = int(pidfile.read_text())
+    try:
+        os.kill(child, 0)
+        alive = open(f"/proc/{child}/stat").read().split(")")[-1].split()[0] != "Z"
+    except (ProcessLookupError, FileNotFoundError):
+        alive = False
+    assert not alive, "the worker survived the timeout"
+
+
+def test_a_relative_path_argument_is_written_to_the_config_as_an_absolute_path(tmp_path, snapshot, monkeypatch):
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    for n in run_gate.FILES:
+        (ref / n).write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    rel_snap = os.path.relpath(snapshot[0], tmp_path)
+    assert not os.path.isabs(rel_snap)
+    stage = run_gate.setup(Path("run-rel"), Path("ref"), Path(rel_snap))
+    cfg = json.loads((stage / "scoring_check_config.json").read_text())
+    assert cfg["model_snapshot"] == str(snapshot[0].resolve())

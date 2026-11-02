@@ -101,3 +101,4 @@ Everything is under `~/orchard-runs/scoring-chip-run/` (outside the repo). Weigh
 - No embedding model (issue 376) and no vision pairs (issue 377). The bundle's retrieval benchmark rows (issue 379) were not run.
 - The default interpreter (system python3, with `ttnn` and `tokenizers`) ran the template and the port. The CPU reference needs the
   reference interpreter.
+- After review, `run_gate.py` gained two fixes (it stops the template's whole process group on a timeout, and it writes absolute paths into the config). They touch the helper only. The numbers above are from before them, and no new chip run was made.

@@ -29,14 +29,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO))
 
-from orchard import full_port, scoring_check          # noqa: E402  (after the path line)
+from orchard import full_port, scoring_check, stallwatch          # noqa: E402  (after the path line)
 
 HERE = Path(__file__).resolve().parent
 FILES = ("scoring-pairs.json", "scoring-reference.json")
+TERM_GRACE_S = 20.0          # choice: time the template gets to stop its worker after SIGTERM, before SIGKILL for the whole group
 
 
 def setup(run_dir: Path, reference_dir: Path, snapshot: Path, port_source: Path = HERE / "port_model.py") -> Path:
     """Build DIR/stages/1 and DIR/stages/2. Returns the stage 2 directory. An existing run directory is refused."""
+    run_dir, reference_dir, snapshot, port_source = (Path(os.path.abspath(x)) for x in (run_dir, reference_dir, snapshot, port_source))
     if run_dir.exists():
         raise SystemExit(f"{run_dir} exists: use a new directory for each run")
     ref = run_dir / "stages" / "1" / "evidence" / "reference"
@@ -54,6 +56,7 @@ def setup(run_dir: Path, reference_dir: Path, snapshot: Path, port_source: Path 
 def run(run_dir: Path, chips: list, server_url: str, timeout_s: float = scoring_check.DEADLINE_S, env: dict | None = None):
     """Run the supervisor's command in `run_dir`, write the output file and `test-result.json`, and apply the gate.
     Returns (completed process, reasons)."""
+    run_dir = Path(os.path.abspath(run_dir))
     stage = run_dir / "stages" / "2"
     cmd = scoring_check.COMMAND.split()
     cmd[0] = sys.executable
@@ -62,12 +65,22 @@ def run(run_dir: Path, chips: list, server_url: str, timeout_s: float = scoring_
     full_env.update({"TT_VISIBLE_DEVICES": ",".join(chips), "ORCHARD_SCORE_SERVER_URL": server_url})
     t0 = time.monotonic()
     timed_out = False
+    # Its own session: the template's worker (which opens the device) stays in the template's process group, so a timeout can stop both.
+    proc = subprocess.Popen(cmd, cwd=run_dir, env=full_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        done = subprocess.run(cmd, cwd=run_dir, env=full_env, capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+        code = proc.returncode
+    except BaseException as exc:
+        stallwatch._kill_group(proc, TERM_GRACE_S)          # SIGTERM to the group, then SIGKILL; returns when the group is gone
+        if not isinstance(exc, subprocess.TimeoutExpired):
+            raise
         timed_out = True
-        done = subprocess.CompletedProcess(cmd, None, (exc.stdout or b"").decode() if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
-                                           (exc.stderr or b"").decode() if isinstance(exc.stderr, bytes) else (exc.stderr or ""))
+        try:
+            stdout, stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        code = None
+    done = subprocess.CompletedProcess(cmd, code, stdout or "", stderr or "")
     out = stage / "evidence" / "hw-test-output.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(done.stdout + done.stderr)
