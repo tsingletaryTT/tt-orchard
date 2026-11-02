@@ -43,6 +43,7 @@ noticed, because the data is never read.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -467,7 +468,7 @@ def _data_parallel(fits_one: bool, box_chips, extra: list) -> dict:
                         "and a copy per chip is not possible"}
     return {"applies": True, "configured_chips": configured, "configured_from": source, "copies": configured, "chips_used": configured,
             "note": DP_NOTE + (": one copy per chip" if configured is None else f": {configured} copies, one per chip, on {configured} chips"),
-            "throughput": DP_THROUGHPUT, "measured_example": json.loads(json.dumps(MEASURED_EXAMPLE))}
+            "throughput": DP_THROUGHPUT, "measured_example": copy.deepcopy(MEASURED_EXAMPLE)}
 
 
 def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None, policy=None, chips=(), box_chips=None, sharded_chips=None, sharded_basis="stated") -> dict:
