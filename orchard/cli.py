@@ -24,7 +24,7 @@
     tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--out DIR] [--result FILE] [--check]
     tt-orchard can (stage SPEC --out DIR | gate BUNDLE SPEC | boot BUNDLE SPEC --work DIR [--hf-home DIR] | commands SPEC --namespace ORG) [--base DIR] [--run-dir RUN]
     tt-orchard verify-package REPO_ID [--scratch DIR] [--staged DIR] [--revision SHA] [--plan] [--check]
-    tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
+    tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--stub-data-dependent] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
     tt-orchard kernel-probe (--op NAME | --ladder [--rungs A,B] [--rung-wall OP=S] [--max-hours H]) [--wall-s S] [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
@@ -449,6 +449,9 @@ def _parser() -> argparse.ArgumentParser:
     inv.add_argument("--layers", type=int, default=2, help="layers to trace (default 2)")
     inv.add_argument("--seq", type=int, default=8, help="sequence length to trace (default 8)")
     inv.add_argument("--class", dest="cls", help="the transformers class to trace if not config.json's first architecture")
+    inv.add_argument("--stub-data-dependent", action="store_true",
+                     help="replace a module torch.export cannot trace (the Qwen4-style sparse attention indexer) with a static "
+                          "stand-in that keeps its ops; the output says which modules were replaced")
     inv.add_argument("--out", help="output directory (default ./ops-inventory)")
     cs = sub.add_parser("coder-speed", parents=[common],
                         help="measure how fast a model server decodes and compare it with the best it has done "
@@ -589,7 +592,8 @@ def _inventory(args, env, home, out) -> int:
                        "or set reference_python in bringup.toml")
     return opinventory.run_inventory(args.target, python=python, ttnn_python=ttnn_python,
                                      out_dir=args.out or "ops-inventory", layers=args.layers, seq=args.seq,
-                                     cls=args.cls, against=args.against, say=say)
+                                     cls=args.cls, against=args.against, say=say,
+                                     stub_data_dependent=args.stub_data_dependent)
 
 
 def sw_interval() -> float:

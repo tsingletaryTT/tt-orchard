@@ -1604,6 +1604,7 @@ Flags:
 - `--layers`: layers to trace (default 2).
 - `--seq`: sequence length to trace (default 8).
 - `--class`: the transformers class to trace, when it is not the first architecture in `config.json`.
+- `--stub-data-dependent`: replace a module `torch.export` cannot trace (the Qwen4-style sparse attention indexer) with a static stand-in that keeps its ops. The result lists each replaced module under `stubbed`. The stand-in ignores which positions each query can see, so its ops are a guide and its graph is not the real graph.
 - `--out`: output directory (default `./ops-inventory`; `./verify-candidates` for `verify-candidates`).
 - `--simulator`: for `refresh-ttnn`, the ttsim library (for example `libttsim_bh.so` from the simulator image, with its
   `soc_descriptor.yaml` beside it). The names are listed against it and no gozer lease is taken, because the script
