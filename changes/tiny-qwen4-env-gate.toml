@@ -1,0 +1,2 @@
+target = "0.9.95"
+summary = "tiny Qwen4 forward tests skip where the torch cannot run the real indexer scatter"
