@@ -72,12 +72,19 @@ BOOT_REQUEST_TIMEOUT_S = 600.0      # choice: one chat request in the boot check
 HOST_ARG = "--host 0.0.0.0"         # what package-thin writes into the uvicorn line
 PORT_DEFAULT = '"${PORT:-8000}"'
 
-TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "extra_tree", "bundle_file", "model_dir"}
+TOP_KEYS = {"can", "weights", "env", "check", "extra_code", "extra_tree", "bundle_file", "model_dir", "plugin_edits"}
 CAN_KEYS = {"name", "kind", "app", "model_py", "metadata", "readme", "arch", "mesh", "device_count", "python", "port", "requirements",
             "verify", "max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "plugin_wheel", "ops_wheels", "models_wheels",
             "vllm_version", "extra_args", "tt_config", "trace_region_bytes", "card_profile"}
 # card profiles: "catalog" asks the card for the sections tt-model's card_publish_gaps() names as required, with content in them
-CARD_PROFILES = ("catalog",)
+CARD_PROFILES = ("catalog", "catalog-measured")
+# "catalog-measured" (issue 365) adds the conditions a performance claim needs, from tenstorrent/skills common/tt-perf-claim-review: whether the
+# kernel cache was warm or cold, how many runs stand behind a number, and the load on the host during the measurement. The gate checks that the
+# section says each one. It cannot check that what it says is true; a reviewer reads the evidence (docs/can-cards.md).
+_COND_CACHE = re.compile(r"\b(?:warm|cold)\b|\bempty (?:kernel )?cache\b|\bkernels? (?:already )?compiled\b", re.I)
+_COND_RUNS = re.compile(r"\b[1-9]\d*\s+(?:runs?|samples?|repetitions?|trials?)\b|\b(?:runs?|samples?|repetitions?|trials?|N)\s*[:=]?\s*[1-9]\d*\b"
+                        r"|\b(?:one|single|a single)\s+(?:run|sample|request)\b", re.I)
+_COND_LOAD = re.compile(r"\bload(?: average)?\b\W{0,4}(?:of |was |about )?\d|\b(?:host|machine|box)(?: was)? (?:idle|quiet)\b|\bidle (?:host|machine|box)\b", re.I)
 MODEL_DIR_KEYS = {"base_config"}
 # set only by a kind vllm spec: the wheels, the serving arguments (an error names these for a tt-dit-server spec that sets one)
 VLLM_ONLY_KEYS = ("plugin_wheel", "ops_wheels", "models_wheels", "vllm_version", "extra_args", "tt_config", "trace_region_bytes")
@@ -108,6 +115,12 @@ PIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?===?[A-Za-z
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 FORBIDDEN_PORTS = (8000, 8011, 8012, 8780)
+# Issue 362 (tenstorrent/skills PR 40): a bundle file under one of these directory names (or named like one) changes the vLLM plugin or vLLM
+# itself. The spec's [plugin_edits] table must give a reason and say where the plugin interface was checked for an option that already does it.
+PLUGIN_DIRS = frozenset({"vllm", "vllm_tt_plugin", "tt_vllm_plugin", "vllm-tt-plugin", "vllm_tt"})
+PLUGIN_EDIT_KEYS = {"reason", "checked"}
+PLUGIN_EDIT_MIN = 20                # choice: the shortest reason or check text; a sentence, not a word
+PLUGIN_EDIT_MAX = 600
 
 
 class CanError(Exception):
@@ -197,6 +210,8 @@ class Spec:
     base_config: tuple[tuple[Path, str], ...] = ()
     # None: the gate does not read the card. "catalog": the gate requires "Expected performance" with a measured row and "Limitations" with text
     card_profile: str | None = None
+    # path inside the bundle -> {"reason", "checked"} for each file that changes the vLLM plugin or vLLM (issue 362)
+    plugin_edits: dict = field(default_factory=dict)
 
 
 # ---- the spec ------------------------------------------------------------------------------------------------------------
@@ -321,6 +336,49 @@ def _serving(can: dict, raw: dict, base: Path) -> dict:
             raise CanError("[model_dir] base_config must include a file named config.json (the model class's architecture name goes there)")
         out["base_config"] = pairs
     return out
+
+
+def _plugin_edits(raw: dict) -> dict:
+    """The [plugin_edits] table: each key is a path inside the bundle, each value a table with a `reason` and a `checked` text."""
+    table = raw.get("plugin_edits", {})
+    if not isinstance(table, dict):
+        raise CanError("[plugin_edits] must be a table")
+    out = {}
+    for path, entry in table.items():
+        what = f"[plugin_edits.{path!r}]"
+        _dst(path, what)
+        if not isinstance(entry, dict):
+            raise CanError(f"{what} must be a table with the keys {sorted(PLUGIN_EDIT_KEYS)}")
+        extra = set(entry) - PLUGIN_EDIT_KEYS
+        if extra:
+            raise CanError(f"{what} has unknown keys {sorted(extra)}; allowed: {sorted(PLUGIN_EDIT_KEYS)}")
+        for key in sorted(PLUGIN_EDIT_KEYS):
+            v = entry.get(key)
+            if not isinstance(v, str) or not PLUGIN_EDIT_MIN <= len(v.strip()) <= PLUGIN_EDIT_MAX:
+                raise CanError(f"{what} {key} must be a sentence of {PLUGIN_EDIT_MIN} to {PLUGIN_EDIT_MAX} characters "
+                               "(reason: why the plugin or vLLM must change; checked: where you looked for an option the plugin already offers)")
+        out[path] = {k: entry[k].strip() for k in PLUGIN_EDIT_KEYS}
+    return out
+
+
+def plugin_edit_files(pkg) -> list[str]:
+    """The bundle files that change the vLLM plugin or vLLM: a path with a directory (or a `.py` file) named like PLUGIN_DIRS. A wheel's file name never matches, so the shipped wheels are not listed. Sorted, relative to the bundle."""
+    root = Path(pkg)
+    found = []
+    for rel in _files_of(root):
+        parts = Path(rel).parts
+        if any(part in PLUGIN_DIRS or (part.endswith(".py") and part[:-3] in PLUGIN_DIRS) for part in parts):
+            found.append(rel)
+    return found
+
+
+def plugin_edit_problems(pkg, reasons: dict) -> list[str]:
+    """One problem for each plugin or vLLM file with no entry in `reasons`, and one for each entry that names a file the bundle does not have."""
+    files = plugin_edit_files(pkg)
+    problems = [f"{rel} changes the vLLM plugin or vLLM and has no stated reason (add a [plugin_edits.\"{rel}\"] table with `reason` and `checked`; "
+                "see the canning skill)" for rel in files if rel not in reasons]
+    problems += [f"[plugin_edits] names {rel}, which is not in the bundle" for rel in sorted(set(reasons) - set(files))]
+    return problems
 
 
 def _extra_code(raw: dict, base: Path, expand_trees: bool = True) -> tuple[tuple[Path, str], ...]:
@@ -449,7 +507,8 @@ def load_spec(path, *, base=None, expand_trees: bool = True) -> Spec:
                 python=can.get("python", "3.12"), port=port, app=app,
                 metadata=_inside(base, can["metadata"], "[can] metadata") if can.get("metadata") else None,
                 requirements=tuple(pins), verify=tuple(verify), env=dict(env),
-                extra_code=_extra_code(raw, base, expand_trees), bundle_files=_files(raw, "bundle_file", base), check=ck, **optional)
+                extra_code=_extra_code(raw, base, expand_trees), bundle_files=_files(raw, "bundle_file", base), check=ck,
+                plugin_edits=_plugin_edits(raw), **optional)
 
 
 # ---- staging -------------------------------------------------------------------------------------------------------------
@@ -927,6 +986,12 @@ def card_problems(text: str, profile: str | None) -> list[str]:
         problems.append("the card's `## Expected performance` section has no row with a number in a table")
     else:
         problems += _reference_problems(perf)
+    if perf is not None and profile == "catalog-measured":
+        body = "\n".join(perf)
+        for rx, what in ((_COND_CACHE, "whether the kernel cache was warm or cold"), (_COND_RUNS, "how many runs stand behind the numbers"),
+                         (_COND_LOAD, "the load on the host during the measurement (a load average, or that the host was idle)")):
+            if not rx.search(body):
+                problems.append(f"the card's `## Expected performance` section does not say {what}")
     limits = sections.get("Limitations")
     if limits is None:
         problems.append("the card has no `## Limitations` section")
@@ -981,6 +1046,7 @@ def gate(pkg, spec: Spec, *, hostname: str | None = None, namespace: str | None 
             problems.append("run.sh binds uvicorn to 0.0.0.0; the server has no sign-in, so it must default to 127.0.0.1")
         if f"${{PORT:-{spec.port}}}" not in run_sh:
             problems.append(f"run.sh does not default to port {spec.port}")
+    problems += plugin_edit_problems(pkg, spec.plugin_edits)
     problems += requirement_problems((pkg / "requirements.txt").read_text(encoding="utf-8", errors="replace"))
     problems += [f"card: {p}" for p in card_problems((pkg / "README.md").read_text(encoding="utf-8", errors="replace"), spec.card_profile)]
     if spec.kind == "vllm":
