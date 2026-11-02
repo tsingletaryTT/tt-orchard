@@ -152,7 +152,7 @@ from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolut
 from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
-from orchard import kept_coder, kernelprobe, swap_draft
+from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
 from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
@@ -1437,10 +1437,15 @@ class Supervisor:
                     return ended
             elif not (resumed and (stage_dir / "test-result.json").is_file()):
                 self._draft(spec, stage_dir)
-                out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed)
-                out = self._wrap_up(spec, stage_dir, prep, out)
-                if out.status != "done":
-                    return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
+                prepared = self._prepare_in_code(spec, stage_dir)
+                if not prepared.done:
+                    out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed, extra=prepared.note)
+                    out = self._wrap_up(spec, stage_dir, prep, out)
+                    if out.status != "done":
+                        return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
+                # Whoever prepared, no result may exist before the test has run: the finish step writes the result from the test's output.
+                if moved := swap_prepare.set_aside_results(stage_dir):
+                    self.ledger.append("decision", spec.number, decision="results written before the test were set aside", files=moved)
                 test, problems = self._read_test(stage_dir)
                 if problems:
                     return "fail", problems, None
@@ -2049,7 +2054,20 @@ class Supervisor:
             self.ledger.append("measurement", 6, name=num["name"], value=num.get("value"),
                                unit=num["unit"], label=num["label"], evidence=num.get("evidence"))
 
-    def _step(self, spec, phase: str, stage_dir: Path, escalated: bool, resumed: bool):
+    def _prepare_in_code(self, spec, stage_dir: Path) -> swap_prepare.PrepareOutcome:
+        """Stage 2's prepare step on the weights-only path, done by the supervisor when `_draft` left a swap_config.json and the template
+        (orchard/swap_prepare.py). Any other stage, and a stage with no drafted config, gets PrepareOutcome(False) and its agent step."""
+        if spec.skill != "weights-swap-check" or spec.draft != "swap_config":
+            return swap_prepare.PrepareOutcome(False)
+        outcome = swap_prepare.prepare(run_dir=self.run_dir, stage_dir=stage_dir, env=agent_env(self.run_dir, extra=self.extra_env),
+                                       stage=spec.number)
+        if outcome.output is not None:
+            self.ledger.append("decision", spec.number, decision="prepare run by the supervisor", returncode=outcome.returncode,
+                               done=outcome.done, **evidence_record(self.run_dir, stage_dir / outcome.output))
+        return outcome
+
+    def _step(self, spec, phase: str, stage_dir: Path, escalated: bool, resumed: bool, extra: str | None = None):
+        """One agent step. `extra`, when given, is added to the task message (stage 2's prepare gets the script's message)."""
         n = spec.number
         tier = tier_for(self.cfg, n, phase=phase, escalated=escalated)
         try:
@@ -2086,7 +2104,7 @@ class Supervisor:
                          finished=self._finished_check(spec, phase, stage_dir))
         name = deliverable(spec, phase)
         step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
-        return step.run(system, user), step
+        return step.run(system, f"{user}\n\n## From the supervisor\n{extra}" if extra else user), step
 
     def _draft(self, spec, stage_dir: Path) -> None:
         """Write the config a stage's skill starts from, when the run already holds every fact in it

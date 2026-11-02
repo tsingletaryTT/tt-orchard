@@ -55,8 +55,8 @@ def test_the_swap_skill_copies_the_templates_that_exist_in_this_repo():
         assert (SKILLS / "weights-swap-templates" / name).is_file()
     assert '"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600' in text
     flat = " ".join(text.split())
-    assert "If `stages/2/swap_config.json` exists, read it once and use it as it is" in flat
-    assert "does not exist, write it FIRST" in flat
+    assert "Do not look for the bundle, the snapshots or a port yourself" in flat
+    assert "`swap_config.json` does not exist" in flat and "Follow \"When there is no swap_config.json\" first" in flat
     assert "`serves` false" in text and "Do not investigate firmware or cache directories" in text
 
 
@@ -253,7 +253,11 @@ def test_both_swap_skills_start_from_the_drafted_config_and_expect_the_architect
     # ConditionalGeneration / CausalLM difference instead of using it.
     for name in ("weights-swap-check.md", "weights-sidecar-check.md"):
         flat = " ".join((SKILLS / name).read_text().split())
-        assert "The supervisor has usually written `swap_config.json` already" in flat, name
+        # The sidecar skill still starts from the drafted config. The swap skill is entered only after the supervisor's own run of
+        # prepare_swap.py exited nonzero or found no config (orchard/swap_prepare.py), and it says so.
+        lead = ("The supervisor does the prepare step itself whenever it holds every fact" if name == "weights-swap-check.md"
+                else "The supervisor has usually written `swap_config.json` already")
+        assert lead in flat, name
         assert "That difference is expected on this path" in flat and "Do not investigate it." in flat, name
 
 
@@ -262,8 +266,10 @@ def test_the_prepare_steps_start_from_the_drafted_config_and_fact_finding_is_onl
     # never opened the config the supervisor had written.
     for name in ("weights-swap-check.md", "weights-sidecar-check.md"):
         text = (SKILLS / name).read_text()
-        steps = text.split("## Prepare phase: the steps", 1)[1].split("\n## ", 1)[0]
-        assert steps.lstrip().startswith("1. Read `stages/2/swap_config.json`"), name
+        swap = name == "weights-swap-check.md"
+        steps = text.split("## Prepare phase: what is left" if swap else "## Prepare phase: the steps", 1)[1].split("\n## ", 1)[0]
+        assert steps.lstrip().startswith("1. Fix the value `prepare_swap.py` named" if swap
+                                         else "1. Read `stages/2/swap_config.json`"), name
         assert "tt-model list`, then read" not in steps and "Find four facts" not in steps, name
         fallback = text.split("## When there is no swap_config.json", 1)[1].split("\n## ", 1)[0]
         assert "Find four facts" in fallback and "weights-swap-templates/prepare_swap.py" in fallback, name
@@ -292,5 +298,5 @@ def test_the_stage_4_skill_keeps_to_the_drafted_counts():
 def test_the_swap_skill_names_the_container_command_for_a_container_config():
     flat = " ".join((SKILLS / "weights-swap-check.md").read_text().split())
     assert "has a `package` key" in flat and "python3 stages/2/serve_and_compare_container.py" in flat
-    assert "skip the `run.sh` check in step 3" in flat
+    assert "skip the `run.sh` check in step 1" in flat
     assert (SKILLS / "weights-swap-templates" / "serve_and_compare_container.py").is_file()
