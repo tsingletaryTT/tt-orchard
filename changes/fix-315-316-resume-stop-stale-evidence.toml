@@ -1,0 +1,4 @@
+target = "0.9.90"
+summary = "A resume on a smaller coder profile checks only the chips the new coder will hold, and a test record from an earlier attempt no longer vouches for a later resume marker."
+pr = 324
+kind = "fix"

@@ -145,6 +145,24 @@ def test_a_container_that_maps_our_device_is_not_stopped(devices, stopped):
     assert ctl.confirm_stopped().stopped is stopped
 
 
+def test_limit_devices_leaves_another_sessions_container_on_a_dropped_chip_alone():
+    # A resume on a smaller profile adopts a record that lists four chips and watches only two.
+    ctl, *_ = control(**{"docker ps-q": [(0, "abc\n", "")],
+                         "docker inspect": [(0, "abc123 /counter-test /dev/tenstorrent/2 /dev/tenstorrent/3 \n", "")]})
+    ctl.adopt({"dev_indices": [0, 1, 2, 3]})
+    assert not ctl.confirm_stopped().stopped              # four chips watched: the container is on ours
+    ctl.limit_devices([0, 1])
+    assert ctl.confirm_stopped().stopped                  # two chips watched: it is not on ours
+
+
+def test_limit_devices_still_blocks_on_a_container_on_a_kept_chip():
+    ctl, *_ = control(**{"docker ps-q": [(0, "abc\n", "")],
+                         "docker inspect": [(0, "abc123 /counter-test /dev/tenstorrent/1 \n", "")]})
+    ctl.adopt({"dev_indices": [0, 1, 2, 3]})
+    ctl.limit_devices([0, 1])
+    assert not ctl.confirm_stopped().stopped
+
+
 def test_another_agents_container_mapping_every_device_is_named_and_does_not_block():
     ctl, *_ = control(**{"docker ps-q": [(0, "abc\n", "")],
                          "docker inspect": [(0, "abc123 /tti-server /dev/tenstorrent \n", "")]})
