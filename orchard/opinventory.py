@@ -159,7 +159,9 @@ def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ign
                       "layers_traced": raw.get("layers_traced"), "note": raw.get("note"),
                       # optional in a raw trace (older traces lack them); python-level graph nodes are not ops
                       "python_nodes": raw.get("python_nodes") or {},
-                      "higher_order_nodes": raw.get("higher_order_nodes") or {}},
+                      "higher_order_nodes": raw.get("higher_order_nodes") or {},
+                      # modules replaced by a static stand-in (--stub-data-dependent): their ops are a guide, not the real graph
+                      "stubbed": raw.get("stubbed") or []},
            "failures": raw.get("failures", []), "label": LABEL,
            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     if "skipped" in raw:
@@ -232,6 +234,10 @@ def render_md(inv) -> str:
     lines += ["", "Ignored ops are metadata only (views of a tensor that is already there) and need no ttnn op.",
               "", "| status | distinct ops |", "| --- | --- |"]
     lines += [f"| {s} | {n} |" for s, n in inv["summary"]["distinct"].items()]
+    for st in inv["traced"].get("stubbed") or []:
+        lines += ["", f"Stand-in: {st['count']} `{st['module']}` module(s) were replaced by a static version that keeps the "
+                      f"op mix and ignores which positions each query can see. Their ops are a guide to what the layer "
+                      f"needs and the graph is not the real graph ({st['note']})."]
     py_nodes = sum((inv["traced"].get("python_nodes") or {}).values())
     if py_nodes:
         lines += ["", f"{py_nodes} python-level nodes (getitem and similar) are not ops and are not counted."]

@@ -7,7 +7,18 @@ from __future__ import annotations
 
 import pytest
 
-from test_ops_inventory_template import needs_stack, run_template
+import subprocess
+
+from test_ops_inventory_template import PY, run_template
+
+def _has_qwen4() -> bool:
+    return PY is not None and subprocess.run(
+        [PY, "-c", "from transformers.models.qwen4_exp import modeling_qwen4_exp"], capture_output=True).returncode == 0
+
+
+needs_stack = pytest.mark.skipif(not _has_qwen4(), reason=(
+    "SKIPPED: no interpreter with torch and a transformers that has qwen4_exp (5.19.0 or later; set "
+    "ORCHARD_REFERENCE_PYTHON), so the indexer stub was not run end to end"))
 
 _TEXT = {
     "hidden_size": 64, "num_hidden_layers": 4, "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 16,
@@ -77,7 +88,10 @@ pos = torch.arange(L).unsqueeze(0)
 cos, sin = rot(h, pos)
 causal = torch.tril(torch.ones(L, L, dtype=torch.bool)).view(1, 1, L, L)
 with torch.no_grad():
-    real = idx(h, (cos, sin), causal, None)
+    try:
+        real = idx(h, (cos, sin), causal, None)
+    except RuntimeError as exc:      # some torch builds refuse the real indexer's int32 scatter index
+        print(json.dumps({"real_unrunnable": str(exc)[:200]})); sys.exit(0)
     import types
     idx.forward = types.MethodType(tpl.qsa_indexer_stub, idx)
     stub = idx(h, (cos, sin), causal, None)
@@ -92,12 +106,13 @@ def test_the_stub_picks_the_same_blocks_as_the_real_indexer_where_every_token_is
     """The stub ignores visibility, so the two agree on the last query, which sees every token. A stub that selected the
     wrong blocks (a wrong pool, scale or topk) would differ here."""
     import json
-    import subprocess
 
-    from test_ops_inventory_template import PY, TEMPLATE
+    from test_ops_inventory_template import TEMPLATE
 
     done = subprocess.run([PY, "-c", PARITY, str(TEMPLATE), json.dumps(_TEXT)], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-600:]
     got = json.loads(done.stdout.strip().splitlines()[-1])
+    if "real_unrunnable" in got:
+        pytest.skip(f"SKIPPED: this torch cannot run the real indexer ({got['real_unrunnable']}), so there is nothing to compare with")
     assert got["shape_equal"] and got["last_row_equal"], got
     assert 0 < got["last_row_selected"] < 32, got          # a real selection, not everything and not nothing

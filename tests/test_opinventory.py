@@ -291,6 +291,26 @@ def test_run_inventory_passes_the_stub_option_only_when_asked(tmp_path):
         assert ("--stub-data-dependent" in run.calls[0]) is stub
 
 
+STUBBED = [{"module": "Qwen4ExpTextQSAIndexer", "count": 1, "note": "static replacement with the same op mix"}]
+
+
+def test_a_stubbed_trace_keeps_the_caveat_in_the_inventory_and_the_markdown():
+    raw = json.loads((FIXTURES / "raw-qwen3-tiny.json").read_text())
+    raw["stubbed"] = STUBBED
+    inv = oi.build(raw, mapping=oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json"),
+                   decomps=oi.load_table(oi.DATA_DIR / "decompositions.json"), dump=None)
+    assert inv["traced"]["stubbed"] == STUBBED
+    md = oi.render_md(inv)
+    assert "Qwen4ExpTextQSAIndexer" in md and "not the real graph" in md
+
+
+def test_an_unstubbed_trace_shows_no_stub_warning():
+    raw = json.loads((FIXTURES / "raw-qwen3-tiny.json").read_text())
+    inv = oi.build(raw, mapping=oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json"),
+                   decomps=oi.load_table(oi.DATA_DIR / "decompositions.json"), dump=None)
+    assert inv["traced"]["stubbed"] == [] and "stand-in" not in oi.render_md(inv)
+
+
 def test_a_dump_directory_with_a_dump_and_no_tables_works(tmp_path):
     """The tables always come from the package; dump_dir only says where to look for the dump."""
     dumps = tmp_path / "dumps"
