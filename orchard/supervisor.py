@@ -1489,6 +1489,10 @@ class Supervisor:
                 # Whoever prepared, no result may exist before the test has run: the finish step writes the result from the test's output.
                 if moved := swap_prepare.set_aside_results(stage_dir):
                     self.ledger.append("decision", spec.number, decision="results written before the test were set aside", files=moved)
+                if spec.draft == "full_port":
+                    # The coder wrote the port; the check is the supervisor's. Its template, config and command are put back as shipped.
+                    if problems := self._pin_full_port(spec, stage_dir, command=True):
+                        return "fail", problems, None
                 test, problems = self._read_test(stage_dir)
                 if problems:
                     return "fail", problems, None
@@ -2166,6 +2170,8 @@ class Supervisor:
             return self._draft_stage4(spec, stage_dir)
         if spec.draft == "stock_config":
             return self._draft_stock(spec, stage_dir)
+        if spec.draft == "full_port":
+            return self._pin_full_port(spec, stage_dir)
         if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
             return
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
@@ -2185,6 +2191,31 @@ class Supervisor:
         self.ledger.append("decision", spec.number, decision="swap config drafted",
                            config=evidence_record(self.run_dir, target), bundle_dir=cfg.get("bundle_dir"),
                            copied=copied, **({"package": cfg["package"]} if "package" in cfg else {}))
+
+    def _pin_full_port(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
+        """Stage 2 of a full port (orchard/full_port.py): put the supervisor's template and its config in the stage directory, replacing any
+        copy there. Called before the prepare step (so the coder can read the template) and again after it (so an edit made during prepare
+        is undone). With `command` set, hw_test.json is also rewritten to the template's fixed command; the coder's deadline is kept when
+        it is a positive number no larger than the default. Returns the problems that stop the stage (no model snapshot in the run)."""
+        snapshot = self.inputs.get("model")
+        if not snapshot:
+            return ["the run has no model snapshot (inputs `model=`), so the port check has nothing to load"]
+        shutil.copy2(Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TEMPLATE_NAME,
+                     stage_dir / full_port.TEMPLATE_NAME)
+        config = stage_dir / full_port.CONFIG_NAME
+        config.write_text(json.dumps({"model_snapshot": str(Path(snapshot).absolute())}, indent=2) + "\n", encoding="utf-8")
+        if command:
+            deadline = full_port.DEADLINE_S
+            try:
+                given = json.loads((stage_dir / "hw_test.json").read_text(encoding="utf-8")).get("deadline_s")
+                if isinstance(given, (int, float)) and not isinstance(given, bool) and 0 < given <= full_port.DEADLINE_S:
+                    deadline = given
+            except (OSError, ValueError, AttributeError):
+                pass
+            (stage_dir / "hw_test.json").write_text(json.dumps({"command": full_port.COMMAND, "deadline_s": deadline}) + "\n", encoding="utf-8")
+        else:
+            self.ledger.append("decision", spec.number, decision="port check template copied", copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME])
+        return []
 
     def _draft_stock(self, spec, stage_dir: Path) -> None:
         """stock_config.json for stage 2 of a stock-runtime run (orchard/stock_runtime.py, draft_config), and the template that reads it.

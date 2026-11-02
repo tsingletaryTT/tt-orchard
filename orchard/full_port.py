@@ -16,10 +16,15 @@ Files, all under the stage directory:
                               of port-check.json as its last act, so the record and the run belong together.
     test-result.json          written by the supervisor after the command ends (exit code, timeout, chips, the output file's sha256).
 
-What the checks do and do not show. They tie `result.json` to a record, the record to a test the supervisor ran on leased chips, and
-the ids to the stage 1 file on disk. They do not prove the chip computed the ids: the agent writes the check script, so a script
-written to cheat could still print a forged record. The source checks (a model file must mention ttnn and must not read the
-reference) make the plain forgeries visible. Slice 2 of the design moves the comparison into a supervisor-owned template.
+What the checks do and do not show. Slice 2 (issue 325): the comparison is made by a supervisor-owned template, skills/full-port-templates/
+port_check.py, which the supervisor copies to stages/2/port_check.py and runs with a fixed command. The coder writes only the port module
+(stages/2/port/port_model.py: load, prefill, decode_step, close). The template runs the port in a second process, computes agreement, the
+reference-id match, the free-run text and the record itself, and prints the sha256 as its last line. The gate checks that the stage's copy
+of the template is the shipped file, that the record carries the shipped file's sha256, that the supervisor's command was the template's
+fixed command, and that the output holds one mark line that matches the record. They tie `result.json` to a record, the record to a test
+the supervisor ran on leased chips, and the ids to the stage 1 file on disk. They do not prove the chip computed the ids: a port that
+returns the reference's ids without computing them looks the same as one that computed them. The source checks (a port file must mention
+ttnn and must not read the reference) make the plain forms visible.
 """
 from __future__ import annotations
 
@@ -42,11 +47,26 @@ PORT_DIR = "stages/2/port/"
 RECORD_FILE = "evidence/port-check.json"
 OUTPUT_FILE = "evidence/hw-test-output.txt"
 OUTPUT_MARK = "PORT_CHECK_SHA256"
-MODEL_ROLE, CHECK_ROLE = "model", "check"
+MODEL_ROLE = "model"                  # every file under stages/2/port/ is model code; the check is the template's
+TEMPLATE = Path(__file__).resolve().parent / "skills" / "full-port-templates" / "port_check.py"      # the shipped template
+TEMPLATE_NAME = "port_check.py"       # its name in stages/2/
+CONFIG_NAME = "port_check_config.json"
+# The only command the supervisor runs for this stage. -P and -s keep files the coder leaves in stages/2/ off the template's sys.path.
+COMMAND = "python3 -P -s stages/2/port_check.py"
+DEADLINE_S = 3600
+PORT_MODULE = "stages/2/port/port_model.py"
 EVIDENCE_NAMES = ("port-check.json", "hw-test-output.txt")     # result.json's evidence list must name both
 JSON_MAX = 16 * 1024 * 1024
 SOURCE_MAX = 2 * 1024 * 1024
 TOLERANCE = 1e-6                      # the gate's recomputed agreement against the number result.json reports
+
+
+def template_sha256() -> str | None:
+    """The sha256 of the shipped template, or None when it cannot be read."""
+    try:
+        return hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def _num(x) -> bool:
@@ -131,6 +151,8 @@ def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
             else:
                 why = f"the hardware test exited with code {code!r}"
             reasons.append(f"test-result.json: {why}")
+        if marker.get("command") != COMMAND:
+            reasons.append(f"test-result.json: the hardware test ran {marker.get('command')!r}; the supervisor's command for this stage is {COMMAND!r}")
 
     # ---- result.json: each field on its own ----
     if result.get("runs") is not True:
@@ -211,8 +233,35 @@ def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
     if not _text(text) or len("".join(text.split())) < MIN_FREE_RUN_CHARS or len(set(text.split())) < MIN_FREE_RUN_WORDS:
         reasons.append(f"free_run_text must be at least {MIN_FREE_RUN_CHARS} non-space characters and {MIN_FREE_RUN_WORDS} different words")
 
-    _source_reasons(record, run_dir, reasons)
+    _template_reasons(record, stage_dir, run_dir, reasons)
+    _source_reasons(record, stage_dir, run_dir, reasons)
     return reasons, seen
+
+
+def _template_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list) -> None:
+    """The record came from the shipped template: the stage's copy is the shipped file, the record carries its sha256, and the config the
+    template read is the file on disk. The record also says which positions the template made, so its own agreement figure must match."""
+    shipped = template_sha256()
+    if shipped is None:
+        reasons.append(f"the shipped template {TEMPLATE.name} cannot be read, so the record cannot be tied to it")
+        return
+    copy = stage_dir / TEMPLATE_NAME
+    mine = _sha(copy) if copy.is_file() and not copy.is_symlink() else None
+    if mine is None:
+        reasons.append(f"{TEMPLATE_NAME} is not in this stage directory as a regular file: the supervisor copies it there and the gate compares it with the shipped one")
+    elif mine != shipped:
+        reasons.append(f"{TEMPLATE_NAME} in this stage differs from the shipped template (sha256 {mine[:12]} against {shipped[:12]}), "
+                       "so the record is not the template's")
+    got = record.get("template_sha256")
+    if got != shipped:
+        reasons.append(f"{RECORD_FILE} template_sha256 {str(got)[:12]} is not the shipped template's ({shipped[:12]}): the record was not written by it")
+    cfg = record.get("config")
+    cfg_path = stage_dir / CONFIG_NAME
+    if not isinstance(cfg, dict) or cfg.get("sha256") != (_sha(cfg_path) if cfg_path.is_file() else None):
+        reasons.append(f"{CONFIG_NAME} is not the file the record names (missing, or changed after the test)")
+    free = record.get("free_run_ids")
+    if not _ids(free) or not free:
+        reasons.append(f"{RECORD_FILE} free_run_ids must be a non-empty list of whole numbers")
 
 
 def _reference_ids(record: dict, run_dir: Path, reasons: list) -> list | None:
@@ -255,25 +304,31 @@ def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list)
         reasons.append(f"{OUTPUT_FILE} is not readable: {exc.reason}")
         return
     marks = re.findall(rf"^{OUTPUT_MARK} ([0-9a-f]{{64}})\s*$", text, re.M)
+    starts = [l for l in text.splitlines() if l.startswith(OUTPUT_MARK)]
+    if len(starts) != 1:
+        reasons.append(f"{OUTPUT_FILE} has {len(starts)} lines that begin with {OUTPUT_MARK}; the template prints exactly one "
+                       "(and prefixes every line the port prints), so something else wrote a line of its own")
     if not marks or marks[-1] != _sha(stage_dir / RECORD_FILE):
         reasons.append(f"{OUTPUT_FILE} does not carry a {OUTPUT_MARK} line that matches {RECORD_FILE}, so the record was not "
                        "written by the test the supervisor ran")
 
 
-def _source_reasons(record: dict, run_dir: Path, reasons: list) -> None:
+def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list) -> None:
     """The port's source files: named, unchanged since the record, and not obviously a way to avoid the chip."""
     sources = record.get("port_sources")
     if not isinstance(sources, list) or not sources:
         reasons.append("port_sources must list the port's source files (stages/2/port/)")
         return
     model_text = []
+    listed = set()
     for i, s in enumerate(sources):
         path = s.get("path") if isinstance(s, dict) else None
         role = s.get("role") if isinstance(s, dict) else None
         f = _inside(run_dir, path) if isinstance(path, str) and path.startswith(PORT_DIR) else None
-        if f is None or role not in (MODEL_ROLE, CHECK_ROLE):
-            reasons.append(f"port_sources[{i}] needs a file under {PORT_DIR} and a role of {MODEL_ROLE!r} or {CHECK_ROLE!r}")
+        if f is None or role != MODEL_ROLE:
+            reasons.append(f"port_sources[{i}] needs a file under {PORT_DIR} and a role of {MODEL_ROLE!r}")
             continue
+        listed.add(path)
         if s.get("sha256") != _sha(f):
             reasons.append(f"port_sources[{i}] {path} changed after the record was written (sha256 differs)")
         if role == MODEL_ROLE:
@@ -284,6 +339,11 @@ def _source_reasons(record: dict, run_dir: Path, reasons: list) -> None:
     if not model_text:
         reasons.append(f"port_sources must include at least one file with the role {MODEL_ROLE!r}")
         return
+    if PORT_MODULE not in listed:
+        reasons.append(f"port_sources does not list {PORT_MODULE}, the port module the template calls")
+    on_disk = {os.path.relpath(f, run_dir) for f in (stage_dir / "port").rglob("*.py") if f.is_file() and not f.is_symlink()}
+    if on_disk - listed:
+        reasons.append(f"{sorted(on_disk - listed)[0]} is in {PORT_DIR} but not in port_sources: it was added after the record was written")
     if not any("ttnn" in t for _, t in model_text):
         reasons.append("no model source in port_sources mentions ttnn, so nothing shows the port runs on the chip")
     for path, t in model_text:
