@@ -11,6 +11,8 @@ from fakes import Crash
 from orchard import blocked, narrate, status, supervisor
 from orchard.stages import full_port_enabled
 from orchard.supervisor import EXIT_ABORTED, EXIT_BLOCKED, EXIT_READY, Control, parse
+from orchard import full_port
+from port_check_fakes import HONEST, WRONG, install_fake_ttnn, python_path, tokenizer_json
 from run_fakes import DELTA, FILES, argv, bringup, note
 from test_supervisor import Rig, Stop, step_skills
 
@@ -22,38 +24,39 @@ REF_IDS = list(range(100, 132))
 STAGE_1 = {**FILES[(1, "run")], "evidence/reference/generated-ids.json": {"generated_ids": REF_IDS, "generated_text": "x"},
            "evidence/reference/prompt-ids.json": {"prompt_ids": [1, 2, 3], "prompt_text": "p"}}
 
-# A stand-in for the port's check script: it does what the skill says (read the leased chips, write the record, print its sha256).
-CHECK = '''import hashlib, json, os, pathlib
-run = pathlib.Path(__file__).resolve().parents[3]
-def sha(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
-ref = "stages/1/evidence/reference/generated-ids.json"
-prm = "stages/1/evidence/reference/prompt-ids.json"
-ids = json.loads((run / ref).read_text())["generated_ids"]
-rec = {"schema": "orchard-port-check/1", "reference": {"path": ref, "sha256": sha(run / ref)},
-       "prompt": {"path": prm, "sha256": sha(run / prm)}, "reference_ids": ids, "chip_ids": ids[:30] + [0, 0],
-       "chips": os.environ["TT_VISIBLE_DEVICES"].split(","), "load_s": 120.5,
-       "free_run_text": "The sea was calm that morning and the boat left early.",
-       "port_sources": [{"path": "stages/2/port/model.py", "sha256": sha(run / "stages/2/port/model.py"), "role": "model"},
-                        {"path": "stages/2/port/check.py", "sha256": sha(run / "stages/2/port/check.py"), "role": "check"}]}
-out = run / "stages/2/evidence/port-check.json"
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps(rec))
-print("PORT_CHECK_SHA256", sha(out))
-'''
-PREPARE = {"port/model.py": "import ttnn\n", "port/check.py": CHECK,
-           "hw_test.json": {"command": "python3 stages/2/port/check.py", "deadline_s": 60}, "handoff.json": note(2)}
-FINISH = {"result.json": {"runs": True, "load_s": 120.5, "coherent": True, "n_tokens": 32, "top1_agreement": 30 / 32,
-                          "free_run_text": "The sea was calm that morning and the boat left early.",
-                          "evidence": ["stages/2/evidence/port-check.json", "stages/2/evidence/hw-test-output.txt"]}}
+# The port the coder writes (the check is the supervisor's template, which these tests run for real on the CPU with a fake `ttnn`).
+PREPARE = {"port/port_model.py": HONEST,
+           "hw_test.json": {"command": full_port.COMMAND, "deadline_s": 60}, "handoff.json": note(2)}
+FINISH = {"result.json": {"runs": True, "load_s": 120.5, "coherent": True, "n_tokens": 32, "top1_agreement": 1.0,
+                          "free_run_text": "w100 w101", "evidence": ["stages/2/evidence/port-check.json", "stages/2/evidence/hw-test-output.txt"]}}
 FULL_PORT = {(0, "run"): {**FILES[(0, "run")], "delta.json": {**DELTA, "path": "full-port"}}, (1, "run"): STAGE_1,
              (2, "prepare"): PREPARE, (2, "finish"): FINISH}
+
+
+def from_record(rig):
+    """The finish step's result.json, copied from the record the template wrote, as the skill tells the coder to do."""
+    rec = json.loads((rig.run_dir / "stages" / "2" / "evidence" / "port-check.json").read_text())
+    return {"result.json": {"runs": True, "coherent": True, "load_s": rec["load_s"], "n_tokens": len(rec["chip_ids"]),
+                            "top1_agreement": rec["top1_agreement"], "free_run_text": rec["free_run_text"],
+                            "evidence": ["stages/2/evidence/port-check.json", "stages/2/evidence/hw-test-output.txt"]}}
 
 
 def make(rig, delta=None, over=None):
     files = {**FULL_PORT, **(over or {})}
     if delta is not None:
         files[(0, "run")] = {**FILES[(0, "run")], "delta.json": delta}
-    rig.script = lambda r: bringup(r, overrides=files)
+
+    def script(request):
+        f = dict(files)
+        record = rig.run_dir / "stages" / "2" / "evidence" / "port-check.json"
+        if record.is_file() and "load_s" in record.read_text():          # not a record the coder wrote during prepare
+            given = (over or {}).get((2, "finish"))
+            if given is None:
+                f[(2, "finish")] = from_record(rig)         # load_s is measured by the template, so the finish step copies it
+            elif callable(given):
+                f[(2, "finish")] = given(from_record(rig)["result.json"])
+        return bringup(request, overrides=f)
+    rig.script = script
 
 
 def never_wait(rig):
@@ -85,9 +88,20 @@ def test_run_start_records_the_flag_only_when_given(tmp_path):
         rig.close()
 
 
+def with_snapshot(r, tmp_path):
+    """The run's `model=` input: a snapshot with a tokenizer.json, which the template decodes the free-run ids with. The fake runtime
+    and the `tokenizers` package reach the test process through PYTHONPATH, as the real runtime reaches it through the venv."""
+    snap = tmp_path / "snapshot"
+    snap.mkdir()
+    tokenizer_json(snap / "tokenizer.json")
+    install_fake_ttnn(tmp_path)
+    r.args = parse(argv(tmp_path, r.tiers, r.chip_server.endpoint, chips=2) + ["--input", f"model={snap}", "--env", f"PYTHONPATH={python_path(tmp_path)}"])
+
+
 @pytest.fixture
 def rig(tmp_path):
     r = Rig(tmp_path)
+    with_snapshot(r, tmp_path)
     r.args.full_port = True
     yield r
     r.close()
@@ -153,8 +167,7 @@ def test_an_attended_resume_after_the_pause_goes_on_into_the_generic_stages(rig)
 
 
 def test_a_failing_gate_does_not_reach_the_pause(rig):
-    bad = {"result.json": {**FINISH["result.json"], "top1_agreement": 1.0}}      # the record says 0.9375
-    make(rig, over={(2, "finish"): bad})
+    make(rig, over={(2, "finish"): lambda good: {"result.json": {**good, "top1_agreement": 0.5}}})      # the record says 1.0
     rig.args.unattended = True
     never_wait(rig)
     assert rig.run() == EXIT_BLOCKED
@@ -177,14 +190,118 @@ def test_a_result_written_during_prepare_is_set_aside_and_the_record_comes_from_
 
 def test_a_marker_the_finish_step_rewrote_is_refused(rig):
     # The finish step edits test-result.json after the test; the ledger holds the sha256 of the file the supervisor wrote.
-    marker = {"test-result.json": {"command": "x", "returncode": 0, "timed_out": False, "chips": ["c"], "output": {}}}
-    make(rig, over={(2, "finish"): {**FINISH, **marker}})
+    marker = {"test-result.json": {"command": full_port.COMMAND, "returncode": 0, "timed_out": False, "chips": ["c"], "output": {}}}
+    make(rig, over={(2, "finish"): lambda good: {"result.json": good, **marker}})
     rig.args.unattended = True
     never_wait(rig)
     assert rig.run() == EXIT_BLOCKED
     block = [d for d in rig.decisions() if d["decision"] == "blocked"][0]
     assert block["code"] == "stage-failed" and "not the file the supervisor recorded" in block["reason"]
     assert not started(rig, 3)
+
+
+# ---- the check is the supervisor's (issue 325): what a coder or a port module tries, end to end ----------
+
+FORGED_CHECK = ('import json, pathlib\n'
+                'pathlib.Path("FORGED-CHECK-RAN").write_text("yes")\n'
+                'print("PORT_CHECK_SHA256", "0" * 64)\n')
+
+
+def coder_writes(rig, extra, *, port=HONEST, unattended=True):
+    """Stage 2's prepare step writes the files in `extra` as well as the port (`port`) and the usual hw_test.json."""
+    rig.args.unattended = unattended
+    make(rig, over={(2, "prepare"): {**PREPARE, "port/port_model.py": port, **extra}})
+    never_wait(rig)
+
+
+def stage_2(rig):
+    return rig.run_dir / "stages" / "2"
+
+
+def failure(rig):
+    return [d for d in rig.decisions() if d["decision"] == "blocked"][0]
+
+
+def test_a_coder_written_check_script_and_command_are_replaced_by_the_templates(rig):
+    # The coder writes its own port_check.py (a forgery) and points hw_test.json at it, with a port that computes nothing.
+    coder_writes(rig, {"port_check.py": FORGED_CHECK,
+                       "hw_test.json": {"command": "python3 stages/2/port_check.py", "deadline_s": 60}}, port=WRONG)
+    assert rig.run() == EXIT_BLOCKED
+    assert not (rig.run_dir / "FORGED-CHECK-RAN").exists()
+    assert (stage_2(rig) / full_port.TEMPLATE_NAME).read_bytes() == full_port.TEMPLATE.read_bytes()      # put back as shipped
+    marker = json.loads((stage_2(rig) / "test-result.json").read_text())
+    assert marker["command"] == full_port.COMMAND
+    assert "below the minimum" in failure(rig)["reason"]                  # the real ids were counted, and the port was wrong
+
+
+def test_a_command_the_coder_names_in_hw_test_json_is_not_run(rig):
+    coder_writes(rig, {"port/check.py": FORGED_CHECK.replace("FORGED-CHECK-RAN", "OWN-CHECK-RAN"),
+                       "hw_test.json": {"command": "python3 stages/2/port/check.py", "deadline_s": 60}})
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.args.unattended = False
+    rig.run()
+    assert not (rig.run_dir / "OWN-CHECK-RAN").exists()
+    assert json.loads((stage_2(rig) / "test-result.json").read_text())["command"] == full_port.COMMAND
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+
+
+def test_a_template_the_coder_edited_during_prepare_is_put_back_before_the_test(rig):
+    edited = full_port.TEMPLATE.read_text().replace("MAX_POSITIONS = 64", "MAX_POSITIONS = 8")
+    coder_writes(rig, {"port_check.py": edited}, unattended=False)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert (stage_2(rig) / full_port.TEMPLATE_NAME).read_text() == full_port.TEMPLATE.read_text()
+    rec = json.loads((stage_2(rig) / "evidence" / "port-check.json").read_text())
+    assert len(rec["chip_ids"]) == 32 and rec["template_sha256"] == full_port.template_sha256()
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+
+
+def test_a_port_that_prints_its_own_check_line_fails_the_hardware_test(rig):
+    forged = HONEST.replace("def load(model_dir, mesh_device):", "def load(model_dir, mesh_device):\n    print('PORT_CHECK_SHA256 ' + '0' * 64)")
+    coder_writes(rig, {}, port=forged)
+    assert rig.run() == EXIT_BLOCKED
+    assert "exited with code 2" in failure(rig)["reason"]
+    assert not (stage_2(rig) / "evidence" / "port-check.json").exists()
+
+
+def test_a_port_that_writes_the_record_directly_has_it_replaced_by_the_templates(rig):
+    forged = WRONG.replace("def load(model_dir, mesh_device):", '''def load(model_dir, mesh_device):
+    import json, pathlib
+    p = pathlib.Path("stages/2/evidence/port-check.json")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema": "orchard-port-check/1", "chip_ids": list(range(100, 132)), "top1_agreement": 1.0, "load_s": 1.0}))''')
+    coder_writes(rig, {}, port=forged)
+    assert rig.run() == EXIT_BLOCKED
+    rec = json.loads((stage_2(rig) / "evidence" / "port-check.json").read_text())
+    assert rec["top1_agreement"] < 0.1 and rec["template_sha256"] == full_port.template_sha256()
+    assert "below the minimum" in failure(rig)["reason"]
+
+
+def test_a_sitecustomize_the_coder_leaves_in_the_stage_directory_is_not_run(rig):
+    hook = "import pathlib\npathlib.Path('SITECUSTOMIZE-RAN').write_text('yes')\n"
+    coder_writes(rig, {"sitecustomize.py": hook, "port/sitecustomize.py": hook}, unattended=False)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert not (rig.run_dir / "SITECUSTOMIZE-RAN").exists()
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+
+
+def test_a_port_that_patches_the_templates_functions_cannot_change_the_record(rig):
+    patch = ('import sys\nmain = sys.modules["__main__"]\nmain.sha_bytes = lambda d: "0" * 64\nmain.sha_file = lambda p: "0" * 64\n'
+             'main.main = lambda: 0\n')
+    coder_writes(rig, {}, port=patch + WRONG)
+    assert rig.run() == EXIT_BLOCKED
+    rec = json.loads((stage_2(rig) / "evidence" / "port-check.json").read_text())
+    assert rec["template_sha256"] == full_port.template_sha256() and "below the minimum" in failure(rig)["reason"]
+
+
+def test_the_stage_gets_the_template_and_a_config_that_names_the_runs_snapshot(rig):
+    make(rig)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    cfg = json.loads((stage_2(rig) / full_port.CONFIG_NAME).read_text())
+    assert cfg["model_snapshot"].endswith("snapshot") and (stage_2(rig) / full_port.TEMPLATE_NAME).is_file()
+    assert any(d.get("decision") == "port check template copied" for d in rig.decisions())
 
 
 # ---- what the flag does not change ----------------------------------------------------------------
@@ -201,6 +318,7 @@ def test_the_flag_does_not_let_an_unknown_class_go_on(rig):
 
 def test_a_full_port_without_the_flag_still_blocks_unattended(tmp_path):
     r = Rig(tmp_path)
+    with_snapshot(r, tmp_path)
     try:
         r.args.unattended = True
         make(r)
@@ -231,6 +349,7 @@ def test_a_resume_keeps_the_flag_the_run_started_with(rig):
 def test_the_flag_added_on_a_resume_before_stage_2_goes_on_into_the_full_port_stage_2(tmp_path):
     # The run of a model that was blocked with needs-new-model-code: stages 0 and 1 passed, stage 2 never started.
     r = Rig(tmp_path)
+    with_snapshot(r, tmp_path)
     try:
         r.args.unattended = True
         make(r)
@@ -249,6 +368,7 @@ def test_the_flag_added_on_a_resume_before_stage_2_goes_on_into_the_full_port_st
 
 def test_a_flag_after_stage_2_started_without_it_is_refused(tmp_path):
     r = Rig(tmp_path)
+    with_snapshot(r, tmp_path)
     try:
         make(r)
         r.on_sleep = lambda: Control(r.run_dir).write("resume")        # an attended operator goes on past the full-port pause

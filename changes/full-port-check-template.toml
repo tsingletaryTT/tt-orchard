@@ -1,0 +1,3 @@
+target = "0.9.92"
+summary = "Full port stage 2 check is a supervisor-owned template with a port module interface"
+pr = 347

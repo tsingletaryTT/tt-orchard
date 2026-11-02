@@ -28,28 +28,29 @@ def put(run, rel, content):
     return p
 
 
-def build(tmp_path, *, result=None, record=None, marker=None, output=None, model_src="import ttnn\n", check_src="print('check')\n",
-          ref_ids=REF_IDS):
+def build(tmp_path, *, result=None, record=None, marker=None, output=None, model_src="import ttnn\n", ref_ids=REF_IDS):
     """A stage 2 directory a passing full-port run would leave. Each argument replaces a part (a dict is merged over the good one)
     so a test changes one fact and watches the gate name it."""
     run = tmp_path / "run"
     ref = put(run, "stages/1/evidence/reference/generated-ids.json", {"generated_ids": ref_ids, "generated_text": "x"})
     prm = put(run, "stages/1/evidence/reference/prompt-ids.json", {"prompt_ids": [1, 2, 3], "prompt_text": "p"})
-    model = put(run, "stages/2/port/model.py", model_src)
-    check = put(run, "stages/2/port/check.py", check_src)
+    model = put(run, "stages/2/port/port_model.py", model_src)
+    template = put(run, "stages/2/" + full_port.TEMPLATE_NAME, full_port.TEMPLATE.read_text())      # the supervisor's copy of the shipped file
+    config = put(run, "stages/2/" + full_port.CONFIG_NAME, {"model_snapshot": "snapshot"})
     good_record = {
         "schema": full_port.RECORD_SCHEMA,
         "reference": {"path": "stages/1/evidence/reference/generated-ids.json", "sha256": sha(ref.read_bytes())},
         "prompt": {"path": "stages/1/evidence/reference/prompt-ids.json", "sha256": sha(prm.read_bytes())},
         "reference_ids": list(ref_ids), "chip_ids": list(ref_ids[:30]) + [0, 0],
-        "chips": list(CHIPS), "load_s": 120.5, "free_run_text": TEXT,
-        "port_sources": [{"path": "stages/2/port/model.py", "sha256": sha(model.read_bytes()), "role": "model"},
-                         {"path": "stages/2/port/check.py", "sha256": sha(check.read_bytes()), "role": "check"}]}
+        "top1_agreement": 30 / 32, "chips": list(CHIPS), "load_s": 120.5,
+        "free_run_ids": list(range(48)), "free_run_text": TEXT, "template_sha256": sha(template.read_bytes()),
+        "config": {"path": "stages/2/" + full_port.CONFIG_NAME, "sha256": sha(config.read_bytes())},
+        "port_sources": [{"path": "stages/2/port/port_model.py", "sha256": sha(model.read_bytes()), "role": "model"}]}
     rec = {**good_record, **(record or {})}
     rec_path = put(run, "stages/2/evidence/port-check.json", rec)
     out_text = f"loading\nPORT_CHECK_SHA256 {sha(rec_path.read_bytes())}\ndone\n" if output is None else output
     out_path = put(run, "stages/2/evidence/hw-test-output.txt", out_text)
-    good_marker = {"command": "python3 stages/2/port/check.py", "returncode": 0, "timed_out": False, "seconds": 5.0, "chips": list(CHIPS),
+    good_marker = {"command": full_port.COMMAND, "returncode": 0, "timed_out": False, "seconds": 5.0, "chips": list(CHIPS),
                    "output": {"path": "stages/2/evidence/hw-test-output.txt", "sha256": sha(out_path.read_bytes())}}
     put(run, "stages/2/test-result.json", {**good_marker, **(marker or {})})
     good_result = {"runs": True, "coherent": True, "n_tokens": 32, "top1_agreement": 30 / 32, "load_s": 120.5, "free_run_text": TEXT,
@@ -106,7 +107,7 @@ def test_reference_ids_that_differ_from_the_stage_1_file_are_refused(tmp_path):
 
 
 def test_a_reference_file_that_is_not_the_stage_1_file_is_refused(tmp_path):
-    g = reasons(tmp_path, record={"reference": {"path": "stages/2/port/model.py", "sha256": sha("import ttnn\n")}})
+    g = reasons(tmp_path, record={"reference": {"path": "stages/2/port/port_model.py", "sha256": sha("import ttnn\n")}})
     assert one(g, "reference.path")
 
 
@@ -139,7 +140,7 @@ def test_an_output_file_that_is_not_the_one_the_supervisor_recorded_is_refused(t
 
 def test_port_sources_that_changed_after_the_record_are_refused(tmp_path):
     stage_dir, run = build(tmp_path)
-    (stage_dir / "port" / "model.py").write_text("import ttnn\n# edited\n")
+    (stage_dir / "port" / "port_model.py").write_text("import ttnn\n# edited\n")
     assert one(gate_full_port(stage_dir, run), "port_sources")
 
 
@@ -262,7 +263,7 @@ def test_a_marker_whose_chips_are_not_a_list_is_a_reason_and_not_a_crash(tmp_pat
 
 
 def test_a_nul_in_a_port_source_path_is_a_reason_and_not_a_crash(tmp_path):
-    bad = {"path": "stages/2/port/model\u0000.py", "sha256": "0" * 64, "role": "model"}
+    bad = {"path": "stages/2/port/port_model\u0000.py", "sha256": "0" * 64, "role": "model"}
     g = reasons(tmp_path, record={"port_sources": [bad]})
     assert one(g, "port_sources")
 
@@ -291,3 +292,71 @@ def test_the_marker_record_is_read_with_a_bound_and_a_fifo_is_refused_without_bl
 def test_a_record_without_a_positive_numeric_load_time_is_refused(tmp_path, load):
     # result.json carries 120.5; with no number in the record nothing supports it.
     assert one(reasons(tmp_path, record={"load_s": load}), "load_s")
+
+
+# ---- slice 2 (issue 325): the supervisor-owned check ----------------------------------------------------
+
+def test_a_template_copy_that_differs_from_the_shipped_file_is_refused(tmp_path):
+    stage_dir, run = build(tmp_path)
+    (stage_dir / full_port.TEMPLATE_NAME).write_text("print('mine')\n")
+    assert one(gate_full_port(stage_dir, run), "differs from the shipped template")
+
+
+def test_a_record_that_carries_another_template_sha256_is_refused(tmp_path):
+    assert one(reasons(tmp_path, record={"template_sha256": "1" * 64}), "template_sha256")
+
+
+def test_a_record_with_no_template_sha256_is_refused(tmp_path):
+    stage_dir, run = build(tmp_path)
+    rec = json.loads((stage_dir / "evidence" / "port-check.json").read_text())
+    del rec["template_sha256"]
+    put(run, "stages/2/evidence/port-check.json", rec)
+    assert one(gate_full_port(stage_dir, run), "template_sha256")
+
+
+def test_a_hardware_test_command_that_is_not_the_templates_is_refused(tmp_path):
+    assert one(reasons(tmp_path, marker={"command": "python3 stages/2/port/check.py"}), "command for this stage")
+
+
+def test_two_lines_that_begin_with_the_check_mark_are_refused(tmp_path):
+    out = f"PORT_CHECK_SHA256 {'0' * 64}\nPORT_CHECK_SHA256 {'1' * 64}\n"
+    assert one(reasons(tmp_path, output=out), "begin with PORT_CHECK_SHA256")
+
+
+def test_a_port_source_with_the_old_check_role_is_refused(tmp_path):
+    src = [{"path": "stages/2/port/port_model.py", "sha256": sha("import ttnn\n"), "role": "check"}]
+    assert one(reasons(tmp_path, record={"port_sources": src}), "role of 'model'")
+
+
+def test_a_record_that_does_not_list_the_port_module_is_refused(tmp_path):
+    stage_dir, run = build(tmp_path)
+    other = put(run, "stages/2/port/other.py", "import ttnn\n")
+    rec = json.loads((stage_dir / "evidence" / "port-check.json").read_text())
+    rec["port_sources"] = [{"path": "stages/2/port/other.py", "sha256": sha(other.read_bytes()), "role": "model"}]
+    put(run, "stages/2/evidence/port-check.json", rec)
+    assert one(gate_full_port(stage_dir, run), "does not list stages/2/port/port_model.py")
+
+
+def test_a_config_that_changed_since_the_record_is_refused(tmp_path):
+    stage_dir, run = build(tmp_path)
+    (stage_dir / full_port.CONFIG_NAME).write_text('{"model_snapshot": "elsewhere"}')
+    assert one(gate_full_port(stage_dir, run), full_port.CONFIG_NAME)
+
+
+def test_the_shipped_template_is_where_the_supervisor_and_the_gate_look():
+    assert full_port.TEMPLATE == SKILLS / "full-port-templates" / "port_check.py" and full_port.TEMPLATE.is_file()
+    assert full_port.COMMAND == f"python3 -P -s stages/2/{full_port.TEMPLATE_NAME}"
+
+
+def test_the_skill_says_the_coder_writes_only_the_port_module_and_names_its_four_functions():
+    flat = " ".join(skill_text().split())
+    for name in ("load(model_dir, mesh_device)", "prefill(model, ids)", "decode_step(model, token_id, position)", "close(model)"):
+        assert name in flat, name
+    assert "stages/2/port/port_model.py" in flat and "You do not write the check" in flat
+    assert full_port.COMMAND in flat and "port_check_config.json" in flat and "template_sha256" in flat
+
+
+def test_the_skill_no_longer_has_the_coder_write_a_check_script_or_mark_a_check_role():
+    flat = " ".join(skill_text().split())
+    assert '"role": "check"' not in flat and "python3 stages/2/port/check.py" not in flat
+    assert "Do not run `port_check.py` yourself" in flat and "Do not edit `port_check.py`" in flat
