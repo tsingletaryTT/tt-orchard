@@ -48,7 +48,7 @@ The page runs the parts of it that can be bounded and cannot follow a link (the 
 
 `tt-orchard can gate`, `can boot` and `can stage` take an optional `--state-dir DIR`. When given, the command writes `DIR/<spec name>.can-state.json` after it finishes. Without the flag nothing is written, and the view works without the file. `can boot` also takes `--cache-state empty|warm`, because the boot check cannot tell whether the kernel cache it used was empty; the operator knows.
 
-The file sits beside the bundle, not inside it. A file inside the bundle would be listed as unlisted by `SHA256SUMS` and fail the gate.
+The file sits beside the bundle. A file inside the bundle would be listed as unlisted by `SHA256SUMS` and fail the gate.
 
 Format (schema 1, JSON, under 64 KB):
 
@@ -86,7 +86,7 @@ A row's tone follows its worst piece: red for a failed gate, a sums mismatch, a 
 - A live Hub state: whether the pinned revision exists, whether a published repository exists, its visibility, its files.
 - The result of running the gate on the page's host (see above).
 - The full problem list of a gate (at most 10 are shown; the rest are counted).
-- Port, requirements, extra code and environment of the spec. The view is a status page, not a spec viewer.
+- Port, requirements, extra code and environment of the spec. The view is a status page.
 - Publish commands. `can commands` prints them as text for the operator; the page never shows a command that publishes.
 - Any control. There is no button that stages, gates, boots or publishes.
 
