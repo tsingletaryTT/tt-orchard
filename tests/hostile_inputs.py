@@ -500,6 +500,16 @@ def _safeio_sha256_file(base: Path):
     return safeio.sha256_file(base / "input.json", max_bytes=1 << 20)
 
 
+def _hwtests_load_plan(base: Path):
+    from orchard import hwtests
+    return hwtests.load_plan(base)
+
+
+def _hwtests_read_plan(base: Path):
+    from orchard import hwtests
+    return hwtests.read_plan(base, required=None, max_chips=4, budget_s=100.0, home="/nohome")
+
+
 def _stages_gate_delta(base: Path):
     from orchard import stages
     (base / "run").mkdir(exist_ok=True)
@@ -801,6 +811,8 @@ READERS: list[Reader] = [
     Reader("stages._evidence_json", _stages_evidence_json, rel="evidence/input.json"),
     Reader("stages.hw_record_problem", _stages_hw_record, rel="tests/2/test-result.json"),
     Reader("stages._suite_reasons_in", _stages_suite_reasons_in),
+    Reader("hwtests.load_plan", _hwtests_load_plan, rel="tests/plan.json"),
+    Reader("hwtests.read_plan", _hwtests_read_plan, rel="hw_tests.json"),
     Reader("stages._read_checked", _stages_read_checked),
     Reader("stages.evidence_record", _stages_evidence_record, documented=(_SafeReadError,)),
     Reader("stages._sha256", _stages_sha256, documented=(_SafeReadError,)),
@@ -972,7 +984,6 @@ UNREGISTERED_MODULES = (
     'granite_package.py',
     'handoff.py',
     'hardware_check.py',
-    'hwtests.py',
     'hwtool.py',
     'kernelladder.py',
     'lab.py',
