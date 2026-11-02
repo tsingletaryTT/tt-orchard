@@ -158,8 +158,8 @@ from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, T
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
-                            FULL_PORT_ALLOWED, full_port_enabled, recorded_by_supervisor)
-from orchard import full_port
+                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, full_port_enabled, recorded_by_supervisor)
+from orchard import full_port, residency
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -925,6 +925,8 @@ class Supervisor:
                             audio_runtime=audio_runtime.selected(entries) is not None,
                             text_runtime=text_runtime.selected(entries) is not None, full_port=full_port_enabled(entries))
             try:
+                if spec is FULL_PORT_STAGE_2:
+                    self._check_residency(spec)        # a model that cannot fit the box starts no prepare step (issue 327)
                 if spec.needs_coder or self._coder_in_use():
                     self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
@@ -2052,6 +2054,42 @@ class Supervisor:
         except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
             self.ledger.append("decision", 0, decision="hazard scan not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
+    def _box_chips(self, spec=None) -> int | None:
+        """The chips of the machine the hardware tests run on: the lab's stated count, or the boards that machine's adapter lists times
+        CHIPS_PER_BOARD (`test_adapter` is the lab's adapter on a lab run, else the coder's). None when it cannot be told (an adapter that
+        fails or lists nothing), and then no residency claim is made."""
+        if self.lab is not None and getattr(self.lab, "chips", None):
+            return int(self.lab.chips)
+        try:
+            boards = len({c.board for c in self.test_adapter.status()})
+        except Exception:                           # an adapter failure is not a residency finding
+            return None
+        return boards * CHIPS_PER_BOARD or None
+
+    def _stage_0_residency(self, stage_dir: Path) -> None:
+        """Write stages/0/residency.json (orchard/residency.py) and record it in the ledger. The estimate comes from the model's safetensors
+        headers; a model that needs more chips than the box has is a hazard in the record, and stage 2 of a full port reads it. A model
+        directory without headers gives a record that says it was skipped."""
+        try:
+            rec = residency.write_residency(stage_dir, model_dir=self.inputs.get("model"), box_chips=self._box_chips())
+            extra = ({"chips_needed": rec["estimated"]["chips_needed"], "fits_box": rec["verdict"]["fits_box"]} if rec["scan"] == "ran" else {})
+            self.ledger.append("evidence", 0, what="residency estimate", scan=rec["scan"], hazards=[h["name"] for h in rec["hazards"]], **extra,
+                               **evidence_record(self.run_dir, stage_dir / residency.FILE))
+        except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
+            self.ledger.append("decision", 0, decision="residency estimate not written", reason=f"{type(exc).__name__}: {exc}"[:200])
+
+    def _check_residency(self, spec) -> None:
+        """Before a full-port stage 2: block with the numbers when stage 0's estimate needs more chips than the box has, or more than the
+        stage's own lease gives the port check (`spec.boards` boards; the check runs on that lease, not on the whole box). The box is
+        read again here, so the lab or board count at this point is the one judged. No record, a damaged or skipped one, or an unknown
+        box is no claim and the stage goes on."""
+        rec, box = residency.read_record(self.run_dir), self._box_chips(spec)
+        stage = spec.boards * CHIPS_PER_BOARD
+        why = (residency.shortfall(rec, box) or residency.shortfall(rec, stage, what=f"stage {spec.number}'s lease")) if box is not None else None
+        if why:
+            self._block(spec.number, why, need_chips=rec["estimated"]["chips_needed"], box_chips=box, stage_chips=stage,
+                        device_bytes=rec["estimated"]["device_bytes"], label=rec["label"])
+
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
         The template decides form and modality from the files; `serving` is a property of this machine, so it comes from the
@@ -2082,6 +2120,7 @@ class Supervisor:
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
             if n == 0:
                 self._stage_0_hazard_scan(stage_dir)
+                self._stage_0_residency(stage_dir)
             extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts()}
                      if n == 0 else {})
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)

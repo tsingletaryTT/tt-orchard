@@ -1550,6 +1550,33 @@ Known limits of the pair:
   simulator venv from `tt-orchard kernel-env`.
 - One board, one seed and 20 kernels were tried. The probe's softmax, center, silu_mul and tile-scan specs were not.
 
+### 5.9a Residency estimate
+
+```bash
+tt-orchard residency /path/to/model-snapshot --chips 2 4        # a local snapshot directory
+tt-orchard residency owner/name --revision main --json          # a repo id: headers only, over the network
+tt-orchard residency DIR --dram-gib 32 --kv-gib 4 --policy routed_experts=bfp8
+```
+
+The command reads the header of each `.safetensors` file (an 8-byte length and a JSON list of tensor dtypes, shapes and byte
+ranges; for a repo id, `huggingface_hub.get_safetensors_metadata`). It never reads tensor data. It groups tensors into embedding,
+attention, gdn, dense_mlp, routed_experts, shared_experts, ngram_ple, vision, mtp and norms_other, applies a quantization policy per
+category (bf16, bfp8, bfp4, or `host` for a category that stays in host memory, the n-gram table in the default policy), and
+prints the weights per chip for 1, 2, 4 and 8 chips (and any count given with `--chips`), the smallest chip count that fits, and
+the free disk and host RAM a first boot needs. The exit status is 1 when none of the `--chips` counts holds the model. The inputs are `--dram-gib`, `--reserve-gib` (per chip), `--kv-gib` (whole model), `--policy CATEGORY=DTYPE`, `--revision` and `--json`.
+
+Every figure is labeled. `measured` figures come from the headers. `estimated` figures are arithmetic on them. DRAM per chip, the
+per-chip reserve, the KV budget and the default policy are choices in `orchard/defaults.py` and `orchard/residency.py`, and the output
+lists each with its source (`caller` or `default (choice)`). No allocator reading backs them. The record's `not_measured` list says what
+a live reading would replace.
+
+Stage 0 of a run writes the same record to `stages/0/residency.json` and adds a `residency estimate` evidence entry to the ledger.
+A model that needs more chips than the box has gets a `model_does_not_fit_box` hazard in that record. Before a full-port stage 2 the
+supervisor reads the record and, when the box (or stage 2's one-board lease, which is where the port check runs) has fewer chips
+than the estimate needs, blocks with the numbers (block code `model-does-not-fit`) and starts no prepare step. The generic stage 2
+only records the estimate. A checkpoint whose `model.safetensors.index.json` names a shard or tensor that is missing is refused as
+incomplete.
+
 ### 5.9b Op inventory
 
 ```bash
