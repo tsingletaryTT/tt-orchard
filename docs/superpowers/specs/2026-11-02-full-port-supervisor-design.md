@@ -1,6 +1,6 @@
 # Full port under the supervisor: design and first slice
 
-Date: 2026-11-02. Status: slice 1 is built by the branch that adds this note; slices 2 to 6 are filed as issues.
+Date: 2026-11-02. Status: slice 1 (PR 331) and slice 2 (issue 325) are built; slices 3 to 6 are filed as issues.
 Nothing here ran on a chip.
 
 ## 1. The problem
@@ -58,7 +58,7 @@ and a gate that checks the evidence and does not trust the agent's summary.
 
 The stage keeps the shape every hardware stage already has:
 
-1. Prepare (agent). Writes the port under `stages/2/port/` (model code) and a check script, then `hw_test.json` and
+1. Prepare (agent). Writes the port under `stages/2/port/` (model code only; since slice 2 the check is the supervisor's template), then `hw_test.json` and
    `handoff.json`. The coder reads the stage 0 delta, the stage 1 reference and the nearest model's TT code as examples.
 2. The supervisor sets aside any result file written during prepare (`swap_prepare.set_aside_results`, which now also covers
    `evidence/port-check.json`), then runs that single command under a lease. It parks the coder when no board is free, as for the
@@ -86,9 +86,22 @@ record the hardware command writes:
 - `free_run_text` in `result.json` equals the record's text and has enough distinct words to be text.
 
 These are checks on shape and provenance. They do not prove the chip computed the ids. A person who wants that proof
-replays the command, which the evidence makes possible. Slice 2 moves the comparison out of agent-written code into a
-supervisor-owned template (as `serve_and_compare.py` does for weights swaps), which closes the gap where the agent writes the
-script that writes the record.
+replays the command, which the evidence makes possible.
+
+Slice 2 (issue 325) moved the comparison out of agent-written code. The coder writes only a port module,
+`stages/2/port/port_model.py`, with four functions: `load(model_dir, mesh_device)`, `prefill(model, ids)`,
+`decode_step(model, token_id, position)` and `close(model)`. The supervisor copies the template
+`orchard/skills/full-port-templates/port_check.py` and a config (`port_check_config.json`, the run's model snapshot) into
+`stages/2/`, puts both back as shipped after the prepare step, rewrites `hw_test.json` to the fixed command
+`python3 -P -s stages/2/port_check.py`, and runs it under the lease. The template reads the stage 1 ids, does the teacher
+forcing, counts the agreement, makes the free run, decodes its text with the model's `tokenizer.json`, writes the record and
+prints `PORT_CHECK_SHA256`. It runs the port module in a second process (the worker) and takes one integer id per request, so
+a port that prints a mark line, writes the record, replaces the template, patches the template's functions or installs an import
+hook cannot reach the process that makes the record. The gate refuses a template copy that differs from the shipped file, a record
+without the shipped file's sha256, a command other than the fixed one, an output with other than one mark line, a record that
+does not match its config, and a port file that is not in the record. What this still does not prove: a port that returns the
+reference's ids without computing them cannot be told from one that computed them, and a coder who can edit the shipped template
+in the orchard checkout is outside what the gate sees (the outer layers in specs sections 10 and 14 cover that).
 
 ### 3.4 Leases and parking
 
@@ -101,7 +114,7 @@ slice 4.
 | Slice | Content | Issue |
 |---|---|---|
 | 1 (this PR) | Opt-in flag, route for class `full-port`, stage 2 skill and gate, pause before stage 3, block code | this PR |
-| 2 | Supervisor-owned `port_check.py` template and a port module interface (load, prefill, decode step), so the agent writes only model code | #325 |
+| 2 (built) | Supervisor-owned `port_check.py` template and a port module interface (load, prefill, decode step, close), so the agent writes only model code | #325 |
 | 3 | Stage 3 (full model on the configured chips) and stage 4 (shrink) for full ports, using the hardware test list (`hwtests.py`) | #326 |
 | 4 | Residency estimator from safetensors headers, used before stage 2 to say how many chips a port needs | #327 |
 | 5 | Stage 0: a weight-repack class for models like Sage-A1.5 whose only difference is the tensor layout of experts | #328 |
