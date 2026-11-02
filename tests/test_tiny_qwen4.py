@@ -20,7 +20,7 @@ import pytest
 
 from orchard import hazards as hz
 from orchard import model_config as mc
-from test_ops_inventory_stub import PY, needs_stack
+from test_ops_inventory_stub import PY, needs_real_forward
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "tiny_qwen4" / "make_checkpoint.py"
@@ -162,7 +162,7 @@ def dense(tmp_path_factory):
     return out
 
 
-@needs_stack
+@needs_real_forward
 def test_a_dense_checkpoint_has_the_expected_files_and_a_manifest_whose_hashes_match(dense):
     files = {p.name for p in dense.iterdir()}
     assert {"config.json", "generation_config.json", "model.safetensors", "prompts.json", "tokenizer.json",
@@ -175,12 +175,12 @@ def test_a_dense_checkpoint_has_the_expected_files_and_a_manifest_whose_hashes_m
         assert sha(dense / rel) == digest, rel
 
 
-@needs_stack
+@needs_real_forward
 def test_the_written_config_is_the_built_config(dense):
     assert json.loads((dense / "config.json").read_text()) == {**mk.build_config("dense", 4), "seed": 11}
 
 
-@needs_stack
+@needs_real_forward
 def test_the_safetensors_file_holds_bf16_floats_and_the_hybrid_layer_keys(dense):
     code = ("import json,sys,struct;f=open(sys.argv[1],'rb');n=struct.unpack('<Q',f.read(8))[0];h=json.loads(f.read(n));"
             "h.pop('__metadata__',None);print(json.dumps({k:v['dtype'] for k,v in h.items()}))")
@@ -195,7 +195,7 @@ def test_the_safetensors_file_holds_bf16_floats_and_the_hybrid_layer_keys(dense)
     assert "mlp.experts" not in names and "shared_expert" not in names        # dense: no expert tensors
 
 
-@needs_stack
+@needs_real_forward
 def test_the_reference_records_32_greedy_tokens_for_each_prompt_through_a_clean_load(dense):
     ref = json.loads((dense / "reference" / "reference-ids.json").read_text())
     prompts = json.loads((dense / "prompts.json").read_text())["prompts"]
@@ -212,7 +212,7 @@ def test_the_reference_records_32_greedy_tokens_for_each_prompt_through_a_clean_
     assert json.loads((dense / "reference" / "prompt-ids.json").read_text())["prompt_ids"] == prompts[0]
 
 
-@needs_stack
+@needs_real_forward
 def test_the_same_seed_gives_the_same_bytes_and_the_same_reference_ids_and_a_different_seed_does_not(dense, tmp_path):
     again = tmp_path / "again"
     assert run_cli("--out", again, "--variant", "dense", "--seed", 11).returncode == 0
@@ -223,7 +223,7 @@ def test_the_same_seed_gives_the_same_bytes_and_the_same_reference_ids_and_a_dif
     assert sha(other / "model.safetensors") != sha(dense / "model.safetensors")
 
 
-@needs_stack
+@needs_real_forward
 @pytest.mark.parametrize("variant,layer_kinds", [("moe", {"Qwen4ExpTextSparseMoeBlock"}), ("mixed", {"Qwen4ExpTextMLP", "Qwen4ExpTextSparseMoeBlock"})])
 def test_the_moe_and_mixed_variants_load_clean_and_record_a_reference(tmp_path, variant, layer_kinds):
     out = tmp_path / variant
@@ -238,7 +238,7 @@ def test_the_moe_and_mixed_variants_load_clean_and_record_a_reference(tmp_path, 
         assert load["dense_qwen4"]["layers"] == [0]
 
 
-@needs_stack
+@needs_real_forward
 def test_the_reference_refuses_a_checkpoint_that_is_missing_a_tensor(dense, tmp_path):
     """A load with a missing key would give a reference from random fill-in weights, and every port would 'agree' with the wrong ids."""
     broken = tmp_path / "broken"
@@ -251,7 +251,7 @@ def test_the_reference_refuses_a_checkpoint_that_is_missing_a_tensor(dense, tmp_
     assert not (broken / "reference" / "generated-ids.json").exists()
 
 
-@needs_stack
+@needs_real_forward
 def test_the_reference_refuses_a_degenerate_decode(tmp_path):
     """With every weight scaled to zero the model emits one constant token; a constant reference lets any wrong port pass."""
     out = tmp_path / "zero"
@@ -260,7 +260,7 @@ def test_the_reference_refuses_a_degenerate_decode(tmp_path):
     assert not (out / "reference" / "generated-ids.json").exists()
 
 
-@needs_stack
+@needs_real_forward
 def test_stage_1s_own_template_runs_on_the_checkpoint_and_passes(dense, tmp_path):
     """The claim in the design: with the tokenizer present, reference_gate.py runs unmodified on the snapshot."""
     stage = tmp_path / "run" / "stages" / "1"
@@ -278,7 +278,7 @@ def test_stage_1s_own_template_runs_on_the_checkpoint_and_passes(dense, tmp_path
     assert load["dense_qwen4"]["layers"] == [0, 1, 2, 3]
 
 
-@needs_stack
+@needs_real_forward
 def test_the_tokenizer_round_trips_and_its_size_equals_the_config_vocabulary(dense):
     code = ("import sys,json;from transformers import AutoTokenizer;t=AutoTokenizer.from_pretrained(sys.argv[1]);"
             "s=['Hello, world.','caf\\u00e9 \\u4f60\\u597d \\U0001F600','a\\tb\\r\\n  c  '];"
@@ -287,7 +287,7 @@ def test_the_tokenizer_round_trips_and_its_size_equals_the_config_vocabulary(den
     assert size == 384 == json.loads((dense / "config.json").read_text())["vocab_size"] and all(trips)
 
 
-@needs_stack
+@needs_real_forward
 def test_no_tokenizer_files_are_written_with_the_option_off_and_the_prompts_still_exist(tmp_path):
     out = tmp_path / "bare"
     assert run_cli("--out", out, "--variant", "dense", "--no-tokenizer", "--no-reference").returncode == 0
@@ -295,7 +295,7 @@ def test_no_tokenizer_files_are_written_with_the_option_off_and_the_prompts_stil
     assert not (out / "reference").exists()
 
 
-@needs_stack
+@needs_real_forward
 def test_a_failed_reference_refresh_removes_the_old_ids_so_they_cannot_be_read_as_results(dense, tmp_path):
     """PR 356 review. A refresh that fails must not leave an earlier `generated-ids.json` that still says complete."""
     broken = tmp_path / "broken"
@@ -309,7 +309,7 @@ def test_a_failed_reference_refresh_removes_the_old_ids_so_they_cannot_be_read_a
     assert not {"generated-ids.json", "prompt-ids.json", "reference-ids.json"} & set(left), left
 
 
-@needs_stack
+@needs_real_forward
 def test_the_greedy_token_is_torchs_argmax_even_when_the_top_logits_tie():
     """PR 356 review. bf16 logits tie often. Stage 1 takes `torch.argmax`; `torch.topk` can order the tied entries differently, which
     would give a reference that stage 1's decoder would not reproduce."""
@@ -323,7 +323,7 @@ def test_the_greedy_token_is_torchs_argmax_even_when_the_top_logits_tie():
     assert done.returncode == 0 and done.stdout.strip() == "0", (done.stdout, done.stderr)
 
 
-@needs_stack
+@needs_real_forward
 def test_a_reference_run_on_an_existing_snapshot_refreshes_the_manifest(tmp_path):
     """PR 356 review. `--reference-only` adds or replaces files the manifest covers, so the manifest is rewritten to match the disk."""
     out = tmp_path / "bare"
