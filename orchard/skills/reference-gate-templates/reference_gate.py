@@ -54,9 +54,11 @@ torch or transformers is not importable. The script writes only inside its own d
 """
 from __future__ import annotations
 
+import contextlib
 import gc
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import platform
@@ -254,11 +256,37 @@ def remap_from_delta(run_dir) -> dict:
     return out
 
 
+def dense_qwen4_shim(transformers, snapshot: Path):
+    """(shim module, config) for a qwen4_exp checkpoint that has a dense layer, else (None, None). transformers 5.19.0 builds a
+    mixture-of-experts block in every layer of qwen4_exp and refuses num_experts 0, so such a checkpoint has no upstream reference.
+    The shim (qwen4_dense.py, next to this file) rebuilds the dense layers with the model's own dense MLP class. PROVISIONAL: it is
+    written from public readings of an unreleased model. A snapshot that is not a Qwen4 config, or has experts in every layer, is
+    untouched. Raises when the shim is needed and its file is not next to this script."""
+    try:
+        raw = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(raw, dict) or raw.get("model_type") not in ("qwen4_exp", "qwen4_exp_text") or "auto_map" in raw:
+        return None, None
+    path = HERE_DIR / "qwen4_dense.py"
+    if not path.is_file():
+        # Without the file the rule cannot be applied, and a dense config would be built as 512 experts per layer.
+        raise FileNotFoundError(f"{path.name} is not next to this script; copy it from the skill's templates directory (a dense qwen4_exp config needs it)")
+    spec = importlib.util.spec_from_file_location("qwen4_dense", path)
+    shim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shim)
+    if not shim.needs_dense_shim(raw):
+        return None, None
+    return shim, shim.prepare_config(transformers, raw)
+
+
 def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -> tuple[object, dict]:
     """(model, load report). Raises when from_pretrained raises. When the first load still misses or does not expect keys and `remap` is
     given (stage 0's name map, see remap_from_delta), the weights are loaded once more with transformers' `key_mapping`, and the load
     that leaves fewer keys unresolved is kept. The report lists both attempts."""
-    config = transformers.AutoConfig.from_pretrained(str(snapshot))
+    shim, config = dense_qwen4_shim(transformers, snapshot)
+    if shim is None:
+        config = transformers.AutoConfig.from_pretrained(str(snapshot))
     arch = (getattr(config, "architectures", None) or [None])[0]
     cls = resolve_class(transformers, config, arch)
     # transformers renamed torch_dtype to dtype in 4.56.
@@ -267,8 +295,11 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
     def attempt(key_mapping):
         t0 = time.time()
         kw = {"key_mapping": key_mapping} if key_mapping else {}
-        got, got_info = cls.from_pretrained(str(snapshot), low_cpu_mem_usage=True, output_loading_info=True,
-                                            **{dkey: torch.bfloat16}, **kw)
+        if shim is not None:
+            kw["config"] = config        # the config with placeholder expert settings; the dense layers are built inside the context
+        with (shim.dense_layers() if shim is not None else contextlib.nullcontext()):
+            got, got_info = cls.from_pretrained(str(snapshot), low_cpu_mem_usage=True, output_loading_info=True,
+                                                **{dkey: torch.bfloat16}, **kw)
         return got, got_info, round(time.time() - t0, 2)
 
     def unresolved(i):
@@ -328,6 +359,9 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
                  "written; a class that renames keys while loading shows its renames there. The "
                  "load check uses transformers' own missing, unexpected and mismatched lists."),
     }
+    if shim is not None:
+        text = config.get_text_config() if hasattr(config, "get_text_config") else config
+        report["dense_qwen4"] = {"layers": list(text.orchard_dense_layers), "note": shim.PROVISIONAL}
     report["pass"] = not (missing or unexpected or mismatched or errors)
     return model, report
 

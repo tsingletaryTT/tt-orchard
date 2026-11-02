@@ -344,6 +344,8 @@ def gate_reference(stage_dir, run_dir) -> GateResult:
         _evidence(run_dir, c.get("evidence"), f"check {c['name']!r}", reasons, seen)
     reasons += _reference_evidence_reasons(Path(stage_dir), d)
     reasons += _template_reasons(Path(stage_dir), "reference_gate.py")
+    if (Path(stage_dir) / "qwen4_dense.py").is_file():          # the dense Qwen4 shim shapes the model the evidence describes
+        reasons += _template_reasons(Path(stage_dir), "qwen4_dense.py")
     return _done(reasons, seen)
 
 
@@ -353,7 +355,9 @@ _SKILLS_ROOT = Path(__file__).with_name("skills")
 # The template scripts whose output a gate trusts, and the shipped file each stage's copy must equal.
 SHIPPED_TEMPLATES = {"delta_triage.py": _SKILLS_ROOT / "delta-triage-templates" / "delta_triage.py",
                      "stock_check.py": _SKILLS_ROOT / "stock-runtime-templates" / "stock_check.py",
-                     "reference_gate.py": _SKILLS_ROOT / "reference-gate-templates" / "reference_gate.py"}
+                     "reference_gate.py": _SKILLS_ROOT / "reference-gate-templates" / "reference_gate.py",
+                     # loaded by reference_gate.py from its own directory for a dense qwen4_exp config; optional in a stage
+                     "qwen4_dense.py": _SKILLS_ROOT / "reference-gate-templates" / "qwen4_dense.py"}
 
 
 def _sha256(path: Path) -> str:
