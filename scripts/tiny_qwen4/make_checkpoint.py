@@ -57,7 +57,8 @@ REPO = HERE.parent.parent
 TEMPLATES = REPO / "orchard" / "skills" / "reference-gate-templates"
 
 VARIANTS = ("dense", "moe", "mixed")
-N_NEW = 32                                   # generated tokens per prompt, as stage 1 decodes
+REFERENCE_FILES = ("prompt-ids.json", "generated-ids.json", "reference-ids.json", "load-report.json")
+N_NEW = 32                                  # generated tokens per prompt, as stage 1 decodes
 TOP_K = 5
 MIN_DISTINCT = 4                             # fewer distinct generated ids than this is a degenerate reference
 PROMPT_LENGTHS = (8, 16, 33)                 # 33 is not a multiple of the delta-net chunk size
@@ -219,6 +220,12 @@ def write_tokenizer(transformers, out: Path) -> None:
 
 # ---- the CPU reference ----------------------------------------------------------------------------------------------
 
+def greedy_token(torch, logits) -> int:
+    """The greedy choice, taken the way stage 1 takes it (`torch.argmax`). `torch.topk` may order tied logits differently and bf16
+    logits tie often, so topk supplies the diagnostic top-5 only."""
+    return int(torch.argmax(logits))
+
+
 class ReferenceRefused(Exception):
     """The reference is not recorded: the load was not clean or the decode is degenerate."""
 
@@ -230,7 +237,10 @@ def layer_blocks(model) -> list[str]:
 def run_reference(snapshot: Path, prompts: list[list[int]], out_dir: Path, *, n_new: int = N_NEW) -> dict:
     """Load the snapshot the way stage 1 does (reference_gate.load_model, which uses the dense shim for a dense layer) and decode
     `n_new` tokens greedily for each prompt, one full forward pass per token with no cache. Writes `out_dir` files; raises
-    ReferenceRefused before writing any ids when the load is not clean."""
+    ReferenceRefused before writing any ids when the load is not clean. Files from an earlier run are removed first, so a refresh that
+    fails leaves nothing that still says `complete`."""
+    for name in REFERENCE_FILES:
+        (out_dir / name).unlink(missing_ok=True)
     torch, transformers = import_stack()
     gate = load_module("reference_gate", TEMPLATES / "reference_gate.py")
     model, load = gate.load_model(torch, transformers, snapshot)
@@ -256,7 +266,7 @@ def run_reference(snapshot: Path, prompts: list[list[int]], out_dir: Path, *, n_
         for k in range(n_new):
             logits = forward(seq)
             vals, ids = torch.topk(logits, TOP_K)
-            chosen = int(ids[0])
+            chosen = greedy_token(torch, logits)
             steps.append({"position": len(seq) - 1, "chosen": chosen, "gap": round(float(vals[0] - vals[1]), 6),
                           "top5": [{"id": int(i), "logit": round(float(v), 5)} for v, i in zip(vals.tolist(), ids.tolist())]})
             appended.append({"chosen": chosen, "before": list(seq), "after": list(seq) + [chosen]})
@@ -266,7 +276,7 @@ def run_reference(snapshot: Path, prompts: list[list[int]], out_dir: Path, *, n_
             raise ReferenceRefused(f"degenerate reference: prompt {index} generated only {len(set(generated))} distinct ids "
                                    f"({generated[:8]}...); a constant output would let any wrong port pass")
         ok, why = gate.appended_at_end(prompt_ids, appended)
-        records.append({"prompt_ids": prompt_ids, "generated_ids": generated, "first_token_ok": int(torch.argmax(first)) == generated[0],
+        records.append({"prompt_ids": prompt_ids, "generated_ids": generated, "first_token_ok": greedy_token(torch, first) == generated[0],
                         "appended_ok": ok, "appended_note": why, "steps": steps})
         if not (records[-1]["first_token_ok"] and ok):
             raise ReferenceRefused(f"prompt {index}: the first-token or append check failed ({why})")
@@ -333,8 +343,21 @@ def reference_only(snapshot: Path, n_new: int = N_NEW) -> int:
         run_reference(snapshot, json.loads(prompts_path.read_text())["prompts"], snapshot / "reference", n_new=n_new)
     except ReferenceRefused as exc:
         return refuse(str(exc), 3)
-    say(f"wrote {snapshot / 'reference'}")
+    refresh_manifest(snapshot)
+    say(f"wrote {snapshot / 'reference'} and refreshed the manifest")
     return 0
+
+
+def refresh_manifest(snapshot: Path) -> dict:
+    """Rewrite the manifest's file inventory to match the snapshot on disk, keeping the variant, seed and layer count it already had
+    (or reading them from config.json when the snapshot has no manifest). A reference run adds or replaces files the manifest covers."""
+    cfg = json.loads((snapshot / "config.json").read_text())
+    seed = cfg.pop("seed", None)
+    old_path = snapshot / "tiny-qwen4-manifest.json"
+    old = json.loads(old_path.read_text()) if old_path.is_file() else {}
+    variant = old.get("variant") or ("mixed" if cfg.get("mlp_only_layers") else "dense" if "num_experts" not in cfg else "moe")
+    return write_manifest(snapshot, cfg, variant, old.get("seed", seed), old.get("layers", cfg["num_hidden_layers"]),
+                          old.get("weight_scale", 1.0))
 
 
 def main(argv=None) -> int:
@@ -347,7 +370,7 @@ def main(argv=None) -> int:
     ap.add_argument("--no-reference", action="store_true", help="write the checkpoint and prompts only")
     ap.add_argument("--weight-scale", type=float, default=1.0, help="multiply every float weight (0 gives a degenerate model; used by a test)")
     ap.add_argument("--n-new", type=int, default=N_NEW, help="generated tokens per prompt (default 32, what stage 1 decodes; fewer only to save time in tests)")
-    ap.add_argument("--reference-only", metavar="SNAPSHOT", help="record the reference for an existing snapshot and write nothing else")
+    ap.add_argument("--reference-only", metavar="SNAPSHOT", help="record the reference for an existing snapshot, then refresh its manifest; write nothing else")
     args = ap.parse_args(argv)
     if args.reference_only:
         return reference_only(Path(args.reference_only), args.n_new)

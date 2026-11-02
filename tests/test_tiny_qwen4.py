@@ -293,3 +293,48 @@ def test_no_tokenizer_files_are_written_with_the_option_off_and_the_prompts_stil
     assert run_cli("--out", out, "--variant", "dense", "--no-tokenizer", "--no-reference").returncode == 0
     assert not (out / "tokenizer.json").exists() and (out / "prompts.json").exists()
     assert not (out / "reference").exists()
+
+
+@needs_stack
+def test_a_failed_reference_refresh_removes_the_old_ids_so_they_cannot_be_read_as_results(dense, tmp_path):
+    """PR 356 review. A refresh that fails must not leave an earlier `generated-ids.json` that still says complete."""
+    broken = tmp_path / "broken"
+    shutil.copytree(dense, broken)
+    assert (broken / "reference" / "generated-ids.json").exists()
+    code = ("import sys;from safetensors.torch import load_file,save_file;d=load_file(sys.argv[1]);"
+            "d.pop('model.layers.1.mlp.down_proj.weight');save_file(d,sys.argv[1],metadata={'format':'pt'})")
+    subprocess.run([PY, "-c", code, str(broken / "model.safetensors")], check=True)
+    assert run_cli("--reference-only", broken, "--n-new", 8).returncode == 3
+    left = sorted(p.name for p in (broken / "reference").iterdir()) if (broken / "reference").exists() else []
+    assert not {"generated-ids.json", "prompt-ids.json", "reference-ids.json"} & set(left), left
+
+
+@needs_stack
+def test_the_greedy_token_is_torchs_argmax_even_when_the_top_logits_tie():
+    """PR 356 review. bf16 logits tie often. Stage 1 takes `torch.argmax`; `torch.topk` can order the tied entries differently, which
+    would give a reference that stage 1's decoder would not reproduce."""
+    code = ("import sys,importlib.util,torch;s=importlib.util.spec_from_file_location('m',sys.argv[1]);m=importlib.util.module_from_spec(s);"
+            "s.loader.exec_module(m);torch.manual_seed(1);bad=0\n"
+            "for _ in range(200):\n"
+            "    x=(torch.randn(384)*2).to(torch.bfloat16).float();x[torch.randperm(384)[:6]]=x.max()\n"
+            "    bad+=m.greedy_token(torch,x)!=int(torch.argmax(x))\n"
+            "print(bad)")
+    done = subprocess.run([PY, "-c", code, str(SCRIPT)], capture_output=True, text=True)
+    assert done.returncode == 0 and done.stdout.strip() == "0", (done.stdout, done.stderr)
+
+
+@needs_stack
+def test_a_reference_run_on_an_existing_snapshot_refreshes_the_manifest(tmp_path):
+    """PR 356 review. `--reference-only` adds or replaces files the manifest covers, so the manifest is rewritten to match the disk."""
+    out = tmp_path / "bare"
+    assert run_cli("--out", out, "--variant", "dense", "--seed", 5, "--no-reference").returncode == 0
+    before = json.loads((out / "tiny-qwen4-manifest.json").read_text())
+    assert not [f for f in before["files"] if f.startswith("reference/")]
+    assert run_cli("--reference-only", out, "--n-new", 8).returncode == 0
+    after = json.loads((out / "tiny-qwen4-manifest.json").read_text())
+    assert after["seed"] == 5 and after["variant"] == "dense" and after["layers"] == 4
+    assert {"reference/generated-ids.json", "reference/reference-ids.json", "reference/load-report.json"} <= set(after["files"])
+    on_disk = {str(p.relative_to(out)) for p in out.rglob("*") if p.is_file() and p.name != "tiny-qwen4-manifest.json"}
+    assert set(after["files"]) == on_disk
+    for rel, digest in after["files"].items():
+        assert sha(out / rel) == digest, rel

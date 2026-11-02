@@ -19,6 +19,15 @@ tokens for the same weights. No part of the check needs a trained model.
 Out of scope: training. ttml has no backward for the gated delta net, hyper-connections or the sparse indexer. Output quality:
 random weights produce noise, so stages that judge text quality (stage 5 and later) are not part of this rehearsal.
 
+Known blocker (found in the PR 356 review): the stage 2 gate for a full port requires `coherent: true` in `result.json` and a
+free-run text of at least 20 non-space characters and 4 different words (`orchard/full_port.py`, `MIN_FREE_RUN_CHARS` and
+`MIN_FREE_RUN_WORDS`; the skill `full-port-check.md` tells the agent to write `coherent: false` for unreadable output). A model with
+random weights emits byte noise, so a correct port of it fails stage 2 on that one field. The rehearsal therefore cannot end in a stage 2
+pass without either a gate change or a false `coherent`. This note takes this policy: the pilot is read for the other gate reasons
+(top-1 agreement, token count, provenance, port sources), and a failure whose only reason is `coherent` counts as a pass of the
+rehearsal. The agent must never write `coherent: true` for noise; a run where it does is a finding about the agent. A rehearsal switch
+that waives the coherence field is a supervisor change, filed as an issue and not part of this PR.
+
 ## 2. What the model is
 
 A flat `qwen4_exp_text` config (the text tower alone, class `Qwen4ExpForCausalLM` in transformers 5.19.0), written with the key
@@ -136,7 +145,10 @@ from a wrong port (the gap between the top two logits at the first differing pos
 | `hc_count` 4, `hc_lowrank` present and not 320 or 640 | config check; the stage 0 scan reads both |
 | Dimensions divide 2 and 4 dies | the scan reports none of the division hazards on the generated configs |
 | Same seed gives the same bytes, a different seed gives different bytes | two builds compared |
-| Safetensors keys equal the model's state dict | built in the reference interpreter |
+| Floats are bf16, the hybrid-layer keys exist, a dense checkpoint has no expert tensor | the safetensors header is read |
+| The first-token check, the greedy choice and the manifest are consistent | `first_token_ok` is true for every prompt; `greedy_token` equals `torch.argmax` on tied bf16 logits (PR 356 review) |
+| A failed refresh leaves no old ids; a successful one rewrites the manifest | `--reference-only` on a broken and on a bare snapshot (PR 356 review) |
+| Stage 1's own template passes on the checkpoint | the unmodified `reference_gate.py` is run in a stage directory |
 | Prompt ids are inside the byte-token range and seeded | pure function test |
 | Output directory inside the repository is refused | refusal test |
 | Reference refuses a load with missing keys | a key removed from a copy of the checkpoint |
@@ -159,7 +171,10 @@ CPU reference. Cost: one board for each hardware test, a few minutes each.
    with no hub entry, stop and file an issue; do not work around it.
 4. Run: `tt-orchard bringup local/tiny-qwen4-dense --no-fetch --offline --full-port --base ...` under the operator's usual
    coder and lease settings. Expected end state: the run stops after stage 2 with code `full-port-stages-unbuilt` (the design's
-   slice 1). A pass at stage 2 means the gate accepted a port; a fail is data about the coder.
+   slice 1) only if the gate accepts the port, and it cannot while the free-run text is noise (see the known blocker in section 1). The
+   expected end state is a stage 2 failure whose reasons are exactly the coherence ones (`coherent must be true`, and possibly the
+   free-run word count). Any other reason (top-1 agreement, token count, provenance, port sources) is data about the coder or the
+   supervisor. Read the gate's full list of reasons in the run's ledger before deciding.
 5. Review `stages/2/port/` by hand. The gate checks provenance and agreement, and a person decides whether the port is what it
    claims to be (design section 3.3 lists what the gate does not prove).
 6. Repeat with `--variant mixed` only after the dense run ends in a known state.
