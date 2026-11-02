@@ -1289,18 +1289,33 @@ class Supervisor:
                                lease_id=lease.lease_id)
             self._finish_boot(lease, canary)
 
-    def _start_coder(self, baseline: dict | None, lease: Lease | None = None) -> None:
+    def _start_coder(self, baseline: dict | None, lease: Lease | None = None, *, check_granted: bool = False) -> None:
+        """Take a lease if none is given, and start the coder under it. `check_granted` (the relaunch after a resume) asks
+        docker about the devices of the lease that was granted before the start: gozer can grant a different board from
+        the board the relaunch's stop check looked at (issue 332)."""
         if lease is None:
             lease = reacquire(self.adapter, chips=self.coder_chips, who=WHO, reason="coder",
                               ledger=self.ledger, stage=None, wait_budget_s=COLD_BOOT_BUDGET_S,
                               clock=self.clock, sleep=self.sleep)
         self.coder_lease = lease          # known from here on, so a shutdown can release it
+        if check_granted and hasattr(self.coder, "limit_devices"):
+            # Before the record, so the pending record pairs the granted lease with the granted board's devices. A stale filter
+            # (the board the stop check looked at) would let cleanup release the granted board with a foreign container on it.
+            self.coder.limit_devices(lease.dev_indices)
         # Recorded before the start: a crash during the boot leaves the lease and server in the
         # ledger, so the restart can stop that server and re-lease.
         # The pending record says "unknown" for this attempt. The live value changes only when the
         # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
                            server={**self.coder.record(), "owned": None})
+        if check_granted:
+            # After the record above, so a block here leaves the granted lease in the ledger: cleanup releases it and a
+            # resume relaunches under it. The check only reads docker; it never resets a device.
+            check = self.coder.confirm_stopped()
+            if not check.stopped:
+                self._block(None, f"a container holds a device of the granted board ({', '.join(lease.chips)}); the coder was "
+                                  "not started. Stop that container or wait for it, then resume",
+                            checks=check.checks, evidence=check.evidence)
         try:
             self.coder.start(lease)
         except ServerNotOwned as exc:
@@ -1384,7 +1399,7 @@ class Supervisor:
             self._block(None, "the coder could not be confirmed stopped for the relaunch", **check)
         if old.lease_id in self._adopted_ids(self.ledger.read()):
             self._release_kept_lease(old)
-        self._start_coder(canary)
+        self._start_coder(canary, check_granted=True)
 
     def _release_kept_lease(self, lease: Lease) -> None:
         """A kept coder's lease stays (STALE) after its container stops; give it back before a new start."""

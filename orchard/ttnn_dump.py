@@ -4,7 +4,9 @@
 
 ttnn's ops are bound from compiled code, so their names are in no Python file, and importing ttnn opens the device.
 The import therefore runs under a one-chip gozer lease, once per ttnn version, and the names are written to
-orchard/data/ttnn_ops-<version>.json. The operator runs this command. The supervisor never does.
+orchard/data/ttnn_ops-<version>-build-<build>.json (the build id is the date of the compiled library, so two builds that share a
+version keep separate files; the loader in orchard/opinventory.py picks the dump for the installed build). The operator runs this
+command. The supervisor never does.
 
 With `--simulator PATH` (the ttsim library, for example libttsim_bh.so from the simulator image, with its
 soc_descriptor.yaml beside it) the import runs against the simulator and takes no lease: the script only lists names and
@@ -13,8 +15,10 @@ never opens a device, and the simulator gives the import nothing to open.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -24,10 +28,18 @@ from orchard.stallwatch import _kill_group
 
 WAIT_AFTER_KILL_S = 10.0     # how long to read the output of a group that was stopped
 MARK = "ORCHARD_TTNN_DUMP "
-# Public callables at the top of ttnn and one level into the two namespaces that hold model ops.
-SCRIPT = r'''
-import importlib.metadata as m, json, types
+# Public callables at the top of ttnn, and every submodule of the namespaces named in WALK_ROOTS, to any depth (up to MAX_DEPTH).
+# `experimental` has submodules of its own (experimental.deepseek_prefill.update_padded_kv_cache, issue 339), so one level is not enough.
+# Other top-level ttnn submodules are listed under `unwalked_namespaces` and are not walked, so a missed namespace shows in the file.
+WALK_ROOTS = ("experimental", "transformer")
+MAX_DEPTH = 4
+SCRIPT_TEMPLATE = r'''
+import importlib.metadata as m, json, os, types
 import ttnn
+
+WALK_ROOTS = __WALK_ROOTS__
+MAX_DEPTH = __MAX_DEPTH__
+__BUILD_ID_SOURCE__
 
 _MISSING = object()
 skipped = []
@@ -47,20 +59,49 @@ def is_op(obj):
     return obj is not _MISSING and callable(obj) and not isinstance(obj, type)
 
 
-names = []
+def is_ttnn_module(obj):
+    # A module that ttnn itself defines. A namespace that imports numpy or torch must not pull their functions in.
+    return isinstance(obj, types.ModuleType) and str(getattr(obj, "__name__", "")).startswith("ttnn")
+
+
+names, unwalked = [], []
+
+
+def walk(mod, prefix, depth, seen):
+    for k in sorted(dir(mod)):
+        if k.startswith("_"):
+            continue
+        label = prefix + "." + k
+        obj = safe_get(mod, k, label)
+        if is_op(obj):
+            names.append(label)
+        elif is_ttnn_module(obj) and depth < MAX_DEPTH and id(obj) not in seen:
+            seen.add(id(obj))
+            walk(obj, label, depth + 1, seen)
+
+
 for n in sorted(dir(ttnn)):
     if n.startswith("_"):
         continue
     obj = safe_get(ttnn, n, n)
     if is_op(obj):
         names.append(n)
-    elif isinstance(obj, types.ModuleType) and n in ("experimental", "transformer"):
-        for k in sorted(dir(obj)):
-            if not k.startswith("_") and is_op(safe_get(obj, k, f"{n}.{k}")):
-                names.append(f"{n}.{k}")
+    elif isinstance(obj, types.ModuleType) and n in WALK_ROOTS:
+        walk(obj, n, 1, {id(obj)})
+    elif is_ttnn_module(obj):
+        unwalked.append(n)
+
+commit = next((v for v in (getattr(ttnn, a, None) for a in ("__git_hash__", "git_hash", "GIT_HASH")) if isinstance(v, str)), None)
+try:
+    build = build_id(os.path.dirname(ttnn.__file__), commit)
+except Exception:
+    build = None
 # The leading newline keeps the marker at the start of its line even if ttnn printed text without one.
-print("\n" + "ORCHARD_TTNN_DUMP " + json.dumps({"ttnn_version": m.version("ttnn"), "names": names, "skipped": skipped}))
+print("\n" + "ORCHARD_TTNN_DUMP " + json.dumps({"ttnn_version": m.version("ttnn"), "build": build, "names": names,
+                                                   "skipped": skipped, "unwalked_namespaces": unwalked}))
 '''
+SCRIPT = (SCRIPT_TEMPLATE.replace("__WALK_ROOTS__", repr(WALK_ROOTS)).replace("__MAX_DEPTH__", str(MAX_DEPTH))
+          .replace("__BUILD_ID_SOURCE__", inspect.getsource(opinventory.build_id)))
 
 
 SIMULATOR_ENV = {"TT_METAL_ARCH_NAME": "blackhole", "TT_METAL_SLOW_DISPATCH_MODE": "1"}
@@ -90,16 +131,35 @@ def parse(stdout: str) -> dict:
 
 
 def write_dump(dump: dict, data_dir) -> Path:
-    """Write ttnn_ops-<version>.json with sorted, de-duplicated names and a sha256 of that list."""
+    """Write the dump with sorted, de-duplicated names and a sha256 of that list.
+
+    The file is `ttnn_ops-<version>-build-<build>.json` when the dump names a build (the date of the compiled library, with a
+    commit when one was found), so two builds that share a version never share a file (issue 339). A dump with no build id is
+    written as `ttnn_ops-<version>.json`, and it is refused when that file already holds a different list of names: it may be
+    another build."""
     version = dump["ttnn_version"]
     if not isinstance(version, str) or not opinventory.VERSION_RE.match(version):
         raise ValueError(f"ttnn version {version!r} is not a plain version token")
+    build = dump.get("build")
+    if build is not None and not (isinstance(build, str) and re.fullmatch(r"\d{8}(-[0-9a-f]{7,40})?|[0-9a-f]{7,40}", build)):
+        raise ValueError(f"build id {build!r} is not a date (YYYYMMDD), a commit, or a date and a commit")
     names = sorted(set(dump["names"]))
-    out = Path(data_dir) / f"ttnn_ops-{version}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
     # sha256 = sha256 of json.dumps(names) with default separators, over the sorted, de-duplicated names.
-    body = json.dumps({"ttnn_version": version, "names": names, "skipped": sorted(set(dump.get("skipped", []))),
-                       "sha256": hashlib.sha256(json.dumps(names).encode()).hexdigest()}, indent=2) + "\n"
+    digest = hashlib.sha256(json.dumps(names).encode()).hexdigest()
+    out = Path(data_dir) / (f"ttnn_ops-{version}-build-{build}.json" if build else f"ttnn_ops-{version}.json")
+    if not build and out.is_file():
+        try:
+            held = json.loads(out.read_text(encoding="utf-8")).get("sha256")
+        except (OSError, ValueError, AttributeError):
+            held = None
+        if held != digest:
+            raise ValueError(f"{out.name} already holds a different list of names and this dump has no build id to name a "
+                             "separate file; refusing to overwrite what may be another build")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps({"ttnn_version": version, **({"build": build} if build else {}), "names": names,
+                       "skipped": sorted(set(dump.get("skipped", []))),
+                       **({"unwalked_namespaces": sorted(set(dump["unwalked_namespaces"]))}
+                          if dump.get("unwalked_namespaces") else {}), "sha256": digest}, indent=2) + "\n"
     # Write beside the target and rename, so a crash never leaves a half-written file under the final name.
     tmp = out.with_name(out.name + ".tmp")
     try:
