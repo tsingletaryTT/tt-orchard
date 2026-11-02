@@ -2064,7 +2064,7 @@ class Supervisor:
 
     def _check_residency(self, spec) -> None:
         """Before a full-port stage 2: block with the numbers when the box has fewer chips than stage 0's estimate needs. The box is read
-        again here, so a lab or a board count that changed since stage 0 is the one judged. No record, a skipped one or an unknown box
+        again here, so the lab or board count at this point is the one judged. No record, a skipped one or an unknown box
         is no claim and the stage goes on."""
         rec, box = residency.read_record(self.run_dir), self._box_chips(spec)
         why = residency.shortfall(rec, box)

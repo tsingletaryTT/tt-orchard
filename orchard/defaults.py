@@ -19,7 +19,7 @@ CHIPS_PER_BOARD = 2
 # estimate reads that as 32 GiB, the larger figure, and the output says so.
 CHIP_DRAM_GIB = 32.0            # choice: DRAM per Blackhole chip as the cards and run logs state it; usable space is lower and unmeasured
 CHIP_RESERVE_GIB = 3.0          # choice: per chip, for trace regions, program binaries and circular buffers; the Flash-Next package cards
-                                # show 1.5 to 1.7 GB free per DRAM bank after captures, which says the overhead is small, not how small
+                                # show 1.5 to 1.7 GB free per DRAM bank after captures, so the overhead is small, and they give no figure for it
 KV_BUDGET_GIB = 4.0             # choice: KV cache and recurrent state for the whole model, spread evenly over the chips. Flash-Next at
                                 # 128k context needs about 3 GiB by arithmetic (12 full-attention layers, 2 KV heads, head dim 256)
 

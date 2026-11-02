@@ -1,0 +1,4 @@
+target = "0.9.92"
+summary = "A residency estimate from safetensors headers says how many chips a checkpoint needs, and a full-port stage 2 blocks when the box is too small."
+pr = 343
+kind = "feature"
