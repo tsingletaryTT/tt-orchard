@@ -988,6 +988,12 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     has `bundle_dir` in its swap_config.json; the supervisor drafted `graft_mtp` there from the decision, and the agent's prepare step can
     change it afterwards, so the check reads what prepare_swap.py recorded it built (`mtp_graft` in model-dir-sources.json). A container
     configuration is another server and is not held to the decision."""
+    # Stage 2's two decision files decide what this configuration is held to. One that is there and refused (a link, a FIFO, an oversize file)
+    # reads as no decision in `graft_chosen` and `drafter_off_chosen`, which would let an ungrafted bundle through.
+    for fname in (GRAFT_DECISION_FILE, sampling_choice.DECISION_FILE):
+        problem = safeio.read_json_checked(Path(run_dir) / "stages" / "2" / fname, max_bytes=JSON_MAX_BYTES).problem(f"stages/2/{fname}")
+        if problem:
+            return [f"{where}: {problem}, so stage 2's decision cannot be checked against this configuration"]
     cdir = Path(stage_dir) / "configs" / str(n)
     got = safeio.read_json_checked(cdir / "swap_config.json", max_bytes=JSON_MAX_BYTES)
     if got.refused:
@@ -1265,6 +1271,10 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
     reasons += sampling_summary_problems(run)
+    for fname in (GRAFT_DECISION_FILE, sampling_choice.DECISION_FILE):
+        problem = safeio.read_json_checked(run / "stages" / "2" / fname, max_bytes=JSON_MAX_BYTES).problem(f"stages/2/{fname}")
+        if problem:
+            reasons.append(f"{problem}, so the package cannot be checked against stage 2's decision")
     drafter_off, host_sampling = served_drafter_state(run)
     sampling_decision = sampling_choice.read_decision(run / "stages" / "2")
     model_has_mtp = delta_model_has_mtp(delta)

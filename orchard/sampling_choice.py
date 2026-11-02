@@ -107,7 +107,10 @@ def need(run_dir, override: str = "auto") -> dict:
     got = safeio.read_json_checked(Path(run_dir) / "stages" / "0" / "evidence" / "genconfig-license.json", max_bytes=MAX_JSON_BYTES)
     g = got.value
     if not isinstance(g, dict):
-        why = f"is not readable: {got.reason}" if got.refused else "is missing" if got.missing else "is not a JSON object"
+        # A missing file and a file that is not an object keep the sentence earlier runs recorded in sampling-decision.json, because
+        # `decision_problems` compares the recomputed evidence with the recorded one and a resumed stage 2 must still pass. A refused file has
+        # a reason of its own (the gate returns `refusals` before it compares).
+        why = f"is not readable: {got.reason}" if got.refused else "is missing or unreadable"
         return {"needed": False, "source": "none", "override": override,
                 "evidence": [f"no evidence: stage 0's evidence/genconfig-license.json {why}"]}
     warns = [w for w in g.get("card_warns_greedy") or [] if isinstance(w, dict) and isinstance(w.get("quote"), str)]

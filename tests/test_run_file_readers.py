@@ -719,3 +719,34 @@ def test_a_manifest_without_a_repo_is_a_problem_and_a_missing_manifest_is_still_
     assert "has no weights.repo_id" in swap_draft.nearest_problem(tmp_path, cfg)
     (bundle / "tt_kernel_manifest.json").write_text(j.dumps({"weights": {"repo_id": "wrong/model"}}))
     assert "serves wrong/model" in swap_draft.nearest_problem(tmp_path, cfg)
+
+
+# ------------------------------------------------ fourth Copilot review of PR 345
+
+@pytest.mark.parametrize("fname", ["graft-decision.json", "sampling-decision.json"])
+def test_stage_4_refuses_a_stage_2_decision_that_is_a_link_instead_of_reading_it_as_no_decision(tmp_path, fname):
+    """A link to the same valid graft decision made graft_chosen() return False, so an ungrafted bundle passed."""
+    from orchard.stages import gate_mesh_swap
+    from test_stage4_graft_gate import bundle_config, gate
+    sd, run = gate(tmp_path)
+    bundle_config(run, 2, grafted=False)
+    real = run / "stages" / "2" / "real-decision.json"
+    write(run, "stages/2/real-decision.json", {"choice": "graft" if fname.startswith("graft") else "drafter-off", "reason": "r"})
+    (run / "stages" / "2" / fname).symlink_to(real.name)
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok and any(f"stages/2/{fname} is not readable" in r for r in g.reasons), g.reasons
+
+
+def test_stage_4_still_passes_with_no_stage_2_decision_files(tmp_path):
+    from orchard.stages import gate_mesh_swap
+    from test_stage4_graft_gate import bundle_config, gate
+    sd, run = gate(tmp_path)
+    bundle_config(run, 2, grafted=False)
+    assert gate_mesh_swap(sd, run, required=(2,)).ok
+
+
+def test_a_decision_recorded_with_the_old_missing_genconfig_wording_still_matches(tmp_path):
+    """A resumed stage 2 whose genconfig-license.json is missing recorded this exact sentence; the recomputation must give the same one."""
+    from orchard import sampling_choice
+    need = sampling_choice.need(tmp_path, "auto")
+    assert need["evidence"] == ["no evidence: stage 0's evidence/genconfig-license.json is missing or unreadable"]
