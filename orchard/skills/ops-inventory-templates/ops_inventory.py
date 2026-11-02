@@ -6,6 +6,7 @@
 `tt-orchard inventory` runs this with the reference interpreter (torch and transformers must import):
 
     python ops_inventory.py --model-dir DIR --out raw-ops.json [--layers 2] [--seq 8] [--class NAME]
+                             [--stub-data-dependent]
 
 DIR needs only config.json. No weights are read and nothing is downloaded: the model is built on the meta device, so a
 27B model traces in seconds. The graph comes from torch.export(strict=False) on one prefill-sized input
@@ -18,6 +19,12 @@ What it will not do: import a repo's own modeling code. A config.json with `auto
 (a subclass of PreTrainedModel): a downloaded config.json must not choose which function of transformers runs.
 The traced class is the class config.json names, unless --class says otherwise (for example MoshiForCausalLM, the text model inside MoshiForConditionalGeneration,
 which takes audio inputs this script does not build). The output says which class was traced.
+
+--stub-data-dependent replaces the forward of a module torch.export cannot trace with a static version that keeps the
+module's ops (the Qwen4-style sparse attention indexer picks tokens with a Python loop and torch.nonzero). The output lists
+each replaced module class under `stubbed`. The stub keeps the op mix and the shapes. It does not keep the token choice
+(it ignores which positions are visible to each query), so the ops of a stubbed module are a guide to what the layer needs
+and its graph is not the real graph.
 
 Exit codes: 0 written (including a `skipped` file), 2 config.json missing, 3 the build or the export failed (the file
 is written with the failure), 4 torch or transformers does not import.
@@ -37,6 +44,67 @@ MAX_MODULES = 5
 NOTE = ("prefill graph from torch.export(strict=False, use_cache=False) on the meta device; "
         "cache and state updates of decoding are not traced. Bodies of higher-order operations (for example "
         "wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op")
+
+
+STUB_NOTE = ("static replacement with the same op mix and shapes; it does not choose tokens the way the real module "
+             "does, so the stubbed module's graph is a guide to its ops and not its real graph")
+
+
+def qsa_indexer_stub(self, hidden_states, position_embeddings, attention_mask, past_key_values):
+    """Qwen4-style sparse attention indexer without data-dependent control flow. The real one loops over query positions,
+    gathers the visible tokens with torch.nonzero and takes a topk over the complete 4-token key blocks. This version pools
+    every full block of keys with a reshape and a mean, scores each query against all blocks (matmul, relu, sum over heads,
+    scale), takes a topk over blocks and builds the token mask with a scatter and an index_select. Visibility is ignored."""
+    import math
+    import sys
+
+    import torch
+
+    rotary = sys.modules[type(self).__module__].apply_rotary_pos_emb
+    batch, seq, _ = hidden_states.shape
+    dim, ratio = self.index_head_dim, self.compress_ratio
+    full_cos, full_sin = position_embeddings
+    qk = self.index_qk_proj(hidden_states)
+    q, token_k = torch.split(qk, [self.index_n_heads * dim, self.index_kv_heads * dim], dim=-1)
+    q = self.q_layernorm(q.reshape(batch, seq, -1, dim))
+    q = rotary(q, cos=full_cos[:, -seq:, :], sin=full_sin[:, -seq:, :], unsqueeze_dim=2)
+    raw_keys = token_k.reshape(batch, seq, -1, dim).squeeze(2)
+    blocks = seq // ratio
+    kv_length = attention_mask.shape[-1]
+    if blocks == 0:
+        mask = torch.ones(batch, seq, kv_length, dtype=torch.bool, device=hidden_states.device)
+    else:
+        pooled = raw_keys[:, : blocks * ratio].reshape(batch, blocks, ratio, dim).float().mean(dim=2)
+        pooled = self.k_layernorm(pooled.to(raw_keys.dtype))
+        starts = torch.arange(blocks, device=hidden_states.device) * ratio
+        keys = rotary(pooled.unsqueeze(2), cos=full_cos[:, starts, :], sin=full_sin[:, starts, :], unsqueeze_dim=2).squeeze(2)
+        scores = torch.matmul(q.float().transpose(1, 2), keys.float().transpose(-1, -2).unsqueeze(1))
+        scores = torch.relu(scores).sum(dim=1) / math.sqrt(dim)
+        chosen = scores.topk(min(self.block_topk, blocks), dim=-1).indices
+        block_of_token = (torch.arange(kv_length, device=hidden_states.device) // ratio).clamp(max=blocks - 1)
+        block_mask = torch.zeros(batch, seq, blocks, dtype=torch.bool, device=hidden_states.device).scatter(-1, chosen, True)
+        mask = block_mask.index_select(-1, block_of_token)
+    mask = mask.unsqueeze(1)
+    if attention_mask.is_floating_point():
+        min_dtype = torch.finfo(attention_mask.dtype).min
+        mask = torch.where(mask, attention_mask.new_zeros(()), min_dtype)
+    return mask
+
+
+STUBS = {"Qwen4ExpTextQSAIndexer": qsa_indexer_stub}
+
+
+def apply_stubs(model) -> list:
+    """Swap in the static forward for every module whose class is in STUBS. Returns what was replaced."""
+    import types
+
+    counts: dict = {}
+    for module in model.modules():
+        stub = STUBS.get(type(module).__name__)
+        if stub is not None:
+            module.forward = types.MethodType(stub, module)
+            counts[type(module).__name__] = counts.get(type(module).__name__, 0) + 1
+    return [{"module": name, "count": n, "note": STUB_NOTE} for name, n in sorted(counts.items())]
 
 
 def write(path, data) -> None:
@@ -181,6 +249,8 @@ def main(argv=None) -> int:
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--seq", type=int, default=8)
     ap.add_argument("--class", dest="cls")
+    ap.add_argument("--stub-data-dependent", action="store_true",
+                    help="replace modules torch.export cannot trace with static stand-ins that keep their ops")
     a = ap.parse_args(argv)
     mdir = Path(a.model_dir)
     cfg_path = mdir / "config.json"
@@ -235,6 +305,8 @@ def main(argv=None) -> int:
         base["layers_in_config"], base["layers_traced"] = reduce_layers(config, a.layers)
         with torch.device("meta"):
             model = cls(config).eval()
+        if a.stub_data_dependent:
+            base["stubbed"] = apply_stubs(model)
         ids = torch.zeros(1, a.seq, dtype=torch.long, device="meta")
     except Exception as exc:
         write(a.out, {**base, "ops": [], "failures": [{"stage": "build", "error": f"{type(exc).__name__}: {str(exc)[:500]}"}]})
