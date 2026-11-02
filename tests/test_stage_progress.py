@@ -7,7 +7,7 @@ import time
 import pytest
 
 from orchard.ledger import Ledger
-from orchard.stages import (STAGES, attempt_started_ts, budget_cap, coder_state, open_stage_dir,
+from orchard.stages import (STAGES, attempt_started_ts, budget_cap, coder_state, evidence_record, open_stage_dir,
                             run_progress)
 
 T0 = calendar.timegm(time.strptime("2026-10-02T00:00:00Z", "%Y-%m-%dT%H:%M:%SZ"))
@@ -124,6 +124,7 @@ def test_a_resumed_stage_with_its_marker_keeps_its_directory(tmp_path, ledger):
     run = tmp_path / "run"
     d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
     (d / "test-result.json").write_text("{}")
+    record_test(ledger, run, 2, d / "test-result.json")        # the supervisor's own record of its test
     again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
     assert again == d and resumed and (d / "test-result.json").exists()
     entry = ledger.read()[-1]["data"]
@@ -132,3 +133,40 @@ def test_a_resumed_stage_with_its_marker_keeps_its_directory(tmp_path, ledger):
     # A new attempt (after an escalation) never resumes, marker or not.
     _, resumed = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
     assert not resumed and (run / "stages" / "2.partial-1" / "test-result.json").exists()
+
+
+def record_test(ledger, run, n, marker):
+    """The ledger entry Supervisor._run_test appends right after it writes test-result.json."""
+    ledger.append("evidence", n, what="hardware test", returncode=0, timed_out=False, **evidence_record(run, marker))
+
+
+def test_a_marker_the_supervisor_did_not_record_is_not_a_resume_point(tmp_path, ledger):
+    """A prepare agent can write test-result.json (and result.json). A kill before the supervisor sets them aside must not make a resume
+    skip the hardware test and read them."""
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text('{"returncode": 0}')
+    (d / "result.json").write_text("{}")
+    again, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert not resumed and not (again / "test-result.json").exists() and not (again / "result.json").exists()
+    assert (run / "stages" / "2.partial-1" / "test-result.json").exists()
+    assert any(e["data"].get("decision") == "marker not written by the supervisor" for e in ledger.read())
+
+
+def test_a_marker_changed_after_the_supervisor_recorded_it_is_not_a_resume_point(tmp_path, ledger):
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text('{"returncode": 1}')
+    record_test(ledger, run, 2, d / "test-result.json")
+    (d / "test-result.json").write_text('{"returncode": 0}')
+    _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert not resumed
+
+
+def test_a_record_for_another_stage_does_not_vouch_for_the_marker(tmp_path, ledger):
+    run = tmp_path / "run"
+    d, _ = open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
+    (d / "test-result.json").write_text("{}")
+    record_test(ledger, run, 3, d / "test-result.json")
+    _, resumed = open_stage_dir(run, STAGES[2], resuming=True, ledger=ledger)
+    assert not resumed
