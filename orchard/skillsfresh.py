@@ -257,6 +257,7 @@ class Freshness:
     update: str | None = None           # the command a person runs to update; orchard never runs it
     warnings: list[str] = field(default_factory=list)
     cached: dict | None = None          # an UNKNOWN result's last good check, when one was used
+    behind_days: float | None = None    # check_clone(want_age=True): days of upstream history HEAD lacks, when it could be told
 
     @property
     def stale(self) -> bool:
@@ -421,14 +422,61 @@ def _dirty(runner: ReadOnlyRunner, root: str, untracked: bool) -> bool | None:
     return any(w != "unchecked" and (untracked or w != "untracked") for w in dirty.values())
 
 
+_UPSTREAM_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
+
+
+def _unix_time(text) -> float | None:
+    """Seconds since the epoch for a commit time (digits, as `%ct` prints it) or a GitHub ISO 8601 date, else None."""
+    from datetime import datetime
+    t = str(text).strip()
+    try:
+        if t.isdigit() and len(t) <= 12:
+            return float(t)
+        return datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp() if len(t) <= 40 else None
+    except ValueError:
+        return None
+
+
+def _commit_times(out: str) -> list[float]:
+    """The commit times in `rev-list --format=%ct` output: every line that is not a `commit <sha>` header."""
+    times = [_unix_time(line) for line in out.splitlines() if line.strip() and not line.startswith("commit ")]
+    return [t for t in times if t is not None]
+
+
+def _behind_days(runner: ReadOnlyRunner, root: str, repo: str, head: str, remote: str) -> float | None:
+    """How many days upstream's tip is past the point where HEAD stopped following it: the tip's commit date minus the
+    date of the oldest commit upstream has and HEAD lacks (one commit interval later than the merge base the pull
+    request this follows used). Read from the local objects when the tip is here, else from GitHub (the compare
+    answer's merge base and the tip commit). None when neither answers."""
+    if runner(["git", "-C", root, "cat-file", "-e", f"{remote}^{{commit}}"], network=False)[0] == 0:
+        missing = _commit_times(_out(runner, ["git", "-C", root, "rev-list", "--format=%ct", f"{head}..{remote}"]) or "")
+        tip = _commit_times(_out(runner, ["git", "-C", root, "rev-list", "-n", "1", "--format=%ct", remote]) or "")
+        if missing and tip:
+            return max(0.0, (tip[0] - min(missing)) / 86400)
+    try:
+        cmp = json.loads(_out(runner, ["gh", "api", f"repos/{repo}/compare/{head}...{remote}"], network=True) or "")
+        base = _unix_time(cmp["merge_base_commit"]["commit"]["committer"]["date"])
+        tip = _unix_time(json.loads(_out(runner, ["gh", "api", f"repos/{repo}/commits/{remote}"], network=True) or "")
+                         ["commit"]["committer"]["date"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return max(0.0, (tip - base) / 86400) if base is not None and tip is not None else None
+
+
 def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, update: Callable[..., str],
-                reuse_s: float = 0.0, branch_warning: bool = True, untracked: bool = True) -> Freshness:
-    """Compare a git checkout's HEAD with its origin's main branch. `update(root, branch, remote)` gives the update
-    hint; `remote` is upstream main's sha once it is known, else None.
-    `untracked` False leaves untracked files out of the dirty-tree warning."""
+                reuse_s: float = 0.0, branch_warning: bool = True, untracked: bool = True,
+                upstream_branch: str = "main", want_age: bool = False) -> Freshness:
+    """Compare a git checkout's HEAD with its origin's main branch (or `upstream_branch`). `update(root, branch, remote)`
+    gives the update hint; `remote` is the upstream tip's sha once it is known, else None.
+    `untracked` False leaves untracked files out of the dirty-tree warning. `want_age` True makes a BEHIND result carry
+    `behind_days` (see _behind_days); it costs up to two more GitHub calls, so the callers that do not use it leave it off."""
     path = str(path)
+    up = f"upstream {upstream_branch}"
     root = _out(runner, ["git", "-C", path, "rev-parse", "--show-toplevel"])
     result = Freshness(source=source, path=root or path, state=UNKNOWN, detail="")
+    if not _UPSTREAM_BRANCH.match(upstream_branch) or ".." in upstream_branch or upstream_branch.endswith(("/", ".lock")):
+        result.detail = f"{upstream_branch!r} is not a branch name orchard will ask upstream about."
+        return result
     key = f"{source}:{root or path}"
     if not root:
         result.detail = f"{path} is not in a git checkout, so it cannot be compared with upstream."
@@ -438,8 +486,8 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
     result.dirty = _dirty(runner, root, untracked)
     if result.dirty:
         result.warnings.append(f"{root} has uncommitted changes.")
-    if branch_warning and result.branch and result.branch != "main":
-        result.warnings.append(f"{root} is on branch {result.branch}; it is compared with upstream main.")
+    if branch_warning and result.branch and result.branch != upstream_branch:
+        result.warnings.append(f"{root} is on branch {result.branch}; it is compared with {up}.")
     if not result.local:
         result.detail = f"HEAD could not be read in {root}."
         return result
@@ -452,15 +500,15 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
     result.update = update(root, result.branch)
     if _reused(result, cache, key, reuse_s):
         return result
-    rc, out, err = runner(["git", "-C", root, "ls-remote", "origin", "refs/heads/main"], network=True)
-    remote = _ref_sha(out, "refs/heads/main") if rc == 0 else None
+    rc, out, err = runner(["git", "-C", root, "ls-remote", "origin", f"refs/heads/{upstream_branch}"], network=True)
+    remote = _ref_sha(out, f"refs/heads/{upstream_branch}") if rc == 0 else None
     if not remote or not re.fullmatch(r"[0-9a-f]{40}", remote):
-        why = (err.strip().splitlines() or ["no answer"])[-1][:200] if rc != 0 else "origin has no main branch"
+        why = (err.strip().splitlines() or ["no answer"])[-1][:200] if rc != 0 else f"origin has no {upstream_branch} branch"
         return _unknown(result, why, cache, key)
     result.remote = remote
     if remote == result.local:
         result.state, result.behind, result.ahead = CURRENT, 0, 0
-        result.detail = f"HEAD {result.local[:9]} is upstream main ({repo})."
+        result.detail = f"HEAD {result.local[:9]} is {up} ({repo})."
         result.update = None
     else:
         ahead, behind = _count(runner, root, repo, result.local, remote)
@@ -468,16 +516,18 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
         result.update = update(root, result.branch, remote)
         if behind is None:
             result.state = DIFFERS
-            result.detail = (f"HEAD {result.local[:9]} is not upstream main {remote[:9]} ({repo}); how far apart they "
+            result.detail = (f"HEAD {result.local[:9]} is not {up} {remote[:9]} ({repo}); how far apart they "
                              "are could not be counted.")
         elif behind > 0:
             result.state = BEHIND
+            if want_age:
+                result.behind_days = _behind_days(runner, root, repo, result.local, remote)
             more = f" and has {_commits(ahead)} of its own" if ahead else ""
-            result.detail = (f"HEAD {result.local[:9]} is {_commits(behind)} behind upstream main {remote[:9]} "
+            result.detail = (f"HEAD {result.local[:9]} is {_commits(behind)} behind {up} {remote[:9]} "
                              f"({repo}){more}.")
         else:
             result.state = AHEAD
-            result.detail = f"HEAD {result.local[:9]} is {_commits(ahead)} ahead of upstream main {remote[:9]} ({repo})."
+            result.detail = f"HEAD {result.local[:9]} is {_commits(ahead)} ahead of {up} {remote[:9]} ({repo})."
             result.update = None
     _remember(result, cache, key)
     return result
@@ -493,9 +543,10 @@ def skills_update(root: str, branch: str | None, remote: str | None = None) -> s
 
 
 def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: float = 0.0,
-                      offline: bool = False) -> list[Freshness]:
+                      offline: bool = False, want_age: bool = False) -> list[Freshness]:
     """One result per git checkout that holds a directory in `dirs` (bringup.toml's skills_dirs). Two directories in
-    one clone are checked once. A directory outside any checkout is an UNKNOWN result of its own."""
+    one clone are checked once. A directory outside any checkout is an UNKNOWN result of its own. `want_age` is passed
+    to check_clone (a BEHIND result then carries `behind_days`)."""
     runner = run if isinstance(run, ReadOnlyRunner) else ReadOnlyRunner(run or _raw_run, offline=offline)
     cache = cache if cache is not None else Cache()
     out: list[Freshness] = []
@@ -510,7 +561,7 @@ def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: fl
             out.append(Freshness(SOURCE_SKILLS, str(d), UNKNOWN, f"{d} does not exist."))
             continue
         out.append(check_clone(d, source=SOURCE_SKILLS, runner=runner, cache=cache, update=skills_update,
-                               reuse_s=reuse_s))
+                               reuse_s=reuse_s, want_age=want_age))
     return out
 
 

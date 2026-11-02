@@ -1,0 +1,416 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Stage 0 stack freshness record: `stages/0/stack-pins.json`.
+
+Taken from tenstorrent/skills PR 44 (`tt-model-bringup: pin and verify stack freshness at startup`). That PR found three stale parts that
+went unnoticed until an operator looked: the skills plugin, a TT vLLM plugin checkout 65 commits behind, and a `transformers` older than the
+checkpoint's `transformers_version`. This module records the same four comparisons for a new run, reusing orchard/skillsfresh.py for every
+git and GitHub call (its read-only runner, github.com only, network budget, and the states CURRENT, BEHIND, AHEAD, DIFFERS, UNKNOWN):
+
+- tt_metal: the tt-metal checkout's HEAD against upstream main.
+- tt_vllm_plugin: the TT vLLM plugin checkout's HEAD against its upstream branch (main unless the operator names another).
+- skills: each tenstorrent/skills clone against upstream main.
+- transformers: the version installed in the reference interpreter against the checkpoint's `transformers_version` (and the table
+  KNOWN_MINIMUMS), plus whether the installed `transformers` has each class the checkpoint's `architectures` names. The interpreter is asked
+  with a fixed script that uses importlib and imports `transformers` only; it never imports ttnn or ttml and never opens a device.
+
+Severity. For a new run these are critical and each writes a hazard with a named reason: a checkout more than MAX_BEHIND_DAYS days behind, a
+`transformers` below the checkpoint's minimum, a `transformers` that cannot be imported, an architecture class that is missing. With
+`new_run=False` (a resume, or a second attempt at stage 0) the same findings are advisories. An upstream that cannot be reached, a part
+nobody named, a DIFFERS result and a BEHIND result whose age could not be told are advisories in both modes. A comparison that was not made is
+never a pass: its part is UNKNOWN and it appears in `advisories`. Severity is `critical`, `advisory` or `ok`; `ok` means every part was
+compared and none needs a note.
+
+The record is written by the supervisor (never by an agent) with safeio.atomic_write. The supervisor records its sha256 in the ledger, and the
+stage 0 gate (`gate_reasons`) reads the file through safeio and accepts it only when the hash is the ledger's. Home directories in any text are
+shown as `~`.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+from orchard import model_config, safeio, skillsfresh
+
+FILE = "stack-pins.json"
+SCHEMA = 1
+MAX_BEHIND_DAYS = 7.0           # choice: the threshold in tenstorrent/skills PR 44 (a checkout older than a week is stale)
+MAX_RECORD_BYTES = 1 << 20
+PROBE_TIMEOUT_S = 120.0         # choice: importing transformers with torch takes a few seconds; a hung import ends here
+PROBE_MAX_BYTES = 64 * 1024
+MAX_CLASSES = 8
+CLASS_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,100}$")
+SEVERITIES = ("critical", "advisory", "ok")
+OFFLINE_ENV = "ORCHARD_STACK_PINS_OFFLINE"
+
+# Checkpoints whose config.json does not state the minimum transformers they need. model_type -> (minimum, source). The config's own
+# `transformers_version`, when it has one, is compared as well and the larger minimum wins.
+KNOWN_MINIMUMS = {
+    "qwen4_exp": ("5.19.0", "operator, 2026-11-02: Qwen4ExpForCausalLM first appears in transformers 5.19.0"),
+}
+
+# Hazard names (stable: the ledger and the bundle quote them).
+H_TT_METAL = "tt_metal_checkout_stale"
+H_VLLM = "tt_vllm_plugin_stale"
+H_SKILLS = "skills_clone_stale"
+H_BELOW = "transformers_below_checkpoint_minimum"
+H_NOT_IMPORTABLE = "transformers_not_importable"
+H_CLASS = "transformers_missing_architecture_class"
+
+# Run by the reference interpreter. Imports transformers and nothing else of ours; the class names arrive as arguments (each already
+# checked against CLASS_NAME). Prints one JSON object on its last line.
+PROBE_SCRIPT = r'''
+import importlib.util, json, sys
+out = {"importable": False, "version": None, "classes": {}}
+try:
+    if importlib.util.find_spec("transformers") is not None:
+        import transformers
+        out["version"] = str(transformers.__version__)
+        out["importable"] = True
+        for name in sys.argv[1:]:
+            try:
+                out["classes"][name] = getattr(transformers, name, None) is not None
+            except Exception:
+                out["classes"][name] = False
+except Exception as exc:
+    out["importable"] = False
+    out["error"] = type(exc).__name__
+print(json.dumps(out))
+'''
+
+
+class StackPinsError(Exception):
+    """An input this module cannot use. Always one sentence with no file content."""
+
+
+@dataclass(frozen=True)
+class Sources:
+    """What to compare. A None or empty source gives an UNKNOWN part that says it was not named."""
+    model_dir: str | None = None
+    ref_python: str | None = None
+    tt_metal_dir: str | None = None
+    vllm_dir: str | None = None
+    vllm_branch: str = "main"
+    skills_dirs: tuple = ()
+
+
+# ---- small helpers --------------------------------------------------------------------------------------------------
+
+def _tilde(value):
+    """`value` with the home directory shown as `~`, through lists and dicts."""
+    try:
+        home = str(Path.home())
+    except (RuntimeError, KeyError):
+        home = ""
+    if isinstance(value, str):
+        return value.replace(home, "~") if len(home) > 1 else value
+    if isinstance(value, list):
+        return [_tilde(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _tilde(v) for k, v in value.items()}
+    return value
+
+
+_VERSION = re.compile(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?(.*)$")
+
+
+def parse_version(text) -> tuple | None:
+    """(numbers, final) for a release such as `5.19.0`, `4.51.0.dev0` or `4.51.0rc1`, else None. `final` is 0 for a pre-release (dev, rc,
+    alpha, beta, a suffix of any other kind) and 1 for a release, so 4.51.0.dev0 sorts below 4.51.0. Local parts (`+cu121`) are dropped."""
+    if not isinstance(text, str) or len(text) > 64:
+        return None
+    m = _VERSION.match(text.split("+", 1)[0])
+    if not m:
+        return None
+    nums = tuple(int(g) for g in m.groups()[:4] if g is not None)
+    return (nums + (0, 0, 0, 0))[:4], (0 if m.group(5).strip() else 1)
+
+
+def _below(installed: tuple, required: tuple) -> bool:
+    return installed < required
+
+
+def _entry(name: str, reason: str) -> dict:
+    return {"name": name, "reason": reason[:400]}
+
+
+# ---- the checkpoint ---------------------------------------------------------------------------------------------------
+
+def config_facts(model_dir) -> dict:
+    """{"model_type", "architectures", "transformers_version"} from `model_dir/config.json`; each is None or [] when the config does not
+    hold a usable one. Raises StackPinsError when the config cannot be read (missing, link out of reach, oversize, or text that is not strict JSON)."""
+    if not isinstance(model_dir, str) or not model_dir or "\0" in model_dir:
+        raise StackPinsError("no checkpoint directory is named")
+    try:
+        path = os.path.realpath(os.path.join(model_dir, "config.json"))     # a cache snapshot's config.json is a link into blobs/
+        cfg = model_config.read_model_config(path)
+    except (ValueError, OSError, model_config.ModelConfigError) as exc:
+        raise StackPinsError(f"the checkpoint's config.json cannot be read ({type(exc).__name__})") from None
+
+    def text(key, limit):
+        try:
+            return safeio.bounded_str(cfg.get(key), max_len=limit, min_len=1, what=key)
+        except safeio.BadValue:
+            return None
+    archs = cfg.get("architectures")
+    names = [a for a in archs if isinstance(a, str) and CLASS_NAME.match(a)][:MAX_CLASSES] if isinstance(archs, list) else []
+    return {"model_type": text("model_type", 100), "architectures": names, "transformers_version": text("transformers_version", 64)}
+
+
+def required_minimum(facts: dict) -> tuple[str | None, str | None]:
+    """(minimum version text, where it came from): the larger of the config's `transformers_version` and the KNOWN_MINIMUMS entry."""
+    found = []
+    tv = facts.get("transformers_version")
+    if parse_version(tv) is not None:
+        found.append((tv, "the checkpoint's config.json transformers_version"))
+    known = KNOWN_MINIMUMS.get(facts.get("model_type") or "")
+    if known:
+        found.append((known[0], f"KNOWN_MINIMUMS for model_type {facts['model_type']} ({known[1]})"))
+    if not found:
+        return None, None
+    return max(found, key=lambda f: parse_version(f[0]))
+
+
+# ---- the reference interpreter ----------------------------------------------------------------------------------------
+
+def _probe_env() -> dict:
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+           "TOKENIZERS_PARALLELISM": "false"}
+    if os.environ.get("HOME"):
+        env["HOME"] = os.environ["HOME"]
+    return env
+
+
+def real_probe_run(argv, timeout, env=None):
+    """The process runner for the interpreter probe. skillsfresh's runner (its own session, the group killed on a timeout) is looked up at
+    each call, so the test suite's guard covers this too."""
+    return skillsfresh._raw_run(argv, timeout, env)
+
+
+def probe_interpreter(python, classes, run: Callable | None = None) -> dict:
+    """Ask `python` for its transformers version and for each class in `classes`. {"state": "answered"|"unknown", "importable", "version",
+    "classes": {name: bool}, "why"}. Never raises. `run` is (argv, timeout, env) -> (returncode, stdout, stderr)."""
+    unknown = lambda why: {"state": "unknown", "importable": None, "version": None, "classes": {}, "why": why}     # noqa: E731
+    if not isinstance(python, str) or not python or "\0" in python:
+        return unknown("no reference interpreter is named (set ORCHARD_REFERENCE_PYTHON)")
+    try:
+        if not (os.path.isfile(python) and os.access(python, os.X_OK)):
+            return unknown("the reference interpreter is not an executable file")
+    except (ValueError, OSError):
+        return unknown("the reference interpreter path cannot be checked")
+    classes = [c for c in classes if isinstance(c, str) and CLASS_NAME.match(c)][:MAX_CLASSES]
+    try:
+        rc, out, err = (run or real_probe_run)([python, "-I", "-c", PROBE_SCRIPT, *classes], PROBE_TIMEOUT_S, _probe_env())
+    except Exception as exc:                        # a broken runner is a failed probe
+        return unknown(f"the interpreter could not be run ({type(exc).__name__})")
+    if rc != 0:
+        return unknown(f"the interpreter exited with status {rc}")
+    lines = [ln for ln in str(out).splitlines() if ln.strip()]
+    try:
+        data = safeio.parse_json_bytes(lines[-1] if lines else "", max_bytes=PROBE_MAX_BYTES, expect=dict)
+        importable = data.get("importable")
+        version = data.get("version")
+        got = data.get("classes")
+        if not isinstance(importable, bool) or not isinstance(got, dict):
+            raise safeio.BadValue("wrong shape")
+        if importable:
+            version = safeio.bounded_str(version, max_len=64, min_len=1, what="version")
+        have = {c: got[c] for c in classes if isinstance(got.get(c), bool)}
+        if importable and len(have) != len(classes):
+            raise safeio.BadValue("a class answer is missing")
+    except safeio.SafeReadError:
+        return unknown("the interpreter's answer was not usable")
+    return {"state": "answered", "importable": importable, "version": version if importable else None, "classes": have, "why": None}
+
+
+# ---- one part each ----------------------------------------------------------------------------------------------------
+
+def _fresh_part(f: skillsfresh.Freshness, hazard: str, new_run: bool) -> tuple[dict, list, list]:
+    """(part, critical entries, advisory entries) for one checkout result."""
+    part = {"state": f.state, "path": f.path, "local": f.local, "remote": f.remote, "behind": f.behind, "ahead": f.ahead,
+            "behind_days": round(f.behind_days, 1) if f.behind_days is not None else None, "branch": f.branch, "dirty": f.dirty,
+            "detail": f.detail, "warnings": list(f.warnings), "update": f.update if f.state in (skillsfresh.BEHIND, skillsfresh.DIFFERS) else None}
+    crit, adv = [], []
+    if f.state == skillsfresh.BEHIND:
+        if f.behind_days is None:
+            adv.append(_entry(f"{hazard}_age_unknown", f"{f.source} is {f.behind} commits behind upstream and the age of the gap could not be told. {f.detail}"))
+        elif f.behind_days > MAX_BEHIND_DAYS:
+            crit.append(_entry(hazard, f"{f.source} is {f.behind} commits and {f.behind_days:.0f} days behind upstream, more than "
+                                       f"{MAX_BEHIND_DAYS:g} days. {f.update_text()}"))
+    elif f.state == skillsfresh.DIFFERS:
+        adv.append(_entry(f"{hazard}_differs", f"{f.source} is not upstream and how far apart they are could not be counted. {f.detail}"))
+    elif f.state == skillsfresh.UNKNOWN:
+        adv.append(_entry(f"{hazard}_unchecked", f"{f.source} was not compared with upstream: {f.detail}"))
+    return part, crit, adv
+
+
+def _unnamed(source: str, hazard: str, why: str) -> tuple[dict, list, list]:
+    part = {"state": skillsfresh.UNKNOWN, "path": None, "detail": why}
+    return part, [], [_entry(f"{hazard}_unchecked", f"{source} was not compared with upstream: {why}")]
+
+
+def _transformers_part(sources: Sources, run) -> tuple[dict, list, list]:
+    crit, adv = [], []
+    part = {"state": skillsfresh.UNKNOWN, "installed": None, "checkpoint_minimum": None, "minimum_source": None, "model_type": None,
+            "architectures": [], "classes": {}, "detail": ""}
+    try:
+        facts = config_facts(sources.model_dir)
+    except StackPinsError as exc:
+        part["detail"] = str(exc)
+        return part, crit, [_entry("transformers_unchecked", f"transformers was not compared with the checkpoint: {exc}")]
+    minimum, source = required_minimum(facts)
+    part.update(model_type=facts["model_type"], architectures=facts["architectures"], checkpoint_minimum=minimum, minimum_source=source)
+    probe = probe_interpreter(sources.ref_python, facts["architectures"], run)
+    if probe["state"] != "answered":
+        part["detail"] = probe["why"]
+        return part, crit, [_entry("transformers_unchecked", f"transformers was not compared with the checkpoint: {probe['why']}")]
+    if not probe["importable"]:
+        part.update(state=skillsfresh.BEHIND, detail="transformers cannot be imported in the reference interpreter")
+        return part, [_entry(H_NOT_IMPORTABLE, "transformers cannot be imported in the reference interpreter, so no class of the checkpoint can load")], adv
+    installed = probe["version"]
+    part.update(installed=installed, classes=probe["classes"])
+    have, need = parse_version(installed), parse_version(minimum) if minimum else None
+    state = skillsfresh.CURRENT
+    if have is None:
+        part["state"], part["detail"] = skillsfresh.UNKNOWN, f"the installed version {installed!r} is not a version number"
+        adv.append(_entry("transformers_unchecked", part["detail"]))
+        return part, crit, adv
+    if need is not None and _below(have, need):
+        state = skillsfresh.BEHIND
+        crit.append(_entry(H_BELOW, f"transformers {installed} is installed in the reference interpreter and the checkpoint needs {minimum} or later "
+                                    f"({source})"))
+    missing = [c for c, ok in probe["classes"].items() if not ok]
+    if missing:
+        state = skillsfresh.BEHIND
+        crit.append(_entry(H_CLASS, f"transformers {installed} has no class {', '.join(missing)} that the checkpoint's architectures name"))
+    if not facts["architectures"]:
+        adv.append(_entry("transformers_architecture_unchecked", "the checkpoint's config.json names no architecture class, so the class check was not made"))
+    if minimum is None and not facts["architectures"]:
+        state = skillsfresh.UNKNOWN
+        adv.append(_entry("transformers_unchecked", "the checkpoint names no minimum transformers version and no class to check"))
+    part["state"] = state
+    part["detail"] = (f"installed {installed}; the checkpoint needs {minimum or 'no stated minimum'}"
+                      + (f"; missing classes: {', '.join(missing)}" if missing else ""))
+    return part, crit, adv
+
+
+# ---- the record -------------------------------------------------------------------------------------------------------
+
+def build_record(sources: Sources, *, new_run: bool, run=None, probe_run=None, cache: skillsfresh.Cache | None = None,
+                 offline: bool = False, now: float | None = None) -> dict:
+    """Make every comparison and return the record. Never raises for an input it cannot use: that part is UNKNOWN with a reason.
+    `run` is the git and gh runner (a ReadOnlyRunner, or a function for one), `probe_run` runs the reference interpreter. No test passes
+    the real ones."""
+    runner = run if isinstance(run, skillsfresh.ReadOnlyRunner) else skillsfresh.ReadOnlyRunner(run or skillsfresh._raw_run, offline=offline)
+    cache = cache if cache is not None else skillsfresh.Cache(write=False)
+    parts: dict = {}
+    crit: list = []
+    adv: list = []
+
+    def take(key, triple):
+        parts[key] = triple[0]
+        crit.extend(triple[1])
+        adv.extend(triple[2])
+
+    def clone(key, directory, hazard, source, update, branch="main"):
+        if not directory:
+            return take(key, _unnamed(source, hazard, "no checkout is named for it"))
+        try:
+            if not Path(directory).is_dir():
+                return take(key, _unnamed(source, hazard, "the named directory does not exist"))
+        except (ValueError, OSError):
+            return take(key, _unnamed(source, hazard, "the named directory cannot be checked"))
+        f = skillsfresh.check_clone(directory, source=source, runner=runner, cache=cache, update=update, upstream_branch=branch, want_age=True)
+        take(key, _fresh_part(f, hazard, new_run))
+
+    clone("tt_metal", sources.tt_metal_dir, H_TT_METAL, "tt-metal", skillsfresh.skills_update)
+    clone("tt_vllm_plugin", sources.vllm_dir, H_VLLM, "TT vLLM plugin", skillsfresh.skills_update, sources.vllm_branch)
+    dirs = [d for d in sources.skills_dirs if d]
+    if not dirs:
+        take("skills", _unnamed("tenstorrent/skills", H_SKILLS, "no clone is named for it"))
+    else:
+        results = skillsfresh.check_skills_dirs(dirs, run=runner, cache=cache, want_age=True)
+        subs = [_fresh_part(f, H_SKILLS, new_run) for f in results]
+        parts["skills"] = [s[0] for s in subs]
+        for s in subs:
+            crit.extend(s[1])
+            adv.extend(s[2])
+    take("transformers", _transformers_part(sources, probe_run))
+
+    if not new_run:                                 # a resume holds the same findings as notes
+        adv = [dict(e, would_be_critical=True) for e in crit] + adv
+        crit = []
+    severity = "critical" if crit else ("advisory" if adv else "ok")
+    stamp = datetime.fromtimestamp(time.time() if now is None else now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _tilde({"schema": SCHEMA, "label": "comparison with upstream at the time of the check", "checked_at": stamp,
+                   "mode": "new" if new_run else "resume", "severity": severity, "max_behind_days": MAX_BEHIND_DAYS,
+                   "hazards": crit, "advisories": adv, "parts": parts})
+
+
+def unchecked_record(why: str, *, new_run: bool, now: float | None = None) -> dict:
+    """The record when no check was supplied: every part UNKNOWN, never a pass."""
+    parts = {"tt_metal": {"state": skillsfresh.UNKNOWN, "detail": why}, "tt_vllm_plugin": {"state": skillsfresh.UNKNOWN, "detail": why},
+             "skills": [{"state": skillsfresh.UNKNOWN, "detail": why}], "transformers": {"state": skillsfresh.UNKNOWN, "detail": why}}
+    stamp = datetime.fromtimestamp(time.time() if now is None else now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"schema": SCHEMA, "label": "no comparison was made", "checked_at": stamp, "mode": "new" if new_run else "resume",
+            "severity": "advisory", "max_behind_days": MAX_BEHIND_DAYS, "hazards": [],
+            "advisories": [_entry("stack_unchecked", f"the stack was not compared with upstream: {why}")], "parts": parts}
+
+
+def write_record(stage_dir, rec: dict) -> str:
+    """Write the record (all or nothing) and return the sha256 of the bytes written. The hash comes from the bytes in hand, so a file
+    swapped afterwards is not what the ledger recorded."""
+    data = (json.dumps(rec, indent=1, sort_keys=True) + "\n").encode("utf-8")
+    safeio.atomic_write(Path(stage_dir) / FILE, data)
+    return hashlib.sha256(data).hexdigest()
+
+
+def make_check(sources: Sources, *, offline: bool | None = None, run=None, probe_run=None) -> Callable:
+    """The callable the supervisor holds: (stage_dir, new_run) -> (record, sha256). `offline` None reads $ORCHARD_STACK_PINS_OFFLINE."""
+    def check(stage_dir, new_run):
+        off = bool(os.environ.get(OFFLINE_ENV)) if offline is None else offline
+        rec = build_record(sources, new_run=new_run, run=run, probe_run=probe_run, offline=off)
+        return rec, write_record(stage_dir, rec)
+    return check
+
+
+# ---- the gate ---------------------------------------------------------------------------------------------------------
+
+def read_record(stage_dir) -> tuple[dict, str]:
+    """(record, sha256 of the bytes read) from the stage directory, through safeio. Raises SafeReadError for anything else than a
+    well-formed record."""
+    data = safeio.read_bytes(Path(stage_dir) / FILE, max_bytes=MAX_RECORD_BYTES)
+    rec = safeio.parse_json_bytes(data, max_bytes=MAX_RECORD_BYTES, expect=dict)
+    if rec.get("schema") != SCHEMA or rec.get("severity") not in SEVERITIES or rec.get("mode") not in ("new", "resume"):
+        raise safeio.WrongType("the record has no usable schema, severity or mode")
+    for key in ("hazards", "advisories"):
+        items = rec.get(key)
+        if not isinstance(items, list) or not all(isinstance(i, dict) and isinstance(i.get("name"), str) and isinstance(i.get("reason"), str)
+                                                  for i in items):
+            raise safeio.WrongType(f"the record's {key} are not a list of named reasons")
+    if not isinstance(rec.get("parts"), dict):
+        raise safeio.WrongType("the record has no parts")
+    return rec, hashlib.sha256(data).hexdigest()
+
+
+def gate_reasons(stage_dir, recorded_sha) -> list[str]:
+    """Why stage 0's stack record does not pass: empty when it is the file the ledger recorded, well formed, and holds no critical hazard.
+    A missing file, a file that is not the recorded one and a record with no ledger entry all fail; none skips the check."""
+    if not isinstance(recorded_sha, str) or not recorded_sha:
+        return [f"{FILE}: the ledger holds no entry for this record"]
+    try:
+        rec, sha = read_record(stage_dir)
+    except safeio.SafeReadError as exc:
+        return [f"{FILE}: cannot be used ({exc.reason if hasattr(exc, 'reason') else type(exc).__name__})"]
+    if sha != recorded_sha:
+        return [f"{FILE}: is not the file the supervisor recorded (its hash changed)"]
+    if rec["severity"] == "critical" or rec["hazards"]:
+        return [f"{FILE}: critical, {h['name']}: {h['reason']}"[:500] for h in rec["hazards"]] or [f"{FILE}: critical"]
+    return []

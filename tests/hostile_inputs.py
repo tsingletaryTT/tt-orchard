@@ -709,6 +709,7 @@ def _types():
  _MigrationRefused) = _types()
 from orchard.audio_package import AudioPackageError as _AudioPackageError  # noqa: E402
 from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
+from orchard.stack_pins import StackPinsError as _StackPinsError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
 def _preflight_config_json(base: Path):
@@ -724,6 +725,17 @@ def _preflight_index_problem(base: Path):
 def _audio_decision_load_category_rules(base: Path):
     from orchard import audio_decision
     return audio_decision.load_category_rules(base / "input.json")
+
+
+def _stack_pins_read_record(base: Path):
+    from orchard import stack_pins
+    return stack_pins.read_record(base)[0]
+
+
+def _stack_pins_config_facts(base: Path):
+    """The checkpoint's config.json is `base/model/config.json`; a refused file is StackPinsError, never another exception."""
+    from orchard import stack_pins
+    return stack_pins.config_facts(str(base / "model"))
 
 
 READERS: list[Reader] = [
@@ -775,6 +787,8 @@ READERS: list[Reader] = [
     Reader("transcripts.load_signature", _transcripts_load_signature, documented=(ValueError, TypeError, KeyError), os_error_ok=ALL_ITEMS),
     Reader("kernelprobe._read_agent_check", _kernelprobe_read_agent_check),
     Reader("skillsfresh.Cache", _skillsfresh_cache),
+    Reader("stack_pins.read_record", _stack_pins_read_record, rel="stack-pins.json", documented=(_SafeReadError,)),
+    Reader("stack_pins.config_facts", _stack_pins_config_facts, rel="model/config.json", documented=(_StackPinsError,)),
     Reader("toolcall_bench._rows", _toolcall_bench_rows, suffix=b"\n", documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("stock_runtime._load_config", _stock_runtime_load_config),
     Reader("model_config.read_model_config", _model_config_read, documented=(_ModelConfigError,)),
