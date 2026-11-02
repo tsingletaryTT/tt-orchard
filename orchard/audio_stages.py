@@ -360,7 +360,7 @@ def subprocess_runner(base_env: dict):
         # sent SIGTERM by orchard/audio_remote.py, which orchard/audio_cli.py turns into an exception), the `except BaseException` below kills that
         # session before the exception goes on, so no CPU run outlives its verb.
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "wb") as log:
+        with safeio.create_for_write(log_path) as log:
             proc = subprocess.Popen(argv, env={**base_env, **env_extra}, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                     start_new_session=True)
             try:

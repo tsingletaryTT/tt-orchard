@@ -141,7 +141,7 @@ from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIP
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
-from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
+from orchard.hwtests import (PLAN, failed_tests, load_plan, move_aside, plan_refusal, pending, read_plan, suspect_caches,
                              unrecorded, write_plan, write_record, write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.package import PackageError, stage_all
@@ -154,7 +154,7 @@ from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+from orchard.stages import (locate, coder_start_blocked, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
@@ -1155,7 +1155,7 @@ class Supervisor:
         lease_rec, server_rec, canary = coder_state(entries)
         released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
                     and e["data"].get("decision") in ("hardware released", "coder left up")}
-        if (lease_rec is None or lease_rec["lease_id"] in released or boot_unfinished(entries)
+        if (lease_rec is None or lease_rec["lease_id"] in released or boot_unfinished(entries) or coder_start_blocked(entries)
                 or not isinstance(canary, dict) or not hasattr(self.adapter, "adopt")):
             return None
         lease = Lease.from_record(lease_rec)
@@ -1277,6 +1277,10 @@ class Supervisor:
                 return
             self._start_coder(None)
             return
+        if coder_start_blocked(entries):
+            # No coder was launched. Nothing is taken from the server record, so a foreign server on the coder's port is never used.
+            self._retry_blocked_start(entries, Lease.from_record(lease_rec), canary)
+            return
         if server_rec:
             self.coder.adopt(server_rec)
         lease = Lease.from_record(lease_rec)
@@ -1311,6 +1315,18 @@ class Supervisor:
                                lease_id=lease.lease_id)
             self._finish_boot(lease, canary)
 
+    def _retry_blocked_start(self, entries: list[dict], lease: Lease, canary: dict | None) -> None:
+        """The last start was blocked by the granted-board check (`coder start blocked`): retry the check and launch. When this process still
+        holds the recorded lease the launch is under it; otherwise (a restart: the lease belonged to a dead pid or was released) a lease is
+        taken and checked. No boot is completed, no canary compared and no coder death counted: there is no coder yet."""
+        self.ledger.append("decision", None, decision="retrying a blocked coder start", lease_id=lease.lease_id)
+        released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
+                    and e["data"].get("decision") in ("hardware released", "coder left up")}
+        mine = [c for c in self.adapter.status() if c.bdf in lease.chips]
+        ours = (lease.lease_id not in released and bool(mine) and all(c.lease_pid == self.adapter.owner_pid for c in mine)
+                and lease.lease_id not in self._adopted_ids(entries))
+        self._start_coder(canary, lease=lease if ours else None, check_granted=True)
+
     def _start_coder(self, baseline: dict | None, lease: Lease | None = None, *, check_granted: bool = False) -> None:
         """Take a lease if none is given, and start the coder under it. `check_granted` (the relaunch after a resume) asks
         docker about the devices of the lease that was granted before the start: gozer can grant a different board from
@@ -1328,16 +1344,21 @@ class Supervisor:
         # ledger, so the restart can stop that server and re-lease.
         # The pending record says "unknown" for this attempt. The live value changes only when the
         # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
-        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
-                           server={**self.coder.record(), "owned": None})
         if check_granted:
-            # After the record above, so a block here leaves the granted lease in the ledger: cleanup releases it and a
-            # resume relaunches under it. The check only reads docker; it never resets a device.
+            # Before "coder starting": a block here has launched nothing, and a "coder starting" record would tell a resume that a launch
+            # happened (it could take a foreign server that answers, or count the missing container as a coder death; issue 351). The
+            # "coder start blocked" record keeps the granted lease and server record in the ledger instead: cleanup releases the lease and a
+            # resume retries this check and the launch (`_retry_blocked_start`). The check only reads docker; it never resets a device.
             check = self.coder.confirm_stopped()
             if not check.stopped:
+                self.ledger.append("decision", None, decision="coder start blocked", lease=lease.record(),
+                                   server={**self.coder.record(), "owned": None},
+                                   reason=f"a container holds a device of the granted board ({', '.join(lease.chips)})")
                 self._block(None, f"a container holds a device of the granted board ({', '.join(lease.chips)}); the coder was "
                                   "not started. Stop that container or wait for it, then resume",
                             checks=check.checks, evidence=check.evidence)
+        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
+                           server={**self.coder.record(), "owned": None})
         try:
             self.coder.start(lease)
         except ServerNotOwned as exc:
@@ -2010,15 +2031,18 @@ class Supervisor:
         folder, so the operator reads them with the rest. Nothing is copied when no package was
         staged. The bundle scrub then searches these copies too."""
         s7 = self.run_dir / "stages" / "7"
-        if not (s7 / "package.json").is_file():
+        # locate: a regular file inside the run directory (links resolved); a FIFO, a device or a link that leaves the run is not copied.
+        package_json = locate(self.run_dir, "stages/7/package.json")[0]
+        if package_json is None:
             return
         dest = bundle / "package"
         dest.mkdir(exist_ok=True)
-        shutil.copyfile(s7 / "package.json", dest / "package.json")
-        if (s7 / "PUBLISH_COMMANDS.txt").is_file():
-            shutil.copyfile(s7 / "PUBLISH_COMMANDS.txt", dest / "PUBLISH_COMMANDS.txt")
+        shutil.copyfile(package_json, dest / "package.json")
+        if (commands := locate(self.run_dir, "stages/7/PUBLISH_COMMANDS.txt")[0]) is not None:
+            shutil.copyfile(commands, dest / "PUBLISH_COMMANDS.txt")
         for card in sorted((s7 / "package").glob("*/README.md")):
-            shutil.copyfile(card, dest / f"{card.parent.name}-README.md")
+            if (found := locate(self.run_dir, os.path.relpath(card, self.run_dir))[0]) is not None:
+                shutil.copyfile(found, dest / f"{card.parent.name}-README.md")
 
     def _gate_feedback(self, spec, stage_dir: Path, step: AgentStep, gate):
         """The step ended "done" and the exit gate failed. Tell the same conversation what the gate
@@ -3051,6 +3075,10 @@ class Supervisor:
         finish step should run."""
         n = spec.number
         tests = load_plan(stage_dir) if resumed else None
+        if resumed and tests is None and (why := plan_refusal(stage_dir)):
+            # A plan that is there and refused (NaN, a link out of the run, over the cap, not a list of tests) is not a missing plan. The
+            # prepare step below replaces it, so the file name and the reason go in the ledger first (issue 386).
+            self.ledger.append("decision", n, decision="hardware test plan refused, so the prepare step runs again", file=PLAN, reason=why)
         if tests is not None and (wrong := swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
                                                                               operator_home=self.paths.operator_home,
                                                                               counts=[t.chips for t in tests])):

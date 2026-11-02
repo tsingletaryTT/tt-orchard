@@ -330,6 +330,62 @@ def test_a_boot_step_that_exits_nonzero_exits_nonzero_and_records_it(rig, monkey
     assert json.loads((rig["stage"] / "test-result.json").read_text())["returncode"] == 4
 
 
+def test_a_boot_whose_output_is_over_the_cap_leaves_a_failed_result_that_names_the_file_and_reason(rig, monkeypatch):
+    """Issue 387: evidence_record raised on the oversize output, so no test-result.json was written and the attempt left no record."""
+    from orchard import stages
+    run_cmd(rig, step="stage")
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setattr(stages, "EVIDENCE_HASH_MAX", 8)             # fake_spawn writes 12 bytes
+    out = io.StringIO()
+    code = package_cmd.main(args(rig, step="boot", cache_root=str(rig["cache"])), out=out, spawn=fake_spawn,
+                            extra_env=rig["extra_env"], hostname="testhost")
+    assert code == 1, out.getvalue()
+    rec = json.loads((rig["stage"] / "test-result.json").read_text())
+    assert rec["returncode"] == 0 and rec["output_refused"]
+    assert rec["output"]["path"] == "stages/7/evidence/hw-test-output.txt" and rec["output"]["unreadable"] == rec["output_refused"]
+    assert "hw-test-output.txt" in out.getvalue() and "failed" in out.getvalue()
+
+
+def test_a_fifo_left_at_the_boot_output_path_does_not_block_the_step(rig, monkeypatch):
+    """Issue 355: open(path, "wb") on a FIFO with no reader blocks forever."""
+    run_cmd(rig, step="stage")
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    out_path = rig["stage"] / "evidence" / "hw-test-output.txt"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.unlink(missing_ok=True)
+    os.mkfifo(out_path)
+    code = package_cmd.main(args(rig, step="boot", cache_root=str(rig["cache"])), out=io.StringIO(), spawn=fake_spawn,
+                            extra_env=rig["extra_env"], hostname="testhost")
+    assert code == 0 and out_path.read_bytes() == b"boot output\n"
+
+
+def test_a_link_at_the_result_path_is_replaced_and_its_target_left_alone(rig, monkeypatch, tmp_path):
+    run_cmd(rig, step="stage")
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    target = tmp_path / "victim.txt"
+    target.write_text("keep me")
+    (rig["stage"] / "test-result.json").unlink(missing_ok=True)
+    os.symlink(target, rig["stage"] / "test-result.json")
+    package_cmd.main(args(rig, step="boot", cache_root=str(rig["cache"])), out=io.StringIO(), spawn=fake_spawn,
+                     extra_env=rig["extra_env"], hostname="testhost")
+    assert target.read_text() == "keep me"
+    assert not (rig["stage"] / "test-result.json").is_symlink()
+
+
+def test_finish_does_not_count_a_boot_whose_output_was_refused(rig):
+    from orchard import package
+    run_cmd(rig, step="stage")
+    result = {"command": "x", "returncode": 0, "timed_out": False, "chips": ["2"], "server": {},
+              "output": {"path": "stages/7/evidence/hw-test-output.txt", "unreadable": "the file is larger than 8 bytes"},
+              "output_refused": "the file is larger than 8 bytes"}
+    (rig["stage"] / "test-result.json").write_text(json.dumps(result))
+    (rig["stage"] / "verify" / "evidence").mkdir(parents=True, exist_ok=True)
+    (rig["stage"] / "verify" / "evidence" / "verify.json").write_text("{}")
+    done = package.finish(rig["run"], rig["stage"], hostname="testhost")
+    required = [p for p in done["profiles"] if p["required"]][0]
+    assert required["verified"] is False and "refused" in required["verify"]["failed"]
+
+
 # ---- paths ------------------------------------------------------------------------------------------
 
 def test_the_models_root_defaults_to_the_one_the_run_recorded_and_a_flag_overrides_it(rig):

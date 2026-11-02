@@ -47,7 +47,7 @@ __all__ = [
     "SafeReadError", "ReadFailed", "PathRefused", "NotRegular", "TooLarge", "ChangedWhileReading", "NotText", "NotJson",
     "WrongType", "BadValue", "BadHeader", "IncompleteScan", "AppendBroken",
     "read_bytes", "read_prefix", "read_json", "Checked", "read_json_checked", "read_text_checked", "sha256_file", "read_jsonl", "resolved", "parse_json_bytes", "open_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
-    "ScanResult", "atomic_write", "append_line", "finite_number", "whole_number", "bounded_str", "safetensors_header",
+    "ScanResult", "atomic_write", "create_for_write", "append_line", "finite_number", "whole_number", "bounded_str", "safetensors_header",
     "SafetensorsHeader", "TensorEntry", "DTYPE_BITS",
 ]
 
@@ -821,6 +821,27 @@ def _fsync_dir(directory: str) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def create_for_write(path, *, mode: int = 0o600):
+    """A new binary file object for `path`, for a writer that streams (a child process's output) and so cannot use `atomic_write`.
+
+    Whatever name is at `path` (a file, a link, a FIFO) is unlinked first, then the file is created with `O_EXCL | O_NOFOLLOW`. A FIFO
+    at the path therefore cannot block the open, and a link at the path is never written through. If something recreates the name between
+    the unlink and the create, the create fails with FileExistsError and nothing is written through it. A directory at the path is an
+    IsADirectoryError. The caller closes the file."""
+    raw = os.fspath(path)
+    try:
+        os.unlink(raw)
+    except FileNotFoundError:
+        pass
+    except IsADirectoryError:
+        raise
+    except PermissionError as exc:          # unlink of a directory is EISDIR on Linux and EPERM on some systems
+        if os.path.isdir(raw) and not os.path.islink(raw):
+            raise IsADirectoryError(errno.EISDIR, "the path is a directory") from exc
+        raise
+    return os.fdopen(os.open(raw, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, mode), "wb")
 
 
 def atomic_write(path, data: bytes | str, *, mode: int = 0o600, replace: bool = True) -> None:

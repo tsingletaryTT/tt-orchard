@@ -2067,7 +2067,7 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     for e in entries:
         d = e["data"]
         own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder adopted", "coder started",
-                                                             "coder container started", "coder not started")
+                                                             "coder container started", "coder not started", "coder start blocked")
         if e["event"] in ("park", "restore") or own:
             if isinstance(d.get("lease"), dict):
                 lease = d["lease"]
@@ -2078,12 +2078,39 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     return lease, server, canary
 
 
+CODER_START_DECISIONS = ("coder starting", "coder adopted", "coder started", "coder container started", "coder not started",
+                         "coder start blocked")
+
+
+def coder_start_blocked(entries: list[dict]) -> bool:
+    """True when the latest coder start decision is "coder start blocked": the granted-board check blocked before `ServerControl.start` ran
+    (issue 351). No coder was launched, so a resume retries the check and the launch under that lease. It does not finish a boot, compare
+    a canary or count a coder death: nothing of the coder's exists to compare or to have died."""
+    last = None
+    for e in entries:
+        if e["event"] == "decision" and e["data"].get("decision") in CODER_START_DECISIONS:
+            last = e["data"]["decision"]
+    return last == "coder start blocked"
+
+
 SUPERVISOR_MARKER = "test-result.json"      # written by Supervisor._run_test, which then appends an evidence entry with its path and sha256
 
 
-def recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
+# Resume markers other than test-result.json that the supervisor writes itself (or whose writer it records), each with the `what` of the
+# evidence entry that vouches for it (issue 344). Supervisor._run_test_list appends "hardware test list" after it writes tests/plan.json;
+# the text and audio stage 1 bodies append "text stage record" or "audio stage record" after the reference file is written.
+VOUCHED_MARKERS = {
+    "tests/plan.json": ("hardware test list",),
+    "text_reference.json": ("text stage record",),
+    "audio_reference.json": ("audio stage record",),
+}
+
+
+def recorded_by_supervisor(ledger, n: int, rec: dict, *, whats: tuple = ()) -> bool:
     """Does the ledger hold an evidence entry for stage `n` with this file's path and sha256? Supervisor._run_test appends one right
-    after it writes the file. A file an agent wrote, or one changed after the record, has none."""
+    after it writes the file. A file an agent wrote, or one changed after the record, has none.
+
+    With `whats`, the entry must have one of those `what` values instead (the markers of VOUCHED_MARKERS)."""
     # Only _run_test's entry has `returncode` and `timed_out`. AgentStep's "evidence file" entries (an agent can link the marker from
     # evidence/) never do, so they do not count.
     entries = ledger.read()
@@ -2096,7 +2123,8 @@ def recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
         (e.get("event") == "decision" and e["data"].get("decision") == "moved the partial stage directory aside")
         or (e.get("event") == "stage_start" and e["data"].get("resumed") is False))), default=-1) + 1
     return any(e.get("event") == "evidence" and e.get("stage") == n and e["data"].get("path") == rec["path"]
-               and e["data"].get("sha256") == rec["sha256"] and "returncode" in e["data"] and "timed_out" in e["data"]
+               and e["data"].get("sha256") == rec["sha256"]
+               and ((e["data"].get("what") in whats) if whats else ("returncode" in e["data"] and "timed_out" in e["data"]))
                for e in entries[start:])
 
 
@@ -2122,6 +2150,10 @@ def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple
                 pass
             elif marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, spec.number, rec):
                 # An agent can write this file. Only the supervisor's own record of its hardware test vouches for it.
+                ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
+            elif spec.marker in VOUCHED_MARKERS and not recorded_by_supervisor(ledger, spec.number, rec, whats=VOUCHED_MARKERS[spec.marker]):
+                # The plan and the stage 1 reference files are written by the supervisor too (issue 344). A file with no matching entry
+                # after the stage's latest move-aside is not a resume point; the stage directory is moved aside and the step runs again.
                 ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
             else:
                 ledger.append("decision", spec.number, decision="resume from marker", marker=rec)
