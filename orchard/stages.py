@@ -153,8 +153,12 @@ def evidence_record(run_dir, path) -> dict:
     root = safeio.resolved(run_dir)
     if not _within(root, target):
         raise safeio.PathRefused("the evidence file is not inside the run directory")
-    digest = safeio.sha256_file(target, max_bytes=EVIDENCE_HASH_MAX)
-    return {"path": os.path.relpath(target, root), "sha256": digest}
+    rel = os.path.relpath(target, root)
+    # Open beneath the run directory, one component at a time without following a link: a parent directory replaced by a link to somewhere
+    # else after the path was resolved is refused, and the hash is never taken from a file outside the run directory.
+    with safeio.pinned_root(root) as pin:
+        digest = safeio.sha256_file(rel, max_bytes=EVIDENCE_HASH_MAX, anchor=pin.fd)
+    return {"path": rel, "sha256": digest}
 
 
 TEXT_MAX_BYTES = 16 * 1024 * 1024       # the largest card, script or bundle text file a gate will read
@@ -500,8 +504,11 @@ def _reference_evidence_reasons(stage_dir: Path, agent: dict) -> list[str]:
         got = dense.get("shim_sha256") if isinstance(dense, dict) else None
         try:
             shipped = _sha256(SHIPPED_TEMPLATES["qwen4_dense.py"])
-        except OSError:
+        except safeio.SafeReadError as exc:
+            # The shipped shim is missing or refused: the report's hash cannot be checked, which is a reason and not a pass.
             shipped = None
+            reasons.append(f"evidence/load-report.json says the model was built with the dense Qwen4 shim, but the shipped shim cannot be read to "
+                           f"check its sha256 ({exc.reason})")
         if shipped is not None and got != shipped:
             reasons.append("evidence/load-report.json says the model was built with the dense Qwen4 shim, but it does not carry the shipped "
                            "shim's sha256 (qwen4_dense.py was edited, or the report was not written by the shipped reference_gate.py)")

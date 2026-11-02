@@ -782,3 +782,41 @@ def test_every_check_of_a_decision_file_gives_the_same_verdict_just_under_at_and
     if fname == "graft-decision.json":
         assert verdicts["stage 2 graft"] == over
     assert verdicts["stage 2 sampling"] == over and verdicts["stage 4"] == over and verdicts["package gate"] == over, verdicts
+
+
+def test_a_parent_directory_swapped_for_a_link_after_resolution_is_refused_by_evidence_record(tmp_path, monkeypatch):
+    """PR 345 review: O_NOFOLLOW covers only the last component, so a link swapped in for a parent directory could make the hash come from a file
+    outside the run directory. The record opens beneath the run directory, component by component."""
+    from orchard import safeio, stages
+    run = tmp_path / "run"
+    (run / "stages" / "2").mkdir(parents=True)
+    (run / "stages" / "2" / "x.json").write_text('{"in": "run"}')
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "x.json").write_text('{"out": "side"}')
+    real_resolved = safeio.resolved
+
+    def swap_after_resolution(path):
+        got = real_resolved(path)                      # the path is resolved while the directory is still a directory
+        d = run / "stages" / "2"
+        if d.is_dir() and not d.is_symlink():
+            (run / "stages" / "2.moved").parent.mkdir(exist_ok=True)
+            d.rename(run / "stages" / "2.moved")
+            d.symlink_to(elsewhere)                    # then the parent is swapped for a link out of the run directory
+        return got
+
+    monkeypatch.setattr(safeio, "resolved", swap_after_resolution)
+    with pytest.raises(safeio.SafeReadError):
+        stages.evidence_record(run, run / "stages" / "2" / "x.json")
+
+
+def test_sha256_file_with_an_anchor_refuses_a_linked_parent(tmp_path):
+    import hashlib
+    from orchard import safeio
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "f").write_bytes(b"abc")
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    with safeio.pinned_root(tmp_path) as pin:
+        assert safeio.sha256_file("real/f", max_bytes=100, anchor=pin.fd) == hashlib.sha256(b"abc").hexdigest()
+        with pytest.raises(safeio.SafeReadError):
+            safeio.sha256_file("link/f", max_bytes=100, anchor=pin.fd)

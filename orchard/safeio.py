@@ -612,16 +612,17 @@ def read_text_checked(path, *, max_bytes: int, anchor: int | None = None, errors
     return _checked(read)
 
 
-def sha256_file(path, *, max_bytes: int) -> str:
+def sha256_file(path, *, max_bytes: int, anchor: int | None = None) -> str:
     """The sha256 (hex) of the regular file at `path`, read in chunks so a large evidence file is not held in memory.
 
     Opens as `read_bytes` opens (`O_NOFOLLOW | O_NONBLOCK`, `fstat` on the same descriptor, regular files only). A file larger than
     `max_bytes` is `TooLarge` before any read and is also refused if it grows past the cap while it is read. A file that changes size
-    or modification time during the read is `ChangedWhileReading`. Raises only SafeReadError."""
+    or modification time during the read is `ChangedWhileReading`. With `anchor` (an open directory descriptor) the path is relative and every component
+    is opened beneath it with `O_NOFOLLOW` (see `read_bytes`), so a parent directory swapped for a link is refused. Raises only SafeReadError."""
     import hashlib
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
         raise ValueError("max_bytes must be a whole number, zero or more")
-    fd = _open_for_read(path, None)
+    fd = _open_for_read(path, anchor)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
