@@ -37,19 +37,19 @@ Dimensions (full-size reading in brackets):
 | `hidden_size` | 64 | 5120 | |
 | `num_hidden_layers` | 4 (option `--layers`, a multiple of 4) | 64 | |
 | `layer_types` | `linear_attention` x3, `full_attention` x1, repeated | assumed 3:1 | The schedule is an assumption in the repo's fixture too. |
-| Attention heads | 8 query, 2 KV, `head_dim` 16 | 24 / 4 / 256 | Ratio 4:1 here, 6:1 full size. Both divide 2 and 4 dies (KV by replication). |
-| Gated delta net | 2 key heads, 6 value heads, width 16, conv kernel 4 | 16 / 48 / 128 | Same 1:3 ratio. |
+| Attention heads | 8 query, 2 KV, `head_dim` 32 | 24 / 4 / 256 | Ratio 4:1 here, 6:1 full size. Both divide 2 and 4 dies (KV by replication). `head_dim` 32 is one whole tile; 16 trips `head_dim_not_whole_tiles`. |
+| Gated delta net | 2 key heads, 6 value heads, width 32, conv kernel 4 | 16 / 48 / 128 | Same 1:3 ratio. |
 | `hc_count` / `hc_lowrank` | 4 / 8 | 4 / 640 | `hc_lowrank` is set from the config, never defaulted. 8 keeps the 1/8 ratio to the hidden size. |
 | `intermediate_size` (dense) | 256 | about 14336 (inferred) | A multiple of 128, so 2 and 4 dies get whole 32-column tiles. |
 | MoE (variants `moe`, `mixed`) | 8 experts, top 2, width 64, shared expert 64 | 512 / 10 / 640 | |
 | Vocabulary | 384 | 248320 | 384 gives whole tiles on 2 and 4 dies. |
-| Sparse indexer | budget 16, compress ratio 4, 2 heads, width 16, 1 KV head | 2048 / 4 / 4 / 128 / 1 | The full-attention layer needs these keys or it does not build. |
+| Sparse indexer | budget 16, compress ratio 4, 4 heads, width 32, 1 KV head | 2048 / 4 / 4 / 128 / 1 | The full-attention layer needs these keys or it does not build. 4 heads divide 2 and 4 dies; 2 heads trip `qsa_heads_not_divisible_by_dies`. |
 | N-gram embedding | `ngram_size` 3, base vocabulary 1000, 2 heads per n-gram, 4 split parts, `ple_layer_ids` [2], `ple_embed_dim` 64 | 20,000,000 base | The table is 4096 x 16 (65k values) here. Full-size Flash-Next has a 102 GB table. |
 | Output gate | `output_gate_type` sigmoid | sigmoid | |
 | Context | `max_position_embeddings` 512 | 262144 | |
 | MTP | not written | 1 layer | The reference loader ignores `mtp.*` keys, so no gate would see it. |
 
-Parameter counts (dense / moe / mixed): about 0.48 M, 0.73 M and 0.67 M. A bf16 checkpoint is about 1 to 1.5 MB.
+Parameter counts are under 2 M for every variant; a bf16 checkpoint is a few MB.
 
 ## 3. What each layer exercises
 
@@ -67,7 +67,7 @@ Chip-side facts from `docs/run-logs/2026-11-02-qwen4-ops-probe.md` that a port w
   short convolution in the gated delta net has dilation 1 and is correct. Dilation shows up only if the port copies the
   Flash-Next indexer or n-gram convolution as written.
 - `chunk_gated_delta_rule` and `fused_recurrent_gated_delta_rule` match the reference at Flash-Next head counts. At these tiny
-  head counts the probe also ran (2 key heads, 4 value heads, width 64) with the same error level. Six value heads is a
+  head counts the probe also ran (2 key heads, 4 value heads, width 64) with the same error level. Six value heads of width 32 is a
   combination the probe did not run.
 - The gated residual composed from ttnn ops matches at hidden 256 and 2560 (PCC 0.99996).
 
