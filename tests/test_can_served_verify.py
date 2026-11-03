@@ -36,6 +36,10 @@ SERVER = textwrap.dedent('''
                 length = 2048 if FAULT == "wrong_context" else 4096
                 if FAULT == "two_names":
                     return self._send(200, {"object": "list", "data": [{"id": "listed-first", "max_model_len": length}, {"id": "alias-name", "max_model_len": length}]})
+                if FAULT == "alias_no_context":      # the alias the can selects omits max_model_len; an unrelated model is listed first
+                    return self._send(200, {"object": "list", "data": [{"id": "listed-first", "max_model_len": length}, {"id": "alias-name"}]})
+                if FAULT == "alias_wrong_context":
+                    return self._send(200, {"object": "list", "data": [{"id": "listed-first", "max_model_len": length}, {"id": "alias-name", "max_model_len": 2048}]})
                 return self._send(200, {"object": "list", "data": [{"id": "served-name", "max_model_len": length}]})
             self._send(404, {"error": "no"})
         def do_POST(self):
@@ -54,7 +58,7 @@ SERVER = textwrap.dedent('''
             if FAULT != "frozen_counter":
                 TOKENS[0] += 5
             content = "" if FAULT == "spent_budget" else None if FAULT == "null_content" else "Paris"
-            if FAULT == "two_names" and content:
+            if FAULT in ("two_names", "alias_no_context", "alias_wrong_context") and content:
                 content = "Paris asked-for=" + str(req.get("model"))       # lets a test see which name the chat request carried
             finish = "length" if FAULT in ("spent_budget", "null_content") else "stop"
             self._send(200, {"model": "other-model" if FAULT == "wrong_echo" else req.get("model"),
@@ -176,6 +180,20 @@ def test_an_alias_set_only_in_extra_args_is_the_name_the_chat_request_carries(tm
     assert ev["passed"], ev
     assert ev["checks"]["served_model"]["ok"] and "alias-name" in ev["checks"]["served_model"]["detail"]
     assert "alias-name" in ev["answer"] and "listed-first" not in ev["answer"], ev["answer"]
+
+
+def test_an_alias_that_omits_max_model_len_is_still_the_name_the_chat_request_carries(tmp_path):
+    """Review of PR 429: with the context unchecked (the alias reports no max_model_len) the request went to the first listed model."""
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "alias-name"), fault="alias_no_context")
+    assert ev["passed"], ev
+    assert "served_model" in [n["name"] for n in ev["not_checked"]], ev["not_checked"]
+    assert "asked-for=alias-name" in ev["answer"] and "listed-first" not in ev["answer"], ev["answer"]
+
+
+def test_an_alias_with_the_wrong_context_still_gets_the_chat_request_and_fails_the_boot(tmp_path):
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "alias-name"), fault="alias_wrong_context")
+    assert not ev["passed"] and ev["checks"]["served_model"]["ok"] is False, ev
+    assert "asked-for=alias-name" in ev["answer"] and "listed-first" not in ev["answer"], ev["answer"]
 
 
 def test_without_a_declared_name_the_request_still_carries_the_first_listed_one(tmp_path):

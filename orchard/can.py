@@ -1230,8 +1230,12 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
                 extra["model"] = models[0]["id"]
         except (safeio.SafeReadError, TypeError):
             pass
-        if aliases and listing is not None and listing["state"] == "pass":
-            extra["model"] = listing["served"]["id"]          # the first declared name the server lists (the default is the first model it lists)
+        # The first declared name the server lists (the default is the first model it lists). The listing names it in `served` whenever the
+        # selection succeeded, whatever the context check ended in (pass, not_checked or fail), so an alias that omits max_model_len is still the
+        # model the request goes to. A listing that held none of the names has no `served`, and the boot fails on that.
+        served = listing.get("served") if listing is not None else None
+        if aliases and isinstance(served, dict) and isinstance(served.get("id"), str):
+            extra["model"] = served["id"]
         extra.update(ck.request_extra)
         chat = f"{base}/v1/chat/completions"
         counter_before = served_verify.scrape(base) if probing else None      # the engine's own token counter, read around the first chat request
