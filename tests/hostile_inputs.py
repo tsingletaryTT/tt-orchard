@@ -510,6 +510,20 @@ def _hwtests_read_plan(base: Path):
     return hwtests.read_plan(base, required=None, max_chips=4, budget_s=100.0, home="/nohome")
 
 
+def _port_repair_marker(base: Path):
+    from orchard import port_repair
+    return port_repair.read_failure(base, base / "stages" / "2")
+
+
+def _port_repair_marker_valid(base: Path) -> None:
+    """A test record that names a capture file, so the reader goes on to read the hostile output file."""
+    import json
+    stage = base / "stages" / "2"
+    stage.mkdir(parents=True, exist_ok=True)
+    (stage / "test-result.json").write_text(json.dumps({"returncode": 2, "timed_out": False,
+                                                        "output": {"path": "stages/2/evidence/hw-test-output.txt", "sha256": "0" * 64}}))
+
+
 def _stages_gate_delta(base: Path):
     from orchard import stages
     (base / "run").mkdir(exist_ok=True)
@@ -847,6 +861,8 @@ READERS: list[Reader] = [
     Reader("stages._suite_reasons_in", _stages_suite_reasons_in),
     Reader("hwtests.load_plan", _hwtests_load_plan, rel="tests/plan.json"),
     Reader("hwtests.read_plan", _hwtests_read_plan, rel="hw_tests.json"),
+    Reader("port_repair.read_failure (test record)", _port_repair_marker, rel="stages/2/test-result.json"),
+    Reader("port_repair.read_failure (output file)", _port_repair_marker, rel="stages/2/evidence/hw-test-output.txt", setup=_port_repair_marker_valid),
     Reader("stages._read_checked", _stages_read_checked),
     Reader("stages.evidence_record", _stages_evidence_record, documented=(_SafeReadError,)),
     Reader("stages._sha256", _stages_sha256, documented=(_SafeReadError,)),

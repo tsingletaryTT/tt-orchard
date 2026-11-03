@@ -122,6 +122,14 @@ def test_the_round_is_in_the_ledger_before_the_repair_step_starts_and_the_second
     assert entries[-1]["event"] != "stage_start" and entries[decided]["stage"] == 2
 
 
+def test_a_home_path_in_the_failure_text_is_redacted_in_the_ledger(rig):
+    secret = f"{rig.home}/secret-model/weights.bin"
+    start(rig, port=BROKEN.replace("model.layers.2.ple.conv1d.weight", secret), unattended=False)
+    rig.run()
+    failure = rounds(rig)[0]["failure"]
+    assert str(rig.home) not in failure and "<home>/secret-model/weights.bin" in failure
+
+
 def test_the_repair_prompt_names_the_round_the_failure_and_the_one_directory_the_coder_may_edit(rig):
     seen = start(rig, unattended=False)
     rig.run()
