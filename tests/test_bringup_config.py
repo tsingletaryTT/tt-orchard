@@ -428,3 +428,11 @@ def test_full_port_rehearsal_is_added_only_when_the_caller_asks(tmp_path):
     assert "--full-port-rehearsal" not in bc.supervisor_argv(cfg, "Cloudflare/clef", full_port=True)
     argv = bc.supervisor_argv(cfg, "Cloudflare/clef", full_port=True, full_port_rehearsal=True)
     assert supervisor.parse(argv).full_port_rehearsal is True
+
+
+def test_port_repair_rounds_are_added_only_when_the_caller_names_them(tmp_path):
+    cfg = load(tmp_path)
+    assert "--port-repair-rounds" not in bc.supervisor_argv(cfg, "Cloudflare/clef")          # a resume then keeps the value the run recorded
+    argv = bc.supervisor_argv(cfg, "Cloudflare/clef", port_repair_rounds=2)
+    assert argv[argv.index("--port-repair-rounds") + 1] == "2" and supervisor.parse(argv).port_repair_rounds == 2
+    assert "--port-repair-rounds" in bc.supervisor_argv(cfg, "Cloudflare/clef", port_repair_rounds=0)       # zero is a value, not an absence

@@ -906,6 +906,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `full-port-stages-unbuilt`, `scoring-route`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `package-missing`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
 | `--full-port` | no | Let a model that stage 0 classed `full-port` go on into the full-port stage 2 (see the class table). The ledger records it, and a resume keeps it. It can be added on a resume only before stage 2 has started, so a run that ended blocked with `needs-new-model-code` can be continued. It changes nothing for another class, and `unknown` and `restricted-head` still stop. `tt-orchard bringup` takes the same flag |
 | `--full-port-rehearsal` | no | For a rehearsal model with random weights (`scripts/tiny_qwen4`): stage 2 of a full port waives its `coherent` field and no other check, and the ledger records a decision that says so. Needs `--full-port`, is given when the run starts, and is kept on a resume. A resume cannot add it. `tt-orchard bringup` takes the same flag |
+| `--port-repair-rounds` | no | A whole number from 0 to 10, default 3. A full-port stage 2 whose port check failed on the port itself gets up to this many repair rounds in the same attempt (section 5.5e). 0 is no rounds. The ledger records the value in `run_start`, and a resume keeps it and refuses another value. `tt-orchard bringup` takes the same flag |
 | `--model-kind` | no | What the model produces: `generative`, `reranker` or `embedding` (issue 378). Without it stage 0 reads the model card's `pipeline_tag` (`text-ranking` is a reranker; `feature-extraction` and `sentence-similarity` are embedding models), then the architecture names (a name with `Embedding`), and records in its `stage_end` which one decided. A reranker or embedding model of class `weights-only`, or of class `full-port` with `--full-port`, takes the scoring route (see Scoring models below). A resume keeps the ledger's answer. `tt-orchard bringup` takes the same flag |
 | `--no-graft-trial` | no | Skip stage 2's graft trial (section 5.5c). The run records the choice, and a resume keeps it. `tt-orchard bringup` takes the same flag |
 | `--sampling` | no | `auto` (default), `needed` or `not-needed`: whether the model's purpose needs sampling (section 5.5d). With `auto`, stage 2 reads the model's files; with a drafter that ignores sampling and a model that needs it, stage 2 serves a drafter-off variant once and chooses by measurement. The run records the setting and a resume keeps it (a different value on a resume is refused). `tt-orchard bringup` takes the same flag |
@@ -1381,6 +1382,49 @@ sentences. A failed trial is not a stage failure.
 The graft trial comes first. A grafted drafter is chosen for a model that needs sampling only when its own probe shows sampling applied.
 The sampling decision then judges the configuration that is served. The decision is `stages/2/sampling-decision.json` and a
 `sampling decision` ledger entry; stage 4's configurations and stage 7's package follow it, and the stage 2 gate recomputes it from the files.
+
+### 5.5e Port repair rounds (issue 420)
+
+The port check of a full-port stage 2 can fail in seconds on a mistake that its failure text names: a weight key the checkpoint does not
+have, a missing import, an id counted from zero that the config counts from one. Before this option the stage ended at the first failed test,
+and the next attempt started again from a fresh prepare step. With it the coder gets up to `--port-repair-rounds` rounds (default 3) in the same attempt.
+
+A failed test earns a round when the supervisor's own record of it shows a failure of the port. The check prints a structured line after
+its `FAILED:` text (`PORT_CHECK_FAILURE {"kind": ..., "op": ...}`); kind `port` is a port that raised an error, did not answer, returned a bad id or
+has the wrong files, and kind `setup` is the run around the port (no leased chip, a stage 1 file that does not read). The test must have exited with
+code 2 without timing out, and its output file must match the sha256 in the test record. Only a line that starts with the token counts: the port's own
+output carries the prefix `port| `.
+
+A device that cannot be opened is kind `setup` too: the worker's `init` reply carries `"kind": "setup"` when `open_device` or `open_mesh_device` raises, and no
+edit to the port can fix that. An import error in the port module at `init` stays kind `port`.
+
+Each round, in order:
+
+1. The decision `port repair round` (`round`, `of`, `op`, `failure`) goes into the ledger, before anything runs. A restart counts the round.
+2. A repair step runs on the coder's tier with the round number and the end of the check's output. The coder may edit only `stages/2/port/`.
+3. The supervisor checks that `test-result.json` and `evidence/hw-test-output.txt` are the files it wrote. A change to either fails the attempt (the
+   ledger decision `port repair refused`). The check's template, config and `hw_test.json` are put back as shipped, and results written during the
+   step are set aside.
+4. A port directory that is the same as before ends the rounds (`port repair rounds ended`, reason `unchanged`): the same files would fail the same
+   way, so no test runs.
+5. The failed output is kept as `evidence/port-repair-round-<k>-output.txt` (its hash is in the ledger), and the same check runs again under a lease,
+   as any hardware test does. The supervisor writes the new record, and the ledger holds a hash for each.
+
+The failure text that reaches the ledger and the repair prompt is cleaned as a whole before any cut: home paths, URL user information and token-shaped
+words are removed, then the failure line is cut to 300 characters. After each hardware test the supervisor records the digest of the port directory it ran
+against (the decision `port repair tested`). A kill after a repair edit and before its rerun leaves the edited port beside the old failed record; the
+resumed attempt sees that the directory differs from the tested digest and runs the test for that edit before it starts another repair or calls the port
+unchanged. This holds on the last round too: an escalated attempt that was killed after its last round's edit keeps its stage directory and tests the edit.
+Just before a rerun the supervisor writes the decision `port repair rerun started` (`round`, and `record`, the seal of the failed test's record). The test
+opens its output file fresh, so from then until the new record is written the old record's hash no longer matches the output. A resume that finds a started
+rerun with no `port repair tested` after it trusts the ledger: if the record is still the sealed one it tests the edit again, and if a new record was written
+it only writes the missing `tested` entry. A resume does not copy a rerun's cut-short output over the copy of what the repair step was shown. The round loop
+has a bound of `2 * rounds + 2` passes and ends with the reason `did not settle` and a failed attempt if it ever reaches it.
+
+After the last round (reason `spent`) or when a round passes, the stage goes on as before: the finish step, the gate, and on a failure a fresh attempt. A
+count of rounds belongs to one attempt. A resume of the same attempt keeps it, an escalated attempt starts its own, and a resume of an escalated
+attempt that still has rounds goes on in its stage directory. The stage's wall time and its budget run through every round. Each round takes the
+lease again, so a board that the coder holds is parked and restored around each test, as it is for any hardware test.
 
 ### 5.6 The credentials preflight
 

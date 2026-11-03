@@ -112,6 +112,21 @@ The prepare phase writes the port and `hw_test.json`, then `handoff.json`. The f
 
 Do not run `port_check.py` yourself.
 
+## Repair phase
+
+When the first check fails because the port did, the supervisor gives you up to three repair rounds in the same attempt (the run's
+`--port-repair-rounds` sets the number). A failure of the port is one the check names: the port raised an error or did not answer at
+`load`, `prefill` or `decode`, or its files are wrong. A failure of the run around the port (no chip, a stage 1 file that does not
+read), a timeout and any other exit code earn no round.
+
+A round gives you the round number, where the check failed and the end of its output. Read the failure and the port, find the
+cause, and edit only the files under `stages/2/port/`. A mistake that the failure text points at is usually one line: a weight key the
+checkpoint does not have, a missing import, an id read from zero when the config counts from one. Read the config and the checkpoint's
+tensor names before you change the port. Do not write any other file and do not run the check. The supervisor runs the same check
+again on the same chips and writes the new record. A change to `test-result.json` or to the output fails the attempt. If you change
+nothing, the rounds end. After the last round the stage goes on as a failed test: the finish phase records it and the next attempt
+starts again.
+
 ## Goal
 
 The finish phase writes `result.json` in your stage directory:
@@ -134,7 +149,8 @@ A number you cannot copy from the record is not measured: write null and say why
 
 1. Read `test-result.json` first. If `returncode` is not 0 or `timed_out` is true, write `result.json` with `runs` false, a `failure` field
    that quotes the last lines of the output, and `coherent`, `n_tokens`, `top1_agreement` and `load_s` null. Then stop. Do not
-   investigate and do not edit the port: the stage ends and the next attempt runs a fresh prepare and a fresh test.
+   investigate and do not edit the port: repair rounds, when the failure was the port's, have already been used, so the stage ends
+   and the next attempt runs a fresh prepare and a fresh test.
 2. Otherwise read `evidence/port-check.json` and `evidence/hw-test-output.txt` and write `result.json` from them. Set `coherent` true
    only if you read `free_run_text` and it is readable text in the language of the prompt. If it is not, write false and quote it.
 3. Reply with a short summary and no tool call.

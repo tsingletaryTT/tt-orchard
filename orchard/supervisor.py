@@ -161,7 +161,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
-from orchard import full_port, model_kind, port_facts, residency, scoring_check
+from orchard import full_port, model_kind, port_facts, port_repair, residency, scoring_check
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -512,6 +512,8 @@ def deliverable(spec, phase: str) -> str | None:
     """The file a step of this phase must leave in the stage directory."""
     if phase == "prepare":
         return "hw_tests.json" if spec.tests else "hw_test.json"
+    if phase == "repair":
+        return None                     # a repair round has no output file: the port directory is what changes (orchard/port_repair.py)
     return spec.gate_file
 
 
@@ -599,8 +601,13 @@ class Supervisor:
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
-                 full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None):
+                 full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
+                 port_repair_rounds: int = port_repair.DEFAULT_ROUNDS):
         self.run_dir = Path(run_dir).resolve()
+        # `--port-repair-rounds` (issue 420): the repair rounds a full-port stage 2 attempt gives the coder after a port check that failed on the
+        # port itself. Recorded in run_start; `build` hands over the recorded value on a resume. 0 is the earlier behaviour: no rounds.
+        self.port_repair_rounds = port_repair.check_rounds(port_repair_rounds)
+        self._repair_baseline: dict | None = None      # the port directory's fingerprint when a repair step starts (the step's `finished` check)
         # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
         # supplied (the tests), and the record says nothing was compared. `_run_resumed` is set when a run starts on a ledger that has begun.
         self.stack_pins, self._run_resumed = stack_pins, False
@@ -880,7 +887,7 @@ class Supervisor:
         if not p.started:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
-                               graft_trial=self.graft_trial, sampling=self.sampling,
+                               graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
                                paths=self.paths.record(), package=self.package,
@@ -1563,11 +1570,13 @@ class Supervisor:
             self._block(n, f"stage {n} needs {spec.disk_gb} GB free on the run directory's disk; "
                            f"{free} GB is free", need_gb=spec.disk_gb, free_gb=free)
         marker = self.run_dir / "stages" / str(n) / "test-result.json"
-        if resuming and escalated and spec.boards and marker.is_file() and self._test_failure(spec, marker.parent):
+        if (resuming and escalated and spec.boards and marker.is_file() and self._test_failure(spec, marker.parent)
+                and not self._repair_pending(spec, marker.parent)):
             # A kill came after the escalate entry and before the stage_end. The escalated attempt
             # must run a fresh prepare and hardware test: its finish step cannot pass on a test
             # that failed, and it gets no gate feedback for one. So the failed record is not a
-            # resume point, and open_stage_dir moves the directory aside.
+            # resume point, and open_stage_dir moves the directory aside. The exception is a full-port stage 2 whose failed test
+            # is one the coder still has repair rounds for (issue 420): the attempt goes on with them, and its count stands.
             self.ledger.append("decision", n, decision="not resuming from a failed hardware test", marker=self._moved_aside_record(marker))
             resuming = False
         stage_dir, resumed = open_stage_dir(self.run_dir, spec, resuming=resuming, ledger=self.ledger)
@@ -1714,6 +1723,12 @@ class Supervisor:
                 # label before the chips are given back, and block when one survives (_sweep).
                 self._hardware_phase(spec, stage_dir, test,
                                      after_test=(lambda: self._sweep(spec.number)) if self._container_config(stage_dir) else None)
+            if spec.draft == "full_port":
+                # A port check that failed on the port itself may earn repair rounds (issue 420). It also runs on a resume, when the stage
+                # directory holds a failed record and the attempt has rounds left.
+                ended = self._port_repair_rounds(spec, stage_dir, escalated, resumed)
+                if ended:
+                    return ended
             if spec.draft == "scoring_check":
                 step = None          # the check's own record is the result: no agent writes a finish step for a scoring model
             else:
@@ -1785,6 +1800,147 @@ class Supervisor:
         if spec.tests:
             return failed_tests(stage_dir, self.required_chips)
         return hardware_test_failure(stage_dir)
+
+    # ---- repair rounds for a full-port stage 2 (issue 420) -------------------------------------
+
+    def _repair_pending(self, spec, stage_dir: Path) -> bool:
+        """Does a full-port stage 2's failed test still owe the coder's work a test, or still have repair rounds? The option is not 0 and the
+        attempt has not ended its rounds, and one of these holds (Copilot's second review of PR 425):
+
+        - a rerun was started and its `tested` entry is missing: the supervisor died while the repaired port was on the chips. The rerun opened
+          the output file fresh, so the old record may no longer match it; the ledger's entry is what says the test is owed;
+        - the record shows a failure of the port (orchard/port_repair.py, `read_failure`) and the attempt's rounds are not all used;
+        - the rounds are all used, but the last round's edit was never tested (the port differs from the one the latest test ran against)."""
+        if spec.draft != "full_port" or not self.port_repair_rounds:
+            return False
+        n, entries = spec.number, self.ledger.read()
+        if port_repair.stopped_noted(entries, n):
+            return False
+        if port_repair.rerun_inflight(entries, n) is not None:
+            return True
+        if port_repair.read_failure(self.run_dir, stage_dir) is None:
+            return False
+        if port_repair.rounds_used(entries, n) < self.port_repair_rounds:
+            return True
+        tested = port_repair.tested_digest(entries, n)
+        return tested is not None and port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)) != tested
+
+    def _seal(self, stage_dir: Path, rel: str) -> dict | None:
+        """The path and sha256 of a file of the stage directory through the bounded reader, or None (missing, a link, over the cap)."""
+        return full_port.file_record(self.run_dir, Path(stage_dir) / rel)
+
+    def _read_output(self, stage_dir: Path) -> str:
+        """The supervisor's capture of the failed test's output, through the bounded reader ("" when it cannot be read)."""
+        try:
+            return safeio.read_bytes(Path(stage_dir) / port_repair.OUTPUT, max_bytes=RUN_JSON_MAX).decode("utf-8", "replace")
+        except (safeio.SafeReadError, OSError, ValueError):
+            return ""
+
+    def _repair_text(self, n: int, k: int, limit: int, failure: dict, raw: str) -> str:
+        """The supervisor's message to a repair step: which round, where the check failed, and the end of its output."""
+        where = f"at the {failure['op']!r} request" if failure.get("op") else "before any request reached the port"
+        return "\n".join([f"Port repair round {k} of {limit} for this attempt. The port check failed {where}.",
+                          f"The end of the check's output (stages/{n}/{port_repair.OUTPUT}):", "```", port_repair.tail(raw).rstrip(), "```",
+                          "The supervisor runs the same check again after this step, on the same chips and with the same reference. "
+                          f"Only your edits under stages/{n}/port/ reach it."])
+
+    def _port_repair_rounds(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
+        """Up to `--port-repair-rounds` repair rounds for a full-port stage 2 whose port check failed on the port itself. Returns
+        (status, reasons, gate) when the stage ends here, else None (the finish step follows, with the last test's record).
+
+        A round: its decision goes to the ledger first (so a restart cannot repeat a round it counted), then a repair step by the coder, who may
+        write only under stages/2/port/. The supervisor's record of the failed test and its output file must be as they were (the ledger
+        holds their hashes), the check's template, config and command are put back as shipped, results written during the step are set
+        aside, and the same check runs again under a lease like any test, so the supervisor writes the new record. A round that changed
+        nothing in the port ends the rounds: the same files would fail the same way. After the last round the stage goes on as it did before
+        this option: the finish step records the failure, the gate fails, and the next attempt starts again."""
+        n, limit = spec.number, self.port_repair_rounds
+        if not limit:
+            return None
+        # Each round takes at most two passes (a catch-up for a rerun whose `tested` entry is missing, then the round) and the last pass reads the
+        # end. A loop whose exit depends on ledger entries gets a bound: a mutant of `rerun_inflight` that never closed spun here, appending forever.
+        for _ in range(2 * limit + 2):
+            entries = self.ledger.read()
+            if port_repair.stopped_noted(entries, n):
+                return None
+            owed = port_repair.rerun_inflight(entries, n)
+            if owed is not None and self._seal(stage_dir, port_repair.MARKER) != owed.get("record"):
+                # The rerun wrote its record and the supervisor died before it wrote the `tested` entry: the test ran. Say so and read its record.
+                self.ledger.append("decision", n, decision=port_repair.TESTED,
+                                   sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
+                continue
+            failure = port_repair.read_failure(self.run_dir, stage_dir)
+            if failure is None and owed is None:
+                return None
+            used = port_repair.rounds_used(entries, n)
+            before = port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)
+            tested = port_repair.tested_digest(entries, n)
+            if tested is None:
+                # The port as the attempt's first test ran it (nothing has edited it since); a later resume compares against this.
+                self.ledger.append("decision", n, decision=port_repair.TESTED, sources=port_repair.digest(before))
+                tested = port_repair.digest(before)
+            # A kill after a repair edit and before its rerun leaves the edited port beside the old failed record. The edit is tested before
+            # another repair starts, and before the port can be called unchanged (review of PR 425).
+            # A rerun that was started and not finished is owed too: its output file was replaced, so the old record may not read as a failure.
+            pending = owed is not None or (port_repair.digest(before) != tested and used > 0)
+            if pending:
+                k = owed["round"] if owed is not None and type(owed.get("round")) is int else used
+            else:
+                if used >= limit:
+                    self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="spent", rounds=used, of=limit, op=failure["op"])
+                    return None
+                k = used + 1
+                sealed = {rel: self._seal(stage_dir, rel) for rel in (port_repair.MARKER, port_repair.OUTPUT)}
+                self._repair_baseline = before
+                # The whole output is cleaned before any cut: the ledger's failure line and the prompt's tail come from this text.
+                raw = port_repair.safe_text(self._read_output(stage_dir), self._homes())
+                self.ledger.append("decision", n, decision=port_repair.DECISION, round=k, of=limit, op=failure["op"], returncode=failure["returncode"],
+                                   failure=port_repair.failed_line(raw))
+                try:
+                    out, _ = self._step(spec, "repair", stage_dir, escalated, resumed, extra=self._repair_text(n, k, limit, failure, raw))
+                finally:
+                    self._repair_baseline = None
+                if out.status != "done":
+                    return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
+                touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
+                if touched:
+                    self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
+                    return "fail", [f"the repair step changed {', '.join(f'stages/{n}/{rel}' for rel in touched)}, which only the supervisor writes. "
+                                    "The attempt fails, and the next attempt starts again"], None
+                if not port_repair.changed(before, port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)):
+                    self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="unchanged", rounds=k, of=limit, op=failure["op"])
+                    return None
+            self._keep_round_record(n, stage_dir, k)
+            if moved := swap_prepare.set_aside_results(stage_dir, keep=(port_repair.MARKER, port_repair.OUTPUT)):
+                self.ledger.append("decision", n, decision="results written before the test were set aside", files=moved)
+            if problems := self._pin_full_port(spec, stage_dir, command=True):
+                return "fail", problems, None
+            test, problems = self._read_test(stage_dir)
+            if problems:
+                return "fail", problems, None
+            # Before the test opens its output file: from here a kill leaves the old record beside an output that no longer matches its hash.
+            self.ledger.append("decision", n, decision=port_repair.RERUN, round=k, record=self._seal(stage_dir, port_repair.MARKER))
+            self._hardware_phase(spec, stage_dir, test)
+            self.ledger.append("decision", n, decision=port_repair.TESTED,
+                               sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
+        self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="did not settle", rounds=port_repair.rounds_used(self.ledger.read(), n), of=limit)
+        return "fail", [f"the port repair rounds did not settle within {2 * limit + 2} passes, which a ledger that follows the rules cannot cause; "
+                        "the attempt fails, and the next attempt starts again"], None
+
+    def _keep_round_record(self, n: int, stage_dir: Path, k: int) -> None:
+        """Copy the failed test's output to evidence/port-repair-round-<k>-output.txt before the next test replaces it, and record the copy's
+        path and sha256 in the ledger. The next test's capture overwrites the file the repair step read; this keeps what it was shown. A resume
+        that finds the copy already recorded leaves it: the output file may by then be a rerun's, cut short."""
+        if port_repair.output_kept(self.ledger.read(), n, k):
+            return
+        try:
+            raw = safeio.read_bytes(Path(stage_dir) / port_repair.OUTPUT, max_bytes=RUN_JSON_MAX)
+        except (safeio.SafeReadError, OSError, ValueError):
+            return
+        target = Path(stage_dir) / "evidence" / f"port-repair-round-{k}-output.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        safeio.atomic_write(target, raw, mode=0o644)
+        self.ledger.append("evidence", n, what="port repair round output", round=k, **self._moved_aside_record(target))
 
     def _package_body(self, spec, stage_dir: Path, resumed: bool):
         """Stage 7 as supervisor code (orchard/package.py): stage and scrub every profile, install a
@@ -2770,7 +2926,11 @@ class Supervisor:
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
         test's prepare step, hw_test.json and handoff.json as the hardware phase reads them; for a run or
-        finish step, the stage's gate. A list of tests (stage 4) and stage 7 have no such check."""
+        finish step, the stage's gate. A list of tests (stage 4) and stage 7 have no such check. A repair round (issue 420) is finished when
+        the port directory differs from what it was when the step started."""
+        if phase == "repair":
+            return lambda: (self._repair_baseline is not None
+                            and bool(port_repair.changed(self._repair_baseline, port_repair.fingerprint(stage_dir / port_repair.PORT_DIR))))
         if phase == "prepare":
             if spec.tests:
                 return lambda: not self._read_plan(spec, stage_dir)[1]
@@ -3628,6 +3788,14 @@ def chip_counts(text: str) -> tuple[int, ...]:
     return counts
 
 
+def _port_repair_rounds_arg(text: str) -> int:
+    """argparse type of `--port-repair-rounds`: a whole number from 0 to port_repair.MAX_ROUNDS."""
+    try:
+        return port_repair.check_rounds(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def parse(argv=None):
     p = argparse.ArgumentParser(prog="python3 -m orchard.supervisor", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -3712,6 +3880,11 @@ def parse(argv=None):
                         "against greedy decoding, and for a model that needs sampling whose served configuration does not show sampling applied it "
                         "serves a drafter-off variant once and chooses by measurement. 'needed' and 'not-needed' are the operator's word. The run "
                         "records the choice and a resume keeps it")
+    r.add_argument("--port-repair-rounds", type=_port_repair_rounds_arg, default=None, metavar="N",
+                   help=f"a full-port stage 2 whose port check failed on the port itself (a missing weight, a bad import, an index off by one) "
+                        f"gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the same "
+                        f"check again (issue 420). 0 is the earlier behaviour, no rounds. Default {port_repair.DEFAULT_ROUNDS}, at most "
+                        f"{port_repair.MAX_ROUNDS}. The ledger records the value and a resume keeps it; a resume that names another value is refused")
     r.add_argument("--full-port", action="store_true",
                    help="let a model that stage 0 classed `full-port` go on: the local coder writes the port in stage 2 and one hardware "
                         "test compares the chip's tokens with the CPU reference (skill full-port-check). Stages 3 to 6 for a full port are "
@@ -3854,6 +4027,15 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                              "with the recorded value, or move this run's directory aside and start a new run")
         sampling_mode = recorded_mode
     sampling_mode = sampling_mode or "auto"
+    repair_rounds = getattr(args, "port_repair_rounds", None)
+    if progress.started:                        # a resumed run keeps the repair-round count it started with (a run that began before the option: the default)
+        recorded_rounds = port_repair.check_rounds((progress.run_start or {}).get("port_repair_rounds", port_repair.DEFAULT_ROUNDS))
+        if repair_rounds is not None and repair_rounds != recorded_rounds:
+            raise ValueError(f"this run started with --port-repair-rounds {recorded_rounds}; --port-repair-rounds {repair_rounds} differs. Leave the option "
+                             "out to resume with the recorded value, or move this run's directory aside and start a new run (the port repair rounds are "
+                             "part of what the run's stage 2 attempts did)")
+        repair_rounds = recorded_rounds
+    repair_rounds = port_repair.DEFAULT_ROUNDS if repair_rounds is None else port_repair.check_rounds(repair_rounds)
     home = operator_home() if home is None else home
     paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
                       home=home, environ=environ)
@@ -3911,7 +4093,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
-                      sampling=sampling_mode,
+                      sampling=sampling_mode, port_repair_rounds=repair_rounds,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req, stack_pins=stack_pins,
                       kind_override=getattr(args, "model_kind", None),
