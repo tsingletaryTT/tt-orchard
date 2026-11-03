@@ -41,8 +41,11 @@ is written for 0, 1 and 3 whenever the output directory could be created.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import errno
 import hashlib
+import heapq
 import io
 import json
 import math
@@ -356,15 +359,19 @@ def read_report(source, top_n: int) -> tuple[list[dict], list[str]]:
     could = [f"report column {c}: absent from the tt-perf-report CSV" for c in REPORT_COLUMNS if c not in header]
     if "OP Code" not in header or "Device Time" not in header:
         raise ProfileError("the tt-perf-report CSV lacks the OP Code or Device Time column, so it cannot rank ops")
-    kept: list[tuple] = []
-    for row in rows:
+    heap: list[tuple] = []                      # the top_n rows so far; the smallest time (the later row among equals) is at the root
+    for seq, row in enumerate(rows):
         dt = _num(_cell(row, "Device Time") or "")
         if dt is None:
             continue
-        kept.append((dt, row))
-    kept.sort(key=lambda t: -t[0])
+        item = (dt, -seq, row)
+        if len(heap) < top_n:
+            heapq.heappush(heap, item)
+        elif item[:2] > heap[0][:2]:
+            heapq.heapreplace(heap, item)
+    kept = [(dt, row) for dt, _, row in sorted(heap, key=lambda t: (-t[0], -t[1]))]
     out = []
-    for dt, row in kept[:top_n]:
+    for dt, row in kept:
         advice_cell = _cell(row, "Advice") or ""
         advice = [_clip(a, MAX_ADVICE_CHARS) for a in advice_cell.split("•")[:MAX_ADVICE_ITEMS * 4] if a.strip()][:MAX_ADVICE_ITEMS]
         out.append({"op_code": _clip(_cell(row, "OP Code") or "", MAX_NAME) or "(unnamed)",
@@ -462,9 +469,11 @@ def tracy_argv(user: list[str], out_dir: Path, noc_traces: bool = False) -> list
 
 
 def has_profiler(python: str, run=subprocess.run) -> str | None:
-    """None when `python -m tracy` can be found by that interpreter; otherwise one sentence. Uses find_spec, so nothing is imported and no device is opened."""
+    """None when `python -m tracy` can be found by that interpreter; otherwise one sentence. Uses find_spec, so nothing is imported and no device is opened.
+    The probe keeps the environment (PYTHONPATH included) because the profiled run inherits it: a tt-metal setup that exposes tools/tracy through
+    PYTHONPATH must pass, and a probe in isolated mode would refuse it."""
     try:
-        res = run([python, "-I", "-c", "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('tracy') else 3)"],
+        res = run([python, "-c", "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('tracy') else 3)"],
                   capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         return f"the Python given cannot be run ({type(exc).__name__})"
@@ -508,16 +517,26 @@ def run_group(argv: list[str], *, timeout_s: float, log_path: Path, env: dict | 
                 return proc.wait(timeout=timeout_s), False
             except subprocess.TimeoutExpired:
                 _signal_group(proc.pid, signal.SIGTERM)
-                try:
-                    proc.wait(timeout=term_grace_s)
-                except subprocess.TimeoutExpired:
-                    _signal_group(proc.pid, signal.SIGKILL)
-                    proc.wait()
+                _wait_group_gone(proc, term_grace_s)
                 return proc.returncode, True
-        except BaseException:
+        finally:
+            # The leader's exit says nothing about its descendants: a child that ignores SIGTERM, or one left running by a command that
+            # exited on its own, still holds the chips. Killing a group with no member is a no-op.
             _signal_group(proc.pid, signal.SIGKILL)
             proc.wait()
-            raise
+
+
+def _wait_group_gone(proc, grace_s: float) -> None:
+    """Wait up to `grace_s` seconds for the leader to exit and for no other member of its group to remain."""
+    deadline = time.monotonic() + max(0.0, grace_s)
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            try:
+                os.killpg(proc.pid, 0)
+            except (ProcessLookupError, PermissionError):
+                return
+        time.sleep(0.1)
+    proc.poll()
 
 
 def _signal_group(pid: int, sig: int) -> None:
@@ -527,52 +546,75 @@ def _signal_group(pid: int, sig: int) -> None:
         pass
 
 
-def find_ops_csv(root: Path) -> Path | None:
-    """The newest `ops_perf_results*.csv` beneath `root` (the profiler names it with a timestamp, so the last name in sort order is the newest).
-    Walks with safeio.scan_beneath: links are never entered, and the walk is cut at MAX_SEARCH_ENTRIES entries."""
+def locate_ops_csv(pin) -> tuple[str, ...] | None:
+    """The path parts, beneath the pinned directory `pin`, of the newest `ops_perf_results*.csv` (the profiler names it with a timestamp, so the last
+    name in sort order is the newest). Walks with safeio.scan_beneath: links are never entered, and the walk is cut at MAX_SEARCH_ENTRIES entries."""
     try:
-        with safeio.pinned_root(root) as pin:
-            found: list[tuple[str, ...]] = []
+        found: list[tuple[str, ...]] = []
 
-            def visit(entry):
-                name = entry.parts[-1] if entry.parts else ""
-                if entry.kind == "file" and name.startswith("ops_perf_results") and name.endswith(".csv"):
-                    found.append(tuple(entry.parts))
-            safeio.scan_beneath(pin, visit, max_entries=MAX_SEARCH_ENTRIES)
+        def visit(entry):
+            name = entry.parts[-1] if entry.parts else ""
+            if entry.kind == "file" and name.startswith("ops_perf_results") and name.endswith(".csv"):
+                found.append(tuple(entry.parts))
+        safeio.scan_beneath(pin, visit, max_entries=MAX_SEARCH_ENTRIES)
     except (safeio.SafeReadError, OSError, ValueError):
         return None
-    if not found:
+    return max(found, key=lambda p: (p[-1], p)) if found else None
+
+
+def find_ops_csv(root: Path) -> Path | None:
+    """The path of the CSV `locate_ops_csv` finds beneath `root`, or None. For a caller that only needs the name; `summarise_dir` reads the file
+    through the pin it found it under, so a directory swapped for a link in between is refused."""
+    try:
+        with safeio.pinned_root(root) as pin:
+            best = locate_ops_csv(pin)
+    except (safeio.SafeReadError, OSError, ValueError):
         return None
-    best = max(found, key=lambda p: (p[-1], p))
-    return root.joinpath(*best)
+    return root.joinpath(*best) if best else None
 
 
-def _lines(path, cap: int):
-    return safeio.iter_lines(path, max_bytes=cap, max_line_bytes=MAX_LINE_BYTES)
+def _lines(path, cap: int, anchor: int | None = None):
+    return safeio.iter_lines(path, max_bytes=cap, max_line_bytes=MAX_LINE_BYTES, anchor=anchor)
 
 
-def analyze_raw_file(path) -> dict:
-    """`analyze_raw` of the file at `path`, streamed through safeio.iter_lines with the RAW_MAX_BYTES cap. Raises safeio.SafeReadError or ProfileError, nothing else."""
-    lines = _lines(Path(path), RAW_MAX_BYTES)
+def analyze_raw_file(path, anchor: int | None = None) -> dict:
+    """`analyze_raw` of the file at `path` (relative to the directory descriptor `anchor` when one is given), streamed through safeio.iter_lines with
+    the RAW_MAX_BYTES cap. Raises safeio.SafeReadError or ProfileError, nothing else."""
+    lines = _lines(path if anchor is not None else Path(path), RAW_MAX_BYTES, anchor)
     try:
         return analyze_raw(lines)
     finally:
         lines.close()
 
 
-def read_report_file(path, top_n: int) -> tuple[list[dict], list[str]]:
-    """`read_report` of the file at `path`, streamed through safeio.iter_lines with the REPORT_MAX_BYTES cap. Raises safeio.SafeReadError or ProfileError, nothing else."""
-    lines = _lines(Path(path), REPORT_MAX_BYTES)
+def read_report_file(path, top_n: int, anchor: int | None = None) -> tuple[list[dict], list[str]]:
+    """`read_report` of the file at `path` (relative to `anchor` when given), streamed through safeio.iter_lines with the REPORT_MAX_BYTES cap.
+    Raises safeio.SafeReadError or ProfileError, nothing else."""
+    lines = _lines(path if anchor is not None else Path(path), REPORT_MAX_BYTES, anchor)
     try:
         return read_report(lines, top_n)
     finally:
         lines.close()
 
 
+def _clear_name(path: Path) -> None:
+    """Remove whatever is at `path` (a file, or a link that tt-perf-report would write through, which opens its --csv path with a plain open(...,"w")),
+    so the tool creates a new file. A directory there is an IsADirectoryError, which the caller reports."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except PermissionError as exc:
+        if os.path.isdir(path) and not os.path.islink(path):
+            raise IsADirectoryError(errno.EISDIR, "the path is a directory") from exc
+        raise
+
+
 def run_perf_report(perf_report: str, raw_csv: Path, out_csv: Path, *, timeout_s: float, log_path: Path, run=run_group) -> str | None:
     """None when `tt-perf-report` wrote `out_csv`; otherwise one sentence. Its terminal output goes to `log_path` and is not read."""
     argv = [perf_report, str(raw_csv), "--csv", str(out_csv), "--no-color", "--no-summary", "--ignore-signposts"]
     try:
+        _clear_name(out_csv)
         code, timed_out = run(argv, timeout_s=timeout_s, log_path=log_path, term_grace_s=10.0)
     except (OSError, subprocess.SubprocessError) as exc:
         return f"tt-perf-report could not be run ({type(exc).__name__})"
@@ -616,18 +658,45 @@ def _top_n(args) -> int:
     return n if isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= MAX_TOP else -1
 
 
+def _earlier_profile(tracy_dir: Path) -> str | None:
+    """A sentence when `tracy_dir` already holds anything, which a new run would add to and `summarise_dir` could then read as the new run's export."""
+    try:
+        with os.scandir(tracy_dir) as it:
+            if next(it, None) is not None:
+                return f"{TRACY_DIR}/ in the output directory is not empty"
+    except FileNotFoundError:
+        return None
+    except (NotADirectoryError, OSError):
+        return f"{TRACY_DIR} in the output directory is not a readable directory"
+    return None
+
+
 def summarise_dir(profile_dir: Path, out_dir: Path, *, top_n: int, perf_report: str | None, report_timeout_s: float, run=run_group,
                   run_info: dict | None = None, command_sha: str | None = None, command_failed: bool = False) -> tuple[dict, int]:
     """Find, run tt-perf-report on, read and summarise the profile under `profile_dir`; write the summary to `out_dir`. Returns (summary, exit code)."""
     extra: list[str] = []
-    csv_path = find_ops_csv(profile_dir)
-    if csv_path is None:
-        s = build_summary(raw=None, top_ops=None, top_source=None, extra_could=["everything: no ops_perf_results CSV was found under the profile directory; "
-                          "the run exported no per-op file (the command may have opened no device, or the profiler build lacks device profiling)"],
-                          run=run_info, command_sha=command_sha, status_reason="no ops_perf_results CSV found", top_n=top_n)
-        return s, EXIT_NOTHING
+    with contextlib.ExitStack() as stack:
+        try:
+            ppin = stack.enter_context(safeio.pinned_root(profile_dir))
+            csv_parts = locate_ops_csv(ppin)
+            opin = stack.enter_context(safeio.pinned_root(out_dir))
+        except (safeio.SafeReadError, OSError, ValueError):
+            csv_parts, opin = None, None
+        if csv_parts is not None and opin is not None:
+            return _summarise_found(ppin, csv_parts, profile_dir, opin, out_dir, extra, top_n=top_n, perf_report=perf_report, report_timeout_s=report_timeout_s,
+                                    run=run, run_info=run_info, command_sha=command_sha, command_failed=command_failed)
+    s = build_summary(raw=None, top_ops=None, top_source=None, extra_could=["everything: no ops_perf_results CSV was found under the profile directory; "
+                      "the run exported no per-op file (the command may have opened no device, or the profiler build lacks device profiling)"],
+                      run=run_info, command_sha=command_sha, status_reason="no ops_perf_results CSV found", top_n=top_n)
+    return s, EXIT_NOTHING
+
+
+def _summarise_found(ppin, csv_parts, profile_dir, opin, out_dir, extra, *, top_n, perf_report, report_timeout_s, run, run_info, command_sha, command_failed):
+    """The rest of `summarise_dir`, once the CSV is found. It is read through `ppin` (the pinned profile directory), and tt-perf-report's CSV is
+    read through `opin` (the pinned output directory), so a subdirectory or file swapped for a link after the walk is refused and never followed."""
+    csv_path = profile_dir.joinpath(*csv_parts)          # the name handed to tt-perf-report, which opens it by path
     try:
-        raw = analyze_raw_file(csv_path)
+        raw = analyze_raw_file("/".join(csv_parts), anchor=ppin.fd)
     except (safeio.SafeReadError, ProfileError) as exc:
         reason = getattr(exc, "reason", None) or str(exc)
         s = build_summary(raw=None, top_ops=None, top_source=None, extra_could=[f"everything: the ops CSV could not be read ({_clip(reason, 120)})"],
@@ -644,7 +713,7 @@ def summarise_dir(profile_dir: Path, out_dir: Path, *, top_n: int, perf_report: 
             extra.append(f"utilization and advice: {problem}; the top rows come from the raw CSV and carry neither")
         else:
             try:
-                top_ops, rep_could = read_report_file(report_csv, top_n)
+                top_ops, rep_could = read_report_file(REPORT_CSV, top_n, anchor=opin.fd)
                 extra += rep_could
                 top_source = "tt-perf-report"
             except (safeio.SafeReadError, ProfileError) as exc:
@@ -664,6 +733,11 @@ def main(args, *, out, run=run_group, probe=has_profiler, tools=has_tracy_tools,
     if n < 0:
         print(f"tt-orchard profile: --top must be a whole number from 1 to {MAX_TOP}", file=out)
         return EXIT_REFUSED
+    for flag, value, positive in (("--timeout", args.timeout, True), ("--report-timeout", args.report_timeout, True), ("--wait-s", args.wait_s, False)):
+        # argparse takes "nan" and "inf" as floats; a NaN deadline is never reached and an infinite one never ends
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or (positive and value == 0):
+            print(f"tt-orchard profile: {flag} must be a finite number of seconds{' above 0' if positive else ', 0 or more'}", file=out)
+            return EXIT_REFUSED
     out_dir = Path(args.out)
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -691,6 +765,10 @@ def main(args, *, out, run=run_group, probe=has_profiler, tools=has_tracy_tools,
             return EXIT_REFUSED
         if isinstance(args.chips, bool) or not isinstance(args.chips, int) or args.chips < 1:
             print("tt-orchard profile: --chips must be a whole number of 1 or more", file=out)
+            return EXIT_REFUSED
+        stale = _earlier_profile(out_dir / TRACY_DIR)
+        if stale:
+            print(f"tt-orchard profile: {stale}; the summary would otherwise be built from the earlier run's CSV. Use a new --out directory or remove it", file=out)
             return EXIT_REFUSED
         sha = command_digest(words)
         nothing = lambda why, text: (build_summary(raw=None, top_ops=None, top_source=None, extra_could=[text], run={"exit_code": None, "wall_s": None, "leased_chips": 0},

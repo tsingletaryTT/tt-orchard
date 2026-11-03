@@ -530,6 +530,147 @@ def test_the_run_gets_tt_metal_home_from_the_flag_or_the_environment(tmp_path):
             choose=lambda w, **kw: [PLAN], environ={"PATH": "/bin", "TT_METAL_HOME": "/ignored"})
     assert seen[0]["TT_METAL_HOME"] == str(home) and seen[0]["PATH"] == "/bin"
     seen.clear()
-    ps.main(args_for(tmp_path, "python3", "x.py", perf_report="tt-perf-report"), out=Out(), run=run, probe=lambda py: None,
+    second = args_for(tmp_path, "python3", "x.py", perf_report="tt-perf-report")
+    second.out = str(tmp_path / "out2")                                   # a new output directory: a used one is refused
+    ps.main(second, out=Out(), run=run, probe=lambda py: None,
             choose=lambda w, **kw: [PLAN], environ={"TT_METAL_HOME": str(home)})
     assert seen[0]["TT_METAL_HOME"] == str(home)
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 416, round 1
+
+def test_a_leader_that_exits_on_sigterm_does_not_save_a_child_that_ignores_it(tmp_path):
+    """Finding 1: the SIGKILL fallback was skipped when the group leader exited within the grace time, whatever its children did."""
+    import sys
+    import time
+    marker = tmp_path / "pids"
+    child = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+    script = ("import subprocess, sys, time\n"
+              f"p = subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+              f"open({str(marker)!r}, 'w').write(str(p.pid))\n"
+              "time.sleep(60)\n")
+    code, timed_out = ps.run_group([sys.executable, "-c", script], timeout_s=1.5, log_path=tmp_path / "log", term_grace_s=3.0)
+    assert timed_out is True
+    pid = int(marker.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_a_child_left_running_by_a_command_that_exited_is_stopped_too(tmp_path):
+    import sys
+    import time
+    marker = tmp_path / "pids"
+    script = ("import subprocess, sys\n"
+              "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+              f"open({str(marker)!r}, 'w').write(str(p.pid))\n")
+    code, timed_out = ps.run_group([sys.executable, "-c", script], timeout_s=20.0, log_path=tmp_path / "log")
+    assert code == 0 and timed_out is False
+    pid = int(marker.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_the_ops_csv_is_read_through_the_pin_it_was_found_under(tmp_path, monkeypatch):
+    """Finding 2: the path was returned, the pin closed, and the file opened by path, so a subdirectory swapped for a link in between was followed."""
+    profile = tmp_path / "profile"
+    (profile / "reports" / "a").mkdir(parents=True)
+    (profile / "reports" / "a" / "ops_perf_results_1.csv").write_text(raw_csv([op("Matmul", 1000, 10)]))
+    outside = tmp_path / "outside"
+    (outside / "a").mkdir(parents=True)
+    (outside / "a" / "ops_perf_results_1.csv").write_text(raw_csv([op("Evil", 9999999, 10)]))
+    real = ps.locate_ops_csv
+
+    def swap_after_the_walk(pin):
+        parts = real(pin)
+        os.rename(profile / "reports", tmp_path / "moved")
+        os.symlink(outside, profile / "reports")                      # the walk saw a directory; by the read it is a link outside the tree
+        return parts
+    monkeypatch.setattr(ps, "locate_ops_csv", swap_after_the_walk)
+    out = tmp_path / "out"
+    out.mkdir()
+    s, code = ps.summarise_dir(profile, out, top_n=3, perf_report=str(tmp_path / "none"), report_timeout_s=1.0)
+    assert "Evil" not in json.dumps(s) and code == ps.EXIT_NOTHING
+
+
+def test_a_link_at_the_report_csv_name_is_not_written_through(tmp_path):
+    """Finding 3: tt-perf-report opens its --csv path with open(path, "w"), so a link planted at OUT/perf-report.csv was followed."""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    out = tmp_path / "perf-report.csv"
+    os.symlink(victim, out)
+    seen = []
+
+    def run(argv, **kw):
+        seen.append(os.path.lexists(out))                             # the name is free when the tool starts
+        out.write_text("a,b\n")
+        return 0, False
+    assert ps.run_perf_report("tt-perf-report", tmp_path / "raw.csv", out, timeout_s=1.0, log_path=tmp_path / "l", run=run) is None
+    assert seen == [False] and victim.read_text() == "keep me" and not out.is_symlink()
+
+
+def test_a_used_output_directory_is_refused_and_nothing_is_run(tmp_path):
+    """Finding 4: a run that exported nothing was summarised from an earlier run's CSV in the same output directory."""
+    calls: list = []
+    first = ps.main(args_for(tmp_path, "python3", "x.py", perf_report="tt-perf-report"), out=Out(), run=fake_run_factory(layered_rows(), REPORT, calls=calls),
+                    probe=lambda py: None, tools=lambda h: None, choose=lambda w, **kw: [PLAN])
+    assert first == 0
+    calls.clear()
+    out = Out()
+    code = ps.main(args_for(tmp_path, "python3", "x.py"), out=out, run=fake_run_factory(None, REPORT, calls=calls), probe=lambda py: None,
+                   tools=lambda h: None, choose=lambda w, **kw: [PLAN])
+    assert code == ps.EXIT_REFUSED and calls == [] and "not empty" in out.getvalue()
+
+
+def test_the_report_keeps_only_the_top_rows_while_streaming_and_ranks_ties_by_file_order():
+    """Finding 5: every row was kept and the whole list sorted before the top rows were taken."""
+    import tracemalloc
+    n = 60000
+
+    def lines():
+        yield "ID,OP Code,Device Time,Advice\n"
+        for i in range(n):
+            yield f"{i},Op{i},{float(i % 5)},{'x' * 200}\n"
+    tracemalloc.start()
+    try:
+        top, _ = ps.read_report(lines(), 3)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert [t["op_code"] for t in top] == ["Op4", "Op9", "Op14"]
+    assert peak < 3_000_000, peak                 # holding the 60,000 rows takes about 40 MB
+
+
+def test_the_probe_keeps_pythonpath_because_the_run_inherits_it():
+    """Finding 6: the probe ran in isolated mode (-I), which ignores PYTHONPATH, so a tt-metal setup that reaches tools/tracy through it was refused.
+    The wiring is what is asserted: the interpreter is started with none of the flags that drop PYTHONPATH."""
+    seen = []
+
+    def run(argv, **kw):
+        seen.append(argv)
+        return type("R", (), {"returncode": 0})()
+    assert ps.has_profiler("python3", run=run) is None
+    assert not {"-I", "-E"} & set(seen[0]) and "env" not in seen[0]
+
+
+@pytest.mark.parametrize("flag", ["--wait-s", "--timeout", "--report-timeout"])
+@pytest.mark.parametrize("bad", ["nan", "inf", "-1"])
+def test_a_wait_or_timeout_that_is_not_a_finite_number_is_refused(tmp_path, flag, bad):
+    """Finding 7: argparse takes `nan` as a float, and a NaN deadline is never reached."""
+    args = ps.parser().parse_args(["--out", str(tmp_path / "out"), flag, bad, "--", "python3", "x.py"])
+    calls: list = []
+    out = Out()
+    code = ps.main(args, out=out, run=fake_run_factory(layered_rows(), REPORT, calls=calls), probe=lambda py: None, tools=lambda h: None,
+                   choose=lambda w, **kw: [PLAN])
+    assert code == ps.EXIT_REFUSED and calls == [] and flag in out.getvalue()
