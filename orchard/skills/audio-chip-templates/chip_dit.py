@@ -311,9 +311,14 @@ class ChipTransformer:
         for l in m.layers:
             d = {}
             d["pre_g"], d["cross_g"], d["ff_g"] = self._g(l.pre_norm.gamma), self._g(l.cross_attend_norm.gamma), self._g(l.ff_norm.gamma)
-            d["qkv"], d["out"] = self._w(l.self_attn.to_qkv.weight), self._w(l.self_attn.to_out.weight)
+            d["out"] = self._w(l.self_attn.to_out.weight)
             d["sq_g"], d["sk_g"] = self._g(l.self_attn.q_norm.gamma), self._g(l.self_attn.k_norm.gamma)
-            d["cq"], d["ckv"], d["cout"] = self._w(l.cross_attn.to_q.weight), self._w(l.cross_attn.to_kv.weight), self._w(l.cross_attn.to_out.weight)
+            d["cout"] = self._w(l.cross_attn.to_out.weight)
+            if not self.differential:
+                # The projections are loaded in the precision that uses them (issue 220): plain attention reads these copies, differential attention
+                # reads only the float32 copies below, so on medium the unused self-attention copies would take 540 MiB across 24 layers.
+                d["qkv"] = self._w(l.self_attn.to_qkv.weight)
+                d["cq"], d["ckv"] = self._w(l.cross_attn.to_q.weight), self._w(l.cross_attn.to_kv.weight)
             d["cq_g"], d["ck_g"] = self._g(l.cross_attn.q_norm.gamma), self._g(l.cross_attn.k_norm.gamma)
             d["loc1"], d["loc1_b"] = self._w(l.to_local_embed[0].weight), self._b(l.to_local_embed[0].bias)
             d["loc2"], d["loc2_b"] = self._w(l.to_local_embed[2].weight), self._b(l.to_local_embed[2].bias)
@@ -321,7 +326,7 @@ class ChipTransformer:
             d["ff2"], d["ff2_b"] = self._w(l.ff.ff[2].weight), self._b(l.ff.ff[2].bias)
             if self.differential:
                 # Differential attention subtracts two nearly equal attention outputs, so its projections, norms and attention run in float32
-                # (see chip_decoder.py, where a bfloat16 version lost the difference). The bfloat16 copies above stay for the other matrix multiplies.
+                # (see chip_decoder.py, where a bfloat16 version lost the difference). The other matrix multiplies (output projections, feed-forward) use the weight dtype.
                 d["qkv32"], d["cq32"], d["ckv32"] = self._w32(l.self_attn.to_qkv.weight), self._w32(l.cross_attn.to_q.weight), self._w32(l.cross_attn.to_kv.weight)
                 d["sq_g32"], d["sk_g32"] = self._g32(l.self_attn.q_norm.gamma), self._g32(l.self_attn.k_norm.gamma)
                 d["cq_g32"], d["ck_g32"] = self._g32(l.cross_attn.q_norm.gamma), self._g32(l.cross_attn.k_norm.gamma)
