@@ -2,7 +2,6 @@
  "orchard/_proofs/telegraph_sqlite.py": 4,
  "orchard/acestep_package.py": 7,
  "orchard/agent.py": 6,
- "orchard/audio_bars.py": 1,
  "orchard/audio_reference.py": 1,
  "orchard/audio_runtime.py": 2,
  "orchard/audio_stages.py": 1,

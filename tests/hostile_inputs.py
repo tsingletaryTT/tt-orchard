@@ -800,6 +800,7 @@ from orchard.audio_package import AudioPackageError as _AudioPackageError  # noq
 from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
 from orchard.stack_pins import StackPinsError as _StackPinsError  # noqa: E402
 from orchard.port_facts import PortFactsError as _PortFactsError  # noqa: E402
+from orchard.profile_summary import ProfileError as _ProfileError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
 def _preflight_config_json(base: Path):
@@ -856,7 +857,28 @@ def _port_facts_reference_source(base: Path):
     return port_facts.reference_source(base, "toy")
 
 
+def _profile_analyze_raw_file(base: Path):
+    from orchard import profile_summary
+    return profile_summary.analyze_raw_file(base / "input.json")
+
+
+def _profile_read_report_file(base: Path):
+    from orchard import profile_summary
+    return profile_summary.read_report_file(base / "input.json", 5)
+
+
+def _profile_summarise_dir(base: Path):
+    """The hostile item sits where the profiler's ops CSV would; tt-perf-report is a path that does not exist, so only the raw CSV is read.
+    The whole command path (find, read, summarise, bound) must come back with a summary and an exit code, never an exception."""
+    from orchard import profile_summary
+    (base / "out").mkdir(exist_ok=True)
+    return profile_summary.summarise_dir(base, base / "out", top_n=5, perf_report=str(base / "no-such-tt-perf-report"), report_timeout_s=5.0)
+
+
 READERS: list[Reader] = [
+    Reader("profile_summary.analyze_raw_file", _profile_analyze_raw_file, documented=(_SafeReadError, _ProfileError)),
+    Reader("profile_summary.read_report_file", _profile_read_report_file, documented=(_SafeReadError, _ProfileError)),
+    Reader("profile_summary.summarise_dir (hostile ops CSV)", _profile_summarise_dir, rel="ops_perf_results_hostile.csv"),
     Reader("preflight._config_json", _preflight_config_json),
     Reader("preflight._index_problem", _preflight_index_problem),
     Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),

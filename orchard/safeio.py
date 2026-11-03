@@ -391,6 +391,64 @@ def read_bytes(path, *, max_bytes: int, anchor: int | None = None) -> bytes:
         os.close(fd)
 
 
+def iter_lines(path, *, max_bytes: int, max_line_bytes: int, anchor: int | None = None, errors: str = "replace") -> Iterator[str]:
+    """The lines of the regular file at `path` as text, one at a time, so a large table is never held in memory (it returns a generator: the limits are checked at once, nothing is opened until
+    the first line is asked for, and the caller closes it, or lets it finish, to release the descriptor).
+
+    Opens as `read_bytes` opens (`O_NOFOLLOW | O_NONBLOCK`, `fstat` on the same descriptor, regular files only, and with `anchor` every component beneath
+    it). The file may hold at most `max_bytes` bytes (`TooLarge` before the first read when `fstat` says more, and again if it grows past the cap) and no
+    line may be longer than `max_line_bytes` (`TooLarge`, raised as soon as the line is seen to be that long, so a 50 MB file with no newline holds at most
+    `max_line_bytes` plus one read chunk in memory). Lines end at b"\n" and keep it. Bytes that are not UTF-8 are decoded with `errors` ("replace" by
+    default, so a bad byte in a cell does not stop a table). A file that changed size or modification time before the last line was given out is
+    `ChangedWhileReading`, raised after that line. Raises only SafeReadError."""
+    for name, value in (("max_bytes", max_bytes), ("max_line_bytes", max_line_bytes)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a whole number, zero or more")
+    return _iter_lines(path, max_bytes, max_line_bytes, anchor, errors)
+
+
+def _iter_lines(path, max_bytes: int, max_line_bytes: int, anchor: int | None, errors: str) -> Iterator[str]:
+    fd = _open_for_read(path, anchor)
+    try:
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise NotRegular("the file is not a regular file")
+            if st.st_size > max_bytes:
+                raise TooLarge(f"the file is larger than {max_bytes} bytes")
+            buf, total = bytearray(), 0
+            while True:
+                chunk = os.read(fd, min(_READ_CHUNK, max_bytes + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise TooLarge(f"the file is larger than {max_bytes} bytes")
+                buf += chunk
+                start = 0
+                while True:
+                    nl = buf.find(b"\n", start)
+                    if nl < 0:
+                        break
+                    if nl - start + 1 > max_line_bytes:
+                        raise TooLarge(f"a line is longer than {max_line_bytes} bytes")
+                    line = bytes(buf[start:nl + 1])
+                    start = nl + 1
+                    yield line.decode("utf-8", errors=errors)
+                del buf[:start]
+                if len(buf) > max_line_bytes:
+                    raise TooLarge(f"a line is longer than {max_line_bytes} bytes")
+            if buf:
+                yield bytes(buf).decode("utf-8", errors=errors)
+            after = os.fstat(fd)
+            if total != st.st_size or after.st_size != st.st_size or after.st_mtime_ns != st.st_mtime_ns:
+                raise ChangedWhileReading("the file changed while it was read")
+        except OSError as exc:
+            raise _os_failure(exc) from None
+    finally:
+        os.close(fd)
+
+
 def read_prefix(path, *, max_bytes: int) -> bytes:
     """The bytes of the regular file at `path` up to the size it had when it was opened, for a file that another process appends to
     (a ledger). Opened as `read_bytes` opens (`O_NOFOLLOW | O_NONBLOCK`, `fstat` on the same descriptor, regular files only, a size over
