@@ -126,13 +126,16 @@ def _is_container(config: Path) -> bool:
     return bool(cfg.get("package")) and not cfg.get("bundle_dir")
 
 
-def set_aside_results(stage_dir) -> list[str]:
+def set_aside_results(stage_dir, *, keep: tuple = ()) -> list[str]:
     """Move every hardware-result file found in `stage_dir` to `<name>.rejected-from-prepare`. Returns the names moved (relative to
     the stage directory). Call it after the prepare phase and before the hardware test: nothing in the stage may claim a result
-    before the test has run."""
+    before the test has run. `keep` names files to leave where they are: a repair round (orchard/port_repair.py) leaves the supervisor's own
+    record and output of the failed test, which the next test replaces whole."""
     stage_dir = Path(stage_dir)
     moved = []
     for name in RESULT_FILES:
+        if name in keep:
+            continue
         f = stage_dir / name
         if f.is_file() or f.is_symlink():
             os.replace(f, f.with_name(f.name + REJECTED_SUFFIX))

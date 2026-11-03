@@ -156,7 +156,14 @@ def worker(read_fd: int, write_fd: int) -> int:
 # ---- the parent --------------------------------------------------------------------------------------------------------------
 
 class PortFailed(Exception):
-    """The port did not do what a request asked. The message is printed and the run exits non-zero."""
+    """The check failed. The message is printed and the run exits 2. `kind` is "port" when the port did not do what a request asked (or its
+    files are wrong), which the coder can repair, and "setup" when the run around the port is wrong (no leased chip, a stage 1 file that does
+    not read), which no edit to the port can fix. `op` names the request that failed, when one did. The supervisor reads both from the
+    structured line printed after the message (orchard/port_repair.py) to decide whether the coder gets a repair round (issue 420)."""
+
+    def __init__(self, message, kind="port", op=None):
+        super().__init__(message)
+        self.kind, self.op = kind, op
 
 
 class Worker:
@@ -192,15 +199,15 @@ class Worker:
         reader.start()
         reader.join(REPLY_TIMEOUT_S)
         if not box or not box[0]:
-            raise PortFailed(f"the port worker did not answer {req['op']!r} (it exited or stopped answering)")
+            raise PortFailed(f"the port worker did not answer {req['op']!r} (it exited or stopped answering)", op=req["op"])
         try:
             answer = json.loads(box[0])
         except ValueError:
-            raise PortFailed(f"the port worker's answer to {req['op']!r} was not JSON")
+            raise PortFailed(f"the port worker's answer to {req['op']!r} was not JSON", op=req["op"])
         if not isinstance(answer, dict) or answer.get("ok") is not True:
-            raise PortFailed(f"the port failed at {req['op']!r}: {answer.get('error') if isinstance(answer, dict) else answer!r}")
+            raise PortFailed(f"the port failed at {req['op']!r}: {answer.get('error') if isinstance(answer, dict) else answer!r}", op=req["op"])
         if "id" in answer and (type(answer["id"]) is not int or answer["id"] < 0):
-            raise PortFailed(f"the port returned an id that is not a whole number at {req['op']!r}: {answer['id']!r}")
+            raise PortFailed(f"the port returned an id that is not a whole number at {req['op']!r}: {answer['id']!r}", op=req["op"])
         return answer.get("id")
 
     def kill_descendants(self) -> None:
@@ -247,7 +254,7 @@ def read_ids(rel: str, key: str) -> list[int]:
     data = json.loads((RUN_DIR / rel).read_text(encoding="utf-8"))
     ids = data.get(key) if isinstance(data, dict) else None
     if not isinstance(ids, list) or not ids or not all(type(i) is int for i in ids):
-        raise PortFailed(f"{rel} holds no list of whole numbers under {key!r}")
+        raise PortFailed(f"{rel} holds no list of whole numbers under {key!r}", kind="setup")
     return ids
 
 
@@ -278,7 +285,7 @@ def main() -> int:
     model_dir = config["model_snapshot"]
     chips = [c for c in os.environ.get("TT_VISIBLE_DEVICES", "").split(",") if c]
     if not chips:
-        raise PortFailed("TT_VISIBLE_DEVICES names no chip: this test runs only under the supervisor's lease")
+        raise PortFailed("TT_VISIBLE_DEVICES names no chip: this test runs only under the supervisor's lease", kind="setup")
     if not (PORT_DIR / f"{PORT_MODULE}.py").is_file():
         raise PortFailed(f"stages/2/port/{PORT_MODULE}.py does not exist: the port module is the file the coder writes")
     refuse_links()
@@ -335,4 +342,5 @@ if __name__ == "__main__":
         sys.exit(main())
     except PortFailed as exc:
         print(f"FAILED: {exc}", flush=True)
+        print("PORT_CHECK_FAILURE " + json.dumps({"kind": exc.kind, "op": exc.op}), flush=True)      # after the text: the supervisor reads this line
         sys.exit(2)
