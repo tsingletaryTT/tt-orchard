@@ -713,3 +713,33 @@ def test_a_later_test_of_the_same_stage_replaces_the_record(swap):
     assert any("ledger" in x and "generation_config.json" in x for x in gate_reasons(swap))
     record_inputs(swap)                                  # the second test ends
     assert not any("ledger" in x for x in gate_reasons(swap))
+
+
+def test_a_reference_interpreter_that_floods_stderr_makes_the_mask_unverifiable(swap, monkeypatch, tmp_path):
+    """The error stream is capped like the reply (3 MB here, so the test itself is bounded); the helper is stopped and a reason is given."""
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", fake_python(tmp_path, "cat > /dev/null; head -c 3000000 /dev/zero | tr '\\\\0' 'e' >&2; sleep 30"))
+    reasons = gate_reasons(swap)
+    assert any("cannot be checked" in x and "error output is too large" in x for x in reasons), reasons
+
+
+def test_a_wrapper_around_the_reference_interpreter_leaves_nothing_running_after_the_deadline(swap, monkeypatch, tmp_path):
+    import os
+    import time
+    from orchard import stages
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    pid_file = tmp_path / "worker.pid"
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", fake_python(tmp_path, f"cat > /dev/null; sleep 300 & echo $! > {pid_file}; wait"))
+    monkeypatch.setattr(stages, "MASK_TIMEOUT_S", 1.5)
+    assert any("did not finish" in x for x in gate_reasons(swap))
+    pid = int(pid_file.read_text())
+    end = time.time() + 8
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"the worker {pid} the wrapper started is still running")
