@@ -1,3 +1,4 @@
 target = "0.9.101"
 summary = "Multi-board test resets: the lease with the lowest device index is reset last, which removed the 4-chip fabric timeout in 12 of 12 trials where the other order failed 6 of 12 (issue 26)"
 kind = "fix"
+pr = 436
