@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime, full_port, model_kind, safeio, scoring_check
+from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe
@@ -980,7 +980,71 @@ def agreement_reference_record(run_dir) -> dict | None:
 
 MASK_TIMEOUT_S = 120.0                 # the helper loads one tokenizer and decodes a few hundred ids
 MASK_REPLY_MAX = 1 << 20
+MASK_ERR_MAX = 64 * 1024               # the helper's error output: a traceback is a few KiB
 MASK_HELPER = Path(__file__).resolve().parent / "skip_mask_helper.py"
+MASK_INPUT_FILES = ("tokenizer.json", "generation_config.json", "config.json")       # the files the masks are rebuilt from (skip_mask_helper.py)
+MASK_INPUTS_DECISION = "agreement mask inputs recorded"    # the supervisor writes one per model directory when a hardware test ends
+MASK_INPUT_UNREADABLE = "unreadable"
+MASK_INPUT_MAX_BYTES = 256 * 1024 * 1024
+MASK_DIR_DEPTH = 4                     # how far under a stage directory a `model-dir` is looked for (stage 4: configs/N/model-dir)
+
+
+def _mask_input_digest(path) -> str | None:
+    """The sha256 of the bytes skip_mask_helper.py reads from `path`: the path resolved once, a regular file, bounded. None for a file that is
+    not there (or a link to nothing), which the helper also treats as absent; MASK_INPUT_UNREADABLE for anything else that cannot be hashed."""
+    try:
+        target = os.path.realpath(path)
+        if not os.path.exists(target):
+            return None
+        return safeio.sha256_file(target, max_bytes=MASK_INPUT_MAX_BYTES)
+    except (OSError, ValueError, safeio.SafeReadError):
+        return MASK_INPUT_UNREADABLE
+
+
+def mask_input_entries(run_dir, stage_dir) -> list[dict]:
+    """One {dir, files} per `model-dir` under `stage_dir` (real directories only, MASK_DIR_DEPTH levels down): `dir` is its path relative to the
+    run directory and `files` maps each of MASK_INPUT_FILES to its sha256 (see _mask_input_digest). The supervisor writes them to the ledger
+    when a hardware test ends, before any agent step can edit the files, and the gate rebuilds a skip mask only from files whose sha256 is the
+    recorded one (PR 422, round 3: a stop list edited after the measurement could make a hidden mismatch look like an unreadable token)."""
+    run_abs, found = os.path.abspath(os.fspath(run_dir)), []
+
+    def walk(directory: str, depth: int) -> None:
+        try:
+            with os.scandir(directory) as it:
+                children = sorted(it, key=lambda e: e.name)
+        except OSError:
+            return
+        for child in children:
+            try:
+                is_dir = child.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if not is_dir or child.name.startswith("."):
+                continue
+            if child.name == "model-dir":
+                found.append({"dir": os.path.relpath(child.path, run_abs),
+                              "files": {name: _mask_input_digest(os.path.join(child.path, name)) for name in MASK_INPUT_FILES}})
+            elif depth < MASK_DIR_DEPTH:
+                walk(child.path, depth + 1)
+    walk(os.path.abspath(os.fspath(stage_dir)), 1)
+    return found
+
+
+def _recorded_mask_inputs(run_dir, model_dir) -> dict | None:
+    """The `files` of the last ledger entry the supervisor wrote for `model_dir`, or None when there is none (or the ledger cannot be read)."""
+    from orchard.ledger import LedgerCorrupt, read_entries
+    try:
+        want = os.path.relpath(os.path.abspath(os.fspath(model_dir)), os.path.abspath(os.fspath(run_dir)))
+        entries = read_entries(Path(run_dir) / "ledger.jsonl")
+    except (LedgerCorrupt, OSError, ValueError, TypeError):
+        return None
+    found = None
+    for e in entries:
+        data = e.get("data")
+        if (e.get("event") == "decision" and isinstance(data, dict) and data.get("decision") == MASK_INPUTS_DECISION
+                and data.get("dir") == want and isinstance(data.get("files"), dict)):
+            found = data["files"]
+    return found
 
 
 def _mask_python(run_dir) -> str | None:
@@ -1005,30 +1069,44 @@ def _mask_python(run_dir) -> str | None:
 
 def _expected_masks(run_dir, model_dir, lists):
     """(masks, None) or (None, why): the skip mask of each list of reference ids, rebuilt by skip_mask_helper.py under the reference
-    interpreter from the served directory's tokenizer.json and eos ids (issue 406). The run is bounded (a timeout, a cap on the reply) and
-    the helper reads the same files the template read. Any failure is a reason, and never a pass."""
-    import subprocess
+    interpreter from the served directory's tokenizer.json and eos ids (issue 406). The run is bounded (a timeout, a cap on each output stream,
+    a process group of its own that is stopped and reaped on every way out: orchard/bounded_run.py). The helper reports the sha256 of the bytes
+    it read, and they must be the ones the supervisor recorded in the ledger when the hardware test ended, so files edited after the measurement
+    cannot change a mask. Any failure is a reason, and never a pass."""
     if model_dir is None:
         return None, "the gate has no model directory to read the tokenizer from"
     python = _mask_python(run_dir)
     if python is None:
         return None, "no reference interpreter with the tokenizers package is configured (run_start's reference_python input, or $ORCHARD_REFERENCE_PYTHON)"
     request = json.dumps({"model_dir": str(model_dir), "lists": lists})
-    try:
-        done = subprocess.run([python, "-I", str(MASK_HELPER), str(Path(agreement_core.__file__).resolve())], input=request, capture_output=True,
-                              text=True, timeout=MASK_TIMEOUT_S, stdin=None, env={"PATH": os.environ.get("PATH", "")}, check=False)
-    except subprocess.TimeoutExpired:
+    res = bounded_run.run([python, "-I", str(MASK_HELPER), str(Path(agreement_core.__file__).resolve())], request, timeout_s=MASK_TIMEOUT_S,
+                          out_max=MASK_REPLY_MAX, err_max=MASK_ERR_MAX, env={"PATH": os.environ.get("PATH", "")})
+    if res.problem == "start":
+        return None, f"the helper that rebuilds the masks could not start: {res.detail}"
+    if res.problem == "timeout":
         return None, f"the helper that rebuilds the masks did not finish in {MASK_TIMEOUT_S:.0f} s"
-    except (OSError, ValueError) as exc:
-        return None, f"the helper that rebuilds the masks could not start: {type(exc).__name__}"
-    if len(done.stdout) > MASK_REPLY_MAX:
+    if res.problem == "stdout":
         return None, "the helper's reply is too large"
+    if res.problem == "stderr":
+        return None, "the helper's error output is too large"
     try:
-        reply = json.loads(done.stdout.strip().splitlines()[-1])
+        reply = json.loads(res.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return None, f"the helper's reply is not JSON (exit {done.returncode})"
+        return None, f"the helper's reply is not JSON (exit {res.returncode})"
     if not isinstance(reply, dict) or reply.get("ok") is not True or not isinstance(reply.get("masks"), list) or len(reply["masks"]) != len(lists):
         return None, f"the helper could not rebuild the masks: {str(reply.get('error') if isinstance(reply, dict) else reply)[:200]}"
+    digests = reply.get("digests")
+    if (not isinstance(digests, dict) or set(digests) != set(MASK_INPUT_FILES)
+            or any(v is not None and not isinstance(v, str) for v in digests.values())):
+        return None, "the helper did not report the digests of the files it read"
+    recorded = _recorded_mask_inputs(run_dir, model_dir)
+    if recorded is None:
+        return None, ("the ledger has no record of the files the masks were measured with (the supervisor writes it when the hardware test "
+                      "ends), so a rebuilt mask cannot be trusted")
+    for name in MASK_INPUT_FILES:
+        if recorded.get(name) != digests[name]:
+            return None, (f"{name} is not the file the hardware test used (its sha256 differs from the ledger's, or it appeared or went "
+                          "missing after the test)")
     return reply["masks"], None
 
 

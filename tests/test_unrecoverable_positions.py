@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_weights_swap_templates import GENERATED, NEAREST, TEMPLATES, VOCAB, swap, report  # noqa: E402,F401  (swap is a fixture)
+from test_weights_swap_templates import GENERATED, NEAREST, TEMPLATES, VOCAB, report, swap as base_swap  # noqa: E402,F401  (base_swap is a fixture)
 from test_agreement_set_template import IDS, gate_reasons, install, make_sets, run, server_sets  # noqa: E402
 
 from tokenizers import Tokenizer  # noqa: E402
@@ -22,6 +22,34 @@ from tokenizers.models import WordLevel  # noqa: E402
 from tokenizers.pre_tokenizers import Whitespace  # noqa: E402
 
 from orchard import agreement_core as core  # noqa: E402
+
+def record_inputs(swap):
+    """What the supervisor writes when a hardware test ends (Supervisor._record_mask_inputs): the sha256 of each file the masks are rebuilt
+    from, in the ledger, before any agent step can touch them."""
+    from orchard import stages
+    from orchard.ledger import Ledger
+    led = Ledger(swap["run"] / "ledger.jsonl")
+    try:
+        for entry in stages.mask_input_entries(swap["run"], swap["stage"]):
+            led.append("decision", 2, decision=stages.MASK_INPUTS_DECISION, **entry)
+    finally:
+        led.close()
+
+
+@pytest.fixture
+def swap(base_swap):
+    """The swap fixture, with the supervisor's ledger record of the mask input files written after every template run (the way a real test
+    ends). `start_unrecorded` is the plain start, for the tests about a missing record."""
+    real = base_swap["start"]
+
+    def start(*args, **kwargs):
+        done = real(*args, **kwargs)
+        record_inputs(base_swap)
+        return done
+    base_swap["start_unrecorded"] = real
+    base_swap["start"] = start
+    return base_swap
+
 
 @pytest.fixture(autouse=True)
 def reference_python(monkeypatch):
@@ -508,7 +536,9 @@ def run_helper(model_dir):
 def test_the_helper_reads_a_tokenizer_and_gives_the_masks(tmp_path):
     rich_tokenizer(tmp_path)
     reply = run_helper(tmp_path)
-    assert reply == {"ok": True, "masks": [[]]}
+    import hashlib
+    assert reply == {"ok": True, "masks": [[]], "digests": {"tokenizer.json": hashlib.sha256((tmp_path / "tokenizer.json").read_bytes()).hexdigest(),
+                                                           "generation_config.json": None, "config.json": None}}
 
 
 def test_the_helper_refuses_a_tokenizer_that_is_a_device_and_a_config_that_is_a_fifo(tmp_path):
@@ -521,3 +551,137 @@ def test_the_helper_refuses_a_tokenizer_that_is_a_device_and_a_config_that_is_a_
     os.mkfifo(tmp_path / "config.json")
     reply = run_helper(tmp_path)
     assert reply["ok"] is False and "not a regular file" in reply["error"], reply
+
+
+# ---- Copilot round 3 on PR 422: the mask is bound to the files the test measured with -----------------------------------------------------
+
+def test_the_supervisor_records_the_mask_input_files_of_every_model_dir_under_a_stage_directory(tmp_path):
+    import hashlib
+    from orchard import stages
+    run = tmp_path / "run"
+    stage = run / "stages" / "4"
+    for rel in ("model-dir", "configs/2/model-dir", "configs/4/model-dir", "sampling-trial/variant/model-dir"):
+        d = stage / rel
+        d.mkdir(parents=True)
+        (d / "tokenizer.json").write_text(f"tok {rel}")
+    (stage / "configs" / "2" / "model-dir" / "generation_config.json").write_text('{"eos_token_id": 1}')
+    blob = tmp_path / "blob"
+    blob.write_text("linked config")
+    (stage / "configs" / "4" / "model-dir" / "config.json").symlink_to(blob)            # a file linked into the model directory is hashed by its bytes
+    (stage / "elsewhere").mkdir()
+    (stage / "elsewhere" / "model-dir").symlink_to(stage / "model-dir")                 # a linked directory is not a model directory of this stage
+    got = {e["dir"]: e["files"] for e in stages.mask_input_entries(run, stage)}
+    assert sorted(got) == ["stages/4/configs/2/model-dir", "stages/4/configs/4/model-dir", "stages/4/model-dir",
+                           "stages/4/sampling-trial/variant/model-dir"]
+    sha = lambda s: hashlib.sha256(s.encode()).hexdigest()
+    assert got["stages/4/configs/2/model-dir"] == {"tokenizer.json": sha("tok configs/2/model-dir"), "generation_config.json": sha('{"eos_token_id": 1}'),
+                                                   "config.json": None}
+    assert got["stages/4/configs/4/model-dir"]["config.json"] == sha("linked config")
+
+
+def test_a_file_that_cannot_be_hashed_is_recorded_as_unreadable_and_never_as_absent(tmp_path):
+    import os
+    from orchard import stages
+    run = tmp_path / "run"
+    md = run / "stages" / "2" / "model-dir"
+    md.mkdir(parents=True)
+    (md / "tokenizer.json").write_text("t")
+    os.mkfifo(md / "config.json")
+    (md / "generation_config.json").symlink_to(tmp_path / "gone")                         # a link to nothing is absent, as the helper treats it
+    files = stages.mask_input_entries(run, run / "stages" / "2")[0]["files"]
+    assert files["config.json"] == stages.MASK_INPUT_UNREADABLE and files["generation_config.json"] is None
+
+
+def test_a_mask_whose_input_files_were_never_recorded_in_the_ledger_is_refused(swap):
+    sets = tricky_sets()
+    rich_tokenizer(swap["stage"] / "model-dir")
+    install(swap, sets)
+    extra = {"vocab": FULL_VOCAB, "silent_ids": SILENT, "agreement_sets": server_sets(sets)}
+    assert swap["start_unrecorded"]("perfect", server_extra=extra, agreement_set=True).returncode == 0
+    reasons = gate_reasons(swap)
+    assert any("skipped positions" in x and "cannot be checked" in x and "ledger" in x for x in reasons), reasons
+
+
+def test_a_stop_list_edited_after_the_measurement_cannot_hide_readable_mismatches(swap):
+    """The attack from the review: mark the readable mismatches as skipped, then add their reference ids to generation_config.json so the
+    rebuilt mask comes out the same. The mask check alone passes; the digest of generation_config.json no longer matches the ledger."""
+    sets = make_sets(wrong_every=4)
+    rich_tokenizer(swap["stage"] / "model-dir")
+    install(swap, sets)
+    extra = {"vocab": FULL_VOCAB, "silent_ids": SILENT, "agreement_sets": server_sets(sets)}
+    assert swap["start"]("perfect", server_extra=extra, agreement_set=True).returncode == 0
+    wrong = list(range(3, 32, 4))
+    doc = {"eos_token_id": [sets[0]["generated_ids"][k] for k in wrong]}
+    (swap["stage"] / "model-dir" / "generation_config.json").write_text(json.dumps(doc))
+    tok = Tokenizer.from_file(str(swap["stage"] / "model-dir" / "tokenizer.json"))
+    hidden = core.expected_skipped(tok, core.stop_ids_from(doc), sets[0]["generated_ids"])
+    assert set(wrong) <= set(hidden)
+
+    def hide(rep):
+        rep["agreement_set"]["entries"][0]["skipped"] = hidden
+    edit(swap, hide)
+    reasons = gate_reasons(swap)
+    assert not any("chat-explain" in x and "are not the ones" in x for x in reasons), "the mask check alone should pass for the edited prompt"
+    assert any("generation_config.json" in x and "ledger" in x for x in reasons), reasons
+
+
+@pytest.mark.parametrize("change,name", [
+    (lambda md: (md / "tokenizer.json").write_text((md / "tokenizer.json").read_text() + "\n"), "tokenizer.json"),
+    (lambda md: (md / "config.json").write_text(json.dumps({"eos_token_id": 3})), "config.json"),
+    (lambda md: (md / "generation_config.json").write_text(json.dumps({"eos_token_id": 3})), "generation_config.json"),
+])
+def test_any_input_file_changed_or_added_after_the_test_is_refused_by_name(swap, change, name):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    assert gate_reasons(swap) == []
+    change(swap["stage"] / "model-dir")
+    reasons = gate_reasons(swap)
+    assert any(name in x and "ledger" in x for x in reasons), reasons
+
+
+def test_a_file_removed_after_the_test_is_refused_by_name(swap):
+    write_config(swap, eos_token_id=1)
+    sets = make_sets()
+    sets[0]["generated_ids"] = with_positions(sets[0]["generated_ids"], {9: 1})
+    rich_tokenizer(swap["stage"] / "model-dir", special_eos=False)
+    install(swap, sets)
+    extra = {"vocab": FULL_VOCAB, "silent_ids": [1], "agreement_sets": server_sets(sets)}
+    assert swap["start"]("perfect", server_extra=extra, agreement_set=True).returncode == 0
+    assert gate_reasons(swap) == []
+    (swap["stage"] / "model-dir" / "config.json").unlink()
+    reasons = gate_reasons(swap)
+    assert any("config.json" in x and "ledger" in x for x in reasons), reasons
+
+
+def test_a_helper_reply_without_the_digests_of_the_files_it_read_is_refused(swap, monkeypatch, tmp_path):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    body = "cat > /dev/null; echo '{\"ok\": true, \"masks\": [[0, 5, 11, 20]]}'"        # one prompt has a nonempty mask: one list
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", fake_python(tmp_path, body))
+    reasons = gate_reasons(swap)
+    assert any("cannot be checked" in x and "digest" in x for x in reasons), reasons
+
+
+def test_a_hardware_test_that_ends_makes_the_supervisor_record_the_mask_input_files(tmp_path):
+    """The wiring: Supervisor._run_test writes the ledger entries the gate looks for, whatever the test's own result was."""
+    import types
+    from orchard import stages
+    from orchard.ledger import Ledger, read_entries
+    from orchard.supervisor import Supervisor
+    run = tmp_path / "run"
+    md = run / "stages" / "2" / "model-dir"
+    md.mkdir(parents=True)
+    (md / "tokenizer.json").write_text("tok")
+    sup = object.__new__(Supervisor)
+    sup.run_dir = run
+    sup.ledger = Ledger(run / "ledger.jsonl")
+    sup._spawn = lambda *a, **k: {"returncode": 1, "timed_out": False}
+    sup._moved_aside_record = lambda marker: {}
+    spec = types.SimpleNamespace(number=2, boards=1, budget_s=100.0)
+    lease = types.SimpleNamespace(chips=["a", "b"], dev_indices=[0, 1], lease_id="L")
+    try:
+        sup._run_test(spec, run / "stages" / "2", {"command": "true", "deadline_s": 10}, lease)
+    finally:
+        sup.ledger.close()
+    found = [e["data"] for e in read_entries(run / "ledger.jsonl") if e["event"] == "decision" and e["data"].get("decision") == stages.MASK_INPUTS_DECISION]
+    assert len(found) == 1 and found[0]["dir"] == "stages/2/model-dir" and found[0]["files"]["tokenizer.json"]

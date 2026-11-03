@@ -8,13 +8,15 @@ The supervisor uses only the standard library, and `tokenizers` lives in the ref
     python3 -I orchard/skip_mask_helper.py PATH_TO_AGREEMENT_CORE      (the request is one JSON object on stdin)
 
 request: {"model_dir": "<served model directory>", "lists": [[reference ids of one prompt], ...]}
-reply:   one JSON line on stdout, {"ok": true, "masks": [[skipped positions of each list], ...]} or {"ok": false, "error": "<why>"}
+reply:   one JSON line on stdout, {"ok": true, "masks": [[skipped positions of each list], ...], "digests": {file: sha256 of the bytes it read,
+         or null for a file that does not exist}} or {"ok": false, "error": "<why>"}
 
 It reads the same input files the template read: the served directory's tokenizer.json and the `eos_token_id` of its generation_config.json
 and config.json. Each is opened by its resolved path, must be a regular file, and is read up to a size cap. The mask rule is
 `agreement_core.expected_skipped`, loaded from the path given, so the gate and the template (which carries a byte-identical copy of that file)
 use one rule. This file imports nothing from orchard.
 """
+import hashlib
 import importlib.util
 import json
 import os
@@ -58,15 +60,23 @@ def answer(request, core_path):
     if (not isinstance(lists, list) or len(lists) > LISTS_MAX
             or not all(isinstance(x, list) and len(x) <= IDS_MAX and all(core._is_int(i) for i in x) for x in lists)):
         return {"ok": False, "error": "lists must be a short list of lists of whole numbers"}
-    tokenizer = Tokenizer.from_str(read_regular(os.path.join(model_dir, "tokenizer.json"), TOKENIZER_MAX).decode("utf-8"))
+    # The digest of each file is taken from the bytes this process parsed, so the gate can compare it with the one the supervisor recorded
+    # when the hardware test ended. None means the file does not exist (a missing configuration file is allowed; a missing tokenizer is not).
+    digests = {}
+    raw = read_regular(os.path.join(model_dir, "tokenizer.json"), TOKENIZER_MAX)
+    digests["tokenizer.json"] = hashlib.sha256(raw).hexdigest()
+    tokenizer = Tokenizer.from_str(raw.decode("utf-8"))
     docs = []
     for name in ("generation_config.json", "config.json"):
         try:
-            docs.append(json.loads(read_regular(os.path.join(model_dir, name), CONFIG_MAX).decode("utf-8")))
+            raw = read_regular(os.path.join(model_dir, name), CONFIG_MAX)
         except FileNotFoundError:
+            digests[name] = None
             continue
+        digests[name] = hashlib.sha256(raw).hexdigest()
+        docs.append(json.loads(raw.decode("utf-8")))
     stops = core.stop_ids_from(*docs)
-    return {"ok": True, "masks": [core.expected_skipped(tokenizer, stops, ids) for ids in lists]}
+    return {"ok": True, "masks": [core.expected_skipped(tokenizer, stops, ids) for ids in lists], "digests": digests}
 
 
 def main():
