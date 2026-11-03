@@ -23,6 +23,12 @@ from tokenizers.pre_tokenizers import Whitespace  # noqa: E402
 
 from orchard import agreement_core as core  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def reference_python(monkeypatch):
+    """The gate rebuilds a skip mask under the reference interpreter (run_start's reference_python, else this variable)."""
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", sys.executable)
+
+
 UNK, PARTIAL, SPLIT, EOS = len(VOCAB), len(VOCAB) + 1, len(VOCAB) + 2, len(VOCAB) + 3
 FULL_VOCAB = VOCAB + ["[UNK]", "�", "a b", "<eos>"]
 SILENT = [PARTIAL, EOS]            # the server's text for these is empty: half a character, and a stop token left out of the response
@@ -244,11 +250,13 @@ def test_an_edited_record_that_marks_readable_mismatches_as_skipped_is_refused(s
     assert any("skipped positions" in x and "tokenizer" in x for x in reasons), reasons
 
 
-def test_an_edited_record_that_clears_the_mask_of_an_unreadable_token_is_refused_too(swap):
+def test_an_edited_record_that_clears_the_mask_can_only_lower_the_agreement_and_is_not_rebuilt(swap):
     sets = tricky_sets()
     assert start_set(swap, sets).returncode == 0
     edit(swap, lambda rep: rep["agreement_set"]["entries"][0].update(skipped=[]))
-    assert any("skipped positions" in x for x in gate_reasons(swap))
+    reasons = gate_reasons(swap)
+    assert not any("skipped" in x for x in reasons), reasons
+    assert core.judge(report(swap)["agreement_set"])["summary"]["per_prompt"][0]["top1"] < 1.0
 
 
 def test_a_mask_the_gate_cannot_check_because_the_tokenizer_is_missing_is_refused(swap):
@@ -256,6 +264,7 @@ def test_a_mask_the_gate_cannot_check_because_the_tokenizer_is_missing_is_refuse
     assert start_set(swap, sets).returncode == 0
     (swap["stage"] / "model-dir" / "tokenizer.json").unlink()
     assert any("skipped positions" in x and "cannot be checked" in x for x in gate_reasons(swap)), gate_reasons(swap)
+    assert not any("Traceback" in x for x in gate_reasons(swap))
 
 
 def start_set_with_control(swap, sets, control):
@@ -273,7 +282,7 @@ def test_the_control_mask_survives_the_reload_and_is_checked_like_the_runs(swap,
     got = report(swap)["agreement_set"]["control"]["entries"]
     assert got[0]["skipped"] == [5, 11, 20], got[0]
     assert not any("skipped" in x for x in gate_reasons(swap)), gate_reasons(swap)
-    edit(swap, lambda r: r["agreement_set"]["control"]["entries"][0].update(skipped=[]))
+    edit(swap, lambda r: r["agreement_set"]["control"]["entries"][0].update(skipped=[0, 5, 11, 20]))     # position 0 is a readable token
     assert any("control" in x and "skipped positions" in x for x in gate_reasons(swap)), gate_reasons(swap)
 
 
@@ -358,3 +367,157 @@ def test_stop_ids_from_takes_whole_numbers_of_the_top_level_only():
     assert core.stop_ids_from({"eos_token_id": 2}, {"eos_token_id": [3, 4]}) == {2, 3, 4}
     assert core.stop_ids_from({"eos_token_id": True}, {"eos_token_id": [True, 5, "6", 7.5, None]}, {"text_config": {"eos_token_id": 9}}) == {5}
     assert core.stop_ids_from(None, [], "x", {"eos_token_id": {"a": 1}}) == set()
+
+
+# ---- Copilot round 2 on PR 422 ----------------------------------------------------------------------------------------------------------
+
+def fake_python(tmp_path, body):
+    """An executable that stands in for the reference interpreter: the gate runs it as `python -I helper core` with the request on stdin."""
+    path = tmp_path / "fake-python"
+    path.write_text("#!/bin/sh\n" + body + "\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+@pytest.mark.parametrize("body,word", [
+    ("cat > /dev/null; echo not-json", "not JSON"),
+    ('cat > /dev/null; echo \'{"ok": false, "error": "no tokenizers"}\'', "no tokenizers"),
+    ('cat > /dev/null; echo \'{"ok": true, "masks": []}\'', "could not rebuild"),
+    ("cat > /dev/null; head -c 2000000 /dev/zero | tr '\\\\0' 'a'", "too large"),
+    ("exit 3", "not JSON"),
+])
+def test_a_reference_interpreter_that_answers_badly_makes_the_mask_unverifiable_not_valid(swap, monkeypatch, tmp_path, body, word):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", fake_python(tmp_path, body))
+    reasons = gate_reasons(swap)
+    assert any("cannot be checked" in x and word in x for x in reasons), reasons
+
+
+def test_a_reference_interpreter_that_never_finishes_is_stopped_at_the_deadline(swap, monkeypatch, tmp_path):
+    from orchard import stages
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", fake_python(tmp_path, "sleep 60"))
+    monkeypatch.setattr(stages, "MASK_TIMEOUT_S", 1.0)
+    reasons = gate_reasons(swap)
+    assert any("cannot be checked" in x and "did not finish" in x for x in reasons), reasons
+
+
+def test_with_no_reference_interpreter_configured_a_nonempty_mask_cannot_be_checked(swap, monkeypatch):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    monkeypatch.delenv("ORCHARD_REFERENCE_PYTHON")
+    reasons = gate_reasons(swap)
+    assert any("cannot be checked" in x and "no reference interpreter" in x for x in reasons), reasons
+
+
+def test_the_interpreter_the_supervisor_recorded_in_run_start_is_the_one_used(swap, monkeypatch):
+    from orchard.ledger import Ledger
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    monkeypatch.delenv("ORCHARD_REFERENCE_PYTHON")
+    led = Ledger(swap["run"] / "ledger.jsonl")
+    try:
+        led.append("run_start", None, model="x/y", inputs={"reference_python": sys.executable})
+    finally:
+        led.close()
+    assert gate_reasons(swap) == []
+
+
+def test_the_gate_does_not_import_the_tokenizers_package_itself(swap, monkeypatch):
+    """The supervisor uses only the standard library: a gate that imports `tokenizers` fails where the reference interpreter has it and the
+    supervisor's own does not."""
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    real_import = __import__
+
+    def refuse(name, *a, **k):
+        if name == "tokenizers" or name.startswith("tokenizers."):
+            raise ImportError("the supervisor has no tokenizers package")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr("builtins.__import__", refuse)
+    assert gate_reasons(swap) == []
+
+
+@pytest.mark.parametrize("scalar", [3, True, 3.5, "3", {"a": 1}])
+def test_a_scalar_mask_is_a_reason_and_not_a_crash(swap, scalar):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    edit(swap, lambda rep: rep["agreement_set"]["entries"][0].update(skipped=scalar))
+    reasons = gate_reasons(swap)
+    assert any("skipped" in x and "list" in x for x in reasons), reasons
+
+
+@pytest.mark.parametrize("scalar", [3, True, 3.5])
+def test_a_scalar_mask_in_the_control_is_a_reason_and_not_a_crash(swap, tmp_path, scalar):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    rep = json.loads((swap["stage"] / "evidence" / "swap-check.json").read_text())
+    path = tmp_path / "control.json"
+    path.write_text(json.dumps({"agreement_set": {**rep["agreement_set"], "model_id": NEAREST}}))
+    assert start_set_with_control(swap, sets, path).returncode == 0
+    edit(swap, lambda r: r["agreement_set"]["control"]["entries"][0].update(skipped=scalar))
+    assert any("control" in x and "skipped" in x for x in gate_reasons(swap)), gate_reasons(swap)
+
+
+def test_the_sampling_choice_reader_gives_the_variants_model_dir_to_the_gate(tmp_path, monkeypatch):
+    """`variant_side` reads the drafter-off variant's swap check through the same prompt-suite and agreement checks as the stage gates, so a
+    variant with a skip mask needs its own model directory or it is refused for that reason alone."""
+    from orchard import sampling_choice as sc
+    from orchard import stages
+    from test_sampling_choice_files import make_run, report as swap_report
+    seen = {}
+    monkeypatch.setattr(stages, "_suite_reasons", lambda rep, run, where="", requested=False, model_dir=None: seen.update(model_dir=model_dir) or [])
+    run, s2 = make_run(tmp_path, variant=swap_report())
+    assert sc.variant_side(s2, run) is not None
+    assert seen["model_dir"] == s2 / sc.TRIAL_DIR / "variant" / "model-dir"
+
+
+def test_a_variant_with_a_nonempty_mask_passes_the_correctness_check_with_its_model_dir(swap):
+    from orchard import sampling_choice as sc
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    rep = report(swap)
+    assert not any("skipped" in x for x in sc._correctness_failures(rep, swap["run"], swap["stage"] / "model-dir"))
+    assert any("no model directory" in x for x in sc._correctness_failures(rep, swap["run"]))
+
+
+def test_a_helper_reply_that_says_not_ok_is_refused_even_when_it_carries_masks(swap, monkeypatch, tmp_path):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    body = "cat > /dev/null; echo '{\"ok\": false, \"error\": \"half done\", \"masks\": [[5, 11, 20]]}'"
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", fake_python(tmp_path, body))
+    reasons = gate_reasons(swap)
+    assert any("cannot be checked" in x and "half done" in x for x in reasons), reasons
+
+
+def run_helper(model_dir):
+    """The helper as the gate starts it, in a child limited to 2 GB of address space so a read that ignores its cap cannot take the box down."""
+    import resource
+    import subprocess
+    helper = Path(core.__file__).resolve().parent / "skip_mask_helper.py"
+
+    def limit():
+        resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+    done = subprocess.run([sys.executable, "-I", str(helper), core.__file__], input=json.dumps({"model_dir": str(model_dir), "lists": [[1, 2]]}),
+                          capture_output=True, text=True, timeout=120, preexec_fn=limit, env={"PATH": "/usr/bin:/bin"})
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_the_helper_reads_a_tokenizer_and_gives_the_masks(tmp_path):
+    rich_tokenizer(tmp_path)
+    reply = run_helper(tmp_path)
+    assert reply == {"ok": True, "masks": [[]]}
+
+
+def test_the_helper_refuses_a_tokenizer_that_is_a_device_and_a_config_that_is_a_fifo(tmp_path):
+    import os
+    (tmp_path / "tokenizer.json").symlink_to("/dev/zero")
+    reply = run_helper(tmp_path)
+    assert reply["ok"] is False and "not a regular file" in reply["error"], reply
+    (tmp_path / "tokenizer.json").unlink()
+    rich_tokenizer(tmp_path)
+    os.mkfifo(tmp_path / "config.json")
+    reply = run_helper(tmp_path)
+    assert reply["ok"] is False and "not a regular file" in reply["error"], reply

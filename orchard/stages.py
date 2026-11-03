@@ -978,32 +978,58 @@ def agreement_reference_record(run_dir) -> dict | None:
         return None
 
 
-def _mask_context(model_dir):
-    """(tokenizer, stop ids, None) for the served directory, or (None, None, why) when the gate cannot rebuild the skip mask of the agreement
-    record (issue 406): no model directory, no `tokenizers` package, a tokenizer.json or config file that is refused or does not parse. The
-    files are the ones the template read; a snapshot's links are followed once, as the template does."""
+MASK_TIMEOUT_S = 120.0                 # the helper loads one tokenizer and decodes a few hundred ids
+MASK_REPLY_MAX = 1 << 20
+MASK_HELPER = Path(__file__).resolve().parent / "skip_mask_helper.py"
+
+
+def _mask_python(run_dir) -> str | None:
+    """The interpreter that has the `tokenizers` package: the run's `reference_python` input as the supervisor recorded it in the ledger's
+    run_start, else $ORCHARD_REFERENCE_PYTHON; None when neither names a file that can run. The supervisor itself uses only the standard
+    library (README, Other licenses), so the gate asks that interpreter and does not import `tokenizers`."""
+    from orchard.ledger import LedgerCorrupt, read_entries
+    value = None
+    try:
+        for e in read_entries(Path(run_dir) / "ledger.jsonl"):
+            data = e.get("data")
+            if e.get("event") == "run_start" and isinstance(data, dict) and isinstance(data.get("inputs"), dict):
+                value = data["inputs"].get("reference_python")
+                break
+    except (LedgerCorrupt, OSError):
+        value = None
+    for candidate in (value, os.environ.get("ORCHARD_REFERENCE_PYTHON")):
+        if isinstance(candidate, str) and candidate and "\0" not in candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _expected_masks(run_dir, model_dir, lists):
+    """(masks, None) or (None, why): the skip mask of each list of reference ids, rebuilt by skip_mask_helper.py under the reference
+    interpreter from the served directory's tokenizer.json and eos ids (issue 406). The run is bounded (a timeout, a cap on the reply) and
+    the helper reads the same files the template read. Any failure is a reason, and never a pass."""
+    import subprocess
     if model_dir is None:
-        return None, None, "the gate has no model directory to read the tokenizer from"
+        return None, "the gate has no model directory to read the tokenizer from"
+    python = _mask_python(run_dir)
+    if python is None:
+        return None, "no reference interpreter with the tokenizers package is configured (run_start's reference_python input, or $ORCHARD_REFERENCE_PYTHON)"
+    request = json.dumps({"model_dir": str(model_dir), "lists": lists})
     try:
-        from tokenizers import Tokenizer
-    except ImportError:
-        return None, None, "the tokenizers package is not installed"
-    root = Path(model_dir)
+        done = subprocess.run([python, "-I", str(MASK_HELPER), str(Path(agreement_core.__file__).resolve())], input=request, capture_output=True,
+                              text=True, timeout=MASK_TIMEOUT_S, stdin=None, env={"PATH": os.environ.get("PATH", "")}, check=False)
+    except subprocess.TimeoutExpired:
+        return None, f"the helper that rebuilds the masks did not finish in {MASK_TIMEOUT_S:.0f} s"
+    except (OSError, ValueError) as exc:
+        return None, f"the helper that rebuilds the masks could not start: {type(exc).__name__}"
+    if len(done.stdout) > MASK_REPLY_MAX:
+        return None, "the helper's reply is too large"
     try:
-        raw = safeio.read_bytes(safeio.resolved(root / "tokenizer.json"), max_bytes=AGREEMENT_TOKENIZER_MAX_BYTES)
-        tokenizer = Tokenizer.from_str(raw.decode("utf-8"))
-    except safeio.SafeReadError as exc:
-        return None, None, f"tokenizer.json is not readable: {exc.reason}"
-    except Exception as exc:                  # noqa: BLE001 - the tokenizers package raises a bare Exception for a file it cannot parse
-        return None, None, f"tokenizer.json does not load: {type(exc).__name__}"
-    docs = []
-    for name in ("generation_config.json", "config.json"):
-        try:
-            docs.append(_safe_json(safeio.resolved(root / name)))
-        except safeio.SafeReadError as exc:
-            if not _is_missing(exc):
-                return None, None, f"{name} is not readable: {exc.reason}"
-    return tokenizer, agreement_core.stop_ids_from(*docs), None
+        reply = json.loads(done.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None, f"the helper's reply is not JSON (exit {done.returncode})"
+    if not isinstance(reply, dict) or reply.get("ok") is not True or not isinstance(reply.get("masks"), list) or len(reply["masks"]) != len(lists):
+        return None, f"the helper could not rebuild the masks: {str(reply.get('error') if isinstance(reply, dict) else reply)[:200]}"
+    return reply["masks"], None
 
 
 def _agreement_binding_reasons(record, run_dir, model_dir=None) -> list[str]:
@@ -1041,8 +1067,7 @@ def _agreement_binding_reasons(record, run_dir, model_dir=None) -> list[str]:
     out += [f"stage 1's agreement reference: {r}" for r in agreement_core.id_problems(entries, shipped_ids)]
     wanted = ({e["id"]: e.get("generated_ids") for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
               if isinstance(entries, list) else {})
-    tokenizer, stops, why = _mask_context(model_dir)
-    unverified = []                         # prompts whose skipped list the gate could not check, once each below
+    to_check = []                           # (label, prompt id, declared mask, reference ids): the masks to rebuild, in one helper run
 
     def check(rows, label):
         for e in rows if isinstance(rows, list) else []:
@@ -1052,17 +1077,17 @@ def _agreement_binding_reasons(record, run_dir, model_dir=None) -> list[str]:
             if not isinstance(ids, list) or not isinstance(full, list) or full[:len(ids)] != ids:
                 out.append(f"the {label}'s reference ids for prompt {pid if isinstance(pid, str) else None!r} are not stage 1's")
                 continue
-            # The skipped list is read from the record, so it is rebuilt here from stage 1's reference ids and the served tokenizer: a list
-            # that hides readable mismatches (or clears an unreadable token) differs from what a correct run writes.
+            # The skipped list is read from the record, so a list that leaves positions out is rebuilt from stage 1's reference ids and the
+            # served tokenizer (by the reference interpreter), and one that hides readable mismatches differs from what a correct run writes.
+            # An absent or empty list is not rebuilt: it leaves every position in the score, so it can only lower the agreement.
             declared = e.get("skipped") if isinstance(e, dict) else None
-            if declared in (None, []) and tokenizer is None:
-                continue
-            if tokenizer is None:
-                unverified.append((label, pid))
-            elif not all(isinstance(k, int) and not isinstance(k, bool) for k in declared or []) or sorted(declared or []) != \
-                    agreement_core.expected_skipped(tokenizer, stops, full[:len(ids)]):
-                out.append(f"the {label}'s skipped positions for prompt {pid!r} are not the ones the served tokenizer and stage 1's reference "
-                           "give (positions are skipped only for a token the server's text cannot give back)")
+            if declared is not None and not isinstance(declared, list):
+                out.append(f"the {label}'s skipped value for prompt {pid!r} must be a list of positions, got {type(declared).__name__}")
+            elif declared:
+                if not all(isinstance(k, int) and not isinstance(k, bool) for k in declared):
+                    out.append(f"the {label}'s skipped positions for prompt {pid!r} must be whole numbers")
+                else:
+                    to_check.append((label, pid, sorted(declared), full[:len(ids)]))
 
     check(record.get("entries"), "agreement set")
     control = record.get("control")
@@ -1071,8 +1096,15 @@ def _agreement_binding_reasons(record, run_dir, model_dir=None) -> list[str]:
         problem = prompt_suite.control_identity_problem(_nearest_model_of(run_dir), control.get("model_id"))
         if problem:
             out.append(f"the agreement control is not a control of the nearest model: {problem}")
-    for label, pid in unverified[:3]:
-        out.append(f"the {label}'s skipped positions for prompt {pid!r} cannot be checked: {why}")
+    if to_check:
+        masks, why = _expected_masks(run_dir, model_dir, [t[3] for t in to_check])
+        if masks is None:
+            out.append(f"the skipped positions of the agreement record cannot be checked: {why}")
+        else:
+            for (label, pid, declared, _), want in zip(to_check, masks):
+                if declared != want:
+                    out.append(f"the {label}'s skipped positions for prompt {pid!r} are not the ones the served tokenizer and stage 1's reference "
+                               "give (positions are skipped only for a token the server's text cannot give back)")
     return out
 
 
