@@ -31,7 +31,7 @@ Eight users sampled: about 250 tok/s total on both builds.
 
 - The "needs a rejection sampler wired into the drafter decoder" blocker in the 2026-10-27 run log has a published working design, and its rule is simple because the drafter proposes by argmax. It fits any drafter that proposes by argmax. A drafter that samples needs the draft probabilities as well (the second switch above).
 - What a port to our own models needs: verify rows that expose the top 32 candidates (a device kernel, `RowsTopK`), the host sampler (portable, about 330 lines), a commit mapping for the model's own state, and the plugin side (parameter routing and the gate).
-- The models in issue 107's list (Clef, AREX-2, CJK-trim) have no argmax drafter of this kind. Their drafter is the MTP head the AREX-2 graft supplies, which also proposes by argmax. The rule would apply there if the verify rows expose the candidates.
+- Of the models in issue 107's list, Clef and CJK-trim ship with the drafter off, so they have nothing to verify against. AREX-2 with the grafted `mtp.*` tensors has an MTP head. The header of `spec_sampling.py` describes exactly that case (an MTP drafter's argmax drafts), but whether the AREX-2 build proposes by argmax was not checked.
 - The probe verdicts of PR 109 (`sampled-ignored`, `sampled-full-speed`) give a way to tell a build with this feature from one without it. cp3 and cp4 should read `sampled-full-speed`. We have not run the probe against them.
 
 ## What this means for issue 63
