@@ -1,3 +1,4 @@
 target = "0.9.100"
 summary = "spawn_checked stops helpers that a killed command started in a session of its own, through a tag in the command's environment, and names them in the command's output"
 kind = "fix"
+pr = 431
