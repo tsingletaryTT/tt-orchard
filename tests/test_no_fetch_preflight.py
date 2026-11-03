@@ -93,3 +93,9 @@ def test_the_bringup_command_passes_no_fetch_to_the_preflight(conf, tmp_path):
     assert "disk-full" not in out and "will be downloaded" not in out, out
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=world(tmp_path))
     assert "disk-full" in out, out
+
+
+def test_a_real_run_with_no_fetch_never_downloads_the_base(conf, tmp_path):
+    """Review of PR 410: the disk row drops the base download under --no-fetch, so the command must not fetch it either."""
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--no-fetch"], sig=world(tmp_path))
+    assert rec.fetched == [] and code != 0 and rec.argv is None

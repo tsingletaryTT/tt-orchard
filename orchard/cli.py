@@ -1289,6 +1289,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         print(f"{style.icon('🍂')}the earlier run read a snapshot with no weights; set aside as {aside}", file=out)
     base_data = next(c for c in checks if c.name == "base").data or {}
     base_hub, base_snapshot = None, base_data.get("snapshot")
+    if base_data.get("needs_fetch") and args.no_fetch and not args.dry_run:
+        return _refuse(f"--no-fetch was given and the base model {base_data['base']} is not in {hf_home}; stage 0 compares against it")
     if base_data.get("needs_fetch"):
         base_hub, why = sig.hub_info(base_data["base"])
         if base_hub is None:
