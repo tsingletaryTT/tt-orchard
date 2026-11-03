@@ -1,0 +1,3 @@
+target = "0.9.101"
+summary = "The tiny Qwen4 rehearsal checkpoint gets width presets (tiny and 27b), width overrides, a size estimate and a size limit."
+kind = "feature"
