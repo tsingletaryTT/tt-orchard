@@ -1,0 +1,71 @@
+{
+ "can": "ace-step-1.5-turbo-blackhole",
+ "repo": "episod/ace-step-1.5-turbo-blackhole",
+ "port": 20140,
+ "ready_timeout_s": 1800,
+ "tt_visible_devices": "0000:01:00.0,0000:02:00.0",
+ "serve_pid": 3999924,
+ "ready": true,
+ "start_to_ready_s": 855.5,
+ "loadavg_at_ready": [
+  57.58740234375,
+  58.05078125,
+  68.9609375
+ ],
+ "requests": [
+  {
+   "label": "first 10 s",
+   "asked_s": 10,
+   "latency_s": 356.04,
+   "http": 200,
+   "x_timings": null,
+   "bytes": 3840088,
+   "codec": "pcm_f32le",
+   "sample_rate": 48000,
+   "channels": 2,
+   "duration_s": 10.0,
+   "peak": 0.8913,
+   "windows_above_-40dBFS": 0.89,
+   "finite": true,
+   "rtf_latency_per_audio_s": 35.604
+  },
+  {
+   "label": "30 s run 1",
+   "asked_s": 30,
+   "latency_s": 5.905,
+   "http": 200,
+   "x_timings": null,
+   "bytes": 11520088,
+   "codec": "pcm_f32le",
+   "sample_rate": 48000,
+   "channels": 2,
+   "duration_s": 30.0,
+   "peak": 0.8913,
+   "windows_above_-40dBFS": 0.82,
+   "finite": true,
+   "rtf_latency_per_audio_s": 0.197
+  },
+  {
+   "label": "30 s run 2",
+   "asked_s": 30,
+   "latency_s": 4.433,
+   "http": 200,
+   "x_timings": null,
+   "bytes": 11520088,
+   "codec": "pcm_f32le",
+   "sample_rate": 48000,
+   "channels": 2,
+   "duration_s": 30.0,
+   "peak": 0.8913,
+   "windows_above_-40dBFS": 0.82,
+   "finite": true,
+   "rtf_latency_per_audio_s": 0.148
+  }
+ ],
+ "loadavg_at_end": [
+  69.69677734375,
+  67.94873046875,
+  69.49609375
+ ],
+ "stop": "stopped on SIGTERM"
+}

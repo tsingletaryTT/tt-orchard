@@ -1,0 +1,44 @@
+{
+ "can": "stable-audio-3-small-music-blackhole",
+ "repo": "episod/stable-audio-3-small-music-blackhole",
+ "port": 20170,
+ "ready_timeout_s": 1800,
+ "tt_visible_devices": "0000:01:00.0,0000:02:00.0",
+ "serve_pid": 512945,
+ "serve_exit": 3,
+ "ready": false,
+ "start_to_ready_s": 24.0,
+ "loadavg_at_ready": [
+  68.02294921875,
+  74.50537109375,
+  72.568359375
+ ],
+ "loadavg_at_end": [
+  68.02294921875,
+  74.50537109375,
+  72.568359375
+ ],
+ "stop": "already exited 3",
+ "log_last_60_lines": [
+  "[vLLM self-contained: episod/stable-audio-3-small-music-blackhole via <root>/stable-audio-3-small-music-blackhole/models/episod/stable-audio-3-small-music-blackhole/run.sh]",
+  "warning: SFPI at /opt/tenstorrent/sfpi is not the version TTNN declares (want 7.85.0[1010], found: riscv-tt-elf-g++ (tenstorrent/sfpi:7.89.0[1050]) 15.1.0); continuing. Set TT_MODEL_STRICT_SFPI=1 to make this fatal.",
+  "INFO:     Started server process [513057]",
+  "INFO:     Waiting for application startup.",
+  "",
+  "Fetching 17 files:   0%|          | 0/17 [00:00<?, ?it/s]",
+  "Fetching 17 files: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 17/17 [00:00<00:00, 548.82it/s]",
+  "<root>/stable-audio-3-small-music-blackhole/models/episod/stable-audio-3-small-music-blackhole/venv/lib/python3.12/site-packages/torch/nn/utils/weight_norm.py:143: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.",
+  "  WeightNorm.apply(module, name, dim)",
+  "ERROR:    OSError: You are trying to access a gated repo.",
+  "Make sure to have access to it at https://huggingface.co/stabilityai/stable-audio-3-small-music.",
+  "401 Client Error. (Request ID: <id>)",
+  "",
+  "Cannot access gated repo for url https://huggingface.co/stabilityai/stable-audio-3-small-music/resolve/8bdfb53c6b0fbc62113cd571fd37373efe15fa14/t5gemma-b-b-ul2/added_tokens.json.",
+  "Access to model stabilityai/stable-audio-3-small-music is restricted. You must have access to it and be authenticated to access it. Please log in.",
+  "ERROR:    Application startup failed. Exiting.",
+  "No module named 'flash_attn'",
+  "flash_attn not installed, disabling Flash Attention",
+  "No module named 'flash_attn'",
+  "flash_attn varlen/bert_padding not available, disabling varlen attention"
+ ]
+}

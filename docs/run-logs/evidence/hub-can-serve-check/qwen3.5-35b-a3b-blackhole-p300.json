@@ -1,0 +1,62 @@
+{
+ "can": "qwen3.5-35b-a3b-blackhole-p300",
+ "repo": "episod/qwen3.5-35b-a3b-blackhole-p300",
+ "port": 20160,
+ "ready_timeout_s": 6000,
+ "tt_visible_devices": "0000:01:00.0,0000:02:00.0",
+ "serve_pid": 1478649,
+ "ready": true,
+ "start_to_ready_s": 4552.7,
+ "loadavg_at_ready": [
+  11.509765625,
+  10.169921875,
+  18.93017578125
+ ],
+ "first_request": {
+  "latency_s": 0.927,
+  "http": 200,
+  "reply": "The three primary colors depend on the context in which they are used:\n\n1.  **In Art and Traditional Color Theory (Subtractive Color Model):**\n    The primary colors are **Red**, **Yellow**, and **Blue**. These are used to create all other colors in painting and pigments.\n\n2.  **In Light and Digital Screens (Additive Color Model):**\n    The primary colors are **Red**, **Green**, and **Blue** (often abbreviated",
+  "finish": "length",
+  "usage": {
+   "prompt_tokens": 18,
+   "total_tokens": 114,
+   "completion_tokens": 96,
+   "prompt_tokens_details": null
+  },
+  "timings": null
+ },
+ "stream_runs": [
+  {
+   "latency_s": 0.628,
+   "ttft_s": 0.127,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 125.76,
+   "text": "Mountain ranges primarily form through the movement of Earth's tectonic plates. When these massive slabs of rock collide, the immense pressure causes the crust to buckle and fold upward, creating towering peaks. This process, known as compressional orogeny, typically occurs at convergent plate boundaries, such as the collision between"
+  },
+  {
+   "latency_s": 0.648,
+   "ttft_s": 0.146,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 125.66,
+   "text": "Mountain ranges primarily form through the collision of Earth's tectonic plates, a process driven by the movement of the planet's lithosphere. When two continental plates converge, neither can easily subduct beneath the other due to their buoyant density. Instead, the immense compressional forces cause the crust to buckle, fold,"
+  },
+  {
+   "latency_s": 0.64,
+   "ttft_s": 0.129,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 123.31,
+   "text": "Mountain ranges primarily form through the tectonic plate collisions occurring deep within Earth's crust. When two continental plates converge, they cannot subduct beneath one another due to their similar low densities. Instead, the immense pressure forces the crust to buckle, fold, and thrust upward over millions of years. This process, known as"
+  }
+ ],
+ "decode_tps_median": 125.66,
+ "card_decode_tps": 125.75,
+ "loadavg_at_end": [
+  11.70947265625,
+  10.23388671875,
+  18.9033203125
+ ],
+ "stop": "stopped on SIGTERM"
+}
