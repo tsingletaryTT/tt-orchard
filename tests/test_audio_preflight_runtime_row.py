@@ -87,3 +87,15 @@ def test_run_preflight_passes_the_runtime_locations_to_the_base_row(tmp_path):
     by = {x.name: x for x in pf.run_preflight(c, MODEL, accept_credentials=True, signals=world(local=snaps))}
     assert "audio runtime" in by["base"].detail and "audio-path-unbuilt" not in by["base"].detail
     assert str(tmp_path / "empty-home" / "orchard-venvs") in by["base"].detail and "Missing now" in by["base"].detail
+
+
+# Issue 264: third-party model code can rewrite files inside its checkpoint directory. The audio base row says so for every audio model.
+
+def test_every_audio_base_row_carries_the_checkpoint_directory_note(tmp_path):
+    (tmp_path / "second").mkdir()
+    served = served_row(tmp_path)
+    unbuilt = audio_base(base_info=(base_hub(gated=False), None), local={MODEL: snap(tmp_path / "hf2", MODEL, REV, names=AUDIO_FILES)},
+                         audio_paths=audio_paths(tmp_path / "second"))
+    for c in (served, unbuilt):
+        assert pf.CHECKPOINT_NOTE in c.detail
+    assert "private" in pf.CHECKPOINT_NOTE and "Hugging Face cache" in pf.CHECKPOINT_NOTE and "264" in pf.CHECKPOINT_NOTE

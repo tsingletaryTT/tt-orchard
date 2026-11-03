@@ -526,6 +526,13 @@ def _stock_check(report, stock, model_id: str = "", hub=None, local_snapshot=lam
     return None
 
 
+# Said on every audio base row (issue 264). ACE-Step's handler copies its own model code into the checkpoint directory it is given, and a
+# bring-up run once did that through a link into the Hugging Face cache and replaced two cached blobs. Any third-party server or handler
+# code run against a cached model has the same exposure, so the row states the rule where an operator reads it before the run.
+CHECKPOINT_NOTE = ("Third-party model code can write into the checkpoint directory it is given. Give it a private tree (small files copied, "
+                   "weight files linked), never a link to a Hugging Face cache snapshot, or it can replace cached blobs (issue 264).")
+
+
 def _audio_runtime_note(model_id: str, local_snapshot: Callable, audio_paths) -> tuple[bool, str]:
     """(serves, sentence) for the run's path after stage 0, answered the way the supervisor will answer it (`_select_audio_runtime`): the
     planners must know the repository, the model's local snapshot must exist, and `audio_runtime.runtime_problems` must find nothing. When
@@ -623,7 +630,7 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
     _, runtime_note = _audio_runtime_note(model_id, local_snapshot, audio_paths)
     return Check("base", WARN, f"base {base} ({which}). {model_id} is an audio model ({audio}). No installed bundle is needed: stage 0 compares "
                  "the two repositories directly, and no bundle, container package or tt-metal model serves an audio model on a chip. "
-                 f"{runtime_note} The base snapshot is still read by stage 0: {where}.{gated_note}", data=data)
+                 f"{runtime_note} The base snapshot is still read by stage 0: {where}.{gated_note} {CHECKPOINT_NOTE}", data=data)
 
 
 def _text_runtime_check(model_id: str, base_override: str | None, *, allowed: bool = True) -> Check | None:

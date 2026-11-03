@@ -507,6 +507,11 @@ def child_env(home_run_dir, adir=None, *, hardware: bool, source=None) -> dict:
     if hardware:
         for k in DEVICE_VARS:
             env.pop(k, None)
+        # The wrapper of orchard/hwtool.py picks its chip from this variable (probe_chip). The allow-list above drops it, so the
+        # validated value is put back: without it the agent's hardware_check leased chip 1 beside the coder (issue 218). A value
+        # that is not a plain number raises ValueError here, before anything is launched, and is never copied.
+        if "ORCHARD_PROBE_CHIP" in source:
+            env["ORCHARD_PROBE_CHIP"] = hwtool.probe_chip(source)
     return env
 
 
