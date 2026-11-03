@@ -438,6 +438,9 @@ def _correctness_failures(report, run_dir) -> list[str]:
     out = stages._swap_reasons(draft if isinstance(draft, dict) else {})
     if run_dir is not None and isinstance(report, dict):
         out += stages._suite_reasons(report, run_dir)
+        # The variant's 32-token numbers are recomputed from its raw replies as the stage 2 gate does (issue 433): a choice made on the draft's
+        # top1_agreement alone could be moved by editing the report.
+        out += stages._token_check_reasons(report, [], run_dir)
     return out
 
 

@@ -43,7 +43,7 @@ from typing import Callable
 from orchard import audio_decision, audio_facts, audio_runtime, full_port, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe
+from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe, token_check
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -727,6 +727,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
+    reasons += _token_check_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", [("result.json", d)], run_dir)
     reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
     reasons += sampling_choice.decision_problems(stage_dir, run_dir)       # the sampling choice (issue 107), when stage 2 made one
     reasons += vocab_trim_problems(stage_dir, run_dir)
@@ -788,6 +789,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
+    reasons += _token_check_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", [("result.json", d)], run_dir)
     reasons += decision_problems(stage_dir, run_dir)
     reasons += sampling_choice.decision_problems(stage_dir, run_dir)
     delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
@@ -947,9 +949,9 @@ def _shipped_agreement_ids() -> list[str] | None:
     return ids if ids and all(isinstance(i, str) for i in ids) else None
 
 
-def _ledger_reference_sha(run_dir) -> str | None:
-    """The sha256 of stage 1's agreement reference file as the supervisor recorded it in the ledger before any stage 2 test ran, or None
-    when no such entry exists (or the ledger cannot be read). The last entry wins."""
+def _ledger_decision_sha(run_dir, decision: str) -> str | None:
+    """The sha256 the supervisor recorded in the ledger under the decision `decision` (an evidence file it hashed before any stage 2 test
+    ran), or None when no such entry exists or the ledger cannot be read. The last entry wins."""
     from orchard.ledger import LedgerCorrupt, read_entries
     try:
         entries = read_entries(Path(run_dir) / "ledger.jsonl")
@@ -958,10 +960,16 @@ def _ledger_reference_sha(run_dir) -> str | None:
     found = None
     for e in entries:
         data = e.get("data")
-        if e.get("event") == "decision" and isinstance(data, dict) and data.get("decision") == AGREEMENT_LEDGER_DECISION \
+        if e.get("event") == "decision" and isinstance(data, dict) and data.get("decision") == decision \
                 and isinstance(data.get("sha256"), str):
             found = data["sha256"]
     return found
+
+
+def _ledger_reference_sha(run_dir) -> str | None:
+    """The sha256 of stage 1's agreement reference file as the supervisor recorded it in the ledger before any stage 2 test ran, or None
+    when no such entry exists (or the ledger cannot be read). The last entry wins."""
+    return _ledger_decision_sha(run_dir, AGREEMENT_LEDGER_DECISION)
 
 
 def agreement_reference_record(run_dir) -> dict | None:
@@ -1055,6 +1063,76 @@ def _suite_reasons(report, run_dir, where: str = "", agreement_requested: bool =
             + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons])
 
 
+# Stage 1's CPU reference ids, the tokens the 32-token check feeds the server one at a time (issue 433). The supervisor puts the file's sha256
+# in the ledger when it drafts stage 2's config, before any stage 2 test; the gate compares the file with it and recomputes the check.
+REFERENCE_IDS_PATH = ("stages", "1", "evidence", "reference", "generated-ids.json")
+REFERENCE_IDS_MAX_BYTES = 8 * 1024 * 1024
+REFERENCE_IDS_LEDGER_DECISION = "stage 1 reference ids recorded"      # Supervisor._draft_stage_files, beside AGREEMENT_LEDGER_DECISION
+
+
+def reference_ids_record(run_dir) -> dict | None:
+    """{path, sha256} of stage 1's `generated-ids.json` when it exists and can be hashed, else None. The supervisor calls this when it drafts
+    stage 2's config, and the sha256 goes into the ledger as the value the gate compares the file with later."""
+    path = Path(run_dir).joinpath(*REFERENCE_IDS_PATH)
+    if not os.path.lexists(path):
+        return None
+    try:
+        return evidence_record(run_dir, path)
+    except safeio.SafeReadError:
+        return None
+
+
+def _reference_ids(run_dir) -> tuple[list | None, list[str], bool]:
+    """(ids, reasons, bound) for the 32-token recompute: stage 1's generated ids, read through safeio and checked against the ledger's hash.
+    `bound` says the ledger holds the file's hash, so the supervisor governed the run from its stage 2 draft and the file cannot have been
+    swapped since. (None, [], False) when there is nothing to compare with: no file and no ledger record (a run from before this check, or a
+    stage 2 without a stage 1 reference), which the gate judges as before. A file the ledger recorded and that is now missing, unreadable or
+    different is a reason; so is a file that is not a list of ids."""
+    path = Path(run_dir).joinpath(*REFERENCE_IDS_PATH)
+    recorded = _ledger_decision_sha(run_dir, REFERENCE_IDS_LEDGER_DECISION)
+    name = REFERENCE_IDS_PATH[-1]
+    bound = recorded is not None
+    if not os.path.lexists(path):
+        if not bound:
+            return None, [], False
+        return None, [f"stage 1's {name} is missing, though the supervisor recorded it in the ledger, so the 32-token check cannot be recomputed"], True
+    try:
+        raw = safeio.read_bytes(path, max_bytes=REFERENCE_IDS_MAX_BYTES)
+        data = safeio.parse_json_bytes(raw, max_bytes=REFERENCE_IDS_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return None, [f"stage 1's {name} cannot be read, so the 32-token check cannot be recomputed: {exc.reason}"], bound
+    reasons = []
+    if recorded is not None and hashlib.sha256(raw).hexdigest() != recorded:
+        reasons.append(f"stage 1's {name} is not the file the supervisor recorded in the ledger (its sha256 differs), so the 32-token check "
+                       "cannot be recomputed from it")
+    ids = data.get("generated_ids") if isinstance(data, dict) else None
+    if not isinstance(ids, list):
+        return None, reasons + [f"stage 1's {name} has no generated_ids list"], bound
+    return (None if reasons else ids), reasons, bound
+
+
+def _token_check_reasons(report, results, run_dir, where: str = "") -> list[str]:
+    """The reasons one swap-check.json's 32-token numbers, and the results that repeat them (`results`: (label, object) pairs), are not what
+    its raw `teacher_forced` records give against stage 1's reference ids (issue 433, orchard/token_check.py). Empty when the report is not an
+    object (the other checks say so) or when the run has no stage 1 reference to compare with."""
+    if not isinstance(report, dict):
+        return []
+    ids, reasons, bound = _reference_ids(run_dir)
+    if ids is None:
+        return [where + r for r in reasons]
+    return [where + r for r in reasons] + token_check.problems(report, results, ids, where, require_records=bound)
+
+
+def _token_check_reasons_in(path, results, run_dir, where: str = "") -> list[str]:
+    """`_token_check_reasons` for the swap-check.json at `path`. A file that is missing or that the safe reader refuses has none here:
+    `_suite_reasons_in` already says why such a file fails, and a result with no swap check is judged as before."""
+    try:
+        report = _safe_json(path)
+    except safeio.SafeReadError:
+        return []
+    return _token_check_reasons(report, results, run_dir, where)
+
+
 def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
     """`_suite_reasons` for the swap-check.json at `path`. A file that is missing has none, and neither has a JSON value that
     is not an object: the other checks of the gate already say what they need of those. A file that is there and that the safe
@@ -1132,6 +1210,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
                            f"result_draft's in {swap}")
         if isinstance(report, dict):
             reasons += _suite_reasons(report, run_dir, f"{where}: ")
+            reasons += _token_check_reasons(report, [("the configuration's result", c)], run_dir, f"{where}: ")
         reasons += _graft_reasons(stage_dir, run_dir, n, where)
         reasons += _sampling_reasons(report, run_dir, where)
         if trim is not None:

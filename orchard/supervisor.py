@@ -155,7 +155,8 @@ from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, REFERENCE_IDS_LEDGER_DECISION, agreement_reference_record,
+                            reference_ids_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
@@ -2534,6 +2535,11 @@ class Supervisor:
         if reference is not None:
             cfg["agreement_set"] = True
             self.ledger.append("decision", spec.number, decision=AGREEMENT_LEDGER_DECISION, **reference)
+        # The 32-token check's reference ids get the same treatment (issue 433): their hash goes into the ledger before any stage 2 test, and the
+        # gate recomputes the check from the raw replies and these ids, so a swap-check.json and a result.json edited together are caught.
+        ids_record = reference_ids_record(self.run_dir)
+        if ids_record is not None:
+            self.ledger.append("decision", spec.number, decision=REFERENCE_IDS_LEDGER_DECISION, **ids_record)
         target = stage_dir / "swap_config.json"
         _put(target, json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"

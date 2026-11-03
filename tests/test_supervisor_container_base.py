@@ -81,6 +81,34 @@ def test_stage_2_uses_the_agreement_set_when_stage_1_wrote_its_reference_and_rec
         r.close()
 
 
+def test_stage_2_records_the_hash_of_stage_1s_reference_ids_before_any_test(tmp_path):
+    """Issue 433: the gate recomputes the 32-token check from stage 1's generated ids, which the ledger binds by hash before the test."""
+    r = container_rig(tmp_path, bundle=True)
+    ids = r.run_dir / "stages" / "1" / "evidence" / "reference" / "generated-ids.json"
+    stage_1 = {**FILES[(1, "run")], "evidence/reference/generated-ids.json": '{"generated_ids": [1, 2, 3]}'}
+    r.script = lambda request: bringup(request, overrides={(1, "run"): stage_1})
+    try:
+        try:
+            r.run()
+        except AssertionError:
+            pass                      # the rig's fake test writes no raw replies, so the gate may now refuse stage 2: the record is what this reads
+        recs = [e for e in r.entries() if e["data"].get("decision") == "stage 1 reference ids recorded"]
+        assert recs and all(e["stage"] == 2 and e["data"]["sha256"] == hashlib.sha256(ids.read_bytes()).hexdigest() for e in recs)
+        drafted_at = next(e["seq"] for e in r.entries() if e["data"].get("decision") == "swap config drafted")
+        assert min(e["seq"] for e in recs) < drafted_at
+    finally:
+        r.close()
+
+
+def test_stage_2_records_no_reference_ids_hash_when_stage_1_wrote_none(tmp_path):
+    r = container_rig(tmp_path, bundle=True)
+    try:
+        assert r.run() == EXIT_READY
+        assert not [e for e in r.entries() if e["data"].get("decision") == "stage 1 reference ids recorded"]
+    finally:
+        r.close()
+
+
 def test_stage_2_does_not_use_the_agreement_set_without_the_reference(tmp_path):
     r = container_rig(tmp_path, bundle=True)
     try:
