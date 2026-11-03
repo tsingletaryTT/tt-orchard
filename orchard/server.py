@@ -51,6 +51,22 @@ ALREADY_RUNNING = re.compile(r"already running", re.IGNORECASE)
 IN_USE = re.compile(r"already in use by another container", re.IGNORECASE)
 
 
+# The refusal's own words, which the block classifier reads to tell a container that holds the chips from a chip that is at fault
+# (orchard/blocked.py `CONTAINER_HOLDS_MARK`; tests/test_coder_cache_round3.py checks that the two agree). The message starts with them, so
+# the diagnostic that follows can be cut or can miss the line without losing the classification.
+IN_USE_MARK = "in use by another container"
+CHIPS_HELD_WINDOW = 200       # characters kept on each side of the refusal in the output that held it
+
+
+def chips_held_message(returncode: int, stderr: str, stdout: str) -> str:
+    """The text of a `ServerChipsHeld`: the fixed marker first, then the stretch of output around the refusal (found in either stream, in any
+    case), so a long warning in the other stream, or a refusal late in a long line, still gives an exact and bounded diagnostic."""
+    both = f"{stderr}\n{stdout}"
+    found = IN_USE.search(both)
+    around = both[max(0, found.start() - CHIPS_HELD_WINDOW):found.end() + CHIPS_HELD_WINDOW] if found else both[:CHIPS_HELD_WINDOW]
+    return f"chips already {IN_USE_MARK} (tt-model serve exited {returncode}): {' '.join(around.split())}"
+
+
 class ServerError(Exception):
     """The server could not be started, or exited."""
 
@@ -263,10 +279,10 @@ class ServerControl:
                     raise ServerNotOwned(
                         f"{s.container_name} already runs and another process owns it; this run did "
                         f"not start it and will not stop it ({text})")
-                if IN_USE.search(res.stderr + res.stdout):
+                if IN_USE.search(res.stderr + "\n" + res.stdout):
                     # Someone's container holds the chips, so this start launched nothing. Not ours to stop or to reset under.
                     self.owned = False
-                    raise ServerChipsHeld(f"tt-model serve exited {res.returncode}: {text}")
+                    raise ServerChipsHeld(chips_held_message(res.returncode, res.stderr, res.stdout))
                 raise ServerError(f"tt-model serve exited {res.returncode}: "
                                   f"{(res.stderr.strip() or res.stdout.strip())[:500]}")
         else:

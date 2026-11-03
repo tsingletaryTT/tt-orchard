@@ -42,8 +42,11 @@ CONTAINER_HOLDS_MARK = "in use by another container"
 
 
 def retryable(code: str, reason: str = "") -> bool:
-    """Whether `tt-orchard bringup` may retry this block by itself."""
-    return code in AUTO_RETRY and OFF_BUS_MARK not in (reason or "") and CONTAINER_HOLDS_MARK not in (reason or "")
+    """Whether `tt-orchard bringup` may retry this block by itself. The marks are matched without regard to case (the classifier below
+    reads the lower-cased text, and a reason already in a ledger or in blocked.json may hold either), and a reason that is not text is read
+    as its string form."""
+    text = "" if reason is None else str(reason).lower()
+    return code in AUTO_RETRY and OFF_BUS_MARK.lower() not in text and CONTAINER_HOLDS_MARK.lower() not in text
 
 
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.

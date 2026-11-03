@@ -344,6 +344,22 @@ def check_coder_cache(*, cache: Path, model_id: str, present: bool, free_gb: flo
                  f"in that cache first, or point HF_HOME at the cache that has it{note}")
 
 
+def coder_download_counted(model: str, *, model_id: str, base_id: str | None, target_local: bool, base_gb: float, cache: Path,
+                           hf_home: Path) -> bool:
+    """Whether the disk row already budgets a download of the coder's model into the cache the coder mounts (issue 417).
+
+    The disk row counts the target's download only when the target is not local, and the base's only when the base needs a download whose
+    size is known (`base_gb` above zero). The command downloads into the run's hf_home. So the coder's download is the same one only when
+    its model is the target with no local snapshot, or the base with a counted download, and the coder mounts that same directory. A model
+    the run does not download (a local target that the coder's stricter snapshot check still rejects, a base that is already cached) has
+    nothing in the disk row, and the coder row has to check the disk itself."""
+    if not _same_dir(cache, hf_home):
+        return False
+    if model == model_id and not target_local:
+        return True
+    return base_id is not None and model == base_id and base_gb > 0.0
+
+
 def check_coder_container(*, name: str, found: list | None, resuming: bool = False) -> Check:
     """A container already named like the coder's blocks `tt-model serve` ("already in use" or "already running"). `found` is a list of
     (name, state) from `docker ps -a`, or None when docker could not be asked. A stopped one is a leftover of an aborted run; `docker rm`
@@ -1206,8 +1222,10 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                 present = bool(s.coder_snapshot(cache, model))
                 base_id = (base_check.data or {}).get("base")
                 # The target and the base download into the run's hf_home. The coder's download is the same one only when its model is one
-                # of them and the cache it mounts is that directory; with another cache it needs a download of its own.
-                shared = model in (model_id, base_id) and _same_dir(cache, hf_home_for(cfg))
+                # of them, the disk row budgets that download (a local target and a cached base have none) and the cache it mounts is that
+                # directory; otherwise it needs a download of its own.
+                shared = coder_download_counted(model, model_id=model_id, base_id=base_id, target_local=local, base_gb=base_gb, cache=cache,
+                                                hf_home=hf_home_for(cfg))
                 # What the command downloads onto this disk before the coder boots: the target and the base, each only when missing. It
                 # fetches them after the preflight, so a disk that holds each download alone can still be short for all three.
                 planned_gb = 0.0

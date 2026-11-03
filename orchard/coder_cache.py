@@ -35,29 +35,38 @@ def effective_cache(environ: Mapping[str, str] | None = None, home: Path | None 
     return (home if home is not None else Path.home()) / ".cache" / "huggingface"
 
 
-_SHARD = re.compile(r"^(?P<stem>.+)-(?P<n>\d{5})-of-(?P<total>\d{5})\.safetensors$")
+_SHARD = re.compile(r"^(?P<stem>.+)-(?P<n>\d{5})-of-(?P<total>\d{5})\.(?P<ext>safetensors|bin)$")
 
 
 def shard_problem(snap: Path) -> str | None:
     """Why a snapshot directory's weights cannot be all there, or None. A snapshot that holds a config and some shards passes
     `preflight.snapshot_complete` when the weight index has not been downloaded yet, because there is no index to read. A sharded model
-    (files named `<stem>-00001-of-00004.safetensors`) needs every shard of each stem and its `<stem>.safetensors.index.json`. This reads
-    names only, in the snapshot's top directory. A single-file model has nothing to check here."""
+    (files named `<stem>-00001-of-00004.safetensors`, or `<stem>-00001-of-00004.bin` for PyTorch weights) needs every shard of each stem
+    and its index (`<stem>.safetensors.index.json`, `<stem>.bin.index.json`). A repository that carries both formats loads from either, so
+    the snapshot passes when one format is complete and fails only when every format that is present is partial. This reads names only, in
+    the snapshot's top directory. A single-file model has nothing to check here."""
     try:
         names = [e.name for e in os.scandir(snap)]
     except OSError as exc:
         return f"the snapshot directory cannot be read ({type(exc).__name__})"
-    groups: dict[tuple[str, int], set[int]] = {}
+    groups: dict[tuple[str, str, int], set[int]] = {}
     for name in names:
         m = _SHARD.match(name)
         if m:
-            groups.setdefault((m["stem"], int(m["total"])), set()).add(int(m["n"]))
-    for (stem, total), have in sorted(groups.items()):
-        if f"{stem}.safetensors.index.json" not in names:
-            return f"the weight index {stem}.safetensors.index.json is missing ({len(have)} of {total} shards are there)"
-        if have != set(range(1, total + 1)):
-            return f"{len(have)} of {total} {stem} shards are there"
-    return None
+            groups.setdefault((m["ext"], m["stem"], int(m["total"])), set()).add(int(m["n"]))
+    problems: dict[str, str] = {}              # the first thing wrong with each format that is present
+    for (ext, stem, total), have in sorted(groups.items()):
+        if ext in problems:
+            continue
+        index = f"{stem}.{ext}.index.json"
+        if index not in names:
+            problems[ext] = f"the weight index {index} is missing ({len(have)} of {total} shards are there)"
+        elif have != set(range(1, total + 1)):
+            problems[ext] = f"{len(have)} of {total} {stem} shards are there"
+    present = {ext for ext, _stem, _total in groups}
+    if not problems or len(problems) < len(present):      # no sharded weights, or one format has all its shards and its index
+        return None
+    return problems[sorted(problems)[0]]
 
 
 def partial_download_bytes(cache: Path) -> int:
