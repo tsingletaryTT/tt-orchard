@@ -27,6 +27,8 @@
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--stub-data-dependent] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
+    tt-orchard profile [--out DIR] [--top N] [--chips N] [--timeout S] [--exclude BOARD] [--wait-s S] [--gozer PATH] [--perf-report PATH] -- PYTHON [-m MODULE | SCRIPT] [ARGS...]
+    tt-orchard profile --from DIR [--out DIR] [--top N] [--perf-report PATH]
     tt-orchard kernel-probe (--op NAME | --ladder [--rungs A,B] [--rung-wall OP=S] [--max-hours H]) [--wall-s S] [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
                             [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
@@ -488,6 +490,10 @@ def _parser() -> argparse.ArgumentParser:
                     help="forget the stored best for these servers first (after changing a server on purpose)")
     cs.add_argument("--baseline-file", help="where the best speeds are kept (default ~/.cache/tt-orchard/speed-baseline.json)")
     cs.add_argument("--json", action="store_true", help="print one JSON list instead of lines")
+    from orchard import profile_summary as _profile
+    sub.add_parser("profile", parents=[common, _profile.parser(add_help=False)],
+                   help="run a command under the tt-metal profiler on a leased board and write a bounded profile-summary.json "
+                        "(or summarise an existing profile with --from; no board needed)")
     from orchard.defaults import KERNEL_PROBE_OPS
     kp = sub.add_parser("kernel-probe", parents=[common],
                         help="ask the running coder to write a tt-lang kernel for one op, N times, and check each "
@@ -1141,6 +1147,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return residency.run(args, out=out)
     if args.cmd == "inventory":
         return _inventory(args, env, home, out)
+    if args.cmd == "profile":
+        from orchard import profile_summary
+        return profile_summary.main(args, out=out)
     if args.cmd == "kernel-probe":
         return _kernel_probe(args, env, home, out)
     if args.cmd == "coder-speed":
