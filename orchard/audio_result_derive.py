@@ -139,9 +139,9 @@ def main(argv=None) -> int:
         return 2
     ref_dir = run / base["reference_runs"]["reference"]["dir"]
     facts = st.run_facts(chip_dir.parent, chip_dir.name)
-    with ar.load_run(ref_dir) as ref, ar.load_run(chip_dir) as cand:
-        report = ar.compare_runs(ref, cand, cross_precision=True)
     floor = audio_bars.load_floor(run / "stages" / "1")           # the floor stage 2 used: the same bars judge the later run
+    with ar.load_run(ref_dir) as ref, ar.load_run(chip_dir) as cand:
+        report = ar.compare_runs(ref, cand, floor.bars, cross_precision=True)      # the full report uses those bars too (None: the provisional ones)
     agreement = st.compare(ref_dir, chip_dir, floor=floor)
     try:
         result = derive(base, chip_run=facts, agreement=agreement, base_sha256=hashlib.sha256(raw).hexdigest(), chip_label=chip_dir.name, floor=floor)

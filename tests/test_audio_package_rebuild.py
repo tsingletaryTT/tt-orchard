@@ -544,9 +544,11 @@ def test_the_derive_command_compares_with_the_floor_of_stage_1(tmp_path, monkeyp
         def __enter__(self): return self
         def __exit__(self, *a): return False
     monkeypatch.setattr(ar, "load_run", lambda d: Run())
-    monkeypatch.setattr(ar, "compare_runs", lambda *a, **k: {})
+    monkeypatch.setattr(ar, "compare_runs", lambda ref, cand, bars=None, **k: {"bars_used": bars})
     out = tmp_path / "derived.json"
-    assert rd.main([str(run), str(chip_dir), str(out)]) == 0
+    report = tmp_path / "report.json"
+    assert rd.main([str(run), str(chip_dir), str(out), "--agreement-report-out", str(report)]) == 0
+    assert json.loads(report.read_text()) == {"bars_used": {"latent": {}}}                 # the full report uses the floor's bars, as the result does
     assert Path(seen["dir"]) == run / "stages" / "1" and seen["floor"].sha256 == FLOOR_SHA
     written = json.loads(out.read_text())
     assert written["noise_floor"]["sha256"] == FLOOR_SHA
