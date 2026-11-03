@@ -317,3 +317,28 @@ def test_a_resume_with_another_count_is_refused_and_one_without_the_option_keeps
         rig.run(pid=200)
     rig.args.port_repair_rounds = None
     rig.run(pid=200)                                       # no option: the recorded 2 stands, and nothing is refused
+
+
+# ---- review of PR 425 ------------------------------------------------------------------------------------------------------------
+
+def test_a_secret_whose_at_sign_is_past_the_cut_does_not_reach_the_ledger_or_the_prompt(rig):
+    secret = "S3CRETpassword" + "p" * 400
+    seen = start(rig, port=BROKEN.replace("model.layers.2.ple.conv1d.weight", f"https://bob:{secret}@host/model"), unattended=False)
+    rig.run()
+    assert "S3CRET" not in rounds(rig)[0]["failure"] and "S3CRET" not in seen[0]
+
+
+def test_a_crash_between_the_repair_edit_and_the_rerun_tests_the_fix_on_resume(rig):
+    # Round 1 writes the fixed port; the supervisor is killed when the rerun starts. The resumed attempt's repair step changes nothing more.
+    start(rig, per_round=[{"port/port_model.py": HONEST}, {}], unattended=False)
+    reruns = []
+
+    def at_the_rerun(e):
+        if e["event"] == "decision" and e["data"].get("decision") == "hardware phase":
+            reruns.append(e)
+        return len(reruns) == 2
+    with pytest.raises(Crash):
+        rig.run(crash_if=at_the_rerun)
+    assert rig.run(pid=200) == EXIT_ABORTED
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    assert exit_codes(rig) == [2, 0] and stopped(rig) == []          # the fix was tested; the port was not called unchanged

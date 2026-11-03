@@ -126,7 +126,11 @@ def worker(read_fd: int, write_fd: int) -> int:
             req = json.loads(line)
             op = req["op"]
             if op == "init":             # untimed: open the device and import the port module
-                device, closer = open_device(ttnn, int(req["n_chips"]))
+                try:
+                    device, closer = open_device(ttnn, int(req["n_chips"]))
+                except Exception as exc:     # the runtime's failure: no edit to the port can fix it, so the parent calls it setup (issue 420)
+                    reply({"ok": False, "kind": "setup", "error": f"{type(exc).__name__}: {exc}"[:2000]})
+                    continue
                 mod = importlib.import_module(PORT_MODULE)
                 reply({"ok": True})
             elif op == "load":           # timed: only the port's own load
@@ -205,7 +209,9 @@ class Worker:
         except ValueError:
             raise PortFailed(f"the port worker's answer to {req['op']!r} was not JSON", op=req["op"])
         if not isinstance(answer, dict) or answer.get("ok") is not True:
-            raise PortFailed(f"the port failed at {req['op']!r}: {answer.get('error') if isinstance(answer, dict) else answer!r}", op=req["op"])
+            runtime = isinstance(answer, dict) and answer.get("kind") == "setup"       # only the worker's own device-open failure says so
+            raise PortFailed(f"the port failed at {req['op']!r}: {answer.get('error') if isinstance(answer, dict) else answer!r}", op=req["op"],
+                             kind="setup" if runtime else "port")
         if "id" in answer and (type(answer["id"]) is not int or answer["id"] < 0):
             raise PortFailed(f"the port returned an id that is not a whole number at {req['op']!r}: {answer['id']!r}", op=req["op"])
         return answer.get("id")

@@ -66,6 +66,25 @@ def test_a_passing_check_prints_no_failure_line(tmp_path):
     assert done.returncode == 0 and not failure_line(done)
 
 
+# ---- a runtime failure at init is setup, a port import failure is not (review of PR 425) -----------------------------------------
+
+def test_a_device_open_failure_at_init_is_setup_and_earns_no_round(tmp_path):
+    run, stage, _ = make_run(tmp_path)
+    (tmp_path / "fake-ttnn" / "ttnn.py").write_text(
+        "class FabricConfig:\n    FABRIC_1D = 1\n    DISABLED = 0\ndef set_fabric_config(c): pass\n"
+        "class MeshShape:\n    def __init__(self, r, c): pass\n"
+        "def open_mesh_device(shape):\n    raise RuntimeError('no such device')\n")
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "no such device" in done.stdout
+    assert port_repair.parse_failure(done.stdout) == {"kind": "setup", "op": "init"}
+
+
+def test_a_port_that_cannot_be_imported_at_init_stays_repairable(tmp_path):
+    run, stage, _ = make_run(tmp_path, "import module_that_does_not_exist\n" + HONEST)
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and port_repair.parse_failure(done.stdout) == {"kind": "port", "op": "init"}
+
+
 # ---- parse_failure ---------------------------------------------------------------------------------------------------------------
 
 def test_parse_takes_the_last_well_formed_line_at_the_start_of_a_line():
@@ -154,6 +173,21 @@ def test_an_unreadable_record_earns_no_round(tmp_path, what):
         real.write_text(text)
         os.symlink(real, out)
     assert port_repair.read_failure(run, stage) is None
+
+
+# ---- the failure text is redacted whole, then cut (review of PR 425) --------------------------------------------------------------
+
+def test_safe_failure_text_removes_user_information_whose_at_sign_is_past_the_cut():
+    secret = "S3CRETpassword" + "p" * 400
+    raw = f'FAILED: the port failed at \'load\': "OSError: https://bob:{secret}@host/model"\nPORT_CHECK_FAILURE {{"kind": "port", "op": "load"}}\n'
+    text = port_repair.safe_text(raw, ("/home/x",))
+    assert "S3CRET" not in text and "S3CRET" not in port_repair.failed_line(text)
+    assert "https://host/model" in text
+
+
+def test_safe_failure_text_hides_a_home_path_and_a_token():
+    text = port_repair.safe_text("FAILED: /home/x/a hf_abcdefgh12345678\n", ("/home/x",))
+    assert "/home/x" not in text and "hf_abcdefgh" not in text
 
 
 # ---- rounds_used -----------------------------------------------------------------------------------------------------------------

@@ -1848,30 +1848,42 @@ class Supervisor:
             if failure is None or port_repair.stopped_noted(entries, n):
                 return None
             used = port_repair.rounds_used(entries, n)
-            if used >= limit:
-                self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="spent", rounds=used, of=limit, op=failure["op"])
-                return None
-            k = used + 1
-            sealed = {rel: self._seal(stage_dir, rel) for rel in (port_repair.MARKER, port_repair.OUTPUT)}
             before = port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)
-            self._repair_baseline = before
-            raw = self._read_output(stage_dir)
-            self.ledger.append("decision", n, decision=port_repair.DECISION, round=k, of=limit, op=failure["op"], returncode=failure["returncode"],
-                               failure=stack_pins_mod.redact(port_repair.failed_line(raw), self._homes()))
-            try:
-                out, _ = self._step(spec, "repair", stage_dir, escalated, resumed, extra=self._repair_text(n, k, limit, failure, raw))
-            finally:
-                self._repair_baseline = None
-            if out.status != "done":
-                return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
-            touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
-            if touched:
-                self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
-                return "fail", [f"the repair step changed {', '.join(f'stages/{n}/{rel}' for rel in touched)}, which only the supervisor writes. "
-                                "The attempt fails, and the next attempt starts again"], None
-            if not port_repair.changed(before, port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)):
-                self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="unchanged", rounds=k, of=limit, op=failure["op"])
-                return None
+            tested = port_repair.tested_digest(entries, n)
+            if tested is None:
+                # The port as the attempt's first test ran it (nothing has edited it since); a later resume compares against this.
+                self.ledger.append("decision", n, decision=port_repair.TESTED, sources=port_repair.digest(before))
+                tested = port_repair.digest(before)
+            # A kill after a repair edit and before its rerun leaves the edited port beside the old failed record. The edit is tested before
+            # another repair starts, and before the port can be called unchanged (review of PR 425).
+            pending = port_repair.digest(before) != tested and used > 0
+            if pending:
+                k = used
+            else:
+                if used >= limit:
+                    self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="spent", rounds=used, of=limit, op=failure["op"])
+                    return None
+                k = used + 1
+                sealed = {rel: self._seal(stage_dir, rel) for rel in (port_repair.MARKER, port_repair.OUTPUT)}
+                self._repair_baseline = before
+                # The whole output is cleaned before any cut: the ledger's failure line and the prompt's tail come from this text.
+                raw = port_repair.safe_text(self._read_output(stage_dir), self._homes())
+                self.ledger.append("decision", n, decision=port_repair.DECISION, round=k, of=limit, op=failure["op"], returncode=failure["returncode"],
+                                   failure=port_repair.failed_line(raw))
+                try:
+                    out, _ = self._step(spec, "repair", stage_dir, escalated, resumed, extra=self._repair_text(n, k, limit, failure, raw))
+                finally:
+                    self._repair_baseline = None
+                if out.status != "done":
+                    return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
+                touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
+                if touched:
+                    self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
+                    return "fail", [f"the repair step changed {', '.join(f'stages/{n}/{rel}' for rel in touched)}, which only the supervisor writes. "
+                                    "The attempt fails, and the next attempt starts again"], None
+                if not port_repair.changed(before, port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)):
+                    self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="unchanged", rounds=k, of=limit, op=failure["op"])
+                    return None
             self._keep_round_record(n, stage_dir, k)
             if moved := swap_prepare.set_aside_results(stage_dir, keep=(port_repair.MARKER, port_repair.OUTPUT)):
                 self.ledger.append("decision", n, decision="results written before the test were set aside", files=moved)
@@ -1881,6 +1893,8 @@ class Supervisor:
             if problems:
                 return "fail", problems, None
             self._hardware_phase(spec, stage_dir, test)
+            self.ledger.append("decision", n, decision=port_repair.TESTED,
+                               sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
         return None
 
     def _keep_round_record(self, n: int, stage_dir: Path, k: int) -> None:

@@ -25,12 +25,17 @@ import json
 import os
 from pathlib import Path
 
+import json
+
 from orchard import full_port, safeio
+from orchard.skillsfresh import scrub_secrets
+from orchard.stack_pins import redact
 from orchard.stages import MOVE_ASIDE_DECISIONS
 
 DEFAULT_ROUNDS = 3                          # `--port-repair-rounds`: repair rounds per stage attempt
 MAX_ROUNDS = 10                             # the largest value the option takes: each round is a model step and a chip test
 DECISION = "port repair round"              # the ledger decision written BEFORE a round's repair step starts; `round` and `of` say which
+TESTED = "port repair tested"              # the ledger decision after each hardware test: `sources` is the digest of the port directory it ran against
 STOPPED = "port repair rounds ended"        # the ledger decision that says why the rounds stopped (spent, unchanged, off)
 FAILURE_TOKEN = "PORT_CHECK_FAILURE "       # starts the structured line the template prints after `FAILED: <text>` (it starts with the template's MARK)
 OUTPUT = "evidence/hw-test-output.txt"      # the supervisor's capture of the test's output, relative to the stage directory
@@ -159,6 +164,36 @@ def fingerprint(directory) -> dict[str, str]:
 def changed(before: dict, after: dict) -> list[str]:
     """The paths added, removed or changed between two fingerprints, sorted."""
     return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+
+
+def safe_text(raw: str, homes: tuple = ()) -> str:
+    """The check's output with home paths, URL user information and token-shaped words removed from the WHOLE text. Every cut (the failure line
+    in the ledger, the tail in the prompt) is taken from this, never from `raw`: a cut between a password and its `@` would hide the user
+    information from the pattern (review of PR 425)."""
+    return scrub_secrets(redact(raw, homes))
+
+
+def digest(sources: dict) -> str:
+    """One sha256 for a `fingerprint` of the port directory."""
+    return hashlib.sha256(json.dumps(sources, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def tested_digest(entries: list[dict], n: int) -> str | None:
+    """The digest of the port directory the stage's latest hardware test ran against, from the `port repair tested` decisions of the current
+    attempt (same boundaries as `rounds_used`), or None. A resume that finds the directory different from this one knows the coder edited it
+    after the test, and that the edit still has to be tested."""
+    found = None
+    for e in entries:
+        if e.get("stage") != n:
+            continue
+        data = e.get("data") or {}
+        if e.get("event") == "stage_start" and data.get("resumed") is False:
+            found = None
+        elif e.get("event") == "decision" and data.get("decision") in MOVE_ASIDE_DECISIONS:
+            found = None
+        elif e.get("event") == "decision" and data.get("decision") == TESTED and isinstance(data.get("sources"), str):
+            found = data["sources"]
+    return found
 
 
 def failed_line(text: str, limit: int = 300) -> str:
