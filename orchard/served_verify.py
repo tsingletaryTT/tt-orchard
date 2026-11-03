@@ -83,8 +83,38 @@ def _context(value) -> int | None:
 
 # ---- /v1/models: served name and context length (verify V2) -------------------------------------------------------------------
 
-def check_listing(status, body, *, declared_name=None, declared_context=None, native_context=None) -> dict:
-    """The model the server lists, against what the can declares. `declared_context` is the `max_model_len` of the spec (None when it
+MAX_SERVED_NAMES = 32
+
+
+def served_names(args) -> list[str]:
+    """The names a spec's serving arguments give `--served-model-name`, in order, each once. vLLM reads the option as `nargs="+"`: the
+    separate words after it, up to the next word that starts with a dash, are the names, and the last occurrence replaces an earlier one.
+    The `--served-model-name=a` form carries one name, and a word after it is not a name. Dashes and underscores in the option's spelling
+    are the same option. Words that are not strings are skipped, and an option with no name gives []."""
+    words = [w for w in args if isinstance(w, str)] if isinstance(args, (list, tuple)) else []
+    names: list[str] = []
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if not word.startswith("--") or word.split("=", 1)[0][2:].replace("-", "_") != "served_model_name":
+            continue
+        if "=" in word:
+            value = word.split("=", 1)[1]
+            names = [value] if value else []
+            continue
+        names = []
+        while i < len(words) and not words[i].startswith("-"):
+            names.append(words[i])
+            i += 1
+    return list(dict.fromkeys(names))[:MAX_SERVED_NAMES]
+
+
+def check_listing(status, body, *, declared_name=None, declared_names=None, declared_context=None, native_context=None) -> dict:
+    """The model the server lists, against what the can declares. `declared_name` is the name the can's chat request asks for
+    (`request_extra.model`); `declared_names` are the `--served-model-name` names of its serving arguments, primary first, and are used only
+    when there is no `declared_name`. With either, the listing must hold one of the names, and the first declared name that is listed is the
+    model that is checked; a declared name that is not listed is noted. `declared_context` is the `max_model_len` of the spec (None when it
     declares none, and then the context length is reported and not compared). `native_context` (the model's own
     `max_position_embeddings`) only labels the served value as below, equal to or above native; it never fails the check."""
     name = "served_model"
@@ -98,13 +128,26 @@ def check_listing(status, body, *, declared_name=None, declared_context=None, na
     if not entries:
         return _result(name, "fail", "the server answered /health and lists no model on /v1/models (the list is empty or its entries have no usable id)")
     chosen = entries[0]
+    notes = []
     if declared_name is not None:
         match = [e for e in entries if e["id"] == declared_name]
         if not match:
             return _result(name, "fail", f"the server lists {[e['id'] for e in entries][:5]}; the can declares the name {declared_name!r}")
         chosen = match[0]
+    elif declared_names:
+        wanted = [n for n in declared_names if isinstance(n, str) and n]
+        listed = {}
+        for e in entries:
+            listed.setdefault(e["id"], e)
+        present = [n for n in wanted if n in listed]
+        if wanted and not present:
+            return _result(name, "fail", f"the server lists {[e['id'] for e in entries][:5]}; the can's serving arguments declare "
+                                         f"--served-model-name {wanted[:MAX_SERVED_NAMES]!r}, and none of those names is listed")
+        if present:
+            chosen = listed[present[0]]
+            if len(present) < len(wanted):
+                notes.append(f"declared names not listed: {[n for n in wanted if n not in listed]}")
     served = {"id": chosen["id"], "max_model_len": _context(chosen.get("max_model_len"))}
-    notes = []
     if declared_context is not None:
         if "max_model_len" not in chosen or chosen.get("max_model_len") is None:
             return _result(name, "not_checked", f"the server does not report max_model_len, so the declared context {declared_context} was not compared",

@@ -34,6 +34,8 @@ SERVER = textwrap.dedent('''
                 if FAULT == "empty_listing":
                     return self._send(200, {"object": "list", "data": []})
                 length = 2048 if FAULT == "wrong_context" else 4096
+                if FAULT == "two_names":
+                    return self._send(200, {"object": "list", "data": [{"id": "listed-first", "max_model_len": length}, {"id": "alias-name", "max_model_len": length}]})
                 return self._send(200, {"object": "list", "data": [{"id": "served-name", "max_model_len": length}]})
             self._send(404, {"error": "no"})
         def do_POST(self):
@@ -52,6 +54,8 @@ SERVER = textwrap.dedent('''
             if FAULT != "frozen_counter":
                 TOKENS[0] += 5
             content = "" if FAULT == "spent_budget" else None if FAULT == "null_content" else "Paris"
+            if FAULT == "two_names" and content:
+                content = "Paris asked-for=" + str(req.get("model"))       # lets a test see which name the chat request carried
             finish = "length" if FAULT in ("spent_budget", "null_content") else "stop"
             self._send(200, {"model": "other-model" if FAULT == "wrong_echo" else req.get("model"),
                              "choices": [{"message": {"content": content}, "finish_reason": finish}], "usage": {"completion_tokens": 5}})
@@ -131,3 +135,84 @@ def test_a_request_extra_model_name_is_the_name_the_listing_is_checked_for(tmp_p
     sp = replace(sp, check=replace(sp.check, request_extra={"model": "not-served"}))
     ev = can.boot_check(bundle(tmp_path), tmp_path / "work", sp, install=False, health_timeout=30)
     assert ev["checks"]["served_model"]["ok"] is False and "not-served" in ev["checks"]["served_model"]["detail"]
+
+
+# ---- issue 385: a --served-model-name alias that a spec sets only through extra_args ---------------------------------------------------------------
+
+from dataclasses import replace
+
+from orchard import served_verify
+
+
+def with_args(*args, **check):
+    sp = replace(spec_of(), extra_args=tuple(args))
+    return replace(sp, check=replace(sp.check, **check)) if check else sp
+
+
+def boot_spec(tmp_path, sp, fault="two_names"):
+    return can.boot_check(bundle(tmp_path, fault), tmp_path / "work", sp, install=False, health_timeout=30)
+
+
+@pytest.mark.parametrize("args,names", [
+    (("--served-model-name", "a"), ["a"]),
+    (("--served-model-name", "a", "b", "--max-num-seqs", "4"), ["a", "b"]),                 # argparse nargs="+": every word up to the next option
+    (("--served_model_name=a", "b"), ["a"]),                                                # an `=` value is the only value; `b` is not a name
+    (("--served-model-name", "a", "--other", "--served-model-name", "c"), ["c"]),            # the last occurrence wins, as argparse does
+    (("--served-model-name", "a", "a", "b"), ["a", "b"]),                                   # a repeated name is listed once
+    (("--served-model-name",), []),
+    (("--max-model-len", "4096"), []),
+    ((), []),
+])
+def test_served_names_reads_the_flag_the_way_vllm_does(args, names):
+    assert served_verify.served_names(args) == names
+
+
+def test_served_names_ignores_words_that_are_not_strings():
+    assert served_verify.served_names(("--served-model-name", 5, None)) == []
+
+
+def test_an_alias_set_only_in_extra_args_is_the_name_the_chat_request_carries(tmp_path):
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "alias-name"))
+    assert ev["passed"], ev
+    assert ev["checks"]["served_model"]["ok"] and "alias-name" in ev["checks"]["served_model"]["detail"]
+    assert "alias-name" in ev["answer"] and "listed-first" not in ev["answer"], ev["answer"]
+
+
+def test_without_a_declared_name_the_request_still_carries_the_first_listed_one(tmp_path):
+    ev = boot_spec(tmp_path, with_args())
+    assert ev["passed"], ev
+    assert "listed-first" in ev["answer"], ev["answer"]
+
+
+def test_a_listing_with_none_of_the_declared_names_fails_and_names_them(tmp_path):
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "gone-a", "gone-b"))
+    check = ev["checks"]["served_model"]
+    assert not ev["passed"] and check["ok"] is False
+    assert "gone-a" in check["detail"] and "gone-b" in check["detail"] and "served-model-name" in check["detail"]
+
+
+def test_a_request_extra_model_name_beats_the_alias_in_extra_args(tmp_path):
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "alias-name", request_extra={"model": "listed-first"}))
+    assert ev["passed"], ev
+    assert "listed-first" in ev["answer"] and "alias-name" not in ev["answer"], ev["answer"]
+
+
+def listing(*ids):
+    import json
+    return json.dumps({"object": "list", "data": [{"id": i, "max_model_len": 4096} for i in ids]}).encode()
+
+
+def test_some_declared_names_listed_and_some_not_passes_and_says_which_are_missing():
+    r = served_verify.check_listing(200, listing("x", "alias-b"), declared_names=["alias-a", "alias-b"], declared_context=4096)
+    assert r["state"] == "pass" and r["served"]["id"] == "alias-b"
+    assert "alias-a" in r["detail"] and "not listed" in r["detail"]
+
+
+def test_the_first_declared_name_that_is_listed_is_chosen_whatever_the_listing_order():
+    r = served_verify.check_listing(200, listing("second", "first"), declared_names=["first", "second"], declared_context=4096)
+    assert r["state"] == "pass" and r["served"]["id"] == "first"
+
+
+def test_a_request_extra_name_is_used_alone_when_both_are_given():
+    r = served_verify.check_listing(200, listing("a", "b"), declared_name="b", declared_names=["a"], declared_context=4096)
+    assert r["state"] == "pass" and r["served"]["id"] == "b"

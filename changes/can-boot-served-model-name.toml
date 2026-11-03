@@ -1,0 +1,3 @@
+target = "0.9.100"
+summary = "can boot reads a --served-model-name set only through extra_args: the request carries the first declared name the server lists, and the check fails when none is listed"
+kind = "fix"

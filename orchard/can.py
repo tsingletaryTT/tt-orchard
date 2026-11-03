@@ -1206,9 +1206,13 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         ck = spec.check
         # A vLLM server must list the model it serves, at the context length the can declares (kind tt-dit-server serves no model list).
         probing = spec.kind != "tt-dit-server" and ck.mode == "chat"
+        declared = ck.request_extra.get("model") if isinstance(ck.request_extra.get("model"), str) else None
+        # A name the can sets only through `--served-model-name` in its serving arguments is the one the request carries, unless request_extra names a model.
+        aliases = [] if declared is not None else served_verify.served_names(spec.extra_args)
+        listing = None
         if probing:
-            served_verify.record(served_verify.check_listing(status, body, declared_name=(ck.request_extra.get("model") if isinstance(ck.request_extra.get("model"), str) else None),
-                                                                           declared_context=spec.max_model_len), check, evidence)
+            listing = served_verify.check_listing(status, body, declared_name=declared, declared_names=aliases, declared_context=spec.max_model_len)
+            served_verify.record(listing, check, evidence)
         if ck.mode == "music":
             _music_checks(base, ck, check, evidence)
             status, _ = _http("GET", f"{base}{ck.health_path}")
@@ -1226,6 +1230,8 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
                 extra["model"] = models[0]["id"]
         except (safeio.SafeReadError, TypeError):
             pass
+        if aliases and listing is not None and listing["state"] == "pass":
+            extra["model"] = listing["served"]["id"]          # the first declared name the server lists, not whichever model it lists first
         extra.update(ck.request_extra)
         chat = f"{base}/v1/chat/completions"
         counter_before = served_verify.scrape(base) if probing else None      # the engine's own token counter, read around the first chat request
