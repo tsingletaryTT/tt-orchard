@@ -685,3 +685,31 @@ def test_a_hardware_test_that_ends_makes_the_supervisor_record_the_mask_input_fi
         sup.ledger.close()
     found = [e["data"] for e in read_entries(run / "ledger.jsonl") if e["event"] == "decision" and e["data"].get("decision") == stages.MASK_INPUTS_DECISION]
     assert len(found) == 1 and found[0]["dir"] == "stages/2/model-dir" and found[0]["files"]["tokenizer.json"]
+
+
+def test_a_ledger_record_for_another_model_directory_does_not_count(swap):
+    from orchard import stages
+    from orchard.ledger import Ledger
+    sets = tricky_sets()
+    rich_tokenizer(swap["stage"] / "model-dir")
+    install(swap, sets)
+    extra = {"vocab": FULL_VOCAB, "silent_ids": SILENT, "agreement_sets": server_sets(sets)}
+    assert swap["start_unrecorded"]("perfect", server_extra=extra, agreement_set=True).returncode == 0
+    led = Ledger(swap["run"] / "ledger.jsonl")
+    try:
+        for entry in stages.mask_input_entries(swap["run"], swap["stage"]):
+            led.append("decision", 2, decision=stages.MASK_INPUTS_DECISION, **(entry | {"dir": "stages/9/model-dir"}))
+    finally:
+        led.close()
+    reasons = gate_reasons(swap)
+    assert any("ledger has no record" in x for x in reasons), reasons
+
+
+def test_a_later_test_of_the_same_stage_replaces_the_record(swap):
+    """A retried stage runs the test again and rebuilds model-dir; the digests it writes are the ones the gate compares with."""
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    (swap["stage"] / "model-dir" / "generation_config.json").write_text(json.dumps({"eos_token_id": 3}))
+    assert any("ledger" in x and "generation_config.json" in x for x in gate_reasons(swap))
+    record_inputs(swap)                                  # the second test ends
+    assert not any("ledger" in x for x in gate_reasons(swap))
