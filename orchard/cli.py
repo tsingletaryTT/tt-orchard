@@ -62,7 +62,7 @@ import threading
 import time
 from pathlib import Path
 
-from orchard import __version__, blocked, bringup_config, dlprogress, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import __version__, audio_facts, blocked, bringup_config, dlprogress, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
 from orchard import caches as tensor_caches
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
@@ -676,6 +676,13 @@ def _downloaded_audio_problem(snapshot: Path) -> str | None:
     return f"missing {', '.join(missing[:3])}" if missing else None
 
 
+def _plain_text_snapshot(local) -> bool:
+    """True when a local snapshot has the text layout: a `config.json` at its root (the audio layout has none, orchard/audio_facts.py). The Hub's tags are the
+    only evidence for audio (orchard/audio_facts.py), so this answers "text" for a model nobody could ask the Hub about, and never "audio"."""
+    names = preflight.snapshot_root_names(local)
+    return audio_facts.TEXT_CONFIG in names
+
+
 def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
     """(state, a reason to refuse `--base <arg>` or None). `state` is "audio", "text" or "unknown" (the Hub could not say, so nothing
     shows whether the model is audio). An audio model (orchard/audio_facts.py) is compared with its base repository directly and no bundle
@@ -689,6 +696,8 @@ def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
     except Exception:
         hub, local = None, None
     state = "unknown" if hub is None else ("audio" if preflight.audio_evidence_for(hub, local) is not None else "text")
+    if state == "unknown" and local and _plain_text_snapshot(local):
+        state = "text"                   # a local model has no Hub entry (issue 409): its own files say it is a text model
     if state == "text":
         return state, None
     inst = _installed(sig)
@@ -1225,7 +1234,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override,
                                       accept_inferred_base=args.accept_inferred_base, progress=progress,
-                                      stock_recorded=recorded_stock)
+                                      stock_recorded=recorded_stock, no_fetch=args.no_fetch)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -1280,6 +1289,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         print(f"{style.icon('🍂')}the earlier run read a snapshot with no weights; set aside as {aside}", file=out)
     base_data = next(c for c in checks if c.name == "base").data or {}
     base_hub, base_snapshot = None, base_data.get("snapshot")
+    if base_data.get("needs_fetch") and args.no_fetch and not args.dry_run:
+        return _refuse(f"--no-fetch was given and the base model {base_data['base']} is not in {hf_home}; stage 0 compares against it")
     if base_data.get("needs_fetch"):
         base_hub, why = sig.hub_info(base_data["base"])
         if base_hub is None:
