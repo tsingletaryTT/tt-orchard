@@ -1956,6 +1956,56 @@ server decoded at 38.7 tok/s.
 - `--baseline-file`: where the best speeds are kept.
 - `--json`: print one JSON list instead of lines.
 
+### 5.9ea Profile a hardware run (a bounded summary of the profiler's output)
+
+```bash
+export TT_METAL_HOME=~/tt-metal                                                    # or pass --tt-metal-home DIR
+tt-orchard profile --out prof -- ~/.tenstorrent-venv/bin/python3 my_workload.py      # lease a free board, profile, summarise
+tt-orchard profile --out prof --top 15 -- ~/.tenstorrent-venv/bin/python3 -m pytest tests/test_x.py
+tt-orchard profile --from prof/tracy --out prof2                                     # summarise a profile that exists; no board, no lease
+```
+
+`profile` picks a board whose chips are all free (the same choice as the benchmark launcher), runs
+`gozer run --exact N -- PYTHON -m tracy -r --no-web-server -o OUT/tracy ARGS`, runs `tt-perf-report` on the ops CSV the profiler
+exported, and writes `OUT/profile-summary.json`. The words after `--` are what `python -m tracy` takes: a Python, then a script
+or `-m module`, then its arguments. The Python must be one that can import `tracy` (tt-metal's `tools/tracy`, built with
+`ENABLE_TRACY` on), and `TT_METAL_HOME` (or `--tt-metal-home`) must name the checkout whose `build/tools/profiler/bin` holds `tracy-capture` and
+`tracy-csvexport`: without it `python -m tracy` looks in the current directory and stops with "Tracy tools were not found" after the lease is
+taken. Both checks run before any lease and open no device (the Python check uses `find_spec`). A model never receives the CSV; it reads the summary,
+which is at most 48 KB whatever the CSV holds (`limits.cut` names any list that was cut to fit).
+The output directory must be new or have an empty `OUT/tracy`: a used one is refused before anything runs, so a run that exports nothing cannot be
+summarised from an earlier run's CSV. `--timeout`, `--report-timeout` and `--wait-s` must be finite numbers (`nan` and `inf` are refused). When the
+command ends, every process left in its process group is killed, since a leftover child still holds the chips; Ctrl+C or SIGTERM to `tt-orchard profile` sends the group SIGTERM and waits for gozer to release the lease before that kill. When `tt-perf-report` is not available, the top ops come from the raw CSV ranked by device time alone. A run with no free board prints the board detail on the console and keeps it out of the summary.
+The ops CSV is copied once to `OUT/ops-snapshot.csv` (at most 256 MB), and the totals and `tt-perf-report` both read that copy. With more than one device in the profile, the top ops are the rows of the device the summary describes; each carries its `device`, and a report with no `Device` column is replaced by the raw rows.
+
+The summary holds the total device time and gap time of the busiest device; the top N ops by device time with the report's
+utilization columns and its advice; time per op code; time per op group; and `could_not_measure`. A figure the exported files do not
+hold is `null`, never 0, and is named there. A gap between ops over 1 ms is host idle time (a sync, a compile, the first op after a device open): it
+is counted in `long_gap_ops` and `long_gap_us` and left out of `gap_us`, so one long stall does not hide the microsecond gaps. A layer number that repeats
+(one signpost per decode step) is summed, so divide a layer's figures by the number of steps.
+
+Op groups come from signposts the workload emits (`tracy_signpost`). A signpost named `layer<N>/boundary`, `layer<N>/mixer`,
+`layer<N>/moe` or `layer<N>/mlp` starts that group of layer N (the separator can be `/`, `:` or `.`); `outside_layers` starts the
+group outside the layers; ops before the first signpost are outside the layers. Each group gives its op count, time in ops, time in
+gaps between ops, and the floor of the rule of thumb (3 to 5 microseconds per op including its gap, from published Blackhole
+fused-decode work; an estimate to compare with the measured time). With no matching signpost there are no groups, and the summary says
+so. Per-DRAM-controller use and network congestion are read from the CSV's `DRAM BW UTIL PER CTRL (%)` and `NPE CONG IMPACT (%)` columns, as a percent
+of peak; the CSV holds no peak, so the summary does not turn them into GB/s. Those columns are empty unless the profiler captured NoC events
+(`--noc-traces` passes the profiler's `--collect-noc-traces`; that path has not been run on hardware by this command). The first real run
+(`docs/run-logs/2026-11-03-profile-first-run.md`) left them empty, and the summary said so.
+
+Exit codes: 0 summary written from measured data; 1 the profiled command failed or timed out (the summary covers what it exported);
+2 refused (usage, a bad `--from`); 3 nothing measured (no profiler in the Python given, no free board, no ops CSV, an unreadable CSV).
+A summary is written for 0, 1 and 3.
+
+- `--out`: output directory (default `./profile`): `profile-summary.json`, the profiler's files under `tracy/`, `perf-report.csv`, `profile-run.log`.
+- `--top`: ops listed (1 to 50, default 10). `--from DIR`: summarise the newest `ops_perf_results*.csv` under DIR; no command is given.
+- `--chips`: chips to lease (default 1). `--exclude`: a board id not to use (repeat). `--wait-s`: wait up to this long for a free board.
+- `--timeout`: seconds the command may run (default 1800); after that its process group is stopped. `--report-timeout`: seconds for `tt-perf-report` (default 300).
+- `--tt-metal-home`: the tt-metal checkout with the Tracy tools (default `$TT_METAL_HOME`); it is passed to the profiled command as `TT_METAL_HOME`.
+- `--noc-traces`: capture NoC events too (slower; fills the DRAM-controller and congestion columns).
+- `--gozer`, `--perf-report`: the commands to run (defaults `gozer` and the `tt-perf-report` on PATH). `--who`, `--reason`: what the lease records.
+
 ### 5.9fa The audio reference environment and the CPU reference
 
 ```bash
@@ -2005,7 +2055,7 @@ python -m orchard.audio_result_derive RUN_DIR CHIP_RUN_DIR OUT_JSON             
 
 Rebuild for the decoder on the chip (2026-10-29, [run log](docs/run-logs/2026-10-29-audio-package-rebuild.md)): `--out` stages into a new directory and
 writes the commands text beside it. `--result` reads an audio result in place of the run's `stages/2/audio_result.json`; `audio_result_derive` makes
-that file from a later chip run and the run's own result without editing either. `--probe` and `--agreement-report` copy two optional JSON files into
+that file from a later chip run and the run's own result without editing either. It reads `stages/1/noise_floor.json` as stage 2 does, compares the later run with those bars, and refuses when the file is not the floor the base result recorded. `--probe` and `--agreement-report` copy two optional JSON files into
 `evidence/`, and `--listening-note` prints the operator's dated listening judgment on the card. The packaged generate command runs the decoder's
 transformer on the chip by default; `AUDIO_HOST_DECODER=1` or `--host-decoder` keeps the decoder on the host.
 
@@ -2051,7 +2101,10 @@ tt-orchard verify-package REPO_ID [--scratch DIR] [--staged DIR] [--revision SHA
 scratch directory (`--scratch`, or a temporary one that stays in place), and runs these checks: the pulled bytes match the Hub's sha256 for the large files;
 the scrub finds no weights, caches, symbolic links, tokens, home paths or host names; a license file or a `license:` line is present; the package's own
 `package-record.json` or `SHA256SUMS` matches every file and lists every file; JSON manifests parse and `tt-model.yaml` names this repository; the weights
-revision in the card matches the package record, `tt-model.yaml` and the launchers, and the weights repository has that revision. `--staged DIR` also compares
+revision in the card matches the package record, `tt-model.yaml` and the launchers, and the weights repository has that revision. A card that pins more than one
+commit (the weights and a code bundle) names each on one line with its repository, `owner/name @ <40-character commit>`, one line per repository (the older
+`owner/name (revision <commit>)` also works; the `@` needs a space before it, so a Git URL such as `git+https://host/org/lib.git@<commit>` is not a pin). A repository named on a different line is never attached to a commit. A commit without its repository on its line
+is a warning that names this form, and a card that pins the weights repository at two commits is a warning too. `--staged DIR` also compares
 the pulled files and hashes with a local staged directory. `--plan` prints the commit, file count and the largest files and pulls nothing. `--revision` pulls a
 commit or branch other than main. A private repository is pulled with `HF_TOKEN` from the environment, which is never printed. A failing check
 makes the exit status 1 only with `--check`; a Hub that cannot be read is a refusal (exit 2).
