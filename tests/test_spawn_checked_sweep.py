@@ -8,6 +8,7 @@ chip open after the lease went back. Every spawn now carries a tag in its enviro
 carry it. No chip is used: the helpers here only sleep."""
 import os
 import signal
+import subprocess
 import sys
 import textwrap
 import time
@@ -238,3 +239,280 @@ def test_a_sweep_that_fails_does_not_replace_the_result_or_the_interrupt(rig, mo
         code, timed_out = spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 4.0, out)
     pids.append(int(pidfile.read_text()))
     assert (code, timed_out) == (None, True)
+
+
+# ---- review of PR 431, round 1 --------------------------------------------------------------------------------------------------------------------
+# The supervisor's SIGINT and SIGTERM handlers raise a BaseException. One that arrives while the cleanup runs must not skip the group kill or the
+# sweep, and the interrupt that was already on its way is the one that propagates.
+
+
+class FirstInterrupt(BaseException):
+    pass
+
+
+class SecondInterrupt(BaseException):
+    pass
+
+
+def kill_wait_interrupted(monkeypatch, pidfile, *, first=True):
+    """The wait of spawn_checked raises FirstInterrupt (the supervisor's handler ran); _kill_session's own wait then raises SecondInterrupt (a
+    second signal), once. Later waits run for real."""
+    real_wait = agent.subprocess.Popen.wait
+    calls = []
+
+    def wait(self, timeout=None):
+        calls.append(1)
+        WAITED.append(self)
+        if len(calls) == 1 and first:
+            wait_for(pidfile)                      # the helper exists before the supervisor is interrupted
+            raise FirstInterrupt
+        if len(calls) == (2 if first else 1) and timeout is None:
+            raise SecondInterrupt
+        return real_wait(self, timeout)
+    monkeypatch.setattr(agent.subprocess.Popen, "wait", wait)
+    return real_wait
+
+
+WAITED: list = []          # the Popen objects whose wait kill_wait_interrupted saw
+
+
+def test_a_second_interrupt_during_the_group_kill_wait_does_not_skip_the_sweep_or_replace_the_first(rig, monkeypatch):
+    run, tmp, pids = rig
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    WAITED.clear()
+    real_wait = kill_wait_interrupted(monkeypatch, pidfile)
+    with open(tmp / "out.txt", "wb") as out, pytest.raises(FirstInterrupt):
+        spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 60.0, out)
+    monkeypatch.setattr(agent.subprocess.Popen, "wait", real_wait)
+    helper = int(pidfile.read_text())
+    pids.append(helper)
+    assert not settle(helper), "the interrupt of the group kill's wait skipped the sweep"
+    assert WAITED and WAITED[0].returncode is not None, "the interrupted wait was not run again, so the killed command was never reaped"
+
+
+@pytest.fixture
+def stop_signal_raises(monkeypatch):
+    """SIGTERM raises SecondInterrupt in this process, as the supervisor's handler raises. The old handler comes back after the test."""
+    def handler(signum, frame):
+        raise SecondInterrupt
+    old = signal.signal(signal.SIGTERM, handler)
+    yield
+    signal.signal(signal.SIGTERM, old)
+
+
+def signal_during_the_sweep(monkeypatch):
+    """The first scan of the sweep runs after a SIGTERM to this process (one arrives while the sweep works)."""
+    from orchard import kernelprobe
+    real = kernelprobe.sweep_strays
+    sent = []
+
+    def sweep(*a, **k):
+        if not sent:
+            sent.append(1)
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real(*a, **k)
+    monkeypatch.setattr(kernelprobe, "sweep_strays", sweep)
+
+
+def test_a_stop_signal_during_the_sweep_is_deferred_until_the_helpers_are_dead_and_the_first_interrupt_propagates(rig, monkeypatch, stop_signal_raises):
+    run, tmp, pids = rig
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    real_wait = agent.subprocess.Popen.wait
+    calls = []
+
+    def wait(self, timeout=None):
+        if not calls:
+            calls.append(1)
+            wait_for(pidfile)
+            raise FirstInterrupt
+        return real_wait(self, timeout)
+    monkeypatch.setattr(agent.subprocess.Popen, "wait", wait)
+    signal_during_the_sweep(monkeypatch)
+    with open(tmp / "out.txt", "wb") as out, pytest.raises(FirstInterrupt):
+        spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 60.0, out)
+    monkeypatch.setattr(agent.subprocess.Popen, "wait", real_wait)
+    helper = int(pidfile.read_text())
+    pids.append(helper)
+    assert not settle(helper), "a stop signal during the sweep skipped the kill"
+
+
+def test_a_stop_signal_during_the_sweep_after_a_timeout_is_raised_once_the_helpers_are_dead(rig, monkeypatch, stop_signal_raises):
+    run, tmp, pids = rig
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    signal_during_the_sweep(monkeypatch)
+    with open(tmp / "out.txt", "wb") as out, pytest.raises(SecondInterrupt):
+        spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 4.0, out)
+    helper = int(pidfile.read_text())
+    pids.append(helper)
+    assert not settle(helper), "a stop signal during the sweep skipped the kill"
+
+
+def test_a_stop_signal_at_every_call_of_the_sweep_cannot_use_up_the_retries(rig, monkeypatch, stop_signal_raises):
+    """Retrying alone does not cover a signal that keeps coming: with the signals held back the sweep runs once, uninterrupted."""
+    run, tmp, pids = rig
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    from orchard import kernelprobe
+    real = kernelprobe.sweep_strays
+
+    def sweep(*a, **k):
+        os.kill(os.getpid(), signal.SIGTERM)            # every call is interrupted by a stop signal
+        return real(*a, **k)
+    monkeypatch.setattr(kernelprobe, "sweep_strays", sweep)
+    with open(tmp / "out.txt", "wb") as out, pytest.raises(SecondInterrupt):
+        spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 4.0, out)
+    helper = int(pidfile.read_text())
+    pids.append(helper)
+    assert not settle(helper), "a stop signal at every call used up the retries and the sweep never ran"
+
+
+def test_the_stop_signal_handlers_are_put_back_after_the_cleanup(rig, stop_signal_raises):
+    run, tmp, pids = rig
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    (run / "port_check.py").write_text(HELPER_CLEAN)
+    with open(tmp / "out.txt", "wb") as out:
+        spawn_checked(f"{sys.executable} port_check.py {run / 'x'}", run, {"PATH": os.environ["PATH"]}, 4.0, out)
+    assert {s: signal.getsignal(s) for s in before} == before                  # an ordinary command runs no cleanup
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    with open(tmp / "out.txt", "wb") as out:
+        spawn_checked(f"{sys.executable} port_check.py {run / 'h.pid'}", run, {"PATH": os.environ["PATH"]}, 3.0, out)
+    pids.append(int((run / "h.pid").read_text()))
+    assert {s: signal.getsignal(s) for s in before} == before
+
+
+def test_a_stop_signal_that_arrives_in_another_thread_is_deferred_too(rig, monkeypatch, stop_signal_raises):
+    """A signal reaches any thread that does not block it, and Python runs the handler in the main thread: a mask of the main thread would not
+    have held it back. Here a second thread sends it during the sweep."""
+    import threading
+    run, tmp, pids = rig
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    from orchard import kernelprobe
+    real = kernelprobe.sweep_strays
+
+    def sweep(*a, **k):
+        t = threading.Thread(target=lambda: os.kill(os.getpid(), signal.SIGTERM))
+        t.start()
+        t.join()
+        time.sleep(0.2)                        # the handler gets its chance to run before the real sweep
+        return real(*a, **k)
+    monkeypatch.setattr(kernelprobe, "sweep_strays", sweep)
+    with open(tmp / "out.txt", "wb") as out, pytest.raises(SecondInterrupt):
+        spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 4.0, out)
+    helper = int(pidfile.read_text())
+    pids.append(helper)
+    assert not settle(helper)
+
+
+# A helper that keeps forking while it is being stopped must not leave a child the sweep never scanned.
+
+FORKER = textwrap.dedent('''
+    import os, signal, sys, time
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    log = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    end = time.time() + 20
+    while time.time() < end:
+        pid = os.fork()
+        if pid == 0:
+            os.setsid()
+            time.sleep(120)
+            os._exit(0)
+        os.write(log, f"{pid}\\n".encode())
+        time.sleep(0.01)
+''')
+
+
+def test_a_helper_that_keeps_forking_leaves_no_child_the_sweep_did_not_scan(tmp_path):
+    from orchard import kernelprobe
+    tag = str(tmp_path / ".spawn-forker")
+    log = tmp_path / "children.txt"
+    forker = subprocess.Popen([sys.executable, "-c", FORKER, str(log)], env={**os.environ, agent.SPAWN_TAG_VAR: tag}, start_new_session=True,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    children = []
+    try:
+        wait_for(log)
+        time.sleep(0.2)
+
+        def slow(real):
+            def send(target, sig):
+                if sig == signal.SIGKILL:
+                    time.sleep(0.25)          # a slow delivery: the window in which an unfrozen forker starts more children
+                return real(target, sig)
+            return send
+        kernelprobe.sweep_strays(tag, var=agent.SPAWN_TAG_VAR, grace_s=0.3, kill=slow(os.kill), killpg=slow(os.killpg))
+        children = [int(x) for x in log.read_text().split()]
+        assert len(children) >= 3
+        assert not [p for p in children + [forker.pid] if alive(p)], "a child started during the sweep was never scanned"
+    finally:
+        for p in children + [forker.pid]:
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+        forker.wait()
+
+
+# What the sweep stopped is handed to the code that called spawn_checked, with the identity each process had before it was signalled, so the
+# structured audit paths (the ledger, the attempt's `swept` list) hold it. A later scan by the caller cannot find a process this sweep removed.
+
+
+def test_the_helpers_the_sweep_stopped_are_collected_with_their_identity(rig):
+    run, tmp, pids = rig
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    with agent.collect_survivors() as records, open(tmp / "out.txt", "wb") as out:
+        spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 4.0, out)
+    helper = int(pidfile.read_text())
+    pids.append(helper)
+    assert [r["pid"] for r in records] == [helper]
+    rec = records[0]
+    assert set(rec) >= {"pid", "cmdline", "stopped", "boot_id", "start"} and rec["stopped"] is True
+    assert isinstance(rec["start"], int) and rec["start"] > 0 and rec["boot_id"]
+
+
+def test_a_helper_that_is_still_running_is_collected_as_not_stopped(rig, monkeypatch):
+    run, tmp, pids = rig
+    from orchard import kernelprobe
+    seen = {}
+
+    def fake(tag, **kw):
+        seen.update(kw)
+        return [{"pid": 4242, "cmdline": "srv", "stopped": False, "boot_id": "b", "start": 7}]
+    monkeypatch.setattr(kernelprobe, "sweep_strays", fake)
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    with agent.collect_survivors() as records, open(tmp / "out.txt", "wb") as out:
+        spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 3.0, out)     # times out, so the sweep runs
+    pids.append(int(pidfile.read_text()))                  # the fake sweep stops nothing; the rig does
+    assert seen.get("identity") is True and records == [{"pid": 4242, "cmdline": "srv", "stopped": False, "boot_id": "b", "start": 7}]
+    assert "still running" in (tmp / "out.txt").read_text()
+
+
+def test_the_sweep_asks_for_no_identity_when_no_collector_is_active(rig, monkeypatch):
+    run, tmp, pids = rig
+    from orchard import kernelprobe
+    seen = {}
+    monkeypatch.setattr(kernelprobe, "sweep_strays", lambda tag, **kw: seen.update(kw) or [])
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    with open(tmp / "out.txt", "wb") as out:
+        spawn_checked(f"{sys.executable} port_check.py {pidfile}", run, {"PATH": os.environ["PATH"]}, 3.0, out)
+    pids.append(int(pidfile.read_text()))
+    assert "var" in seen and seen["identity"] is False      # the fake ran (the sweep was reached) and no identity was asked for
+
+
+def test_the_agent_shell_keeps_the_helpers_it_stopped_for_the_attempt_record(rig):
+    run, tmp, pids = rig
+    stage = run / "stages" / "0"
+    stage.mkdir(parents=True)
+    (run / "port_check.py").write_text(HELPER_SESSION)
+    pidfile = run / "helper.pid"
+    tools = agent.Tools(run, stage, {"PATH": os.environ["PATH"]}, timeout=4.0)
+    reply = tools.shell(f"{sys.executable} port_check.py {pidfile}")
+    helper = int(pidfile.read_text())
+    pids.append(helper)
+    assert reply.startswith("killed after")
+    assert [r["pid"] for r in tools.swept] == [helper] and tools.swept[0]["stopped"] is True

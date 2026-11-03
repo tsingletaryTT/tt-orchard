@@ -55,12 +55,15 @@ user account or a mount namespace, which plan 4 does not set up.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import os
 import re
 import signal
 import subprocess
+import threading
 import time
 import urllib.request
 import uuid
@@ -153,13 +156,76 @@ def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> t
         proc.wait(timeout=timeout)
         return proc.returncode, False
     except subprocess.TimeoutExpired:
-        _kill_session(proc)
-        _sweep_helpers(tag, stdout)
+        late = _cleanup(proc, tag, stdout)
+        if late is not None:
+            raise late                       # a stop signal arrived during the cleanup; nothing else is on its way, so it goes on now
         return None, True
     except BaseException:
-        _kill_session(proc)
-        _sweep_helpers(tag, stdout)
+        _cleanup(proc, tag, stdout)          # the interrupt already on its way is the one that propagates, not one that arrives meanwhile
         raise
+
+
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)      # the supervisor's handlers for these raise a BaseException
+CLEANUP_TRIES = 3                                   # a step that an interrupt cut short is run again, this many times in all
+
+
+class _HeldStopSignals:
+    """While held, SIGINT and SIGTERM are recorded and not acted on. The handlers are swapped, not the signal mask: a mask covers one thread, and
+    in a process with other threads the signal can reach any of them while Python still runs the handler in the main thread. A handler can be
+    swapped in the main thread only, so in another thread nothing is held and the cleanup relies on its retries. `release` puts the handlers
+    back and runs the handler of each signal that came, as the signal would have; it returns the exception that handler raised, or None."""
+
+    def __init__(self):
+        self.old: dict = {}
+        self.arrived: list = []
+        if threading.current_thread() is threading.main_thread():
+            for signum in STOP_SIGNALS:
+                try:
+                    self.old[signum] = signal.signal(signum, self._hold)
+                except (ValueError, OSError):
+                    pass
+
+    def _hold(self, signum, frame) -> None:
+        self.arrived.append((signum, frame))
+
+    def release(self) -> BaseException | None:
+        for signum, handler in self.old.items():
+            try:
+                signal.signal(signum, handler)
+            except (ValueError, OSError, TypeError):
+                pass
+        for signum, frame in self.arrived:
+            handler = self.old.get(signum)
+            try:
+                if callable(handler):
+                    handler(signum, frame)
+                elif handler == signal.SIG_DFL:
+                    os.kill(os.getpid(), signum)          # the default action of the signal, after the cleanup
+            except BaseException as exc:
+                return exc
+        return None
+
+
+def _cleanup(proc, tag: str, stdout) -> BaseException | None:
+    """Kill the command's group, then sweep the helpers that carry `tag`, so that no interrupt skips either step.
+
+    The stop signals are held back while this runs (_HeldStopSignals): one that arrives meanwhile is acted on when the cleanup is done. A step
+    that an exception still stops (a thread that is not the main one) is run again, up to CLEANUP_TRIES times. Returns the first exception that
+    came up during the cleanup, or None; the caller decides whether it replaces anything."""
+    late = None
+    held = _HeldStopSignals()
+    try:
+        for step in (lambda: _kill_session(proc), lambda: _sweep_helpers(tag, stdout)):
+            for _ in range(CLEANUP_TRIES):
+                try:
+                    step()
+                    break
+                except BaseException as exc:
+                    late = late or exc
+    finally:
+        replayed = held.release()
+        late = late or replayed
+    return late
 
 
 def _kill_session(proc) -> None:
@@ -170,12 +236,33 @@ def _kill_session(proc) -> None:
     proc.wait()
 
 
+_SURVIVORS: contextvars.ContextVar = contextvars.ContextVar("orchard_spawn_survivors", default=None)
+
+
+@contextlib.contextmanager
+def collect_survivors():
+    """Within this block, every spawn_checked call in this context adds what its sweep stopped to the list this yields: one record per process
+    ({"pid", "cmdline", "stopped", "boot_id", "start"}), with the identity it had before it was signalled. The sweep removes a process before
+    any later scan can see it, so the structured audit paths (the supervisor's ledger, a kernel-probe attempt's `swept` list) take the records
+    from here. `stopped` False means the process is still running."""
+    records: list[dict] = []
+    token = _SURVIVORS.set(records)
+    try:
+        yield records
+    finally:
+        _SURVIVORS.reset(token)
+
+
 def _sweep_helpers(tag: str, stdout) -> None:
     """Stop the processes that carry `tag` (SIGTERM, a short grace, then SIGKILL) and say which in `stdout`. This runs on the way out of a kill,
-    so it never raises: an error here must not replace the result or the interrupt that is already on its way."""
+    so it does not raise an Exception: an error here must not replace the result or the interrupt that is already on its way. A collector
+    (collect_survivors) also gets the records, with the identity each process had before it was signalled."""
+    sink = _SURVIVORS.get()
     try:
         from orchard import kernelprobe              # imported here: kernelprobe imports this module
-        records = kernelprobe.sweep_strays(tag, var=SPAWN_TAG_VAR)
+        records = kernelprobe.sweep_strays(tag, var=SPAWN_TAG_VAR, identity=sink is not None)
+        if sink is not None:
+            sink.extend(r for r in records if isinstance(r, dict))
         if records:
             lines = "".join(f"orchard: a helper outlived the command and was stopped: pid {r['pid']} {r['cmdline']}"
                             f"{'' if r['stopped'] else ' (still running)'}\n" for r in records)
@@ -246,6 +333,8 @@ class Tools:
         # host tt-metal tree's models/ that those stages may change. write_file reaches it by a path that starts with its name.
         self.scratch = Path(scratch) if scratch is not None else None
         self.env, self.timeout, self.limit = env, timeout, limit
+        # What the sweeps after this tool's shell commands stopped (see collect_survivors); a kernel-probe attempt lists them under `swept`.
+        self.swept: list[dict] = []
 
     def call(self, name: str, arguments: str) -> str:
         try:
@@ -282,8 +371,9 @@ class Tools:
         out_path = self.stage_dir / "log" / "last-shell-output.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(out_path, "wb") as out:
+            with open(out_path, "wb") as out, collect_survivors() as swept:
                 code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out)
+            self.swept.extend(swept)
         except Denied as exc:
             return f"refused: {exc}"
         text = out_path.read_text(encoding="utf-8", errors="replace")

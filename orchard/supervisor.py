@@ -125,7 +125,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
-from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
+from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, served_chat, stage0_scan
 from orchard import text_runtime
 from orchard import stack_pins as stack_pins_mod
@@ -3248,7 +3248,7 @@ class Supervisor:
                            deadline_s=deadline, chips=list(chips), **record,
                            **({"where": self._where()} if self.lab is not None else {}))
         t0 = self.clock()
-        with _open_fresh(out_path) as out:
+        with _open_fresh(out_path) as out, collect_survivors() as survivors:
             try:
                 if self.lab is not None:
                     code, timed_out = self._spawn_on_lab(n, command, env, deadline, out)
@@ -3257,6 +3257,7 @@ class Supervisor:
             except Denied as exc:
                 code, timed_out = None, False
                 out.write(f"refused: {exc}\n".encode("utf-8"))
+        self._record_test_helpers(n, survivors)
         if (timed_out or code not in (0, None)) and self.lab is None:
             # A test that ran and did not succeed is checked against the bus before anyone calls it a model failure. A refused
             # command (code None and no timeout) never reached a chip.
@@ -3265,6 +3266,20 @@ class Supervisor:
         return {"command": command, "returncode": code, "timed_out": timed_out,
                 "seconds": round(self.clock() - t0, 3), "chips": list(chips),
                 "output": self._moved_aside_record(out_path)}
+
+    def _record_test_helpers(self, n: int, survivors: list[dict]) -> None:
+        """The helpers a hardware test started in sessions of their own, which spawn_checked's sweep stopped after the test ended or was killed:
+        a server that run.sh started, for example. The sweep removes them before any later scan, so this is the only record of them: one
+        ledger entry with the identity each had (pid, boot id, start time) before it was signalled. A helper that is still running afterwards
+        (it replaced its environment, so the sweep cannot name it again) blocks the run the way a server of the graft trial does, so the coder
+        is not restored over a process that holds a chip."""
+        if not survivors:
+            return
+        self.ledger.append("decision", n, decision="hardware test helpers stopped", servers=survivors)
+        left = [r["pid"] for r in survivors if not r.get("stopped")]
+        if left:
+            self._block(n, "a helper of the hardware test is still running (pid " + ", ".join(str(p) for p in left) + "), so the coder is "
+                           "not restored over it; stop it and run the command again", pids=left)
 
     def _kernel_cache(self) -> Path:
         return Path(self.paths.cache_root) / "kernels"

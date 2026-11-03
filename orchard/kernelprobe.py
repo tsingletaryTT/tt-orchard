@@ -726,6 +726,7 @@ def load_attempts(probe_dir, *, ops, probe_id) -> tuple[list[dict], int]:
 
 SWEEP_GRACE_S = 2.0          # how long the strays get after SIGTERM before the SIGKILL
 SWEEP_POLL_S = 0.05
+SWEEP_FREEZE_ROUNDS = 8       # scans (each after a SIGSTOP of what is known) before the SIGKILL goes out even if new processes keep appearing
 
 
 RUN_DIR_VAR = "ORCHARD_RUN_DIR"
@@ -874,11 +875,23 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
             except (ProcessLookupError, PermissionError):
                 pass
 
+        def freeze() -> None:
+            """Stop every process found so far (SIGSTOP) and scan again, until a scan finds no process that is new: a helper that keeps forking
+            cannot start a child after the last scan, because it cannot run once it is stopped. A stopped process still dies of SIGKILL.
+            At most SWEEP_FREEZE_ROUNDS scans, so a source of processes that never ends cannot hold the sweep; the SIGKILLs then go out."""
+            for _ in range(SWEEP_FREEZE_ROUNDS):
+                before = len(records)
+                for r in records:
+                    send(r["pid"], signal.SIGSTOP)
+                note(found())
+                if len(records) == before:
+                    return
+
         def kill_pass() -> None:
-            """The second scan and the SIGKILLs. Every step has its own guard, so this never raises: an error here
+            """Freeze, rescan until the set is stable, then the SIGKILLs. Every step has its own guard, so this never raises: an error here
             cannot replace an interrupt that is on its way out."""
             try:
-                note(found())                            # a second scan: new processes started during the grace
+                freeze()                                 # new processes started during the grace are scanned, and cannot start more
             except Exception:
                 pass                                     # the processes already known still get their SIGKILL
             for r in records:
@@ -929,7 +942,8 @@ def _partial_attempt(box: dict, kw: dict, exc: BaseException) -> dict | None:
         "op": kw["op"], "attempt": kw["n"], "status": "interrupted",
         "status_detail": f"{type(exc).__name__} before the attempt finished; the agent's hardware calls so far are kept",
         "turns": None, "agent_wall_s": None, "passed_sim": False, "category": None, "first_line": "",
-        "pcc_min": None, "sets": [], "violations": [], "hw": None, "agent_check_untrusted": False, "swept": [],
+        "pcc_min": None, "sets": [], "violations": [], "hw": None, "agent_check_untrusted": False,
+        "swept": list(getattr(box.get("tools"), "swept", [])),
         "sampling": sampling, "coder_speed": kw.get("coder_speed"), "agent_hw": hwcheck.summary(),
         "provenance": provenance(kernel_sha256=None, tt_lang=box.get("facts"), coder_model=kw.get("coder_model"),
                                  probe_id=kw.get("probe_id"), simulator_pcc_min=None, sampling=dict(sampling),
@@ -984,9 +998,12 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         if _box is not None:
             _box["hwcheck"], _box["facts"] = hwcheck, facts
     started = time.monotonic()
+    tools = attempt_tools(adir, hardware=hwcheck)
+    if _box is not None:
+        _box["tools"] = tools                        # an interrupted attempt keeps what the tools' sweeps stopped (_partial_attempt)
     try:
         dog = watchdog if watchdog is not None else build_watchdog(control, ledger)
-        step = AgentStep(agent=AGENT, endpoint=endpoint, model=model, tools=attempt_tools(adir, hardware=hwcheck),
+        step = AgentStep(agent=AGENT, endpoint=endpoint, model=model, tools=tools,
                          ledger=ledger,
                          stage=0, phase="probe", feed=dog.feed, control=control, run_dir=adir,
                          evidence_dir=adir / "evidence", log_path=adir / "log" / "probe-00001.jsonl", http=http,
@@ -998,8 +1015,9 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         outcome = step.run(SKILL.read_text(encoding="utf-8"), user)
     finally:
         ledger.close()
-        # Before any verdict, and on a crash or an interrupt too: no process the agent started may keep running.
-        swept = sweep_strays(adir)
+        # Before any verdict, and on a crash or an interrupt too: no process the agent started may keep running. The helpers that a shell
+        # command's own sweep stopped (agent.spawn_checked) are no longer there to find, so the tools' records come first.
+        swept = list(tools.swept) + sweep_strays(adir)
     agent_wall_s = round(time.monotonic() - started, 2)
     try:
         check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)

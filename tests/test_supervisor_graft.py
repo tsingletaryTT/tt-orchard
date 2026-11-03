@@ -455,6 +455,7 @@ def test_the_trials_command_is_one_the_command_runner_allows(rig):
 # start run.sh with start_new_session=True, so a server survives that kill and keeps the chips open. The supervisor finds those servers by
 # the trial directory in their environment, stops them, and only then restores the coder or gives the lease back.
 import os
+import signal
 import subprocess
 import sys
 
@@ -647,6 +648,86 @@ def test_an_error_during_the_trial_test_also_stops_its_servers(tmp_path, monkeyp
             r.run()
         assert s.servers[0].poll() is not None
         assert len(stage2(r, "graft trial servers stopped")) == 1
+    finally:
+        s.cleanup()
+        r.close()
+
+
+# ---- review of PR 431, round 1: what spawn_checked's own sweep stopped must reach the ledger -------------------------------------------------------
+
+HELPER_LAUNCHER = ("import subprocess, sys, time\n"
+                   "h = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'], start_new_session=True)\n"
+                   "open(sys.argv[1], 'w').write(str(h.pid))\n"
+                   "time.sleep(600)\n")
+
+
+class RealHelperSpy(TrialSpy):
+    """The trial's command is a real command that starts a server in a session of its own (the server inherits the spawn tag and the trial
+    directory from the command's environment) and then outlives a short deadline, so spawn_checked's own kill and sweep run for real."""
+
+    def __init__(self, real, **kw):
+        super().__init__(real, **kw)
+        self.pidfile = None
+
+    def __call__(self, command, run_dir, env, timeout, out):
+        if "graft_trial.py" not in command:
+            return self.real(command, run_dir, env, timeout, out)
+        self.trials.append({"command": command, "timeout": timeout, "env": dict(env)})
+        script = Path(run_dir) / "real_helper.py"
+        script.write_text(HELPER_LAUNCHER)
+        self.pidfile = Path(run_dir) / "real-helper.pid"
+        return self.real(f"{sys.executable} real_helper.py {self.pidfile}", run_dir, env, 3.0, out)
+
+    def cleanup(self):
+        try:
+            os.kill(int(self.pidfile.read_text()), signal.SIGKILL)
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def test_a_server_the_kill_sweep_stopped_is_recorded_with_its_identity_before_the_coder_comes_back(tmp_path, monkeypatch):
+    r = make_rig(tmp_path, chips=4)
+    s = RealHelperSpy(supervisor.spawn_checked)
+    monkeypatch.setattr(supervisor, "spawn_checked", s)
+    try:
+        assert r.run() == EXIT_READY
+        pid = int(s.pidfile.read_text())
+        entries = [e["data"] for e in r.entries() if e["data"].get("decision") == "hardware test helpers stopped"]
+        assert len(entries) == 1 and [x["pid"] for x in entries[0]["servers"]] == [pid]
+        rec = entries[0]["servers"][0]
+        assert set(rec) >= {"pid", "boot_id", "start", "cmdline", "stopped"} and rec["stopped"] is True
+        assert isinstance(rec["start"], int) and rec["start"] > 0 and rec["boot_id"]
+        at = after_trial_start(r, lambda e: e["data"].get("decision") == "hardware test helpers stopped")
+        restore = after_trial_start(r, lambda e: e["event"] == "restore" and e["data"].get("step") == "reset")
+        assert at is not None and restore is not None and at < restore
+    finally:
+        s.cleanup()
+        r.close()
+
+
+@pytest.mark.parametrize("chips", [2, 4])
+def test_a_helper_the_kill_sweep_could_not_stop_blocks_the_run_before_the_coder_comes_back(tmp_path, monkeypatch, chips):
+    from orchard import agent as agent_module
+    r = make_rig(tmp_path, chips=chips)
+    s = RealHelperSpy(supervisor.spawn_checked)
+    monkeypatch.setattr(supervisor, "spawn_checked", s)
+    real_sweep = supervisor.kernelprobe.sweep_strays
+
+    def sweep(target, **kw):
+        if kw.get("var") == agent_module.SPAWN_TAG_VAR:
+            return [{"pid": 999999, "cmdline": "srv", "stopped": False, "boot_id": "b", "start": 7}]
+        return real_sweep(target, **kw)
+    monkeypatch.setattr(supervisor.kernelprobe, "sweep_strays", sweep)
+
+    def stop():
+        raise Stop()                            # a blocked run waits for the operator here
+    r.on_sleep = stop
+    try:
+        with pytest.raises(Stop):
+            r.run()
+        blocks = [e["data"] for e in r.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+        assert any("still running" in b["reason"] and "999999" in b["reason"] for b in blocks)
+        assert after_trial_start(r, lambda e: e["event"] == "restore") is None
     finally:
         s.cleanup()
         r.close()
