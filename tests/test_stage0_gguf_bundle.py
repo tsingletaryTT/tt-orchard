@@ -45,7 +45,7 @@ def test_the_section_names_the_reading_the_differences_and_the_full_precision_hi
     assert "2 agree, 1 differ, 1 not comparable" in sec
     assert "multi-token prediction layers: GGUF 0; config 1." in sec and "a converter drops it" in sec
     assert "blk.N.ssm_a (F32, 24)" in sec and "output_norm.weight (F32, 1)" in sec
-    assert "not a measurement on Tenstorrent hardware" in sec and "Used by a later stage: Not shown" in sec
+    assert "was not measured on Tenstorrent hardware" in sec and "Used by a later stage: Not shown" in sec
     assert "safetensors" in sec and "no stage uses these files as weights" in sec
 
 

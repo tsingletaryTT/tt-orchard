@@ -1212,7 +1212,7 @@ dimensions, tied embeddings, the multi-token-prediction count, vocabulary size, 
 with both values. A header that cannot be read is listed as unreadable with its reason. Nothing here changes the class or the path, and a
 difference is a finding for the agent and the operator to read, never a gate failure. `delta.json` gets one finding that points at the
 file, and RISKS.md gets a section, "What the GGUF files show", which says no stage records using the full-precision list. That list is
-llama.cpp's choice for that file, a hint about which tensors are sensitive to precision and not a measurement on this hardware. The TT
+llama.cpp's choice for that file. It is a hint about which tensors are sensitive to precision, and it was not measured on this hardware. The TT
 stack and vLLM load safetensors; no stage loads or dequantizes a GGUF.
 
 **The sidecar parity check** (stage 2, class `weights+sidecar`; skill `weights-sidecar-check`). The sidecar

@@ -142,8 +142,8 @@ architecture's hyperparameters, whether the output projection is tied, the multi
 template, how each kind of tensor was quantized, and an `agreement` table against `config.json` (each row says agree, differ or not
 comparable, with both values). Read it as an independent reading of the architecture. A row that differs is a finding to explain in the
 delta (a conversion quirk, a dropped head, a different template), and it never changes the class or the path. The tensors the quantization
-left at full precision are a hint about which tensors are sensitive to precision, taken from llama.cpp's choice, and they are not a
-measurement on this hardware. The script writes the file and the finding that points at it. Do not edit the file, and do not load or
+left at full precision are a hint about which tensors are sensitive to precision, taken from llama.cpp's choice. They were not
+measured on this hardware. The script writes the file and the finding that points at it. Do not edit the file, and do not load or
 dequantize a GGUF tensor: the TT runtime and vLLM load safetensors. A header that could not be read is listed with its reason and is not an error.
 
 Names that the `model.language_model.` rule leaves over are paired by what they share: a model that calls its

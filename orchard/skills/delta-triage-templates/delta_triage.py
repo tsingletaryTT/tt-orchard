@@ -1049,9 +1049,9 @@ GGUF_TYPES = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8:
               22: "IQ2_S", 23: "IQ4_XS", 24: "I8", 25: "I16", 26: "I32", 27: "I64", 28: "F64", 29: "IQ1_M", 30: "BF16", 34: "TQ1_0",
               35: "TQ2_0", 39: "MXFP4"}
 GGUF_FULL_PRECISION = ("F32", "F16", "BF16", "F64")
-GGUF_NOTE = ("An independent reading of each GGUF header, made without the weights. It is evidence for the agent and the operator, not a "
-              "gate. The full-precision list is the choice of the tool that quantized the file (llama.cpp's), a hint about which tensors "
-              "are sensitive and not a measurement on Tenstorrent hardware. Nothing here loads or dequantizes a tensor.")
+GGUF_NOTE = ("An independent reading of each GGUF header, made without the weights. It is evidence for the agent and the operator and never a "
+              "gate. The full-precision list is the choice of the tool that quantized the file (llama.cpp's). It is a hint about which "
+              "tensors are sensitive, and it was not measured on Tenstorrent hardware. Nothing here loads or dequantizes a tensor.")
 
 
 class GgufError(ValueError):
@@ -1434,7 +1434,7 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> d
                          "full_precision": full,
                          "note": ("Kinds of tensor the tool that quantized this file left at full precision, with the layer number folded "
                                   "into N. A hint about which tensors are sensitive to precision, from llama.cpp's choice for this file. "
-                                  "It is not a measurement on Tenstorrent hardware.")},
+                                  "It was not measured on Tenstorrent hardware.")},
         "tied_embeddings": tied, "nextn_predict_layers": nextn,
     }
     rows = gguf_agreement(role, arch, kv, tied, tokens, template_sha, config, template_text, mtp_tensors)
@@ -1528,7 +1528,7 @@ def gguf_finding(g: dict) -> str:
         parts.append(text)
     return ("The repository ships GGUF files. The TT runtime does not read them, and their headers were read here without the weights as an "
             "independent description of the model. " + "; ".join(parts) + ". evidence/gguf-header.json holds the agreement table and "
-            "the tensors the quantization left at full precision, which is a hint and not a measurement.")
+            "the tensors the quantization left at full precision, which is a hint that was not measured on Tenstorrent hardware.")
 
 
 # ---- tokenizer ------------------------------------------------------------------------------------

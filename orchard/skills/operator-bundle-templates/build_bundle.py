@@ -2213,7 +2213,7 @@ def gguf_risks(run: Run, redact: Redactor) -> list[str]:
                               for x in full[:GGUF_KINDS_SHOWN])
             more = f", and {len(full) - GGUF_KINDS_SHOWN} more" if len(full) > GGUF_KINDS_SHOWN else ""
             lines.append("- Kept at full precision by the tool that quantized this file (a hint for the datatype choice from llama.cpp's "
-                         f"decision for this file, not a measurement on Tenstorrent hardware): {shown}{more}.")
+                         f"decision for this file; it was not measured on Tenstorrent hardware): {shown}{more}.")
         lines += ["- Used by a later stage: Not shown. No stage records that it used these files.", ""]
     return lines
 
