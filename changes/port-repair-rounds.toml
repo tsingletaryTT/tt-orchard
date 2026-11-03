@@ -1,0 +1,2 @@
+target = "0.9.100"
+summary = "A full-port stage 2 whose port check failed on the port itself gives the coder up to --port-repair-rounds (default 3) repair rounds in the same attempt, then runs the same check again"

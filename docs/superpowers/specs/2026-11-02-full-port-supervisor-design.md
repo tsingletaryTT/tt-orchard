@@ -111,6 +111,29 @@ No change in slice 1. The stage spec asks for one board, and the existing hardwa
 coder. A model that does not fit one board stops at the prepare step with a refusal that says so; the residency estimate is
 slice 4.
 
+### 3.5 Repair rounds (issue 420)
+
+The first unattended run of the tiny Qwen4 rehearsal (docs/run-logs/2026-11-03-tiny-qwen4-rehearsal-first-run.md) failed stage 2's port check in nine
+seconds at `load`, on a mistake the failure text named: the port counted the config's one-indexed `ple_layer_ids` from zero. The stage ended at the failed
+test (`_test_failure`, on purpose: the finish step records a failed test and cannot be asked to make it pass), and the next attempt began again.
+
+A failed test of the port now earns the coder up to N repair rounds in the same attempt (`--port-repair-rounds`, default 3, recorded in `run_start`).
+
+- **What earns a round.** The supervisor's record of the test shows exit code 2 without a timeout, and the output file the record names (read through the
+  bounded reader, same sha256) holds a `PORT_CHECK_FAILURE` line of kind `port`. The template prints that line, unprefixed, after `FAILED:`; every line
+  of the port's worker carries a prefix, so a port cannot write one. Kind `setup` (no leased chip, a stage 1 file that does not read), a timeout and any other
+  exit code earn none.
+- **What a round does.** The ledger decision comes first. A repair step edits only `stages/2/port/`. `test-result.json` and the output file must still be
+  the files the supervisor wrote, or the attempt fails with the named reason. The template, config and `hw_test.json` are put back, results written during the
+  step are set aside, and the same check runs under a lease. The new record is the supervisor's, with its own ledger hash. A round that changes nothing in
+  the port ends the rounds without a test.
+- **Where the count lives.** In the ledger, per attempt: it starts at a `stage_start` that is not a resume and at a moved-aside stage directory. A resume keeps
+  it. A resume of an escalated attempt that still has rounds goes on in its stage directory and does not move it aside.
+- **What does not change.** The gate, the template's checks, the hash that ties the final record to the supervisor, the finish step (it still records a failed test
+  and does not investigate), and the failure path after the last round: a failed gate, then escalation, then a fresh attempt.
+- **Cost.** Each round is one agent step and one 10-second to 1-hour test with a lease. The lease is taken again for each round and is not held between rounds: when the coder holds
+  the board the test needs, the coder must be up for the repair step, so a lease held across the step would hold a board the coder is parked from.
+
 ## 4. Slices
 
 | Slice | Content | Issue |

@@ -73,7 +73,7 @@ def parse_failure(text) -> dict | None:
 def read_failure(run_dir, stage_dir) -> dict | None:
     """{"kind": "port", "op", "returncode": 2} when the supervisor's record of stage 2's test shows a failure of the port, else None.
 
-    Needs all of: a test record that reads as a JSON object; an exit code of exactly 2 (a bool or a float is not one) with `timed_out` false (the
+    Needs all of: a test record that is a JSON object; an exit code of exactly 2 (a bool or a float is not one) with `timed_out` false (the
     check exits 2 only for a failure it named); an `output` entry in the record that names the stage's output file; that file read through the
     bounded reader with the sha256 the record holds; and a failure line of kind `port` in it. Anything else is None, so a record or an output
     file the coder rewrote earns no round."""

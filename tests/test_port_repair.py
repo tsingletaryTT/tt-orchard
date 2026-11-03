@@ -231,3 +231,30 @@ def test_a_link_that_points_somewhere_else_is_a_change(tmp_path):
     (tmp_path / "a.py").unlink()
     os.symlink("/etc/passwd", tmp_path / "a.py")
     assert port_repair.changed(before, port_repair.fingerprint(tmp_path)) == ["a.py"]
+
+
+# ---- the narration ---------------------------------------------------------------------------------------------------------------
+
+def narrated_lines(tmp_path, *decisions):
+    from orchard.ledger import Ledger
+    from test_supervisor_graft import narrated
+    run = tmp_path / "run"
+    with Ledger(run / "ledger.jsonl") as led:
+        led.append("run_start", None, model="x/y")
+        for data in decisions:
+            led.append("decision", 2, **data)
+    return narrated(run)
+
+
+def test_a_round_is_narrated_with_the_failure_and_what_happens_next(tmp_path):
+    out = narrated_lines(tmp_path, {"decision": port_repair.DECISION, "round": 1, "of": 3, "op": "load", "failure": "the port failed at 'load': KeyError"})
+    [line] = [x for x in out if "port repair round 1 of 3" in x]
+    assert "at 'load'" in line and "KeyError" in line and "same check runs again" in line
+
+
+def test_the_end_of_the_rounds_says_why(tmp_path):
+    out = narrated_lines(tmp_path, {"decision": port_repair.STOPPED, "reason": "spent", "rounds": 3, "of": 3},
+                         {"decision": port_repair.STOPPED, "reason": "unchanged", "rounds": 1, "of": 3},
+                         {"decision": "port repair refused", "round": 1, "files": ["test-result.json"]})
+    joined = "\n".join(out)
+    assert "all the rounds were used" in joined and "changed nothing in the port" in joined and "test-result.json, which only the supervisor writes" in joined
