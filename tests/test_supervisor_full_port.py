@@ -594,3 +594,15 @@ def test_a_config_that_is_a_fifo_leaves_no_facts_and_does_not_hang_the_stage(tmp
     S._seed_full_port(stub, SimpleNamespace(number=2), sd)
     assert not (sd / "port_facts.json").exists() and stub._port_seed["facts"] is False
     assert any(k.get("decision") == "port facts not written" for _, k in entries)
+
+
+def test_a_skeleton_that_cannot_be_copied_leaves_the_facts_and_a_ledger_decision_and_does_not_stop_the_stage(tmp_path):
+    from types import SimpleNamespace
+    snap = _checkpoint(tmp_path)
+    sd = tmp_path / "stages" / "2"
+    sd.mkdir(parents=True)
+    (sd / "port").write_text("a file where the port directory should be")
+    stub, entries, S = _stub(tmp_path, snap)
+    S._seed_full_port(stub, SimpleNamespace(number=2), sd)
+    assert (sd / "port_facts.json").is_file() and stub._port_seed == {"facts": True, "skeleton": False}
+    assert any(k.get("decision") == "port skeleton not copied" for _, k in entries)

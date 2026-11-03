@@ -2570,7 +2570,11 @@ class Supervisor:
                                    tensor_groups=facts["tensor_groups"], tensors_left_out=facts["tensors_left_out"],
                                    conventions=[c["field"] for c in facts["conventions"]],
                                    reference_found=root is not None)
-        skeleton = port_facts.copy_skeleton(stage_dir)
+        try:
+            skeleton = port_facts.copy_skeleton(stage_dir)
+        except (OSError, safeio.SafeReadError) as exc:       # a full or read-only stage directory, or no shipped skeleton: the coder writes the port from nothing, as before
+            skeleton = False
+            self.ledger.append("decision", spec.number, decision="port skeleton not copied", problem=exc.__class__.__name__)
         if skeleton:
             self.ledger.append("decision", spec.number, decision="port skeleton copied")
         self._port_seed = {"facts": facts_written, "skeleton": skeleton}

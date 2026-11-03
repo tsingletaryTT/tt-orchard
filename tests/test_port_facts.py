@@ -137,6 +137,28 @@ def test_an_id_list_field_carries_the_references_index_convention(single):
     assert [c["field"] for c in facts["conventions"]] == ["ple_layer_ids", "other_ids"]
 
 
+def test_only_fields_that_hold_layer_or_position_numbers_are_listed_as_index_fields(tmp_path):
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    cfg = {"eos_token_id": [1, 2], "ple_layer_ids": [2], "mlp_only_layers": [0, 3], "full_attention_layers": [3], "vocab_size": 384,
+           "bos_token_id": 1, "layer_types": ["a"], "hidden_sizes": [64, 128],
+           "skip_layers": ["x", "y"], "block_ids": [True, False]}          # names that fit, values that are not whole numbers
+    (snap / "config.json").write_text(json.dumps(cfg))
+    write_safetensors(snap / "model.safetensors", {"w": ("F32", (2,))})
+    fields = sorted(f["field"] for f in port_facts.build(snap)["index_fields"])
+    assert fields == ["full_attention_layers", "mlp_only_layers", "ple_layer_ids"]
+
+
+@pytest.mark.parametrize("value", [None, [], {}, {"a": 1}, 5, 10**20, "", "a\x00b", [None], [[1]], ["x" * 500], True])
+def test_a_config_field_of_any_type_never_raises_and_a_bad_id_list_is_not_trusted(single, value):
+    cfg = {**CONFIG, "layer_types": value, "ple_layer_ids": value, "model_type": value, "text_config": value, "hidden_size": value}
+    (single / "config.json").write_text(json.dumps(cfg))
+    facts = port_facts.build(single)
+    assert facts["schema"] == port_facts.SCHEMA
+    listed = [f["values"] for f in facts["index_fields"]]
+    assert all(isinstance(v, list) and v and all(isinstance(x, int) and not isinstance(x, bool) for x in v) for v in listed)
+
+
 def test_without_the_references_source_the_convention_is_said_to_be_unknown(single):
     f = port_facts.build(single, reference_source=None)["index_fields"][0]
     assert "not stated" in f["convention"] and "layer numbers of the tensors" in f["convention"]

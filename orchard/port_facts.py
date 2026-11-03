@@ -50,7 +50,8 @@ MAX_NOTES = 12
 MAX_NOTE_CHARS = 300
 MAX_SHARDS_LISTED = 8
 MAX_SCHEDULE = 4096
-INDEX_FIELD = re.compile(r"(_ids?|_idx|_indices|_layers?)$")       # config fields that hold layer or position numbers
+# Config fields that hold layer, block, expert or position numbers. `eos_token_id` lists hold token ids and do not match.
+INDEX_FIELD = re.compile(r"(layer|block|expert|position).*(_ids?|_idx|_indices|_numbers?)$|_layers?$")
 CONVENTION = re.compile(r"\b(?:one|zero|1|0)[- ]?(?:based|indexed)\b", re.I)
 _FIELD_HEAD = re.compile(r"^\s{4,8}(\w+) \(`")                       # `    name (`type`, *optional*):` in a configuration docstring
 _MODEL_TYPE = re.compile(r"[a-z0-9_]{1,64}")
