@@ -102,7 +102,7 @@ def test_a_duplicate_prompt_id_is_refused():
 
 def test_score_counts_matches_and_names_the_first_mismatch():
     s = core.score_prompt([1, 2, 3, 4], [1, 2, 9, 4])
-    assert s == {"n": 4, "matches": 3, "top1": 0.75, "first_mismatch": 2}
+    assert s == {"n": 4, "matches": 3, "top1": 0.75, "first_mismatch": 2, "skipped": 0}
     assert core.score_prompt([1, 2], [1, 2])["first_mismatch"] is None
     assert core.score_prompt([1, 2], [None, 2])["matches"] == 1
 

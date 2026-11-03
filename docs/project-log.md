@@ -3978,3 +3978,9 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Issue 288: item 1 and the weights-repo part of item 3 were fixed in PR 396. Item 2 (repository and commit on different lines of a card) stays open because it needs a decision on the card format.
 - Issue 173: the remaining code item is in `orchard/audio_package.py`, which PR 397's area touches; the other two items need a board. Left open with the blocker in a comment.
 - Review round 1 (Copilot): the no-base warning in `check_base` returned before `_audio_base`, so an audio model with no base had no checkpoint note. The warning now carries `CHECKPOINT_NOTE` when the model is audio (`tests/test_audio_preflight.py`); removing it turns that test red.
+
+## 2026-11-03 Unrecoverable positions in the token comparison (branch `fix-406-unrecoverable-positions`, issue 406)
+- Prompt (operator): recently filed issues are to be considered for fixing.
+- Change: `serve_and_compare.py` marks a position `skipped` when the reference token cannot be read back from the server text (half of a character, a token that does not re-encode to itself, a special token or a `generation_config.json` eos id). The 32-token check leaves it out of matches and count (`positions_skipped`, `n_tokens` counts the rest). `agreement_core.score_prompt` takes `skipped`, refuses more than a quarter of a prompt, and the damage control and the control comparison both use it.
+- Limit: a server that returns token ids (logprobs, `return_token_ids`) would make the skip unnecessary; the bundle server still rejects logprobs.
+- Mutations: 12 guards, each turned a test red; one survived at first (the damage control hid its own damage when skipped positions lined up with it) and the design was changed.

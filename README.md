@@ -1228,7 +1228,12 @@ Options: `--turns` (default 50), `--repeats` (default 5), `--sizes` (default `81
 
 ### 5.3c The prompt suite in stages 2 and 4
 
-The 32-token check compares one prompt with the CPU reference. After it, the swap tests send eight fixed prompts
+The 32-token check compares one prompt with the CPU reference. It reads each generated token back from the text the server
+returns. A reference token that the text cannot give back is left out of both the matches and the count, and the record lists
+it under `positions_skipped` (and as `skipped` in each agreement-set entry): half of a character, a token that does not
+re-encode to itself, and a stop token (a special token, or an id in `generation_config.json`'s `eos_token_id`) that the server
+leaves out of the response. The agreement set refuses a prompt that leaves out more than a quarter of its positions, and the
+32-token check keeps its floor of 16 compared tokens. After it, the swap tests send eight fixed prompts
 (`orchard/skills/weights-swap-templates/prompt_suite.json`: a chat question, code, arithmetic, a multi-turn exchange, a
 Russian question, a tool call, a summary and a list format) and record the raw replies in `evidence/swap-check.json`.
 The prompt format follows the model's tokenizer: a chat template means the chat endpoint, none means plain
