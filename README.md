@@ -2051,7 +2051,7 @@ python -m orchard.audio_result_derive RUN_DIR CHIP_RUN_DIR OUT_JSON             
 
 Rebuild for the decoder on the chip (2026-10-29, [run log](docs/run-logs/2026-10-29-audio-package-rebuild.md)): `--out` stages into a new directory and
 writes the commands text beside it. `--result` reads an audio result in place of the run's `stages/2/audio_result.json`; `audio_result_derive` makes
-that file from a later chip run and the run's own result without editing either. `--probe` and `--agreement-report` copy two optional JSON files into
+that file from a later chip run and the run's own result without editing either. It reads `stages/1/noise_floor.json` as stage 2 does, compares the later run with those bars, and refuses when the file is not the floor the base result recorded. `--probe` and `--agreement-report` copy two optional JSON files into
 `evidence/`, and `--listening-note` prints the operator's dated listening judgment on the card. The packaged generate command runs the decoder's
 transformer on the chip by default; `AUDIO_HOST_DECODER=1` or `--host-decoder` keeps the decoder on the host.
 
