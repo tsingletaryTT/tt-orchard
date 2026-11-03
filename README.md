@@ -353,7 +353,9 @@ The coder container has its own cache. `tt-model serve` mounts the Hugging Face 
 A scratch `HF_HOME` made a boot write 94 GB and fill a root disk on 2026-11-03 (issue 417). The `coder-cache` preflight row checks for the
 model, and the live narration of a coder boot adds the cache's partial downloads and the fall in its disk's free space to its once-a-minute
 line when either passes 2 GB. When the supervisor confirms that it stopped its own coder, it removes the stopped container, because a
-container that docker killed without an exit event stays on disk and `tt-model serve` refuses its name (the `container` row looks for one).
+container that docker killed without an exit event, or that died during a boot (`Exited (1)`), stays on disk, and `tt-model serve` counts it as holding
+the chips and refuses to start (the `container` row looks for one). That includes a start whose `tt-model serve` itself failed; only a start refused because
+another process owns the container leaves it alone.
 
 Each chip configuration needs its own tensor cache. The supervisor checks free space only on the
 filesystem that holds the run directory. On the development machine the root disk was 99% full, so
@@ -1296,6 +1298,13 @@ minute), then runs the same command again, which resumes from the ledger with a 
 `--auto-retries` retries (default 2, and 0 turns it off) and says each one on the screen. A block that names a missing
 model, a full disk, a credential or a rule, a failed stage after escalation, or a spent retry budget is never retried
 automatically. After the last retry the run ends blocked as before.
+
+A `coder-unusable` block that says `in use by another container` is the other exception: `tt-model serve` refused to start because a
+container, running or stopped, holds the chips it was asked to use. A coder container left as `Exited` by an earlier boot does this with
+the chips healthy (issue 417), so the block is classed as a coder problem and not a hardware one. Its text names the container and the
+command that removes it (`docker rm <name>`), or says to list containers when none has the coder's name. It is not retried by itself,
+because the container stays until someone removes it. A retry within the same run removes a stopped container of the coder's exact name
+once and starts again when the run launched a coder before; a container that was there before the run, or that runs, is never removed.
 
 A `hardware-unhealthy` block that says `a chip this run uses is off the PCIe bus or unreadable` is the exception: it is never
 retried, because the board needs a power cycle or a reboot and a retry would meet the same board. The supervisor makes that

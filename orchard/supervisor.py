@@ -154,7 +154,7 @@ from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
-from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
+from orchard.server import ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
 from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
@@ -1427,7 +1427,17 @@ class Supervisor:
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
                            server={**self.coder.record(), "owned": None})
         try:
-            self.coder.start(lease)
+            try:
+                self.coder.start(lease)
+            except ServerChipsHeld as held:
+                # `tt-model serve` counts a stopped container as holding its chips. When this run launched a coder before (a retry), a
+                # stopped container under the coder's name is that launch's leftover: remove it and start once more. Anything else is
+                # not ours to remove, and the block says what holds the chips and how to clear it (issue 417).
+                if not self._remove_own_leftover(lease):
+                    self._block_chips_held(held, lease)
+                self.coder.start(lease)
+        except ServerChipsHeld as exc:
+            self._block_chips_held(exc, lease, retried=True)
         except ServerNotOwned as exc:
             # Another process owns the container of this name. Record that, so no later stop (this
             # run's cleanup, a resume) touches it, and block with the usual coder reason.
@@ -1530,6 +1540,54 @@ class Supervisor:
         if result:
             self.ledger.append("decision", None, decision="coder container removed" if result.get("removed") else "coder container left",
                                result=result)
+
+    def _remove_own_leftover(self, lease: Lease) -> bool:
+        """A start was refused because a container holds the chips. True when this run launched a coder before (an earlier "coder starting"
+        entry besides the newest), a stopped container under the coder's exact name was found, and it was removed. A container
+        that runs, one of another name, and any container when this run launched nothing earlier are left alone (issue 417)."""
+        find, remove = getattr(self.coder, "find_container", None), getattr(self.coder, "remove_container", None)
+        if find is None or remove is None:
+            return False
+        launches = sum(1 for e in self.ledger.read() if e["event"] == "decision" and e["data"].get("decision") == "coder starting")
+        if launches < 2:
+            return False
+        try:
+            found = find()
+            if not found or any(state == "running" for _, state in found):
+                return False
+            result = remove(even_if_unowned=True)
+        except (ServerError, OSError) as exc:
+            self.ledger.append("notice", None, what="removing the leftover coder container failed", error=str(exc))
+            return False
+        if not result:
+            return False
+        self.ledger.append("decision", None, decision="coder container removed" if result.get("removed") else "coder container left",
+                           result=result, before_start=True, lease_id=lease.lease_id)
+        return bool(result.get("removed"))
+
+    def _block_chips_held(self, exc: Exception, lease: Lease, retried: bool = False) -> None:
+        """Block after `tt-model serve` refused because a container holds the chips. The reason names the container that is left over and
+        the command that removes it, and says the chips are not at fault, so the block is classed as a coder problem and not a hardware one
+        (orchard/blocked.py). A chip that has in fact left the bus is still reported first, as for any failed boot."""
+        found = None
+        try:
+            found = self.coder.find_container() if hasattr(self.coder, "find_container") else None
+        except (ServerError, OSError):
+            found = None
+        stopped = [(n, st) for n, st in (found or []) if st != "running"]
+        if stopped:
+            n, st = stopped[0]
+            fix = f"A stopped container named {n} is left over ({st}); remove it with `docker rm {n}`, then resume."
+        elif found:
+            fix = f"A container named {found[0][0]} is running and holds them; stop it with `tt-model stop`, then resume."
+        else:
+            fix = ("No container with the coder's name was found; list containers with `docker ps -a`, remove or stop the container that holds "
+                   "the chips, then resume.")
+        again = " The leftover of this run's earlier launch was removed once and the start was refused again." if retried else ""
+        reason = (f"the coder did not start and answer; nothing is retried: {exc}. The chips are not at fault: another container holds "
+                  f"them. {fix}{again}")
+        self._block_if_off_bus(None, reason, lease.chips)
+        self._block(None, reason)
 
     def _release_kept_lease(self, lease: Lease) -> None:
         """A kept coder's lease stays (STALE) after its container stops; give it back before a new start."""

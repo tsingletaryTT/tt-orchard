@@ -352,10 +352,16 @@ def test_a_container_that_only_contains_our_name_is_left_alone():
     assert ctl.remove_container() is None and not any(a[:2] == ["docker", "rm"] for a in run_.argvs())
 
 
-@pytest.mark.parametrize("owned", [False, None])
-def test_a_container_this_control_did_not_start_is_not_removed(owned):
-    ctl, run_ = owned_control((0, f"{NAME} exited\n", ""), owned=owned)
+def test_a_container_that_a_refusal_said_another_process_owns_is_not_removed():
+    ctl, run_ = owned_control((0, f"{NAME} exited\n", ""), owned=False)
     assert ctl.remove_container() is None and run_.calls == []
+
+
+def test_a_container_of_unknown_ownership_is_removed_when_it_is_stopped_and_ours_by_name():
+    """Unknown (None) is a start that failed for another reason or a ledger record without the field: tt-model made the container under our
+    name. Issue 417: after a boot failure the container was left as `Exited (1)` and refused the retry."""
+    ctl, run_ = owned_control((0, f"{NAME} exited\n", ""), owned=None)
+    assert ctl.remove_container()["removed"] is True and ["docker", "rm", NAME] in run_.argvs()
 
 
 def test_a_bundle_server_has_no_container_to_remove():
