@@ -63,6 +63,7 @@ import signal
 import subprocess
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -127,6 +128,9 @@ def agent_env(run_dir, *, extra: dict | None = None, source=None) -> dict:
 
 # ---- running a checked command ------------------------------------------------------------------
 
+SPAWN_TAG_VAR = "ORCHARD_SPAWN_TAG"       # in every spawned command's environment: a value of its own, so a sweep finds what the command started
+
+
 def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> tuple[int | None, bool]:
     """Run one shell string after the runner's checks. Returns (exit code or None, timed out).
 
@@ -135,18 +139,26 @@ def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> t
     supervisor's SIGINT or SIGTERM handler, or an error): a terminal's Ctrl-C does not reach a
     process in another session, so without this the command would keep running, possibly with a
     device open, after the supervisor had released its lease.
+
+    A helper that the command put in a session of its own (`start_new_session=True`, a double fork
+    with `setsid`) is not in the command's group, so the group kill misses it (issue 390). Every
+    command carries ORCHARD_SPAWN_TAG with a value of its own, and after a kill the processes that
+    carry it are stopped and named in `stdout`. A process that replaced its environment is not found.
     """
     check_string(command, run_dir)
-    proc = subprocess.Popen(["bash", "-c", command], cwd=run_dir, env=env, stdin=subprocess.DEVNULL,
+    tag = str(Path(run_dir).resolve() / f".spawn-{uuid.uuid4().hex}")       # a value to match, never created as a path
+    proc = subprocess.Popen(["bash", "-c", command], cwd=run_dir, env={**env, SPAWN_TAG_VAR: tag}, stdin=subprocess.DEVNULL,
                             stdout=stdout, stderr=subprocess.STDOUT, start_new_session=True)
     try:
         proc.wait(timeout=timeout)
         return proc.returncode, False
     except subprocess.TimeoutExpired:
         _kill_session(proc)
+        _sweep_helpers(tag, stdout)
         return None, True
     except BaseException:
         _kill_session(proc)
+        _sweep_helpers(tag, stdout)
         raise
 
 
@@ -156,6 +168,24 @@ def _kill_session(proc) -> None:
     except ProcessLookupError:
         pass
     proc.wait()
+
+
+def _sweep_helpers(tag: str, stdout) -> None:
+    """Stop the processes that carry `tag` (SIGTERM, a short grace, then SIGKILL) and say which in `stdout`. This runs on the way out of a kill,
+    so it never raises: an error here must not replace the result or the interrupt that is already on its way."""
+    try:
+        from orchard import kernelprobe              # imported here: kernelprobe imports this module
+        records = kernelprobe.sweep_strays(tag, var=SPAWN_TAG_VAR)
+        if records:
+            lines = "".join(f"orchard: a helper outlived the command and was stopped: pid {r['pid']} {r['cmdline']}"
+                            f"{'' if r['stopped'] else ' (still running)'}\n" for r in records)
+            try:
+                stdout.write(lines.encode("utf-8") if "b" in getattr(stdout, "mode", "b") else lines)
+                stdout.flush()
+            except (OSError, ValueError, TypeError):
+                pass
+    except Exception:
+        pass
 
 
 READ_FILE_MAX_BYTES = 16 * 1024 * 1024    # choice: read_file loads a file whole to page through it
