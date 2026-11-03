@@ -67,7 +67,7 @@ def test_another_failure_is_not_the_in_use_refusal(text):
 
 
 def test_a_container_after_a_failed_start_with_unknown_ownership_is_removed():
-    ctl, run = control([(1, "", "container exited with code 1")], listing=(0, f"{NAME} exited\n", ""))
+    ctl, run = control([(1, "", "container exited with code 1")], listing=(0, f"{NAME} exited c1\n", ""))
     with pytest.raises(ServerError):
         ctl.start(LEASE)
     assert ctl.owned is None
@@ -75,7 +75,7 @@ def test_a_container_after_a_failed_start_with_unknown_ownership_is_removed():
 
 
 def test_a_known_refusal_blocks_the_removal_unless_the_caller_says_the_container_is_this_runs():
-    ctl, run = control([(1, "", REFUSAL)], listing=(0, f"{NAME} exited\n", ""))
+    ctl, run = control([(1, "", REFUSAL)], listing=(0, f"{NAME} exited c1\n", ""))
     with pytest.raises(ServerChipsHeld):
         ctl.start(LEASE)
     assert ctl.remove_container() is None and rms(run) == []
@@ -123,7 +123,7 @@ def test_a_block_that_names_a_container_is_not_retried_by_itself():
 class ScriptedCoder(MachineCoder):
     """The fake machine for readiness and chips; a real ServerControl over scripted commands for the start, the stop checks and the removal."""
 
-    def __init__(self, machine, serve, listing=(0, f"{NAME} exited\n", "")):
+    def __init__(self, machine, serve, listing=(0, f"{NAME} exited c1\n", "")):
         super().__init__(machine)
         self.ctl, self.run = control(serve, listing=listing)
 
@@ -155,6 +155,9 @@ class ScriptedCoder(MachineCoder):
     def find_container(self):
         return self.ctl.find_container()
 
+    def find_container_rows(self):
+        return self.ctl.find_container_rows()
+
 
 @pytest.fixture
 def rig(tmp_path):
@@ -175,16 +178,19 @@ def launch(rig, coder):
     return made
 
 
-def earlier_launch(rig):
-    """The ledger of a run that already launched a coder once (the first attempt of a retry)."""
+def earlier_launch(rig, created="c1"):
+    """The ledger of a run that already launched a coder once (the first attempt of a retry). `created` is the id of the container that
+    launch made, recorded as the supervisor records it; None is a launch that was refused and made none."""
     rig.run_dir.mkdir(parents=True, exist_ok=True)
     with Ledger(rig.run_dir / "ledger.jsonl") as led:
         led.append("decision", None, decision="coder starting", server={"kind": "container", "target": SPEC.target, "owned": None})
+        if created:
+            led.append("decision", None, decision="coder container created", container_id=created, name=NAME)
 
 
 def test_a_leftover_of_this_runs_own_launch_is_removed_and_the_start_is_tried_again(rig):
     earlier_launch(rig)
-    exited, gone = (0, f"{NAME} exited\n", ""), (0, "", "")
+    exited, gone = (0, f"{NAME} exited c1\n", ""), (0, "", "")
     # the listings in order: the check, the removal's own look, then nothing once it is removed
     made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL), (0, "", "")], listing=[exited, exited, gone]))
     rig.run()
@@ -226,7 +232,7 @@ def test_a_refusal_with_no_stopped_container_of_that_name_says_to_list_container
 
 def test_a_running_container_of_that_name_is_never_removed_by_the_retry(rig):
     earlier_launch(rig)
-    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], listing=(0, f"{NAME} running\n", "")))
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], listing=(0, f"{NAME} running c1\n", "")))
     assert rig.run() == 5
     assert rms(made[0].run) == [] and len(serves(made[0].run)) == 1
 

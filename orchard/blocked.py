@@ -52,6 +52,7 @@ _BLOCKED_WORDS = (
     ("model-does-not-fit", ("does not fit this box", "does not fit stage")),                     # before the hardware words: its text says `chips`
     ("package-missing", ("no installed bundle or container package",)),     # before the hardware words: its text says `chip`
     ("disk-full", ("disk", "free space", " gb free")),
+    ("hardware-unhealthy", (OFF_BUS_MARK.lower(),)),         # a chip that left the bus outranks a container refusal found in the same text
     ("coder-unusable", (CONTAINER_HOLDS_MARK,)),     # before the hardware words: the text says `chip(s)`, and the chips are healthy
     ("hardware-unhealthy", ("lease", "chip", "board", "reset", "gozer", "hardware", "device")),
     ("coder-unusable", ("coder", "canary", "server", "model did not")),

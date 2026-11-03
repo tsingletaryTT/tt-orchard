@@ -1253,7 +1253,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             checks = preflight_page()
     stops = preflight.blocked(checks)
     if stops and args.prune_caches and all(c.reason == "disk-full" for c in stops):
-        short = preflight.prunable_shortfall(next(c for c in stops if c.name == "disk"))
+        # The block may be the coder cache's alone (a `coder-cache` row, issue 417): tensor caches cannot free that disk, so nothing is pruned.
+        disk_row = next((c for c in stops if c.name == "disk"), None)
+        short = preflight.prunable_shortfall(disk_row) if disk_row is not None else None
         if short:
             ok, _gone = tensor_caches.prune_to_fit(cfg, short, say=lambda m: print(f"{style.icon('🧹')}{m}", file=out),
                                             dry_run=args.dry_run)

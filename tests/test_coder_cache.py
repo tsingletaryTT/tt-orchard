@@ -448,7 +448,7 @@ def test_each_confirmed_stop_site_calls_the_removal(where):
               "end-of-run release": 'reason="the coder is not confirmed stopped; the lease was not "',
               "relaunch": 'self._block(None, "the coder could not be confirmed stopped for the relaunch", **check)'}[where]
     after = text.split(marker, 1)[1][:700]
-    assert "self._remove_coder_container()" in after
+    assert "self._remove_coder_container(" in after
 
 
 # ---- the narrator --------------------------------------------------------------------------------------------------------------

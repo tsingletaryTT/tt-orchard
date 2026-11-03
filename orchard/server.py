@@ -64,8 +64,9 @@ class ServerNotOwned(ServerError):
     owns it, so this run must not stop it."""
 
 
-class ServerChipsHeld(ServerError):
-    """`tt-model serve` refused because a container (running or stopped) holds the chips it was asked to use."""
+class ServerChipsHeld(ServerNotOwned):
+    """`tt-model serve` refused because a container (running or stopped) holds the chips it was asked to use. It is a kind of not-owned
+    refusal, so every handler that records a refusal (the park and restore path as well as the supervisor's start) persists it."""
 
 
 class NotReady(ServerError):
@@ -354,35 +355,43 @@ class ServerControl:
         self._check_port(checks, ev)
         return StopCheck(all(checks.values()), checks, ev)
 
-    def find_container(self) -> list[tuple[str, str]] | None:
-        """(name, state) of each container whose name is exactly this server's container name, from `docker ps -a`; None when docker did not
-        answer. Read only."""
+    def find_container_rows(self) -> list[tuple[str, str, str]] | None:
+        """(name, state, id) of each container whose name is exactly this server's container name, from `docker ps -a`; None when docker
+        did not answer. Read only."""
         name = self.spec.container_name
-        ls = self.run([self.docker, "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}} {{.State}}"], self.timeout)
+        ls = self.run([self.docker, "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}} {{.State}} {{.ID}}"], self.timeout)
         if ls.returncode != 0:
             return None
         rows = [ln.split() for ln in ls.stdout.splitlines()]
-        return [(parts[0], parts[1] if len(parts) > 1 else "") for parts in rows if parts[:1] == [name]]
+        return [(p[0], p[1] if len(p) > 1 else "", p[2] if len(p) > 2 else "") for p in rows if p[:1] == [name]]
 
-    def remove_container(self, *, even_if_unowned: bool = False) -> dict | None:
+    def find_container(self) -> list[tuple[str, str]] | None:
+        """(name, state) of each container whose name is exactly this server's container name; None when docker did not answer."""
+        rows = self.find_container_rows()
+        return None if rows is None else [(n, st) for n, st, _ in rows]
+
+    def remove_container(self, *, even_if_unowned: bool = False, only_id: str | None = None) -> dict | None:
         """Remove the stopped container of this server, once the caller has confirmed the stop (issue 417). A container that docker killed
         without an exit event, or that died during a boot, stays on disk under its name, and `tt-model serve` refuses to start while that
         name exists. Only a container package is touched, only a container whose name is exactly ours, never one that is running (the
         listing is checked here and `docker rm` runs without `-f`), and not after a refusal that said another process owns the container
         (`owned` is False) unless the caller knows the container is this run's own (`even_if_unowned`). An unknown owner (a start that
         failed for another reason, or a ledger record without the field) counts as ours: tt-model made the container under our name.
-        Returns what was found and done, or None when there was nothing to do."""
+        `only_id` makes the removal conditional on the listed container having that id (the id this run recorded when it created the container), so a
+        container that took the name since is left alone. Returns what was found and done, or None when there was nothing to do."""
         name = self.spec.container_name
         if self.spec.kind != "container" or (self.owned is False and not even_if_unowned):
             return None
-        found = self.find_container()
+        found = self.find_container_rows()
         if found is None:
             return {"container": name, "listed": False}
-        states = [st for _, st in found]
+        states = [st for _, st, _ in found]
         if not states:
             return None
         if "running" in states:
             return {"container": name, "removed": False, "why": "it is running"}
+        if only_id is not None and not any(i and (i.startswith(only_id) or only_id.startswith(i)) for _, _, i in found):
+            return {"container": name, "removed": False, "why": "it is not the container this run created"}
         rm = self.run([self.docker, "rm", name], self.timeout)
         return {"container": name, "state": states[0], "removed": rm.returncode == 0, "stderr": rm.stderr.strip()[-200:]}
 

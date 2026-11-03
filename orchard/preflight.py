@@ -299,13 +299,17 @@ def coder_model_id(load: Callable, tiers_path: Path, coder_port: int) -> str | N
 
 
 def check_coder_cache(*, cache: Path, model_id: str, present: bool, free_gb: float | None, need_gb: float, need_from: str,
-                      no_fetch: bool, hf_home_flag: Path | None = None) -> Check:
+                      no_fetch: bool, hf_home_flag: Path | None = None, planned_gb: float = 0.0, counted_by_disk_row: bool = False) -> Check:
     """Is the coder's base model in the cache the coder container will mount (issue 417)? `tt-model serve` mounts $HF_HOME from its own
     environment, so `cache` is that directory and `hf_home_flag` (the run's --hf-home) is only compared with it.
 
     A missing model is a block when the download cannot fit (`free_gb` under `need_gb` plus the headroom) or when --no-fetch forbids a
     download, and a warning otherwise: on a new machine the first coder boot downloads its model by design, and a warning says how large
-    it is and where it goes. The size is the Hub's, or the stated fallback when the Hub could not be asked (`need_from`)."""
+    it is and where it goes. The size is the Hub's, or the stated fallback when the Hub could not be asked (`need_from`).
+
+    `planned_gb` is what the run itself downloads onto the same disk before the coder boots (the target and the base model, which the command
+    fetches after the preflight): it is taken from `free_gb` first. `counted_by_disk_row` says the coder's model is the target or the base,
+    whose download the disk row already counts, so this row adds none of its own."""
     from orchard import coder_cache
     note = ""
     if hf_home_flag is not None and Path(hf_home_flag) != Path(cache):
@@ -313,12 +317,17 @@ def check_coder_cache(*, cache: Path, model_id: str, present: bool, free_gb: flo
                 "so the model has to be there")
     if present:
         return Check("coder-cache", OK, f"the coder's base model {model_id} is in {cache}, which the coder container mounts{note}")
+    if counted_by_disk_row:
+        return Check("coder-cache", WARN, f"the coder's base model {model_id} is not in {cache}, which the coder container mounts. It is the "
+                     f"model this run downloads first, and the disk row counts that download; the coder boot finds it there only when "
+                     f"{cache} is the cache that download goes to{note}")
     where = (f"the coder's base model {model_id} is not in {cache}, which the coder container mounts; its boot would download about "
              f"{need_gb:.0f} GB ({need_from}) into it")
-    if free_gb is not None and free_gb < need_gb + coder_cache.HEADROOM_GB:
-        return Check("coder-cache", BLOCK, f"{where}, and that disk has {free_gb:.0f} GB free (the download needs {need_gb:.0f} GB plus "
-                     f"{coder_cache.HEADROOM_GB:.0f} GB of headroom). Put the snapshot in that cache, or point HF_HOME at the cache that "
-                     f"has it{note}", "disk-full")
+    if free_gb is not None and free_gb - planned_gb < need_gb + coder_cache.HEADROOM_GB:
+        after = f" ({free_gb - planned_gb:.0f} GB after the {planned_gb:.0f} GB this run downloads onto it first)" if planned_gb > 0 else ""
+        return Check("coder-cache", BLOCK, f"{where}, and that disk has {free_gb:.0f} GB free{after} (the download needs {need_gb:.0f} GB "
+                     f"plus {coder_cache.HEADROOM_GB:.0f} GB of headroom). Put the snapshot in that cache, or point HF_HOME at the cache "
+                     f"that has it{note}", "disk-full")
     if no_fetch:
         return Check("coder-cache", BLOCK, f"{where}, and --no-fetch forbids a download. Put the snapshot in that cache, or point "
                      f"HF_HOME at the cache that has it{note}", "coder-unusable")
@@ -1187,6 +1196,13 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                     return None                           # the tiers row says why
                 cache = Path(s.coder_cache())
                 present = bool(s.coder_snapshot(cache, model))
+                base_id = (base_check.data or {}).get("base")
+                shared = model in (model_id, base_id)
+                # What the command downloads onto this disk before the coder boots: the target and the base, each only when missing. It
+                # fetches them after the preflight, so a disk that holds each download alone can still be short for all three.
+                planned_gb = 0.0
+                if not no_fetch and bool(s.same_device(cache, hf_home_for(cfg))):
+                    planned_gb = (hub.total_bytes / 1e9 if hub is not None and not local else 0.0) + base_gb
                 need_gb, need_from = cc.FALLBACK_BASE_GB, f"a fixed estimate, because the hub could not be asked about {model}"
                 if not present:
                     try:
@@ -1196,7 +1212,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                     if coder_hub is not None and coder_hub.total_bytes > 0:
                         need_gb, need_from = coder_hub.total_bytes / 1e9, "the hub's size for it"
                 return check_coder_cache(cache=cache, model_id=model, present=present, free_gb=s.free_gb(cache), need_gb=need_gb,
-                                         need_from=need_from, no_fetch=no_fetch, hf_home_flag=Path(cfg.hf_home) if cfg.hf_home else None)
+                                         need_from=need_from, no_fetch=no_fetch, hf_home_flag=Path(cfg.hf_home) if cfg.hf_home else None,
+                                         planned_gb=planned_gb, counted_by_disk_row=shared and not no_fetch)
             try:
                 found = coder_cache_row()
                 if found is not None:
@@ -1457,13 +1474,16 @@ def default_signals(cfg, research_options=None) -> Signals:
 
     def coder_cache() -> Path:
         from orchard import coder_cache as cc
-        return cc.effective_cache(home=Path(cfg.operator_home or supervisor.operator_home()))
+        # `tt-model serve` runs in this process's environment and home, so the default is under this process's home. The configured operator
+        # home has no effect on it (the boot watch reads the same one).
+        return cc.effective_cache()
 
     def coder_snapshot(cache: Path, model_id: str) -> bool:
         org, name = model_id.split("/", 1)
         snaps = Path(cache) / "hub" / f"models--{org}--{name}" / "snapshots"
         try:
-            return any(d.is_dir() and snapshot_complete(d) for d in snaps.iterdir())
+            from orchard import coder_cache as cc
+            return any(d.is_dir() and snapshot_complete(d) and cc.shard_problem(d) is None for d in snaps.iterdir())
         except OSError:
             return False
 

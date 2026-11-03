@@ -13,6 +13,7 @@ live narrator can ask during a coder boot. The preflight rows are in `orchard/pr
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Callable, Mapping
@@ -32,6 +33,31 @@ def effective_cache(environ: Mapping[str, str] | None = None, home: Path | None 
     if raw:
         return Path(raw)
     return (home if home is not None else Path.home()) / ".cache" / "huggingface"
+
+
+_SHARD = re.compile(r"^(?P<stem>.+)-(?P<n>\d{5})-of-(?P<total>\d{5})\.safetensors$")
+
+
+def shard_problem(snap: Path) -> str | None:
+    """Why a snapshot directory's weights cannot be all there, or None. A snapshot that holds a config and some shards passes
+    `preflight.snapshot_complete` when the weight index has not been downloaded yet, because there is no index to read. A sharded model
+    (files named `<stem>-00001-of-00004.safetensors`) needs every shard of each stem and its `<stem>.safetensors.index.json`. This reads
+    names only, in the snapshot's top directory. A single-file model has nothing to check here."""
+    try:
+        names = [e.name for e in os.scandir(snap)]
+    except OSError as exc:
+        return f"the snapshot directory cannot be read ({type(exc).__name__})"
+    groups: dict[tuple[str, int], set[int]] = {}
+    for name in names:
+        m = _SHARD.match(name)
+        if m:
+            groups.setdefault((m["stem"], int(m["total"])), set()).add(int(m["n"]))
+    for (stem, total), have in sorted(groups.items()):
+        if f"{stem}.safetensors.index.json" not in names:
+            return f"the weight index {stem}.safetensors.index.json is missing ({len(have)} of {total} shards are there)"
+        if have != set(range(1, total + 1)):
+            return f"{len(have)} of {total} {stem} shards are there"
+    return None
 
 
 def partial_download_bytes(cache: Path) -> int:

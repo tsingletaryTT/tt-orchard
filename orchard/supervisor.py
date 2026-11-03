@@ -853,7 +853,7 @@ class Supervisor:
                     if not check["ok"]:
                         ok = False
                         continue
-                    self._remove_coder_container()
+                    self._remove_coder_container(record=False)
                 (self.adapter if is_coder else self.test_adapter).release(lease)
             except (AdapterError, ServerError, OSError):
                 ok = False
@@ -1436,6 +1436,7 @@ class Supervisor:
                 if not self._remove_own_leftover(lease):
                     self._block_chips_held(held, lease)
                 self.coder.start(lease)
+            self._note_created_container(lease)
         except ServerChipsHeld as exc:
             self._block_chips_held(exc, lease, retried=True)
         except ServerNotOwned as exc:
@@ -1445,6 +1446,7 @@ class Supervisor:
                                server=self.coder.record(), reason=str(exc))
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         except (ServerError, OSError) as exc:
+            self._note_created_container(lease)       # tt-model may have made the container before it failed: record it for the cleanup
             self._block_if_off_bus(None, f"the coder did not start and answer; nothing is retried: {exc}", lease.chips)
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry gives
@@ -1526,49 +1528,77 @@ class Supervisor:
             self._release_kept_lease(old)
         self._start_coder(canary, check_granted=True)
 
-    def _remove_coder_container(self) -> None:
-        """After the coder's stop is confirmed, remove its stopped container so the next `tt-model serve` is not refused for the name (issue 417).
-        A control without the method (a fake, a bundle) does nothing, and a failure is a notice: the stop already succeeded."""
+    def _remove_coder_container(self, record: bool = True) -> None:
+        """After the coder's stop is confirmed, remove its stopped container so the next `tt-model serve` does not find it holding the chips
+        (issue 417). Best effort: the stop already succeeded and the lease must still be released, so no failure of the removal or of the
+        ledger write that records it is allowed to escape. A control without the method (a fake, a bundle) does nothing. `record=False` is the
+        ledger-free shutdown (`_release_from_memory`), which writes nothing because the ledger is what failed."""
         remove = getattr(self.coder, "remove_container", None)
         if remove is None:
             return
         try:
             result = remove()
-        except (ServerError, OSError) as exc:
-            self.ledger.append("notice", None, what="removing the stopped coder container failed", error=str(exc))
+        except Exception as exc:            # best effort: a docker or fake failure must not stop the release that follows
+            if record:
+                self._note("notice", what="removing the stopped coder container failed", error=str(exc))
             return
-        if result:
-            self.ledger.append("decision", None, decision="coder container removed" if result.get("removed") else "coder container left",
-                               result=result)
+        if result and record:
+            self._note("decision", decision="coder container removed" if result.get("removed") else "coder container left", result=result)
+
+    def _note(self, event: str, **data) -> None:
+        """A ledger entry that may fail without failing the caller (a full disk is when these notes matter least)."""
+        try:
+            self.ledger.append(event, None, **data)
+        except Exception:
+            pass
+
+    def _note_created_container(self, lease: Lease) -> None:
+        """Record the id of the container this run's `tt-model serve` just made under the coder's name, so a later removal can check that a
+        leftover is that container and not one that predates the run (issue 417). Best effort; nothing is recorded when docker cannot say."""
+        rows = getattr(self.coder, "find_container_rows", None)
+        if rows is None:
+            return
+        try:
+            found = rows() or []
+        except Exception:
+            return
+        for name, _state, cid in found:
+            if cid:
+                self._note("decision", decision="coder container created", container_id=cid, name=name, lease_id=lease.lease_id)
 
     def _remove_own_leftover(self, lease: Lease) -> bool:
-        """A start was refused because a container holds the chips. True when this run launched a coder before (an earlier "coder starting"
-        entry besides the newest), a stopped container under the coder's exact name was found, and it was removed. A container
-        that runs, one of another name, and any container when this run launched nothing earlier are left alone (issue 417)."""
-        find, remove = getattr(self.coder, "find_container", None), getattr(self.coder, "remove_container", None)
-        if find is None or remove is None:
+        """A start was refused because a container holds the chips. True when a stopped container under the coder's exact name was found,
+        its id is one this run recorded as created by its own launch ("coder container created"), and it was removed. A container that runs,
+        one of another name, and one whose id this run did not record (it predates the run, or took the name since) are left alone, however
+        many earlier attempts the ledger shows (issue 417)."""
+        rows, remove = getattr(self.coder, "find_container_rows", None), getattr(self.coder, "remove_container", None)
+        if rows is None or remove is None:
             return False
-        launches = sum(1 for e in self.ledger.read() if e["event"] == "decision" and e["data"].get("decision") == "coder starting")
-        if launches < 2:
-            return False
+        created = {e["data"].get("container_id") for e in self.ledger.read()
+                   if e["event"] == "decision" and e["data"].get("decision") == "coder container created"}
+        created.discard(None)
         try:
-            found = find()
-            if not found or any(state == "running" for _, state in found):
+            found = rows()
+            if not found or any(state == "running" for _, state, _ in found) or any(cid not in created for _, _, cid in found):
                 return False
-            result = remove(even_if_unowned=True)
+            result = remove(even_if_unowned=True, only_id=found[0][2])
         except (ServerError, OSError) as exc:
-            self.ledger.append("notice", None, what="removing the leftover coder container failed", error=str(exc))
+            self._note("notice", what="removing the leftover coder container failed", error=str(exc))
             return False
         if not result:
             return False
-        self.ledger.append("decision", None, decision="coder container removed" if result.get("removed") else "coder container left",
-                           result=result, before_start=True, lease_id=lease.lease_id)
+        self._note("decision", decision="coder container removed" if result.get("removed") else "coder container left",
+                   result=result, before_start=True, lease_id=lease.lease_id)
         return bool(result.get("removed"))
 
     def _block_chips_held(self, exc: Exception, lease: Lease, retried: bool = False) -> None:
         """Block after `tt-model serve` refused because a container holds the chips. The reason names the container that is left over and
         the command that removes it, and says the chips are not at fault, so the block is classed as a coder problem and not a hardware one
         (orchard/blocked.py). A chip that has in fact left the bus is still reported first, as for any failed boot."""
+        # Recorded before the block, as the not-owned refusal is: a fresh invocation adopts the latest server record, and the record written at
+        # "coder starting" says the owner is unknown, which would let a relaunch stop and remove the container that caused this refusal.
+        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(),
+                           reason=str(exc))
         found = None
         try:
             found = self.coder.find_container() if hasattr(self.coder, "find_container") else None
