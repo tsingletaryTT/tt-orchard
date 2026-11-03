@@ -853,6 +853,7 @@ class Supervisor:
                     if not check["ok"]:
                         ok = False
                         continue
+                    self._remove_coder_container()
                 (self.adapter if is_coder else self.test_adapter).release(lease)
             except (AdapterError, ServerError, OSError):
                 ok = False
@@ -1162,6 +1163,7 @@ class Supervisor:
                                    reason="the coder is not confirmed stopped; the lease was not "
                                           "released", evidence=check)
                 return False
+            self._remove_coder_container()
             self.adapter.release(lease)
             self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id)
             if adopted:
@@ -1509,9 +1511,25 @@ class Supervisor:
                              accept=("CLAIMED", "STALE", "FREE"))
         if not check["ok"]:
             self._block(None, "the coder could not be confirmed stopped for the relaunch", **check)
+        self._remove_coder_container()
         if old.lease_id in self._adopted_ids(self.ledger.read()):
             self._release_kept_lease(old)
         self._start_coder(canary, check_granted=True)
+
+    def _remove_coder_container(self) -> None:
+        """After the coder's stop is confirmed, remove its stopped container so the next `tt-model serve` is not refused for the name (issue 417).
+        A control without the method (a fake, a bundle) does nothing, and a failure is a notice: the stop already succeeded."""
+        remove = getattr(self.coder, "remove_container", None)
+        if remove is None:
+            return
+        try:
+            result = remove()
+        except (ServerError, OSError) as exc:
+            self.ledger.append("notice", None, what="removing the stopped coder container failed", error=str(exc))
+            return
+        if result:
+            self.ledger.append("decision", None, decision="coder container removed" if result.get("removed") else "coder container left",
+                               result=result)
 
     def _release_kept_lease(self, lease: Lease) -> None:
         """A kept coder's lease stays (STALE) after its container stops; give it back before a new start."""

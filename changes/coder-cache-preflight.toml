@@ -1,0 +1,3 @@
+target = "0.9.100"
+summary = "Preflight checks the coder's base model is in the cache the coder mounts and that no stopped coder container is left; a coder boot reports cache writes; the supervisor removes its stopped container (issue 417)."
+kind = "fix"

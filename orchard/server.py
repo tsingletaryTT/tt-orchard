@@ -67,6 +67,12 @@ class NotReady(ServerError):
         self.waited_s = waited_s
 
 
+def container_name_for(target: str, profile: str) -> str:
+    """The name tt-model gives the container of a package: tt-model-<name>-<profile> (gozer-park skill). The preflight uses it to look
+    for a leftover container before a start."""
+    return f"tt-model-{target.rsplit('/', 1)[-1]}-{profile}"
+
+
 @dataclass(frozen=True)
 class ServerSpec:
     target: str                    # tt-model package or bundle id (org/name); a label for "process"
@@ -91,8 +97,7 @@ class ServerSpec:
 
     @property
     def container_name(self) -> str:
-        # tt-model names the container tt-model-<name>-<profile> (gozer-park skill).
-        return f"tt-model-{self.target.rsplit('/', 1)[-1]}-{self.profile}"
+        return container_name_for(self.target, self.profile)
 
 
 @dataclass(frozen=True)
@@ -337,6 +342,26 @@ class ServerControl:
             self._check_process(checks, ev)
         self._check_port(checks, ev)
         return StopCheck(all(checks.values()), checks, ev)
+
+    def remove_container(self) -> dict | None:
+        """Remove the stopped container this control started, once the caller has confirmed the stop (issue 417). A container that docker
+        killed without an exit event, or that died during a boot, stays on disk under its name, and `tt-model serve` refuses to start
+        while that name exists. Only a container package that this control started (`owned` is True) is touched, only a container whose
+        name is exactly ours, and never one that is running: the listing is checked here and `docker rm` runs without `-f`. Returns what
+        was found and done, or None when there was nothing to do."""
+        name = self.spec.container_name
+        if self.spec.kind != "container" or self.owned is not True:
+            return None
+        ls = self.run([self.docker, "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}} {{.State}}"], self.timeout)
+        if ls.returncode != 0:
+            return {"container": name, "listed": False, "stderr": ls.stderr.strip()[-200:]}
+        states = [ln.split()[1] if len(ln.split()) > 1 else "" for ln in ls.stdout.splitlines() if ln.split()[:1] == [name]]
+        if not states:
+            return None
+        if "running" in states:
+            return {"container": name, "removed": False, "why": "it is running"}
+        rm = self.run([self.docker, "rm", name], self.timeout)
+        return {"container": name, "state": states[0], "removed": rm.returncode == 0, "stderr": rm.stderr.strip()[-200:]}
 
     def _is_mine(self, line: str) -> bool:
         parts = line.split(None, 3)

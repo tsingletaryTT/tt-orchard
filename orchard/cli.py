@@ -1351,7 +1351,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     narrator = None
     if not args.quiet:
         # An existing run shows its last few entries first, so a resume says where it left off.
-        narrator = narrate.Narrator(run_dir, style, out, replay=6 if resuming else False)
+        from orchard import coder_cache
+        narrator = narrate.Narrator(run_dir, style, out, replay=6 if resuming else False,
+                                    boot_watch=lambda: coder_cache.BootWatch(coder_cache.effective_cache()))
         narrator.start()
     retried = 0
     try:
