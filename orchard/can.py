@@ -1231,7 +1231,7 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         except (safeio.SafeReadError, TypeError):
             pass
         if aliases and listing is not None and listing["state"] == "pass":
-            extra["model"] = listing["served"]["id"]          # the first declared name the server lists, not whichever model it lists first
+            extra["model"] = listing["served"]["id"]          # the first declared name the server lists (the default is the first model it lists)
         extra.update(ck.request_extra)
         chat = f"{base}/v1/chat/completions"
         counter_before = served_verify.scrape(base) if probing else None      # the engine's own token counter, read around the first chat request
