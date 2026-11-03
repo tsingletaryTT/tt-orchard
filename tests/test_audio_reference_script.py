@@ -274,6 +274,78 @@ def test_a_plain_dict_environment_does_not_change_the_hub_client_of_this_process
     assert c.HF_HUB_OFFLINE is False
 
 
+def online_hub_client(monkeypatch, tmp_path):
+    """The state a load test starts from: the Hub client and Transformers online, with no saved login anywhere.
+
+    Both libraries read their settings once, when they are imported, so changing the environment afterwards does not reach them:
+    - the Hub client holds its own offline flag, and the paths of the saved-login files (HF_TOKEN_PATH, HF_STORED_TOKENS_PATH). The paths are
+      pointed at files that do not exist, or a saved login on the machine is still read.
+    - Transformers 4.x holds a copy of the offline flag in `transformers.utils.hub`. A module imported during the test is not in the snapshot
+      the autouse fixture took, so the flag is registered with monkeypatch here, set to False, and put back at the end of the test.
+    Everything goes through monkeypatch, so the test's end restores it. Call this after the libraries are imported."""
+    c = hub_constants()
+    monkeypatch.setattr(c, "HF_HUB_OFFLINE", False)
+    for name in ("HF_TOKEN_PATH", "HF_STORED_TOKENS_PATH"):
+        if hasattr(c, name):
+            monkeypatch.setattr(c, name, str(tmp_path / f"no-{name.lower().replace('_', '-')}"))
+    hub = sys.modules.get("transformers.utils.hub")
+    if hub is not None and hasattr(hub, "_is_offline_mode"):
+        monkeypatch.setattr(hub, "_is_offline_mode", False)
+
+
+def test_the_online_state_hides_a_saved_login_from_the_hub_client(tmp_path, monkeypatch):
+    """Review of PR 430: the Hub client cached the path of the saved-login file when it was imported, so changing HF_TOKEN_PATH in the environment
+    left a saved login readable. The state the load tests start from has no token anywhere, in the environment or in a file."""
+    c = hub_constants()
+    saved = tmp_path / "saved-login"
+    saved.write_text("hf_saved_login_token")
+    monkeypatch.setattr(c, "HF_TOKEN_PATH", str(saved))                      # a machine with a saved login: the client holds this path
+    for name in mr.TOKEN_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    import huggingface_hub
+    assert huggingface_hub.get_token() == "hf_saved_login_token"             # the setup this test replaces: the file is read
+    online_hub_client(monkeypatch, tmp_path)
+    assert huggingface_hub.get_token() is None
+    if hasattr(c, "HF_STORED_TOKENS_PATH"):
+        assert not Path(c.HF_STORED_TOKENS_PATH).exists()
+
+
+def test_the_online_state_puts_back_the_transformers_flag_it_changed(tmp_path, monkeypatch):
+    """Review of PR 430: Transformers 4.x keeps its own copy of the offline flag, and a module imported during a test is not in the snapshot the
+    autouse fixture took, so the flag must be registered with monkeypatch when the state is set."""
+    import types
+    fake = types.ModuleType("transformers.utils.hub")
+    fake._is_offline_mode = True                                              # what an offline load of an earlier test leaves behind
+    monkeypatch.setitem(sys.modules, "transformers.utils.hub", fake)
+    c = hub_constants()
+    monkeypatch.setattr(c, "HF_HUB_OFFLINE", True)                           # the Hub client's flag as an offline load left it
+    inner = pytest.MonkeyPatch()
+    online_hub_client(inner, tmp_path)
+    assert fake._is_offline_mode is False and c.HF_HUB_OFFLINE is False       # both loads start online
+    inner.undo()
+    assert fake._is_offline_mode is True and c.HF_HUB_OFFLINE is True         # teardown puts both back
+
+
+def test_the_online_state_leaves_a_module_without_the_flag_alone(tmp_path, monkeypatch):
+    import types
+    bare = types.ModuleType("transformers.utils.hub")
+    monkeypatch.setitem(sys.modules, "transformers.utils.hub", bare)
+    online_hub_client(monkeypatch, tmp_path)
+    assert not hasattr(bare, "_is_offline_mode")
+
+
+def test_the_tokenizer_load_helper_starts_from_a_state_with_no_saved_login(tmp_path, monkeypatch):
+    """The wiring: the helper the load tests use puts the Hub client in the online, no-login state before it loads anything."""
+    c = hub_constants()
+    saved = tmp_path / "saved-login"
+    saved.write_text("hf_saved_login_token")
+    monkeypatch.setattr(c, "HF_TOKEN_PATH", str(saved))
+    monkeypatch.setattr(c, "HF_HUB_OFFLINE", True)
+    tokenizer_load_attempts(tmp_path, monkeypatch, offline=False)
+    import huggingface_hub
+    assert huggingface_hub.get_token() is None and c.HF_HUB_OFFLINE is False
+
+
 def tokenizer_load_attempts(tmp_path, monkeypatch, *, offline: bool):
     """Load a tokenizer from a private cache that holds its two files and nothing else, with every network call recorded and refused and no token
     anywhere. Returns (the tokenizer, the network attempts). `offline` runs offline_environment() first, as the server does."""
@@ -281,8 +353,7 @@ def tokenizer_load_attempts(tmp_path, monkeypatch, *, offline: bool):
     tokenizers = pytest.importorskip("tokenizers", reason="the fake tokenizer is built with the tokenizers library")
     import socket
     from transformers import AutoTokenizer
-    c = hub_constants()
-    monkeypatch.setattr(c, "HF_HUB_OFFLINE", False)
+    online_hub_client(monkeypatch, tmp_path)
     register_environment_restore(monkeypatch)
     for name in mr.TOKEN_VARIABLES + ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
         monkeypatch.delenv(name)
