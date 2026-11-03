@@ -1,0 +1,3 @@
+target = "0.9.102"
+summary = "Boot check: the layer line and the KV-cache lines of a real tt-metal server are pinned, the layer progress bar is read, and the result says when the capacity is the plugin's own block count"
+kind = "fix"

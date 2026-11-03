@@ -317,16 +317,28 @@ def check_mesh(log_text, *, expected_devices) -> dict:
 
 
 # ---- layers loaded and the KV cache, from the server log (verify V9, issue 370) --------------------------------------------------
-# The line formats are the ones vLLM prints (the v1 engine: `GPU KV cache size: N tokens` and `Maximum concurrency for N tokens per request: Xx`;
-# the older engine: `# GPU blocks: N`). They differ between releases, so a log that has none of them is `not_checked`; the tests pin the
-# formats of the releases named in the fixtures. The layer line is whatever the model prints when it has built its decoder stack:
-# `loaded N layers`, `built N decoder layers`, `layers loaded: N`. The line of a particular tt-metal model has not been read from a real
-# server log yet (issue 370 stays open for that); a log with no such line is `not_checked`.
+# The formats below were read from a real server log on 2026-11-03: vLLM 0.26.0 (V1 engine) serving a Qwen3.8-27B-class package with the
+# tt-metal `qwen36` model code on two Blackhole chips. The model prints `Loading 64 transformer layers (indices=[0, 1, ...])` before it builds
+# its stack and a progress bar `Loading layers: 100%|##########| 64/64` as it finishes; the engine prints `Overriding num_gpu_blocks=4100 with
+# num_gpu_blocks_override=4100`, then `GPU KV cache size: 262,400 tokens` and `Maximum concurrency for 262,144 tokens per request: 1.00x`. Each
+# appeared once in every such log on this box (23 logs). Other releases and models print other shapes: the older engine prints `# GPU blocks: N`,
+# and the guesses `built N decoder layers` and `layers loaded: N` stay in the list. A log with none of them is `not_checked`. The tests pin
+# the fixtures by release (tests/test_served_verify_engine_real.py, tests/test_served_verify_logs.py).
+#
+# Two facts the real lines show. The layer line is printed before the layers load, so it states an intent: the progress bar is what says they
+# finished. And on a TT server the engine's block count is set by the plugin from the size the model asked for (`Getting max_tokens_all_users=
+# 262144 for number of blocks in KV cache`), so the `GPU KV cache size` that follows is that request rounded up to whole blocks. It is not a
+# measurement of device memory, and a check of it against `max_model_len` cannot fail on such a server. The result says which it is.
 _LAYERS_LINES = (re.compile(r"\b(?:loaded|loading|built|created|initiali[sz]ed)\s+(\d{1,4})\s+(?:decoder\s+|transformer\s+)?layers\b", re.IGNORECASE),
                  re.compile(r"\blayers\s+loaded\s*[:=]\s*(\d{1,4})\b", re.IGNORECASE))
+# The tqdm bar of a tt-metal model's layer loop. Every width is bounded, so a line of repeated bar text costs a fixed amount per repeat.
+_LAYERS_BAR = re.compile(r"Loading layers:\s{0,8}\d{1,3}%\|[^|\r\n]{0,64}\|\s{0,8}(\d{1,4})/(\d{1,4})\b")
 _KV_TOKENS = re.compile(r"\bGPU KV cache size:\s*([\d,]{1,20})\s*tokens\b", re.IGNORECASE)
 _KV_CONCURRENCY = re.compile(r"\bMaximum concurrency for\s*([\d,]{1,20})\s*tokens per request:\s*(\d{1,9}(?:\.\d{1,6})?)x\b", re.IGNORECASE)
 _KV_BLOCKS = re.compile(r"#\s*GPU blocks:\s*(\d{1,12})\b", re.IGNORECASE)
+_KV_OVERRIDE = re.compile(r"\bOverriding num_gpu_blocks=\d{1,12}\s+with\s+num_gpu_blocks_override=(\d{1,12})\b")
+MAX_ENGINE_LOG_CHARS = 64 * 1024 * 1024      # choice: the bound the boot check puts on its read of the server log (orchard/can.py MAX_LOG_BYTES)
+MAX_LAYER_COUNTS_LISTED = 5                  # choice: a log that states more different layer counts than this is listed by its first few
 
 
 def layers_in_config(config) -> int | None:
@@ -346,42 +358,79 @@ def _int(text: str) -> int:
     return int(text.replace(",", ""))
 
 
+def _whole(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _layers_result(seen: list[int], bars: list[tuple[int, int]], expected: int | None) -> dict:
+    """`layers_loaded` from the layer counts the log states (in log order), the last layer progress bar, and `num_hidden_layers`. The last
+    stated count decides, as for the other log lines. When several different counts are stated they are listed, and a count that equals
+    the config's but is not the last is named: the last line may belong to another component (a drafter, say)."""
+    if expected is None:
+        return _result("layers_loaded", "not_checked", "no num_hidden_layers is known (the bundle holds no config.json that states it)")
+    if not seen:
+        return _result("layers_loaded", "not_checked", "the server log has no line that states how many layers were loaded")
+    last = seen[-1]
+    distinct = sorted(set(seen))
+    facts = {"layers": last, "layer_counts_seen": distinct[:MAX_LAYER_COUNTS_LISTED], "layers_completed": bars[-1][0] if bars else None}
+    if last != expected:
+        hint = f" (another line states {expected}, the config's count; the last line may belong to another component)" if expected in seen[:-1] else ""
+        return _result("layers_loaded", "fail", f"the engine loaded {last} layers; config.json says num_hidden_layers is {expected}{hint}", **facts)
+    if bars and bars[-1][0] != bars[-1][1]:
+        return _result("layers_loaded", "fail", f"the engine announced {last} layers but its layer progress bar ended at {bars[-1][0]}/{bars[-1][1]}", **facts)
+    if bars and bars[-1][1] != last:
+        return _result("layers_loaded", "fail", f"the engine announced {last} layers but its layer progress bar counts {bars[-1][1]}", **facts)
+    note = f"progress bar {bars[-1][0]}/{bars[-1][1]}" if bars else "no progress bar in the log, so the count is the engine's announcement"
+    return _result("layers_loaded", "pass", f"the engine loaded {last} layers, as config.json says ({note})", **facts)
+
+
 def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=None, block_size=None) -> list[dict]:
-    """Two results from the server log: `layers_loaded` (the layers the engine says it loaded, against `num_hidden_layers` of `config`) and
-    `kv_cache` (the cache capacity in tokens and the concurrency the engine states, against the can's `max_model_len`). The last matching line wins.
-    A cache smaller than one full-length sequence, or a stated concurrency below 1, is a fail. A concurrency below `max_num_seqs` is
-    reported in the detail and does not fail: it means that many full-length sequences do not fit together. A log without the line, or
-    no `config` to compare with, is `not_checked`."""
+    """Two results from the server log: `layers_loaded` (the layers the engine says it loaded, against `num_hidden_layers` of `config`, and the
+    layer progress bar where the model prints one) and `kv_cache` (the cache capacity in tokens and the concurrency the engine states, against the
+    can's `max_model_len`). The last matching line wins. At most `MAX_ENGINE_LOG_CHARS` characters are read.
+
+    A cache smaller than one full-length sequence, or a stated concurrency below 1, is a fail. A cache that holds fewer full-length sequences than
+    `max_num_seqs` is not a fail: the result says so (`full_length_sequences`, `fewer_than_max_num_seqs`), because that many requests that all
+    approach `max_model_len` cannot be in flight together. `capacity_basis` says whether the capacity follows a block count the plugin set
+    (`plugin override`: a size the plugin chose, which says nothing about device memory) or is the engine's own. A log without the line, or no `config` to compare
+    with, is `not_checked`."""
     out = []
     expected = layers_in_config(config)
     if not isinstance(log_text, str):
         why = "the server log could not be read"
         return [_result("layers_loaded", "not_checked", why), _result("kv_cache", "not_checked", why)]
+    if len(log_text) > MAX_ENGINE_LOG_CHARS:
+        log_text = log_text[:MAX_ENGINE_LOG_CHARS]
     seen = [int(m.group(1)) for m in sorted((m for rx in _LAYERS_LINES for m in rx.finditer(log_text)), key=lambda m: m.start())]      # log order
-    if expected is None:
-        out.append(_result("layers_loaded", "not_checked", "no num_hidden_layers is known (the bundle holds no config.json that states it)"))
-    elif not seen:
-        out.append(_result("layers_loaded", "not_checked", "the server log has no line that states how many layers were loaded"))
-    elif seen[-1] != expected:
-        out.append(_result("layers_loaded", "fail", f"the engine loaded {seen[-1]} layers; config.json says num_hidden_layers is {expected}", layers=seen[-1]))
-    else:
-        out.append(_result("layers_loaded", "pass", f"the engine loaded {seen[-1]} layers, as config.json says", layers=seen[-1]))
+    bars = [(int(a), int(b)) for a, b in _LAYERS_BAR.findall(log_text)]
+    out.append(_layers_result(seen, bars, expected))
     tokens = [_int(m) for m in _KV_TOKENS.findall(log_text)]
     blocks = [int(m) for m in _KV_BLOCKS.findall(log_text)]
     conc = [(_int(a), float(b)) for a, b in _KV_CONCURRENCY.findall(log_text)]
-    capacity = tokens[-1] if tokens else (blocks[-1] * block_size if blocks and isinstance(block_size, int) and not isinstance(block_size, bool) and block_size > 0 else None)
+    overrides = [int(m) for m in _KV_OVERRIDE.findall(log_text)]
+    capacity = tokens[-1] if tokens else (blocks[-1] * block_size if blocks and _whole(block_size) and block_size > 0 else None)
     if capacity is None and not conc:
         out.append(_result("kv_cache", "not_checked", "the server log states no KV-cache size (no `GPU KV cache size` line, and no block count with a declared block size)"))
         return out
+    basis = None if capacity is None else ("plugin override" if overrides else "engine")
     parts = []
     if capacity is not None:
         parts.append(f"capacity {capacity} tokens")
+        if overrides:
+            parts.append(f"the plugin set the block count to {overrides[-1]}, so this figure is the size it asked for and not a measured allocation")
     if conc:
         parts.append(f"concurrency {conc[-1][1]:g}x at {conc[-1][0]} tokens per request")
     if max_num_seqs is not None:
         parts.append(f"the can's max_num_seqs is {max_num_seqs}")
-    facts = {"capacity_tokens": capacity, "concurrency": conc[-1][1] if conc else None, "tokens_per_request": conc[-1][0] if conc else None}
-    if capacity is not None and isinstance(max_model_len, int) and not isinstance(max_model_len, bool) and capacity < max_model_len:
+    sequences = capacity // max_model_len if capacity is not None and _whole(max_model_len) and max_model_len > 0 else None
+    fewer = sequences < max_num_seqs if sequences is not None and _whole(max_num_seqs) else None
+    if fewer:
+        parts.append(f"only {sequences} full-length sequence{'' if sequences == 1 else 's'} {'fits' if sequences == 1 else 'fit'}, so requests that all approach "
+                     f"max_model_len wait or are preempted")
+    facts = {"capacity_tokens": capacity, "capacity_basis": basis, "override_blocks": overrides[-1] if overrides else None,
+             "concurrency": conc[-1][1] if conc else None, "tokens_per_request": conc[-1][0] if conc else None,
+             "full_length_sequences": sequences, "fewer_than_max_num_seqs": fewer}
+    if capacity is not None and _whole(max_model_len) and capacity < max_model_len:
         out.append(_result("kv_cache", "fail", f"the KV cache holds {capacity} tokens, less than one sequence of the declared max_model_len {max_model_len}", **facts))
     elif conc and conc[-1][1] < 1:
         out.append(_result("kv_cache", "fail", f"the engine states a concurrency of {conc[-1][1]:g}x for {conc[-1][0]} tokens per request: one full-length sequence does not fit", **facts))
