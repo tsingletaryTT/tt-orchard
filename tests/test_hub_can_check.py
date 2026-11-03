@@ -8,6 +8,7 @@ started, the port table against the cards, and the audio check on a real file.""
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import signal
 import subprocess
@@ -216,3 +217,73 @@ def test_the_script_refuses_to_start_when_the_cards_port_is_taken(mod, tmp_path)
         s.close()
     assert not (tmp_path / "launched").exists(), "a server was launched on an occupied port"
     assert cp.returncode == 1 and "already in use" in cp.stdout
+
+
+# ---- review round 2 (PR 411): signals must run the cleanup; --print-env must match env_for -----------------------------------------
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_to_the_driver_stops_the_server_it_started(mod, tmp_path, sig):
+    import socket
+    port = mod.CANS["granite-4.0-h-1b-blackhole"]["port"]
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", port))
+    except OSError:
+        pytest.skip(f"port {port} is in use on this machine")
+    probe.close()
+    # a stand-in `tt-model` that records its pid and stays up like a server; a real one must never run here
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    pidfile = tmp_path / "server.pid"
+    (fakebin / "tt-model").write_text(f"#!/bin/sh\necho $$ > {pidfile}\nexec sleep 300\n")
+    (fakebin / "tt-model").chmod(0o755)
+    env = {**os.environ, "PATH": f"{fakebin}:{os.environ['PATH']}"}
+    driver = subprocess.Popen([sys.executable, str(SCRIPT), "granite-4.0-h-1b-blackhole", "--root", str(tmp_path / "root"),
+                               "--ready-timeout", "600"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        for _ in range(200):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            subprocess.run(["sleep", "0.05"])
+        server = int(pidfile.read_text())
+        subprocess.run(["sleep", "0.3"])                    # the driver is in its polling loop
+        driver.send_signal(sig)
+        driver.communicate(timeout=120)
+        assert driver.returncode == 128 + sig
+    finally:
+        if driver.poll() is None:
+            driver.kill()
+            driver.wait()
+    gone = False
+    for _ in range(100):
+        try:
+            os.kill(server, 0)
+            with open(f"/proc/{server}/stat") as fh:
+                if fh.read().split()[2] == "Z":
+                    gone = True
+                    break
+        except (ProcessLookupError, FileNotFoundError):
+            gone = True
+            break
+        subprocess.run(["sleep", "0.05"])
+    if not gone:
+        os.kill(server, signal.SIGKILL)
+    assert gone, "the server outlived the driver that a signal ended"
+    record = json.loads((tmp_path / "root" / "granite-4.0-h-1b-blackhole" / "result.json").read_text())
+    assert record["stop"].startswith(("stopped", "needed")) and record["terminated_by"] == sig.name
+
+
+def test_print_env_shows_every_change_env_for_makes(mod, tmp_path):
+    base = {**os.environ, "HUGGINGFACE_HUB_CACHE": "/var/tmp/x", "TRANSFORMERS_CACHE": "/var/tmp/y", "HF_HUB_CACHE": "/var/tmp/z"}
+    cp = subprocess.run([sys.executable, str(SCRIPT), "granite-4.0-h-1b-blackhole", "--root", str(tmp_path), "--print-env"],
+                        capture_output=True, text=True, env=base)
+    assert cp.returncode == 0
+    exports = dict(line[len("export "):].split("=", 1) for line in cp.stdout.splitlines() if line.startswith("export "))
+    unsets = {line.split()[1] for line in cp.stdout.splitlines() if line.startswith("unset ")}
+    # apply the printed lines to the caller's environment and compare with what the driver passes to tt-model
+    applied = {k: v for k, v in base.items() if k not in unsets}
+    applied.update(exports)
+    want = mod.env_for(tmp_path / "granite-4.0-h-1b-blackhole")
+    # the shell lines apply to the same variables, so a variable the printed lines forget differs here
+    assert {k: v for k, v in want.items() if applied.get(k) != v} == {}
+    assert {k for k in base if k not in want} == unsets

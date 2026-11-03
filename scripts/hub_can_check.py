@@ -53,22 +53,41 @@ PROMPT = "Explain in about 150 words how a mountain range forms."
 FIRST_PROMPT = "Name the three primary colors."
 
 
+ENV_UNSET = ("HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE")
+
+
+def env_changes(root: Path) -> tuple[dict, tuple]:
+    """Every assignment and removal the isolated environment makes, as (assignments, names to unset). `env_for` applies it and
+    `--print-env` prints it, so the manual pull, `--pull-only` and the served process share one definition."""
+    root = Path(os.path.abspath(root))              # the child runs in another working directory
+    assign = {
+        "XDG_CACHE_HOME": str(root / "xdg"),
+        "TT_MODEL_MODELS_DIR": str(root / "models"),
+        "HF_HOME": str(root / "hf"),
+        "TT_METAL_CACHE": str(root / "kernel-cache"),
+        # variables that would send writes elsewhere when the caller's shell sets them
+        "HF_HUB_CACHE": str(root / "hf" / "hub"),
+        "TT_DIT_CACHE_DIR": str(root / "tt-dit-cache"),
+        "TT_CACHE_PATH": str(root / "tt-cache"),
+        "TT_CACHE_HOME": str(root / "tt-cache"),
+    }
+    return assign, ENV_UNSET
+
+
 def env_for(root: Path) -> dict:
     """The environment that keeps every write inside `root` (HF_TOKEN is inherited, never printed)."""
-    root = Path(os.path.abspath(root))              # the child runs in another working directory
+    assign, unset = env_changes(root)
     e = dict(os.environ)
-    e["XDG_CACHE_HOME"] = str(root / "xdg")
-    e["TT_MODEL_MODELS_DIR"] = str(root / "models")
-    e["HF_HOME"] = str(root / "hf")
-    e["TT_METAL_CACHE"] = str(root / "kernel-cache")
-    # variables that would send writes elsewhere when the caller's shell sets them
-    e["HF_HUB_CACHE"] = str(root / "hf" / "hub")
-    e["TT_DIT_CACHE_DIR"] = str(root / "tt-dit-cache")
-    e["TT_CACHE_PATH"] = str(root / "tt-cache")
-    e["TT_CACHE_HOME"] = str(root / "tt-cache")
-    for name in ("HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"):
+    for name in unset:
         e.pop(name, None)
+    e.update(assign)
     return e
+
+
+def env_lines(root: Path) -> list:
+    """Shell lines for the same changes, for a manual `tt-model pull`."""
+    assign, unset = env_changes(root)
+    return [f"unset {n}" for n in unset] + [f"export {k}={v}" for k, v in assign.items()]
 
 
 def port_busy(port: int) -> bool:
@@ -270,6 +289,18 @@ def stop_group(proc: subprocess.Popen, wait_s: int = 60) -> str:
     return "needed SIGKILL" + (" (launcher had exited)" if launcher_gone else "") + ("" if not group_alive(pgid) else "; group still alive")
 
 
+class Terminated(SystemExit):
+    """Raised by the SIGTERM and SIGHUP handlers so that the cleanup in `finally` runs before the driver exits."""
+
+    def __init__(self, signum: int):
+        super().__init__(128 + signum)
+        self.signum = signum
+
+
+def _raise_terminated(signum, frame):
+    raise Terminated(signum)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("can")
@@ -290,8 +321,7 @@ def main() -> int:
     if a.hf_token_path:
         env["HF_TOKEN_PATH"] = os.path.abspath(a.hf_token_path)
     if a.print_env:
-        for k in ("XDG_CACHE_HOME", "TT_MODEL_MODELS_DIR", "HF_HOME", "TT_METAL_CACHE"):
-            print(f"export {k}={env[k]}")
+        print("\n".join(env_lines(work)))
         return 0
     if a.pull_only:
         t = time.monotonic()
@@ -313,10 +343,14 @@ def main() -> int:
         return 1
     log = open(work / "serve.log", "wb")
     t0 = time.monotonic()
+    # The server runs in its own session, so a signal that ends only the driver would leave it holding the board and the port.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _raise_terminated)
     proc = subprocess.Popen(["tt-model", "serve", f"{OWNER}/{a.can}", "--port", str(spec["port"]),
                              "--no-update-check"], env=env, stdout=log, stderr=subprocess.STDOUT,
                             start_new_session=True, cwd=str(work))
     result["serve_pid"] = proc.pid
+    terminated = None
     try:
         ready = False
         while time.monotonic() - t0 < timeout:
@@ -357,11 +391,16 @@ def main() -> int:
                 outdir = work / "clips"
                 outdir.mkdir(exist_ok=True)
                 result["requests"] = music_requests(kind, base, outdir)
+    except Terminated as sig_exit:
+        terminated = sig_exit
+        result["terminated_by"] = signal.Signals(sig_exit.signum).name
     except Exception as exc:  # the record must survive any failure; the traceback goes to the log
         import traceback
         result["error"] = f"{type(exc).__name__}: {exc}"
         log.write(traceback.format_exc().encode())
     finally:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)      # a second signal must not interrupt the cleanup
         result["loadavg_at_end"] = os.getloadavg()
         result["stop"] = stop_group(proc)
         log.close()
@@ -369,6 +408,8 @@ def main() -> int:
         (work / "result.json").write_text(json.dumps(result, indent=2))
     printable = {k: v for k, v in result.items() if k != "log_tail"}
     print(json.dumps(printable, indent=2)[:6000])
+    if terminated is not None:
+        raise terminated
     return 0 if run_ok(result) else 1
 
 
