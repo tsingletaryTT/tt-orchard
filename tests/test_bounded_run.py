@@ -170,15 +170,28 @@ def test_a_program_that_cannot_start_is_a_problem_and_not_an_exception(tmp_path)
     assert got["problem"] == "start" and got["detail"]
 
 
-def test_a_large_request_does_not_deadlock_a_helper_that_writes_before_it_reads():
-    """The helper writes a megabyte (more than a pipe holds) before it reads its 4 MiB request, so the caller has to read the output while the
-    request is still going in: the request is written from a thread of its own."""
+def test_a_helper_that_never_reads_its_request_cannot_stop_the_deadline_from_being_checked():
+    """A request bigger than a pipe, to a helper that never reads it: a write from the calling thread would block for good and the deadline
+    would never be looked at. The request goes in from a thread of its own."""
     got = limited("""
-        child = "import sys; sys.stdout.write('o' * (1 << 20)); sys.stdout.flush(); sys.stdin.read()"
-        res = br.run([sys.executable, "-I", "-c", child], "r" * (4 << 20), timeout_s=30, out_max=2 << 20, err_max=1000)
+        res = br.run([sys.executable, "-I", "-c", "import time; time.sleep(300)"], "r" * (4 << 20), timeout_s=1.5, out_max=1000, err_max=1000)
         show(res)
     """)
-    assert got["problem"] is None and got["stdout_len"] == 1 << 20
+    assert got["problem"] == "timeout"
+
+
+def test_a_helper_that_ignores_the_first_signal_is_killed_after_the_grace_period(tmp_path):
+    """SIGTERM first, SIGKILL after the grace period: a wrapper that traps SIGTERM and its child are both gone when run() returns."""
+    pid_file = tmp_path / "pids"
+    got = limited(f"""
+        br.GRACE_S = 1.0
+        script = "trap '' TERM; sleep 300 & echo $$ $! > {pid_file}; while true; do sleep 1; done"
+        res = br.run(["bash", "-c", script], "", timeout_s=1.0, out_max=1000, err_max=1000)
+        show(res)
+    """)
+    assert got["problem"] == "timeout"
+    wrapper, child = (int(x) for x in pid_file.read_text().split())
+    assert gone(wrapper) and gone(child)
 
 
 def test_the_limited_child_is_what_stops_a_scenario_that_has_lost_its_cap():
