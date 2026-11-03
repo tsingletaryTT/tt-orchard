@@ -172,7 +172,12 @@ def test_a_failed_job_makes_the_run_fail(mod):
 def test_stop_group_kills_a_child_that_ignores_sigterm_after_the_launcher_exits(mod, tmp_path):
     marker = tmp_path / "child.pid"
     # the launcher exits at once; its child ignores SIGTERM and stays in the group
-    proc = subprocess.Popen(["bash", "-c", f"(trap '' TERM; sleep 300) & echo $! > {marker}"], start_new_session=True)
+    # the child ignores SIGTERM before it writes its pid, so the test never signals it too early (a race under load); the shell
+    # that starts it exits at once, leaving the child alone in the group
+    child_code = (f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                  f"open({str(marker)!r}, 'w').write(str(__import__('os').getpid())); time.sleep(300)")
+    proc = subprocess.Popen(["bash", "-c", f"{sys.executable} -c \"$CHILD\" &"], start_new_session=True,
+                            env={**os.environ, "CHILD": child_code})
     for _ in range(100):
         if marker.exists() and marker.read_text().strip():
             break
