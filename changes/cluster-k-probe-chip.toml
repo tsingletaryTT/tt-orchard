@@ -1,0 +1,3 @@
+target = "0.9.99"
+summary = "ORCHARD_PROBE_CHIP reaches the agent's hardware wrapper; audio base rows carry a checkpoint-directory note"
+pr = 414

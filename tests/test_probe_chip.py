@@ -53,3 +53,51 @@ def test_the_agents_hardware_tool_lease_follows_the_variable(monkeypatch, tmp_pa
     hwtool.run_wrapper(who="w", reason="r", wait_s=1, result_path=tmp_path / "r.json", command=["true"], sh=sh)
     acquire = next(a for a in seen if "acquire" in a)
     assert _exact(acquire) == "2"
+
+
+# The agent's hardware_check launches the wrapper through child_env, whose allow-list used to drop the variable (issue 218): the
+# wrapper then leased chip 1, beside the coder, and queued behind it.
+
+class _Seen(Exception):
+    pass
+
+
+def _env_the_wrapper_is_launched_with(tmp_path):
+    seen = {}
+
+    def run_watched(argv, **kw):
+        seen["env"] = kw["env"]
+        raise _Seen
+
+    adir, vdir = tmp_path / "a", tmp_path / "v"
+    adir.mkdir()
+    vdir.mkdir()
+    kernel = adir / "kernel.py"
+    kernel.write_text("x = 1\n")
+    wrapper = {"who": "w", "wait_s": 1, "sha256": "0" * 64, "call_timeout_s": 5}
+    with pytest.raises(_Seen):
+        kernelprobe._hw_run(adir, vdir, kernel, op="add", reason="r", shared_python="python3", run_watched=run_watched,
+                            cancel=lambda t: None, wrapper=wrapper)
+    return seen["env"]
+
+
+def test_the_wrapper_launch_forwards_the_chip_selection(monkeypatch, tmp_path):
+    monkeypatch.setenv("ORCHARD_PROBE_CHIP", "2")
+    assert _env_the_wrapper_is_launched_with(tmp_path)["ORCHARD_PROBE_CHIP"] == "2"
+
+
+def test_the_wrapper_launch_adds_nothing_when_the_variable_is_unset(monkeypatch, tmp_path):
+    monkeypatch.delenv("ORCHARD_PROBE_CHIP", raising=False)
+    assert "ORCHARD_PROBE_CHIP" not in _env_the_wrapper_is_launched_with(tmp_path)
+
+
+@pytest.mark.parametrize("bad", ["", "-1", "1,2", "two", "1; rm", "--chips"])
+def test_a_bad_selection_is_refused_before_the_wrapper_starts(monkeypatch, tmp_path, bad):
+    monkeypatch.setenv("ORCHARD_PROBE_CHIP", bad)
+    with pytest.raises(ValueError, match="ORCHARD_PROBE_CHIP"):
+        _env_the_wrapper_is_launched_with(tmp_path)
+
+
+def test_a_child_that_is_not_leased_gets_no_selection(monkeypatch, tmp_path):
+    monkeypatch.setenv("ORCHARD_PROBE_CHIP", "2")
+    assert "ORCHARD_PROBE_CHIP" not in kernelprobe.child_env(tmp_path, hardware=False)
