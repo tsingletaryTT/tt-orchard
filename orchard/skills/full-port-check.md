@@ -14,6 +14,26 @@ runs it on one board, and compares its greedy tokens with the CPU reference from
 
 The stage has one hardware test and no retry loop of its own. If the port does not run, record that and stop (see "Finish phase").
 
+## Start here
+
+The supervisor has already put two things in the stage directory, and the prepare task tells you so:
+
+- `stages/2/port_facts.json`: the config's small fields, the layer schedule by type, every tensor's dtype and shape (read from the
+  checkpoint's own headers, whether it is one `model.safetensors` or shards), and, for config fields that hold layer ids, the index
+  convention the reference class states for them. Read it first, once. It is written from the checkpoint, so you do not need to read
+  the config, the weight headers or the weights again to learn shapes. A checkpoint with one file has no `model.safetensors.index.json`;
+  the file says which case this is. When a config id list says `one-indexed`, layer index = id - 1. When the file says the convention
+  was not found, compare the ids with the layer numbers of the tensors before you use them.
+- `stages/2/port/port_model.py`: a skeleton. Each of the four functions raises `NotImplementedError` until you replace its body, and
+  `read_tensors(model_dir)` returns every tensor by name from one file or from shards. A port left as the skeleton fails the check at
+  `load` and says so.
+
+Write a first version of `port_model.py` within 12 turns, even if it is incomplete, and refine it after. A stage that reads for twenty
+turns and writes nothing is stopped by the watchdog and costs a coder reboot. Do not page through the stage 1 reference files: the
+check reads them and your port may not. Do not search the machine for other models' code; the worked example named below is enough.
+If `port_facts.json` is not there, the supervisor could not read the checkpoint (the ledger says why); collect the same facts yourself
+from `config.json` and the weight headers, once.
+
 ## What the stage produces
 
 Under `stages/2/port/`: the port's source, and nothing else. The one file the check calls is `stages/2/port/port_model.py`. It defines

@@ -493,3 +493,104 @@ def test_the_rehearsal_flag_cannot_be_added_on_a_resume(rig):
     rig.args.full_port_rehearsal = True
     with pytest.raises(ValueError, match="only when the run starts"):
         rig.run(pid=200)
+
+
+# ---- the facts file, the skeleton and the prepare note (orchard/port_facts.py) -----------------------------------------------
+
+def _snapshot_with_weights(rig):
+    from test_port_facts import CONFIG, TENSORS, write_safetensors
+    snap = rig.tmp / "snapshot"
+    (snap / "config.json").write_text(json.dumps(CONFIG))
+    write_safetensors(snap / "model.safetensors", TENSORS)
+    return snap
+
+
+def _watch_first_prepare(rig):
+    """Record what the stage directory and the prepare task hold when the coder's first prepare turn arrives."""
+    from run_fakes import where
+    seen = {}
+    inner = rig.script
+
+    def script(request):
+        if "tools" in request and where(request) == (2, "prepare") and not seen:
+            sd = rig.run_dir / "stages" / "2"
+            facts, port = sd / "port_facts.json", sd / "port" / "port_model.py"
+            seen.update(facts=json.loads(facts.read_text()) if facts.is_file() else None,
+                        skeleton=port.read_text() if port.is_file() else None,
+                        user=[m["content"] for m in request["messages"] if m["role"] == "user"][0])
+        return inner(request)
+    rig.script = script
+    return seen
+
+
+def test_the_coder_starts_from_a_facts_file_a_skeleton_and_a_task_that_says_to_write_early(rig):
+    _snapshot_with_weights(rig)
+    make(rig)
+    seen = _watch_first_prepare(rig)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert seen["facts"]["schema"] == "orchard-port-facts/1" and seen["facts"]["weights"]["layout"] == "single file"
+    assert "NotImplementedError" in seen["skeleton"] and "def read_tensors" in seen["skeleton"]
+    task = seen["user"].split("## From the supervisor", 1)[1]
+    assert "port_facts.json" in task and "within 12 turns" in task and "skeleton" in task and full_port.COMMAND in task
+    decisions = {d.get("decision") for d in rig.decisions()}
+    assert {"port facts written", "port skeleton copied"} <= decisions
+
+
+def test_a_snapshot_the_facts_cannot_read_leaves_no_facts_file_and_the_task_still_says_to_write_early(rig):
+    make(rig)                                   # the rig's snapshot has a tokenizer and no config or weights
+    seen = _watch_first_prepare(rig)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert seen["facts"] is None and "NotImplementedError" in seen["skeleton"]
+    task = seen["user"].split("## From the supervisor", 1)[1]
+    assert "port_facts.json" not in task and "within 12 turns" in task
+    problem = next(d for d in rig.decisions() if d.get("decision") == "port facts not written")
+    assert "config.json" in problem["problem"]
+
+
+def _stub(tmp_path, snapshot):
+    from types import SimpleNamespace
+    entries = []
+    stub = SimpleNamespace(inputs={"model": str(snapshot)}, run_dir=tmp_path,
+                           ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
+    return stub, entries, supervisor.Supervisor
+
+
+def _checkpoint(tmp_path, with_config=True):
+    from test_port_facts import CONFIG, TENSORS, write_safetensors
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    if with_config:
+        (snap / "config.json").write_text(json.dumps(CONFIG))
+    write_safetensors(snap / "model.safetensors", TENSORS)
+    return snap
+
+
+def test_a_port_the_coder_already_wrote_is_kept_and_the_task_does_not_call_it_a_skeleton(tmp_path):
+    from types import SimpleNamespace
+    snap = _checkpoint(tmp_path)
+    sd = tmp_path / "stages" / "2"
+    (sd / "port").mkdir(parents=True)
+    (sd / "port" / "port_model.py").write_text("# the coder's own port, mentions ttnn\n")
+    stub, entries, S = _stub(tmp_path, snap)
+    S._seed_full_port(stub, SimpleNamespace(number=2), sd)
+    assert (sd / "port" / "port_model.py").read_text().startswith("# the coder's own port")
+    assert stub._port_seed == {"facts": True, "skeleton": False}
+    assert not any(k.get("decision") == "port skeleton copied" for _, k in entries)
+    note = S._prepare_in_code(stub, SimpleNamespace(draft="full_port", skill="full-port-check", number=2), sd).note
+    assert "port_facts.json" in note and "is a skeleton" not in note
+
+
+@pytest.mark.timeout(30)
+def test_a_config_that_is_a_fifo_leaves_no_facts_and_does_not_hang_the_stage(tmp_path):
+    import os
+    from types import SimpleNamespace
+    snap = _checkpoint(tmp_path, with_config=False)
+    os.mkfifo(snap / "config.json")
+    sd = tmp_path / "stages" / "2"
+    sd.mkdir(parents=True)
+    stub, entries, S = _stub(tmp_path, snap)
+    S._seed_full_port(stub, SimpleNamespace(number=2), sd)
+    assert not (sd / "port_facts.json").exists() and stub._port_seed["facts"] is False
+    assert any(k.get("decision") == "port facts not written" for _, k in entries)

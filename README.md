@@ -235,6 +235,19 @@ The suite has 7,177 passing tests and 3 skipped (measured with `python3 -m pytes
 The full-port path (a model that needs new model code) has never run. When stage 0 chooses it, the
 supervisor pauses before stage 2 for the operator.
 
+**What the coder starts stage 2 of a full port from (issue 427).** Before the prepare step the supervisor writes
+`stages/2/port_facts.json` from the checkpoint and copies a port skeleton to `stages/2/port/port_model.py`, and the prepare task
+says to write a first version within 12 turns. The facts file holds the config's small fields, the layer schedule by type, every
+tensor's dtype and shape from the safetensors headers (one file or shards, read through `residency.read_headers`, so links are
+followed once, only regular files are read and headers are size-capped), and for each config field that holds layer ids the index
+convention in the reference's configuration class (found with `find_spec`, without importing `transformers`; a `_text`, `_vision` or
+`_audio` model type is also looked up under its family). It is kept under 10,500 characters so one `read_file` returns all of it, and
+it says how many tensor groups it left out. The skeleton's four functions raise `NotImplementedError`, so a port left as it is fails
+the check at `load`. A port already in the stage directory is kept on a resume. When the checkpoint or its config cannot be read, no
+facts file is written, the ledger says why (`port facts not written`) and the coder works from its skill as before. In three
+rehearsal runs the first attempt read the stage 1 reference in pages and probed for a weight index a single-file checkpoint does not
+have, wrote nothing for 20 turns and was stopped by the watchdog; see issue 427.
+
 **Matching a model to its nearest one.** Stage 0 pairs the two models' tensors the way a person would. Names the
 `model.language_model.` rule leaves over are paired by what they share (`language_model.layers.5...` and
 `model.language_model.layers.5...`), and the pairs and prefix rewrites are recorded in `delta.json` under
