@@ -27,8 +27,14 @@ What is checked here:
     request reports generating. This shows the engine saw the work.
   * `check_mesh`: the device count the engine logs when it opens its mesh must equal the devices the can declares.
 
-Not checked here, and named in the study: throughput and batching (V10, V11), long prefill (V12), reasoning-model parser checks
-(V13 to V18), the quiet-warning log filter (V22) and the upstream lookups (V23 to V25).
+Added for issues 360 to 373 and 385 (the live multi-request probes are in orchard/served_probes.py):
+  * `served_names` and `request_model`: a `--served-model-name` alias set only through `extra_args` is the name the request carries (385).
+  * `judge_completion`: the judgement of one raw completion, so a recorded body (stage 2 and 4, issue 368) is judged by the same rules.
+  * `check_engine_log`: layers loaded and KV-cache capacity from the server log, against config.json and the can's limits (370).
+  * `log_warnings`: the quiet-warning filter over the server log (373). It never fails a boot.
+  * `reasoning_split`, `distribution`, `classify_reasoning`, `check_prefix_reuse`: judges for reasoning replies and prefix reuse (360, 361, 372).
+
+Not checked here, and named in the study: the upstream lookups (V23 to V25).
 """
 from __future__ import annotations
 
@@ -83,38 +89,41 @@ def _context(value) -> int | None:
 
 # ---- /v1/models: served name and context length (verify V2) -------------------------------------------------------------------
 
-MAX_SERVED_NAMES = 32
-
-
-def served_names(args) -> list[str]:
-    """The names a spec's serving arguments give `--served-model-name`, in order, each once. vLLM reads the option as `nargs="+"`: the
-    separate words after it, up to the next word that starts with a dash, are the names, and the last occurrence replaces an earlier one.
-    The `--served-model-name=a` form carries one name, and a word after it is not a name. Dashes and underscores in the option's spelling
-    are the same option. Words that are not strings are skipped, and an option with no name gives []."""
-    words = [w for w in args if isinstance(w, str)] if isinstance(args, (list, tuple)) else []
-    names: list[str] = []
+def served_names(extra_args) -> tuple[str, ...]:
+    """The names `--served-model-name` gives in a spec's serving arguments (issue 385): `--served-model-name a b`, `--served_model_name=a`.
+    The option takes one or more names, each the word after it up to the next word that starts with a dash. Dashes and underscores in the
+    option name are the same option, and the last use wins (argparse). A name that is empty or longer than MAX_NAME_CHARS is dropped.
+    No such option gives an empty tuple."""
+    found: tuple[str, ...] = ()
+    words = [w for w in (extra_args or ()) if isinstance(w, str)]
     i = 0
     while i < len(words):
-        word = words[i]
-        i += 1
-        if not word.startswith("--") or word.split("=", 1)[0][2:].replace("-", "_") != "served_model_name":
-            continue
-        if "=" in word:
-            value = word.split("=", 1)[1]
-            names = [value] if value else []
-            continue
-        names = []
-        while i < len(words) and not words[i].startswith("-"):
-            names.append(words[i])
+        head, eq, tail = words[i].partition("=")
+        if head.startswith("--") and head[2:].replace("-", "_") == "served_model_name":
+            names = [tail] if eq else []
             i += 1
-    return list(dict.fromkeys(names))[:MAX_SERVED_NAMES]
+            while i < len(words) and not words[i].startswith("-"):
+                names.append(words[i])
+                i += 1
+            found = tuple(n for n in names if _name(n) is not None)
+            continue
+        i += 1
+    return found
 
 
-def check_listing(status, body, *, declared_name=None, declared_names=None, declared_context=None, native_context=None) -> dict:
-    """The model the server lists, against what the can declares. `declared_name` is the name the can's chat request asks for
-    (`request_extra.model`); `declared_names` are the `--served-model-name` names of its serving arguments, primary first, and are used only
-    when there is no `declared_name`. With either, the listing must hold one of the names, and the first declared name that is listed is the
-    model that is checked; a declared name that is not listed is noted. `declared_context` is the `max_model_len` of the spec (None when it
+def request_model(body, declared_names=()) -> str | None:
+    """The model name a request will carry: the first declared name that `/v1/models` lists, else (when none is declared) the first listed
+    id. None when the listing is unusable or lists none of the declared names; `check_listing` says why."""
+    doc = _json(body, "listing")
+    data = doc.get("data") if doc is not None else None
+    ids = [e["id"] for e in data if isinstance(e, dict) and _name(e.get("id")) is not None] if isinstance(data, list) else []
+    if declared_names:
+        return next((n for n in declared_names if n in ids), None)
+    return ids[0] if ids else None
+
+
+def check_listing(status, body, *, declared_name=None, declared_names=(), declared_context=None, native_context=None) -> dict:
+    """The model the server lists, against what the can declares. `declared_context` is the `max_model_len` of the spec (None when it
     declares none, and then the context length is reported and not compared). `native_context` (the model's own
     `max_position_embeddings`) only labels the served value as below, equal to or above native; it never fails the check."""
     name = "served_model"
@@ -128,26 +137,16 @@ def check_listing(status, body, *, declared_name=None, declared_names=None, decl
     if not entries:
         return _result(name, "fail", "the server answered /health and lists no model on /v1/models (the list is empty or its entries have no usable id)")
     chosen = entries[0]
-    notes = []
-    if declared_name is not None:
-        match = [e for e in entries if e["id"] == declared_name]
-        if not match:
-            return _result(name, "fail", f"the server lists {[e['id'] for e in entries][:5]}; the can declares the name {declared_name!r}")
-        chosen = match[0]
-    elif declared_names:
-        wanted = [n for n in declared_names if isinstance(n, str) and n]
-        listed = {}
-        for e in entries:
-            listed.setdefault(e["id"], e)
-        present = [n for n in wanted if n in listed]
-        if wanted and not present:
-            return _result(name, "fail", f"the server lists {[e['id'] for e in entries][:5]}; the can's serving arguments declare "
-                                         f"--served-model-name {wanted[:MAX_SERVED_NAMES]!r}, and none of those names is listed")
-        if present:
-            chosen = listed[present[0]]
-            if len(present) < len(wanted):
-                notes.append(f"declared names not listed: {[n for n in wanted if n not in listed]}")
+    declared = tuple(n for n in ((declared_name,) + tuple(declared_names or ())) if isinstance(n, str) and n)
+    if declared:
+        listed = {e["id"]: e for e in entries}
+        hit = next((n for n in declared if n in listed), None)
+        if hit is None:
+            shown = repr(declared[0]) if len(declared) == 1 else repr(list(declared))
+            return _result(name, "fail", f"the server lists {[e['id'] for e in entries][:5]}; the can declares the name {shown}")
+        chosen = listed[hit]
     served = {"id": chosen["id"], "max_model_len": _context(chosen.get("max_model_len"))}
+    notes = []
     if declared_context is not None:
         if "max_model_len" not in chosen or chosen.get("max_model_len") is None:
             return _result(name, "not_checked", f"the server does not report max_model_len, so the declared context {declared_context} was not compared",
@@ -214,29 +213,36 @@ def _completion_text(body) -> str | None:
 def probe_completions(base: str, model: str, *, timeout: float = PROBE_TIMEOUT_S) -> list[dict]:
     """The arithmetic and the sequential-state probes, one request each, at temperature 0 with at most 16 new tokens. A server with no
     /v1/completions route (a chat-only server) is `not_checked`. A server that cannot be reached is a fail."""
-    probes = (("arithmetic", "17*24=", lambda t: _FIRST_INT.match(t) is not None and int(_FIRST_INT.match(t).group(1)) == 408,
-               "the product 17*24 is 408"),
-              ("sequence", "1 2 3 4 5 6 7 8", lambda t: _SEQUENCE.match(t) is not None, "counting on from 8 gives 9, 10, 11 with no repeat or skip"))
     out = []
-    for name, prompt, good, meaning in probes:
+    for name, prompt in COMPLETION_PROBES:
         try:
             status, body = _post(base.rstrip("/") + "/v1/completions", {"model": model, "prompt": prompt, "temperature": 0, "max_tokens": 10}, timeout)
         except (OSError, ValueError, http.client.HTTPException) as exc:        # a refused connection, a timeout, a cut-off body (IncompleteRead is not an OSError)
             out.append(_result(name, "fail", f"no answer from /v1/completions: {type(exc).__name__}"))
             continue
-        if status in ABSENT_ROUTE:
-            out.append(_result(name, "not_checked", f"the server has no /v1/completions route (it answered {status})"))
-        elif status != 200:
-            out.append(_result(name, "fail", f"POST /v1/completions answered {status}"))
-        else:
-            text = _completion_text(body)
-            if text is None:
-                out.append(_result(name, "fail", "the completion has no choices[0].text string"))
-            elif good(text):
-                out.append(_result(name, "pass", meaning, text=text[:40]))
-            else:
-                out.append(_result(name, "fail", f"expected: {meaning}; the server answered {text[:40]!r}", text=text[:40]))
+        out.append(judge_completion(name, status, body))
     return out
+
+
+COMPLETION_PROBES = (("arithmetic", "17*24="), ("sequence", "1 2 3 4 5 6 7 8"))     # (name, prompt); the stage 2 template sends the same two (a test holds them equal)
+_GOOD = {"arithmetic": (lambda t: _FIRST_INT.match(t) is not None and int(_FIRST_INT.match(t).group(1)) == 408, "the product 17*24 is 408"),
+         "sequence": (lambda t: _SEQUENCE.match(t) is not None, "counting on from 8 gives 9, 10, 11 with no repeat or skip")}
+
+
+def judge_completion(name: str, status, body) -> dict:
+    """The verdict on one raw completion answered with `status` and `body` for the probe `name` of COMPLETION_PROBES. The live probe and the
+    stage 2 and 4 recorded probe both call this, so one rule judges both."""
+    good, meaning = _GOOD[name]
+    if status in ABSENT_ROUTE:
+        return _result(name, "not_checked", f"the server has no /v1/completions route (it answered {status})")
+    if status != 200:
+        return _result(name, "fail", f"POST /v1/completions answered {status}")
+    text = _completion_text(body)
+    if text is None:
+        return _result(name, "fail", "the completion has no choices[0].text string")
+    if good(text):
+        return _result(name, "pass", meaning, text=text[:40])
+    return _result(name, "fail", f"expected: {meaning}; the server answered {text[:40]!r}", text=text[:40])
 
 
 # ---- the server's own counters (verify V8) -------------------------------------------------------------------------------------
@@ -308,6 +314,249 @@ def check_mesh(log_text, *, expected_devices) -> dict:
     if n != expected_devices:
         return _result(name, "fail", f"the engine opened a mesh of {n} devices; the can declares {expected_devices}", devices=n)
     return _result(name, "pass", f"the engine opened a mesh of {n} devices, as declared", devices=n)
+
+
+# ---- layers loaded and the KV cache, from the server log (verify V9, issue 370) --------------------------------------------------
+# The line formats are the ones vLLM prints (the v1 engine: `GPU KV cache size: N tokens` and `Maximum concurrency for N tokens per request: Xx`;
+# the older engine: `# GPU blocks: N`). They differ between releases, so a log that has none of them is `not_checked`; the tests pin the
+# formats of the releases named in the fixtures. The layer line is whatever the model prints when it has built its decoder stack:
+# `loaded N layers`, `built N decoder layers`, `layers loaded: N`. The line of a particular tt-metal model has not been read from a real
+# server log yet (issue 370 stays open for that); a log with no such line is `not_checked`.
+_LAYERS_LINES = (re.compile(r"\b(?:loaded|loading|built|created|initiali[sz]ed)\s+(\d{1,4})\s+(?:decoder\s+|transformer\s+)?layers\b", re.IGNORECASE),
+                 re.compile(r"\blayers\s+loaded\s*[:=]\s*(\d{1,4})\b", re.IGNORECASE))
+_KV_TOKENS = re.compile(r"\bGPU KV cache size:\s*([\d,]{1,20})\s*tokens\b", re.IGNORECASE)
+_KV_CONCURRENCY = re.compile(r"\bMaximum concurrency for\s*([\d,]{1,20})\s*tokens per request:\s*(\d{1,9}(?:\.\d{1,6})?)x\b", re.IGNORECASE)
+_KV_BLOCKS = re.compile(r"#\s*GPU blocks:\s*(\d{1,12})\b", re.IGNORECASE)
+
+
+def layers_in_config(config) -> int | None:
+    """`num_hidden_layers` of a parsed config.json (top level, or under `text_config` for a multimodal wrapper), or None."""
+    if not isinstance(config, dict):
+        return None
+    for holder in (config, config.get("text_config")):
+        if isinstance(holder, dict):
+            try:
+                return safeio.whole_number(holder.get("num_hidden_layers"), lo=1, hi=100000, what="num_hidden_layers")
+            except safeio.BadValue:
+                continue
+    return None
+
+
+def _int(text: str) -> int:
+    return int(text.replace(",", ""))
+
+
+def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=None, block_size=None) -> list[dict]:
+    """Two results from the server log: `layers_loaded` (the layers the engine says it loaded, against `num_hidden_layers` of `config`) and
+    `kv_cache` (the cache capacity in tokens and the concurrency the engine states, against the can's `max_model_len`). The last matching line wins.
+    A cache smaller than one full-length sequence, or a stated concurrency below 1, is a fail. A concurrency below `max_num_seqs` is
+    reported in the detail and does not fail: it means that many full-length sequences do not fit together. A log without the line, or
+    no `config` to compare with, is `not_checked`."""
+    out = []
+    expected = layers_in_config(config)
+    if not isinstance(log_text, str):
+        why = "the server log could not be read"
+        return [_result("layers_loaded", "not_checked", why), _result("kv_cache", "not_checked", why)]
+    seen = [int(m.group(1)) for m in sorted((m for rx in _LAYERS_LINES for m in rx.finditer(log_text)), key=lambda m: m.start())]      # log order
+    if expected is None:
+        out.append(_result("layers_loaded", "not_checked", "no num_hidden_layers is known (the bundle holds no config.json that states it)"))
+    elif not seen:
+        out.append(_result("layers_loaded", "not_checked", "the server log has no line that states how many layers were loaded"))
+    elif seen[-1] != expected:
+        out.append(_result("layers_loaded", "fail", f"the engine loaded {seen[-1]} layers; config.json says num_hidden_layers is {expected}", layers=seen[-1]))
+    else:
+        out.append(_result("layers_loaded", "pass", f"the engine loaded {seen[-1]} layers, as config.json says", layers=seen[-1]))
+    tokens = [_int(m) for m in _KV_TOKENS.findall(log_text)]
+    blocks = [int(m) for m in _KV_BLOCKS.findall(log_text)]
+    conc = [(_int(a), float(b)) for a, b in _KV_CONCURRENCY.findall(log_text)]
+    capacity = tokens[-1] if tokens else (blocks[-1] * block_size if blocks and isinstance(block_size, int) and not isinstance(block_size, bool) and block_size > 0 else None)
+    if capacity is None and not conc:
+        out.append(_result("kv_cache", "not_checked", "the server log states no KV-cache size (no `GPU KV cache size` line, and no block count with a declared block size)"))
+        return out
+    parts = []
+    if capacity is not None:
+        parts.append(f"capacity {capacity} tokens")
+    if conc:
+        parts.append(f"concurrency {conc[-1][1]:g}x at {conc[-1][0]} tokens per request")
+    if max_num_seqs is not None:
+        parts.append(f"the can's max_num_seqs is {max_num_seqs}")
+    facts = {"capacity_tokens": capacity, "concurrency": conc[-1][1] if conc else None, "tokens_per_request": conc[-1][0] if conc else None}
+    if capacity is not None and isinstance(max_model_len, int) and not isinstance(max_model_len, bool) and capacity < max_model_len:
+        out.append(_result("kv_cache", "fail", f"the KV cache holds {capacity} tokens, less than one sequence of the declared max_model_len {max_model_len}", **facts))
+    elif conc and conc[-1][1] < 1:
+        out.append(_result("kv_cache", "fail", f"the engine states a concurrency of {conc[-1][1]:g}x for {conc[-1][0]} tokens per request: one full-length sequence does not fit", **facts))
+    else:
+        out.append(_result("kv_cache", "pass", "; ".join(parts), **facts))
+    return out
+
+
+# ---- quiet warnings in the server log (verify V22, issue 373) ------------------------------------------------------------------
+
+MAX_WARNING_LINES = 20             # choice: a person reads these; more than this is a log that needs reading in full
+MAX_WARNING_CHARS = 300
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# a line that every healthy run prints: the periodic engine statistics, and the import messages of backends this machine does not use
+_BACKEND = r"\b(?:cuda|libcuda|rocm|hip|xpu|nvml|pynvml|triton|flash_?attn|flashinfer|nccl|cudnn)\b"
+# a backend word with an import or start-up message (the backend is absent from this machine), and the engine statistics line. A warning that
+# names a backend and reports a fallback or a mismatch does not match the second form and stays.
+_NOISE = re.compile(r"Avg (?:prompt|generation) throughput|Engine \d+:.*(?:Running|Waiting):|\bPrefix cache hit rate\b|"
+                    r"(?=.*" + _BACKEND + r")(?=.*(?:failed to import|importerror|no module named|cannot open shared object|not installed|is installed but|"
+                    r"not available|no (?:cuda|rocm|xpu|gpu)|driver\(s\) found|libcuda))", re.IGNORECASE)
+_WARNING = re.compile(r"\b(?:warn(?:ing)?s?|fall(?:s|ing)?[ -]?back|fell back|unrecogni[sz]ed|unknown|unsupported|not supported|not recogni[sz]ed|"
+                      r"ignor(?:e|es|ed|ing)|mismatch(?:es|ed)?|deprecat\w*|defaulting|overrid(?:e|es|ing|den)|disabled|disabling|"
+                      r"not (?:found|available)|no such|cannot|could not|failed)\b", re.IGNORECASE)
+_SHAPE = re.compile(r"\d[\d,.:%-]*")
+
+
+def log_warnings(log_text) -> dict:
+    """The lines of a server log that may explain a slow or wrong run (issue 373): fallbacks, an unrecognised device or model name, ignored
+    options, mismatches, deprecations. It drops the lines every healthy run prints (see _NOISE), keeps lines that match a broad keyword
+    list, collapses lines that differ only in numbers and times, keeps at most MAX_WARNING_LINES, and cuts each at MAX_WARNING_CHARS.
+    A hit means read the line. It does not mean the run is wrong, and the boot check never fails on it. Returns
+    `{"lines": [{"text", "count"}], "hits": N, "dropped_as_noise": N, "truncated": bool}`; a log that cannot be read gives `lines: None`."""
+    if not isinstance(log_text, str):
+        return {"lines": None, "hits": 0, "dropped_as_noise": 0, "truncated": False}
+    seen: dict[str, dict] = {}
+    hits = noise = 0
+    truncated = False
+    for raw in log_text.splitlines():
+        line = _ANSI.sub("", raw).strip()
+        if not line or not _WARNING.search(line):
+            continue
+        if _NOISE.search(line):
+            noise += 1
+            continue
+        hits += 1
+        key = _SHAPE.sub("#", line)[:MAX_WARNING_CHARS]
+        if key in seen:
+            seen[key]["count"] += 1
+        elif len(seen) < MAX_WARNING_LINES:
+            seen[key] = {"text": line[:MAX_WARNING_CHARS], "count": 1}
+        else:
+            truncated = True
+    return {"lines": list(seen.values()), "hits": hits, "dropped_as_noise": noise, "truncated": truncated}
+
+
+# ---- reasoning replies and prefix reuse (verify V13 to V17, issues 360, 361, 372) ----------------------------------------------------
+
+def distribution(values) -> dict | None:
+    """`{"n", "min", "median", "max"}` of the whole numbers in `values` (booleans and other types are skipped), or None when there are none."""
+    xs = sorted(v for v in (values or ()) if isinstance(v, int) and not isinstance(v, bool) and v >= 0)
+    if not xs:
+        return None
+    mid = xs[len(xs) // 2] if len(xs) % 2 else (xs[len(xs) // 2 - 1] + xs[len(xs) // 2]) / 2
+    return {"n": len(xs), "min": xs[0], "median": mid, "max": xs[-1]}
+
+
+def _message_texts(message) -> tuple[str, str]:
+    """(reasoning text, answer text) of a chat message. The reasoning field is `reasoning_content` (vLLM before 0.11) or `reasoning`."""
+    if not isinstance(message, dict):
+        return "", ""
+    reasoning = next((message[k] for k in ("reasoning_content", "reasoning") if isinstance(message.get(k), str) and message[k].strip()), "")
+    content = message.get("content") if isinstance(message.get("content"), str) else ""
+    return reasoning, content
+
+
+def reasoning_split(body) -> dict | None:
+    """Reasoning tokens and answer tokens of one chat reply (issue 361), from a reply body (bytes, or an already parsed dict). Returns
+    `{"completion_tokens", "reasoning_tokens", "answer_tokens", "basis", "finish_reason"}` or None when the reply has no usable
+    `usage.completion_tokens`. `basis` says where the split comes from: `reported` (usage.completion_tokens_details.reasoning_tokens), `estimated
+    by characters` (the share of reasoning characters in the reply, which is an estimate) or `no reasoning text`."""
+    doc = body if isinstance(body, dict) else _json(body, "reply")
+    if doc is None:
+        return None
+    usage = doc.get("usage")
+    total = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        return None
+    choices = doc.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    reasoning, content = _message_texts(choice.get("message"))
+    details = usage.get("completion_tokens_details")
+    reported = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    if isinstance(reported, int) and not isinstance(reported, bool) and 0 <= reported <= total:
+        r, basis = reported, "reported"
+    elif reasoning:
+        r, basis = round(total * len(reasoning) / (len(reasoning) + len(content))), "estimated by characters"
+    else:
+        r, basis = 0, "no reasoning text"
+    return {"completion_tokens": total, "reasoning_tokens": r, "answer_tokens": total - r, "basis": basis, "finish_reason": choice.get("finish_reason")}
+
+
+_THINK_TAG = re.compile(r"</?think>", re.IGNORECASE)
+DROPPED_RATIO = 3          # choice: a reply whose token count is three times its visible answer and more, with no reasoning field, generated thinking that the server dropped
+DROPPED_FLOOR = 16         # choice: and at least this many tokens beyond the visible answer
+
+
+def classify_reasoning(body) -> dict:
+    """How one chat reply of a reasoning model carries its thinking (issue 372): `populated` (a reasoning field holds text and the content is
+    clean), `leaking` (a think tag in the content), `dropped` (no reasoning field, and the token count far above the visible answer: thinking
+    was generated and the parser threw it away), `none` (no thinking text and no sign of dropped thinking) or `unusable` (not a chat reply)."""
+    doc = body if isinstance(body, dict) else _json(body, "reply")
+    choices = doc.get("choices") if doc is not None else None
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+    if choice is None or not isinstance(choice.get("message"), dict):
+        return {"kind": "unusable", "detail": "the reply has no choices[0].message object"}
+    reasoning, content = _message_texts(choice["message"])
+    split = reasoning_split(doc)
+    if _THINK_TAG.search(content) or _THINK_TAG.search(reasoning):
+        return {"kind": "leaking", "detail": "a think tag is in the reply text: the server's reasoning parser is not separating the thinking", "split": split}
+    if reasoning and content.strip():
+        return {"kind": "populated", "detail": "the reasoning field holds text and the content is the answer", "split": split}
+    if reasoning:
+        return {"kind": "populated", "detail": "the reasoning field holds text and the content is empty (the budget ended during thinking)", "split": split}
+    if split is not None:
+        visible = len(content) // 3 + 1                      # three characters to the token is an over-count of tokens, so the dropped test errs toward `none`
+        if split["completion_tokens"] >= DROPPED_RATIO * visible + DROPPED_FLOOR:
+            return {"kind": "dropped", "detail": f"{split['completion_tokens']} tokens were generated and the visible answer is about {visible}; the reasoning field is empty",
+                    "split": split}
+    return {"kind": "none", "detail": "no thinking text and no sign of dropped thinking", "split": split}
+
+
+_PARSER_LINE = re.compile(r"reasoning[_-]parser\W{0,6}([A-Za-z0-9_.-]{1,64})", re.IGNORECASE)
+
+
+def reasoning_parser_printed(log_text) -> bool:
+    """True when the log holds an engine-argument form of the parser setting (`reasoning_parser=...`, `--reasoning-parser x`), with a value or `None`.
+    The word `reasoning` alone (a model name) is not one."""
+    return isinstance(log_text, str) and _PARSER_LINE.search(log_text) is not None
+
+
+def reasoning_parser_in_log(log_text) -> str | None:
+    """The name after `reasoning_parser` (or `--reasoning-parser`) in the server log's printed engine arguments; the last one wins. A value of
+    `None` or `null` means no parser. None when the log prints none."""
+    if not isinstance(log_text, str):
+        return None
+    found = _PARSER_LINE.findall(log_text)
+    if not found:
+        return None
+    return None if found[-1].lower() in ("none", "null") else found[-1]
+
+
+def check_prefix_reuse(first: dict, repeat: dict, control: dict, *, declared: bool) -> dict:
+    """Is a repeated long prefix served faster (issues 360, 361)? Each argument is `{"seconds", "prompt_tokens", "cached_tokens"}` for the same-size
+    requests: `first` (a long prompt, cold), `repeat` (the same prompt again) and `control` (a different prompt of the same size, so the
+    server's warm kernels are not mistaken for a cache). The server's own count decides when it reports one (`usage.prompt_tokens_details.cached_tokens`
+    of at least half the prompt); otherwise the repeat must take at most 60 percent of the control's time, and the verdict says it was judged by
+    timing. `declared` says the can claims prefix caching: a repeat that is not faster is then a fail, and otherwise it is recorded as `not_checked`
+    with the numbers (a can that does not claim prefix caching is not failed for lacking it)."""
+    name = "prefix_reuse"
+
+    def num(d, k):
+        v = d.get(k) if isinstance(d, dict) else None
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else None
+    cached, prompt, t_rep, t_ctl = num(repeat, "cached_tokens"), num(repeat, "prompt_tokens"), num(repeat, "seconds"), num(control, "seconds")
+    facts = {"first_s": num(first, "seconds"), "repeat_s": t_rep, "control_s": t_ctl, "prompt_tokens": prompt, "cached_tokens": cached}
+    if cached is not None and prompt:
+        reused, basis = cached >= prompt / 2, "the server's cached-token count"
+    elif t_rep is not None and t_ctl:
+        reused, basis = t_rep <= 0.6 * t_ctl, "timing (the server reports no cached-token count)"
+    else:
+        return _result(name, "not_checked", "the requests reported neither a cached-token count nor a usable time", **facts)
+    if reused:
+        return _result(name, "pass", f"a repeated prefix was served from the cache, judged by {basis}", basis=basis, **facts)
+    detail = f"a repeated prefix was not served faster, judged by {basis}"
+    return _result(name, "fail" if declared else "not_checked", detail + ("" if declared else " (the can does not declare prefix caching)"), basis=basis, **facts)
 
 
 # ---- into the boot check's evidence ---------------------------------------------------------------------------------------------

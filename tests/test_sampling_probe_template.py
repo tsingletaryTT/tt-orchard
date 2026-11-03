@@ -26,6 +26,7 @@ def requests(tmp_path):
 
 def run(swap, tmp_path, sampling="applied", **kw):
     kw.setdefault("sampling_probe", True)
+    kw.setdefault("live_probe", False)          # these tests count the completion requests; the live probe (issue 368) has its own tests
     extra = {"request_log": str(tmp_path / "requests.jsonl"), "sampling": sampling, "usage_tokens": 96, "sampling_log_settle_s": 0.05,
              "probe_delay_s": 0.3}       # every probe request takes about the same time, so a few milliseconds of jitter cannot change a ratio
     extra.update(kw.pop("server_extra", {}))
