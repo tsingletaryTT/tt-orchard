@@ -1782,3 +1782,107 @@ def test_arbitrary_file_bytes_never_raise_anything_but_a_safe_error(tmp_path_fac
         safeio.safetensors_header(p, max_header_bytes=1 << 10)
     except SafeReadError:
         pass
+
+
+# ----------------------------------------------------------------------------------------------------------- iter_lines (issue 113)
+
+def _lines(path, **kw):
+    kw.setdefault("max_bytes", CAP)
+    kw.setdefault("max_line_bytes", 1000)
+    return list(safeio.iter_lines(path, **kw))
+
+
+def test_iter_lines_gives_each_line_with_its_newline_and_the_unterminated_tail(tmp_path):
+    p = tmp_path / "f.csv"
+    p.write_bytes(b"a,b\n1,2\n3,4")
+    assert _lines(p) == ["a,b\n", "1,2\n", "3,4"]
+    p.write_bytes(b"")
+    assert _lines(p) == []
+
+
+def test_iter_lines_keeps_lines_across_read_chunks(tmp_path):
+    p = tmp_path / "f.csv"
+    line = b"x" * 700 + b"\n"
+    p.write_bytes(line * 400)                                   # 280 KB, several 64 KB reads, lines cut by chunk edges
+    got = _lines(p)
+    assert len(got) == 400 and set(got) == {line.decode()}
+
+
+def test_iter_lines_decodes_bad_bytes_with_replacement_and_strictly_on_request(tmp_path):
+    p = tmp_path / "f.csv"
+    p.write_bytes(b"ok\n\xff\xfe\n")
+    assert _lines(p)[1] == "��\n"
+    with pytest.raises(UnicodeDecodeError):
+        _lines(p, errors="strict")
+
+
+def test_iter_lines_refuses_a_line_longer_than_the_cap_before_reading_on(tmp_path):
+    p = tmp_path / "f.csv"
+    p.write_bytes(b"ok\n" + b"y" * 5000 + b"\nafter\n")
+    with pytest.raises(TooLarge):
+        _lines(p)
+    p.write_bytes(b"y" * 5000)                                 # no newline at all
+    with pytest.raises(TooLarge):
+        _lines(p)
+
+
+def test_iter_lines_refuses_a_file_over_the_cap_a_directory_a_fifo_and_a_link(tmp_path):
+    p = tmp_path / "f.csv"
+    p.write_bytes(b"a\n" * 100)
+    with pytest.raises(TooLarge):
+        _lines(p, max_bytes=50)
+    with pytest.raises(NotRegular):
+        _lines(tmp_path)
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(NotRegular):
+        _lines(fifo)
+    link = tmp_path / "link"
+    link.symlink_to(p)
+    with pytest.raises(SafeReadError):
+        _lines(link)
+
+
+def test_iter_lines_notices_a_file_that_grew_during_the_read(tmp_path):
+    p = tmp_path / "f.csv"
+    p.write_bytes(b"a\n" * 10)
+    gen = safeio.iter_lines(p, max_bytes=CAP, max_line_bytes=1000)
+    assert next(gen) == "a\n"
+    with open(p, "ab") as f:                                    # a writer appends after the read began
+        f.write(b"more\n")
+    with pytest.raises(ChangedWhileReading):
+        list(gen)
+
+
+def test_iter_lines_releases_the_descriptor_when_closed_early_and_refuses_bad_limits(tmp_path):
+    p = tmp_path / "f.csv"
+    p.write_bytes(b"a\n" * 10)
+    before = fd_count()
+    gen = safeio.iter_lines(p, max_bytes=CAP, max_line_bytes=1000)
+    next(gen)
+    assert fd_count() == before + 1
+    gen.close()
+    assert fd_count() == before
+    for bad in (-1, True, "5", 1.5):
+        with pytest.raises(ValueError):
+            safeio.iter_lines(p, max_bytes=bad, max_line_bytes=10)
+
+
+def test_iter_lines_enforces_the_size_cap_while_reading_not_only_from_fstat(tmp_path, monkeypatch):
+    """A file that is larger than `fstat` said when it was opened (it grew, or a filesystem lies): the read stops at the cap."""
+    p = tmp_path / "f.csv"
+    p.write_bytes(b"a\n" * 5000)                                # 10 KB
+    real = os.fstat
+    seen = []
+
+    def lying_fstat(fd):
+        st = real(fd)
+        if not seen:
+            seen.append(1)
+            class Fake:
+                st_mode, st_size, st_mtime_ns = st.st_mode, 10, st.st_mtime_ns
+            return Fake()
+        return st
+    monkeypatch.setattr(os, "fstat", lying_fstat)
+    with pytest.raises(TooLarge):
+        list(safeio.iter_lines(p, max_bytes=100, max_line_bytes=1000))

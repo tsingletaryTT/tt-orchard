@@ -55,7 +55,7 @@ from array import array
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from orchard import can_audio, safeio, served_verify
+from orchard import can_audio, safeio, served_probes, served_verify
 from orchard.defaults import PACKAGE_INSTALL_TIMEOUT_S, PACKAGE_THIN_TIMEOUT_S
 from orchard.package import (PackageError, TEMPLATES, assert_no_publish, run_logged, splice_extra_args, weights_wiring_problems,
                              wire_weights)
@@ -105,7 +105,7 @@ WEIGHTS_KEYS = {"repo", "revision"}
 CHECK_KEYS = {"prompt", "expect", "max_tokens", "ready_contains", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens", "request_extra",
               "mode", "health_path", "lyrics", "caption", "seconds", "seed", "sample_rate", "min_seconds", "min_peak", "min_loud_fraction",
               "path", "body", "expect_seconds", "channels", "max_warm_s", "repeat_identical",
-              "audio_seconds", "audio_steps", "audio_seed", "max_rtf"}
+              "audio_seconds", "audio_steps", "audio_seed", "max_rtf", "reasoning", "prefix_caching", "quirks"}
 CHECK_MODES = ("chat", "music", "audio", "audio-job")
 CHAT_ONLY_KEYS = {"expect", "max_tokens", "min_decode_tok_s", "stream", "rate_prompt", "rate_max_tokens"}   # refused in mode "audio-job"
 AUDIO_JOB_KEYS = {"audio_seconds", "audio_steps", "audio_seed", "max_rtf"}                                  # only for mode "audio-job" (orchard/can_audio.py)
@@ -139,6 +139,13 @@ class Check:
     stream: bool = True
     # fields merged into every chat request body (for a thinking model: { chat_template_kwargs = { enable_thinking = false } })
     request_extra: dict = field(default_factory=dict)
+    # reasoning: the model is a reasoning model (issue 372), so the boot check adds the reasoning probes. prefix_caching: the model claims prefix
+    # caching (issue 360), so the boot check times a repeated long prefix and fails when it is not served faster. quirks: per-model notes keyed
+    # by model and server release, each {model, server_release, note}; the boot evidence lists the ones for this spec's weights repo (or name)
+    # and vllm_version, because a quirk belongs to one release
+    reasoning: bool = False
+    prefix_caching: bool = False
+    quirks: tuple = ()
     # mode "chat" (the default) asks /v1/chat/completions. Mode "music" asks /v1/audio/speech for a short WAV clip and tests the audio:
     mode: str = "chat"
     health_path: str = "/health"           # the path the boot check waits on (a server of its own may use /v1/health)
@@ -462,7 +469,7 @@ def load_spec(path, *, base=None, expand_trees: bool = True) -> Spec:
             v = check.get(key)
             if key in check and (isinstance(v, bool) or not isinstance(v, int) or v < (1 if key == "audio_steps" else 0)):
                 raise CanError(f"[check] {key} must be a whole number ({'1' if key == 'audio_steps' else '0'} or more)")
-    ck = Check(**{k: (tuple(v) if k == "ready_contains" else v) for k, v in check.items()})
+    ck = Check(**{k: (tuple(v) if k in ("ready_contains", "quirks") and isinstance(v, list) else v) for k, v in check.items()})
     if ck.mode not in CHECK_MODES:
         raise CanError(f"[check] mode must be one of {CHECK_MODES}, got {ck.mode!r}")
     if not isinstance(ck.health_path, str) or not re.fullmatch(r"/[A-Za-z0-9._/-]*", ck.health_path):
@@ -474,6 +481,13 @@ def load_spec(path, *, base=None, expand_trees: bool = True) -> Spec:
         raise CanError(f"[check] expect is not a regular expression: {exc}") from exc
     if not isinstance(ck.request_extra, dict):
         raise CanError("[check] request_extra must be a table")
+    for key in ("reasoning", "prefix_caching"):
+        if not isinstance(getattr(ck, key), bool):
+            raise CanError(f"[check] {key} must be true or false")
+    if not isinstance(ck.quirks, (list, tuple)) or len(ck.quirks) > 50 or not all(
+            isinstance(q, dict) and set(q) == {"model", "server_release", "note"} and all(isinstance(v, str) and 0 < len(v) <= 500 for v in q.values())
+            for q in ck.quirks):
+        raise CanError("[check] quirks must be a list of at most 50 tables, each with the text keys model, server_release and note (500 characters at most)")
     if "card_profile" in can and can["card_profile"] not in CARD_PROFILES:
         raise CanError(f"[can] card_profile must be one of {CARD_PROFILES}, got {can['card_profile']!r}")
     optional = {k: can[k] for k in ("max_num_seqs", "block_size", "max_model_len", "mesh_fabric", "vllm_version", "card_profile") if k in can}
@@ -895,6 +909,67 @@ def _has_measured_row(lines: list[str]) -> bool:
         i = j          # a separator row inside this table's rows is a body row, so the scan goes on after them (one pass, never quadratic)
     return False
 
+# a cell that holds nothing a reader can use as a reference
+_PLACEHOLDER = re.compile(r"[-\u2013\u2014?.\u2026_ ]*|n/?a|tbd|tba|todo|none|unknown|null", re.IGNORECASE)
+_REFERENCE_HEADING = re.compile(r"(?:[a-z0-9-]+ ){0,2}(?:reference|baseline)")
+
+
+def _plain(cell: str) -> str:
+    """A cell's text without emphasis marks, backticks and a trailing parenthesis, lower-cased (for matching a heading or a placeholder)."""
+    return re.sub(r"\s*\([^)]*\)\s*$", "", re.sub(r"[*_`]", "", cell)).strip().lower()
+
+
+_REFERENCE_WORD = re.compile(r"\b(?:reference|baseline)\b", re.IGNORECASE)
+_NO_REFERENCE = re.compile(r"\b(?:tbd|tba|todo|n/?a|none|unknown|unspecified)\b", re.IGNORECASE)
+
+
+def _names_a_reference(line: str) -> bool:
+    """A line (not a heading, not a table row) that states what the reference is: it holds the word `reference` or `baseline`, no placeholder word,
+    and at least four more words (so `### Reference`, `Reference: TBD.` and `Reference.` do not count)."""
+    text = line.strip()
+    if not text or text.startswith("#") or _is_row(line) or not _REFERENCE_WORD.search(text) or _NO_REFERENCE.search(text):
+        return False
+    return len(re.findall(r"[A-Za-z0-9`][\w`./-]*", _REFERENCE_WORD.sub(" ", text))) >= 4
+
+
+def _carry(extra: dict) -> dict:
+    """The request fields the boot probes carry from the chat request: everything but the model name (each probe sets it) and `max_tokens`
+    (each probe sets its own budget, so the budget in its evidence is the one that was sent)."""
+    return {k: v for k, v in extra.items() if k not in ("model", "max_tokens")}
+
+
+def _reference_problems(lines: list[str]) -> list[str]:
+    """The Expected performance rows that have a number and no reference (issue 366). A table whose header has a column headed `reference`,
+    `HF reference`, `CPU reference` or `baseline` is asked for text or a number in that column on each body row that has a number in
+    another column (the first cell is the label). The section may instead hold a sentence after the table that names the reference
+    or the baseline. A table with no such column is not asked for anything. Markdown drops body cells past the header's width, and a
+    short row has an empty cell. One pass over the lines."""
+    out: list[str] = []
+    i = 1
+    while i < len(lines):
+        if not (_is_row(lines[i]) and _is_row(lines[i - 1])):
+            i += 1
+            continue
+        sep, head = _cells(lines[i]), _cells(lines[i - 1])
+        if len(sep) != len(head) or not all(re.fullmatch(r":?-+:?", c) for c in sep):
+            i += 1
+            continue
+        refs = [k for k, h in enumerate(head) if k > 0 and _REFERENCE_HEADING.fullmatch(_plain(h))]
+        j, bare = i + 1, []
+        while j < len(lines) and _is_row(lines[j]):
+            cells = (_cells(lines[j]) + [""] * len(head))[:len(head)]
+            if refs and any(re.match(r"[~<>]?\d", c) for k, c in enumerate(cells) if k > 0 and k not in refs) \
+                    and not any(not _PLACEHOLDER.fullmatch(_plain(cells[k])) for k in refs):
+                bare.append(cells[0] or "(unlabelled)")
+            j += 1
+        if bare:
+            sentence = any(_names_a_reference(ln) for ln in lines[j:])
+            if not sentence:
+                out.append("the `## Expected performance` table has a `" + _plain(head[refs[0]]) + "` column that is empty for " + ", ".join(repr(b[:40]) for b in bare[:5])
+                           + " (add what each row was compared with, or a sentence under the table that names the reference)")
+        i = j
+    return out
+
 
 def card_problems(text: str, profile: str | None) -> list[str]:
     """What the card lacks for `profile` (an empty list is a pass; `None` asks for nothing). The "catalog" profile mirrors the sections
@@ -909,6 +984,8 @@ def card_problems(text: str, profile: str | None) -> list[str]:
         problems.append("the card has no `## Expected performance` section")
     elif not _has_measured_row(perf):
         problems.append("the card's `## Expected performance` section has no row with a number in a table")
+    else:
+        problems += _reference_problems(perf)
     if perf is not None and profile == "catalog-measured":
         body = "\n".join(perf)
         for rx, what in ((_COND_CACHE, "whether the kernel cache was warm or cold"), (_COND_RUNS, "how many runs stand behind the numbers"),
@@ -1207,8 +1284,9 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         # A vLLM server must list the model it serves, at the context length the can declares (kind tt-dit-server serves no model list).
         probing = spec.kind != "tt-dit-server" and ck.mode == "chat"
         if probing:
-            served_verify.record(served_verify.check_listing(status, body, declared_name=(ck.request_extra.get("model") if isinstance(ck.request_extra.get("model"), str) else None),
-                                                                           declared_context=spec.max_model_len), check, evidence)
+            # the name the request carries: request_extra.model, else the `--served-model-name` alias(es) of the spec's extra_args (issue 385)
+            declared_names = (ck.request_extra["model"],) if isinstance(ck.request_extra.get("model"), str) else served_verify.served_names(spec.extra_args)
+            served_verify.record(served_verify.check_listing(status, body, declared_names=declared_names, declared_context=spec.max_model_len), check, evidence)
         if ck.mode == "music":
             _music_checks(base, ck, check, evidence)
             status, _ = _http("GET", f"{base}{ck.health_path}")
@@ -1224,6 +1302,9 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
             models = safeio.parse_json_bytes(body, max_bytes=MAX_JSON_BYTES, expect=dict).get("data") or []
             if models and isinstance(models[0], dict) and models[0].get("id"):
                 extra["model"] = models[0]["id"]
+            alias = served_verify.request_model(body, declared_names) if probing else None
+            if alias:
+                extra["model"] = alias
         except (safeio.SafeReadError, TypeError):
             pass
         extra.update(ck.request_extra)
@@ -1256,6 +1337,14 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
             except safeio.SafeReadError:
                 log_for_mesh = None
             served_verify.record(served_verify.check_mesh(log_for_mesh, expected_devices=spec.device_count), check, evidence)
+            for result in served_verify.check_engine_log(log_for_mesh, config=_bundle_config(copy), max_model_len=spec.max_model_len,
+                                                          max_num_seqs=spec.max_num_seqs, block_size=spec.block_size):
+                served_verify.record(result, check, evidence)
+            evidence["log_warnings"] = served_verify.log_warnings(log_for_mesh)      # recorded without a verdict: a hit means read the line (issue 373)
+            evidence["token_split"] = {"chat": served_verify.reasoning_split(body) if body else None}     # reasoning tokens and answer tokens per reply (issue 361)
+            quirks = [q for q in ck.quirks if q["model"] in (spec.repo, spec.name) and q["server_release"] == spec.vllm_version]
+            if quirks:
+                evidence["quirks"] = list(quirks)
         if ck.min_decode_tok_s is not None:
             # a separate request for a long answer, after the first one has warmed the kernels (a short answer has no decode rate)
             rate_body = {"messages": [{"role": "user", "content": ck.rate_prompt}], "max_tokens": ck.rate_max_tokens, **extra}
@@ -1277,6 +1366,8 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
             evidence["rate_timings"] = rate_timings
             check("decode_rate", code == 200 and isinstance(rate, (int, float)) and rate >= ck.min_decode_tok_s,
                   f"{rate} tok/s reported over {rate_timings.get('completion_tokens')} tokens; at least {ck.min_decode_tok_s} wanted")
+        if probing and extra.get("model"):
+            _live_probes(base, ck, spec, extra, rate if ck.min_decode_tok_s is not None else None, log_for_mesh, check, evidence)
         if ck.stream:
             status, body = _http("POST", chat, {"messages": [{"role": "user", "content": ck.prompt}], "max_tokens": ck.max_tokens, "stream": True,
                                                 **extra}, timeout=BOOT_REQUEST_TIMEOUT_S)
@@ -1294,6 +1385,35 @@ def boot_check(bundle, work, spec: Spec, *, env: dict | None = None, health_time
         return _finish(work, evidence)
     finally:
         _stop(proc)
+
+
+def _bundle_config(copy: Path):
+    """The parsed config.json of the copy's model directory files (`base_config/config.json`), or None when the bundle has none or it cannot be read."""
+    try:
+        return safeio.read_json(copy / "base_config" / "config.json", max_bytes=MAX_JSON_BYTES, expect=dict)
+    except safeio.SafeReadError:
+        return None
+
+
+def _live_probes(base: str, ck: Check, spec: Spec, extra: dict, single_rate, log_text, check, evidence: dict) -> None:
+    """The probes that send more than one request (orchard/served_probes.py), after the chat and rate requests. The model name and the can's
+    request_extra go with every request. Each result is recorded the way served_verify.record does; a not_checked is listed with its reason."""
+    model = extra["model"]
+    carry = _carry(extra)
+    t = BOOT_REQUEST_TIMEOUT_S
+    results = [served_probes.probe_code(base, model, carry, timeout=t),
+               served_probes.probe_long_prefill(base, model, carry, max_model_len=spec.max_model_len, timeout=t),
+               served_probes.probe_batching(base, model, carry, single_rate=single_rate, max_num_seqs=spec.max_num_seqs, timeout=t)]
+    if ck.prefix_caching:
+        results.append(served_probes.probe_prefix_reuse(base, model, carry, declared=True, max_model_len=spec.max_model_len, timeout=t))
+    if ck.reasoning:
+        results += served_probes.probe_reasoning(base, model, carry, log_text=log_text, timeout=t)
+    for result in results:
+        served_verify.record(result, check, evidence)
+        if result["name"] == "reasoning_field" and result.get("split"):
+            evidence.setdefault("token_split", {})["reasoning_probe"] = result["split"]
+        if result["name"] in ("long_prefill", "prefix_reuse", "batching"):
+            evidence.setdefault("probe_facts", {})[result["name"]] = {k: v for k, v in result.items() if k not in ("name", "detail")}
 
 
 def audio_check_problems(ck: Check) -> None:
