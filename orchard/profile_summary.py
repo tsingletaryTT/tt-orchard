@@ -64,6 +64,7 @@ SCHEMA = "tt-orchard-profile-summary/1"
 SUMMARY_FILE = "profile-summary.json"
 RUN_LOG = "profile-run.log"
 REPORT_CSV = "perf-report.csv"
+RAW_SNAPSHOT = "ops-snapshot.csv"          # the private copy of the ops CSV that both the totals and tt-perf-report read
 TRACY_DIR = "tracy"
 
 SUMMARY_MAX_BYTES = 48 * 1024          # choice: a few thousand tokens at most; a model reads this, the CSV it came from can be hundreds of MB
@@ -350,19 +351,26 @@ def analyze_raw(source) -> dict:
 
 # ----------------------------------------------------------------------------------------------------- the tt-perf-report CSV
 
-def read_report(source, top_n: int) -> tuple[list[dict], list[str]]:
+def read_report(source, top_n: int, device: int | None = None) -> tuple[list[dict], list[str]]:
     """The `top_n` rows of tt-perf-report's `--csv` file with the largest device time, and the reasons something was not read. Pure.
 
     Every field is typed: a number cell that is not a plain decimal is None, advice is split on the bullet the tool joins it with, cut to
-    MAX_ADVICE_ITEMS items of MAX_ADVICE_CHARS characters. Columns the file lacks are named in the reasons and give None for every row."""
+    MAX_ADVICE_ITEMS items of MAX_ADVICE_CHARS characters. Columns the file lacks are named in the reasons and give None for every row. Each entry
+    carries the report's `Device`. With `device` given, only that device's rows are ranked, so the list describes the device the summary does; a
+    report with no Device column cannot be tied to it and gives no rows."""
     header, rows = _rows(source, "the tt-perf-report CSV")
     could = [f"report column {c}: absent from the tt-perf-report CSV" for c in REPORT_COLUMNS if c not in header]
     if "OP Code" not in header or "Device Time" not in header:
         raise ProfileError("the tt-perf-report CSV lacks the OP Code or Device Time column, so it cannot rank ops")
+    if device is not None and "Device" not in header:
+        could.append(f"top ops: the tt-perf-report CSV has no Device column, so its rows cannot be tied to device {device}, the device of this summary")
+        return [], could
     heap: list[tuple] = []                      # the top_n rows so far; the smallest time (the later row among equals) is at the root
     for seq, row in enumerate(rows):
         dt = _num(_cell(row, "Device Time") or "")
         if dt is None:
+            continue
+        if device is not None and _num(_cell(row, "Device") or "", lo=0, hi=1e6) != device:
             continue
         item = (dt, -seq, row)
         if len(heap) < top_n:
@@ -375,7 +383,7 @@ def read_report(source, top_n: int) -> tuple[list[dict], list[str]]:
         advice_cell = _cell(row, "Advice") or ""
         advice = [_clip(a, MAX_ADVICE_CHARS) for a in advice_cell.split("•")[:MAX_ADVICE_ITEMS * 4] if a.strip()][:MAX_ADVICE_ITEMS]
         out.append({"op_code": _clip(_cell(row, "OP Code") or "", MAX_NAME) or "(unnamed)",
-                    "id": _num(_cell(row, "ID") or "", hi=1e12),
+                    "id": _num(_cell(row, "ID") or "", hi=1e12), "device": _num(_cell(row, "Device") or "", lo=0, hi=1e6),
                     "device_time_us": _round(dt), "op_to_op_gap_us": _round(_num(_cell(row, "Op-to-Op Gap") or "")),
                     "share_of_total_pct": _round(_num(_cell(row, "Total %") or ""), 1), "bound": _clip(_cell(row, "Bound") or "", 16) or None,
                     "cores": _num(_cell(row, "Cores") or "", hi=1e6), "dram_gb_s": _round(_num(_cell(row, "DRAM") or ""), 1),
@@ -399,10 +407,11 @@ def _dump(summary: dict) -> str:
 
 
 def bound(summary: dict) -> dict:
-    """`summary` cut until its JSON is at most SUMMARY_MAX_BYTES. The lists that grow with the input go first (layers, then top ops, then op codes,
+    """`summary` cut until its JSON is at most SUMMARY_MAX_BYTES (a `limits.cut` already in it is kept, so a second call does not lose the record of the first). The lists that grow with the input go first (layers, then top ops, then op codes,
     then reasons); `limits.cut` names what was cut. If the fixed part alone is too large the lists are emptied. Returns a new dict."""
     s = json.loads(_dump(summary))
-    cut: list[str] = []
+    earlier = (s.get("limits") or {}).get("cut") if isinstance(s.get("limits"), dict) else None
+    cut: list[str] = [c for c in earlier if isinstance(c, str)] if isinstance(earlier, list) else []
     s["limits"] = {"max_bytes": SUMMARY_MAX_BYTES, "cut": cut}
 
     def size() -> int:
@@ -508,8 +517,9 @@ def has_tracy_tools(tt_metal_home: str | None) -> str | None:
 
 
 def run_group(argv: list[str], *, timeout_s: float, log_path: Path, env: dict | None = None, term_grace_s: float = 150.0) -> tuple[int | None, bool]:
-    """Run `argv` in its own process group with stdout and stderr in `log_path`. Returns (exit code, timed_out). A timeout sends SIGTERM to the group,
-    waits `term_grace_s` (gozer's own stop takes up to 120 s and resets the chips), then SIGKILL. The process group is always reaped before return."""
+    """Run `argv` in its own process group with stdout and stderr in `log_path`. Returns (exit code, timed_out). A timeout, or an interrupt of this
+    process, sends SIGTERM to the group, waits `term_grace_s` (gozer's own stop takes up to 120 s and resets the chips), then SIGKILL. The process group
+    is always reaped before return."""
     with safeio.create_for_write(log_path) as log:
         proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True, env=env)
         try:
@@ -519,6 +529,12 @@ def run_group(argv: list[str], *, timeout_s: float, log_path: Path, env: dict | 
                 _signal_group(proc.pid, signal.SIGTERM)
                 _wait_group_gone(proc, term_grace_s)
                 return proc.returncode, True
+        except BaseException:
+            # Ctrl+C or another exit from this function: the child is in its own session and did not get the signal. SIGTERM first, so gozer can
+            # release the lease and reset the chips, then the grace time; a second interrupt skips the wait and goes straight to the kill below.
+            _signal_group(proc.pid, signal.SIGTERM)
+            _wait_group_gone(proc, term_grace_s)
+            raise
         finally:
             # The leader's exit says nothing about its descendants: a child that ignores SIGTERM, or one left running by a command that
             # exited on its own, still holds the chips. Killing a group with no member is a no-op.
@@ -587,12 +603,12 @@ def analyze_raw_file(path, anchor: int | None = None) -> dict:
         lines.close()
 
 
-def read_report_file(path, top_n: int, anchor: int | None = None) -> tuple[list[dict], list[str]]:
+def read_report_file(path, top_n: int, anchor: int | None = None, device: int | None = None) -> tuple[list[dict], list[str]]:
     """`read_report` of the file at `path` (relative to `anchor` when given), streamed through safeio.iter_lines with the REPORT_MAX_BYTES cap.
     Raises safeio.SafeReadError or ProfileError, nothing else."""
     lines = _lines(path if anchor is not None else Path(path), REPORT_MAX_BYTES, anchor)
     try:
-        return read_report(lines, top_n)
+        return read_report(lines, top_n, device)
     finally:
         lines.close()
 
@@ -691,13 +707,32 @@ def summarise_dir(profile_dir: Path, out_dir: Path, *, top_n: int, perf_report: 
     return s, EXIT_NOTHING
 
 
+def _device_to_filter(raw: dict):
+    """The device id the report's rows are filtered to: the summary's device when the profile has more than one, else None (nothing to tell apart)."""
+    dev = raw.get("device")
+    return int(dev) if isinstance(dev, (int, float)) and not isinstance(dev, bool) and (raw.get("devices_seen") or 0) > 1 else None
+
+
+def _copy_beneath(pin, rel: str, dest: Path) -> None:
+    """Copy the file `rel` beneath the pinned directory to a new file at `dest`, through safeio.iter_lines (the RAW_MAX_BYTES cap, a link refused,
+    the descriptor held open once), so the totals and tt-perf-report read the same bytes whatever happens to the profile directory afterwards."""
+    lines = _lines(rel, RAW_MAX_BYTES, pin.fd)
+    try:
+        with safeio.create_for_write(dest) as f:
+            for line in lines:
+                f.write(line.encode("utf-8", "replace"))
+    finally:
+        lines.close()
+
+
 def _summarise_found(ppin, csv_parts, profile_dir, opin, out_dir, extra, *, top_n, perf_report, report_timeout_s, run, run_info, command_sha, command_failed):
     """The rest of `summarise_dir`, once the CSV is found. It is read through `ppin` (the pinned profile directory), and tt-perf-report's CSV is
     read through `opin` (the pinned output directory), so a subdirectory or file swapped for a link after the walk is refused and never followed."""
-    csv_path = profile_dir.joinpath(*csv_parts)          # the name handed to tt-perf-report, which opens it by path
+    snapshot = out_dir / RAW_SNAPSHOT                    # tt-perf-report opens its input by path, so it gets the private copy too
     try:
-        raw = analyze_raw_file("/".join(csv_parts), anchor=ppin.fd)
-    except (safeio.SafeReadError, ProfileError) as exc:
+        _copy_beneath(ppin, "/".join(csv_parts), snapshot)
+        raw = analyze_raw_file(RAW_SNAPSHOT, anchor=opin.fd)
+    except (safeio.SafeReadError, ProfileError, OSError) as exc:
         reason = getattr(exc, "reason", None) or str(exc)
         s = build_summary(raw=None, top_ops=None, top_source=None, extra_could=[f"everything: the ops CSV could not be read ({_clip(reason, 120)})"],
                           run=run_info, command_sha=command_sha, status_reason="ops CSV unreadable", top_n=top_n)
@@ -708,14 +743,17 @@ def _summarise_found(ppin, csv_parts, profile_dir, opin, out_dir, extra, *, top_
         extra.append("utilization and advice: tt-perf-report was not found on PATH (pass --perf-report); the top rows come from the raw CSV and carry neither")
     else:
         report_csv = out_dir / REPORT_CSV
-        problem = run_perf_report(tool, csv_path, report_csv, timeout_s=report_timeout_s, log_path=out_dir / "perf-report.log", run=run)
+        problem = run_perf_report(tool, snapshot, report_csv, timeout_s=report_timeout_s, log_path=out_dir / "perf-report.log", run=run)
         if problem:
             extra.append(f"utilization and advice: {problem}; the top rows come from the raw CSV and carry neither")
         else:
             try:
-                top_ops, rep_could = read_report_file(REPORT_CSV, top_n, anchor=opin.fd)
+                top_ops, rep_could = read_report_file(REPORT_CSV, top_n, anchor=opin.fd, device=_device_to_filter(raw))
                 extra += rep_could
                 top_source = "tt-perf-report"
+                if not top_ops:                                   # nothing usable in the report: the raw rows below are the fallback
+                    top_ops, top_source = None, None
+                    extra.append("utilization and advice: the tt-perf-report CSV gave no ranked row; the top rows come from the raw CSV and carry neither")
             except (safeio.SafeReadError, ProfileError) as exc:
                 reason = getattr(exc, "reason", None) or str(exc)
                 extra.append(f"utilization and advice: the tt-perf-report CSV could not be read ({_clip(reason, 120)}); the top rows come from the raw CSV")
@@ -806,6 +844,7 @@ def main(args, *, out, run=run_group, probe=has_profiler, tools=has_tracy_tools,
                         summary["status_reason"] = "gozer queued the run (exit 10); nothing was profiled"
                     elif failed and summary.get("status_reason") is None:
                         summary["status_reason"] = f"the command exited with code {exit_code}; the summary covers what it exported"
+                    summary = bound(summary)                  # the reason was added after the first bound
     try:
         _write_summary(out_dir, summary)
     except OSError as exc:

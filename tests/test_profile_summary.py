@@ -674,3 +674,128 @@ def test_a_wait_or_timeout_that_is_not_a_finite_number_is_refused(tmp_path, flag
     code = ps.main(args, out=out, run=fake_run_factory(layered_rows(), REPORT, calls=calls), probe=lambda py: None, tools=lambda h: None,
                    choose=lambda w, **kw: [PLAN])
     assert code == ps.EXIT_REFUSED and calls == [] and flag in out.getvalue()
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 416, round 2
+
+def two_device_rows():
+    return [op("Matmul", 10000, 10, dev=0), op("Add", 2000, 10, dev=0), op("BigOnOtherChip", 90000, 10, dev=1), op("Matmul", 5000, 10, dev=1)]
+
+
+def two_device_report():
+    return report_csv([{"ID": 1, "OP Code": "BigOnOtherChip", "Device": 1, "Device Time": 90.0},
+                       {"ID": 2, "OP Code": "Matmul", "Device": 0, "Device Time": 10.0},
+                       {"ID": 3, "OP Code": "Add", "Device": 0, "Device Time": 2.0}])
+
+
+def test_top_ops_are_ranked_among_the_rows_of_the_device_the_summary_describes():
+    """Round 2, finding 1: the summary's totals come from one device but the report was ranked across every device and dropped its Device column."""
+    top, could = ps.read_report(two_device_report(), 3, device=0)
+    assert [t["op_code"] for t in top] == ["Matmul", "Add"] and [t["device"] for t in top] == [0, 0]
+    top, _ = ps.read_report(two_device_report(), 3)
+    assert top[0]["op_code"] == "BigOnOtherChip" and top[0]["device"] == 1          # with no device asked for, each entry still says which chip
+
+
+def test_a_report_with_no_device_column_cannot_be_tied_to_the_summarys_device_and_the_raw_rows_are_used(tmp_path):
+    profile = tmp_path / "profile" / "r"
+    profile.mkdir(parents=True)
+    (profile / "ops_perf_results_1.csv").write_text(raw_csv(two_device_rows()))
+    out = tmp_path / "out"
+    out.mkdir()
+    no_device = report_csv([{"ID": 1, "OP Code": "BigOnOtherChip", "Device Time": 90.0}], header=[h for h in REPORT_HEADER if h != "Device"])
+    s, code = ps.summarise_dir(tmp_path / "profile", out, top_n=3, perf_report="tt-perf-report", report_timeout_s=1.0, run=fake_run_factory(None, no_device))
+    assert s["top_ops_source"].startswith("raw ops csv") and all(t["op_code"] != "BigOnOtherChip" for t in s["top_ops"])
+    assert any("Device column" in c for c in s["could_not_measure"])
+
+
+def test_a_multi_device_run_lists_only_the_summarys_device_in_its_top_ops(tmp_path):
+    profile = tmp_path / "profile" / "r"
+    profile.mkdir(parents=True)
+    (profile / "ops_perf_results_1.csv").write_text(raw_csv(two_device_rows()))
+    out = tmp_path / "out"
+    out.mkdir()
+    s, _ = ps.summarise_dir(tmp_path / "profile", out, top_n=3, perf_report="tt-perf-report", report_timeout_s=1.0, run=fake_run_factory(None, two_device_report()))
+    assert s["device"]["id"] == 1 or s["device"]["id"] == 0
+    assert {t["device"] for t in s["top_ops"]} == {s["device"]["id"]}
+
+
+def test_an_interrupt_gives_the_child_the_grace_time_before_it_is_killed(tmp_path):
+    """Round 2, finding 2: Ctrl+C sent SIGKILL at once, so gozer could not release the lease and reset the chips. A child that handles SIGTERM must run its handler."""
+    import sys
+    done = tmp_path / "cleaned"
+    ready = tmp_path / "ready"
+    script = ("import signal, sys, time\n"
+              f"def h(*a):\n    time.sleep(0.5)\n    open({str(done)!r}, 'w').write('x')\n    sys.exit(0)\n"
+              "signal.signal(signal.SIGTERM, h)\n"
+              f"open({str(ready)!r}, 'w').write('r')\n"
+              "time.sleep(60)\n")
+    import threading
+    import time
+
+    def interrupt():
+        for _ in range(100):
+            if ready.exists():
+                break
+            time.sleep(0.05)
+        import _thread
+        _thread.interrupt_main()
+    threading.Thread(target=interrupt, daemon=True).start()
+    with pytest.raises(KeyboardInterrupt):
+        ps.run_group([sys.executable, "-c", script], timeout_s=60.0, log_path=tmp_path / "log", term_grace_s=10.0)
+    assert done.exists()
+
+
+def test_a_report_with_no_readable_rows_falls_back_to_the_raw_rows(tmp_path):
+    """Round 2, finding 3: a header-only report made the top ops empty and skipped the raw fallback."""
+    profile = tmp_path / "profile" / "r"
+    profile.mkdir(parents=True)
+    (profile / "ops_perf_results_1.csv").write_text(raw_csv(layered_rows()))
+    out = tmp_path / "out"
+    out.mkdir()
+    for report in (report_csv([]), report_csv([{"ID": 1, "OP Code": "A", "Device Time": "NaN"}])):
+        s, code = ps.summarise_dir(tmp_path / "profile", out, top_n=3, perf_report="tt-perf-report", report_timeout_s=1.0, run=fake_run_factory(None, report))
+        assert s["top_ops_source"] == "raw ops csv (one row per op code)" and len(s["top_ops"]) == 3 and code == 0
+        assert any("no row with a readable Device Time" in c for c in s["could_not_measure"])
+
+
+def test_the_status_reason_added_after_the_bound_does_not_push_the_summary_over_the_cap(tmp_path, monkeypatch):
+    """Round 2, finding 4: timeout and failure reasons were set after bound(), so a summary at the cap grew past it."""
+    def run_once(name, **kw):
+        args = args_for(tmp_path, "python3", "x.py", perf_report="tt-perf-report")
+        args.out = str(tmp_path / name)
+        ps.main(args, out=Out(), run=fake_run_factory(layered_rows(), REPORT, **kw), probe=lambda py: None, tools=lambda h: None, choose=lambda w, **kw2: [PLAN])
+        return (tmp_path / name / ps.SUMMARY_FILE).read_bytes()
+    baseline = run_once("first")
+    monkeypatch.setattr(ps, "SUMMARY_MAX_BYTES", len(baseline))              # a summary exactly at the cap before the reason is added
+    stopped = run_once("second", exit_code=1, timed_out=True)
+    assert len(stopped) <= len(baseline)
+    s = json.loads(stopped)
+    assert s["status_reason"].startswith("the command was stopped") and s["limits"]["cut"]
+
+
+def test_bound_keeps_the_cut_record_of_an_earlier_bound():
+    s = ps.build_summary(raw=None, top_ops=None, top_source=None, extra_could=["x"] * 5, run=None, command_sha=None, status_reason="r", top_n=3)
+    s["limits"]["cut"].append("per_layer")
+    s["status_reason"] = "z" * ps.MAX_REASON
+    again = ps.bound(s)
+    assert "per_layer" in again["limits"]["cut"]
+
+
+def test_both_consumers_read_one_private_copy_of_the_ops_csv(tmp_path):
+    """Round 2, finding 5 (open since round 1): tt-perf-report reopened the mutable profile path, so its input could differ from the CSV used for the totals."""
+    profile = tmp_path / "profile" / "r"
+    profile.mkdir(parents=True)
+    src = profile / "ops_perf_results_1.csv"
+    src.write_text(raw_csv(layered_rows()))
+    out = tmp_path / "out"
+    out.mkdir()
+    seen = []
+
+    def run(argv, **kw):
+        seen.append(Path(argv[1]))
+        Path(argv[argv.index("--csv") + 1]).write_text(REPORT)
+        src.write_text(raw_csv([op("Swapped", 1, 1)]))                      # the profile file changes while the tool runs
+        return 0, False
+    s, code = ps.summarise_dir(tmp_path / "profile", out, top_n=3, perf_report="tt-perf-report", report_timeout_s=1.0, run=run)
+    assert seen[0].parent == out and seen[0] != src and seen[0].read_text() == raw_csv(layered_rows())
+    assert "Swapped" not in json.dumps(s) and s["groups"]["mixer"]["ops"] == 4

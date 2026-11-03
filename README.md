@@ -1971,7 +1971,8 @@ taken. Both checks run before any lease and open no device (the Python check use
 which is at most 48 KB whatever the CSV holds (`limits.cut` names any list that was cut to fit).
 The output directory must be new or have an empty `OUT/tracy`: a used one is refused before anything runs, so a run that exports nothing cannot be
 summarised from an earlier run's CSV. `--timeout`, `--report-timeout` and `--wait-s` must be finite numbers (`nan` and `inf` are refused). When the
-command ends, every process left in its process group is killed, since a leftover child still holds the chips.
+command ends, every process left in its process group is killed, since a leftover child still holds the chips; Ctrl+C sends the group SIGTERM and waits for gozer to release the lease before that kill.
+The ops CSV is copied once to `OUT/ops-snapshot.csv` (at most 256 MB), and the totals and `tt-perf-report` both read that copy. With more than one device in the profile, the top ops are the rows of the device the summary describes; each carries its `device`, and a report with no `Device` column is replaced by the raw rows.
 
 The summary holds the total device time and gap time of the busiest device; the top N ops by device time with the report's
 utilization columns and its advice; time per op code; time per op group; and `could_not_measure`. A figure the exported files do not
