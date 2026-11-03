@@ -120,6 +120,51 @@ def skipped_positions(skipped, n: int) -> list[int]:
     return sorted(skipped)
 
 
+def stop_ids_from(*docs) -> set[int]:
+    """The whole-number `eos_token_id` values (a number or a list) of the top level of each JSON document given (generation_config.json and
+    config.json of the served directory). Anything else in the field is ignored; a bool is not an id."""
+    out: set[int] = set()
+    for doc in docs:
+        value = doc.get("eos_token_id") if isinstance(doc, dict) else None
+        for v in value if isinstance(value, list) else [value]:
+            if _is_int(v):
+                out.add(v)
+    return out
+
+
+def special_ids(tokenizer) -> set[int]:
+    """The ids of the tokenizer's special added tokens; empty when the tokenizer cannot list them."""
+    try:
+        return {int(i) for i, tok in tokenizer.get_added_tokens_decoder().items() if getattr(tok, "special", False) is True}
+    except (AttributeError, TypeError, ValueError):
+        return set()
+
+
+def unrecoverable_ids(tokenizer, stops, ids) -> set[int]:
+    """Which of `ids` cannot be read back from the text a server returns for one generated token (issue 406): a stop id (`stops` plus the
+    tokenizer's special tokens), a token whose text is empty or holds a replacement character, and a token whose text re-encodes to other
+    ids. It reads the REFERENCE ids, so what the chip answered cannot move a position in or out of the score. The serve-and-compare template
+    has the same rule in its own file (it cannot import this one), and a test keeps the two equal."""
+    stopped = set(stops) | special_ids(tokenizer)
+    out: set[int] = set()
+    for i in set(ids):
+        if i in stopped:
+            out.add(i)
+            continue
+        text = tokenizer.decode([i])
+        back = tokenizer.encode(text, add_special_tokens=False).ids if text else []
+        if not text or "\ufffd" in text or back[:1] != [i]:
+            out.add(i)
+    return out
+
+
+def expected_skipped(tokenizer, stops, reference_ids) -> list[int]:
+    """The positions of `reference_ids` a correct run leaves out of the score: what the template's mask must be, and what the gate compares
+    a record's `skipped` list with."""
+    bad = unrecoverable_ids(tokenizer, stops, reference_ids)
+    return [k for k, r in enumerate(reference_ids) if r in bad]
+
+
 def score_prompt(reference_ids, chip_ids, skipped=None) -> dict:
     """Teacher-forced agreement of one prompt: `chip_ids[k]` is the first id the chip returned at position k when it was given the
     reference's first k tokens, and `reference_ids[k]` is the reference's token. A missing or None chip id is a mismatch. The two lists
@@ -276,7 +321,12 @@ def control_problems(control_entries, entries) -> list[str]:
         chip = c.get("chip_ids")
         if c.get("error") not in (None, ""):
             out.append(f"control prompt {cid!r} had a failed request: {str(c['error'])[:120]}")
-        if not isinstance(chip, list) or any(x is None for x in chip):
+        try:
+            left_out = set(skipped_positions(c.get("skipped"), len(c["reference_ids"])))
+        except (ValueError, KeyError, TypeError):
+            out.append(f"control prompt {cid!r} has a malformed skipped list")
+            left_out = set()
+        if not isinstance(chip, list) or any(x is None for k, x in enumerate(chip) if k not in left_out):
             out.append(f"control prompt {cid!r} has missing chip ids")
     for cid in sorted(set(mine) - seen):
         out.append(f"control prompt {cid!r} is missing")

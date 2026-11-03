@@ -933,6 +933,7 @@ def _hub_fetch_reasons(report, where: str = "") -> list[str]:
 AGREEMENT_PROMPTS_FILE = Path(__file__).resolve().parent / "skills" / "weights-swap-templates" / "agreement_prompts.json"
 AGREEMENT_REFERENCE_PATH = ("stages", "1", "evidence", "reference", "agreement-reference.json")
 AGREEMENT_REFERENCE_MAX_BYTES = 8 * 1024 * 1024
+AGREEMENT_TOKENIZER_MAX_BYTES = 256 * 1024 * 1024      # the template's SERVED_INPUT_MAX_BYTES for a tokenizer.json
 AGREEMENT_LEDGER_DECISION = "agreement reference recorded"     # the supervisor writes it when it drafts stage 2's config (Supervisor._record_agreement_reference)
 
 
@@ -977,7 +978,35 @@ def agreement_reference_record(run_dir) -> dict | None:
         return None
 
 
-def _agreement_binding_reasons(record, run_dir) -> list[str]:
+def _mask_context(model_dir):
+    """(tokenizer, stop ids, None) for the served directory, or (None, None, why) when the gate cannot rebuild the skip mask of the agreement
+    record (issue 406): no model directory, no `tokenizers` package, a tokenizer.json or config file that is refused or does not parse. The
+    files are the ones the template read; a snapshot's links are followed once, as the template does."""
+    if model_dir is None:
+        return None, None, "the gate has no model directory to read the tokenizer from"
+    try:
+        from tokenizers import Tokenizer
+    except ImportError:
+        return None, None, "the tokenizers package is not installed"
+    root = Path(model_dir)
+    try:
+        raw = safeio.read_bytes(safeio.resolved(root / "tokenizer.json"), max_bytes=AGREEMENT_TOKENIZER_MAX_BYTES)
+        tokenizer = Tokenizer.from_str(raw.decode("utf-8"))
+    except safeio.SafeReadError as exc:
+        return None, None, f"tokenizer.json is not readable: {exc.reason}"
+    except Exception as exc:                  # noqa: BLE001 - the tokenizers package raises a bare Exception for a file it cannot parse
+        return None, None, f"tokenizer.json does not load: {type(exc).__name__}"
+    docs = []
+    for name in ("generation_config.json", "config.json"):
+        try:
+            docs.append(_safe_json(safeio.resolved(root / name)))
+        except safeio.SafeReadError as exc:
+            if not _is_missing(exc):
+                return None, None, f"{name} is not readable: {exc.reason}"
+    return tokenizer, agreement_core.stop_ids_from(*docs), None
+
+
+def _agreement_binding_reasons(record, run_dir, model_dir=None) -> list[str]:
     """The agreement-set record must have been scored against the reference stage 1 wrote and the prompt set the repository ships. The
     reference file's sha256 is checked against the one the supervisor put in the ledger, so a file replaced after stage 1 (together with the
     hash the template recorded) is refused. The prompt ids must be the shipped ids, each once, in the reference, the record and the control;
@@ -1012,6 +1041,8 @@ def _agreement_binding_reasons(record, run_dir) -> list[str]:
     out += [f"stage 1's agreement reference: {r}" for r in agreement_core.id_problems(entries, shipped_ids)]
     wanted = ({e["id"]: e.get("generated_ids") for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
               if isinstance(entries, list) else {})
+    tokenizer, stops, why = _mask_context(model_dir)
+    unverified = []                         # prompts whose skipped list the gate could not check, once each below
 
     def check(rows, label):
         for e in rows if isinstance(rows, list) else []:
@@ -1020,6 +1051,18 @@ def _agreement_binding_reasons(record, run_dir) -> list[str]:
             full = wanted.get(pid) if isinstance(pid, str) else None
             if not isinstance(ids, list) or not isinstance(full, list) or full[:len(ids)] != ids:
                 out.append(f"the {label}'s reference ids for prompt {pid if isinstance(pid, str) else None!r} are not stage 1's")
+                continue
+            # The skipped list is read from the record, so it is rebuilt here from stage 1's reference ids and the served tokenizer: a list
+            # that hides readable mismatches (or clears an unreadable token) differs from what a correct run writes.
+            declared = e.get("skipped") if isinstance(e, dict) else None
+            if declared in (None, []) and tokenizer is None:
+                continue
+            if tokenizer is None:
+                unverified.append((label, pid))
+            elif not all(isinstance(k, int) and not isinstance(k, bool) for k in declared or []) or sorted(declared or []) != \
+                    agreement_core.expected_skipped(tokenizer, stops, full[:len(ids)]):
+                out.append(f"the {label}'s skipped positions for prompt {pid!r} are not the ones the served tokenizer and stage 1's reference "
+                           "give (positions are skipped only for a token the server's text cannot give back)")
 
     check(record.get("entries"), "agreement set")
     control = record.get("control")
@@ -1028,10 +1071,12 @@ def _agreement_binding_reasons(record, run_dir) -> list[str]:
         problem = prompt_suite.control_identity_problem(_nearest_model_of(run_dir), control.get("model_id"))
         if problem:
             out.append(f"the agreement control is not a control of the nearest model: {problem}")
+    for label, pid in unverified[:3]:
+        out.append(f"the {label}'s skipped positions for prompt {pid!r} cannot be checked: {why}")
     return out
 
 
-def _agreement_reasons(record, run_dir, requested: bool) -> list[str]:
+def _agreement_reasons(record, run_dir, requested: bool, model_dir=None) -> list[str]:
     """All gate reasons for one swap-check.json's `agreement_set`. A run whose swap_config.json asked for the set (`requested`) needs a
     completed record; a run that did not ask has none unless a record is present, in which case it is judged like any other."""
     ran = isinstance(record, dict) and record.get("ran") is True
@@ -1039,10 +1084,10 @@ def _agreement_reasons(record, run_dir, requested: bool) -> list[str]:
         return ["swap_config.json asks for the agreement set and swap-check.json holds no completed agreement_set record (missing, malformed or ran false)"]
     if not ran:
         return []
-    return agreement_core.judge(record, expected_ids=_shipped_agreement_ids() or [])["reasons"] + _agreement_binding_reasons(record, run_dir)
+    return agreement_core.judge(record, expected_ids=_shipped_agreement_ids() or [])["reasons"] + _agreement_binding_reasons(record, run_dir, model_dir)
 
 
-def _suite_reasons(report, run_dir, where: str = "", agreement_requested: bool = False) -> list[str]:
+def _suite_reasons(report, run_dir, where: str = "", agreement_requested: bool = False, model_dir=None) -> list[str]:
     """The prompt-suite reasons (orchard/prompt_suite.py) in one swap-check.json report, each prefixed with `where`.
     A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
     result.json: the record holds the raw replies, and the verdict is computed here from them. A control in the record has
@@ -1050,7 +1095,7 @@ def _suite_reasons(report, run_dir, where: str = "", agreement_requested: bool =
     probe = [where + r for r in sampling_probe.problems(report.get("sampling_probe") if isinstance(report, dict) else None)]
     # The agreement set (issue 15): every number is recomputed from the raw ids in the record, with the same file the template used.
     record = report.get("agreement_set") if isinstance(report, dict) else None
-    agreement = [where + r for r in _agreement_reasons(record, run_dir, agreement_requested)]
+    agreement = [where + r for r in _agreement_reasons(record, run_dir, agreement_requested, model_dir)]
     return (_hub_fetch_reasons(report, where) + probe + agreement
             + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons])
 
@@ -1076,7 +1121,7 @@ def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
         return [f"{where}swap-check.json is not readable JSON: {exc.reason}"]
     if not isinstance(report, dict):
         return [f"{where}swap_config.json asks for the agreement set and swap-check.json is not an object"] if requested else []
-    return _suite_reasons(report, run_dir, where, requested)
+    return _suite_reasons(report, run_dir, where, requested, Path(path).parent.parent / "model-dir")
 
 
 def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
@@ -1131,7 +1176,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
             reasons.append(f"{where}: top1_agreement {c.get('top1_agreement')!r} is not the "
                            f"result_draft's in {swap}")
         if isinstance(report, dict):
-            reasons += _suite_reasons(report, run_dir, f"{where}: ")
+            reasons += _suite_reasons(report, run_dir, f"{where}: ", model_dir=Path(stage_dir) / "configs" / str(n) / "model-dir")
         reasons += _graft_reasons(stage_dir, run_dir, n, where)
         reasons += _sampling_reasons(report, run_dir, where)
         if trim is not None:

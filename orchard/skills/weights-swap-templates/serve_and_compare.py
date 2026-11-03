@@ -430,7 +430,7 @@ def load_agreement_control(cfg: dict, run_dir: Path, entries: list, set_sha: str
         mine = {e["id"]: [int(i) for i in e["generated_ids"][:len(ctl.get(e["id"], []))]] for e in entries}
         same = record["prompt_set_sha256"] == set_sha and ctl == mine
         embedded = [{"id": e["id"], "kind": e.get("kind"), "reference_ids": e["reference_ids"], "chip_ids": e["chip_ids"],
-                     "error": e.get("error")} for e in record["entries"]]
+                     "skipped": e.get("skipped") or [], "error": e.get("error")} for e in record["entries"]]
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         print(f"serve_and_compare: cannot use the agreement control {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -583,8 +583,8 @@ def special_tokens(model_dir: Path) -> list[str]:
 
 
 def stop_token_ids(tokenizer, model_dir: Path) -> set[int]:
-    """The ids the server leaves out of the text it returns: the tokenizer's special added tokens and generation_config.json's
-    eos_token_id (an int or a list). An unreadable or odd file gives no ids from it."""
+    """The ids the server leaves out of the text it returns: the tokenizer's special added tokens and the top-level eos_token_id (an int or a
+    list) of generation_config.json and of config.json, which the served bundle also reads. An unreadable or odd file gives no ids from it."""
     ids: set[int] = set()
     try:
         for i, tok in tokenizer.get_added_tokens_decoder().items():
@@ -592,13 +592,14 @@ def stop_token_ids(tokenizer, model_dir: Path) -> set[int]:
                 ids.add(int(i))
     except (AttributeError, TypeError, ValueError):
         pass
-    try:
-        eos = json.loads(read_small_file(Path(os.path.realpath(Path(model_dir) / "generation_config.json"))).decode("utf-8")).get("eos_token_id")
-    except (OSError, ValueError, AttributeError):
-        eos = None
-    for v in eos if isinstance(eos, list) else [eos]:
-        if isinstance(v, int) and not isinstance(v, bool):
-            ids.add(v)
+    for name in ("generation_config.json", "config.json"):
+        try:
+            eos = json.loads(read_small_file(Path(os.path.realpath(Path(model_dir) / name))).decode("utf-8")).get("eos_token_id")
+        except (OSError, ValueError, AttributeError):
+            eos = None
+        for v in eos if isinstance(eos, list) else [eos]:
+            if isinstance(v, int) and not isinstance(v, bool):
+                ids.add(v)
     return ids
 
 

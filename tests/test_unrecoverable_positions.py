@@ -6,6 +6,7 @@ correct chip token was recorded as a mismatch. The reference token is known, so 
 scoring leaves them out of both the matches and the count. A mismatch on any other position still counts."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -13,7 +14,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_weights_swap_templates import GENERATED, TEMPLATES, VOCAB, swap, report  # noqa: E402,F401  (swap is a fixture)
+from test_weights_swap_templates import GENERATED, NEAREST, TEMPLATES, VOCAB, swap, report  # noqa: E402,F401  (swap is a fixture)
 from test_agreement_set_template import IDS, gate_reasons, install, make_sets, run, server_sets  # noqa: E402
 
 from tokenizers import Tokenizer  # noqa: E402
@@ -213,3 +214,147 @@ def test_a_control_that_skipped_other_positions_cannot_be_used():
 
 def test_the_template_copy_of_the_core_is_still_identical():
     assert (TEMPLATES / "agreement_core.py").read_bytes() == (Path(core.__file__)).read_bytes()
+
+
+# ---- Copilot round 1 on PR 422 ----------------------------------------------------------------------------------------------------------
+
+def edit(swap, change):
+    path = swap["stage"] / "evidence" / "swap-check.json"
+    rep = json.loads(path.read_text())
+    change(rep)
+    path.write_text(json.dumps(rep))
+
+
+def test_an_edited_record_that_marks_readable_mismatches_as_skipped_is_refused(swap):
+    """Every fourth token wrong is 8 of 32 per prompt. Marking those eight positions skipped satisfies the quarter cap and lifts the
+    agreement from 0.75 to 1.0, so the gate has to recompute the mask from the reference and the tokenizer."""
+    sets = make_sets(wrong_every=4)
+    rich_tokenizer(swap["stage"] / "model-dir")
+    install(swap, sets)
+    extra = {"vocab": FULL_VOCAB, "silent_ids": SILENT, "agreement_sets": server_sets(sets)}
+    assert swap["start"]("perfect", server_extra=extra, agreement_set=True).returncode == 0
+    assert any("pooled top-1" in x for x in gate_reasons(swap))
+    wrong = list(range(3, 32, 4))
+
+    def hide(rep):
+        for e in rep["agreement_set"]["entries"]:
+            e["skipped"] = wrong
+    edit(swap, hide)
+    reasons = gate_reasons(swap)
+    assert any("skipped positions" in x and "tokenizer" in x for x in reasons), reasons
+
+
+def test_an_edited_record_that_clears_the_mask_of_an_unreadable_token_is_refused_too(swap):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    edit(swap, lambda rep: rep["agreement_set"]["entries"][0].update(skipped=[]))
+    assert any("skipped positions" in x for x in gate_reasons(swap))
+
+
+def test_a_mask_the_gate_cannot_check_because_the_tokenizer_is_missing_is_refused(swap):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    (swap["stage"] / "model-dir" / "tokenizer.json").unlink()
+    assert any("skipped positions" in x and "cannot be checked" in x for x in gate_reasons(swap)), gate_reasons(swap)
+
+
+def start_set_with_control(swap, sets, control):
+    extra = {"vocab": FULL_VOCAB, "silent_ids": SILENT, "agreement_sets": server_sets(sets)}
+    return swap["start"]("perfect", server_extra=extra, agreement_set=True, agreement_control=str(control))
+
+
+def test_the_control_mask_survives_the_reload_and_is_checked_like_the_runs(swap, tmp_path):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    rep = json.loads((swap["stage"] / "evidence" / "swap-check.json").read_text())
+    path = tmp_path / "control.json"
+    path.write_text(json.dumps({"agreement_set": {**rep["agreement_set"], "model_id": NEAREST}}))
+    assert start_set_with_control(swap, sets, path).returncode == 0
+    got = report(swap)["agreement_set"]["control"]["entries"]
+    assert got[0]["skipped"] == [5, 11, 20], got[0]
+    assert not any("skipped" in x for x in gate_reasons(swap)), gate_reasons(swap)
+    edit(swap, lambda r: r["agreement_set"]["control"]["entries"][0].update(skipped=[]))
+    assert any("control" in x and "skipped positions" in x for x in gate_reasons(swap)), gate_reasons(swap)
+
+
+def test_a_control_that_has_no_chip_id_at_a_skipped_position_can_be_used():
+    ref = list(range(40))
+    chip = list(ref)
+    chip[3] = None                                  # a stop token answered with empty text leaves no id
+    mine = [{"id": "p0", "reference_ids": ref, "chip_ids": list(ref), "skipped": [3]}]
+    ctl = [{"id": "p0", "reference_ids": ref, "chip_ids": chip, "skipped": [3], "error": None}]
+    assert core.control_problems(ctl, mine) == []
+    chip[4] = None
+    assert any("missing chip ids" in x for x in core.control_problems(ctl, mine))
+
+
+def test_a_control_with_a_failed_request_is_still_refused_when_the_mask_is_nonempty():
+    ref = list(range(40))
+    mine = [{"id": "p0", "reference_ids": ref, "chip_ids": list(ref), "skipped": [3]}]
+    ctl = [{"id": "p0", "reference_ids": ref, "chip_ids": list(ref), "skipped": [3], "error": "HTTP 500"}]
+    assert any("failed request" in x for x in core.control_problems(ctl, mine))
+
+
+@pytest.mark.parametrize("skipped", [[40], [-1], [3, 3], "3", [True]])
+def test_a_control_with_a_malformed_mask_is_refused(skipped):
+    ref = list(range(40))
+    mine = [{"id": "p0", "reference_ids": ref, "chip_ids": list(ref)}]
+    ctl = [{"id": "p0", "reference_ids": ref, "chip_ids": list(ref), "skipped": skipped, "error": None}]
+    assert any("malformed skipped list" in x for x in core.control_problems(ctl, mine))
+
+
+def write_config(swap, **doc):
+    (swap["stage"] / "model-dir" / "config.json").write_text(json.dumps(doc))
+
+
+def test_a_stop_id_from_config_json_is_skipped_in_the_32_token_check(swap):
+    write_config(swap, eos_token_id=1)
+    gen, r = start_tricky(swap, positions={20: 1}, special_eos=False, silent=[1])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert report(swap)["positions_skipped"] == [20]
+
+
+def test_config_json_with_a_list_a_bool_or_text_gives_only_its_whole_number_ids(swap):
+    write_config(swap, eos_token_id=[1, True, "2", 3.5, None])
+    gen, r = start_tricky(swap, positions={20: 1, 21: 2}, special_eos=False, silent=[1, 2])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert report(swap)["positions_skipped"] == [20]
+
+
+def test_a_stop_id_from_config_json_is_skipped_in_the_agreement_set_and_the_gate_agrees(swap):
+    write_config(swap, eos_token_id=1)
+    sets = make_sets()
+    sets[0]["generated_ids"] = with_positions(sets[0]["generated_ids"], {9: 1})
+    rich_tokenizer(swap["stage"] / "model-dir", special_eos=False)
+    install(swap, sets)
+    extra = {"vocab": FULL_VOCAB, "silent_ids": [1], "agreement_sets": server_sets(sets)}
+    assert swap["start"]("perfect", server_extra=extra, agreement_set=True).returncode == 0
+    assert report(swap)["agreement_set"]["entries"][0]["skipped"] == [0, 9]     # id 1 is also the reference token at position 0
+    assert gate_reasons(swap) == []
+
+
+def test_the_gates_mask_and_the_templates_mask_are_the_same_function_of_the_tokenizer(tmp_path):
+    spec = importlib.util.spec_from_file_location("sac_parity", TEMPLATES / "serve_and_compare.py")
+    tpl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tpl)
+    rich_tokenizer(tmp_path)
+    tok = Tokenizer.from_file(str(tmp_path / "tokenizer.json"))
+    ids = list(range(len(FULL_VOCAB)))
+    for stops in (set(), {1}, {3, 4}):
+        (tmp_path / "generation_config.json").write_text(json.dumps({"eos_token_id": sorted(stops)}))
+        want = tpl.unrecoverable_ids(tok, tmp_path, ids)
+        assert want == core.unrecoverable_ids(tok, core.stop_ids_from({"eos_token_id": sorted(stops)}), ids)
+
+
+def test_a_record_whose_mask_mixes_numbers_and_text_is_a_reason_and_not_a_crash(swap):
+    sets = tricky_sets()
+    assert start_set(swap, sets).returncode == 0
+    edit(swap, lambda rep: rep["agreement_set"]["entries"][0].update(skipped=[5, "a", 20]))
+    reasons = gate_reasons(swap)
+    assert any("skipped" in x for x in reasons), reasons
+
+
+def test_stop_ids_from_takes_whole_numbers_of_the_top_level_only():
+    assert core.stop_ids_from({"eos_token_id": 2}, {"eos_token_id": [3, 4]}) == {2, 3, 4}
+    assert core.stop_ids_from({"eos_token_id": True}, {"eos_token_id": [True, 5, "6", 7.5, None]}, {"text_config": {"eos_token_id": 9}}) == {5}
+    assert core.stop_ids_from(None, [], "x", {"eos_token_id": {"a": 1}}) == set()
