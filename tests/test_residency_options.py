@@ -338,6 +338,7 @@ board 0000046131924055  (p300c)
 
 def test_the_fit_row_blocks_hydrogen_before_any_download_with_the_numbers():
     hub = pf.parse_hub(hub_payload())
+    hub.host_table = False                  # the config was read and names no table that the default policy keeps on the host
     c = pf.check_fit(hub, 4)
     assert (c.name, c.status, c.reason) == ("fit", "block", "model-does-not-fit")
     assert "at least 14 chips" in c.detail and "this box has 4 chips" in c.detail and "at any listed precision" in c.detail
@@ -347,6 +348,121 @@ def test_the_fit_row_passes_a_model_the_bound_does_not_rule_out_and_says_it_is_a
     hub = pf.parse_hub(hub_payload({"BF16": 8_000_000_000}))
     c = pf.check_fit(hub, 4)
     assert c.status == "ok" and "bound" in c.detail.lower() and "no tensor name" in c.detail
+
+
+# ---- a table the default policy keeps on the host (review of PR 435, round 1) -----------------------------------------------------
+# The Hub's counts are totals by dtype. A model with an n-gram or per-layer table keeps that table in host memory under the default
+# policy, so the total is not a lower bound on the device bytes, and a block built on it could refuse a model that fits. The row blocks
+# only when the model's config.json is read and names no such table; otherwise it says what it found and leaves the decision to stage 0,
+# which reads the tensor names.
+
+@pytest.mark.parametrize("config,expect", [
+    ({"hidden_size": 5120, "num_hidden_layers": 4}, False),
+    ({"ngram_size": 3, "ngram_vocab_size_base": 1000}, True),
+    ({"ple_layer_ids": [2], "ple_embed_dim": 64}, True),
+    ({"text_config": {"hidden_size": 64, "ple_embed_dim": 64}}, True),                  # a nested text config
+    ({"decoder": [{"layers": {"per_layer_embed": 1}}]}, True),                          # a list, and a key with per_layer in it
+    ({"multiple_of": 256, "sample_rate": 16000, "example_count": 3, "simple_gate": True}, False),      # `ple` inside another word is no table
+    ({}, False),
+    ([], None), ("x", None), (None, None), (3, None),
+])
+def test_the_config_names_a_host_table_by_its_keys(config, expect):
+    assert rs.config_has_host_table(config) is expect
+
+
+def test_a_hostile_config_is_read_to_a_bound():
+    deep = cfg = {}
+    for _ in range(50):
+        cfg["a"] = {}
+        cfg = cfg["a"]
+    cfg["ngram_size"] = 3
+    assert rs.config_has_host_table(deep) in (False, None)                               # too deep to be read: no claim of a table
+    wide = {f"k{i}": 1 for i in range(100_000)}
+    assert rs.config_has_host_table(wide) is None                                        # too many keys: unknown, so the row cannot block
+
+
+@pytest.mark.parametrize("host_table,word", [(True, "n-gram or per-layer table"), (None, "could not be read")])
+def test_the_fit_row_is_advisory_when_a_host_table_is_named_or_the_config_was_not_read(host_table, word):
+    hub = pf.parse_hub(hub_payload())
+    hub.host_table = host_table
+    c = pf.check_fit(hub, 4)
+    assert c.status == "warn" and c.reason is None and word in c.detail
+    assert "at least 14 chips" in c.detail and "Stage 0" in c.detail                      # the numbers still ride along, and who decides
+
+
+def test_the_fit_row_keeps_its_pass_whatever_the_host_table_says():
+    hub = pf.parse_hub(hub_payload({"BF16": 8_000_000_000}))
+    for state in (True, False, None):
+        hub.host_table = state
+        assert pf.check_fit(hub, 4).status == "ok"
+
+
+class FakeResp:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def read(self, n=-1):
+        return self.body if n < 0 else self.body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_the_hub_config_is_read_without_a_token_pinned_to_the_revision_and_bounded():
+    seen = []
+
+    def opener(req, timeout=None):
+        seen.append(req)
+        return FakeResp(json.dumps({"ngram_size": 3}).encode())
+    assert pf.read_hub_config("owner/name", "a" * 40, opener=opener) == {"ngram_size": 3}
+    assert seen[0].full_url == "https://huggingface.co/owner/name/resolve/" + "a" * 40 + "/config.json"
+    assert not any(k.lower() == "authorization" for k in seen[0].headers)
+    # a revision that is not a plain hash is not put in the URL; a repo id that is not owner/name is not requested at all
+    pf.read_hub_config("owner/name", "../x", opener=opener)
+    assert seen[1].full_url.endswith("/resolve/main/config.json")
+    assert pf.read_hub_config("owner/name/../../x", "main", opener=lambda *a, **k: pytest.fail("requested")) is None
+    # valid JSON that grows past the bound in trailing space: cut at the bound it still parses, so only the size check can refuse it
+    big = FakeResp(b'{"ngram_size": 3}' + b" " * (pf.CONFIG_FETCH_BYTES + 5))
+    assert pf.read_hub_config("owner/name", "main", opener=lambda *a, **k: big) is None
+    exact = FakeResp(b'{"ngram_size": 3}' + b" " * (pf.CONFIG_FETCH_BYTES - len(b'{"ngram_size": 3}')))
+    assert pf.read_hub_config("owner/name", "main", opener=lambda *a, **k: exact) == {"ngram_size": 3}          # exactly the bound is read
+    for body in (b"not json", b"[1, 2]", b"3", b"", b"\xff\xfe"):
+        assert pf.read_hub_config("owner/name", "main", opener=lambda *a, body=body, **k: FakeResp(body)) is None
+
+    def gone(*a, **k):
+        raise pf.urllib.error.HTTPError("u", 404, "no", {}, None)
+    assert pf.read_hub_config("owner/name", "main", opener=gone) is None
+    assert pf.read_hub_config("owner/name", "main", opener=lambda *a, **k: (_ for _ in ()).throw(TimeoutError("slow"))) is None
+
+
+@pytest.mark.parametrize("config_body,expect", [(json.dumps({"hidden_size": 64}).encode(), False), (json.dumps({"ngram_size": 3}).encode(), True),
+                                                (b"not json", None)])
+def test_hub_info_reads_the_config_only_for_a_model_with_counts_and_records_what_it_names(tmp_path, monkeypatch, config_body, expect):
+    urls = []
+
+    def fake(req, timeout=None):
+        urls.append(req.full_url)
+        if "/api/models/" in req.full_url:
+            return FakeResp(json.dumps(hub_payload()).encode())
+        return FakeResp(config_body)
+    monkeypatch.setattr(pf.urllib.request, "urlopen", fake)
+    info, err = pf.default_signals(_cfg(tmp_path)).hub_info("deep-principle/Hydrogen-1.0")
+    assert err is None and info.host_table is expect
+    assert [u.rsplit("/", 1)[-1] for u in urls] == ["Hydrogen-1.0?blobs=true", "config.json"]
+    urls.clear()
+    nocounts = {"id": "a/b", "sha": "abc", "siblings": [], "tags": ["license:mit"]}
+    monkeypatch.setattr(pf.urllib.request, "urlopen", lambda req, timeout=None: urls.append(req.full_url) or FakeResp(json.dumps(nocounts).encode()))
+    info, err = pf.default_signals(_cfg(tmp_path)).hub_info("a/b")
+    assert info.host_table is None and len(urls) == 1                                    # no counts, no second request
+
+
+def test_the_bound_says_a_host_table_would_lower_the_device_figure():
+    assert "host" in rs.BOUND_NOT_MEASURED and "device" in rs.BOUND_NOT_MEASURED
+    rec = rs.totals_bound(HYDROGEN, box_chips=4)
+    assert any("host" in n for n in rec["measured"]["notes"])
 
 
 @pytest.mark.parametrize("hub,chips", [(None, 4), ("nocounts", 4), ("params", None), ("params", 0)])
@@ -363,13 +479,22 @@ def _cfg(tmp_path):
 
 def test_run_preflight_adds_the_fit_row_after_gozer_only_when_the_hub_gave_counts(tmp_path):
     import test_preflight as tp
-    s = tp.signals(hub_info=lambda m: (pf.parse_hub(hub_payload()), None), gozer_status=lambda: FOUR_CHIPS, free_gb=lambda p: 5000.0)
+    def hub(host_table):
+        info = pf.parse_hub(hub_payload())
+        info.host_table = host_table
+        return lambda m: (info, None)
+    s = tp.signals(hub_info=hub(False), gozer_status=lambda: FOUR_CHIPS, free_gb=lambda p: 5000.0)
     out = pf.run_preflight(_cfg(tmp_path), "deep-principle/Hydrogen-1.0", accept_credentials=False, signals=s)
     names = [c.name for c in out]
     assert names.index("fit") == names.index("gozer") + 1
     fit = next(c for c in out if c.name == "fit")
     assert fit.status == "block" and fit.reason == "model-does-not-fit"
     assert "fit" in [c.name for c in pf.blocked(out)]
+    for state in (True, None):          # a host table named, or the config unread: the same counts are a finding and the run is not blocked by them
+        s = tp.signals(hub_info=hub(state), gozer_status=lambda: FOUR_CHIPS, free_gb=lambda p: 5000.0)
+        out = pf.run_preflight(_cfg(tmp_path), "deep-principle/Hydrogen-1.0", accept_credentials=False, signals=s)
+        fit = next(c for c in out if c.name == "fit")
+        assert fit.status == "warn" and "fit" not in [c.name for c in pf.blocked(out)]
     plain = pf.run_preflight(_cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=tp.signals())
     assert "fit" not in [c.name for c in plain]
 

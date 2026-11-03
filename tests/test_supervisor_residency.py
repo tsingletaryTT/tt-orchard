@@ -226,3 +226,106 @@ def test_a_lab_run_does_not_judge_the_first_boot_by_this_boxs_disk(tmp_path, mon
     assert blocks == [] and reads == []                                   # a lab: nothing read, nothing blocked
     Supervisor._check_residency(stub(None), spec)
     assert len(blocks) == 1 and reads == [tmp_path / "cache"] and "free disk" in blocks[0]       # no lab: the cache root's disk is read
+
+
+# ---- a finish-only resume of stage 2 (review of PR 435, round 1) --------------------------------------------------------------------
+# After the hardware test has ended, a resumed stage 2 only reads results: nothing is converted, nothing is downloaded. The converted cache
+# the test made may fill the disk the first-boot check would demand again, so the machine check belongs to attempts that run the hardware
+# phase (a first attempt, and a retry that must rerun a failed test), and a finish-only resume is not held to it.
+
+def hardware_stub(tmp_path, *, marker: bool, failed: bool = False):
+    from types import SimpleNamespace
+    d = tmp_path / "stages" / "2"
+    d.mkdir(parents=True)
+    if marker:
+        (d / "test-result.json").write_text("{}")
+    return SimpleNamespace(run_dir=tmp_path, _test_failure=lambda spec, stage_dir: ({"problem": "the test failed"} if failed else None))
+
+
+@pytest.mark.parametrize("resuming,marker,escalated,failed,expect", [
+    (False, False, False, False, True),       # a fresh attempt runs the hardware phase
+    (False, True, False, False, True),        # a marker left by an earlier attempt: open_stage_dir moves it aside, the test reruns
+    (True, False, False, False, True),        # resumed before the test ended
+    (True, True, False, False, False),        # resumed after a finished test: only the finish step runs
+    (True, True, True, False, False),         # escalated, the marker holds a good result: still only the finish step
+    (True, True, True, True, True),           # escalated, the marker holds a failed test: moved aside, the test reruns
+    (True, True, False, True, False),         # not escalated, a failed test: the stage ends on it without a rerun
+])
+def test_the_hardware_phase_is_pending_unless_a_resumed_stage_only_reads_a_finished_test(tmp_path, resuming, marker, escalated, failed, expect):
+    from types import SimpleNamespace
+    from orchard.supervisor import Supervisor
+    stub = hardware_stub(tmp_path, marker=marker, failed=failed)
+    spec = SimpleNamespace(number=2, boards=1)
+    assert Supervisor._hardware_pending(stub, spec, resuming=resuming, escalated=escalated) is expect
+
+
+def _record():
+    return {"label": "estimate", "scan": "ran", "assumptions": [], "estimated": {"chips_needed": 1, "device_bytes": 1,
+            "first_boot": {"snapshot_local": True, "checkpoint_bytes_to_download": 0, "cache_bytes": 1, "disk_bytes": 1 << 40,
+                           "conversion_in_flight_bytes": 0, "host_ram_bytes": 1 << 40}}, "verdict": {"fits_box": True}}
+
+
+def test_a_check_for_a_finish_only_attempt_reads_no_machine_figure_and_blocks_nothing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from orchard.supervisor import Supervisor
+    monkeypatch.setattr(residency, "read_record", lambda run_dir: _record())
+    reads, blocks = [], []
+    monkeypatch.setattr(residency, "machine_facts", lambda path: reads.append(path) or (1, 1))
+    stub = SimpleNamespace(run_dir=tmp_path, lab=None, paths=SimpleNamespace(cache_root=tmp_path / "cache"), _box_chips=lambda spec: 4,
+                           _block=lambda stage, why, **ev: blocks.append(why))
+    spec = SimpleNamespace(boards=1, number=2)
+    Supervisor._check_residency(stub, spec, hardware_pending=False)
+    assert blocks == [] and reads == []
+    Supervisor._check_residency(stub, spec, hardware_pending=True)
+    assert len(blocks) == 1 and "free disk" in blocks[0] and reads == [tmp_path / "cache"]
+    Supervisor._check_residency(stub, spec)                                                    # the default is the strict one
+    assert len(blocks) == 2
+
+
+def test_a_finish_only_attempt_is_still_held_to_the_chips_the_box_has(tmp_path, monkeypatch):
+    """Only the machine check is lifted. The chip count is not about the cache, and the box the run resumes on is read again."""
+    from types import SimpleNamespace
+    from orchard.supervisor import Supervisor
+    rec = _record()
+    rec["estimated"]["chips_needed"] = 35
+    rec["verdict"] = {"fits_box": False}
+    monkeypatch.setattr(residency, "read_record", lambda run_dir: rec)
+    blocks = []
+    stub = SimpleNamespace(run_dir=tmp_path, lab=None, paths=SimpleNamespace(cache_root=tmp_path / "cache"), _box_chips=lambda spec: 4,
+                           _block=lambda stage, why, **ev: blocks.append(why))
+    Supervisor._check_residency(stub, SimpleNamespace(boards=1, number=2), hardware_pending=False)
+    assert len(blocks) == 1 and "does not fit this box" in blocks[0]
+
+
+def test_a_resume_after_the_hardware_test_is_not_blocked_by_the_disk_the_cache_now_fills(tmp_path, monkeypatch):
+    """The wiring: a real supervisor crashes after stage 2's hardware test ended and before the stage's end was recorded, and resumes on a
+    disk that has 1 MiB free. The first-boot check must not block it; the stage ends with a pass. The snapshot is the full-port tests' (a
+    stage 2 that passes) with safetensors headers added, so stage 0 writes a residency record for the check to judge."""
+    from fakes import Crash
+    from test_supervisor_full_port import with_snapshot
+    r = Rig(tmp_path)
+    try:
+        with_snapshot(r, tmp_path)
+        r.args.full_port = True
+        write_snapshot(tmp_path / "snapshot", SMALL, shards=1)
+        make(r)
+        monkeypatch.setattr(residency, "machine_facts", lambda path: (1 << 50, 1 << 50))
+        agent_steps = []
+
+        def crash_at_the_finish_step(e):          # stage 2's second agent step is the finish step, after the hardware test's evidence entry
+            if e["event"] == "decision" and e["stage"] == 2 and e["data"].get("decision") == "agent step":
+                agent_steps.append(e)
+            return len(agent_steps) == 2
+        with pytest.raises(Crash):
+            r.run(crash_if=crash_at_the_finish_step)
+        assert (r.run_dir / "stages" / "2" / "test-result.json").is_file()
+        assert not [e for e in r.entries() if e["event"] == "stage_end" and e["stage"] == 2]
+        assert json.loads((r.run_dir / "stages" / "0" / residency.FILE).read_text())["scan"] == "ran"     # there is a record to judge
+        monkeypatch.setattr(residency, "machine_facts", lambda path: (1 << 20, 1 << 20))          # the converted cache fills the disk now
+        r.on_sleep = lambda: Control(r.run_dir).write("abort")
+        r.run(pid=200)
+        pauses = [d["reason"] for d in r.decisions() if d.get("decision") == "pause"]
+        assert not any("first boot" in p for p in pauses), pauses
+        assert [e["data"]["result"] for e in r.entries() if e["event"] == "stage_end" and e["stage"] == 2] == ["pass"]
+    finally:
+        r.close()

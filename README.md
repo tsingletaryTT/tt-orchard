@@ -1597,16 +1597,21 @@ for a token. The number of experts per token is in `config.json`, which the esti
 For a repository too large to read header by header, `tt-orchard residency owner/name --totals-only --chips 4` makes one Hub call for the
 parameter counts by dtype and prints a lower bound for each precision. It never reads a header, a tensor name or a shape, so it counts every
 floating-point parameter as a weight that a block format can shrink and every integer dtype (a packed MXFP4, NVFP4 or GPTQ repository) at the
-bytes it stores. The real figure is at least the bound. `deep-principle/Hydrogen-1.0` (753.3 billion parameters, 1,506.7 GB in bf16) needs
-at least 49 chips at bf16, 26 at bfp8 and 14 at bfp4 under the default assumptions, so it does not fit a four-chip box at any listed
-precision. Preflight reads the same counts from the Hub answer it already fetches and adds a `fit` row after the gozer row: it blocks with
-code `model-does-not-fit` when even bfp4 needs more chips than the box has, before any download starts. A lab run skips the row, because its
-tests run on another box.
+bytes it stores. The real total is at least the bound. The device figure is lower for a model whose default policy keeps an n-gram or
+per-layer table in host memory, and totals cannot show a table. `deep-principle/Hydrogen-1.0` (753.3 billion parameters, 1,506.7 GB in
+bf16) needs at least 49 chips at bf16, 26 at bfp8 and 14 at bfp4 under the default assumptions, so it does not fit a four-chip box at any
+listed precision, provided its config names no such table. Preflight reads the same counts from the Hub answer it already fetches and adds a `fit` row after the gozer row. It also reads the model's
+`config.json` (one request of at most 1 MiB, at the revision the counts describe, with no token) and looks for keys that name a host-resident
+table (`ngram_*`, `ple_*`, `per_layer`). The row blocks with code `model-does-not-fit` when even bfp4 needs more chips than the box has and the
+config was read and names no such table, before any download starts. When the config names a table, or could not be read, the row is a warning
+that carries the same numbers, and stage 0 reads the tensor names and decides. A lab run skips the row, because its tests run on another box.
 
 Before a full-port stage 2 the supervisor also compares the record's first-boot figures with this machine: the disk under the cache root
 (block code `disk-full`) and the host RAM available (`model-does-not-fit`). Each is the record's estimate against a reading of
 `/proc/meminfo` and the filesystem. A reading that cannot be taken is no claim, and a lab run skips the check because the first boot happens
-on the lab.
+on the lab. The check applies to an attempt that runs the hardware test (a first attempt, a resume before the test ended, a retry that reruns
+a failed test). A resume after the test ended only reads its result, converts and downloads nothing, and is not held to it, because the
+converted cache may already fill the disk. The chip counts are checked on every attempt.
 
 When the weights per chip fit one chip with the stated reserve and KV budget (the one-chip row), the output adds a data-parallel line and the
 record gets `estimated.data_parallel`: the number of copies the configured chips can hold (one per chip), the chips that gives a copy each, and

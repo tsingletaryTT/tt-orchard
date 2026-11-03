@@ -122,7 +122,44 @@ BOUND_POLICY_TEXT = ("if every weight were stored at bfp4, a lower bound: tensor
                      "one-dimensional tensors are counted at the block size too")
 BOUND_NOT_MEASURED = (
     "tensor names and shapes: the Hub's counts are totals by dtype, so no category, expert count or one-dimensional tensor (a norm or a bias, "
-    "which no block format shrinks) is known; every figure is therefore a lower bound on the bytes a real checkpoint needs")
+    "which no block format shrinks) is known; every figure is therefore a lower bound on the bytes a real checkpoint holds, and on the "
+    "device bytes only when no n-gram or per-layer table is among them: the default policy keeps such a table in host memory, which would "
+    "lower the device figure")
+BOUND_HOST_NOTE = ("the counts include every parameter, so a table that the default policy keeps on the host (an n-gram or per-layer "
+                   "embedding) is counted as if it sat on the chips; the device figure of a model with such a table is lower")
+MAX_CONFIG_KEYS, MAX_CONFIG_DEPTH = 5000, 6        # a config.json is a few dozen keys; these bounds keep a hostile one from costing time
+
+
+def _table_key(key: str) -> bool:
+    """Whether a config key names the n-gram or per-layer table that `categorize` puts in `ngram_ple`: a word that starts with `ngram`, the word
+    `ple`, or `per_layer`. A word is a part between underscores, so `multiple_of` and `sample_rate` do not match."""
+    low = key.lower()
+    parts = low.split("_")
+    return "per_layer" in low or "ple" in parts or any(p.startswith("ngram") for p in parts)
+
+
+def config_has_host_table(config) -> bool | None:
+    """Whether a model's config.json names a table that the default policy keeps on the host (an n-gram or per-layer embedding), looking at
+    every key down to MAX_CONFIG_DEPTH levels, through lists too. None when the config is not an object, or is too large or too deep to read to
+    the end without finding one: no claim either way, and the row that asks cannot block on it."""
+    if not isinstance(config, dict):
+        return None
+    seen = 0
+    stack = [(config, 0)]
+    while stack:
+        node, depth = stack.pop()
+        items = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+        for key, value in items:
+            seen += 1
+            if seen > MAX_CONFIG_KEYS:
+                return None
+            if isinstance(key, str) and _table_key(key):
+                return True
+            if isinstance(value, (dict, list)):
+                if depth + 1 > MAX_CONFIG_DEPTH:
+                    return None
+                stack.append((value, depth + 1))
+    return False
 
 
 class ResidencyError(ValueError):
@@ -588,7 +625,7 @@ def totals_bound(parameters, *, box_chips=None, dram_gib=None, kv_gib=None, rese
     need = need_by[lowest]
     table = [{"chips": n, "fits": {p: need_by[p] <= n for p in PRECISIONS}} for n in sorted(set(MESH_SIZES) | set(extra) | ({box_chips} if box_chips else set()))]
     best = next((p for p in PRECISIONS if box_chips and need_by[p] <= box_chips), None)
-    notes = ["the counts are the Hub's totals by dtype; no tensor name or shape was read"]
+    notes = ["the counts are the Hub's totals by dtype; no tensor name or shape was read", BOUND_HOST_NOTE]
     if any(d not in FLOAT_DTYPES and n for d, n in counts.items()):
         notes.append("integer dtypes (U8, I8 and the like) are counted at their stored bytes: a packed checkpoint (MXFP4, NVFP4, GPTQ) reports its "
                      "packed bytes this way and no block format shrinks them")

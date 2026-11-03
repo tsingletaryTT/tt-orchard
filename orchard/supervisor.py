@@ -972,7 +972,9 @@ class Supervisor:
                             kind=run_model_kind(entries))
             try:
                 if spec in (FULL_PORT_STAGE_2, SCORING_STAGE_2):
-                    self._check_residency(spec)        # a model that cannot fit the box starts no prepare step (issue 327)
+                    # a model that cannot fit the box starts no prepare step (issue 327)
+                    self._check_residency(spec, hardware_pending=self._hardware_pending(
+                        spec, resuming=p.open_stage == p.next_stage, escalated=p.next_stage in p.escalated))
                 if spec.needs_coder or self._coder_in_use():
                     self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
@@ -2359,18 +2361,29 @@ class Supervisor:
         except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
             self.ledger.append("decision", 0, decision="residency estimate not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
-    def _check_residency(self, spec) -> None:
+    def _hardware_pending(self, spec, *, resuming: bool, escalated: bool) -> bool:
+        """Whether the attempt about to start runs the stage's hardware phase: a first attempt, a resume before the test ended, and a retry whose
+        failed test is moved aside and rerun. False for a resume after the test ended, which only reads the result (`_stage_body` skips the
+        prepare step and the test when `test-result.json` is there). The same rule as `_run_stage` uses to keep or move aside the record."""
+        marker = self.run_dir / "stages" / str(spec.number) / "test-result.json"
+        if not resuming or not marker.is_file():
+            return True
+        return bool(escalated and spec.boards and self._test_failure(spec, marker.parent))
+
+    def _check_residency(self, spec, *, hardware_pending: bool = True) -> None:
         """Before a full-port stage 2: block with the numbers when stage 0's estimate needs more chips than the box has, or more than the
         stage's own lease gives the port check (`spec.boards` boards; the check runs on that lease, not on the whole box). The box is
         read again here, so the lab or board count at this point is the one judged. No record, a damaged or skipped one, or an unknown
-        box is no claim and the stage goes on."""
+        box is no claim and the stage goes on. The first boot's disk and host RAM are judged only when `hardware_pending`: a resume after the
+        hardware test ended converts and downloads nothing, and the cache the test made may already fill the disk the check would demand
+        again (review of PR 435, round 1). The chip counts are judged either way."""
         rec, box = residency.read_record(self.run_dir), self._box_chips(spec)
         stage = spec.boards * CHIPS_PER_BOARD
         why = (residency.shortfall(rec, box) or residency.shortfall(rec, stage, what=f"stage {spec.number}'s lease")) if box is not None else None
         if why:
             self._block(spec.number, why, need_chips=rec["estimated"]["chips_needed"], box_chips=box, stage_chips=stage,
                         device_bytes=rec["estimated"]["device_bytes"], label=rec["label"])
-        if rec is not None and self.lab is None:
+        if rec is not None and self.lab is None and hardware_pending:
             # The first boot converts the weights on this box (a lab run converts on the lab, which this box cannot read): the converted cache
             # and a download need disk under the cache root, and the conversion needs host RAM. Each is the record's estimate against a reading.
             free, mem = residency.machine_facts(self.paths.cache_root)

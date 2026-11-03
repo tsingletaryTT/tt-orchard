@@ -67,6 +67,7 @@ class HubInfo:
     pipeline_tag: str | None = None                            # the Hub's pipeline_tag when it is a non-empty string
     tags: list[str] = field(default_factory=list)              # the Hub's tags (strings only)
     parameters: dict | None = None                             # the Hub's safetensors parameter counts by dtype: whole counts under string names, else None
+    host_table: bool | None = None                             # whether config.json names a table the default policy keeps on the host (residency.config_has_host_table); None: not read
 
 
 def _parameters(payload: dict) -> dict | None:
@@ -79,6 +80,31 @@ def _parameters(payload: dict) -> dict | None:
     if not all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 0 for k, v in raw.items()):
         return None
     return dict(raw)
+
+
+CONFIG_FETCH_BYTES = 1 << 20         # a config.json larger than this is not read from the Hub
+_HUB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+_HUB_REVISION = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def read_hub_config(model_id: str, sha: str | None, *, opener=None) -> dict | None:
+    """The model's config.json from the Hub as an object, or None for any reason it cannot be had: an id that is not owner/name, a failed or slow
+    request, an answer over CONFIG_FETCH_BYTES, text that is not JSON, JSON that is not an object. No Authorization header is sent (the harness
+    never sends the operator's token). The revision is the hash the Hub's answer gave, so the file read is the one the counts describe; a value
+    that is not a plain hash is not put in the address and `main` is read."""
+    if not isinstance(model_id, str) or not _HUB_ID.match(model_id):
+        return None
+    rev = sha if isinstance(sha, str) and _HUB_REVISION.match(sha) else "main"
+    req = urllib.request.Request(f"https://huggingface.co/{model_id}/resolve/{rev}/config.json", headers={"User-Agent": "tt-orchard"})
+    try:
+        with (opener or urllib.request.urlopen)(req, timeout=HUB_TIMEOUT_S) as resp:
+            raw = resp.read(CONFIG_FETCH_BYTES + 1)
+        if len(raw) > CONFIG_FETCH_BYTES:
+            return None
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):          # URLError and HTTPError are OSErrors; a timeout is too
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _size(value) -> int:
@@ -793,7 +819,14 @@ def check_fit(hub: HubInfo | None, chips) -> Check | None:
         return Check("fit", WARN, f"the Hub's parameter counts could not be sized: {exc}")
     why = residency.shortfall(rec, chips)
     if why:
-        return Check("fit", BLOCK, why, "model-does-not-fit")
+        if hub.host_table is False:
+            return Check("fit", BLOCK, why, "model-does-not-fit")
+        # The counts include a table that the default policy keeps on the host, or the config was not read to rule one out: the figure may be
+        # too high for the chips, so it is a finding and not a refusal. Stage 0 reads the tensor names and decides.
+        found = ("the model's config names an n-gram or per-layer table, which the default policy keeps in host memory" if hub.host_table
+                 else "the model's config.json could not be read, so a table that the default policy keeps in host memory cannot be ruled out")
+        return Check("fit", WARN, f"{why.rstrip('. ')}. This is not a block: the counts are totals, {found}, and the chips would hold less than the "
+                                  "counts say. Stage 0 reads the tensor names and decides")
     best = rec["verdict"]["best_fit"]
     return Check("fit", OK, f"{rec['measured']['total_parameters'] / 1e9:.1f} billion parameters by the Hub's counts need at least "
                             f"{rec['estimated']['chips_needed']} chips at the lowest listed precision; the highest listed precision that fits this "
@@ -1267,6 +1300,9 @@ def default_signals(cfg, research_options=None) -> Signals:
                 if not isinstance(data, dict):
                     return None, "the hub's answer is not a JSON object"
                 info = parse_hub(data)
+                if info.parameters:                  # the fit row needs to know whether a host-resident table is among the counts
+                    from orchard import residency
+                    info.host_table = residency.config_has_host_table(read_hub_config(model_id, info.sha))
                 known_hubs[model_id] = info          # local_snapshot measures its candidates against this, with no second request
                 return info, None
         except urllib.error.HTTPError as exc:
