@@ -595,3 +595,50 @@ def test_a_weights_table_whose_repo_cannot_be_read_is_never_a_pass(tmp_path):
     files["tt-model.yaml"] = (f"schema: \"5.1\"\nrepo: {REPO}\nweights:\n  revision: \"{REV}\"\n").encode()
     _, text = run(FakeHub(files), tmp_path / "again")
     assert "FAIL" in line(text, "manifests") and "weights repo" in line(text, "manifests"), text
+
+
+# ---- issue 288 item 2: the card names each pin on one line, `owner/name @ <commit>`
+
+def _card_run(tmp_path, readme, hub_kw=None):
+    files = good_files()
+    files["README.md"] = readme.encode()
+    files.pop("package-record.json")
+    hub = FakeHub(files, **(hub_kw or {}))
+    _, text = run(hub, tmp_path)
+    return hub, line(text, "revision")
+
+
+FRONT = "---\nlicense: apache-2.0\nbase_model: ibm/thing\ntags:\n- blackhole\n---\n# thing\n"
+
+
+def test_a_repository_at_commit_line_is_a_pin_for_that_repository(tmp_path):
+    hub, rev_line = _card_run(tmp_path, FRONT + f"ibm/thing @ {REV}\nsomeone/bundle @ {OTHER}\n")
+    assert rev_line.strip().startswith("ok"), rev_line
+    assert ("exists", "ibm/thing", REV) in hub.calls and ("exists", "someone/bundle", OTHER) in hub.calls
+    assert ("exists", "ibm/thing", OTHER) not in hub.calls and ("exists", "someone/bundle", REV) not in hub.calls
+
+
+def test_a_commit_on_a_line_without_its_repository_is_reported_and_the_required_form_is_named(tmp_path):
+    """The bundle is named on one line and its commit on the next. The verdict says which form the card must use."""
+    readme = FRONT + f"Weights: ibm/thing @ {REV}\nThe code bundle is someone/bundle.\nIts revision `{OTHER}`.\n"
+    hub, rev_line = _card_run(tmp_path, readme)
+    assert rev_line.strip().startswith("warn") and "owner/name @" in rev_line and OTHER in rev_line, rev_line
+    assert REV not in rev_line.split("owner/name @")[0].split("without")[-1]      # the weights line is not blamed
+
+
+def test_a_repository_on_an_earlier_line_is_not_attached_to_the_weights_commit(tmp_path):
+    """The weights commit has no repository on its line. The bundle named above it must not become its repository."""
+    readme = FRONT + f"Code bundle: someone/bundle @ {OTHER}\nWeights revision `{REV}`.\n"
+    hub, rev_line = _card_run(tmp_path, readme)
+    assert ("exists", "ibm/thing", REV) in hub.calls and ("exists", "someone/bundle", REV) not in hub.calls
+    assert rev_line.strip().startswith("warn") and REV in rev_line and "owner/name @" in rev_line, rev_line
+
+
+def test_a_card_with_one_commit_and_no_repository_on_its_line_is_not_reported(tmp_path):
+    _, rev_line = _card_run(tmp_path, FRONT + f"The weights are at revision `{REV}`.\n")
+    assert rev_line.strip().startswith("ok"), rev_line
+
+
+def test_the_primary_repository_is_pinned_at_exactly_one_commit(tmp_path):
+    _, rev_line = _card_run(tmp_path, FRONT + f"ibm/thing @ {REV}\nibm/thing @ {OTHER}\n")
+    assert rev_line.strip().startswith("warn") and "ibm/thing at two commits" in rev_line, rev_line

@@ -45,7 +45,10 @@ from orchard.scrub import scrub_package
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 EXIT_OK, EXIT_FAILED, EXIT_REFUSED = 0, 1, 2
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
-REVISION_NEAR = re.compile(r"revision\W{0,8}([0-9a-f]{40})\b", re.IGNORECASE)
+REVISION_NEAR = re.compile(r"(?:revision\W{0,8}|@\s*)([0-9a-f]{40})\b", re.IGNORECASE)
+# The card names each pin on one line, with its repository: `owner/name @ <40-character commit>` (the older `owner/name (revision <commit>)`
+# also works). A repository named on another line is never attached to a commit (a code bundle's repository would become the weights').
+PIN_LINE_FORM = "write each pin on one line as `owner/name @ <40-character commit>`, one line per repository"
 IGNORED = frozenset({".gitattributes"})          # the Hub adds this file; no package record lists it
 RECORD_FILES = ("package-record.json", "SHA256SUMS")
 LICENSE_FILES = re.compile(r"^(LICENSE|LICENCE|COPYING)([-._].*)?$", re.IGNORECASE)
@@ -433,6 +436,22 @@ def _graft_pin(root: Path) -> tuple[str | None, str | None]:
             rev.lower() if isinstance(rev, str) and HEX40.match(rev.lower()) else None)
 
 
+def pin_form_notes(card: str | None, graft_rev: str | None, model: str | None) -> list[str]:
+    """What the card's pin lines leave ambiguous (issue 288). A card with two or more commits must name the repository on each commit's
+    line; a commit without one still counts as a primary weights pin (as before), and the note says which form to use. The primary
+    repository is pinned at one commit."""
+    named = sorted(card_revisions(card))
+    notes = []
+    loose = [rev for rev in named if len(named) > 1 and rev != graft_rev and _repo_named_before(card, rev) is None]
+    if loose:
+        notes.append(f"the card names {', '.join(loose)} without a repository on its line, so the repository is not known; {PIN_LINE_FORM}")
+    if model:
+        mine = [rev for rev in named if rev != graft_rev and _repo_named_before(card, rev) == model]
+        if len(mine) > 1:
+            notes.append(f"the card pins {model} at two commits ({', '.join(mine)}); name exactly one")
+    return notes
+
+
 def check_revision(root: Path, card: str | None, record, hub: Hub | None) -> Finding:
     named = card_revisions(card)
     if not named:
@@ -454,6 +473,7 @@ def check_revision(root: Path, card: str | None, record, hub: Hub | None) -> Fin
         for rev in sorted({m.lower() for m in LAUNCHER_WEIGHTS_PIN.findall(active)} - want):
             problems.append(f"{fname} pins the weights at {rev}; the card's primary weights pin is {', '.join(sorted(want))}")
     graft_repo, graft_rev = _graft_pin(root)
+    notes.extend(pin_form_notes(card, graft_rev, model))
     if hub is not None and model:
         for rev in sorted(named):
             repo = (graft_repo if rev == graft_rev else None) or _repo_named_before(card, rev) or model
