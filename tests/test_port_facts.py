@@ -305,3 +305,105 @@ def test_the_skeleton_neither_names_the_reference_files_nor_hides_ttnn():
 
 def test_the_skeleton_reads_single_and_sharded_checkpoints_the_same_way():
     assert "*.safetensors" in skeleton() and "index.json" not in skeleton()
+
+
+# ---- Copilot's first review of PR 432: hostile names, linear trimming, omissions that are recorded --------------------------------
+
+def snapshot_with(tmp_path, tensors, config=CONFIG, name="snap"):
+    snap = tmp_path / name
+    snap.mkdir()
+    (snap / "config.json").write_text(json.dumps(config))
+    write_safetensors(snap / "model.safetensors", tensors)
+    return snap
+
+
+def test_a_tensor_name_with_a_5000_digit_numeric_component_does_not_stop_the_facts(tmp_path):
+    # `int()` of 5,000 digits raises ValueError under Python's default limit; the supervisor catches only PortFactsError (Copilot, PR 432).
+    huge = "model.layers." + "9" * 5000 + ".w"
+    facts = port_facts.build(snapshot_with(tmp_path, {**TENSORS, huge: ("BF16", (2, 2))}))
+    assert facts["tensors_with_long_names"] == 1
+    assert "9" * 50 not in json.dumps(facts)                       # the name is counted, never copied into the file
+    assert facts["tensor_groups"] == len(port_facts.build(snapshot_with(tmp_path, TENSORS, name="plain"))["tensors"])
+
+
+def test_a_long_digit_run_that_is_no_layer_number_stays_in_the_pattern(tmp_path):
+    odd = "model.layers.1234567890123.w"                           # 13 digits: within the name cap, too long to be a layer number
+    facts = port_facts.build(snapshot_with(tmp_path, {**TENSORS, odd: ("BF16", (2, 2))}))
+    line = next(t for t in facts["tensors"] if "1234567890123" in t)
+    assert "{i}" not in line and "layers " not in line
+
+
+def test_trimming_many_groups_serialises_a_bounded_amount(tmp_path, monkeypatch):
+    # One json.dumps of the whole file per removed line is quadratic in the number of groups; the header reader allows a million tensors.
+    snap = snapshot_with(tmp_path, {f"group{k}.weight": ("BF16", (2, 2)) for k in range(3000)})
+    real, total = json.dumps, [0]
+
+    def counting(*a, **kw):
+        out = real(*a, **kw)
+        total[0] += len(out)
+        return out
+    monkeypatch.setattr(port_facts.json, "dumps", counting)
+    facts = port_facts.build(snap)
+    assert facts["tensors_left_out"] > 2000 and len(facts["tensors"]) + facts["tensors_left_out"] == facts["tensor_groups"]
+    assert total[0] < 40 * port_facts.MAX_CHARS                    # a handful of page-sized encodings, not thousands of file-sized ones
+
+
+def test_what_is_trimmed_is_still_the_longest_prefix_that_fits(tmp_path):
+    snap = snapshot_with(tmp_path, {f"group{k:04d}.weight": ("BF16", (2, 2)) for k in range(3000)})
+    facts = port_facts.build(snap)
+    assert len(json.dumps(facts, indent=2)) + 1 <= port_facts.MAX_CHARS
+    longer = dict(facts, tensors=facts["tensors"] + ["group9999.weight  BF16 [2, 2]  x1"], tensors_left_out=facts["tensors_left_out"] - 1)
+    assert len(json.dumps(longer, indent=2)) + 1 > port_facts.MAX_CHARS or len(facts["tensors"]) == facts["tensor_groups"]
+    assert facts["tensors"] == sorted(facts["tensors"])[:len(facts["tensors"])]      # the kept lines are the first ones in name order
+
+
+def test_config_fields_removed_to_fit_are_named_in_the_left_out_list(single, monkeypatch):
+    whole = port_facts.build(single)
+    bare = len(json.dumps(dict(whole, tensors=[]), indent=2)) + 1
+    monkeypatch.setattr(port_facts, "MAX_CHARS", bare - 60)
+    facts = port_facts.build(single)
+    dropped = set(whole["config"]) - set(facts["config"])
+    assert dropped and dropped <= set(facts["config_left_out"]) and facts["config_left_out"] == sorted(facts["config_left_out"])
+    assert not set(facts["config"]) & set(facts["config_left_out"])
+
+
+def test_text_config_fields_removed_to_fit_are_named_in_their_own_left_out_list(tmp_path, monkeypatch):
+    nested = {"model_type": "toy_exp", "text_config": {**{k: v for k, v in CONFIG.items() if k != "model_type"}, "extra_note": "x"}}
+    snap = snapshot_with(tmp_path, TENSORS, config=nested)
+    whole = port_facts.build(snap)
+    bare = len(json.dumps(dict(whole, tensors=[]), indent=2)) + 1
+    monkeypatch.setattr(port_facts, "MAX_CHARS", bare - 60)
+    facts = port_facts.build(snap)
+    dropped = set(whole["text_config"]) - set(facts["text_config"])
+    assert dropped and dropped <= set(facts["text_config_left_out"]) and facts["text_config_left_out"] == sorted(facts["text_config_left_out"])
+
+
+def test_conventions_beyond_the_cap_are_counted(tmp_path):
+    many = "class C:\n    r\"\"\"\n    Args:\n" + "".join(
+        f"        ids_{k} (`list[int]`, *optional*):\n            One-indexed ids number {k}.\n" for k in range(port_facts.MAX_NOTES + 3)) + "    \"\"\"\n"
+    facts = port_facts.build(snapshot_with(tmp_path, TENSORS), reference_source=many)
+    assert len(facts["conventions"]) == port_facts.MAX_NOTES and facts["conventions_left_out"] == 3
+
+
+def test_a_layer_schedule_that_was_not_summarised_says_so(tmp_path):
+    long_types = {**CONFIG, "layer_types": ["full_attention"] * (port_facts.MAX_SCHEDULE + 1)}
+    facts = port_facts.build(snapshot_with(tmp_path, TENSORS, config=long_types))
+    assert facts["layer_schedule"] is None and "layer_types" in facts["layer_schedule_note"] and str(port_facts.MAX_SCHEDULE) in facts["layer_schedule_note"]
+    plain = port_facts.build(snapshot_with(tmp_path, TENSORS, name="ok"))
+    assert plain["layer_schedule_note"] is None and plain["conventions_left_out"] == 0 and plain["tensors_with_long_names"] == 0
+
+
+def test_an_estimate_that_lets_too_many_lines_in_is_corrected_one_line_at_a_time(tmp_path, monkeypatch):
+    # The one-pass cut is exact for the encoder it measures; the check after it is the safety net. Make each line look three characters shorter
+    # than it is and the net has to remove the extras, and the file must still fit and still add up.
+    snap = snapshot_with(tmp_path, {f"group{k:04d}.weight": ("BF16", (2, 2)) for k in range(3000)})
+    real = json.dumps
+
+    def generous(obj, *a, **kw):
+        out = real(obj, *a, **kw)
+        return out[:-3] if isinstance(obj, str) and not a and not kw else out
+    monkeypatch.setattr(port_facts.json, "dumps", generous)
+    facts = port_facts.build(snap)
+    monkeypatch.undo()
+    assert len(real(facts, indent=2)) + 1 <= port_facts.MAX_CHARS
+    assert len(facts["tensors"]) + facts["tensors_left_out"] == facts["tensor_groups"]

@@ -622,3 +622,22 @@ def test_an_evidence_record_the_ledger_refuses_leaves_a_ledger_decision_and_does
     S._seed_full_port(stub, SimpleNamespace(number=2), sd)
     assert stub._port_seed["facts"] is False
     assert any(k.get("decision") == "port facts not written" for _, k in entries)
+
+
+def test_an_unexpected_error_in_the_facts_step_leaves_a_ledger_decision_and_does_not_stop_the_stage(tmp_path, monkeypatch):
+    # The facts are advisory: before they existed the coder worked from its skill. An error nobody listed (Copilot, PR 432: a 5,000-digit tensor
+    # name raised ValueError) must not stop the run, and its message, which may quote a tensor name, stays out of the ledger.
+    from types import SimpleNamespace
+    from orchard import port_facts
+    snap = _checkpoint(tmp_path)
+    sd = tmp_path / "stages" / "2"
+    sd.mkdir(parents=True)
+
+    def boom(*a, **k):
+        raise ValueError("Exceeds the limit (4300 digits) in model.layers.99999.weight")
+    monkeypatch.setattr(port_facts, "build", boom)
+    stub, entries, S = _stub(tmp_path, snap)
+    S._seed_full_port(stub, SimpleNamespace(number=2), sd)
+    assert stub._port_seed["facts"] is False and not (sd / "port_facts.json").exists() and stub._port_seed["skeleton"] is True
+    problem = next(k for _, k in entries if k.get("decision") == "port facts not written")["problem"]
+    assert "ValueError" in problem and "99999" not in problem

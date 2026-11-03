@@ -50,13 +50,15 @@ MAX_NOTES = 12
 MAX_NOTE_CHARS = 300
 MAX_SHARDS_LISTED = 8
 MAX_SCHEDULE = 4096
+MAX_NAME_CHARS = 200              # a tensor name longer than this is counted and not listed: the header reader bounds names only by the header's size
+MAX_NUMBER_DIGITS = 6             # a numeric name component of more digits is no layer or expert number and stays in the pattern as it is
 # Config fields that hold layer, block, expert or position numbers. `eos_token_id` lists hold token ids and do not match.
 INDEX_FIELD = re.compile(r"(layer|block|expert|position).*(_ids?|_idx|_indices|_numbers?)$|_layers?$")
 CONVENTION = re.compile(r"\b(?:one|zero|1|0)[- ]?(?:based|indexed)\b", re.I)
 _FIELD_HEAD = re.compile(r"^\s{4,8}(\w+) \(`")                       # `    name (`type`, *optional*):` in a configuration docstring
 _MODEL_TYPE = re.compile(r"[a-z0-9_]{1,64}")
 SUB_CONFIG_SUFFIXES = ("text", "vision", "audio")                    # `qwen4_exp_text` lives in models/qwen4_exp/configuration_qwen4_exp.py
-_NUMBER_IN_NAME = re.compile(r"(?<=\.)\d+(?=\.|$)")
+_NUMBER_IN_NAME = re.compile(rf"(?<=\.)\d{{1,{MAX_NUMBER_DIGITS}}}(?=\.|$)")
 UNKNOWN_CONVENTION = ("not stated in the reference configuration source (or that source was not found): compare these ids with the "
                       "layer numbers of the tensors below before using them as layer indexes")
 _FIND_TRANSFORMERS = "import importlib.util as u; s = u.find_spec('transformers'); print(list(s.submodule_search_locations)[0] if s else '')"
@@ -74,17 +76,21 @@ class PortFactsError(Exception):
 
 # ---- the reference's conventions ---------------------------------------------------------------------------------------------
 
-def convention_notes(source) -> list[dict]:
+def convention_notes(source, left_out: list | None = None) -> list[dict]:
     """The fields of a configuration docstring whose description says how they are numbered (one-indexed, zero-based and the like):
-    [{"field", "note"}] in file order, at most MAX_NOTES, each note at most MAX_NOTE_CHARS."""
+    [{"field", "note"}] in file order, at most MAX_NOTES, each note at most MAX_NOTE_CHARS. A field the cap leaves out is appended to
+    `left_out` when that list is given, so the file can say how many there were."""
     if not isinstance(source, str):
         return []
     notes, field, body = [], None, []
 
     def close():
         text = " ".join(body).strip()
-        if field and text and CONVENTION.search(text) and len(notes) < MAX_NOTES and all(n["field"] != field for n in notes):
-            notes.append({"field": field, "note": text[:MAX_NOTE_CHARS]})
+        if field and text and CONVENTION.search(text) and all(n["field"] != field for n in notes) and (left_out is None or field not in left_out):
+            if len(notes) < MAX_NOTES:
+                notes.append({"field": field, "note": text[:MAX_NOTE_CHARS]})
+            elif left_out is not None:
+                left_out.append(field)
 
     for line in source.splitlines():
         head = _FIELD_HEAD.match(line)
@@ -171,20 +177,32 @@ def _ranges(numbers) -> str:
     return ",".join(parts)
 
 
-def _schedule(text_config: dict):
+def _schedule(text_config: dict) -> tuple:
+    """(the layer schedule grouped by type, or None) and a note that says why a `layer_types` the config holds was not summarised (else None)."""
     types = text_config.get("layer_types")
-    if not isinstance(types, list) or not types or len(types) > MAX_SCHEDULE or not all(isinstance(t, str) and len(t) <= MAX_STR for t in types):
-        return None
+    if types is None:
+        return None, None
+    if not isinstance(types, list) or not types:
+        return None, "layer_types is in the config but is not a non-empty list, so no schedule is given"
+    if len(types) > MAX_SCHEDULE:
+        return None, f"layer_types is in the config but has more than {MAX_SCHEDULE} entries, so no schedule is given"
+    if not all(isinstance(t, str) and len(t) <= MAX_STR for t in types):
+        return None, "layer_types is in the config but holds something other than short strings, so no schedule is given"
     by_type: dict = {}
     for i, t in enumerate(types):
         by_type.setdefault(t, []).append(i)
-    return {t: _ranges(ix) for t, ix in by_type.items()}
+    return {t: _ranges(ix) for t, ix in by_type.items()}, None
 
 
-def _groups(tensors) -> list[str]:
-    """One line per group of tensors with one name pattern (numbers in the name replaced by {i}), one dtype and one shape."""
+def _groups(tensors) -> tuple:
+    """(one line per group of tensors with one name pattern (numbers in the name replaced by {i}), one dtype and one shape, and the
+    count of tensors whose names were too long to list). A name over MAX_NAME_CHARS is never read for numbers or copied into a line."""
     groups: dict = {}
+    too_long = 0
     for t in sorted(tensors, key=lambda t: t.name):
+        if len(t.name) > MAX_NAME_CHARS:
+            too_long += 1
+            continue
         first = _NUMBER_IN_NAME.search(t.name)
         key = (_NUMBER_IN_NAME.sub("{i}", t.name), t.dtype, tuple(t.shape))
         g = groups.setdefault(key, [0, []])
@@ -194,7 +212,7 @@ def _groups(tensors) -> list[str]:
     out = []
     for (pattern, dtype, shape), (count, firsts) in groups.items():
         out.append(f"{pattern}  {dtype} {list(shape)}  x{count}" + (f"  layers {_ranges(firsts)}" if firsts else ""))
-    return out
+    return out, too_long
 
 
 def _weights(snapshot: Path, headers) -> dict:
@@ -231,21 +249,23 @@ def build(snapshot, *, reference_source=None, reference_lookup=None) -> dict:
     model_types = [m for m in (config.get("model_type"), (nested or {}).get("model_type")) if isinstance(m, str)]
     if reference_source is None and reference_lookup is not None:
         reference_source = next((s for s in (reference_lookup(m) for m in model_types) if s), None)
-    notes = convention_notes(reference_source)
+    unlisted: list = []
+    notes = convention_notes(reference_source, unlisted)
     by_field = {n["field"]: n["note"] for n in notes}
     index_fields = []
     for where, section in (("config", top), ("text_config", text)):
         for key, v in section.items():
             if INDEX_FIELD.search(key) and isinstance(v, list) and v and all(isinstance(x, int) and not isinstance(x, bool) for x in v):
                 index_fields.append({"field": key, "in": where, "values": v, "convention": by_field.get(key, UNKNOWN_CONVENTION)})
-    lines = _groups(headers.tensors)
+    lines, long_names = _groups(headers.tensors)
+    schedule, schedule_note = _schedule(nested if nested is not None else config)
     facts = {"schema": SCHEMA, "model_type": model_types[0] if model_types else None, "config": top,
              "config_left_out": sorted(top_left)}
     if nested is not None:
         facts["text_config"], facts["text_config_left_out"] = text, sorted(text_left)
-    facts.update({"layer_schedule": _schedule(nested if nested is not None else config), "index_fields": index_fields,
-                  "conventions": notes, "weights": _weights(snap, headers), "tensor_groups": len(lines), "tensors": lines,
-                  "tensors_left_out": 0,
+    facts.update({"layer_schedule": schedule, "layer_schedule_note": schedule_note, "index_fields": index_fields,
+                  "conventions": notes, "conventions_left_out": len(unlisted), "weights": _weights(snap, headers),
+                  "tensor_groups": len(lines), "tensors": lines, "tensors_left_out": 0, "tensors_with_long_names": long_names,
                   "reading": ("Tensor lines are one per name pattern ({i} stands for a number in the name) with dtype, shape, how many "
                               "tensors and, when the name has a number, which numbers. Layer ids in the config may be counted from 0 or "
                               "from 1: see index_fields.")})
@@ -253,15 +273,34 @@ def build(snapshot, *, reference_source=None, reference_lookup=None) -> dict:
 
 
 def _fit(facts: dict) -> dict:
-    """Drop tensor lines from the end, then config fields, until the file fits MAX_CHARS."""
+    """Drop tensor lines from the end, then config fields, until the file fits MAX_CHARS. Every field dropped is named in the matching
+    `*_left_out` list, so the coder can tell a setting the summary dropped from one the checkpoint does not have.
+
+    The header reader allows a million tensors, so the tensor lines are cut in one pass over their own encoded lengths (each costs its
+    text, a four-space indent, a comma and a newline) to the longest prefix that can fit; the exact check then removes at most the few lines
+    that the rest of the file needs. Serialising the whole file once per removed line was quadratic in the number of groups."""
     def size():
         return len(json.dumps(facts, indent=2)) + 1
-    while size() > MAX_CHARS and facts["tensors"]:
-        facts["tensors"].pop()
+    lines, total, already = facts["tensors"], len(facts["tensors"]), facts["tensors_left_out"]
+    facts["tensors"], facts["tensors_left_out"] = [], already + total          # measured with every line counted as left out: the digits are the longest
+    room = MAX_CHARS - size() - 2                                              # the rest of the file, once; a non-empty list is two characters longer than `[]`
+    facts["tensors"] = lines
+    used = keep = 0
+    for line in lines:
+        cost = len(json.dumps(line)) + 6
+        if used + cost > room:
+            break
+        used += cost
+        keep += 1
+    del lines[keep:]
+    facts["tensors_left_out"] = already + total - keep
+    while size() > MAX_CHARS and lines:
+        lines.pop()
         facts["tensors_left_out"] += 1
-    for section in ("text_config", "config"):
+    for section, left_out in (("text_config", "text_config_left_out"), ("config", "config_left_out")):
         while size() > MAX_CHARS and facts.get(section):
-            facts[section].popitem()
+            key, _ = facts[section].popitem()
+            facts[left_out] = sorted([*facts[left_out], key])
     if size() > MAX_CHARS:
         raise PortFactsError("the facts do not fit one read_file page even without tensors")
     return facts

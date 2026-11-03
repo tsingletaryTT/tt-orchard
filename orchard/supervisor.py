@@ -2564,6 +2564,9 @@ class Supervisor:
                 record = evidence_record(self.run_dir, port_facts.write(stage_dir, facts))
             except (port_facts.PortFactsError, OSError, safeio.SafeReadError) as exc:
                 self.ledger.append("decision", spec.number, decision="port facts not written", problem=str(exc)[:300])
+            except Exception as exc:         # advisory step: an error nobody listed (a hostile tensor name) must not stop the run; its text may quote the checkpoint
+                self.ledger.append("decision", spec.number, decision="port facts not written",
+                                   problem=f"{exc.__class__.__name__}: an unexpected error while reading the checkpoint")
             else:
                 facts_written = True
                 self.ledger.append("decision", spec.number, decision="port facts written", facts=record,

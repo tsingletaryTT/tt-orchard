@@ -242,7 +242,13 @@ tensor's dtype and shape from the safetensors headers (one file or shards, read 
 followed once, only regular files are read and headers are size-capped), and for each config field that holds layer ids the index
 convention in the reference's configuration class (found with `find_spec`, without importing `transformers`; a `_text`, `_vision` or
 `_audio` model type is also looked up under its family). It is kept under 10,500 characters so one `read_file` returns all of it, and
-it says how many tensor groups it left out. The skeleton's four functions raise `NotImplementedError`, so a port left as it is fails
+it says what it left out: `tensors_left_out` (groups cut to fit; the lines are cut in one pass over their encoded lengths, so a checkpoint
+with a million groups costs one pass and not one encoding of the whole file per line), `config_left_out` and `text_config_left_out` (every
+config field dropped for size or because it is not a short scalar or list, named), `conventions_left_out` (convention notes over the
+cap of 12), `layer_schedule_note` (why a `layer_types` the config holds was not summarised) and `tensors_with_long_names` (tensors whose
+names are over 200 characters; they are counted and never listed). A numeric name component of more than six digits is no layer number
+and stays in the name pattern as it is. If building the file fails for a reason nobody listed, the ledger says `port facts not written`
+with the exception's class and no text, and the stage goes on. The skeleton's four functions raise `NotImplementedError`, so a port left as it is fails
 the check at `load`. A port already in the stage directory is kept on a resume. When the checkpoint or its config cannot be read, no
 facts file is written, the ledger says why (`port facts not written`) and the coder works from its skill as before. In three
 rehearsal runs the first attempt read the stage 1 reference in pages and probed for a weight index a single-file checkpoint does not

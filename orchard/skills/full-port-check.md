@@ -23,7 +23,9 @@ The supervisor has already put two things in the stage directory, and the prepar
   convention the reference class states for them. Read it first, once. It is written from the checkpoint, so you do not need to read
   the config, the weight headers or the weights again to learn shapes. A checkpoint with one file has no `model.safetensors.index.json`;
   the file says which case this is. When a config id list says `one-indexed`, layer index = id - 1. When the file says the convention
-  was not found, compare the ids with the layer numbers of the tensors before you use them.
+  was not found, compare the ids with the layer numbers of the tensors before you use them. The file names what it left out for size:
+  `tensors_left_out`, `config_left_out`, `text_config_left_out`, `conventions_left_out`, `layer_schedule_note` and
+  `tensors_with_long_names`. A field in a `*_left_out` list may well be in the checkpoint's config; read `config.json` for that one field.
 - `stages/2/port/port_model.py`: a skeleton. Each of the four functions raises `NotImplementedError` until you replace its body, and
   `read_tensors(model_dir)` returns every tensor by name from one file or from shards. A port left as the skeleton fails the check at
   `load` and says so.
