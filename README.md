@@ -1192,7 +1192,11 @@ comparison does not count the nearest model's `lm_head` as missing from a model 
 rerank|embed`) records a fixed input set and the Hugging Face scores or vectors, and stage 2 (skill `scoring-check`, gate `orchard/scoring_check.py`) has the
 coder write a port module and runs the supervisor's own check on one leased board: Pearson, absolute differences, top document, order, NDCG@10 and Hit@1 for a
 reranker; the cosine to the Hugging Face vector, mean and minimum for each input kind, for an embedding model. A pair file may name image or video files that the
-check hands to the port with their sha256. Stages 3 to 6 are not built for this route, so the run pauses after stage 2 (block code `scoring-route`). Design:
+check hands to the port with their sha256. The record says where the scores were computed (`computed_on`, issue 407): in the check's worker process (the
+default), or by a model server on a loopback address that the port declares with `COMPUTES_ON = "server"` and `server_address(model)`. For a server the record
+holds the address and the check's own probe of `/health` and `/v1/models`, and the gate asks for a loopback address and a server that answers, and does not ask a
+server-backed port to mention `ttnn`. A pass for a server-backed port says the scores are consistent with the reference and that something answers at the address. `chips` stays the chips the
+check opened and `load_s` the time of the port's `load` call, and the record says so. Stages 3 to 6 are not built for this route, so the run pauses after stage 2 (block code `scoring-route`). Design:
 [docs/superpowers/specs/2026-11-02-scoring-model-check-design.md](docs/superpowers/specs/2026-11-02-scoring-model-check-design.md). No port has run through the check on a chip.
 
 **Audio models.** A model in the stable-audio-tools layout (`model_config.json`, one combined `model.safetensors`, no `config.json`) is read by an
