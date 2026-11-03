@@ -193,7 +193,7 @@ def classify_pause(data: dict) -> tuple[str, str | None]:
         return "restricted_head", None
     if "full-port route" in reason:
         return "full_port_unbuilt", None
-    if "full port" in reason:
+    if "full port" in reason or "could not decide this model's class" in reason:
         return "full_port", None
     if "cap" in reason and ("since" in reason or "lasted" in reason):
         return "budget", None

@@ -18,8 +18,9 @@
                      its tensors are in the layout tt-transformers loads. No weights swap (there is no installed bundle) and no new
                      model code: stage 2 serves it through tt-transformers on one board (orchard/stock_runtime.py)
     full-port        the model needs new model code
-    unknown          stage 0 could not decide (an unreadable or overlapping sidecar, headers that would not
-                     parse). Nothing unproven runs as weights-only, so it takes the full-port path
+    unknown          stage 0 could not decide (an unreadable or overlapping safetensors sidecar, headers that would not
+                     parse). Nothing unproven runs as weights-only, so it takes the full-port path. A GGUF file is not
+                     a sidecar and does not make a class unknown (delta.json `ignored_files`)
 
 Every class maps to one of the two paths the stage machine already knows, so a run that records a class
 changes nothing for the stages that do not care about it. `path` stays in delta.json and in stage 0's
@@ -29,6 +30,8 @@ from __future__ import annotations
 
 CLASSES = ("weights-only", "weights+sidecar", "restricted-head", "vocab-trim", "stock-runtime", "full-port", "unknown")
 SIDECAR_CLASSES = ("weights+sidecar", "restricted-head")      # the classes whose delta.json may list sidecars
+IGNORED_WEIGHT_SUFFIXES = (".gguf",)     # weights files stage 0 lists in delta.json `ignored_files` and does not count as sidecars (issue 437);
+#                                        orchard/skills/delta-triage-templates/delta_triage.py keeps the same tuple as IGNORED_SUFFIXES
 
 _PATH_OF = {"weights-only": "weights-only", "weights+sidecar": "weights-only", "restricted-head": "full-port",
             "vocab-trim": "weights-only", "stock-runtime": "stock-runtime", "full-port": "full-port", "unknown": "full-port"}
