@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from orchard import audio_package as ap
-from test_audio_package import (LIB, REV, SETTINGS, args, arr, audio_result, bench_file, card_of, gate, run_pinned, size, timings,  # noqa: F401
+from test_audio_package import (FLOOR_SHA, LIB, REV, SETTINGS, args, arr, audio_result, bench_file, card_of, gate, measured, run_pinned, size, timings,  # noqa: F401
                                 world, staged)
 
 HERE = Path(ap.__file__).resolve().parent
@@ -480,3 +480,76 @@ def test_the_derive_command_refuses_to_overwrite_a_file_and_a_run_with_no_result
     assert rd.main([str(tmp_path), str(tmp_path), str(out)]) == 2 and "never overwritten" in capsys.readouterr().err
     assert rd.main([str(tmp_path), str(tmp_path), str(tmp_path / "new.json")]) == 2 and "refused" in capsys.readouterr().err
     assert not (tmp_path / "new.json").exists()
+
+
+# ---- a derived result keeps the bars of the base result (issue 173, item 1) ----------------------------------------------------------
+
+FLOOR_BARS = "measured: 3.0 times the worst CPU-environment spread, checked against a known-bad control"
+
+
+def floor_of(sha=FLOOR_SHA, measured_bars=True):
+    from orchard import audio_bars as ab
+    if not measured_bars:
+        return ab.Floor(None, ab.NO_FLOOR)
+    return ab.Floor({"latent": {}}, FLOOR_BARS, sha)
+
+
+def test_a_derived_result_made_with_a_measured_floor_keeps_the_floor_and_builds_a_package(world, tmp_path):
+    from orchard import audio_result_derive as rd
+    out = rd.derive(measured(audio_result()), chip_run=chip_run(), agreement=arr(0.99, 0.1, bars=FLOOR_BARS), base_sha256="a", chip_label="x",
+                    floor=floor_of())
+    assert out["noise_floor"]["sha256"] == FLOOR_SHA and out["noise_floor"]["measured"] is True
+    assert not any("provisional" in x for x in out["limits"]) and any("noise floor measured between CPU runs" in x for x in out["limits"])
+    f = tmp_path / "derived.json"
+    f.write_text(json.dumps(out))
+    world.write_bench(bench_file([size_dec(10.0, [0.8, 0.82, 0.83])]))
+    world.stage(result_path=f)
+    card = card_of(world.pkg)
+    assert "measured (bars from a measured noise floor)" in card and f"sha256 `{FLOOR_SHA}`" in card and gate(world.pkg) == []
+
+
+def test_a_derived_result_with_no_floor_keeps_the_provisional_sentence():
+    from orchard import audio_result_derive as rd
+    out = rd.derive(audio_result(), chip_run=chip_run(), agreement=arr(0.99, 0.1), base_sha256="a", chip_label="x", floor=floor_of(measured_bars=False))
+    assert any("provisional" in x for x in out["limits"]) and "noise_floor" not in out
+
+
+@pytest.mark.parametrize("base,floor,agreement,match", [
+    (lambda: measured(audio_result(), sha="cd" * 32), lambda: floor_of(), lambda: arr(0.99, 0.1, bars=FLOOR_BARS), "floor"),        # another floor file
+    (lambda: audio_result(), lambda: floor_of(), lambda: arr(0.99, 0.1, bars=FLOOR_BARS), "floor"),                                 # base had no record
+    (lambda: measured(audio_result()), lambda: floor_of(measured_bars=False), lambda: arr(0.99, 0.1), "floor"),                      # file gone
+    (lambda: measured(audio_result()), lambda: floor_of(), lambda: arr(0.99, 0.1), "bars"),                                          # compared without it
+])
+def test_a_derived_result_refuses_bars_that_are_not_the_base_results(base, floor, agreement, match):
+    from orchard import audio_result_derive as rd
+    with pytest.raises(rd.DeriveError, match=match):
+        rd.derive(base(), chip_run=chip_run(), agreement=agreement(), base_sha256="a", chip_label="x", floor=floor())
+
+
+def test_the_derive_command_compares_with_the_floor_of_stage_1(tmp_path, monkeypatch):
+    """The wiring: main loads the floor from stages/1 and gives the same floor to the comparison and to derive."""
+    from orchard import audio_bars as ab, audio_reference as ar, audio_result_derive as rd, audio_stages as st
+    run = tmp_path / "run"
+    (run / "stages" / "2").mkdir(parents=True)
+    (run / "stages" / "1").mkdir()
+    (run / "stages" / "2" / "audio_result.json").write_text(json.dumps(measured(audio_result(), bars=FLOOR_BARS) | {"reference_runs": {"reference": {"dir": "ref"}}}))
+    chip_dir = tmp_path / "overnight" / "e2e1"
+    chip_dir.mkdir(parents=True)
+    seen = {}
+    monkeypatch.setattr(ab, "load_floor", lambda d: seen.setdefault("dir", d) and floor_of())
+    monkeypatch.setattr(st, "run_facts", lambda parent, name: chip_run())
+    monkeypatch.setattr(st, "compare", lambda ref, cand, **kw: seen.setdefault("floor", kw.get("floor")) and arr(0.99, 0.1, bars=FLOOR_BARS))
+
+    class Run:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(ar, "load_run", lambda d: Run())
+    monkeypatch.setattr(ar, "compare_runs", lambda ref, cand, bars=None, **k: {"bars_used": bars})
+    out = tmp_path / "derived.json"
+    report = tmp_path / "report.json"
+    assert rd.main([str(run), str(chip_dir), str(out), "--agreement-report-out", str(report)]) == 0
+    assert json.loads(report.read_text()) == {"bars_used": {"latent": {}}}                 # the full report uses the floor's bars, as the result does
+    assert Path(seen["dir"]) == run / "stages" / "1" and seen["floor"].sha256 == FLOOR_SHA
+    written = json.loads(out.read_text())
+    assert written["noise_floor"]["sha256"] == FLOOR_SHA
+    assert any("noise floor measured between CPU runs" in x for x in written["limits"]) and not any("provisional" in x for x in written["limits"])
