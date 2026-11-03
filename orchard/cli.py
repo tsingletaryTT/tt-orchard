@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
-    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port]
+    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port] [--model-kind generative|reranker|embedding]
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
@@ -62,7 +62,7 @@ import threading
 import time
 from pathlib import Path
 
-from orchard import __version__, blocked, bringup_config, dlprogress, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import __version__, audio_facts, blocked, bringup_config, dlprogress, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
 from orchard import caches as tensor_caches
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
@@ -132,6 +132,11 @@ def _parser() -> argparse.ArgumentParser:
                         "compares the chip's tokens with the CPU reference. Stages 3 to 6 for a full port are not built yet, so the run ends "
                         "blocked after stage 2 (code full-port-stages-unbuilt). A run that already ran stage 2 without the flag refuses it. "
                         "No other class changes")
+    b.add_argument("--model-kind", choices=("generative", "reranker", "embedding"), default=None,
+                   help="what the model produces. Without it stage 0 reads the model card's pipeline_tag (text-ranking is a reranker; "
+                        "feature-extraction and sentence-similarity are embedding models), then the architecture names. A reranker or embedding "
+                        "model takes the scoring route (stage 1 records Hugging Face scores or vectors, stage 2 runs the scoring check on the "
+                        "coder's port); stages 3 to 6 are not built for it, so the run ends blocked after stage 2 (code scoring-route)")
     b.add_argument("--full-port-rehearsal", action="store_true",
                    help="with --full-port, for a rehearsal model with random weights: stage 2 waives its `coherent` field and no other check, "
                         "and the ledger says so. Given when the run starts; a resume keeps it and cannot add it")
@@ -671,6 +676,13 @@ def _downloaded_audio_problem(snapshot: Path) -> str | None:
     return f"missing {', '.join(missing[:3])}" if missing else None
 
 
+def _plain_text_snapshot(local) -> bool:
+    """True when a local snapshot has the text layout: a `config.json` at its root (the audio layout has none, orchard/audio_facts.py). The Hub's tags are the
+    only evidence for audio (orchard/audio_facts.py), so this answers "text" for a model nobody could ask the Hub about, and never "audio"."""
+    names = preflight.snapshot_root_names(local)
+    return audio_facts.TEXT_CONFIG in names
+
+
 def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
     """(state, a reason to refuse `--base <arg>` or None). `state` is "audio", "text" or "unknown" (the Hub could not say, so nothing
     shows whether the model is audio). An audio model (orchard/audio_facts.py) is compared with its base repository directly and no bundle
@@ -684,6 +696,8 @@ def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
     except Exception:
         hub, local = None, None
     state = "unknown" if hub is None else ("audio" if preflight.audio_evidence_for(hub, local) is not None else "text")
+    if state == "unknown" and local and _plain_text_snapshot(local):
+        state = "text"                   # a local model has no Hub entry (issue 409): its own files say it is a text model
     if state == "text":
         return state, None
     inst = _installed(sig)
@@ -1220,7 +1234,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override,
                                       accept_inferred_base=args.accept_inferred_base, progress=progress,
-                                      stock_recorded=recorded_stock)
+                                      stock_recorded=recorded_stock, no_fetch=args.no_fetch)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -1275,6 +1289,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         print(f"{style.icon('🍂')}the earlier run read a snapshot with no weights; set aside as {aside}", file=out)
     base_data = next(c for c in checks if c.name == "base").data or {}
     base_hub, base_snapshot = None, base_data.get("snapshot")
+    if base_data.get("needs_fetch") and args.no_fetch and not args.dry_run:
+        return _refuse(f"--no-fetch was given and the base model {base_data['base']} is not in {hf_home}; stage 0 compares against it")
     if base_data.get("needs_fetch"):
         base_hub, why = sig.hub_info(base_data["base"])
         if base_hub is None:
@@ -1306,7 +1322,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               accept_credentials=not args.refuse_credentials_visible,
                                               graft_trial=not args.no_graft_trial,
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
-                                              full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal)
+                                              full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)

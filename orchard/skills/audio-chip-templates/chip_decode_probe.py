@@ -79,6 +79,13 @@ def log_mel_l1(torch, wave_a, wave_b, sr=44100, n_fft=2048, hop=512, n_mels=96):
     return float((spec(a) - spec(b)).abs().mean())
 
 
+def tokens_by_features(t):
+    """A layer output as [tokens, D]. The library's hooks see [1, 17*T, D] for the sliding-window (medium) decoder and [(b nc), 34, D] for the chunked
+    one, while `ChipDecoder.probe` returns [T, 17, D] and [(b nc), 34, D]. The tokens come in the same order in both, so flattening every axis but the
+    last makes them comparable (issue 220: the shapes differed and the summary raised KeyError before anything was written)."""
+    return t.reshape(-1, t.shape[-1])
+
+
 def first_divergence_summary(np, layer_ref, layer_bf, layer_chip, wave_ref, wave_bf, wave_chip) -> dict:
     """The first-divergence probe of orchard/first_divergence.py on the decoder's six or twelve layers, the chip against the CPU float32 reference, with the CPU
     decoder in bfloat16 as the floor (the error a bfloat16 decoder shows with no chip involved). Two tolerances are reported: 3 times that floor (the probe's
@@ -87,7 +94,7 @@ def first_divergence_summary(np, layer_ref, layer_bf, layer_chip, wave_ref, wave
     from orchard import first_divergence as fd
 
     def run(layers, wave):
-        arrays = {("layer", f"layer_{i:02d}"): v.numpy() for i, v in layers.items()}
+        arrays = {("layer", f"layer_{i:02d}"): tokens_by_features(v).numpy() for i, v in layers.items()}
         arrays[("waveform", "audio")] = wave.numpy()
         return fd.MemoryRun(arrays)
     ref, bf, chip = run(layer_ref, wave_ref), run(layer_bf, wave_bf), run(layer_chip, wave_chip)
@@ -191,9 +198,8 @@ def main(argv=None) -> int:
             result["layers"] = {}
             chip_layers = dict(chip.probe)
             for i in sorted(chip.probe):
-                ref = layer_ref[i]
-                got = chip.probe[i]
-                # hooks see [(b nc), 34, D]; the probe is the same
+                ref = tokens_by_features(layer_ref[i])
+                got = tokens_by_features(chip.probe[i])
                 result["layers"][f"layer_{i}"] = stats(np, got.numpy(), ref.numpy())
             chip.probe = None
             result["first_divergence"] = first_divergence_summary(np, layer_ref, layer_bf, dict(chip_layers), wave_ref, wave_bf, wave_chip)

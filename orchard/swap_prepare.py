@@ -32,7 +32,8 @@ NOTE_TAIL_CHARS = 1500           # how much of the script's output the agent is 
 
 # Files only the hardware test or the finish step may write. A copy written during prepare is set aside under this suffix.
 RESULT_FILES = ("result.json", "test-result.json", "evidence/swap-check.json", "evidence/hw-test-output.txt",
-                "evidence/port-check.json")       # the last is the full-port stage 2's record (orchard/full_port.py)
+                "evidence/port-check.json",       # the full-port stage 2's record (orchard/full_port.py)
+                "evidence/scoring-check.json")    # the scoring stage 2's record (orchard/scoring_check.py)
 REJECTED_SUFFIX = ".rejected-from-prepare"
 
 
@@ -83,7 +84,8 @@ def prepare(*, run_dir, stage_dir, env: dict, stage: int = 2) -> PrepareOutcome:
     rel = os.path.relpath(out_path, stage_dir)
     command = f"python3 stages/{stage}/prepare_swap.py"
     code, timed_out, refused = None, False, None
-    with open(out_path, "wb") as out:
+    # A FIFO or link an agent left at the output path would block the open or send the output elsewhere: the name is removed first.
+    with safeio.create_for_write(out_path) as out:
         try:
             code, timed_out = spawn_checked(command, run_dir, env, PREPARE_TIMEOUT_S, out)
         except Denied as exc:
@@ -111,9 +113,7 @@ def prepare(*, run_dir, stage_dir, env: dict, stage: int = 2) -> PrepareOutcome:
                            "of at least 16 and top1_agreement of at least 0.85.",
     }
     for name, body in (("hw_test.json", test), ("handoff.json", handoff)):
-        tmp = stage_dir / f"{name}.tmp"
-        tmp.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, stage_dir / name)
+        safeio.atomic_write(stage_dir / name, json.dumps(body, indent=2) + "\n")
     return PrepareOutcome(True, None, code, rel)
 
 

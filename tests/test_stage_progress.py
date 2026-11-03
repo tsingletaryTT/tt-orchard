@@ -130,7 +130,7 @@ def test_a_partial_stage_directory_is_moved_aside_and_never_deleted(tmp_path, le
     assert (run / "stages" / "2.partial-1" / "evidence" / "work.txt").read_text() == "half done"
     open_stage_dir(run, STAGES[2], resuming=False, ledger=ledger)
     assert (run / "stages" / "2.partial-2").is_dir()
-    moved = [e["data"]["path"] for e in ledger.read() if e["event"] == "decision"]
+    moved = [e["data"]["path"] for e in ledger.read() if e["data"].get("decision") == "moved the partial stage directory aside"]
     assert moved == ["stages/2.partial-1", "stages/2.partial-2"]
 
 

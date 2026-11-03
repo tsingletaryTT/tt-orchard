@@ -2,7 +2,7 @@
 
 ## Summary
 
-This run brought up Altworld/Hemmingway-1 on the weights-only path. Stages that passed: 0, 1, 2, 4, 7. Stages skipped: 3, 5, 6. Stage 7 staged 2 package(s); 1 passed its boot check. RISKS.md lists 6 TODO item(s) and 4 stage 0 hazard(s).
+This run brought up Altworld/Hemmingway-1 on the weights-only path. Stages that passed: 0, 1, 2, 4, 7. Stages skipped: 3, 5, 6. Stage 7 staged 2 package(s); 1 passed its boot check. RISKS.md lists 6 TODO item(s) and 4 stage 0 delta-triage hazard(s) (a kernel hazard scan, when the run has one, is counted in the stage 0 section).
 
 ## Run facts
 

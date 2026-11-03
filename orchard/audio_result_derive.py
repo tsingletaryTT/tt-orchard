@@ -125,9 +125,9 @@ def main(argv=None) -> int:
     except DeriveError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
-    out.write_text(json.dumps(result, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    safeio.atomic_write(out, json.dumps(result, indent=1, sort_keys=True) + "\n", mode=0o644)
     if a.agreement_report_out:
-        Path(a.agreement_report_out).write_text(json.dumps(report, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        safeio.atomic_write(a.agreement_report_out, json.dumps(report, indent=1, sort_keys=True) + "\n", mode=0o644)
     print(f"wrote {out}")
     return 0
 

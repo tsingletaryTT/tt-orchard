@@ -86,17 +86,30 @@ def runtime_problems(model_dir) -> list[str]:
 @dataclass(frozen=True)
 class AudioPaths:
     """Where the runtime's three programs live. `reference_python` has CPU torch and the library; `chip_python` has ttnn (the shared Tenstorrent
-    environment, which also has torch and the library's dependencies; the library itself is found through PYTHONPATH=`src_dir`)."""
+    environment, which also has torch and the library's dependencies; the library itself is found through PYTHONPATH=`src_dir`).
+
+    The `acestep_*` fields are for a model with an ACE-Step audio profile (issue 269) and are empty for Stable Audio: the community bundle's `code/`
+    directory (real files, see scripts/acestep/acestep_run.py), the weights snapshot directory, and the interpreter that runs the bundle on the CPU (empty:
+    `reference_python`). The record holds them only when set, so records of runs that never had them are unchanged."""
     reference_python: str
     chip_python: str
     src_dir: str
+    acestep_bundle_code: str = ""
+    acestep_snapshot: str = ""
+    acestep_python: str = ""
 
     def record(self) -> dict:
-        return {"reference_python": self.reference_python, "chip_python": self.chip_python, "src_dir": self.src_dir}
+        rec = {"reference_python": self.reference_python, "chip_python": self.chip_python, "src_dir": self.src_dir}
+        for key in ("acestep_bundle_code", "acestep_snapshot", "acestep_python"):
+            if getattr(self, key):
+                rec[key] = getattr(self, key)
+        return rec
 
     @classmethod
     def from_record(cls, rec: dict) -> "AudioPaths":
-        return cls(rec["reference_python"], rec["chip_python"], rec["src_dir"])
+        base = (rec["reference_python"], rec["chip_python"], rec["src_dir"])        # a record that is not an object raises here, as before
+        extra = {k: rec[k] for k in ("acestep_bundle_code", "acestep_snapshot", "acestep_python") if isinstance(rec.get(k), str)}
+        return cls(*base, **extra)
 
 
 def audio_paths(operator_home, environ=None) -> AudioPaths:
@@ -106,7 +119,9 @@ def audio_paths(operator_home, environ=None) -> AudioPaths:
     return AudioPaths(
         reference_python=env.get("ORCHARD_AUDIO_PYTHON") or str(home / "orchard-venvs" / "stable-audio" / "bin" / "python"),
         chip_python=env.get("ORCHARD_TTNN_PYTHON") or str(home / ".tenstorrent-venv" / "bin" / "python"),
-        src_dir=env.get("ORCHARD_AUDIO_SRC") or str(home / "orchard-src" / "stable-audio-3"))
+        src_dir=env.get("ORCHARD_AUDIO_SRC") or str(home / "orchard-src" / "stable-audio-3"),
+        acestep_bundle_code=env.get("ORCHARD_ACESTEP_BUNDLE_CODE") or "", acestep_snapshot=env.get("ORCHARD_ACESTEP_SNAPSHOT") or "",
+        acestep_python=env.get("ORCHARD_ACESTEP_PYTHON") or "")
 
 
 def environment_problems(paths: AudioPaths) -> list[str]:

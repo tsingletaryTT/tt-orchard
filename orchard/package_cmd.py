@@ -30,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-from orchard import package
+from orchard import package, safeio
 from orchard.agent import agent_env, spawn_checked
 from orchard.kernelprobe import _TICKET, cancel_ticket
 from orchard.ledger import Ledger, LedgerLocked, LedgerCorrupt, read_entries
@@ -59,6 +59,16 @@ TASK_LABELS = {"gsm8k": "GSM8K", "ifeval": "IFEval", "humaneval": "HumanEval", "
 
 class PackageCommandError(Exception):
     """The command refuses; the message says why."""
+
+
+def _record(run: Path, path) -> dict:
+    """`evidence_record`, with a refusal that names the run-relative file (review of PR 403): the reason of a SafeReadError says what was wrong
+    and not which file."""
+    try:
+        return evidence_record(run, path)
+    except safeio.SafeReadError as exc:
+        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(run))
+        raise PackageCommandError(f"{rel} was refused: {exc.reason}") from exc
 
 
 def _say(out, text: str = "") -> None:
@@ -248,7 +258,7 @@ def _stage(run: Path, led: Ledger, args, entries, out, *, extra_env, hostname) -
         raise PackageCommandError(f"packaging: {exc}") from None
     names = [p["name"] for p in staged["profiles"]]
     led.append("evidence", 7, what="package staged", profiles=names,
-               **evidence_record(run, stage_dir / "package.json"))
+               **_record(run, stage_dir / "package.json"))
     _say(out, f"staged: {', '.join(names)}"
               + (f" (skipped: {len(staged['skipped_profiles'])})" if staged["skipped_profiles"] else ""))
     return stage_dir
@@ -394,7 +404,9 @@ def boot_step(run: Path, args, out, *, env, spawn, extra_env) -> int:
     except ValueError:                      # not the main thread: nothing to install, the finally still runs
         previous = None
     try:
-        with open(out_path, "wb") as log:
+        # A name an agent left at the output path (a FIFO would block the open, a link would send the output elsewhere) is removed and the
+        # file is created new without following a link.
+        with safeio.create_for_write(out_path) as log:
             code, timed_out = spawn(test["command"], run, benv, test["deadline_s"], log)
     finally:
         server = _stop_recorded_server(stage_dir)
@@ -407,12 +419,20 @@ def boot_step(run: Path, args, out, *, env, spawn, extra_env) -> int:
                       "not be stopped. The chips are still open: look with `gozer status` and use the "
                       "gozer-gatekeeper skill. Do not reset a chip by hand")
     result = {"command": test["command"], "returncode": code, "timed_out": timed_out,
-              "seconds": round(time.time() - t0, 3), "chips": chips.split(","),
-              "output": evidence_record(run, out_path), "server": server}
-    tmp = stage_dir / "test-result.json.tmp"
-    tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    os.replace(tmp, stage_dir / "test-result.json")
+              "seconds": round(time.time() - t0, 3), "chips": chips.split(","), "server": server}
+    try:
+        result["output"] = evidence_record(run, out_path)
+    except safeio.SafeReadError as exc:
+        # The bounded reader refuses the output (over the size cap, a link that leaves the run, a changed file). The boot ran, but its output
+        # cannot be vouched for, so the attempt gets a failed result that names the file and the reason (issue 387). Without it the
+        # error left no test-result.json and no record of the refusal.
+        result["output"] = {"path": os.path.relpath(out_path, run), "unreadable": exc.reason}
+        result["output_refused"] = exc.reason
+    safeio.atomic_write(stage_dir / "test-result.json", json.dumps(result, indent=2))
     _say(out, f"boot check: exit {code}, timed out {timed_out}, {result['seconds']} s")
+    if "output_refused" in result:
+        _say(out, f"boot check: its output {result['output']['path']} was refused: {result['output_refused']}. The result is recorded as failed")
+        return EXIT_FAILED
     if server.get("outcome") == "still running":
         return EXIT_FAILED
     return EXIT_OK if code == 0 and not timed_out else EXIT_FAILED
@@ -421,7 +441,7 @@ def boot_step(run: Path, args, out, *, env, spawn, extra_env) -> int:
 def _finish(run: Path, led: Ledger, stage_dir: Path, out, *, hostname) -> int:
     result = stage_dir / "test-result.json"
     if result.is_file():
-        led.append("evidence", 7, what="package boot check", **evidence_record(run, result))
+        led.append("evidence", 7, what="package boot check", **_record(run, result))
     try:
         package.finish(run, stage_dir, hostname=hostname)
     except PackageError as exc:
@@ -450,10 +470,7 @@ def _write_handoff(stage_dir: Path) -> str:
     token = secrets.token_hex(16)
     boot_id, start = proc_identity(os.getpid()) or (None, None)
     path = stage_dir / HANDOFF_FILE
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"token": token, "pid": os.getpid(), "boot_id": boot_id, "start_time": start}),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    safeio.atomic_write(path, json.dumps({"token": token, "pid": os.getpid(), "boot_id": boot_id, "start_time": start}))
     return token
 
 
@@ -537,8 +554,8 @@ def main(args, *, out=None, env=None, runner=None, spawn=None, extra_env=None, h
                               "finished")
                     return EXIT_FAILED
             return _finish(run, led, stage_dir, out, hostname=hostname)
-    except PackageCommandError as exc:
-        _say(out, f"package: {exc}")
+    except (PackageCommandError, safeio.SafeReadError) as exc:      # a refused run file is a named refusal, not a traceback
+        _say(out, f"package: {exc if isinstance(exc, PackageCommandError) else 'a run file was refused: ' + exc.reason}")
         return EXIT_REFUSED
 
 
@@ -649,9 +666,7 @@ def benchmark_rows(bench: dict, model_key: str, base_key: str | None) -> list[di
 
 def _replace_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    safeio.atomic_write(path, text)
 
 
 def card_main(args, *, out=None, extra_env=None, hostname=None) -> int:
@@ -702,7 +717,7 @@ def card_main(args, *, out=None, extra_env=None, hostname=None) -> int:
             led.append("decision", 7, decision="package card", benchmark=BENCHMARK_COPY,
                        model_key=args.model_key, base_key=args.base_key, rows=len(rows),
                        reported=bool(args.reported), identity_unverified=unverified,
-                       sha256=evidence_record(run, run / BENCHMARK_COPY)["sha256"])
+                       sha256=_record(run, run / BENCHMARK_COPY)["sha256"])
             for note in unverified:
                 _say(out, f"identity not verified (accepted by --accept-unverified-identity): {note}")
             ids = _packaged_identities(run)
@@ -710,6 +725,6 @@ def card_main(args, *, out=None, extra_env=None, hostname=None) -> int:
             _say(out, f"{len(rows)} measured rows from {Path(args.benchmark).name}"
                       + ("; reported scores installed" if reported_text is not None else ""))
             return _finish(run, led, stage_dir, out, hostname=hostname)
-    except PackageCommandError as exc:
-        _say(out, f"package-card: {exc}")
+    except (PackageCommandError, safeio.SafeReadError) as exc:
+        _say(out, f"package-card: {exc if isinstance(exc, PackageCommandError) else 'a run file was refused: ' + exc.reason}")
         return EXIT_REFUSED

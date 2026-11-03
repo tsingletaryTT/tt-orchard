@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime, full_port, safeio
+from orchard import audio_decision, audio_facts, audio_runtime, full_port, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe
@@ -551,6 +551,28 @@ def gate_full_port(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult
     waived: list[str] = []
     reasons, seen = full_port.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived)
     return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
+
+
+def gate_scoring_reference(stage_dir, run_dir) -> GateResult:
+    """Stage 1 of a scoring model (a reranker or an embedding model, issue 378): the pair set and the Hugging Face scores or vectors that
+    `python3 -m orchard.scoring_reference` writes under stages/1/evidence/reference/. The kind is the one the pair file names; the supervisor
+    checks that it is the run's kind (`Supervisor._check_gate`)."""
+    kind = None
+    try:
+        doc = _safe_json(Path(run_dir) / scoring_check.PAIRS_FILE, max_bytes=scoring_check.JSON_MAX, expect=dict)
+        kind = doc.get("model_kind")
+    except safeio.SafeReadError as exc:
+        return GateResult(False, (f"{scoring_check.PAIRS_FILE} is not readable JSON: {exc.reason}",))
+    reasons, seen = scoring_check.reference_reasons(run_dir, kind if isinstance(kind, str) else "")
+    return _done(reasons, seen)
+
+
+def gate_scoring(stage_dir, run_dir) -> GateResult:
+    """Stage 2 of a scoring model (issue 378): the supervisor's own scoring check ran the port on the leased chip and its scores or vectors
+    match the stage 1 reference within the bounds. orchard/scoring_check.py holds the checks; the kind is the config's (the supervisor
+    passes the run's kind when it checks the gate itself)."""
+    reasons, seen = scoring_check.check(stage_dir, run_dir)
+    return _done(reasons, seen)
 
 
 def _delta_refusal(run_dir) -> str | None:
@@ -1603,6 +1625,27 @@ FULL_PORT_STAGE_2 = dataclasses.replace(
     gate=gate_full_port, draft="full_port")
 
 
+# A scoring model (a reranker or an embedding model, issue 378, docs/superpowers/specs/2026-11-02-scoring-model-check-design.md): stage 1 records
+# a pair set and the Hugging Face scores or vectors instead of generated ids, and stage 2 runs the supervisor's scoring check on the coder's port
+# module (skill scoring-check, orchard/scoring_check.py). No agent writes a finish step for stage 2: the check's own record is the result, so
+# the gate file is that record.
+SCORING_STAGE_1 = dataclasses.replace(
+    STAGES[1], name="CPU reference scores or vectors for a scoring model", skill="scoring-reference", refs=(),
+    gate_file=scoring_check.PAIRS_FILE.removeprefix("stages/1/"), gate=gate_scoring_reference)
+SCORING_STAGE_2 = dataclasses.replace(
+    STAGES[2], name="scoring model on one board and parity with the CPU reference", skill="scoring-check",
+    gate_file=scoring_check.RECORD_FILE, gate=gate_scoring, draft="scoring_check")
+
+
+def scoring_routed(kind, path, cls, full_port: bool) -> bool:
+    """Whether a run of a scoring kind takes the scoring route: class `weights-only` (the backbone is the nearest model's and a port module
+    reads its output), or class `full-port` with the operator's `--full-port` (the port also carries new model code). Any other class has
+    no scoring route yet, and the supervisor pauses (SCORING_NOT_ROUTED)."""
+    if kind not in model_kind.SCORING_KINDS:
+        return False
+    return (path == "weights-only" and cls == "weights-only") or (full_port and path == "full-port" and cls == "full-port")
+
+
 # The weights+sidecar class (orchard/classes.py): stage 2 also measures the sidecar head's parity in the same
 # hardware lease (the weights-sidecar-check skill), and its gate checks both. Every other stage is the
 # weights-only spec: the backbone is what those stages test.
@@ -1898,9 +1941,22 @@ def run_facts(entries: list[dict], run_dir) -> dict | None:
     return dict(facts) if not audio_facts.facts_problems(facts) else None
 
 
+def run_model_kind(entries: list[dict]) -> str:
+    """The model kind of the run (orchard/model_kind.py), read from stage 0's passing `stage_end` like the class: a resumed run keeps the kind
+    the first attempt decided. A ledger written before kinds, or one whose record is malformed, gives "generative", which is every run
+    before the scoring check."""
+    end = None
+    for e in entries:
+        if e["event"] == "stage_end" and e["stage"] == 0 and e["data"].get("result") == "pass":
+            end = e["data"]
+    rec = end.get("model_kind") if end is not None else None
+    kind = rec.get("kind") if isinstance(rec, dict) else None
+    return kind if kind in model_kind.KINDS else "generative"
+
+
 def spec_for(number: int, path: str | None, package_format: str | None = None,
              cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False, text_runtime: bool = False,
-             full_port: bool = False) -> StageSpec:
+             full_port: bool = False, kind: str = "generative") -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
@@ -1911,6 +1967,8 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         return STOCK_STAGE_0
     if audio_runtime and number in AUDIO_TABLE:
         return AUDIO_TABLE[number]
+    if number in (1, 2) and scoring_routed(kind, path, cls, full_port):
+        return SCORING_STAGE_1 if number == 1 else SCORING_STAGE_2       # a scoring model has no generated tokens to compare
     if full_port and number == 2 and path == "full-port" and cls == "full-port":
         return FULL_PORT_STAGE_2          # only stage 0's own `full-port` answer: `unknown` and `restricted-head` keep their pauses
     if path == "stock-runtime":
@@ -2202,7 +2260,7 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     for e in entries:
         d = e["data"]
         own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder adopted", "coder started",
-                                                             "coder container started", "coder not started")
+                                                             "coder container started", "coder not started", "coder start pending", "coder start blocked")
         if e["event"] in ("park", "restore") or own:
             if isinstance(d.get("lease"), dict):
                 lease = d["lease"]
@@ -2213,12 +2271,45 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     return lease, server, canary
 
 
+CODER_START_DECISIONS = ("coder starting", "coder adopted", "coder started", "coder container started", "coder not started",
+                         "coder start pending", "coder start blocked")
+
+
+def coder_start_blocked(entries: list[dict]) -> bool:
+    """True when the latest coder start decision is "coder start pending" or "coder start blocked": the granted-board check was under way or
+    blocked before `ServerControl.start` ran
+    (issue 351). No coder was launched, so a resume retries the check and the launch under that lease. It does not finish a boot, compare
+    a canary or count a coder death: nothing of the coder's exists to compare or to have died."""
+    last = None
+    for e in entries:
+        if e["event"] == "decision" and e["data"].get("decision") in CODER_START_DECISIONS:
+            last = e["data"]["decision"]
+    return last in ("coder start pending", "coder start blocked")
+
+
 SUPERVISOR_MARKER = "test-result.json"      # written by Supervisor._run_test, which then appends an evidence entry with its path and sha256
 
 
-def recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
+# Resume markers other than test-result.json that the supervisor writes itself (or whose writer it records), each with the `what` of the
+# evidence entry that vouches for it (issue 344). Supervisor._run_test_list appends "hardware test list" after it writes tests/plan.json;
+# the text and audio stage 1 bodies append "text stage record" or "audio stage record" after the reference file is written.
+VOUCHED_MARKERS = {
+    "tests/plan.json": ("hardware test list",),
+    "text_reference.json": ("text stage record",),
+    "audio_reference.json": ("audio stage record",),
+}
+
+
+# Both entries of a move-aside are boundaries between attempts. "moving ..." is written before the rename, so a kill after the rename and a second
+# kill after the fresh directory is made still leave a boundary in the ledger (review of PR 403). "moved ..." follows the rename.
+MOVE_ASIDE_DECISIONS = ("moving the partial stage directory aside", "moved the partial stage directory aside")
+
+
+def recorded_by_supervisor(ledger, n: int, rec: dict, *, whats: tuple = ()) -> bool:
     """Does the ledger hold an evidence entry for stage `n` with this file's path and sha256? Supervisor._run_test appends one right
-    after it writes the file. A file an agent wrote, or one changed after the record, has none."""
+    after it writes the file. A file an agent wrote, or one changed after the record, has none.
+
+    With `whats`, the entry must have one of those `what` values instead (the markers of VOUCHED_MARKERS)."""
     # Only _run_test's entry has `returncode` and `timed_out`. AgentStep's "evidence file" entries (an agent can link the marker from
     # evidence/) never do, so they do not count.
     entries = ledger.read()
@@ -2228,10 +2319,11 @@ def recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
     # boundary too: a kill between the rename and the move-aside entry leaves no entry, and the next attempt then starts a fresh
     # directory. A stage_start with resumed=True is not one: it comes after the record the attempt resumed from.
     start = max((i for i, e in enumerate(entries) if e.get("stage") == n and (
-        (e.get("event") == "decision" and e["data"].get("decision") == "moved the partial stage directory aside")
+        (e.get("event") == "decision" and e["data"].get("decision") in MOVE_ASIDE_DECISIONS)
         or (e.get("event") == "stage_start" and e["data"].get("resumed") is False))), default=-1) + 1
     return any(e.get("event") == "evidence" and e.get("stage") == n and e["data"].get("path") == rec["path"]
-               and e["data"].get("sha256") == rec["sha256"] and "returncode" in e["data"] and "timed_out" in e["data"]
+               and e["data"].get("sha256") == rec["sha256"]
+               and ((e["data"].get("what") in whats) if whats else ("returncode" in e["data"] and "timed_out" in e["data"]))
                for e in entries[start:])
 
 
@@ -2258,12 +2350,18 @@ def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple
             elif marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, spec.number, rec):
                 # An agent can write this file. Only the supervisor's own record of its hardware test vouches for it.
                 ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
+            elif spec.marker in VOUCHED_MARKERS and not recorded_by_supervisor(ledger, spec.number, rec, whats=VOUCHED_MARKERS[spec.marker]):
+                # The plan and the stage 1 reference files are written by the supervisor too (issue 344). A file with no matching entry
+                # after the stage's latest move-aside is not a resume point; the stage directory is moved aside and the step runs again.
+                ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
             else:
                 ledger.append("decision", spec.number, decision="resume from marker", marker=rec)
                 return d, True
         k = 1
         while (aside := d.with_name(f"{spec.number}.partial-{k}")).exists():
             k += 1
+        ledger.append("decision", spec.number, decision="moving the partial stage directory aside",
+                      path=os.path.relpath(aside, run_dir))
         os.rename(d, aside)
         ledger.append("decision", spec.number, decision="moved the partial stage directory aside",
                       path=os.path.relpath(aside, run_dir))

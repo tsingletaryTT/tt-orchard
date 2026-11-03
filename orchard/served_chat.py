@@ -50,11 +50,12 @@ TOKEN_NAMES = ("eos_token", "bos_token", "pad_token", "unk_token")
 LABEL = "check of the served files, the recorded chat replies and the recorded live probe; this check sent no request to a server"
 NOT_CHECKED = ("whether a reply begins and ends as the model's card describes (the card is prose); whether a model trained on a different "
                "template answers worse; the card of the model was not read")
-# A role header at the start of a reply: the word `assistant` followed by a colon or a line end, with an optional start-of-turn token before it.
+# A role header at the start of a reply: a role word (`assistant`, `user`, `system` or `tool`) followed by a colon or a line end, with an
+# optional start-of-turn token before it. A reply that starts with one of them is echoing the template.
 # The files whose digests the swap test records when it runs the suite (serve_and_compare.py `served_files`). The replies are tied to them.
 INPUT_FILES = ("tokenizer.json", "tokenizer_config.json", "generation_config.json", "config.json", "chat_template.jinja")
 MAX_INPUT_BYTES = 256 << 20
-ROLE_HEADER = re.compile(r"\A\s*(?:<\|im_start\|>\s*)?[Aa]ssistant[ \t]*(?::|\n)")
+ROLE_HEADER = re.compile(r"\A\s*(?:<\|im_start\|>\s*)?(?:[Aa]ssistant|[Uu]ser|[Ss]ystem|[Tt]ool)[ \t]*(?::|\n)")
 
 
 def _real(path) -> str:
@@ -279,9 +280,26 @@ def token_summary(totals, thinking, answers, max_tokens) -> dict:
     return out
 
 
-def check_replies(record, end_tokens=()) -> dict:
-    """The recorded chat replies of a swap check's `prompt_suite` record, with `end_tokens` the strings of the new model's end-of-turn ids.
-    Never raises."""
+def _call_texts(e: dict) -> list[str]:
+    """The name and arguments of each tool call of a reply, for the end-token search (a reply that is only a tool call has no content)."""
+    out = []
+    for call in e.get("tool_calls") if isinstance(e.get("tool_calls"), list) else []:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else call
+        for key in ("name", "arguments"):
+            v = fn.get(key)
+            if isinstance(v, str):
+                out.append(v)
+            elif isinstance(v, (dict, list)):
+                out.append(json.dumps(v, ensure_ascii=False))
+    return out
+
+
+def check_replies(record, end_tokens=(), start_tokens=()) -> dict:
+    """The recorded chat replies of a swap check's `prompt_suite` record, with `end_tokens` the strings of the new model's end-of-turn ids
+    and `start_tokens` named tokens (bos, pad, unk, eos) that the suite's `special_tokens` list may lack because they live in the
+    vocabulary and not in `added_tokens`. Never raises."""
     empty = {"mode": None, "checked": False, "why_not": "", "counts": {"checked": 0, "stopped": 0, "length": 0}, "problems": [], "incomplete": []}
     if not isinstance(record, dict) or record.get("ran") is not True:
         return {**empty, "why_not": "the prompt suite did not run"}
@@ -289,7 +307,7 @@ def check_replies(record, end_tokens=()) -> dict:
     if mode != "chat":
         return {**empty, "mode": mode, "why_not": "the prompt suite sent plain completions (the tokenizer has no chat template), so no chat reply exists"}
     entries = record.get("entries") if isinstance(record.get("entries"), list) else []
-    specials = [t for t in (record.get("special_tokens") if isinstance(record.get("special_tokens"), list) else [])
+    specials = [t for t in (record.get("special_tokens") if isinstance(record.get("special_tokens"), list) else []) + list(start_tokens)
                 if isinstance(t, str) and len(t) >= 3 and not t.isalnum()]
     ends = [t for t in end_tokens if isinstance(t, str) and t]
     problems: list[dict] = []
@@ -319,6 +337,7 @@ def check_replies(record, end_tokens=()) -> dict:
             lead = text.lstrip()
             if ROLE_HEADER.match(text) or any(lead.startswith(t) for t in specials):
                 add("role_header_start", f"the reply to {e.get('id')!r} begins with a role header or a special token: {lead[:30]!r}")
+        for text in texts + _call_texts(e):
             for t in ends:
                 if t in text:
                     add("stop_token_in_reply", f"the reply to {e.get('id')!r} holds the end token {t!r}, so the server did not stop on it")
@@ -390,7 +409,9 @@ def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
     except safeio.SafeReadError as exc:
         if not _absent(exc):
             incomplete.append(f"the swap check could not be read: {exc.reason}")
-    replies = check_replies(suite, files["end_tokens"])
+    served_named = files["special_tokens"].get("served") if isinstance(files.get("special_tokens"), dict) else None
+    named = [v for v in served_named.values() if isinstance(v, str)] if isinstance(served_named, dict) else []
+    replies = check_replies(suite, files["end_tokens"], start_tokens=named)
     if suite is None:
         replies = {**replies, "why_not": "the swap check could not be read"}
     live = check_live_probe(live_record)

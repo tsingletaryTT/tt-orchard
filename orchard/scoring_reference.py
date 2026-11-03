@@ -7,6 +7,10 @@ ids) does not apply. This module writes the record that the stage 2 scoring chec
 orchard/scoring_check.py) compares a port against. The first slice covers one model class: a Qwen3-style yes/no reranker.
 
     python3 -m orchard.scoring_reference rerank --model-dir SNAPSHOT --out DIR [--dtype fp32|bf16] [--max-length 8192]
+    python3 -m orchard.scoring_reference embed  --model-dir SNAPSHOT --out DIR [--max-length 8192]       (issue 376, see "embedding models")
+
+`embed` records 24 inputs (four kinds) and a unit vector for each from a Hugging Face run: the last position of the final-normed hidden
+state, L2 normalised, in fp32. It writes the same two file names; the reference file holds `vectors` in place of `scores`.
 
 Run it in an interpreter that has torch and transformers (ORCHARD_REFERENCE_PYTHON). It writes two files into DIR:
 
@@ -205,9 +209,101 @@ def record(model_dir: str, out_dir: str, *, dtype: str = "fp32", max_length: int
     return ref
 
 
+# ---- embedding models (issue 376) -------------------------------------------------------------------------------------------
+# The reference for an embedding model is a vector for each input: the last token's hidden state after the final norm, L2 normalised, in
+# fp32 on the CPU. That is the pooling the Qwen3-Embedding model card uses (`last_token_pool` over the last hidden state, then `normalize`)
+# and the public bundle raahemnabeel/qwen3-vl-embedding-8b (reference.py, doc/accuracy.md) follows. The shape of the check comes from that
+# bundle's table: the cosine to the Hugging Face vector, as a mean and a minimum, for each input kind.
+
+EMBED_MODEL_KIND = "embedding"
+EMBED_SET_VERSION = "scoring-embed/1"       # bump when a text below changes
+EMBED_KINDS = ("text", "multilingual", "code", "long")
+EMBED_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"
+EMBED_SOURCES = ("Qwen/Qwen3-Embedding model card, Transformers Usage (get_detailed_instruct and last_token_pool)",
+                 "raahemnabeel/qwen3-vl-embedding-8b: reference.py and doc/accuracy.md (the per-kind cosine table)")
+# kind -> (the two groups whose queries are embedded, the group whose four documents are embedded)
+_EMBED_SOURCE = {"text": (("short-capital", "short-boil"), "short-capital"),
+                 "multilingual": (("multilingual-zh", "multilingual-de"), "multilingual-zh"),
+                 "code": (("code-reverse", "code-http"), "code-reverse"),
+                 "long": (("long-photosynthesis", "long-treaty"), "long-photosynthesis")}
+
+
+def embed_set() -> list[dict]:
+    """The fixed embedding inputs, in a fixed order: for each of four kinds, two queries (with the card's instruction in front) and four
+    documents (as they are), taken from the reranker's pair set. Six inputs of each kind, 24 in all."""
+    rows = []
+    by_name = {g[0]: g for g in _GROUPS}
+    for kind in EMBED_KINDS:
+        query_groups, doc_group = _EMBED_SOURCE[kind]
+        for name in query_groups:
+            rows.append({"id": f"{name}-query", "kind": kind, "role": "query",
+                         "text": f"Instruct: {EMBED_INSTRUCTION}\nQuery:{by_name[name][2]}"})
+        for n, (doc, _relevant) in enumerate(by_name[doc_group][3]):
+            rows.append({"id": f"{doc_group}-doc{n}", "kind": kind, "role": "document", "text": doc})
+    return rows
+
+
+def embed_ids(tokenizer, text: str, *, max_length: int = MAX_LENGTH) -> list[int]:
+    """The token ids of one input as the tokenizer's own post-processor makes them (for Qwen3-Embedding that adds the end-of-text token the
+    card's last-token pooling reads), cut at the right end to `max_length`."""
+    if max_length < 1:
+        raise ValueError(f"max_length must be at least 1, got {max_length}")
+    return tokenizer.encode(text, add_special_tokens=True).ids[:max_length]
+
+
+def build_embed_inputs(tokenizer, *, max_length: int = MAX_LENGTH) -> dict:
+    """The contents of scoring-pairs.json for an embedding model (the rows are inputs, not pairs: the file name is shared with the reranker)."""
+    rows = [{**row, "input_ids": embed_ids(tokenizer, row["text"], max_length=max_length)} for row in embed_set()]
+    return {"schema": PAIRS_SCHEMA, "pair_set": EMBED_SET_VERSION, "model_kind": EMBED_MODEL_KIND, "instruction": EMBED_INSTRUCTION,
+            "max_length": max_length, "sources": list(EMBED_SOURCES), "pairs": rows}
+
+
+def embed_vectors_hf(model_dir: str, inputs: dict) -> list[list[float]]:
+    """Hugging Face vectors in fp32 on the CPU, one input at a time with no padding: the last position of the final-normed hidden state,
+    divided by its length. Needs torch and transformers. A model that has an output head loads without it (AutoModel)."""
+    import torch
+    from transformers import AutoModel
+    model = AutoModel.from_pretrained(model_dir, dtype=torch.float32).eval()
+    out = []
+    with torch.no_grad():
+        for p in inputs["pairs"]:
+            h = model(input_ids=torch.tensor([p["input_ids"]], dtype=torch.long)).last_hidden_state[0, -1].float()
+            out.append([float(x) for x in torch.nn.functional.normalize(h, dim=0)])
+    return out
+
+
+def record_embedding(model_dir: str, out_dir: str, *, max_length: int = MAX_LENGTH) -> dict:
+    """Write scoring-pairs.json and scoring-reference.json (with `vectors`) into `out_dir`. Returns the reference record without the vectors."""
+    from tokenizers import Tokenizer
+    tok_path = Path(model_dir) / "tokenizer.json"
+    try:
+        data = safeio.read_bytes(safeio.resolved(tok_path), max_bytes=FILE_MAX)        # a cache snapshot's tokenizer.json is a link into blobs/
+    except safeio.SafeReadError as exc:
+        raise ValueError(f"{tok_path} cannot be read: {exc.reason}") from exc
+    tokenizer = Tokenizer.from_str(data.decode("utf-8"))
+    inputs = build_embed_inputs(tokenizer, max_length=max_length)
+    pairs_bytes = encode_json(inputs)
+    vectors = embed_vectors_hf(model_dir, inputs)
+    import torch
+    import transformers
+    ref = {"schema": REFERENCE_SCHEMA, "model_kind": EMBED_MODEL_KIND, "precision": "fp32",
+           "vector": "last position of the final-normed hidden state, L2 normalised", "dim": len(vectors[0]),
+           "pairs": {"file": PAIRS_FILE, "sha256": hashlib.sha256(pairs_bytes).hexdigest(), "count": len(inputs["pairs"])},
+           "vectors": vectors, "torch": torch.__version__, "transformers": transformers.__version__}
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    safeio.atomic_write(out / PAIRS_FILE, pairs_bytes)
+    safeio.atomic_write(out / REFERENCE_FILE, encode_json(ref))
+    return {k: v for k, v in ref.items() if k != "vectors"}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m orchard.scoring_reference", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    em = sub.add_parser("embed", help="record the input set and the Hugging Face vectors for an embedding model (last token, final norm, L2)")
+    em.add_argument("--model-dir", required=True, help="the Hugging Face snapshot directory (config, weights, tokenizer.json)")
+    em.add_argument("--out", required=True, help="the directory that receives scoring-pairs.json and scoring-reference.json")
+    em.add_argument("--max-length", type=int, default=MAX_LENGTH, help="input length limit in ids (default 8192)")
     rr = sub.add_parser("rerank", help="record the pair set and the Hugging Face scores for a Qwen3-style yes/no reranker")
     rr.add_argument("--model-dir", required=True, help="the Hugging Face snapshot directory (config, weights, tokenizer.json)")
     rr.add_argument("--out", required=True, help="the directory that receives scoring-pairs.json and scoring-reference.json")
@@ -215,7 +311,10 @@ def main(argv=None) -> int:
     rr.add_argument("--max-length", type=int, default=MAX_LENGTH, help="prompt length limit in ids (default 8192, the model card's)")
     args = ap.parse_args(argv)
     try:
-        ref = record(args.model_dir, args.out, dtype=args.dtype, max_length=args.max_length)
+        if args.cmd == "embed":
+            ref = record_embedding(args.model_dir, args.out, max_length=args.max_length)
+        else:
+            ref = record(args.model_dir, args.out, dtype=args.dtype, max_length=args.max_length)
     except (ValueError, OSError) as exc:
         print(f"scoring reference: {exc}", file=sys.stderr)
         return 2

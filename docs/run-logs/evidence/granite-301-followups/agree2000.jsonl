@@ -1,0 +1,11 @@
+{"chunk": 128, "event": "start", "max_len": 2048, "mode": "agree", "path": "step", "runs": 3, "t": 1793666857.164, "tokens": 2000, "trace": true, "warmups": 1}
+{"event": "prompt", "sha256": "6a1695bc96415cb186d951e0b00c1e3e1d2bed7c857dce439c7d3c2d79a19142", "t": 1793666858.19, "tokens": 2000}
+{"event": "before", "iteration": 0, "label": "construct", "phase": "setup", "t": 1793666860.378, "timeout_s": 240}
+{"event": "after", "iteration": 0, "label": "construct", "phase": "setup", "seconds": 5.5559, "t": 1793666865.936}
+{"event": "before", "iteration": 1, "label": "step", "phase": "agree", "t": 1793666865.938, "timeout_s": 180}
+{"event": "after", "iteration": 1, "label": "step", "phase": "agree", "seconds": 54.0605, "t": 1793666919.999}
+{"event": "before", "iteration": 1, "label": "chunked", "phase": "agree", "t": 1793666920.004, "timeout_s": 180}
+{"event": "after", "iteration": 1, "label": "chunked", "phase": "agree", "seconds": 3.101, "t": 1793666923.105}
+{"event": "result", "t": 1793666923.115, "tokens": 2000}
+{"event": "before", "iteration": 0, "label": "close", "phase": "setup", "t": 1793666923.115, "timeout_s": 60}
+{"event": "after", "iteration": 0, "label": "close", "phase": "setup", "seconds": 0.0168, "t": 1793666923.134}
