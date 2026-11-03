@@ -576,6 +576,17 @@ def coder_tier(cfg, port: int) -> str:
     return names[0]
 
 
+def reset_order(leases) -> list:
+    """The order in which a multi-board test's separate leases are reset: the lease that holds the lowest device index last.
+
+    Issue 26, measured on 2026-11-03 (a 1x4 mesh open with the 1-D fabric and strict init, from a release and a fresh lease each
+    time): two leases reset board 1 and then board 0 failed 0 of 12 trials, a single lease reset once failed 0 of 11, and two
+    leases reset board 0 and then board 1 failed 6 of 12 with `Fabric Router Sync: Timeout after 10000 ms on Device 0`. Only
+    that box and its two-board layout were measured; the rule is the pattern that fits those trials. The list it is given is not
+    changed."""
+    return sorted(leases, key=lambda lease: min(lease.dev_indices), reverse=True)
+
+
 # ---- the supervisor -----------------------------------------------------------------------------
 
 BUNDLE_BUILD_TIMEOUT_S = 600            # build_bundle.py reads files and copies packages; no network
@@ -3383,6 +3394,10 @@ class Supervisor:
             self._release_test_lease()
             raise
         try:
+            if extra is not None and min(extra.dev_indices) < min(lease.dev_indices):
+                # The further board was reset when its lease was taken, and the park has since reset the coder's board, which
+                # holds the higher device index. The board with device 0 must be reset last (reset_order, issue 26).
+                self._reset_test_chips(n, test, extra)
             self._run_listed_test(spec, stage_dir, test, [lease] + ([extra] if extra else []))
         finally:
             self._cleanup_after_test(lambda: self._sweep(n))
@@ -3447,8 +3462,9 @@ class Supervisor:
         """Reset a multi-board test's chips in place, so the test starts on chips reset after their last use.
 
         The park resets only the coder's board. On 2026-10-13 the 4-chip test failed twice with fabric router
-        timeouts on the chips the smaller tests had used, and passed once all four were reset. The cause was
-        not isolated, so this is a precaution that costs about 42 s per board, and a refused reset blocks."""
+        timeouts on the chips the smaller tests had used, and passed once all four were reset. This costs about
+        42 s per board, and a refused reset blocks. The order of two separate leases' resets matters (`reset_order`,
+        issue 26): the board with device 0 goes last. Whether stale state on the chips also plays a part is not isolated."""
         try:
             self.test_adapter.reset(lease)
         except AdapterError as exc:
@@ -3504,7 +3520,7 @@ class Supervisor:
             self.ledger.append("decision", n, decision="test failed at startup; resetting the test chips and trying once more",
                                config=test.chips, returncode=result["returncode"], seconds=result["seconds"],
                                first_output=self._moved_aside_record(first))
-            for lease in leases:
+            for lease in reset_order(leases):
                 self._reset_test_chips(n, test, lease)
             result = spawn()
         path = write_record(stage_dir, test.chips, {"config": test.chips, **result,
