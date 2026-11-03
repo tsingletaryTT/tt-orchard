@@ -70,6 +70,10 @@ def env_changes(root: Path) -> tuple[dict, tuple]:
         "TT_DIT_CACHE_DIR": str(root / "tt-dit-cache"),
         "TT_CACHE_PATH": str(root / "tt-cache"),
         "TT_CACHE_HOME": str(root / "tt-cache"),
+        # the cans' own server code reads these ahead of its defaults (minicpm3_asgi, acestep_asgi, stable_audio_asgi)
+        "MINICPM3_CACHE": str(root / "minicpm3-cache"),
+        "ACESTEP_WORK": str(root / "acestep-work"),
+        "AUDIO_PKG_CACHE": str(root / "audio-pkg-cache"),
     }
     return assign, ENV_UNSET
 
@@ -87,7 +91,8 @@ def env_for(root: Path) -> dict:
 def env_lines(root: Path) -> list:
     """Shell lines for the same changes, for a manual `tt-model pull`."""
     assign, unset = env_changes(root)
-    return [f"unset {n}" for n in unset] + [f"export {k}={v}" for k, v in assign.items()]
+    import shlex
+    return [f"unset {shlex.quote(n)}" for n in unset] + [f"export {shlex.quote(k)}={shlex.quote(v)}" for k, v in assign.items()]
 
 
 def port_busy(port: int) -> bool:
@@ -116,10 +121,14 @@ OK_STATES = ("done", "completed")
 
 
 def run_ok(result: dict) -> bool:
-    """The exit condition: ready, no error, and every job that reports a status ended in done or completed."""
+    """The exit condition: ready, no error, every job that reports a status ended in done or completed, and every stream ended well."""
     if not result.get("ready") or "error" in result:
         return False
-    return all(r.get("status") in OK_STATES for r in result.get("requests", []) if "status" in r)
+    if not all(r.get("status") in OK_STATES for r in result.get("requests", []) if "status" in r):
+        return False
+    if "stream_runs" in result and (not result["stream_runs"] or not all(r.get("stream_ok") for r in result["stream_runs"])):
+        return False                       # a stream that ended badly (error event, no [DONE], empty) fails the can
+    return True
 
 
 def http(method: str, url: str, body: dict | None = None, timeout: float = 600, raw: bool = False):
@@ -141,12 +150,18 @@ def chat_stream(base: str, model, extra: dict, max_tokens: int) -> dict:
     t0 = time.monotonic()
     first = last = None
     chunks, text, usage = 0, [], None
+    saw_done, problem = False, None
     with urllib.request.urlopen(req, timeout=900) as r:
         for line in r:
             line = line.decode().strip()
-            if not line.startswith("data:") or line.endswith("[DONE]"):
+            if line.startswith("data:") and line.endswith("[DONE]"):
+                saw_done = True
+                continue
+            if not line.startswith("data:"):
                 continue
             obj = json.loads(line[5:])
+            if obj.get("error"):
+                problem = problem or f"error event in the stream: {str(obj['error'])[:200]}"
             if obj.get("usage"):
                 usage = obj["usage"]
             for ch in obj.get("choices", []):
@@ -158,10 +173,21 @@ def chat_stream(base: str, model, extra: dict, max_tokens: int) -> dict:
                     chunks += 1
                     text.append(piece)
     total = time.monotonic() - t0
+    if not saw_done:                       # a server that fails mid-generation can end an HTTP 200 stream without [DONE]
+        problem = problem or "the stream ended before [DONE]"
+    if not "".join(text).strip():
+        problem = problem or "empty answer"
     n = (usage or {}).get("completion_tokens") or chunks
     tps = (n - 1) / (last - first) if first and last and last > first and n > 1 else None
     return {"latency_s": round(total, 3), "ttft_s": round(first - t0, 3) if first else None, "tokens": n,
-            "chunks": chunks, "decode_tps": round(tps, 2) if tps else None, "text": "".join(text)}
+            "chunks": chunks, "decode_tps": round(tps, 2) if tps else None, "text": "".join(text),
+            "stream_ok": problem is None, "stream_problem": problem}
+
+
+def median_tps(runs: list):
+    """Upper-middle decode speed over the streams that ended well; None when none did."""
+    tps = sorted(r["decode_tps"] for r in runs if r.get("stream_ok") and r.get("decode_tps"))
+    return tps[len(tps) // 2] if tps else None
 
 
 def audio_facts(path: Path) -> dict:
@@ -384,8 +410,7 @@ def main() -> int:
                 for _ in range(3):
                     runs.append(chat_stream(base, spec.get("model"), extra, 64))
                 result["stream_runs"] = runs
-                tps = [r["decode_tps"] for r in runs if r["decode_tps"]]
-                result["decode_tps_median"] = sorted(tps)[len(tps) // 2] if tps else None
+                result["decode_tps_median"] = median_tps(runs)
                 result["card_decode_tps"] = spec["card_decode_tps"]
             else:
                 outdir = work / "clips"

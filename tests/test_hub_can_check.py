@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -287,3 +288,97 @@ def test_print_env_shows_every_change_env_for_makes(mod, tmp_path):
     # the shell lines apply to the same variables, so a variable the printed lines forget differs here
     assert {k: v for k, v in want.items() if applied.get(k) != v} == {}
     assert {k for k in base if k not in want} == unsets
+
+
+# ---- review round 3 (PR 411): server cache variables, shell quoting, a stream that ends badly -----------------------------------
+
+def test_the_servers_own_cache_variables_are_set_under_the_root(mod, tmp_path, monkeypatch):
+    for name in ("MINICPM3_CACHE", "ACESTEP_WORK", "AUDIO_PKG_CACHE"):
+        monkeypatch.setenv(name, "/var/tmp/elsewhere")
+    env = mod.env_for(tmp_path)
+    for name in ("MINICPM3_CACHE", "ACESTEP_WORK", "AUDIO_PKG_CACHE"):
+        assert Path(env[name]).resolve().is_relative_to(tmp_path.resolve()), name
+
+
+def test_print_env_lines_survive_a_shell_with_a_space_and_a_dollar_in_the_root(mod, tmp_path):
+    root = tmp_path / "a b$HOME`x`'q"
+    base = {**os.environ, "HUGGINGFACE_HUB_CACHE": "/var/tmp/x", "TRANSFORMERS_CACHE": "/var/tmp/y", "MINICPM3_CACHE": "/var/tmp/z"}
+    cp = subprocess.run([sys.executable, str(SCRIPT), "granite-4.0-h-1b-blackhole", "--root", str(root), "--print-env"],
+                        capture_output=True, text=True, env=base)
+    assert cp.returncode == 0
+    # run the printed lines in a real shell and read back every variable env_for sets
+    want = mod.env_for(root / "granite-4.0-h-1b-blackhole")
+    names = sorted(set(mod.env_changes(root / "granite-4.0-h-1b-blackhole")[0]) | set(mod.ENV_UNSET))
+    probe = cp.stdout + "\n" + "\n".join(f'printf "%s\\0" "${{{n}-__unset__}}"' for n in names)
+    out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, env=base).stdout
+    got = dict(zip(names, out.split("\0")[-len(names) - 1:-1]))
+    for n in names:
+        assert got[n] == want.get(n, "__unset__"), n
+
+
+class _Stream:
+    """A fake chat server that streams a fixed body, so the parser meets the endings a real server can produce."""
+    def __init__(self, lines):
+        import http.server
+        import threading
+        outer = lines
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for ln in outer:
+                    self.wfile.write(ln.encode() + b"\n\n")
+                    self.wfile.flush()
+                    time.sleep(0.01)
+
+            def log_message(self, *a):
+                pass
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def _chunk(text):
+    return "data: " + json.dumps({"choices": [{"delta": {"content": text}}]})
+
+
+GOOD = [_chunk("one "), _chunk("two "), _chunk("three"), "data: " + json.dumps({"usage": {"completion_tokens": 3}}), "data: [DONE]"]
+
+
+@pytest.mark.parametrize("name,lines,problem", [
+    ("error event", [_chunk("one "), "data: " + json.dumps({"error": {"message": "boom"}}), "data: [DONE]"], "error"),
+    ("eof before DONE", [_chunk("one "), _chunk("two ")], "DONE"),
+    ("empty answer", ["data: " + json.dumps({"choices": [{"delta": {}}]}), "data: [DONE]"], "empty"),
+])
+def test_a_stream_that_ends_badly_is_rejected(mod, name, lines, problem):
+    s = _Stream(lines)
+    try:
+        r = mod.chat_stream(s.base, None, {}, 8)
+    finally:
+        s.close()
+    assert r["stream_ok"] is False and problem in r["stream_problem"], r
+
+
+def test_a_complete_stream_is_accepted(mod):
+    s = _Stream(GOOD)
+    try:
+        r = mod.chat_stream(s.base, None, {}, 8)
+    finally:
+        s.close()
+    assert r["stream_ok"] is True and r["stream_problem"] is None and r["text"] == "one two three"
+
+
+def test_rejected_streams_stay_out_of_the_median_and_fail_the_run(mod):
+    runs = [{"stream_ok": True, "decode_tps": 30.0}, {"stream_ok": False, "decode_tps": 999.0}, {"stream_ok": True, "decode_tps": 32.0}]
+    assert mod.median_tps(runs) == 32.0                      # of [30, 32], the upper middle value; the 999 is excluded
+    assert mod.median_tps([{"stream_ok": False, "decode_tps": 5.0}]) is None
+    assert mod.run_ok({"ready": True, "stream_runs": runs}) is False
+    assert mod.run_ok({"ready": True, "stream_runs": [runs[0], runs[2]]}) is True
+    assert mod.run_ok({"ready": True, "stream_runs": []}) is False
