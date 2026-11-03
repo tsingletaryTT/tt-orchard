@@ -3856,6 +3856,14 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Change: those four tests use `needs_real_forward` (added in PR 384) in place of `needs_stack`. The tests that only build a config or trace on the meta device keep their gate.
 - Result: default interpreter 17 passed, 4 skipped; reference interpreter 21 passed.
 
+## 2026-11-02 Served-model checks, card reference gate (cluster A, branch `cluster-a-served-checks`; issues 360, 361, 366, 368 to 373, 385, 321, 17)
+- Prompt: close the open issues of the boot check, the served-model checks and the card gates by resolving them. Read `docs/run-logs/2026-11-02-serve-model-verify-mapping.md` first.
+- Design decision for issue 368: the swap template (`serve_and_compare.py`) cannot import `orchard`, so it records raw answers under `live_probe` in `swap-check.json` (the listing, two raw completions, the token-counter lines before and after the first completion, the `--max-model-len` that `run.sh` passes) and judges nothing. `served_chat.check_live_probe` judges the record with `served_verify` (`judge_completion`, `check_listing`, `check_counter`), so one set of rules serves the live probe and the recorded one. A swap check from before the change has no record and the stage check reports it as not checked. The other option (probes in the supervisor's step after the test) was not used because the server is stopped when the test ends.
+- New: `orchard/served_probes.py` (code parse with `ast` and `symtable`, never run; batching; long prefill; reasoning; prefix reuse), additions to `served_verify.py` (`served_names`, `request_model`, `judge_completion`, `check_engine_log`, `log_warnings`, `reasoning_split`, `classify_reasoning`, `check_prefix_reuse`), `[check] reasoning`, `prefix_caching` and `quirks`, the card gate's reference column rule (issue 366), and two more parts in the role-fit test (prefix reuse and tokens per reply).
+- Issue 321 was already fixed by PR 346 (`verify_bundle.py` records `tensor_cache_at_start` with `basis: file age`; the card says `judged by file age`). Closed with the test names.
+- Left open: 370 (the layer line of a real tt-metal server log has not been read; the KV-cache lines follow vLLM's formats), 360 (the resume check and the ten invariants wait for tenstorrent/skills PR 42), 361 (the card row for reasoning tokens), 17 (the reply start and end against the card, and a run on a fine-tune with a different template).
+- Tests: 5 new test files plus changes to `tests/test_can_served_verify.py`. About 60 mutations were run (each guard removed in turn); two survived first (a recursion path that the parser never reached, and a prompt-size constant that happened to equal the fake's rate) and each got a test. One mutation (a burst with no bound) hung the test with a million threads and the test was changed to use 20.
+
 ## 2026-11-02 Audio cluster G: music server faults, ACE-Step guards, chip decoder review findings, profile commands (branch `worktree-agent-a980fb093f221bd15`)
 - Prompt: close the open audio and music issues that can be closed without a board (264, 270, 306, 269, 271, 168, 254 to 256, 160 to 163, 212, 220, 272, 273).
 - 306: the vendored MiniMax-Music3 `server/engine.py` carries a local patch (recorded in `pkgsrc/music3/PROVENANCE.md`). A device fault fails every queued job and sets its `done` event. `submit` takes a lock shared with the fault handler, and a job is registered only after it is queued, so a refused job no longer stays in `engine.jobs`. `tests/test_music3_engine.py` uses a fake generator; each of three guards was removed in turn and turned a test red.
@@ -4005,3 +4013,8 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Tests first (4 red), then the fixes; each fix reintroduced and a test went red (5 mutations, none survived).
 - Not requested: a fourth round. Nothing declined.
 
+## 2026-11-03 First unattended tiny Qwen4 rehearsal (branch `pilot-qwen4-tiny-run-notes`)
+- Prompt (operator): use the hardware, try the next bring-up unattended.
+- Run: `tt-orchard bringup local/tiny-qwen4-dense --full-port --full-port-rehearsal`; stages 0 and 1 passed, stage 2 failed on the port reading one-indexed `ple_layer_ids` as zero-indexed. Details in `docs/run-logs/2026-11-03-tiny-qwen4-rehearsal-first-run.md`.
+- Setup mistakes found on the way (issue 417): a scratch `HF_HOME` is mounted into the coder and made it download 80 GB; a killed coder container blocks the next boot until removed.
+- Issue filed for a bounded repair round after a quick port-check failure.
