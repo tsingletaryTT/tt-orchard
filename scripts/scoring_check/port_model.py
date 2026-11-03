@@ -18,9 +18,10 @@ address is the environment variable ORCHARD_SCORE_SERVER_URL, for example http:/
 (127.0.0.1, ::1 or localhost) and name a port. The request does not use a proxy. The port also leaves the device the template opened
 alone: the template opens a device of its own for the worker, and the server holds a different chip of the leased board.
 
-What this does not show: the model runs in the server, which is another process. The template's check that a port module mentions ttnn is
-met by this comment, and that check cannot tell a port that computes from one that forwards. Here forwarding is the design, and the run log
-says which chip the server held. Prompts longer than the server's own limit are refused by the server.
+What this does not show: the model runs in the server, which is another process. This module declares that (`COMPUTES_ON = "server"` and
+`server_address`), so the record says a server computed the scores, with the template's own probe of the address, and the gate does not
+ask this module to mention ttnn (issue 407). The record's `chips` are the chips the check opened, and the run log says which chip the
+server held. Prompts longer than the server's own limit are refused by the server.
 """
 import http.client
 import json
@@ -28,6 +29,7 @@ import math
 import os
 from urllib.parse import urlsplit
 
+COMPUTES_ON = "server"             # the template records this and probes the address below; see server_address
 ENV_URL = "ORCHARD_SCORE_SERVER_URL"
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 MAX_PER_REQUEST = 32               # choice: the server accepts more; a group is 4 to 20 prompts
@@ -75,6 +77,12 @@ def _call(model: dict, method: str, path: str, body=None):
         raise RuntimeError(f"cannot reach the server for {method} {path}: {type(exc).__name__}: {exc}")
     finally:
         conn.close()
+
+
+def server_address(model: dict) -> str:
+    """The address the template probes and records: loopback host and port, with an IPv6 host in brackets."""
+    host = f"[{model['host']}]" if ":" in model["host"] else model["host"]
+    return f"{host}:{model['port']}"
 
 
 def load(model_dir: str, mesh_device):
