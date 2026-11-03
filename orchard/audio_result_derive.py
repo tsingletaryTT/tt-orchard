@@ -30,6 +30,8 @@ import json
 import sys
 from pathlib import Path
 
+from orchard import audio_bars
+
 MATCH_KEYS = ("prompt", "steps", "cfg_scale", "sampler", "seed", "sample_size", "duration")
 DECODER_KEY = "chip_decoder_call_s"
 RUNTIME_NAME = "stable-audio-3-dit-and-decoder-on-chip"
@@ -40,9 +42,27 @@ class DeriveError(Exception):
     """The later run cannot stand in for the base result's chip run; the message says why."""
 
 
-def derive(base: dict, *, chip_run: dict, agreement: dict, base_sha256: str, chip_label: str) -> dict:
+def _check_floor(base: dict, floor, agreement: dict) -> None:
+    """The later run's agreement must be judged by the bars the base result's kept evidence was judged by (issue 173). A measured floor must be the
+    floor the base result recorded, and the agreement text must say it came from that floor; a base result made with a measured floor cannot go on
+    with provisional bars, and a base result with no floor record cannot pick one up."""
+    recorded = base.get("noise_floor")
+    if floor.measured:
+        if recorded != floor.record():
+            raise DeriveError(f"the noise floor file now on disk (sha256 {str(floor.sha256)[:12]}) is not the floor the base result's bars came from; its kept "
+                              "control and environment floor were judged under other bars")
+        bars = agreement.get("bars")
+        if not (isinstance(bars, str) and bars.startswith("measured:")):
+            raise DeriveError("the later run's agreement bars do not say they came from the measured floor; compare it with that floor")
+    elif isinstance(recorded, dict) and recorded.get("measured") is True:
+        raise DeriveError("the base result's bars came from a measured noise floor and no usable floor file is on disk now; the later run cannot be judged by "
+                          "other bars")
+
+
+def derive(base: dict, *, chip_run: dict, agreement: dict, base_sha256: str, chip_label: str, floor=None) -> dict:
     """A new result dictionary (the base is not changed). `chip_run` is `audio_stages.run_facts` of the later run (dir, model, revision, library_commit,
-    settings, timings); `agreement` is `audio_stages.compare(reference, later run)`."""
+    settings, timings); `agreement` is `audio_stages.compare(reference, later run, floor=floor)`. `floor` is the `audio_bars.Floor` of stage 1's directory
+    (None keeps the provisional-bars sentence and checks nothing about bars)."""
     old = ((base.get("runs") or {}).get("chip")) if isinstance(base, dict) else None
     if not isinstance(old, dict):
         raise DeriveError("the base result has no runs.chip to replace")
@@ -59,6 +79,8 @@ def derive(base: dict, *, chip_run: dict, agreement: dict, base_sha256: str, chi
         raise DeriveError(f"the later run recorded no {DECODER_KEY}, so it did not run the autoencoder decoder's transformer on the chip")
     if not (isinstance(agreement, dict) and agreement.get("ok") is True and agreement.get("comparable") is True):
         raise DeriveError("the later run did not agree with the CPU reference within the bars (or the two were not comparable)")
+    if floor is not None:
+        _check_floor(base, floor, agreement)
     out = copy.deepcopy(base)
     chip = copy.deepcopy(chip_run)
     chip["role"] = "chip"
@@ -73,7 +95,7 @@ def derive(base: dict, *, chip_run: dict, agreement: dict, base_sha256: str, chi
         dropped.append("repeats.chip")
     out["runtime"] = RUNTIME_NAME
     out["limits"] = ["Nobody has listened to the clips; no check here says the music is good.",
-                     "The agreement bars are provisional choices, not yet set from a measured noise floor.",
+                     (audio_bars.limit_line(floor) if floor is not None else "The agreement bars are provisional choices that were never set from a measured noise floor."),
                      "The diffusion transformer and the autoencoder decoder's transformer ran on the chip. The T5Gemma encoder, the sampler, the decoder's first linear "
                      "layer, its final convolution and the waveform unpatching ran on the host.",
                      "Agreement is measured on one prompt, one duration and one seed, with the later chip run.",
@@ -119,9 +141,10 @@ def main(argv=None) -> int:
     facts = st.run_facts(chip_dir.parent, chip_dir.name)
     with ar.load_run(ref_dir) as ref, ar.load_run(chip_dir) as cand:
         report = ar.compare_runs(ref, cand, cross_precision=True)
-    agreement = st.compare(ref_dir, chip_dir)
+    floor = audio_bars.load_floor(run / "stages" / "1")           # the floor stage 2 used: the same bars judge the later run
+    agreement = st.compare(ref_dir, chip_dir, floor=floor)
     try:
-        result = derive(base, chip_run=facts, agreement=agreement, base_sha256=hashlib.sha256(raw).hexdigest(), chip_label=chip_dir.name)
+        result = derive(base, chip_run=facts, agreement=agreement, base_sha256=hashlib.sha256(raw).hexdigest(), chip_label=chip_dir.name, floor=floor)
     except DeriveError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
