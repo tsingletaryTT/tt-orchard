@@ -979,7 +979,8 @@ def test_a_real_timed_out_boot_check_leaves_no_server_running(rig, monkeypatch):
                                 extra_env=rig["extra_env"])
         server = json.loads(pid_file.read_text())
         assert code == 1 and result(rig)["timed_out"] is True, out.getvalue()
-        assert result(rig)["server"]["outcome"] in ("stopped", "killed")
+        # spawn_checked now stops the server first (it carries the spawn's tag, issue 390), so the step may find it already gone
+        assert result(rig)["server"]["outcome"] in ("stopped", "killed", "already gone")
         with pytest.raises(ProcessLookupError):
             os.killpg(server["pgid"], 0)
     finally:
