@@ -147,8 +147,7 @@ def reference_command(item: dict, paths, stage_rel_dir: Path, script: Path) -> t
     """argv and extra environment for one CPU run. The reference interpreter finds the library through its editable install; the chip interpreter
     through PYTHONPATH. `--expect-src` makes the script refuse a library from anywhere else."""
     if item.get("profile") is not None:
-        raise AudioStageError(f"the CPU command for the {item['profile']} profile is not wired yet: it is scripts/acestep/acestep_run.py --device cpu, which needs "
-                              "the bundle code, the snapshot and a project root that the audio paths do not hold (issue 269)")
+        return acestep_reference_command(item, paths, stage_rel_dir)
     s = settings_for(item["name"])
     python = paths.reference_python if item["interpreter"] == "reference" else paths.chip_python
     argv = [python, str(script), "--model", item["name"], "--out", str(stage_rel_dir / item["dir"]), "--prompt", s["prompt"],
@@ -156,6 +155,55 @@ def reference_command(item: dict, paths, stage_rel_dir: Path, script: Path) -> t
             "--sampler", s["sampler"], "--sample-size", str(s["sample_size"]), "--expect-src", paths.src_dir]
     env = {"PYTHONPATH": paths.src_dir} if item["interpreter"] == "chip" else {}
     return argv, env
+
+
+ACESTEP_RUN = Path(__file__).resolve().parent.parent / "scripts" / "acestep" / "acestep_run.py"
+
+
+def _acestep_inputs(paths) -> tuple[str, str, str]:
+    """(bundle code directory, snapshot directory, interpreter) of the ACE-Step bundle, or an AudioStageError naming the variable to set."""
+    code, snap = getattr(paths, "acestep_bundle_code", ""), getattr(paths, "acestep_snapshot", "")
+    if not code or not snap:
+        raise AudioStageError("a model with the ACE-Step profile needs the bundle's code directory and the weights snapshot: set ORCHARD_ACESTEP_BUNDLE_CODE "
+                              "(real files, not links) and ORCHARD_ACESTEP_SNAPSHOT before the run starts")
+    return code, snap, getattr(paths, "acestep_python", "") or paths.reference_python
+
+
+def acestep_reference_command(item: dict, paths, stage_rel_dir: Path) -> tuple[list[str], dict]:
+    """argv and extra environment of the CPU float32 reference run of a profile item (scripts/acestep/acestep_run.py --device cpu). The project root
+    ACE-Step writes under is `acestep-root` inside the stage; `acestep_run.py` makes `checkpoints` in it a private copy of the snapshot, so nothing in the
+    Hugging Face cache is written (issue 264)."""
+    code, snap, python = _acestep_inputs(paths)
+    s = settings_for(item["name"])
+    argv = [python, str(ACESTEP_RUN), "--device", "cpu", "--bundle-code", code, "--snapshot", snap, "--root", str(stage_rel_dir / "acestep-root"),
+            "--out", str(stage_rel_dir / item["dir"]), "--prompt", s["prompt"], "--duration", str(s["duration"]), "--seed", str(s["seed"])]
+    return argv, {}
+
+
+def stage2_kind(item: dict) -> str:
+    """How stage 2 judges a plan item: "per_step" for a profile that says so, else "end_to_end" (the Stable Audio comparison)."""
+    p = _profile_of(item)
+    return audio_profile.STAGE2_END_TO_END if p is None else p.stage2[0]
+
+
+def per_step_commands(item: dict, paths, stage_dir, reference_run_dir) -> list[dict]:
+    """The commands of a per-step stage 2 in the order they run: [{name, device, argv}]. `floor`: the CPU bfloat16 teacher-forced run of the recorded float32
+    reference (writes <stage>/floor.teacher.json); `chip`: the chip's per-step check of the same recorded inputs (writes <stage>/chip.stepcheck.json; the
+    only command that needs a board); `bars`: `orchard.step_bars` over the two, which writes <stage>/bars.json and exits non-zero when the chip fails a bar or
+    a control passes one. Paths are the ones given; the caller runs each under its own lease or none."""
+    if stage2_kind(item) != audio_profile.STAGE2_PER_STEP:
+        raise AudioStageError(f"the plan item {item.get('name')!r} has stage 2 kind {stage2_kind(item)!r}; per_step commands need a per_step profile")
+    code, snap, python = _acestep_inputs(paths)
+    stage, ref = Path(stage_dir), str(reference_run_dir)
+    s = settings_for(item["name"])
+    common = ["--bundle-code", code, "--snapshot", snap, "--prompt", s["prompt"], "--duration", str(s["duration"]), "--seed", str(s["seed"])]
+
+    def run(name, device, extra):
+        return [python, str(ACESTEP_RUN), "--device", device, *common, "--root", str(stage / f"acestep-root-{name}"), "--out", str(stage / name), *extra]
+    return [{"name": "floor", "device": "cpu", "argv": run("floor", "cpu", ["--cpu-dtype", "bfloat16", "--teacher-forced", ref])},
+            {"name": "chip", "device": "chip", "argv": [paths.chip_python, *run("chip", "chip", ["--stepcheck", ref])[1:]]},
+            {"name": "bars", "device": "cpu", "argv": [python, "-m", "orchard.step_bars", "--floor", str(stage / "floor.teacher.json"),
+                                                      "--chip", str(stage / "chip.stepcheck.json"), "--run", ref, "--out", str(stage / "bars.json")]}]
 
 
 def write_json(path, value) -> None:

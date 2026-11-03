@@ -1,0 +1,67 @@
+{
+ "can": "granite-4.0-h-1b-blackhole",
+ "repo": "episod/granite-4.0-h-1b-blackhole",
+ "port": 20110,
+ "ready_timeout_s": 900,
+ "tt_visible_devices": "0000:01:00.0,0000:02:00.0",
+ "serve_pid": 3314369,
+ "ready": true,
+ "start_to_ready_s": 51.1,
+ "loadavg_at_ready": [
+  74.98193359375,
+  80.41845703125,
+  69.2724609375
+ ],
+ "first_request": {
+  "latency_s": 5.762,
+  "http": 200,
+  "reply": "The three primary colors are red, blue, and yellow.",
+  "finish": "stop",
+  "usage": {
+   "prompt_tokens": 36,
+   "completion_tokens": 12,
+   "total_tokens": 48
+  },
+  "timings": {
+   "prompt_tokens": 36,
+   "completion_tokens": 12,
+   "prefill_s": 4.8984,
+   "first_token_s": 4.8986,
+   "decode_tok_s": 12.9547
+  }
+ },
+ "stream_runs": [
+  {
+   "latency_s": 9.237,
+   "ttft_s": 2.461,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 9.3,
+   "text": "A mountain range forms through a complex process involving tectonic plate movements, volcanic activity, and erosion. When tectonic plates collide, they can push up the Earth's crust, creating mountain ranges. For instance, the Himalayas were formed by the collision of the Indian and Eurasian plates. Volcanic activity"
+  },
+  {
+   "latency_s": 11.971,
+   "ttft_s": 4.16,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 8.07,
+   "text": "A mountain range forms through a complex process involving tectonic plate movements, volcanic activity, and erosion. When tectonic plates collide, they can push up the Earth's crust, creating mountain ranges. For instance, the Himalayas were formed by the collision of the Indian and Eurasian plates. Volcanic activity"
+  },
+  {
+   "latency_s": 10.265,
+   "ttft_s": 2.997,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 8.67,
+   "text": "A mountain range forms through a complex process involving tectonic plate movements, volcanic activity, and erosion. When tectonic plates collide, they can push up the Earth's crust, creating mountain ranges. For instance, the Himalayas were formed by the collision of the Indian and Eurasian plates. Volcanic activity"
+  }
+ ],
+ "decode_tps_median": 8.67,
+ "card_decode_tps": 34.0,
+ "loadavg_at_end": [
+  79.6435546875,
+  80.73486328125,
+  69.83740234375
+ ],
+ "stop": "stopped on SIGTERM"
+}

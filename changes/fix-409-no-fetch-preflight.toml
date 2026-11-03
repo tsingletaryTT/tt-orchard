@@ -1,0 +1,2 @@
+target = "0.9.99"
+summary = "Preflight: --no-fetch counts no download in the disk row; a local model with a config.json is a text model when the Hub cannot answer (issue 409)"

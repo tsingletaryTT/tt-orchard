@@ -356,6 +356,15 @@ def test_with_no_base_at_all_the_old_warning_stays():
     assert c.status == "warn" and "names no base_model" in c.detail and c.data["base"] is None
 
 
+def test_with_no_base_at_all_the_audio_row_still_carries_the_checkpoint_note():
+    """Issue 264: the no-base warning returns before _audio_base, so it carries the note itself."""
+    c = audio_base(hub=pf.parse_hub(audio_payload(cardData={"license": "other"})))
+    assert pf.CHECKPOINT_NOTE in c.detail
+    text = pf.check_base(model_id=MODEL, hub=pf.parse_hub(audio_payload(cardData={"license": "other"})), base_override=None, installed=[],
+                         local_snapshot=lambda m: None, search=None)
+    assert pf.CHECKPOINT_NOTE not in text.detail          # a model that is not audio gets no audio note
+
+
 def test_a_text_model_keeps_the_old_block_when_no_bundle_serves_its_base():
     c = pf.check_base(model_id=MODEL, hub=pf.parse_hub(audio_payload()), base_override=None, installed=[], local_snapshot=lambda m: None,
                       search=None)

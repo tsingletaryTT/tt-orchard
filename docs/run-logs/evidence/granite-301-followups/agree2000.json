@@ -1,0 +1,29 @@
+{
+ "chunk": 128,
+ "logit_cosine": 1.0000125,
+ "logit_max_abs": 42.5,
+ "logit_max_abs_diff": 0.3333,
+ "max_len": 2048,
+ "max_state_rel_diff": 0.020645977929234505,
+ "mode": "agree",
+ "next4_chunked": [
+  220,
+  18,
+  2919,
+  13
+ ],
+ "next4_equal": true,
+ "next4_step": [
+  220,
+  18,
+  2919,
+  13
+ ],
+ "prompt_sha256": "6a1695bc96415cb186d951e0b00c1e3e1d2bed7c857dce439c7d3c2d79a19142",
+ "seconds_chunked_including_readout": 3.101,
+ "seconds_step_including_readout": 54.06,
+ "tokens": 2000,
+ "top1_equal": true,
+ "top5_overlap": 5,
+ "trace": true
+}

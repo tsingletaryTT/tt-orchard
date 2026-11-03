@@ -21,6 +21,8 @@ acestep_serve.py takes flags. uvicorn does not pass them here, so the same setti
     ACESTEP_BUNDLE_CODE   the `code/` directory of the community bundle, if you already have it as real files (default: fetched into ACESTEP_WORK)
     ACESTEP_SNAPSHOT      the weights snapshot directory, if you already have it (default: the pinned revision in the Hugging Face cache)
     ACESTEP_FAST          all (default), none, or a comma-separated list of the steps of acestep_fast.py
+    ACESTEP_REQUEST_TIMEOUT_S   seconds a request waits for its clip (default 600). Past it the reply is 504; the chip call cannot be stopped, so it keeps the
+                          slot until it returns and a new request gets 503 meanwhile (issue 271)
     HF_MODEL, TT_MODEL_WEIGHTS_REVISION   the weights repository and revision (run.sh sets both from the manifest)
 
 The bundle code (sunandbean/acestep-1.5-turbo-p100a) and the weights are not in the bundle. At start-up both are fetched at the pinned revisions and
@@ -41,6 +43,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+IMPORTED_AT = time.time()       # the ready line reports the time since this import, and its own wall-clock time, so a start time need not be polled for
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent       # in the repository: pkgsrc/server/ -> the repository root
 
@@ -75,7 +78,21 @@ PINS = _pins()
 MODEL_ID = PINS["model"]
 LOCK = threading.Lock()         # one clip at a time; taken without waiting, released by the worker
 STATE: dict = {}                # session, work: filled by startup()
+DEFAULT_REQUEST_TIMEOUT_S = 600.0     # a 480 s clip takes about 15 s on the chip (evidence/sweep.json); ten minutes leaves a wide margin
 WEIGHT_PATTERNS = ["acestep-v15-turbo/*", "vae/*", "Qwen3-Embedding-0.6B/*", "config.json"]    # as `run.sh fetch` of the recipe package
+
+
+def _timeout_from(text) -> float:
+    """ACESTEP_REQUEST_TIMEOUT_S: seconds as a finite positive number; unset means the default. Anything else stops the server before it loads a model."""
+    if text is None:
+        return DEFAULT_REQUEST_TIMEOUT_S
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        value = float("nan")
+    if not (0 < value < float("inf")):
+        raise ValueError(f"ACESTEP_REQUEST_TIMEOUT_S must be a finite number of seconds above 0, got {text!r}")
+    return value
 
 
 def settings(environ=None):
@@ -85,7 +102,8 @@ def settings(environ=None):
     return SimpleNamespace(
         work=Path(e.get("ACESTEP_WORK") or Path(cache) / "ace-step-1.5-turbo-blackhole"), bundle_code=e.get("ACESTEP_BUNDLE_CODE") or None,
         snapshot=e.get("ACESTEP_SNAPSHOT") or None, fast=e.get("ACESTEP_FAST", "all"), model=e.get("HF_MODEL") or MODEL_ID,
-        revision=e.get("TT_MODEL_WEIGHTS_REVISION") or PINS["model_revision"], host=e.get("HOST", "127.0.0.1"), port=int(e.get("PORT", serve.PORT)))
+        revision=e.get("TT_MODEL_WEIGHTS_REVISION") or PINS["model_revision"], host=e.get("HOST", "127.0.0.1"), port=int(e.get("PORT", serve.PORT)),
+        request_timeout_s=_timeout_from(e.get("ACESTEP_REQUEST_TIMEOUT_S")))
 
 
 # ---- inputs ---------------------------------------------------------------------------------------------------------------
@@ -137,9 +155,12 @@ def startup(a):
     session = acestep_run.Session(device="chip", bundle_code=code, snapshot=snapshot, root=root, fast=steps)
     work = Path(a.work) / "clips-in-flight"
     work.mkdir(parents=True, exist_ok=True)
-    STATE.update(session=session, work=work)
+    STATE.update(session=session, work=work, timeout_s=a.request_timeout_s)
+    now = time.time()
+    # `ready_unix` is the wall-clock time of this line, so whoever started the process gets the exact time to ready as `ready_unix` minus its own start time
+    # instead of polling /health; `since_import_s` is the time from this module's import (after the interpreter started, before the inputs were checked).
     print(json.dumps({"event": "ready", "model": MODEL_ID, "revision": session.WEIGHTS_REVISION, "fast": list(session.fast),
-                      "load_s": round(time.perf_counter() - t0, 2)}), flush=True)
+                      "load_s": round(time.perf_counter() - t0, 2), "ready_unix": now, "since_import_s": round(now - IMPORTED_AT, 3)}), flush=True)
     return session.close
 
 
@@ -203,8 +224,17 @@ async def _music(receive, send):
     if bad:
         LOCK.release()
         return await _reply(send, 503, {"error": f"the chip is unusable until the server is restarted: {bad}"})
+    work = asyncio.get_running_loop().run_in_executor(None, _make_clip, params)
     try:
-        payload, timings = await asyncio.get_running_loop().run_in_executor(None, _make_clip, params)
+        # The wait ends at the limit; the chip call does not (a device call cannot be cancelled from here). It keeps the slot until it returns, so a later
+        # request gets 503 "a clip is being made" and no second call reaches the chip. The late clip is dropped.
+        limit = STATE.get("timeout_s", DEFAULT_REQUEST_TIMEOUT_S)
+        payload, timings = await asyncio.wait_for(asyncio.shield(work), limit)
+    except asyncio.TimeoutError:
+        work.add_done_callback(lambda f: f.exception())          # a failure after the limit is read here, so it is not logged as never retrieved
+        sys.stderr.write(f"serve: a clip took longer than {limit:g} s; the chip call is still running\n")
+        return await _reply(send, 504, {"error": f"the clip was not ready within the time limit ({limit:g} s); the chip call is still running and the server "
+                                                  "takes no new request until it returns"})
     except Exception as exc:  # noqa: BLE001  a failed generate is a 500 with its type, never the model's text
         sys.stderr.write(f"serve: generation failed: {type(exc).__name__}\n")
         return await _reply(send, 500, {"error": f"generation failed ({type(exc).__name__})"})

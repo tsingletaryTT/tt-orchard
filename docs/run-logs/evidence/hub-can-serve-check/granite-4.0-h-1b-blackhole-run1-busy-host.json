@@ -1,0 +1,57 @@
+{
+ "can": "granite-4.0-h-1b-blackhole",
+ "repo": "episod/granite-4.0-h-1b-blackhole",
+ "port": 20110,
+ "ready_timeout_s": 900,
+ "tt_visible_devices": "0000:01:00.0,0000:02:00.0",
+ "serve_pid": 3053459,
+ "ready": true,
+ "start_to_ready_s": 303.4,
+ "first_request": {
+  "latency_s": 171.716,
+  "http": 200,
+  "reply": "The three primary colors are red, blue, and yellow. The sky appears blue due to the scattering of sunlight by the Earth's atmosphere, a phenomenon known as Rayleigh scattering.",
+  "finish": "stop",
+  "usage": {
+   "prompt_tokens": 47,
+   "completion_tokens": 36,
+   "total_tokens": 83
+  },
+  "timings": {
+   "prompt_tokens": 47,
+   "completion_tokens": 36,
+   "prefill_s": 168.6815,
+   "first_token_s": 168.6902,
+   "decode_tok_s": 12.9289
+  }
+ },
+ "stream_runs": [
+  {
+   "latency_s": 4.301,
+   "ttft_s": 2.098,
+   "tokens": 36,
+   "chunks": 36,
+   "decode_tps": 16.33,
+   "text": "The three primary colors are red, blue, and yellow. The sky appears blue due to the scattering of sunlight by the Earth's atmosphere, a phenomenon known as Rayleigh scattering."
+  },
+  {
+   "latency_s": 3.648,
+   "ttft_s": 1.105,
+   "tokens": 36,
+   "chunks": 36,
+   "decode_tps": 14.25,
+   "text": "The three primary colors are red, blue, and yellow. The sky appears blue due to the scattering of sunlight by the Earth's atmosphere, a phenomenon known as Rayleigh scattering."
+  },
+  {
+   "latency_s": 3.706,
+   "ttft_s": 1.221,
+   "tokens": 36,
+   "chunks": 36,
+   "decode_tps": 14.78,
+   "text": "The three primary colors are red, blue, and yellow. The sky appears blue due to the scattering of sunlight by the Earth's atmosphere, a phenomenon known as Rayleigh scattering."
+  }
+ ],
+ "decode_tps_median": 14.78,
+ "card_decode_tps": 34.0,
+ "stop": "stopped on SIGTERM"
+}

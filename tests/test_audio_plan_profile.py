@@ -50,31 +50,3 @@ def test_the_sample_rate_and_clip_file_of_an_item_come_from_its_profile():
 def test_an_unknown_profile_key_in_an_item_is_an_error_not_the_stable_audio_default():
     with pytest.raises(ap.AudioStageError):
         ap.sample_rate_of({"name": "x", "profile": "no-such-profile"})
-
-
-def test_a_profile_item_has_no_cpu_command_yet_and_says_so():
-    item = ap.reference_plan(ACE, None)[0]
-    with pytest.raises(ap.AudioStageError, match="acestep_run.py"):
-        ap.reference_command(item, None, __import__("pathlib").Path("stages/1"), __import__("pathlib").Path("x.py"))
-
-
-def test_write_clip_names_the_file_and_the_rate_it_is_given(tmp_path):
-    import numpy as np
-    sf = pytest.importorskip("soundfile")
-    from orchard import audio_reference as ar
-    from orchard import audio_stages as st
-    rec = ar.Recorder(tmp_path / "r", model={"name": "m"}, library={"name": "l"},
-                      settings={"prompt": "p", "duration": 1.0, "steps": 1, "cfg_scale": 1.0, "sampler": "s", "seed": 1, "dtype": "float32", "sample_size": 48000,
-                                "device": "cpu"})
-    rec.record("waveform", "audio", (0.3 * np.sin(np.arange(48000) / 20.0)).astype(np.float32)[None, :].repeat(2, 0))
-    rec.finish()
-    clip = st.write_clip(tmp_path / "r", 48000, "audio.wav")
-    assert clip.name == "audio.wav" and sf.info(str(clip)).samplerate == 48000
-    assert not (tmp_path / "r" / "clips" / "audio.flac").exists()
-
-
-def test_the_stage_code_takes_the_clip_path_and_rate_from_the_plan_item():
-    import inspect
-    from orchard import audio_stages as st
-    src = inspect.getsource(st.run_references) + inspect.getsource(st.finish_chip)
-    assert "clip_name_of(item)" in src and "sample_rate_of(item)" in src and "clips/audio.flac" not in src

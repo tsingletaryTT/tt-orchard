@@ -69,6 +69,7 @@ The server reads its settings from the environment, because uvicorn passes no fl
 | `ACESTEP_BUNDLE_CODE` | fetched into `ACESTEP_WORK` | the `code/` directory of the model code, if you already have it as real files |
 | `ACESTEP_SNAPSHOT` | the pinned revision in the Hugging Face cache | the weights snapshot directory, if you already have it |
 | `ACESTEP_FAST` | `all` | `none`, or a comma-separated list of `gc_freeze`, `timbre_cache`, `cond_cache`, `kv_on_chip`, `text_on_chip`, `lyric_on_chip` |
+| `ACESTEP_REQUEST_TIMEOUT_S` | `600` | seconds a request waits for its clip; past it the reply is 504, and the chip call keeps the slot until it returns (a new request gets 503 meanwhile) |
 | `HF_HOME` | `.hf` in the bundle | the Hugging Face cache (point it at an existing cache to avoid the 6.5 GB download) |
 
 ## Expected performance
