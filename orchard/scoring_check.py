@@ -24,7 +24,15 @@ What it checks, each as a named reason:
   the same numbers;
 - the recomputed numbers meet the bounds. The shipped defaults are DEFAULT_BOUNDS. The config may state stricter bounds and never looser
   ones: a config bound that is looser than the default is a reason, and the stricter value is the one applied;
-- the port's source files are the ones the record lists, unchanged, none is a link, one mentions ttnn, none reads the reference.
+- the record says where the scores were computed (`computed_on`, issue 407): in the worker process, or by a server on a loopback
+  address that the port declared and that answered the template's probe. A server-backed port is not asked to mention ttnn, because it
+  does not run the model; an in-process port is;
+- the port's source files are the ones the record lists, unchanged, none is a link, none reads the reference, and an in-process port's
+  sources mention ttnn.
+
+What a pass says for a server-backed port: the numbers are consistent with the reference, and something answered on the declared
+loopback address. It does not say the chip the supervisor leased ran them, and `chips` and `load_s` then name the chips the check opened
+and the time of the port's own `load` call (the record says so in `computed_on`).
 
 What this does not show: the same limits as the full-port check. The numbers come from a test the supervisor ran, and a port that returns
 the reference's scores without computing them looks the same as one that computed them. The bounds are choices made from two public
@@ -58,6 +66,8 @@ TEMPLATE = Path(__file__).resolve().parent / "skills" / "scoring-check-templates
 TEMPLATE_NAME = "scoring_check.py"
 CONFIG_NAME = "scoring_check_config.json"
 COMMAND = "python3 -P -s stages/2/scoring_check.py"
+COMPUTES_ON_VALUES = ("in-process", "server")                  # the template's list is the same
+LOOPBACK_ADDRESS = re.compile(r"(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})")          # and so is its pattern for a declared server
 DEADLINE_S = 3600
 ORDER_GAP = 0.5                       # the same value as the template's; a test checks the two files agree
 JSON_MAX = 16 * 1024 * 1024           # choice: the pair file is a few MB at most (32 prompts of up to 8192 ids)
@@ -389,7 +399,8 @@ def check(stage_dir, run_dir, kind=None) -> tuple[list[str], list[str]]:
         if not _num(v) or v <= 0:
             reasons.append(f"{RECORD_FILE} {key} must be a positive number of seconds, got {v!r}")
     _template_reasons(record, stage_dir, reasons)
-    _source_reasons(record, stage_dir, run_dir, reasons)
+    server_backed = _computed_on_reasons(record, reasons)
+    _source_reasons(record, stage_dir, run_dir, reasons, server_backed)
     return reasons, seen
 
 
@@ -670,7 +681,45 @@ def _template_reasons(record: dict, stage_dir: Path, reasons: list) -> None:
         reasons.append(f"{CONFIG_NAME} is not the file the record names (missing, or changed after the test)")
 
 
-def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list) -> None:
+def _computed_on_reasons(record: dict, reasons: list) -> bool:
+    """The reasons the record's `computed_on` cannot be believed (issue 407), added to `reasons`. Returns True when the record says a
+    server computed the scores and says it well enough to skip the ttnn-mention check; any doubt returns False, so the mention is still
+    asked for."""
+    c = record.get("computed_on")
+    if not isinstance(c, dict):
+        reasons.append(f"{RECORD_FILE} computed_on must be an object that says where the scores were computed, got {type(c).__name__}")
+        return False
+    where, server = c.get("where"), c.get("server")
+    for key in ("chips", "load_s"):
+        if not isinstance(c.get(key), str) or not c.get(key):
+            reasons.append(f"{RECORD_FILE} computed_on.{key} must be the text that says what the record's {key} means, got {c.get(key)!r}")
+    if where not in COMPUTES_ON_VALUES or not isinstance(where, str):
+        reasons.append(f"{RECORD_FILE} computed_on.where must be one of {COMPUTES_ON_VALUES}, got {where!r}")
+        return False
+    if where == "in-process":
+        if server is not None:
+            reasons.append(f"{RECORD_FILE} computed_on.where is 'in-process' but computed_on.server names a server")
+        return False
+    if not isinstance(server, dict):
+        reasons.append(f"{RECORD_FILE} computed_on.where is 'server' but computed_on.server is not an object with the address and the probe")
+        return False
+    address, probe = server.get("address"), server.get("probe")
+    m = LOOPBACK_ADDRESS.fullmatch(address) if isinstance(address, str) else None
+    if m is None or not 1 <= int(m.group(2)) <= 65535:
+        reasons.append(f"{RECORD_FILE} computed_on.server.address must be a loopback host and a port (127.0.0.1, localhost or [::1]), got {address!r}")
+        return False
+    if not isinstance(probe, dict):
+        reasons.append(f"{RECORD_FILE} computed_on.server.probe must be the template's probe of the server, got {type(probe).__name__}")
+        return False
+    status = probe.get("health_status")
+    if isinstance(status, bool) or status != 200:
+        reasons.append(f"the server the port declared at {address} did not answer the template's probe of /health with 200 "
+                       f"(computed_on.server.probe: status {status!r}, error {str(probe.get('error'))[:120]!r})")
+        return False
+    return True
+
+
+def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list, server_backed: bool = False) -> None:
     sources = record.get("port_sources")
     if not isinstance(sources, list) or not sources:
         reasons.append("port_sources must list the port's source files (stages/2/port/)")
@@ -705,7 +754,7 @@ def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list)
     on_disk = {os.path.relpath(f, run_dir) for f in (stage_dir / "port").rglob("*.py") if f.is_file()}
     if on_disk - listed:
         reasons.append(f"{sorted(on_disk - listed)[0]} is in {PORT_DIR} but not in port_sources: it was added after the record was written")
-    if not any("ttnn" in t for _, t in texts):
+    if not server_backed and not any("ttnn" in t for _, t in texts):
         reasons.append("no model source in port_sources mentions ttnn, so nothing shows the port runs on the chip")
     for path, t in texts:
         if "scoring-reference" in t or "scoring-pairs" in t or "evidence/reference" in t:
