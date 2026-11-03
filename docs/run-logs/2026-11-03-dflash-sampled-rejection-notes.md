@@ -24,7 +24,7 @@ Eight users sampled: about 250 tok/s total on both builds.
 ## Other points from the card that bear on tt-orchard
 
 - cp4 changed the default for requests that send no sampling settings from temperature 1.0 to 0.6 with top_k 20 and top_p 0.95. The card says 1.0 occasionally picks an unlikely token, which shows up as typos in identifiers in code.
-- The bundle ships its own `vllm_tt_plugin` wheel next to the model code. Issue 107's decision 1 (2026-10-27) allows no change to the plugin and accepts a monkeypatch applied safely from the package. Whether this wheel differs from the upstream plugin was not checked (no diff was made). That check decides whether the bundle's method fits decision 1.
+- The bundle ships its own `vllm_tt_plugin` wheel next to the model code. Issue 107's decision 1 (2026-10-27) allowed no change to the plugin and accepted a monkeypatch applied safely from the package. The operator widened it on 2026-11-03: monkeypatched plugin changes are fine when they travel with the model container. A plugin patch shipped in our own package therefore fits. Whether the mando wheel differs from the upstream plugin was not checked (no diff was made); the diff shows what its patch changes.
 - The drafter weights are bfp8 and the KV cache is Q4 (`q4kv`). The target weights are the unquantized `Qwen/Qwen3.8-27B` checkpoint, converted at load. Nothing in this bundle reads a quantized checkpoint.
 
 ## What this means for issue 107
