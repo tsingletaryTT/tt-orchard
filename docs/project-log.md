@@ -3999,3 +3999,9 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Tests first (8 red), then the fixes; each fix reintroduced and a test went red (7 mutations, none survived).
 - Not changed: tt-perf-report still opens the snapshot by path in the operator's own output directory.
 
+## 2026-11-03 `tt-orchard profile`: Copilot round 3 on PR 416 (issue 113 step 1, last round)
+- Review (Copilot, round 3, "needs a closer look", no open issues, 3 findings in unchanged code): SIGTERM to the controller ended it without the group cleanup, so the workload kept running in its own session under gozer's lease; the raw fallback ranked top ops by device time plus the gap before them; the no-free-board reason copied board ids and gozer's stderr into the summary a model reads.
+- Fixes: `exit_on_sigterm` turns SIGTERM into SystemExit(143) while the command runs, so `run_group` sends the group SIGTERM, waits the grace time and kills; the old handler is put back. The fallback uses a separate by-device-time list. The summary reason is a fixed sentence and the detail is printed to the console.
+- Tests first (4 red), then the fixes; each fix reintroduced and a test went red (5 mutations, none survived).
+- Not requested: a fourth round. Nothing declined.
+

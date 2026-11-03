@@ -799,3 +799,74 @@ def test_both_consumers_read_one_private_copy_of_the_ops_csv(tmp_path):
     s, code = ps.summarise_dir(tmp_path / "profile", out, top_n=3, perf_report="tt-perf-report", report_timeout_s=1.0, run=run)
     assert seen[0].parent == out and seen[0] != src and seen[0].read_text() == raw_csv(layered_rows())
     assert "Swapped" not in json.dumps(s) and s["groups"]["mixer"]["ops"] == 4
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 416, round 3
+
+def test_sigterm_to_the_controller_runs_the_graceful_group_cleanup_and_restores_the_handler(tmp_path):
+    """Round 3, finding 1: SIGTERM killed the controller without the cleanup, and the child (in its own session) kept running under gozer's lease."""
+    import signal
+    import subprocess
+    import sys
+    import time
+    done, ready = tmp_path / "cleaned", tmp_path / "ready"
+    child = ("import signal, sys, time\n"
+             f"def h(*a):\n    time.sleep(0.5)\n    open({str(done)!r}, 'w').write('x')\n    sys.exit(0)\n"
+             "signal.signal(signal.SIGTERM, h)\n"
+             f"open({str(ready)!r}, 'w').write('r')\n"
+             "time.sleep(60)\n")
+    ctl = ("import sys\n"
+           f"sys.path.insert(0, {str(Path(ps.__file__).resolve().parent.parent)!r})\n"
+           "from pathlib import Path\n"
+           "from orchard import profile_summary as ps\n"
+           f"with ps.exit_on_sigterm():\n"
+           f"    ps.run_group([sys.executable, '-c', {child!r}], timeout_s=60.0, log_path=Path({str(tmp_path / 'log')!r}), term_grace_s=10.0)\n")
+    proc = subprocess.Popen([sys.executable, "-c", ctl])
+    for _ in range(200):
+        if ready.exists():
+            break
+        time.sleep(0.05)
+    assert ready.exists()
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 128 + signal.SIGTERM
+    assert done.exists()                                              # the child ran its own handler: it was given the grace time
+
+
+def test_main_takes_sigterm_only_while_the_command_runs_and_puts_the_old_handler_back(tmp_path):
+    import signal
+    before = signal.getsignal(signal.SIGTERM)
+    during = []
+    base = fake_run_factory(layered_rows(), REPORT)
+
+    def run(argv, **kw):
+        during.append(signal.getsignal(signal.SIGTERM))
+        return base(argv, **kw)
+    ps.main(args_for(tmp_path, "python3", "x.py", perf_report="tt-perf-report"), out=Out(), run=run, probe=lambda py: None, tools=lambda h: None,
+            choose=lambda w, **kw: [PLAN])
+    assert during and during[0] not in (before, signal.SIG_DFL) and signal.getsignal(signal.SIGTERM) == before
+
+
+def test_the_raw_fallback_ranks_by_device_time_alone_not_device_time_plus_gap(tmp_path):
+    """Round 3, finding 2: with --top 1 a 1 us kernel with a 900 us gap beat a 100 us kernel with no gap."""
+    rows = [op("Slow", 100_000, 0), op("Gappy", 1_000, 900_000), op("Mid", 50_000, 0)]
+    raw = ps.analyze_raw(raw_csv(rows).splitlines(keepends=True))
+    top = ps.top_from_raw(raw)
+    assert [t["op_code"] for t in top] == ["Slow", "Mid", "Gappy"]
+    many = [op(f"Gap{i}", 1_000, 900_000 + i) for i in range(30)] + [op("Slow", 100_000, 0)]
+    top = ps.top_from_raw(ps.analyze_raw(raw_csv(many).splitlines(keepends=True)))
+    assert top[0]["op_code"] == "Slow"                                 # even when the by-op-code list (time plus gap) is full of gappy codes
+
+
+def test_a_no_free_board_summary_holds_no_board_id_or_gozer_stderr_and_the_console_does(tmp_path):
+    """Round 3, finding 3: the NoFreeBoard text (board ids, gozer's stderr) was copied into the summary a model reads."""
+    secret = "board 0000046131924062 at /home/someone/.config stderr: Traceback host-a17"
+
+    def choose(wants, **kw):
+        raise bench_control.NoFreeBoard(f"gozer status failed (exit 2): {secret}")
+    out = Out()
+    code = ps.main(args_for(tmp_path, "python3", "x.py"), out=out, run=fake_run_factory(layered_rows(), REPORT), probe=lambda py: None, tools=lambda h: None,
+                   choose=choose)
+    text = (tmp_path / "out" / ps.SUMMARY_FILE).read_text()
+    assert code == 3 and "0000046131924062" not in text and "someone" not in text and "host-a17" not in text
+    assert any("no board was free" in c for c in json.loads(text)["could_not_measure"])
+    assert "0000046131924062" in out.getvalue()                       # the detail is for the person at the console

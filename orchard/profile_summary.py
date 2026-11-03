@@ -298,7 +298,7 @@ def analyze_raw(source) -> dict:
                  "columns_missing": missing, "arch": arch, "devices_seen": len(devices), "device": None}
     if not devices:
         could.append("device ops: the ops CSV holds no row with a device id, so no device time was read")
-        out.update(total=None, top_by_code=[], groups=None, per_layer=[], layers_seen=0, dram_per_bank=None, noc_congestion=None, could_not_measure=could)
+        out.update(total=None, top_by_code=[], top_by_device_time=[], groups=None, per_layer=[], layers_seen=0, dram_per_bank=None, noc_congestion=None, could_not_measure=could)
         return out
     device = min(devices, key=lambda d: (-devices[d].total["ops"], d))
     d = devices[device]
@@ -317,6 +317,8 @@ def analyze_raw(source) -> dict:
     # Ranked by raw sums (a missing column adds 0 to the order only); the rows themselves report a missing time as None.
     ranked = sorted(d.by_code.items(), key=lambda kv: (-(kv[1]["time_in_ops_us"] + kv[1]["gap_us"]), kv[0]))
     out["top_by_code"] = [{"op_code": c, **_finish_bucket(b)} for c, b in ranked[:MAX_OP_CODES_LISTED]]
+    by_time = sorted(d.by_code.items(), key=lambda kv: (-kv[1]["time_in_ops_us"], kv[0]))     # the fallback for the top ops: device time alone
+    out["top_by_device_time"] = [{"op_code": c, **_finish_bucket(b)} for c, b in by_time[:MAX_TOP]]
     out["op_codes_seen"] = len(d.by_code)
     if matched:
         out["groups"] = {g: _finish_bucket(d.by_group[g]) if g in d.by_group else None for g in GROUPS}
@@ -395,9 +397,10 @@ def read_report(source, top_n: int, device: int | None = None) -> tuple[list[dic
 
 
 def top_from_raw(raw: dict) -> list[dict]:
-    """When tt-perf-report cannot run, the top rows come from the raw CSV: op codes by time in ops plus gap, with no utilization and no advice."""
+    """When tt-perf-report cannot run, the top rows come from the raw CSV: op codes by device time alone (the gap before an op is not time the op ran,
+    and `--top` promises the largest device time first), with no utilization and no advice."""
     return [{"op_code": r["op_code"], "ops": r["ops"], "device_time_us": r["time_in_ops_us"], "op_to_op_gap_us": r["gap_us"],
-             "advice": []} for r in raw.get("top_by_code", [])]
+             "advice": []} for r in raw.get("top_by_device_time", [])]
 
 
 # ------------------------------------------------------------------------------------------------------------- the summary
@@ -540,6 +543,22 @@ def run_group(argv: list[str], *, timeout_s: float, log_path: Path, env: dict | 
             # exited on its own, still holds the chips. Killing a group with no member is a no-op.
             _signal_group(proc.pid, signal.SIGKILL)
             proc.wait()
+
+
+@contextlib.contextmanager
+def exit_on_sigterm():
+    """While the block runs, SIGTERM to this process raises SystemExit(143) instead of ending it at once, so `run_group`'s cleanup runs (SIGTERM to the
+    child's session, the grace time, the kill) and the workload does not keep running under gozer's lease with no timeout. The old handler is put
+    back on the way out. A thread other than the main one cannot install a handler; the block then runs as it is."""
+    try:
+        old = signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(SystemExit(128 + signum)))
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, old)
 
 
 def _wait_group_gone(proc, grace_s: float) -> None:
@@ -820,7 +839,9 @@ def main(args, *, out, run=run_group, probe=has_profiler, tools=has_tracy_tools,
             try:
                 plan = (choose or bench_control.choose_boards)([args.chips], gozer=args.gozer, exclude=tuple(args.exclude), wait_s=args.wait_s)[0]
             except bench_control.NoFreeBoard as exc:
-                summary, code = nothing("no free board", f"everything: no board was free to lease ({_clip(str(exc), 200)}); nothing was run")
+                # The exception text can hold board ids and gozer's stderr; a model reads the summary, so only a fixed sentence goes there.
+                print(f"tt-orchard profile: no board was free to lease ({_clip(str(exc), 300)})", file=out)
+                summary, code = nothing("no free board", "everything: no board was free to lease (the detail is on the console of the run); nothing was run")
                 plan = None
             except (OSError, subprocess.SubprocessError) as exc:
                 summary, code = nothing("gozer unavailable", f"everything: gozer could not be run ({type(exc).__name__}); nothing was run")
@@ -830,7 +851,8 @@ def main(args, *, out, run=run_group, probe=has_profiler, tools=has_tracy_tools,
                 print(f"tt-orchard profile: running under a lease on a free board ({args.chips} chip(s)); output in {out_dir}", file=out)
                 t0 = now()
                 try:
-                    exit_code, timed_out = run(full, timeout_s=args.timeout, log_path=out_dir / RUN_LOG, env={**environ, "TT_METAL_HOME": home})
+                    with exit_on_sigterm():
+                        exit_code, timed_out = run(full, timeout_s=args.timeout, log_path=out_dir / RUN_LOG, env={**environ, "TT_METAL_HOME": home})
                 except (OSError, subprocess.SubprocessError) as exc:
                     summary, code = nothing("run failed to start", f"everything: the profiled command could not be started ({type(exc).__name__})")
                 else:
