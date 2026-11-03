@@ -408,7 +408,7 @@ def printed_command(cfg: dict, ids: list[int]) -> list[str]:
 
 def main() -> int:
     from tokenizers import Tokenizer      # imported here so a missing package fails before docker
-    from serve_and_compare import (ServerHTTPError, cache_state, guard_cache, load_reference, measure,
+    from serve_and_compare import (ServerHTTPError, cache_state, declared_max_model_len, guard_cache, load_reference, measure,
                                    suite_preflight, write_report)
 
     try:
@@ -469,6 +469,7 @@ def main() -> int:
         print(f"serve_and_compare_container: docker run exited {r.returncode}: {r.stderr[-2000:]}")
         return 4
     container = Container(r.stdout.split()[-1], log_path)
+    container.declared_max_model_len = declared_max_model_len(" ".join(argv))      # the container route has no run.sh: the context comes from its command
     stopped = False
     try:
         m = measure(cfg, container, log_path, tokenizer, reference[0], reference[1], suite_setup)

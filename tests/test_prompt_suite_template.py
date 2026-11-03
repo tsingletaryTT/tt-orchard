@@ -41,6 +41,7 @@ def requests(tmp_path):
 
 def run(swap, tmp_path, **kw):
     kw.setdefault("prompt_suite", True)
+    kw.setdefault("live_probe", False)          # these tests count the requests of the suite; the live probe (issue 368) has its own tests
     extra = kw.pop("server_extra", {})
     return swap["start"]("perfect", server_extra={"request_log": str(tmp_path / "requests.jsonl"), **extra}, **kw)
 
