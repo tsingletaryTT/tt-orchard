@@ -10,6 +10,7 @@ the previous coder container was left as `Exited (1)`, and the block was labelle
 import pytest
 
 from fakes import LEASE, FakeClock, FakeRun
+from orchard.commands import CommandResult
 from orchard import blocked
 from orchard.ledger import Ledger
 from orchard.server import ServerChipsHeld, ServerControl, ServerError, ServerSpec, StopCheck
@@ -71,7 +72,7 @@ def test_a_container_after_a_failed_start_with_unknown_ownership_is_removed():
     with pytest.raises(ServerError):
         ctl.start(LEASE)
     assert ctl.owned is None
-    assert ctl.remove_container()["removed"] is True and rms(run) == [["docker", "rm", NAME]]
+    assert ctl.remove_container()["removed"] is True and rms(run) == [["docker", "rm", "c1"]]       # by the id it listed
 
 
 def test_a_known_refusal_blocks_the_removal_unless_the_caller_says_the_container_is_this_runs():
@@ -120,12 +121,59 @@ def test_a_block_that_names_a_container_is_not_retried_by_itself():
 # ---- the supervisor --------------------------------------------------------------------------------------------------------------
 
 
-class ScriptedCoder(MachineCoder):
-    """The fake machine for readiness and chips; a real ServerControl over scripted commands for the start, the stop checks and the removal."""
+class StatefulRun:
+    """Scripted commands over a docker that remembers. `serve` entries are (returncode, stdout, stderr[, rows the call creates]); `rows` are the
+    containers (name, state, id) that exist; `docker rm` removes a row by name or by id and fails when none matches; `list_script` gives the
+    answers of the first `docker ps -a` calls (a container that changes between two looks), then the live rows."""
 
-    def __init__(self, machine, serve, listing=(0, f"{NAME} exited c1\n", "")):
+    def __init__(self, serve, rows, list_script=None):
+        self.serve, self.rows, self.list_script, self.calls = list(serve), [tuple(r) for r in rows], list(list_script or []), []
+
+    def argvs(self):
+        return [c["argv"] for c in self.calls]
+
+    def __call__(self, argv, timeout, *, env=None, kill_on_timeout=True):
+        argv = [str(a) for a in argv]
+        self.calls.append({"argv": argv, "timeout": timeout, "env": env, "kill_on_timeout": kill_on_timeout})
+
+        def out(rc, text="", err=""):
+            return CommandResult(tuple(argv), rc, text, err)
+        if argv[:2] == ["tt-model", "serve"]:
+            entry = self.serve.pop(0) if len(self.serve) > 1 else self.serve[0]
+            self.rows += [tuple(r) for r in (entry[3] if len(entry) > 3 else [])]
+            return out(*entry[:3])
+        if argv[:2] == ["docker", "ps"] and "-a" in argv:
+            rows = self.list_script.pop(0) if self.list_script else self.rows
+            return out(0, "".join(f"{n} {st} {i}\n" for n, st, i in rows))
+        if argv[:3] == ["docker", "ps", "-q"]:
+            return out(0)
+        if argv[:2] == ["docker", "ps"]:
+            return out(0, "".join(f"{i} img {n} \n" for n, st, i in self.rows if st == "running"))
+        if argv[:2] == ["docker", "rm"]:
+            kept = [r for r in self.rows if argv[2] not in (r[0], r[2])]
+            gone, self.rows = len(kept) != len(self.rows), kept
+            return out(0 if gone else 1, argv[2], "" if gone else "No such container")
+        if argv[:2] == ["tt-model", "stop"]:
+            self.rows = [(n, "exited" if st == "running" else st, i) for n, st, i in self.rows]
+            return out(0, "stopped 1 container(s)")
+        if argv[:2] == ["ss", "-ltn"]:
+            return out(0, SS_HEADER)
+        if argv[:2] == ["curl", "-sS"]:
+            return out(7, "", "refused")
+        raise AssertionError(f"unexpected call: {argv}")
+
+
+EXITED = [(NAME, "exited", "c1")]
+
+
+class ScriptedCoder(MachineCoder):
+    """The fake machine for readiness and chips; a real ServerControl over a stateful docker for the start, the stop checks and the removal."""
+
+    def __init__(self, machine, serve, rows=EXITED, list_script=None):
         super().__init__(machine)
-        self.ctl, self.run = control(serve, listing=listing)
+        self.run = StatefulRun(serve, rows, list_script)
+        clock = FakeClock()
+        self.ctl = ServerControl(SPEC, run=self.run, clock=clock, sleep=clock.sleep)
 
     owned = property(lambda self: self.ctl.owned, lambda self, v: setattr(self.ctl, "owned", v))
 
@@ -190,13 +238,11 @@ def earlier_launch(rig, created="c1"):
 
 def test_a_leftover_of_this_runs_own_launch_is_removed_and_the_start_is_tried_again(rig):
     earlier_launch(rig)
-    exited, gone = (0, f"{NAME} exited c1\n", ""), (0, "", "")
-    # the listings in order: the check, the removal's own look, then nothing once it is removed
-    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL), (0, "", "")], listing=[exited, exited, gone]))
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL), (0, "", "", [(NAME, "running", "c2")])]))
     rig.run()
     c = made[0]
     order = [a[1] for a in c.run.argvs() if a[:2] in (["tt-model", "serve"], ["docker", "rm"])]
-    assert rms(c.run) == [["docker", "rm", NAME]] and order[:3] == ["serve", "rm", "serve"]     # refused, removed, started again
+    assert rms(c.run)[0] == ["docker", "rm", "c1"] and order[:3] == ["serve", "rm", "serve"]     # refused, removed by id, started again
     removed = [d for d in rig.decisions() if d["decision"] == "coder container removed"]
     assert removed and removed[0]["result"]["removed"] is True and removed[0].get("before_start") is True
     assert "coder container started" in [d["decision"] for d in rig.decisions()]
@@ -214,7 +260,8 @@ def test_a_leftover_from_before_this_run_is_not_removed_and_the_block_names_it(r
 
 def test_the_retry_gives_up_when_the_second_start_is_refused_too(rig):
     earlier_launch(rig)
-    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL), (1, "", REFUSAL)]))
+    # the second refusal: another stopped container (c2) now holds the chips
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL), (1, "", REFUSAL, [(NAME, "exited", "c2")])]))
     assert rig.run() == 5
     assert len(serves(made[0].run)) == 2 and len(rms(made[0].run)) == 1
     reason = blocks(rig)[-1]
@@ -224,7 +271,7 @@ def test_the_retry_gives_up_when_the_second_start_is_refused_too(rig):
 
 def test_a_refusal_with_no_stopped_container_of_that_name_says_to_list_containers(rig):
     earlier_launch(rig)
-    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], listing=(0, "", "")))
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], rows=[]))
     assert rig.run() == 5
     reason = blocks(rig)[-1]
     assert "docker ps -a" in reason and rms(made[0].run) == []
@@ -232,15 +279,15 @@ def test_a_refusal_with_no_stopped_container_of_that_name_says_to_list_container
 
 def test_a_running_container_of_that_name_is_never_removed_by_the_retry(rig):
     earlier_launch(rig)
-    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], listing=(0, f"{NAME} running c1\n", "")))
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], rows=[(NAME, "running", "c1")]))
     assert rig.run() == 5
     assert rms(made[0].run) == [] and len(serves(made[0].run)) == 1
 
 
 def test_a_start_that_fails_after_creating_its_container_leaves_none_behind(rig):
-    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", "container exited with code 1")]))
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", "container exited with code 1", [(NAME, "exited", "c7")])], rows=[]))
     assert rig.run() == 5
-    assert rms(made[0].run) == [["docker", "rm", NAME]]
+    assert rms(made[0].run) == [["docker", "rm", "c7"]]
     assert any(d["decision"] == "coder container removed" for d in rig.decisions())
 
 

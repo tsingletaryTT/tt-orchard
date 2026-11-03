@@ -284,6 +284,14 @@ def check_port(port: int, in_use: bool, resuming: bool = False, kept: bool = Fal
     return Check("port", OK, f"coder port {port} is free")
 
 
+def _same_dir(a, b) -> bool:
+    """Whether two paths name one directory after links are resolved. A path that cannot be resolved compares as written."""
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return Path(a) == Path(b)
+
+
 def coder_model_id(load: Callable, tiers_path: Path, coder_port: int) -> str | None:
     """The model the coder serves: the `model` of the single chips tier on the coder port. The supervisor needs the coder to list that id at
     /v1/models, and the container's vLLM loads it by that id. None when the tiers file cannot be read or no chips tier uses the port (the
@@ -1197,7 +1205,9 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                 cache = Path(s.coder_cache())
                 present = bool(s.coder_snapshot(cache, model))
                 base_id = (base_check.data or {}).get("base")
-                shared = model in (model_id, base_id)
+                # The target and the base download into the run's hf_home. The coder's download is the same one only when its model is one
+                # of them and the cache it mounts is that directory; with another cache it needs a download of its own.
+                shared = model in (model_id, base_id) and _same_dir(cache, hf_home_for(cfg))
                 # What the command downloads onto this disk before the coder boots: the target and the base, each only when missing. It
                 # fetches them after the preflight, so a disk that holds each download alone can still be short for all three.
                 planned_gb = 0.0

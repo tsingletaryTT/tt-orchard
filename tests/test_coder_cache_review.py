@@ -41,11 +41,12 @@ def target_hub(gb):
 
 
 def preflight(tmp_path, *, model_id="Cloudflare/clef", same_device=True, no_fetch=False, coder_hub_gb=149.0, target_gb=80.0, free=200.0,
-              present=False, local=False):
+              present=False, local=False, cache=Path("/hf")):
     def hub(model):
         return (target_hub(coder_hub_gb if model == CODER_MODEL else target_gb), None)
     sig = signals(hub_info=hub, same_device=lambda a, b: same_device, free_gb=lambda p: free,
-                  local_snapshot=lambda m: Path("/snap") if local else None, coder_snapshot=lambda c, m: present)
+                  local_snapshot=lambda m: Path("/snap") if local else None, coder_snapshot=lambda c, m: present,
+                  coder_cache=lambda: cache)
     c = coder_cfg(tmp_path)
     c.coder.port = 8000
     return {r.name: r for r in pf.run_preflight(c, model_id, accept_credentials=False, signals=sig, no_fetch=no_fetch)}
@@ -65,7 +66,7 @@ def test_a_target_already_on_disk_downloads_nothing(tmp_path):
 
 
 def test_a_coder_that_is_the_target_model_is_counted_once_by_the_disk_row(tmp_path):
-    rows = preflight(tmp_path, model_id=CODER_MODEL, target_gb=149.0, free=200.0)
+    rows = preflight(tmp_path, model_id=CODER_MODEL, target_gb=149.0, free=200.0, cache=tmp_path / "hf")    # the cfg's hf_home
     assert rows["coder-cache"].status != "block" and "disk row" in rows["coder-cache"].detail
 
 
@@ -172,7 +173,7 @@ def test_the_ledger_free_release_removes_the_container_without_writing_and_still
     sup, led = bare(rig, lambda m: ScriptedCoder(m, serve=[(0, "", "")]))
     try:
         sup.coder_lease = sup.adapter.acquire(2, "orchard:supervisor", "coder")
-
+        sup.coder.ctl.owned = True                           # its `tt-model serve` exited 0: the container is this run's
         writes = []
         sup.ledger.append = lambda *a, **k: writes.append(a)
         assert sup._release_from_memory() is True
@@ -189,6 +190,7 @@ def test_a_removal_that_raises_cannot_stop_the_ledger_free_release(rig):
     sup, led = bare(rig, lambda m: Boom(m, serve=[(0, "", "")]))
     try:
         sup.coder_lease = sup.adapter.acquire(2, "orchard:supervisor", "coder")
+        sup.coder.ctl.owned = True
         assert sup._release_from_memory() is True and rig.m.leases == {}
     finally:
         led.__exit__(None, None, None)
@@ -200,6 +202,7 @@ def test_a_failing_ledger_write_after_a_removal_does_not_raise(rig):
         def boom(*a, **k):
             raise OSError("no space left on device")
         sup.ledger.append = boom
+        sup.coder.ctl.owned = True
         sup._remove_coder_container()                       # must return, not raise
         assert len(rms(sup.coder.run)) == 1
     finally:
@@ -218,20 +221,20 @@ def test_a_container_that_predates_the_run_is_not_removed_after_an_earlier_refus
 
 def test_a_container_with_another_id_than_the_one_this_run_created_is_not_removed(rig):
     earlier_launch(rig, created="c1")
-    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], listing=(0, f"{NAME} exited zzz\n", "")))
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], rows=[(NAME, "exited", "zzz")]))
     assert rig.run() == 5
     assert rms(made[0].run) == []
 
 
 def test_a_started_coder_records_the_id_of_its_container(rig):
-    launch(rig, lambda m: ScriptedCoder(m, serve=[(0, "", "")], listing=(0, f"{NAME} running c9\n", "")))
+    launch(rig, lambda m: ScriptedCoder(m, serve=[(0, "", "", [(NAME, "running", "c9")])], rows=[]))
     rig.run()
     made = [d for d in rig.decisions() if d["decision"] == "coder container created"]
-    assert made and made[0]["container_id"] == "c9" and made[0]["name"] == NAME
+    assert made and made[0]["container_id"] == "c9"
 
 
 def test_a_start_that_fails_after_creating_its_container_records_the_id_too(rig):
-    launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", "container exited with code 1")], listing=(0, f"{NAME} exited c7\n", "")))
+    launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", "container exited with code 1", [(NAME, "exited", "c7")])], rows=[]))
     assert rig.run() == 5
     assert [d["container_id"] for d in rig.decisions() if d["decision"] == "coder container created"] == ["c7"]
 
@@ -312,9 +315,9 @@ def test_the_same_on_a_dry_run(real_caches, box):
 
 def test_a_container_that_took_the_name_between_the_check_and_the_removal_is_left_alone(rig):
     earlier_launch(rig, created="c1")
-    first, swapped = (0, f"{NAME} exited c1\n", ""), (0, f"{NAME} exited zzz\n", "")
-    # the supervisor's look matches the recorded id; the removal's own look finds another container under the name
-    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], listing=[first, swapped]))
+    c1, zzz = [(NAME, "exited", "c1")], [(NAME, "exited", "zzz")]
+    # the looks in order: before the start, the supervisor's check (the recorded id), then the removal's own (another container took the name)
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], rows=c1, list_script=[c1, c1, zzz]))
     assert rig.run() == 5
     assert rms(made[0].run) == []
 
@@ -325,3 +328,125 @@ def test_the_listing_asks_docker_for_the_container_id():
     assert ctl.find_container_rows() == [(NAME, "exited", "c1")]
     listing = [a for a in run.argvs() if a[:3] == ["docker", "ps", "-a"]][0]
     assert "{{.ID}}" in listing[listing.index("--format") + 1]
+
+
+# ---- round 2, thread 1: a shared model is counted once only when the download goes to the cache the coder mounts ---------------------
+
+
+def test_a_coder_model_that_is_the_target_still_needs_its_own_download_when_the_caches_differ(tmp_path):
+    # the CLI downloads the target into the cfg's hf_home (tmp_path/hf); the coder mounts /hf, which has no snapshot and little room
+    rows = preflight(tmp_path, model_id=CODER_MODEL, target_gb=149.0, free=100.0, cache=Path("/hf"))
+    assert (rows["coder-cache"].status, rows["coder-cache"].reason) == ("block", "disk-full")
+
+
+def test_the_same_directory_reached_through_a_link_counts_as_one_cache(tmp_path):
+    real = tmp_path / "hf"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    rows = preflight(tmp_path, model_id=CODER_MODEL, target_gb=149.0, free=200.0, cache=link)
+    assert rows["coder-cache"].status != "block" and "disk row" in rows["coder-cache"].detail
+
+
+# ---- round 2, thread 2: the removal acts on the container that was checked, by its id ------------------------------------------------
+
+
+def test_the_removal_runs_docker_rm_on_the_verified_id_and_not_on_the_name():
+    from test_coder_chips_held import control
+    ctl, run = control([(1, "", REFUSAL)], listing=(0, f"{NAME} exited c1\n", ""))
+    with pytest.raises(ServerChipsHeld):
+        ctl.start(__import__("fakes").LEASE)
+    assert ctl.remove_container(even_if_unowned=True, only_id="c1")["removed"] is True
+    assert rms(run) == [["docker", "rm", "c1"]]
+
+
+def test_a_listing_without_an_id_falls_back_to_the_name():
+    from test_coder_chips_held import control
+    ctl, run = control([(0, "", "")], listing=(0, f"{NAME} exited\n", ""))
+    ctl.owned = True
+    assert ctl.remove_container()["removed"] is True and rms(run) == [["docker", "rm", NAME]]
+
+
+# ---- round 2, thread 3: only a container this run proved it made is recorded or cleaned up -----------------------------------------
+
+
+def test_a_start_that_fails_before_creating_anything_leaves_the_existing_container_alone(rig):
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", "image pull failed")], rows=[(NAME, "exited", "x1")]))
+    assert rig.run() == 5
+    assert rms(made[0].run) == [] and not [d for d in rig.decisions() if d["decision"] == "coder container created"]
+
+
+def test_a_container_of_another_name_made_by_the_failed_start_is_not_recorded(rig):
+    rows = [(NAME, "exited", "x1")]
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", "container exited", [("tt-model-other", "exited", "n1")])], rows=rows))
+    assert rig.run() == 5
+    assert rms(made[0].run) == [] and not [d for d in rig.decisions() if d["decision"] == "coder container created"]
+
+
+def test_a_resumed_run_removes_the_container_its_own_earlier_launch_created(rig):
+    earlier_launch(rig, created="c1")
+    made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", "image pull failed")], rows=[(NAME, "exited", "c1")]))
+    assert rig.run() == 5
+    assert rms(made[0].run) == [["docker", "rm", "c1"]]
+
+
+class _Ledger:
+    def read(self):
+        return []
+
+    def append(self, *a, **k):
+        pass
+
+
+def _bare(owned):
+    from orchard.supervisor import Supervisor
+
+    class Coder:
+        removed = []
+
+        def find_container_rows(self):
+            return [(NAME, "exited", "x1")]
+
+        def remove_container(self, **kw):
+            self.removed.append(kw)
+            return {"container": NAME, "removed": True}
+    Coder.owned = owned
+    sup = Supervisor.__new__(Supervisor)
+    sup.coder, sup.ledger = Coder(), _Ledger()
+    return sup, Coder
+
+
+def test_an_unknown_owner_is_not_cleaned_up_without_a_recorded_id():
+    sup, coder = _bare(None)
+    sup._remove_coder_container()
+    assert coder.removed == []
+    sup._created_ids = {"x1"}
+    sup._remove_coder_container()
+    assert coder.removed == [{"only_id": "x1"}]
+
+
+def test_a_started_coder_is_cleaned_up_without_a_recorded_id():
+    sup, coder = _bare(True)
+    sup._remove_coder_container()
+    assert coder.removed == [{}]
+
+
+def test_a_known_foreign_owner_is_never_cleaned_up():
+    sup, coder = _bare(False)
+    sup._created_ids = {"x1"}
+    sup._remove_coder_container()
+    assert coder.removed == []
+
+
+# ---- round 2, thread 4: the boot watch measures a cache directory that does not exist yet ------------------------------------------
+
+
+def test_the_free_space_of_a_missing_cache_is_read_from_its_nearest_existing_parent(tmp_path):
+    assert cc._free_bytes(tmp_path / "no" / "such" / "cache") is not None
+    assert cc.BootWatch(tmp_path / "no" / "such" / "cache")._baseline is not None
+
+
+def test_a_download_that_starts_in_a_cache_made_after_the_watch_is_reported(tmp_path):
+    free = iter([300 * 10**9, 280 * 10**9])
+    w = cc.BootWatch(tmp_path / "later", free=lambda p: next(free), partial=lambda p: 0)
+    assert "20.0 GB" in w.report()

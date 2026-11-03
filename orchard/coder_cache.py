@@ -85,10 +85,19 @@ def partial_download_bytes(cache: Path) -> int:
 
 
 def _free_bytes(path: Path) -> int | None:
-    try:
-        return shutil.disk_usage(path).free
-    except (OSError, ValueError):
-        return None
+    """Free bytes on the disk that holds `path`. A directory that does not exist yet (a cache the boot is about to create) is measured at
+    its nearest existing parent, so the baseline is taken before the first write and a later fall is not read as zero."""
+    probe = Path(path)
+    for _ in range(64):
+        try:
+            return shutil.disk_usage(probe).free
+        except FileNotFoundError:
+            if probe.parent == probe:
+                return None
+            probe = probe.parent
+        except (OSError, ValueError):
+            return None
+    return None
 
 
 class BootWatch:

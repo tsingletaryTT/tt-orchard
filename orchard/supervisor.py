@@ -1426,6 +1426,7 @@ class Supervisor:
                             checks=check.checks, evidence=check.evidence)
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
                            server={**self.coder.record(), "owned": None})
+        before = self._coder_container_ids()      # the containers under the coder's name before this attempt: none of them is this run's
         try:
             try:
                 self.coder.start(lease)
@@ -1436,7 +1437,7 @@ class Supervisor:
                 if not self._remove_own_leftover(lease):
                     self._block_chips_held(held, lease)
                 self.coder.start(lease)
-            self._note_created_container(lease)
+            self._note_created_container(lease, before)
         except ServerChipsHeld as exc:
             self._block_chips_held(exc, lease, retried=True)
         except ServerNotOwned as exc:
@@ -1446,7 +1447,7 @@ class Supervisor:
                                server=self.coder.record(), reason=str(exc))
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         except (ServerError, OSError) as exc:
-            self._note_created_container(lease)       # tt-model may have made the container before it failed: record it for the cleanup
+            self._note_created_container(lease, before)       # tt-model may have made the container before it failed: record it for the cleanup
             self._block_if_off_bus(None, f"the coder did not start and answer; nothing is retried: {exc}", lease.chips)
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry gives
@@ -1537,7 +1538,19 @@ class Supervisor:
         if remove is None:
             return
         try:
-            result = remove()
+            rows = getattr(self.coder, "find_container_rows", None)
+            if getattr(self.coder, "owned", None) is False:
+                return                      # another process owns the container
+            if getattr(self.coder, "owned", None) is True or rows is None:
+                result = remove()           # its `tt-model serve` exited 0, so the container under the name is this run's
+            else:
+                # The owner is unknown (a start that failed, or a record without the field): remove only a container whose id this run
+                # recorded as created. One that was there before the attempt is not proven to be this run's.
+                found = rows() or []
+                created = self._known_created_ids(use_ledger=record)
+                if not found or any(cid not in created for _, _, cid in found):
+                    return
+                result = remove(only_id=found[0][2])
         except Exception as exc:            # best effort: a docker or fake failure must not stop the release that follows
             if record:
                 self._note("notice", what="removing the stopped coder container failed", error=str(exc))
@@ -1552,19 +1565,43 @@ class Supervisor:
         except Exception:
             pass
 
-    def _note_created_container(self, lease: Lease) -> None:
-        """Record the id of the container this run's `tt-model serve` just made under the coder's name, so a later removal can check that a
-        leftover is that container and not one that predates the run (issue 417). Best effort; nothing is recorded when docker cannot say."""
+    def _coder_container_ids(self) -> set[str] | None:
+        """The ids of the containers under the coder's exact name now, or None when docker cannot say (nothing is then provable)."""
         rows = getattr(self.coder, "find_container_rows", None)
         if rows is None:
-            return
+            return None
         try:
-            found = rows() or []
+            found = rows()
         except Exception:
+            return None
+        return None if found is None else {cid for _, _, cid in found if cid}
+
+    def _known_created_ids(self, use_ledger: bool = True) -> set[str]:
+        """The ids this run created under the coder's name: those noted by this process, and with `use_ledger` those the ledger holds from
+        an earlier process of the run."""
+        known = set(getattr(self, "_created_ids", ()))
+        if use_ledger:
+            try:
+                known |= {e["data"].get("container_id") for e in self.ledger.read()
+                          if e["event"] == "decision" and e["data"].get("decision") == "coder container created"}
+            except Exception:
+                pass
+        known.discard(None)
+        return known
+
+    def _note_created_container(self, lease: Lease, before: set[str] | None) -> None:
+        """Record the id of the container this run's `tt-model serve` made under the coder's name, so a later removal can check that a leftover
+        is that container and not one that predates the run (issue 417). Only an id that was not there before the attempt counts: a start that
+        failed before it created anything (an image pull, say) leaves a pre-existing container, which is not this run's. With no listing from
+        before the attempt nothing is proven, so nothing is recorded. Best effort."""
+        now = self._coder_container_ids()
+        if before is None or now is None:
             return
-        for name, _state, cid in found:
-            if cid:
-                self._note("decision", decision="coder container created", container_id=cid, name=name, lease_id=lease.lease_id)
+        for cid in sorted(now - before):
+            if not hasattr(self, "_created_ids"):
+                self._created_ids = set()
+            self._created_ids.add(cid)
+            self._note("decision", decision="coder container created", container_id=cid, lease_id=lease.lease_id)
 
     def _remove_own_leftover(self, lease: Lease) -> bool:
         """A start was refused because a container holds the chips. True when a stopped container under the coder's exact name was found,
@@ -1574,9 +1611,7 @@ class Supervisor:
         rows, remove = getattr(self.coder, "find_container_rows", None), getattr(self.coder, "remove_container", None)
         if rows is None or remove is None:
             return False
-        created = {e["data"].get("container_id") for e in self.ledger.read()
-                   if e["event"] == "decision" and e["data"].get("decision") == "coder container created"}
-        created.discard(None)
+        created = self._known_created_ids()
         try:
             found = rows()
             if not found or any(state == "running" for _, state, _ in found) or any(cid not in created for _, _, cid in found):

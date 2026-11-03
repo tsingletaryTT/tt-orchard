@@ -390,9 +390,12 @@ class ServerControl:
             return None
         if "running" in states:
             return {"container": name, "removed": False, "why": "it is running"}
-        if only_id is not None and not any(i and (i.startswith(only_id) or only_id.startswith(i)) for _, _, i in found):
+        verified = [i for _, _, i in found if i and (only_id is None or i.startswith(only_id) or only_id.startswith(i))]
+        if only_id is not None and not verified:
             return {"container": name, "removed": False, "why": "it is not the container this run created"}
-        rm = self.run([self.docker, "rm", name], self.timeout)
+        # `docker rm` runs on the id that was listed and checked: the name can move to another container between the listing and the
+        # removal. A listing without ids (an older docker format) falls back to the exact name.
+        rm = self.run([self.docker, "rm", verified[0] if verified else name], self.timeout)
         return {"container": name, "state": states[0], "removed": rm.returncode == 0, "stderr": rm.stderr.strip()[-200:]}
 
     def _is_mine(self, line: str) -> bool:
