@@ -1306,13 +1306,19 @@ Before a multi-board hardware test (stage 4's 4-chip test) the supervisor also r
 through gozer. The 4-chip test failed twice with fabric router timeouts on chips that earlier tests had used and passed
 after all four were reset. This costs about 42 seconds per board.
 
-When the two boards are leased separately (the coder's board and a further board), the order of the two resets matters
-(issue 26). On 2026-11-03, with a 1x4 mesh opened on the 1-D fabric with strict init after a fresh lease, resetting board 1
-and then board 0 failed 0 of 12 trials, one lease on all four chips with one reset failed 0 of 11, and resetting board 0 and
-then board 1 failed 6 of 12 with `Fabric Router Sync: Timeout after 10000 ms on Device 0`. The supervisor therefore resets the
-lease that holds the lowest device index last: on the retry after a startup failure, and once more after the park when the
-further board has the lower device index (the coder on board 1). Only this two-board box was measured, and a hang while loading
-a warm tensor cache after a passing fabric start (seen on 2026-10-18) is a separate finding that this does not address.
+When the chips are leased as two separate leases (the coder's lease and a further lease), the order of the two resets matters
+(issue 26). On 2026-11-03, with a 1x4 mesh opened on the 1-D fabric with strict init after a fresh lease, resetting the lease
+whose chips have the lowest PCI address last failed 0 of 12 trials, one lease on all four chips with one reset failed 0 of 11,
+and resetting that lease first failed 6 of 12 with `Fabric Router Sync: Timeout after 10000 ms on Device 0`. The supervisor
+therefore resets the lease whose chips have the lowest PCI address last: on the retry after a startup failure, and once more
+after the park when the further lease has the lower address. The ledger records which key ordered the resets
+(`test chips reset order`: `pci_address`, or `device_index` when a lease carries no usable address).
+
+On this box the trials fit three keys equally: the lowest device index, the lowest PCI address, and the higher board serial
+first. The rule uses the PCI address because it follows the physical slot, and a device index is a position the driver assigns
+in probe order. No reboot and no second box has been tried. Stable names for boards and chips are the longer-term fix
+([tt-gozer issue 4](https://github.com/tsingletaryTT/tt-gozer/issues/4)). A hang while loading a warm tensor cache after a
+passing fabric start (seen on 2026-10-18) is a separate finding that this does not address.
 
 ### 5.5b Freeing disk with `--prune-caches`
 
