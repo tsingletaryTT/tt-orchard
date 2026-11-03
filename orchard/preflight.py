@@ -157,6 +157,7 @@ def check_hub(hub: HubInfo | None, error: str | None, local: bool, local_path: P
 
 
 HINT_COUNT, HINT_MIN_GB = 6, 1.0
+NO_FETCH_NOTE = "its snapshot is not on disk and --no-fetch forbids a download"
 
 
 def _dir_gb(d: Path) -> float:
@@ -982,9 +983,10 @@ def cache_root_for(cfg) -> Path:
 def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
                   resuming: bool = False, base_override: str | None = None,
                   accept_inferred_base: bool = False, progress: Callable[[str], None] | None = None,
-                  stock_recorded: str | None = None) -> list[Check]:
+                  stock_recorded: str | None = None, no_fetch: bool = False) -> list[Check]:
     """`progress(text)` is told what is about to run (the hub lookup, the research, the machine checks), so a
-    terminal is not silent while the research reads weight headers for a minute or two."""
+    terminal is not silent while the research reads weight headers for a minute or two. With `no_fetch` nothing is downloaded: the
+    disk row counts no download and the base row says a missing snapshot is not fetched (issue 409)."""
     from orchard.research.types import reporter
     say = reporter(progress)
     s = signals or default_signals(cfg)
@@ -1054,7 +1056,12 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     except Exception as exc:
         base_check = Check("base", BLOCK, f"could not check: {type(exc).__name__}: {exc}", "nearest-model-missing")
     base_gb = 0.0
-    if base_check.data and base_check.data.get("needs_fetch") and isinstance(base_check.data.get("base_gb"), (int, float)):
+    if no_fetch and base_check.data and base_check.data.get("needs_fetch"):
+        # The command forbids a download, so the disk row counts none. The data keeps `needs_fetch`: stage 0 still needs the snapshot.
+        said = "its snapshot will be downloaded"
+        base_check.detail = (base_check.detail.replace(said, NO_FETCH_NOTE) if said in base_check.detail
+                             else base_check.detail + ". The snapshot " + NO_FETCH_NOTE.removeprefix("its snapshot "))
+    elif base_check.data and base_check.data.get("needs_fetch") and isinstance(base_check.data.get("base_gb"), (int, float)):
         base_gb = float(base_check.data["base_gb"])       # the audio base row already asked the hub
     elif base_check.data and base_check.data.get("needs_fetch"):
         # A failed lookup is not a size of zero: the base row says the disk row cannot count it (the command refuses the run later if

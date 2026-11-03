@@ -1,0 +1,3 @@
+target = "0.9.99"
+summary = "Granite 301 follow-ups: package 0.3.0 boot and smoke, agreement past 1,024 tokens, smoke label fix (evidence and docs)"
+pr = 415
