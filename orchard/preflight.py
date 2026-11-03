@@ -66,6 +66,19 @@ class HubInfo:
     architectures: list[str] = field(default_factory=list)
     pipeline_tag: str | None = None                            # the Hub's pipeline_tag when it is a non-empty string
     tags: list[str] = field(default_factory=list)              # the Hub's tags (strings only)
+    parameters: dict | None = None                             # the Hub's safetensors parameter counts by dtype: whole counts under string names, else None
+
+
+def _parameters(payload: dict) -> dict | None:
+    """`safetensors.parameters` of the Hub's answer when it is a non-empty mapping of string names to whole non-negative counts, else None.
+    A damaged answer is no figure: the fit row then makes no claim."""
+    st = payload.get("safetensors")
+    raw = st.get("parameters") if isinstance(st, dict) else None
+    if not isinstance(raw, dict) or not raw or len(raw) > 64:
+        return None
+    if not all(isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 0 for k, v in raw.items()):
+        return None
+    return dict(raw)
 
 
 def _size(value) -> int:
@@ -98,6 +111,7 @@ def parse_hub(payload: dict) -> HubInfo:
         total_bytes=sum(_size(s.get("size")) for s in siblings), files=names,
         pipeline_tag=payload.get("pipeline_tag") if isinstance(payload.get("pipeline_tag"), str) and payload.get("pipeline_tag") else None,
         tags=[t for t in payload["tags"] if isinstance(t, str)] if isinstance(payload.get("tags"), list) else [],
+        parameters=_parameters(payload),
         code_files=[n for n in names if n.endswith(".py")],
         has_license_file=any(_LICENSE_FILE.match(Path(n).name) for n in names),
     )
@@ -766,6 +780,27 @@ def check_gozer(text: str, kept: bool = False) -> Check:
     return Check("gozer", OK, f"all {len(chips)} chips are free")
 
 
+def check_fit(hub: HubInfo | None, chips) -> Check | None:
+    """Whether the model can fit this box at all, from the Hub's parameter counts by dtype (issue 327). None when the Hub gave no counts or the
+    chip count is unknown: no claim, no row. The figure is a lower bound (orchard/residency.py `totals_bound`: no tensor name or shape was
+    read), so a block means that even the lowest listed precision needs more chips than the box has, and the run has not started a download."""
+    if hub is None or not hub.parameters or isinstance(chips, bool) or not isinstance(chips, int) or chips < 1:
+        return None
+    from orchard import residency
+    try:
+        rec = residency.totals_bound(hub.parameters, box_chips=chips)
+    except residency.ResidencyError as exc:
+        return Check("fit", WARN, f"the Hub's parameter counts could not be sized: {exc}")
+    why = residency.shortfall(rec, chips)
+    if why:
+        return Check("fit", BLOCK, why, "model-does-not-fit")
+    best = rec["verdict"]["best_fit"]
+    return Check("fit", OK, f"{rec['measured']['total_parameters'] / 1e9:.1f} billion parameters by the Hub's counts need at least "
+                            f"{rec['estimated']['chips_needed']} chips at the lowest listed precision; the highest listed precision that fits this "
+                            f"box's {chips} chips is {best}. This is a bound from totals only (no tensor name or shape was read), and the DRAM figure "
+                            "is a choice")
+
+
 @dataclass(frozen=True)
 class Signals:
     hub_info: Callable            # (model_id) -> (HubInfo | None, error text | None)
@@ -1116,6 +1151,16 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         return gozer_seen[0]
 
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(gozer_text(), kept=_kept_on_port(cfg)))
+    if hub is not None and hub.parameters and not in_lab:
+        # A lab runs its tests on another box, so this box's chips say nothing about the fit. The count comes from the same gozer text.
+        def fit() -> Check:
+            try:
+                chips_here = len(_CHIP_LINE.findall(gozer_text()))
+            except Exception:                         # the gozer row already says so
+                chips_here = 0
+            return check_fit(hub, chips_here) or Check("fit", OK, "the box's chip count could not be read from gozer, so the model's size by the "
+                                                               "Hub's parameter counts was not compared with it")
+        guarded("fit", "model-does-not-fit", fit)
     if s.bus is not None:
         def bus_row() -> Check:
             from orchard import bus as bus_check

@@ -1584,6 +1584,26 @@ per-chip reserve, the KV budget and the default policy are choices in `orchard/d
 lists each with its source (`caller` or `default (choice)`). No allocator reading backs them. The record's `not_measured` list says what
 a live reading would replace.
 
+Next to the policy it uses, the record lists the whole model at each of bf16, bfp8 and bfp4 (`estimated.precision_options`): the bytes on
+the chips and the chips that needs. A refusal names these, so it says which precision would fit ("the highest listed precision that fits is
+bfp8, which needs 3 chips") or that none does ("the model does not fit this box at any listed precision"). A model with routed experts is
+marked (`estimated.mixture_of_experts`): every expert stays resident on the chips, so the chip count follows all the experts. Only a few run
+for a token. The number of experts per token is in `config.json`, which the estimate does not read, because the headers do not hold it.
+
+For a repository too large to read header by header, `tt-orchard residency owner/name --totals-only --chips 4` makes one Hub call for the
+parameter counts by dtype and prints a lower bound for each precision. It never reads a header, a tensor name or a shape, so it counts every
+floating-point parameter as a weight that a block format can shrink and every integer dtype (a packed MXFP4, NVFP4 or GPTQ repository) at the
+bytes it stores. The real figure is at least the bound. `deep-principle/Hydrogen-1.0` (753.3 billion parameters, 1,506.7 GB in bf16) needs
+at least 49 chips at bf16, 26 at bfp8 and 14 at bfp4 under the default assumptions, so it does not fit a four-chip box at any listed
+precision. Preflight reads the same counts from the Hub answer it already fetches and adds a `fit` row after the gozer row: it blocks with
+code `model-does-not-fit` when even bfp4 needs more chips than the box has, before any download starts. A lab run skips the row, because its
+tests run on another box.
+
+Before a full-port stage 2 the supervisor also compares the record's first-boot figures with this machine: the disk under the cache root
+(block code `disk-full`) and the host RAM available (`model-does-not-fit`). Each is the record's estimate against a reading of
+`/proc/meminfo` and the filesystem. A reading that cannot be taken is no claim, and a lab run skips the check because the first boot happens
+on the lab.
+
 When the weights per chip fit one chip with the stated reserve and KV budget (the one-chip row), the output adds a data-parallel line and the
 record gets `estimated.data_parallel`: the number of copies the configured chips can hold (one per chip), the chips that gives a copy each, and
 a note that this is replication with no collective operations. The configured chips are the box's when stage 0 knows it, else the largest

@@ -79,6 +79,15 @@ def no_real_bus_reads(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_machine_readings(monkeypatch):
+    """The supervisor's residency check compares the first boot's disk and host RAM with this machine's readings (orchard/residency.py
+    `machine_facts`). A test that runs a supervisor must not pass or fail on the free space of the machine it runs on: the default
+    reading is none, which is no claim. Tests of the check give their own readings."""
+    from orchard import residency
+    monkeypatch.setattr(residency, "machine_facts", lambda path: (None, None))
+
+
+@pytest.fixture(autouse=True)
 def no_real_gozer_leases(monkeypatch):
     """No test may reach the real gozer through the agent hardware tool (orchard/hwtool.py): a real `gozer acquire` takes a lease and
     the release resets the chips, and `gozer status` reads the live board. The wrapper and the status check look their command

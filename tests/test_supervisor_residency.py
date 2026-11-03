@@ -162,3 +162,67 @@ def test_only_a_full_port_stage_2_is_gated(tmp_path):
         assert started(r, 2)
     finally:
         r.close()
+
+
+# ---- the first boot against the machine (issue 327) --------------------------------------------------------------------------------
+
+def run_with_readings(rig, tmp_path, monkeypatch, readings, tensors=SMALL):
+    with_model(rig, tmp_path, tensors)
+    make(rig)
+    monkeypatch.setattr(residency, "machine_facts", lambda path: readings)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    return [d["reason"] for d in rig.decisions() if d.get("decision") == "pause"]
+
+
+def test_too_little_free_disk_blocks_stage_2_with_a_disk_code_and_starts_no_prepare_step(rig, tmp_path, monkeypatch):
+    pauses = run_with_readings(rig, tmp_path, monkeypatch, (1 << 20, 1 << 50))
+    assert pauses and pauses[0].startswith("blocked: the first boot needs about") and "free disk" in pauses[0]
+    assert blocked.block_code({"reason": pauses[0]}) == "disk-full"
+    assert not started(rig, 2)
+    notice = next(e["data"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked"))
+    assert notice["evidence"]["free_disk_bytes"] == 1 << 20 and notice["evidence"]["disk_bytes_needed"] > 1 << 20
+
+
+def test_too_little_host_ram_blocks_stage_2_as_a_model_that_does_not_fit(rig, tmp_path, monkeypatch):
+    pauses = run_with_readings(rig, tmp_path, monkeypatch, (1 << 50, 1 << 20))
+    assert pauses and pauses[0].startswith("blocked: the model does not fit this box: the first boot's conversion needs about")
+    assert "host RAM" in pauses[0] and blocked.block_code({"reason": pauses[0]}) == "model-does-not-fit"
+    assert not started(rig, 2)
+
+
+def test_readings_that_hold_the_first_boot_or_are_unknown_block_nothing(rig, tmp_path, monkeypatch):
+    pauses = run_with_readings(rig, tmp_path, monkeypatch, (1 << 50, 1 << 50))
+    assert not any("first boot" in p for p in pauses) and started(rig, 2)
+
+
+def test_unknown_readings_are_no_claim(rig, tmp_path, monkeypatch):
+    pauses = run_with_readings(rig, tmp_path, monkeypatch, (None, None))
+    assert not any("first boot" in p for p in pauses) and started(rig, 2)
+
+
+def test_the_chip_shortfall_is_reported_before_the_machine_check(rig, tmp_path, monkeypatch):
+    pauses = run_with_readings(rig, tmp_path, monkeypatch, (1, 1), tensors=HUGE)
+    assert pauses and pauses[0].startswith("blocked: the model does not fit this box: the estimate needs at least")
+    assert "precision" in pauses[0]                      # the options sentence rides along with the numbers
+
+
+def test_a_lab_run_does_not_judge_the_first_boot_by_this_boxs_disk(tmp_path, monkeypatch):
+    """`_check_residency` on a stub supervisor: with a lab the first boot happens on the lab, so this box's readings are not read at all."""
+    from types import SimpleNamespace
+    from orchard.supervisor import Supervisor
+    rec = {"label": "estimate", "scan": "ran", "assumptions": [], "estimated": {"chips_needed": 1, "device_bytes": 1,
+           "first_boot": {"snapshot_local": True, "checkpoint_bytes_to_download": 0, "cache_bytes": 1, "disk_bytes": 1 << 40,
+                          "conversion_in_flight_bytes": 0, "host_ram_bytes": 1 << 40}}}
+    monkeypatch.setattr(residency, "read_record", lambda run_dir: rec)
+    reads, blocks = [], []
+    monkeypatch.setattr(residency, "machine_facts", lambda path: reads.append(path) or (1, 1))
+
+    def stub(lab):
+        return SimpleNamespace(run_dir=tmp_path, lab=lab, paths=SimpleNamespace(cache_root=tmp_path / "cache"), _box_chips=lambda spec: 4,
+                               _block=lambda stage, why, **ev: blocks.append(why))
+    spec = SimpleNamespace(boards=1, number=2)
+    Supervisor._check_residency(stub(object()), spec)
+    assert blocks == [] and reads == []                                   # a lab: nothing read, nothing blocked
+    Supervisor._check_residency(stub(None), spec)
+    assert len(blocks) == 1 and reads == [tmp_path / "cache"] and "free disk" in blocks[0]       # no lab: the cache root's disk is read

@@ -2370,6 +2370,15 @@ class Supervisor:
         if why:
             self._block(spec.number, why, need_chips=rec["estimated"]["chips_needed"], box_chips=box, stage_chips=stage,
                         device_bytes=rec["estimated"]["device_bytes"], label=rec["label"])
+        if rec is not None and self.lab is None:
+            # The first boot converts the weights on this box (a lab run converts on the lab, which this box cannot read): the converted cache
+            # and a download need disk under the cache root, and the conversion needs host RAM. Each is the record's estimate against a reading.
+            free, mem = residency.machine_facts(self.paths.cache_root)
+            why = residency.machine_shortfall(rec, free_disk_bytes=free, mem_available_bytes=mem)
+            if why:
+                fb = rec["estimated"]["first_boot"]
+                self._block(spec.number, why, disk_bytes_needed=fb["disk_bytes"], free_disk_bytes=free, host_ram_bytes_needed=fb["host_ram_bytes"],
+                            mem_available_bytes=mem, label=rec["label"])
 
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).

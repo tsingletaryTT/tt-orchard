@@ -36,6 +36,15 @@ measured example (`MEASURED_EXAMPLE`) is the author's figure for one reranker on
 card or a plan says anything about speed. Stage 0 also notes a model that fits one chip but is configured for tensor parallel across
 several (`sharded_chips`): a hazard note, never a block.
 
+Precision options and the refusal. The record lists the whole model at each of bf16, bfp8 and bfp4 (`estimated.precision_options`), and
+`shortfall` ends its sentence with the highest listed precision that fits or says that none does. A model with routed experts is marked
+(`estimated.mixture_of_experts`): every expert stays resident. `machine_shortfall` compares the first boot's disk and host RAM with two
+readings (`machine_facts`), and the supervisor blocks on it before a full-port stage 2.
+
+Totals only. `totals_bound` takes the Hub's parameter counts by dtype (one model-info call, `totals_from_hub`) and gives a lower bound by
+precision with no tensor name or shape. It exists for a repository whose headers are too many to read (Hydrogen-1.0 has 303 shards), and
+for the preflight's `fit` row, which refuses a model no listed precision can fit before the run downloads anything.
+
 Limits. Even spread of the weights over the chips, no replication of any tensor in the table's rows, no padding to tiles, one reserve per
 chip. The data-parallel block counts the host RAM and disk of one copy. A shard whose data is shorter than its header says is not
 noticed, because the data is never read.
@@ -48,13 +57,16 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
 import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchard import decode_floor, defaults, safeio
+from fractions import Fraction
+
+from orchard import decode_floor, defaults, safeio, sizing
 
 FILE = "residency.json"
 INDEX_FILE = "model.safetensors.index.json"
@@ -97,6 +109,20 @@ SHARDED_BASES = ("stated", "required chip counts")
 DP_NOTE = "replication: one full copy of the weights on each chip, with no collective operations between the chips"
 DP_THROUGHPUT = ("not estimated: measured scaling is needed. The one measured example is " + MEASURED_EXAMPLE["model"] + ": 21.7, 42.0 and 83.0 pairs/s "
                  "on a p150, a p300 and a p300x2 with four clients (" + MEASURED_EXAMPLE["basis"] + ")")
+
+
+# The whole-model precisions the record lists next to the policy it uses, highest first. Each applies one block format (or bf16) to every
+# floating-point weight of two or more dimensions; a norm vector or an integer tensor keeps the bytes it has in the checkpoint.
+PRECISIONS = ("bf16", "bfp8", "bfp4")
+MAX_TOTAL_PARAMS = 10 ** 15          # a count above this is not a model: a hostile answer must not turn into a huge integer sum
+MOE_NOTE = ("a mixture-of-experts model keeps every expert's weights resident on the chips although only a few experts run for each token, "
+            "so the chip count follows all the experts. The number of experts used per token is not in the safetensors "
+            "headers and was not read")
+BOUND_POLICY_TEXT = ("if every weight were stored at bfp4, a lower bound: tensor names and shapes were not read, so norms and other "
+                     "one-dimensional tensors are counted at the block size too")
+BOUND_NOT_MEASURED = (
+    "tensor names and shapes: the Hub's counts are totals by dtype, so no category, expert count or one-dimensional tensor (a norm or a bias, "
+    "which no block format shrinks) is known; every figure is therefore a lower bound on the bytes a real checkpoint needs")
 
 
 class ResidencyError(ValueError):
@@ -423,6 +449,13 @@ def _gib(n: float) -> str:
     return f"{n / GIB:.1f} GiB"
 
 
+def _precision_options(by_precision: dict, dram: float, reserve: float, kv: float) -> dict:
+    """The whole model at each listed precision: the bytes on the chips and the chips they need (the same arithmetic as the table's rows)."""
+    return {"label": "estimate", "rows": [{"precision": p, "device_bytes": int(by_precision[p]),
+                                           "chips_needed": _chips_needed(int(by_precision[p]), dram, reserve, kv)} for p in PRECISIONS],
+            "note": "one block format (or bf16) for every floating-point weight of two or more dimensions; categories the policy keeps on the host stay there"}
+
+
 def shortfall(record, chips, what: str = "this box") -> str | None:
     """A sentence when the record's estimate needs more chips than `chips`, else None (also None when `chips` is unknown or the record is
     unusable). `what` names the limit in the sentence: "this box", or "stage 2's lease" when the stage gets fewer chips than the box has."""
@@ -433,9 +466,29 @@ def shortfall(record, chips, what: str = "this box") -> str | None:
         return None
     a = {x["name"]: x for x in record.get("assumptions", [])}
     dram = a.get("dram_gib_per_chip", {}).get("value", "?")
-    return (f"the model does not fit {what}: the estimate needs at least {need} chips and {what} has {chips} chips "
-            f"({_gib(record['estimated']['device_bytes'])} of weights on the chips under the stated policy, DRAM {dram} GiB per chip; "
-            f"the DRAM figure is a choice and no allocator reading has been taken)")
+    policy = record["estimated"].get("policy_text")
+    text = (f"the model does not fit {what}: the estimate needs at least {need} chips and {what} has {chips} chips "
+            f"({_gib(record['estimated']['device_bytes'])} of weights on the chips {policy if isinstance(policy, str) else 'under the stated policy'}, "
+            f"DRAM {dram} GiB per chip; the DRAM figure is a choice and no allocator reading has been taken)")
+    tail = _options_sentence(record, chips, what)
+    return f"{text}. {tail}" if tail else text
+
+
+def _options_sentence(record, chips: int, what: str) -> str:
+    """The precision options of `record` against `chips`: every listed precision with the chips it needs, and either the highest one
+    that fits or that none does. An empty string when the record has no options (an older record) or they are damaged."""
+    opts = (record.get("estimated") or {}).get("precision_options")
+    rows = opts.get("rows") if isinstance(opts, dict) else None
+    whole = lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 1      # noqa: E731
+    if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) and isinstance(r.get("precision"), str) and whole(r.get("chips_needed"))
+                                                         for r in rows):
+        return ""
+    listing = ", ".join(f"{r['precision']} needs {r['chips_needed']} chips" for r in rows)
+    best = next((r for r in rows if r["chips_needed"] <= chips), None)
+    head = f"for the whole model at each listed precision: {listing}"
+    if best is None:
+        return f"{head}; the model does not fit {what} at any listed precision"
+    return f"{head}; the highest listed precision that fits is {best['precision']}, which needs {best['chips_needed']} chips"
 
 
 def usable(record) -> bool:
@@ -451,6 +504,139 @@ def usable(record) -> bool:
         return False
     a = record.get("assumptions", [])
     return isinstance(a, list) and all(isinstance(x, dict) and isinstance(x.get("name"), str) for x in a)
+
+
+def machine_facts(path) -> tuple[int | None, int | None]:
+    """(free disk bytes on the filesystem that holds `path`, the host's MemAvailable in bytes). Either is None when it cannot be read; a
+    reading that is not made is no claim. Never raises."""
+    free = None
+    if isinstance(path, (str, os.PathLike)):
+        try:
+            free = int(shutil.disk_usage(path).free)
+        except (OSError, ValueError, OverflowError):
+            free = None
+    try:
+        mem = sizing.mem_available_bytes()
+    except Exception:                                    # a damaged /proc/meminfo is not a finding about the model
+        mem = None
+    return free, mem if isinstance(mem, int) and not isinstance(mem, bool) and mem > 0 else None
+
+
+def machine_shortfall(record, *, free_disk_bytes, mem_available_bytes) -> str | None:
+    """A sentence when the record's first boot needs more disk or host RAM than the machine reads, else None. A reading that is None, a damaged
+    record and a record that was skipped are no claim. The record's `first_boot` figures are estimates (the converted cache, the download when
+    the snapshot is not local, and the conversion's host RAM); the machine's figures are readings. The weights' own cache is the disk need."""
+    if not usable(record):
+        return None
+    fb = record["estimated"].get("first_boot")
+    whole = lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0      # noqa: E731
+    if not isinstance(fb, dict) or not whole(fb.get("disk_bytes")) or not whole(fb.get("host_ram_bytes")):
+        return None
+    parts = []
+    if whole(mem_available_bytes) and fb["host_ram_bytes"] > mem_available_bytes:
+        parts.append(f"the model does not fit this box: the first boot's conversion needs about {_gib(fb['host_ram_bytes'])} of host RAM "
+                     f"and {_gib(mem_available_bytes)} is available")
+    if whole(free_disk_bytes) and fb["disk_bytes"] > free_disk_bytes:
+        download = fb.get("checkpoint_bytes_to_download")
+        extra = " and the download of the checkpoint" if whole(download) and download > 0 else ""
+        parts.append(f"the first boot needs about {_gib(fb['disk_bytes'])} of free disk for the converted weights{extra}, "
+                     f"and the cache disk has {_gib(free_disk_bytes)} free")
+    return "; ".join(parts) + " (estimates of the first boot against the machine's readings; the converted size was not measured)" if parts else None
+
+
+def _validate_totals(parameters) -> dict:
+    if not isinstance(parameters, dict) or not parameters:
+        raise ResidencyError("the parameter counts must be a non-empty mapping from a dtype name to a count")
+    out = {}
+    for dtype, count in parameters.items():
+        if not isinstance(dtype, str) or dtype not in DTYPE_WIDTH:
+            raise ResidencyError("the parameter counts name a dtype that is not a safetensors dtype (known: " + ", ".join(sorted(DTYPE_WIDTH)) + ")")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0 or count > MAX_TOTAL_PARAMS:
+            raise ResidencyError(f"the count for {dtype} must be a whole number from 0 to {MAX_TOTAL_PARAMS}")
+        out[dtype] = count
+    if sum(out.values()) == 0:
+        raise ResidencyError("the parameter counts hold no parameters")
+    return out
+
+
+def totals_bound(parameters, *, box_chips=None, dram_gib=None, kv_gib=None, reserve_gib=None, chips=(), source="hub totals") -> dict:
+    """A lower bound on the chips a model needs from the Hub's parameter counts by dtype alone (no tensor name, shape or header was read).
+
+    Every floating-point parameter is counted as if it sat in a tensor of two or more dimensions, so each listed precision gets the smallest
+    bytes the format can give; integer dtypes (a packed MXFP4, NVFP4 or GPTQ repository reports its packed bytes as U8) are counted at the
+    bytes they store, and no block format shrinks them. A real checkpoint holds norms and biases that no format shrinks, so the true figure is
+    at least the bound. The record carries the same `shortfall` fields as an estimate, so a model that cannot fit even at the lowest listed
+    precision is refused with the numbers and the precision that would fit."""
+    counts = _validate_totals(parameters)
+    dram_src, kv_src, res_src = ("caller" if v is not None else "default (choice)" for v in (dram_gib, kv_gib, reserve_gib))
+    dram = _number(defaults.CHIP_DRAM_GIB if dram_gib is None else dram_gib, "dram_gib", lo=0, allow_equal=False)
+    kv = _number(defaults.KV_BUDGET_GIB if kv_gib is None else kv_gib, "kv_gib", lo=0, allow_equal=True)
+    reserve = _number(defaults.CHIP_RESERVE_GIB if reserve_gib is None else reserve_gib, "reserve_gib", lo=0, allow_equal=True)
+    if reserve >= dram:
+        raise ResidencyError(f"the reserve ({reserve:g} GiB per chip) must be below the DRAM per chip ({dram:g} GiB)")
+    extra = _chip_list(chips, "chips")
+    if box_chips is not None:
+        box_chips = _chip_list([box_chips], "box_chips")[0]
+    floats = sum(n for d, n in counts.items() if d in FLOAT_DTYPES)
+    fixed = sum(n * DTYPE_WIDTH[d] for d, n in counts.items() if d not in FLOAT_DTYPES)
+    by_precision = {p: fixed + int(Fraction(decode_floor.DTYPE_BYTES[p]) * floats) for p in PRECISIONS}
+    options = _precision_options(by_precision, dram, reserve, kv)
+    options["note"] = "a lower bound for each precision: every floating-point parameter is counted as a weight of two or more dimensions"
+    need_by = {r["precision"]: r["chips_needed"] for r in options["rows"]}
+    lowest = PRECISIONS[-1]
+    device = by_precision[lowest]
+    need = need_by[lowest]
+    table = [{"chips": n, "fits": {p: need_by[p] <= n for p in PRECISIONS}} for n in sorted(set(MESH_SIZES) | set(extra) | ({box_chips} if box_chips else set()))]
+    best = next((p for p in PRECISIONS if box_chips and need_by[p] <= box_chips), None)
+    notes = ["the counts are the Hub's totals by dtype; no tensor name or shape was read"]
+    if any(d not in FLOAT_DTYPES and n for d, n in counts.items()):
+        notes.append("integer dtypes (U8, I8 and the like) are counted at their stored bytes: a packed checkpoint (MXFP4, NVFP4, GPTQ) reports its "
+                     "packed bytes this way and no block format shrinks them")
+    record = {
+        "label": "bound", "scan": "ran", "source": source, "labels": {
+            "measured": "the Hub's parameter counts by dtype (no safetensors header, tensor name or tensor data was read)",
+            "estimated": "arithmetic on those counts and the listed assumptions: a lower bound, and no allocator reading backs it"},
+        "measured": {"parameters_by_dtype": counts, "total_parameters": sum(counts.values()), "notes": notes},
+        "estimated": {"device_bytes": device, "chips_needed": need, "smallest_mesh": 1 << (need - 1).bit_length(), "policy_text": BOUND_POLICY_TEXT,
+                      "precision_options": options, "rows": table},
+        "assumptions": [
+            {"name": "dram_gib_per_chip", "value": dram, "source": dram_src, "note": "DRAM per chip; usable space is lower and was not measured"},
+            {"name": "reserve_gib_per_chip", "value": reserve, "source": res_src, "note": "per chip, for trace regions, binaries and circular buffers"},
+            {"name": "kv_budget_gib", "value": kv, "source": kv_src, "note": "KV cache and recurrent state for the whole model, spread evenly over the chips"},
+            {"name": "placement", "value": "even spread", "source": "default (choice)", "note": "weights are divided evenly over the chips; no replication, no tile padding"}],
+        "not_measured": [BOUND_NOT_MEASURED, *NOT_MEASURED[:4]], "hazards": [],
+        "verdict": {"box_chips": box_chips, "fits_box": None if box_chips is None else best is not None, "chips_needed": need, "best_fit": best}}
+    if box_chips is not None:
+        why = shortfall(record, box_chips)
+        if why:
+            record["hazards"].append({"name": "model_does_not_fit_box", "reason": why})
+    return record
+
+
+def _hub_model_info(repo_id, revision=None):
+    import huggingface_hub
+    return huggingface_hub.model_info(repo_id, revision=revision)
+
+
+def totals_from_hub(repo_id, revision=None, *, fetch=None) -> dict:
+    """The Hub's parameter counts by dtype for a repo id: one model-info call, no safetensors header and no weight. `fetch(repo_id, revision)`
+    replaces the call in tests. A failure names its type and never its text, which may hold a token."""
+    if not isinstance(repo_id, str) or not _REPO_ID.match(repo_id):
+        raise ResidencyError("the target is not a repo id like owner/name (--totals-only reads the Hub's parameter counts for a repo id)")
+    if revision is not None and not (isinstance(revision, str) and re.match(r"^[A-Za-z0-9._/-]{1,200}$", revision)):
+        raise ResidencyError("the revision is not a branch name, tag or commit hash")
+    try:
+        info = (fetch or _hub_model_info)(repo_id, revision)
+    except ResidencyError:
+        raise
+    except ImportError:
+        raise ResidencyError("huggingface_hub is not installed, so a repo id cannot be read") from None
+    except Exception as exc:
+        raise ResidencyError(f"the Hugging Face model info call for {repo_id} failed ({type(exc).__name__})") from None
+    params = getattr(getattr(info, "safetensors", None), "parameters", None)
+    if not isinstance(params, dict) or not params:
+        raise ResidencyError(f"the Hugging Face model info lists no safetensors parameter counts for {repo_id}")
+    return dict(params)
 
 
 def _data_parallel(fits_one: bool, box_chips, extra: list) -> dict:
@@ -499,6 +685,7 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
 
     measured = {c: {"tensors": 0, "elements": 0, "bytes": 0} for c in CATEGORIES}
     stored = {c: 0 for c in CATEGORIES}
+    uniform = {p: 0 for p in PRECISIONS}         # the chips' bytes if one precision applied to the whole model (categories on the host stay there)
     layer_groups: dict[str, int] = {}
     for t in headers.tensors:
         cat = categorize(t.name, t.shape)
@@ -510,6 +697,8 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
             stored[cat] += t.bytes
             continue
         stored[cat] += _stored_bytes(t, pol[cat])
+        for p in PRECISIONS:
+            uniform[p] += _stored_bytes(t, p)
         if t.dtype in FLOAT_DTYPES and len(t.shape) >= 2:
             g = _LAYER_PREFIX.match(t.name)
             key = g.group(1) if g else cat
@@ -526,6 +715,9 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
         rows.append({"chips": n, "per_chip_bytes": int(device / n), "used_bytes_per_chip": int(used), "free_bytes_per_chip": int(free), "fits": ok})
     need = _chips_needed(device, dram, reserve, kv)
     mesh = 1 << (need - 1).bit_length()
+    routed = by_measured.get("routed_experts")
+    moe = ({"present": True, "routed_expert_tensors": routed["tensors"], "routed_expert_checkpoint_bytes": routed["bytes"],
+            "routed_expert_stored_bytes": stored["routed_experts"], "note": MOE_NOTE} if routed else {"present": False})
 
     flight = max(layer_groups.values(), default=0)      # the largest group: each tensor's source plus the larger of its source and converted size
     to_download = 0 if headers.local else headers.checkpoint_bytes
@@ -539,6 +731,7 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
             "by_category": {c: {"placement": "host" if pol[c] == "host" else "device", "stored_bytes": stored[c]} for c in by_measured},
             "host_resident_categories": host_cats, "device_bytes": device, "host_bytes": host,
             "rows": rows, "chips_needed": need, "smallest_mesh": mesh, "first_boot": first_boot,
+            "precision_options": _precision_options(uniform, dram, reserve, kv), "mixture_of_experts": moe,
             "data_parallel": _data_parallel(next(r for r in rows if r["chips"] == 1)["fits"], box_chips, extra)},
         "assumptions": [
             {"name": "dram_gib_per_chip", "value": dram, "source": dram_src, "note": "DRAM per chip; usable space is lower and was not measured"},
@@ -606,6 +799,9 @@ def parser(add_help=True) -> argparse.ArgumentParser:
                                  description="Estimate how many chips a checkpoint needs from its safetensors headers (no weights are read).")
     ap.add_argument("target", help="a model snapshot directory, or a repo id like owner/name (headers only, over the network)")
     ap.add_argument("--revision", help="the branch, tag or commit of a repo id")
+    ap.add_argument("--totals-only", action="store_true",
+                    help="for a repo id: read only the Hub's parameter counts by dtype (one call; no safetensors header) and print a lower bound by "
+                         "precision. Use it for a repository too large to read header by header")
     ap.add_argument("--chips", type=int, nargs="+", metavar="N", help="chip counts to show; the exit status is 1 when none of them holds the model")
     ap.add_argument("--dram-gib", type=float, help=f"DRAM per chip in GiB (default {defaults.CHIP_DRAM_GIB:g}, a choice)")
     ap.add_argument("--reserve-gib", type=float, help=f"per-chip reserve in GiB (default {defaults.CHIP_RESERVE_GIB:g}, a choice)")
@@ -641,6 +837,12 @@ def _text(rec: dict, stated: list[int]) -> list[str]:
         lines += ["", f"  data parallel: the model fits one chip; {copies}", f"    {d['note']}", f"    throughput: {d['throughput']}"]
     else:
         lines += ["", "  data parallel: not available; the model does not fit one chip with the stated reserve and KV budget"]
+    lines += ["", "  the whole model at one precision (categories the policy keeps on the host stay there):"]
+    lines += [f"    {r['precision']:<6}{_gib(r['device_bytes']):>13} on the chips  needs {r['chips_needed']} chips" for r in e["precision_options"]["rows"]]
+    moe = e["mixture_of_experts"]
+    if moe["present"]:
+        lines += ["", f"  mixture of experts: {moe['routed_expert_tensors']} routed-expert tensors, {_gib(moe['routed_expert_stored_bytes'])} on the chips "
+                      f"under the policy", f"    {moe['note']}"]
     lines += ["", f"  chips needed: at least {e['chips_needed']} (smallest mesh {e['smallest_mesh']})",
               f"  first boot: free disk {_gib(fb['disk_bytes'])} ({'snapshot already local' if fb['snapshot_local'] else 'includes the download'}), "
               f"host RAM {_gib(fb['host_ram_bytes'])}", "", "  assumptions:"]
@@ -652,6 +854,28 @@ def _text(rec: dict, stated: list[int]) -> list[str]:
     if stated:
         ok = [r["chips"] for r in e["rows"] if r["chips"] in stated and r["fits"]]
         lines += ["", f"  stated chip counts {stated}: " + (f"the model fits at {ok}" if ok else "the model does not fit any of them")]
+    return lines
+
+
+def _text_bound(rec: dict, stated: list[int]) -> list[str]:
+    m, e = rec["measured"], rec["estimated"]
+    lines = [f"residency bound for {rec['source']}  (label: {rec['label']})",
+             f"  measured: {m['total_parameters'] / 1e9:.1f} billion parameters ({', '.join(f'{d} {n:,}' for d, n in sorted(m['parameters_by_dtype'].items()))})",
+             f"    {rec['labels']['measured']}", f"  estimated: {rec['labels']['estimated']}"]
+    lines += [f"  note: {n}" for n in m["notes"]]
+    lines += ["", "  the whole model at one precision (a lower bound):"]
+    lines += [f"    {r['precision']:<6}{_gib(r['device_bytes']):>13} on the chips  needs at least {r['chips_needed']} chips" for r in e["precision_options"]["rows"]]
+    lines += ["", f"  {'chips':>6}  " + "  ".join(f"{p:<6}" for p in PRECISIONS)]
+    lines += [f"  {r['chips']:>6}  " + "  ".join(f"{('fits' if r['fits'][p] else 'no'):<6}" for p in PRECISIONS) for r in e["rows"]]
+    lines += ["", f"  chips needed: at least {e['chips_needed']} (the lowest listed precision, {PRECISIONS[-1]}; smallest mesh {e['smallest_mesh']})", "", "  assumptions:"]
+    lines += [f"    {a['name']} = {a['value']}  [{a['source']}] {a['note']}" for a in rec["assumptions"]]
+    lines.append("  not measured:")
+    lines += [f"    {s}" for s in rec["not_measured"]]
+    for h in rec["hazards"]:
+        lines += ["", f"  {h['name']}: {h['reason']}"]
+    if stated:
+        ok = [r["chips"] for r in e["rows"] if r["chips"] in stated and any(r["fits"].values())]
+        lines += ["", f"  stated chip counts {stated}: " + (f"the bound allows the model at {ok}" if ok else "the model does not fit any of them at any listed precision")]
     return lines
 
 
@@ -667,6 +891,20 @@ def run(args, out=None) -> int:
                 raise ResidencyError(f"--policy needs CATEGORY=DTYPE, got {item!r}")
             overrides[cat] = dtype
         stated = list(args.chips or [])
+        if getattr(args, "totals_only", False):
+            if overrides:
+                raise ResidencyError("--policy has no effect with --totals-only (the bound lists every whole-model precision)")
+            rec = totals_bound(totals_from_hub(args.target, args.revision), dram_gib=args.dram_gib, kv_gib=args.kv_gib, reserve_gib=args.reserve_gib,
+                               chips=stated, box_chips=max(stated) if stated else None, source=f"hub totals:{args.target}")
+            if args.json:
+                print(json.dumps(rec, indent=2, sort_keys=True), file=out)
+            else:
+                print("\n".join(_text_bound(rec, stated)), file=out)
+            if stated and not any(any(r["fits"].values()) for r in rec["estimated"]["rows"] if r["chips"] in stated):
+                if args.json:
+                    print("residency: the model does not fit any stated chip count at any listed precision", file=sys.stderr)
+                return 1
+            return 0
         rec = estimate(read_target(args.target, revision=args.revision), dram_gib=args.dram_gib, kv_gib=args.kv_gib, reserve_gib=args.reserve_gib,
                        policy=overrides or None, chips=stated)
     except ResidencyError as exc:
