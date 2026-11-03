@@ -36,6 +36,7 @@ DEFAULT_ROUNDS = 3                          # `--port-repair-rounds`: repair rou
 MAX_ROUNDS = 10                             # the largest value the option takes: each round is a model step and a chip test
 DECISION = "port repair round"              # the ledger decision written BEFORE a round's repair step starts; `round` and `of` say which
 TESTED = "port repair tested"              # the ledger decision after each hardware test: `sources` is the digest of the port directory it ran against
+RERUN = "port repair rerun started"         # the ledger decision written just BEFORE a round's hardware rerun: `round`, and `record`, the seal of the failed test's record
 STOPPED = "port repair rounds ended"        # the ledger decision that says why the rounds stopped (spent, unchanged, off)
 FAILURE_TOKEN = "PORT_CHECK_FAILURE "       # starts the structured line the template prints after `FAILED: <text>` (it starts with the template's MARK)
 OUTPUT = "evidence/hw-test-output.txt"      # the supervisor's capture of the test's output, relative to the stage directory
@@ -194,6 +195,45 @@ def tested_digest(entries: list[dict], n: int) -> str | None:
         elif e.get("event") == "decision" and data.get("decision") == TESTED and isinstance(data.get("sources"), str):
             found = data["sources"]
     return found
+
+
+def _attempt_events(entries: list[dict], n: int) -> list[tuple]:
+    """The (event, data) pairs of stage `n`'s current attempt: after the last stage_start that is not a resume and the last decision that moved
+    the stage directory aside (the same boundaries as `rounds_used`)."""
+    out: list[tuple] = []
+    for e in entries:
+        if e.get("stage") != n:
+            continue
+        data = e.get("data") or {}
+        if (e.get("event") == "stage_start" and data.get("resumed") is False) or (
+                e.get("event") == "decision" and data.get("decision") in MOVE_ASIDE_DECISIONS):
+            out = []
+        out.append((e.get("event"), data))
+    return out
+
+
+def rerun_inflight(entries: list[dict], n: int) -> dict | None:
+    """The `port repair rerun started` decision of stage `n`'s current attempt that no `port repair tested` decision has followed, or None.
+
+    A rerun opens the test's output file fresh, so from then until the record is written the old record's output hash does not match and
+    `read_failure` says nothing. This entry is what a resume trusts instead: the ledger is the supervisor's own. Its `record` is the seal
+    of the failed test's record at that moment; a record that no longer matches it was written by the rerun."""
+    open_ = None
+    for event, data in _attempt_events(entries, n):
+        if event != "decision":
+            continue
+        if data.get("decision") == RERUN:
+            open_ = data
+        elif data.get("decision") == TESTED:
+            open_ = None
+    return open_
+
+
+def output_kept(entries: list[dict], n: int, k: int) -> bool:
+    """Has this attempt already copied round `k`'s failed output to the evidence directory and recorded it? A rerun that was cut short has
+    replaced the output file, so a resume must not copy it over the copy the repair step was shown."""
+    return any(event == "evidence" and data.get("what") == "port repair round output" and data.get("round") == k
+               for event, data in _attempt_events(entries, n))
 
 
 def failed_line(text: str, limit: int = 300) -> str:

@@ -342,3 +342,124 @@ def test_a_crash_between_the_repair_edit_and_the_rerun_tests_the_fix_on_resume(r
     assert rig.run(pid=200) == EXIT_ABORTED
     assert [d["result"] for d in rig.ends(2)] == ["pass"]
     assert exit_codes(rig) == [2, 0] and stopped(rig) == []          # the fix was tested; the port was not called unchanged
+
+
+# ---- Copilot's second review of PR 425: a kill while a rerun is owed ------------------------------------------------------------------------
+
+def repairs_by_attempt(rig, table):
+    """Like `repairs`, but a repair step writes `table[(attempt, round)]` (nothing when absent). The attempt is the count of fresh stage 2 starts in the
+    ledger, so an escalated attempt can write another file from the first attempt's round with the same number."""
+    base = rig.script
+
+    def script(request):
+        if "tools" in request and where(request) == (2, "repair"):
+            found = re.search(r"round (\d+) of (\d+)", request["messages"][1]["content"])
+            k = int(found.group(1)) if found else 1
+            entries = []
+            for line in (rig.run_dir / "ledger.jsonl").read_text().splitlines():      # the supervisor holds the ledger's lock: read the file, do not open it
+                try:
+                    entries.append(json.loads(line))
+                except ValueError:
+                    pass                                                              # a line the supervisor is writing right now
+            attempt = sum(1 for e in entries if e.get("stage") == 2 and e.get("event") == "stage_start" and e.get("data", {}).get("resumed") is False)
+            return bringup(request, overrides={(2, "repair"): table.get((attempt, k), {})})
+        return base(request)
+    rig.script = script
+
+
+def crash_at_rerun(rig, *, escalated, before_rerun=False):
+    """Run until the supervisor dies when the repaired port's rerun starts. The first attempt's rerun is the second hardware phase; with
+    `escalated` the first attempt spends its only round on a port that still fails, and the kill is on the escalated attempt's only round,
+    its fourth hardware phase. With `before_rerun` the kill is earlier: when the round's failed output has been copied to the evidence
+    directory, after the repair step's edit and before the rerun is recorded. Returns the count of matching ledger entries at the kill."""
+    seen = []
+
+    def at(e):
+        if before_rerun:
+            if e["event"] == "evidence" and e["data"].get("what") == "port repair round output":
+                seen.append(e)
+            return len(seen) == (2 if escalated else 1)
+        if e["event"] == "decision" and e["data"].get("decision") == "hardware phase":
+            seen.append(e)
+        return len(seen) == (4 if escalated else 2)
+    if escalated:
+        rig.args.port_repair_rounds = 1
+        make(rig, over={(2, "prepare"): {**PREPARE, "port/port_model.py": BROKEN}})
+        repairs_by_attempt(rig, {(1, 1): {"port/port_model.py": broken(1)}, (2, 1): {"port/port_model.py": HONEST}})
+        rig.args.unattended = False
+        rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    else:
+        start(rig, per_round=[{"port/port_model.py": HONEST}, {}], unattended=False)
+    with pytest.raises(Crash):
+        rig.run(crash_if=at)
+    return len(seen)
+
+
+def tests_started(rig):
+    return [d for d in rig.decisions() if d.get("decision") == "hardware test started"]
+
+
+@pytest.mark.parametrize("escalated", [False, True], ids=["first attempt", "escalated attempt"])
+def test_a_kill_when_the_last_repair_round_reruns_tests_the_fix_on_resume(rig, escalated):
+    # The escalated variant: the attempt's only round is already counted when the kill comes, so `used < rounds` is false (Copilot, PR 425).
+    crash_at_rerun(rig, escalated=escalated)
+    assert rig.run(pid=200) == EXIT_ABORTED
+    assert [d["result"] for d in rig.ends(2)] == (["escalate", "pass"] if escalated else ["pass"])       # the fix was tested in the attempt that wrote it
+    assert exit_codes(rig)[-1] == 0
+    assert not any(d.get("decision") == "not resuming from a failed hardware test" for d in rig.decisions())
+
+
+@pytest.mark.parametrize("escalated", [False, True], ids=["first attempt", "escalated attempt"])
+def test_a_kill_after_the_rerun_replaced_the_output_file_tests_the_fix_on_resume(rig, escalated):
+    # The test's output file is opened fresh when the rerun starts, so from then until the record is written the old record's output hash no
+    # longer matches. The resume used to read no failure there and went on to the finish step with the old failure (Copilot, PR 425).
+    crash_at_rerun(rig, escalated=escalated)
+    (stage_2(rig) / port_repair.OUTPUT).write_text("the first lines of the rerun, cut short by the kill\n")
+    assert rig.run(pid=200) == EXIT_ABORTED
+    assert [d["result"] for d in rig.ends(2)] == (["escalate", "pass"] if escalated else ["pass"])       # no wasted attempt: the resume tested the fix
+    assert exit_codes(rig)[-1] == 0
+    assert [d["reason"] for d in stopped(rig)] == (["spent"] if escalated else [])      # only the first attempt's only round ended as spent
+    kept = [e for e in rig.entries() if e["event"] == "evidence" and e["data"].get("what") == "port repair round output"]
+    assert [e["data"]["round"] for e in kept] == [1] * len(kept) and len({e["data"]["sha256"] for e in kept}) == 1
+    saved = (stage_2(rig) / "evidence" / "port-repair-round-1-output.txt").read_text()
+    assert "first lines of the rerun" not in saved and "PORT_CHECK_FAILURE" in saved      # what the repair step was shown, not the cut-short rerun
+
+
+def test_a_kill_after_the_rerun_wrote_its_record_does_not_run_the_test_again(rig):
+    start(rig, per_round=[{"port/port_model.py": HONEST}, {}], unattended=False)
+    released = []
+
+    def after_the_second_record(e):
+        if e["event"] == "evidence" and e["stage"] == 2 and e["data"].get("what") == "hardware test":
+            released.append(e)
+        return len(released) == 2
+    with pytest.raises(Crash):
+        rig.run(crash_if=after_the_second_record)
+    assert rig.run(pid=200) == EXIT_ABORTED
+    assert len(tests_started(rig)) == 2 and exit_codes(rig)[-1] == 0
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+
+
+@pytest.mark.parametrize("escalated", [False, True], ids=["first attempt", "escalated attempt"])
+def test_a_kill_after_the_last_round_edit_and_before_its_rerun_is_recorded_tests_the_fix_on_resume(rig, escalated):
+    # No rerun entry exists yet, the old record is whole, and (escalated) the attempt's rounds are all counted: only the port's difference from the
+    # port the latest test ran against says that a test is owed.
+    crash_at_rerun(rig, escalated=escalated, before_rerun=True)
+    assert len([d for d in rig.decisions() if d.get("decision") == port_repair.RERUN]) == (1 if escalated else 0)      # the first attempt's only
+    assert rig.run(pid=200) == EXIT_ABORTED
+    assert [d["result"] for d in rig.ends(2)] == (["escalate", "pass"] if escalated else ["pass"])
+    assert exit_codes(rig)[-1] == 0
+    assert not any(d.get("decision") == "not resuming from a failed hardware test" for d in rig.decisions())
+
+
+def test_repair_rounds_that_cannot_settle_end_in_a_failure_and_do_not_loop(rig, monkeypatch):
+    # A ledger that follows the rules cannot do this; the bound is for a fault in the in-flight logic itself (a mutant of it spun forever,
+    # appending a `tested` entry on every pass).
+    start(rig, per_round=[{"port/port_model.py": HONEST}, {}], unattended=False)
+    monkeypatch.setattr(port_repair, "rerun_inflight", lambda entries, n: {"round": 1, "record": {"path": "nothing", "sha256": "0" * 64}})
+    rig.run()
+    assert [d["reason"] for d in stopped(rig)].count("did not settle") >= 1
+    assert "pass" not in [d["result"] for d in rig.ends(2)]               # a loop that could not settle is not a pass
+    assert "did not settle within" in (rig.run_dir / "ledger.jsonl").read_text()        # the attempt's failure says why, in the ledger
+    tested = [d for d in rig.decisions() if d.get("decision") == port_repair.TESTED]
+    assert len(tested) <= len(started(rig, 2)) * (2 * port_repair.DEFAULT_ROUNDS + 2)         # each attempt has its passes and no more

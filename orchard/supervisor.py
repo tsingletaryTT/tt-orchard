@@ -1804,13 +1804,26 @@ class Supervisor:
     # ---- repair rounds for a full-port stage 2 (issue 420) -------------------------------------
 
     def _repair_pending(self, spec, stage_dir: Path) -> bool:
-        """Does a full-port stage 2's failed test still have repair rounds? The record shows a failure of the port (orchard/port_repair.py,
-        `read_failure`), the option is not 0, the attempt's rounds are not all used and it has not already ended them."""
+        """Does a full-port stage 2's failed test still owe the coder's work a test, or still have repair rounds? The option is not 0 and the
+        attempt has not ended its rounds, and one of these holds (Copilot's second review of PR 425):
+
+        - a rerun was started and its `tested` entry is missing: the supervisor died while the repaired port was on the chips. The rerun opened
+          the output file fresh, so the old record may no longer match it; the ledger's entry is what says the test is owed;
+        - the record shows a failure of the port (orchard/port_repair.py, `read_failure`) and the attempt's rounds are not all used;
+        - the rounds are all used, but the last round's edit was never tested (the port differs from the one the latest test ran against)."""
         if spec.draft != "full_port" or not self.port_repair_rounds:
             return False
-        entries = self.ledger.read()
-        return (port_repair.read_failure(self.run_dir, stage_dir) is not None and not port_repair.stopped_noted(entries, spec.number)
-                and port_repair.rounds_used(entries, spec.number) < self.port_repair_rounds)
+        n, entries = spec.number, self.ledger.read()
+        if port_repair.stopped_noted(entries, n):
+            return False
+        if port_repair.rerun_inflight(entries, n) is not None:
+            return True
+        if port_repair.read_failure(self.run_dir, stage_dir) is None:
+            return False
+        if port_repair.rounds_used(entries, n) < self.port_repair_rounds:
+            return True
+        tested = port_repair.tested_digest(entries, n)
+        return tested is not None and port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)) != tested
 
     def _seal(self, stage_dir: Path, rel: str) -> dict | None:
         """The path and sha256 of a file of the stage directory through the bounded reader, or None (missing, a link, over the cap)."""
@@ -1842,10 +1855,22 @@ class Supervisor:
         nothing in the port ends the rounds: the same files would fail the same way. After the last round the stage goes on as it did before
         this option: the finish step records the failure, the gate fails, and the next attempt starts again."""
         n, limit = spec.number, self.port_repair_rounds
-        while limit:
-            failure = port_repair.read_failure(self.run_dir, stage_dir)
+        if not limit:
+            return None
+        # Each round takes at most two passes (a catch-up for a rerun whose `tested` entry is missing, then the round) and the last pass reads the
+        # end. A loop whose exit depends on ledger entries gets a bound: a mutant of `rerun_inflight` that never closed spun here, appending forever.
+        for _ in range(2 * limit + 2):
             entries = self.ledger.read()
-            if failure is None or port_repair.stopped_noted(entries, n):
+            if port_repair.stopped_noted(entries, n):
+                return None
+            owed = port_repair.rerun_inflight(entries, n)
+            if owed is not None and self._seal(stage_dir, port_repair.MARKER) != owed.get("record"):
+                # The rerun wrote its record and the supervisor died before it wrote the `tested` entry: the test ran. Say so and read its record.
+                self.ledger.append("decision", n, decision=port_repair.TESTED,
+                                   sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
+                continue
+            failure = port_repair.read_failure(self.run_dir, stage_dir)
+            if failure is None and owed is None:
                 return None
             used = port_repair.rounds_used(entries, n)
             before = port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)
@@ -1856,9 +1881,10 @@ class Supervisor:
                 tested = port_repair.digest(before)
             # A kill after a repair edit and before its rerun leaves the edited port beside the old failed record. The edit is tested before
             # another repair starts, and before the port can be called unchanged (review of PR 425).
-            pending = port_repair.digest(before) != tested and used > 0
+            # A rerun that was started and not finished is owed too: its output file was replaced, so the old record may not read as a failure.
+            pending = owed is not None or (port_repair.digest(before) != tested and used > 0)
             if pending:
-                k = used
+                k = owed["round"] if owed is not None and type(owed.get("round")) is int else used
             else:
                 if used >= limit:
                     self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="spent", rounds=used, of=limit, op=failure["op"])
@@ -1892,14 +1918,21 @@ class Supervisor:
             test, problems = self._read_test(stage_dir)
             if problems:
                 return "fail", problems, None
+            # Before the test opens its output file: from here a kill leaves the old record beside an output that no longer matches its hash.
+            self.ledger.append("decision", n, decision=port_repair.RERUN, round=k, record=self._seal(stage_dir, port_repair.MARKER))
             self._hardware_phase(spec, stage_dir, test)
             self.ledger.append("decision", n, decision=port_repair.TESTED,
                                sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
-        return None
+        self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="did not settle", rounds=port_repair.rounds_used(self.ledger.read(), n), of=limit)
+        return "fail", [f"the port repair rounds did not settle within {2 * limit + 2} passes, which a ledger that follows the rules cannot cause; "
+                        "the attempt fails, and the next attempt starts again"], None
 
     def _keep_round_record(self, n: int, stage_dir: Path, k: int) -> None:
         """Copy the failed test's output to evidence/port-repair-round-<k>-output.txt before the next test replaces it, and record the copy's
-        path and sha256 in the ledger. The next test's capture overwrites the file the repair step read; this keeps what it was shown."""
+        path and sha256 in the ledger. The next test's capture overwrites the file the repair step read; this keeps what it was shown. A resume
+        that finds the copy already recorded leaves it: the output file may by then be a rerun's, cut short."""
+        if port_repair.output_kept(self.ledger.read(), n, k):
+            return
         try:
             raw = safeio.read_bytes(Path(stage_dir) / port_repair.OUTPUT, max_bytes=RUN_JSON_MAX)
         except (safeio.SafeReadError, OSError, ValueError):

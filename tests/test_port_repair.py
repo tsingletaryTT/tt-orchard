@@ -292,3 +292,36 @@ def test_the_end_of_the_rounds_says_why(tmp_path):
                          {"decision": "port repair refused", "round": 1, "files": ["test-result.json"]})
     joined = "\n".join(out)
     assert "all the rounds were used" in joined and "changed nothing in the port" in joined and "test-result.json, which only the supervisor writes" in joined
+
+
+# ---- Copilot's second review of PR 425: the ledger readers for a rerun that was started ----------------------------------------------------
+
+def entry(event, stage=2, **data):
+    return {"event": event, "stage": stage, "data": data}
+
+
+RERUN = entry("decision", decision=port_repair.RERUN, round=1, record={"path": "stages/2/test-result.json", "sha256": "a" * 64})
+TESTED = entry("decision", decision=port_repair.TESTED, sources="b" * 64)
+KEPT = entry("evidence", what="port repair round output", round=1, path="x", sha256="c" * 64)
+
+
+def test_a_started_rerun_is_in_flight_until_a_tested_entry_follows_it():
+    assert port_repair.rerun_inflight([RERUN], 2) == RERUN["data"]
+    assert port_repair.rerun_inflight([RERUN, TESTED], 2) is None
+    assert port_repair.rerun_inflight([RERUN, TESTED, {**RERUN, "data": {**RERUN["data"], "round": 2}}], 2)["round"] == 2
+
+
+def test_an_in_flight_rerun_of_another_stage_or_another_attempt_does_not_count():
+    assert port_repair.rerun_inflight([{**RERUN, "stage": 4}], 2) is None
+    fresh = entry("stage_start", resumed=False)
+    assert port_repair.rerun_inflight([RERUN, fresh], 2) is None                              # a new attempt starts without it
+    assert port_repair.rerun_inflight([RERUN, entry("stage_start", resumed=True)], 2) == RERUN["data"]      # a resume keeps it
+    moved = entry("decision", decision=sorted(port_repair.MOVE_ASIDE_DECISIONS)[0])
+    assert port_repair.rerun_inflight([RERUN, moved], 2) is None
+
+
+def test_a_kept_output_belongs_to_its_round_stage_and_attempt():
+    assert port_repair.output_kept([KEPT], 2, 1) and not port_repair.output_kept([KEPT], 2, 2)
+    assert not port_repair.output_kept([{**KEPT, "stage": 4}], 2, 1)
+    assert not port_repair.output_kept([KEPT, entry("stage_start", resumed=False)], 2, 1)
+    assert port_repair.output_kept([KEPT, entry("stage_start", resumed=True)], 2, 1)

@@ -1391,7 +1391,12 @@ The failure text that reaches the ledger and the repair prompt is cleaned as a w
 words are removed, then the failure line is cut to 300 characters. After each hardware test the supervisor records the digest of the port directory it ran
 against (the decision `port repair tested`). A kill after a repair edit and before its rerun leaves the edited port beside the old failed record; the
 resumed attempt sees that the directory differs from the tested digest and runs the test for that edit before it starts another repair or calls the port
-unchanged.
+unchanged. This holds on the last round too: an escalated attempt that was killed after its last round's edit keeps its stage directory and tests the edit.
+Just before a rerun the supervisor writes the decision `port repair rerun started` (`round`, and `record`, the seal of the failed test's record). The test
+opens its output file fresh, so from then until the new record is written the old record's hash no longer matches the output. A resume that finds a started
+rerun with no `port repair tested` after it trusts the ledger: if the record is still the sealed one it tests the edit again, and if a new record was written
+it only writes the missing `tested` entry. A resume does not copy a rerun's cut-short output over the copy of what the repair step was shown. The round loop
+has a bound of `2 * rounds + 2` passes and ends with the reason `did not settle` and a failed attempt if it ever reaches it.
 
 After the last round (reason `spent`) or when a round passes, the stage goes on as before: the finish step, the gate, and on a failure a fresh attempt. A
 count of rounds belongs to one attempt. A resume of the same attempt keeps it, an escalated attempt starts its own, and a resume of an escalated
