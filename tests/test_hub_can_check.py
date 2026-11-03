@@ -103,3 +103,116 @@ def test_the_script_refuses_an_unknown_can_name(tmp_path):
     cp = subprocess.run([sys.executable, str(SCRIPT), "not-a-can", "--root", str(tmp_path), "--print-env"],
                         capture_output=True, text=True)
     assert cp.returncode == 2 and "unknown can" in cp.stderr and "Traceback" not in cp.stderr
+
+
+# ---- review round 1 (PR 411): hangs, a held board, false success, writes outside the root ------------------------------------------
+
+def test_inherited_cache_variables_are_overridden_inside_the_root(mod, tmp_path, monkeypatch):
+    for name in ("HF_HUB_CACHE", "TT_DIT_CACHE_DIR", "TT_CACHE_PATH", "TT_CACHE_HOME", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"):
+        monkeypatch.setenv(name, "/var/tmp/elsewhere")
+    env = mod.env_for(tmp_path)
+    for name in ("HF_HUB_CACHE", "TT_DIT_CACHE_DIR", "TT_CACHE_PATH", "TT_CACHE_HOME"):
+        assert Path(env[name]).resolve().is_relative_to(tmp_path.resolve()), name
+    assert "HUGGINGFACE_HUB_CACHE" not in env and "TRANSFORMERS_CACHE" not in env
+
+
+def test_a_relative_root_becomes_absolute(mod, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    env = mod.env_for(Path("rel-root"))
+    assert all(os.path.isabs(env[n]) for n in ("XDG_CACHE_HOME", "TT_MODEL_MODELS_DIR", "HF_HOME", "TT_METAL_CACHE", "HF_HUB_CACHE"))
+
+
+def test_port_busy_sees_a_listener_and_a_free_port(mod):
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    try:
+        assert mod.port_busy(port) is True
+    finally:
+        s.close()
+    assert mod.port_busy(port) is False
+
+
+def test_poll_job_gives_up_at_its_deadline(mod):
+    now = [0.0]
+    calls = []
+
+    def get(timeout):
+        calls.append(timeout)
+        return {"status": "running"}
+
+    def sleep(s):
+        now[0] += s
+        assert len(calls) < 100, "the poll loop never reached its deadline"
+    with pytest.raises(TimeoutError):
+        mod.poll_job(get, ("done",), deadline_s=10, interval=3, clock=lambda: now[0], sleep=sleep)
+    assert max(calls) <= 10 and now[0] <= 13           # each request is capped by the time left
+
+
+def test_poll_job_returns_a_terminal_state(mod):
+    states = iter([{"status": "queued"}, {"status": "running"}, {"status": "error"}])
+    st = mod.poll_job(lambda timeout: next(states), ("done", "error"), deadline_s=100, interval=0, clock=lambda: 0.0, sleep=lambda s: None)
+    assert st["status"] == "error"
+
+
+def test_a_failed_job_makes_the_run_fail(mod):
+    ok = {"ready": True, "requests": [{"status": "done"}, {"status": "completed"}]}
+    assert mod.run_ok(ok) is True
+    for bad in ("error", "failed", "cancelled", None):
+        assert mod.run_ok({"ready": True, "requests": [{"status": "done"}, {"status": bad}]}) is False
+    assert mod.run_ok({"ready": True, "requests": [{"latency_s": 1.0}]}) is True      # a synchronous request has no job status
+    assert mod.run_ok({"ready": False}) is False
+    assert mod.run_ok({"ready": True, "error": "x"}) is False
+
+
+def test_stop_group_kills_a_child_that_ignores_sigterm_after_the_launcher_exits(mod, tmp_path):
+    marker = tmp_path / "child.pid"
+    # the launcher exits at once; its child ignores SIGTERM and stays in the group
+    proc = subprocess.Popen(["bash", "-c", f"(trap '' TERM; sleep 300) & echo $! > {marker}"], start_new_session=True)
+    for _ in range(100):
+        if marker.exists() and marker.read_text().strip():
+            break
+        subprocess.run(["sleep", "0.05"])
+    child = int(marker.read_text())
+    proc.wait(10)
+    verdict = mod.stop_group(proc, wait_s=1)
+    assert "SIGKILL" in verdict
+    gone = False
+    for _ in range(100):
+        try:
+            os.kill(child, 0)
+            with open(f"/proc/{child}/stat") as fh:
+                if fh.read().split()[2] == "Z":
+                    gone = True
+                    break
+        except (ProcessLookupError, FileNotFoundError):
+            gone = True
+            break
+        subprocess.run(["sleep", "0.05"])
+    assert gone
+
+
+def test_the_script_refuses_to_start_when_the_cards_port_is_taken(mod, tmp_path):
+    import socket
+    port = mod.CANS["granite-4.0-h-1b-blackhole"]["port"]
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        pytest.skip(f"port {port} is in use on this machine")
+    s.listen(1)
+    # a stand-in `tt-model` first on PATH: if the guard fails, the script starts this instead of a real server (which would open a board)
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    (fakebin / "tt-model").write_text(f"#!/bin/sh\necho launched > {tmp_path}/launched\nexit 0\n")
+    (fakebin / "tt-model").chmod(0o755)
+    env = {**os.environ, "PATH": f"{fakebin}:{os.environ['PATH']}"}
+    try:
+        cp = subprocess.run([sys.executable, str(SCRIPT), "granite-4.0-h-1b-blackhole", "--root", str(tmp_path / "root")],
+                            capture_output=True, text=True, timeout=60, env=env)
+    finally:
+        s.close()
+    assert not (tmp_path / "launched").exists(), "a server was launched on an occupied port"
+    assert cp.returncode == 1 and "already in use" in cp.stdout

@@ -55,12 +55,52 @@ FIRST_PROMPT = "Name the three primary colors."
 
 def env_for(root: Path) -> dict:
     """The environment that keeps every write inside `root` (HF_TOKEN is inherited, never printed)."""
+    root = Path(os.path.abspath(root))              # the child runs in another working directory
     e = dict(os.environ)
     e["XDG_CACHE_HOME"] = str(root / "xdg")
     e["TT_MODEL_MODELS_DIR"] = str(root / "models")
     e["HF_HOME"] = str(root / "hf")
     e["TT_METAL_CACHE"] = str(root / "kernel-cache")
+    # variables that would send writes elsewhere when the caller's shell sets them
+    e["HF_HUB_CACHE"] = str(root / "hf" / "hub")
+    e["TT_DIT_CACHE_DIR"] = str(root / "tt-dit-cache")
+    e["TT_CACHE_PATH"] = str(root / "tt-cache")
+    e["TT_CACHE_HOME"] = str(root / "tt-cache")
+    for name in ("HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"):
+        e.pop(name, None)
     return e
+
+
+def port_busy(port: int) -> bool:
+    """True when something already listens on 127.0.0.1:port (its health route could answer for a server this script did not start)."""
+    import socket
+    with socket.socket() as s:
+        s.settimeout(2)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def poll_job(get, terminal, deadline_s: float, interval: float, clock=time.monotonic, sleep=time.sleep) -> dict:
+    """Call `get(timeout)` until its status is in `terminal`; TimeoutError at the deadline. Each request is capped by the time left."""
+    end = clock() + deadline_s
+    while True:
+        left = end - clock()
+        if left <= 0:
+            raise TimeoutError(f"job still not finished after {deadline_s} s")
+        st = get(left)
+        if st.get("status") in terminal:
+            return st
+        sleep(min(interval, max(end - clock(), 0)))
+
+
+JOB_TIMEOUT_S = 1800
+OK_STATES = ("done", "completed")
+
+
+def run_ok(result: dict) -> bool:
+    """The exit condition: ready, no error, and every job that reports a status ended in done or completed."""
+    if not result.get("ready") or "error" in result:
+        return False
+    return all(r.get("status") in OK_STATES for r in result.get("requests", []) if "status" in r)
 
 
 def http(method: str, url: str, body: dict | None = None, timeout: float = 600, raw: bool = False):
@@ -146,11 +186,8 @@ def music_requests(kind: str, base: str, out: Path) -> list:
             _, _, job = http("POST", base + "/v1/audio/jobs", {
                 "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM", "duration": dur,
                 "steps": 8, "cfg_scale": 1.0, "seed": 42})
-            while True:
-                _, _, st = http("GET", base + f"/v1/audio/jobs/{job['id']}")
-                if st["status"] in ("done", "error", "cancelled"):
-                    break
-                time.sleep(1)
+            st = poll_job(lambda left: http("GET", base + f"/v1/audio/jobs/{job['id']}", timeout=min(60, left))[2],
+                          ("done", "error", "cancelled"), JOB_TIMEOUT_S, 1)
             lat = time.monotonic() - t0
             rec = {"label": label, "asked_s": dur, "latency_s": round(lat, 3), "status": st["status"],
                    "server_stats": st.get("stats"), "error": st.get("error")}
@@ -169,11 +206,8 @@ def music_requests(kind: str, base: str, out: Path) -> list:
                 "instructions": "fiona crapple, jazzy piano, raw female vocal, upright bass, brushed drums, intimate",
                 "audio_duration": dur, "seed": seed, "response_format": "wav"})
             jid = job.get("id") or job.get("job_id")
-            while True:
-                _, _, st = http("GET", base + f"/v1/music/jobs/{jid}")
-                if st.get("status") in ("done", "completed", "error", "failed", "cancelled"):
-                    break
-                time.sleep(2)
+            st = poll_job(lambda left: http("GET", base + f"/v1/music/jobs/{jid}", timeout=min(60, left))[2],
+                          ("done", "completed", "error", "failed", "cancelled"), JOB_TIMEOUT_S, 2)
             lat = time.monotonic() - t0
             rec = {"label": label, "asked_s": dur, "latency_s": round(lat, 3), "status": st.get("status"),
                    "job": {k: v for k, v in st.items() if k != "audio"}}
@@ -189,18 +223,51 @@ def music_requests(kind: str, base: str, out: Path) -> list:
     return runs
 
 
-def stop_group(proc: subprocess.Popen, wait_s: int = 60) -> str:
-    """SIGTERM the process group this script started (its pid is the group id), SIGKILL after wait_s."""
-    if proc.poll() is not None:
-        return f"already exited {proc.returncode}"
-    os.killpg(proc.pid, signal.SIGTERM)
+def group_alive(pgid: int) -> bool:
+    """True while any process of the group exists (a zombie counts until its parent reaps it)."""
     try:
-        proc.wait(wait_s)
-        return "stopped on SIGTERM"
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait(30)
-        return "needed SIGKILL"
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def stop_group(proc: subprocess.Popen, wait_s: int = 60) -> str:
+    """SIGTERM the process group this script started (its pid is the group id), then SIGKILL it if members remain after wait_s.
+    The launcher exiting first does not end the check: a server child can outlive it and hold the board."""
+    pgid = proc.pid
+    launcher_gone = proc.poll() is not None
+    if not group_alive(pgid):
+        return f"already exited {proc.returncode}"
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    end = time.monotonic() + wait_s
+    while time.monotonic() < end:
+        if proc.poll() is None:
+            try:
+                proc.wait(0.2)
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            time.sleep(0.2)
+        if not group_alive(pgid):
+            return "stopped on SIGTERM"
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    end = time.monotonic() + 30
+    while time.monotonic() < end and group_alive(pgid):
+        if proc.poll() is None:
+            try:
+                proc.wait(0.2)
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            time.sleep(0.2)
+    return "needed SIGKILL" + (" (launcher had exited)" if launcher_gone else "") + ("" if not group_alive(pgid) else "; group still alive")
 
 
 def main() -> int:
@@ -216,11 +283,12 @@ def main() -> int:
     if a.can not in CANS:
         ap.error(f"unknown can {a.can!r}; known: {', '.join(CANS)}")
     spec = CANS[a.can]
+    a.root = Path(os.path.abspath(a.root))
     work = a.root / a.can
     work.mkdir(parents=True, exist_ok=True)
     env = env_for(work)
     if a.hf_token_path:
-        env["HF_TOKEN_PATH"] = a.hf_token_path
+        env["HF_TOKEN_PATH"] = os.path.abspath(a.hf_token_path)
     if a.print_env:
         for k in ("XDG_CACHE_HOME", "TT_MODEL_MODELS_DIR", "HF_HOME", "TT_METAL_CACHE"):
             print(f"export {k}={env[k]}")
@@ -237,6 +305,12 @@ def main() -> int:
     timeout = a.ready_timeout or spec["ready_timeout"]
     result = {"can": a.can, "repo": f"{OWNER}/{a.can}", "port": spec["port"], "ready_timeout_s": timeout,
               "tt_visible_devices": env.get("TT_VISIBLE_DEVICES")}
+    if port_busy(spec["port"]):
+        result["error"] = f"port {spec['port']} is already in use; refusing to start (its health route could answer for another server)"
+        result["ready"] = False
+        (work / "result.json").write_text(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2))
+        return 1
     log = open(work / "serve.log", "wb")
     t0 = time.monotonic()
     proc = subprocess.Popen(["tt-model", "serve", f"{OWNER}/{a.can}", "--port", str(spec["port"]),
@@ -295,7 +369,7 @@ def main() -> int:
         (work / "result.json").write_text(json.dumps(result, indent=2))
     printable = {k: v for k, v in result.items() if k != "log_tail"}
     print(json.dumps(printable, indent=2)[:6000])
-    return 0 if result.get("ready") and "error" not in result else 1
+    return 0 if run_ok(result) else 1
 
 
 if __name__ == "__main__":
