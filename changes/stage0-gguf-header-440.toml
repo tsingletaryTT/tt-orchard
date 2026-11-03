@@ -1,0 +1,3 @@
+target = "0.9.103"
+summary = "Stage 0 reads each ignored GGUF header into evidence/gguf-header.json with an agreement table against config.json, and the operator bundle says what the files show."
+kind = "feature"

@@ -1201,6 +1201,20 @@ sidecar, except a `.gguf` file: that is llama.cpp's format (a quantized copy of 
 top-level `.py` file in the repo with its sha256 (`code_files`). The triage script reads headers and
 hashes files. It never imports or runs a code file.
 
+**GGUF headers as evidence** (issue 440, a slice of 439). A GGUF header describes the model without the weights, so stage 0 reads the
+header of each ignored `.gguf` file into `evidence/gguf-header.json`. The read is bounded: one descriptor, at most 64 MiB of header, array and
+string lengths checked against the file size and a cap before they are used, and never the tensor data. A link is followed, because a
+Hugging Face snapshot is made of links, and the opened file must be a regular file. For each file the record holds the architecture's
+hyperparameters, whether the output projection is tied, the multi-token-prediction count, a hash of the embedded chat template and the
+quantization of each kind of tensor (the layer number folded into `N`), with the kinds left at full precision listed. It also holds an
+`agreement` table against `config.json`: each row (block count, sizes, heads, rope settings, layer pattern, the linear-attention
+dimensions, tied embeddings, the multi-token-prediction count, vocabulary size, the chat template) says agree, differ or not comparable,
+with both values. A header that cannot be read is listed as unreadable with its reason. Nothing here changes the class or the path, and a
+difference is a finding for the agent and the operator to read, never a gate failure. `delta.json` gets one finding that points at the
+file, and RISKS.md gets a section, "What the GGUF files show", which says no stage records using the full-precision list. That list is
+llama.cpp's choice for that file, a hint about which tensors are sensitive to precision and not a measurement on this hardware. The TT
+stack and vLLM load safetensors; no stage loads or dequantizes a GGUF.
+
 **The sidecar parity check** (stage 2, class `weights+sidecar`; skill `weights-sidecar-check`). The sidecar
 head reads the backbone's final hidden state for every token, which the TT serving stack does not return.
 `hidden_parity.py` (in `orchard/skills/sidecar-parity-templates/`) loads the backbone on the leased board
