@@ -127,6 +127,10 @@ A failed test of the port now earns the coder up to N repair rounds in the same 
   the files the supervisor wrote, or the attempt fails with the named reason. The template, config and `hw_test.json` are put back, results written during the
   step are set aside, and the same check runs under a lease. The new record is the supervisor's, with its own ledger hash. A round that changes nothing in
   the port ends the rounds without a test.
+- **Setup and cleaning.** A failed device open at `init` is kind `setup` (the worker says so); a port import error is kind `port`. The output text is cleaned as a
+  whole (home paths, URL user information, tokens) before the ledger's 300-character failure line or the prompt's tail is cut from it.
+- **A kill between an edit and its rerun.** The ledger holds the digest of the port directory each test ran against (`port repair tested`). A resume that finds
+  a different directory tests that edit first, without a new repair step or a new round, and only then goes on.
 - **Where the count lives.** In the ledger, per attempt: it starts at a `stage_start` that is not a resume and at a moved-aside stage directory. A resume keeps
   it. A resume of an escalated attempt that still has rounds goes on in its stage directory and does not move it aside.
 - **What does not change.** The gate, the template's checks, the hash that ties the final record to the supervisor, the finish step (it still records a failed test

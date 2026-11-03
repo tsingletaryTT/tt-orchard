@@ -1372,6 +1372,9 @@ has the wrong files, and kind `setup` is the run around the port (no leased chip
 code 2 without timing out, and its output file must match the sha256 in the test record. Only a line that starts with the token counts: the port's own
 output carries the prefix `port| `.
 
+A device that cannot be opened is kind `setup` too: the worker's `init` reply carries `"kind": "setup"` when `open_device` or `open_mesh_device` raises, and no
+edit to the port can fix that. An import error in the port module at `init` stays kind `port`.
+
 Each round, in order:
 
 1. The decision `port repair round` (`round`, `of`, `op`, `failure`) goes into the ledger, before anything runs. A restart counts the round.
@@ -1383,6 +1386,12 @@ Each round, in order:
    way, so no test runs.
 5. The failed output is kept as `evidence/port-repair-round-<k>-output.txt` (its hash is in the ledger), and the same check runs again under a lease,
    as any hardware test does. The supervisor writes the new record, and the ledger holds a hash for each.
+
+The failure text that reaches the ledger and the repair prompt is cleaned as a whole before any cut: home paths, URL user information and token-shaped
+words are removed, then the failure line is cut to 300 characters. After each hardware test the supervisor records the digest of the port directory it ran
+against (the decision `port repair tested`). A kill after a repair edit and before its rerun leaves the edited port beside the old failed record; the
+resumed attempt sees that the directory differs from the tested digest and runs the test for that edit before it starts another repair or calls the port
+unchanged.
 
 After the last round (reason `spent`) or when a round passes, the stage goes on as before: the finish step, the gate, and on a failure a fresh attempt. A
 count of rounds belongs to one attempt. A resume of the same attempt keeps it, an escalated attempt starts its own, and a resume of an escalated
