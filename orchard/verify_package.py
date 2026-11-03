@@ -45,9 +45,9 @@ from orchard.scrub import scrub_package
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 EXIT_OK, EXIT_FAILED, EXIT_REFUSED = 0, 1, 2
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
-REVISION_NEAR = re.compile(r"(?:revision\W{0,8}|@\s*)([0-9a-f]{40})\b", re.IGNORECASE)
+REVISION_NEAR = re.compile(r"(?:revision\W{0,8}|(?<=\s)@\s*)([0-9a-f]{40})\b", re.IGNORECASE)
 # The card names each pin on one line, with its repository: `owner/name @ <40-character commit>` (the older `owner/name (revision <commit>)`
-# also works). A repository named on another line is never attached to a commit (a code bundle's repository would become the weights').
+# also works). The `@` needs whitespace before it, so a Git dependency URL (`git+https://host/org/lib.git@<sha>`) is not a pin. A repository named on another line is never attached to a commit (a code bundle's repository would become the weights').
 PIN_LINE_FORM = "write each pin on one line as `owner/name @ <40-character commit>`, one line per repository"
 IGNORED = frozenset({".gitattributes"})          # the Hub adds this file; no package record lists it
 RECORD_FILES = ("package-record.json", "SHA256SUMS")

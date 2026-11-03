@@ -642,3 +642,13 @@ def test_a_card_with_one_commit_and_no_repository_on_its_line_is_not_reported(tm
 def test_the_primary_repository_is_pinned_at_exactly_one_commit(tmp_path):
     _, rev_line = _card_run(tmp_path, FRONT + f"ibm/thing @ {REV}\nibm/thing @ {OTHER}\n")
     assert rev_line.strip().startswith("warn") and "ibm/thing at two commits" in rev_line, rev_line
+
+
+def test_a_git_dependency_url_with_an_at_sign_is_not_a_hub_pin(tmp_path):
+    """`pip install git+https://host/org/lib.git@<sha>` and `org/lib.git@<sha>` are Git references. The `@` pin form needs whitespace before it."""
+    readme = (FRONT + f"Weights: ibm/thing @ {REV}\n"
+              f"pip install git+https://github.com/example/library.git@{OTHER}\n"
+              f"pip install example/other.git@{'c' * 40}\n")
+    hub, rev_line = _card_run(tmp_path, readme)
+    assert rev_line.strip().startswith("ok"), rev_line
+    assert not [c for c in hub.calls if c[0] == "exists" and c[2] != REV], hub.calls
