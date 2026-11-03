@@ -69,6 +69,13 @@ def test_two_partial_formats_are_still_a_problem(tmp_path):
     assert cc.shard_problem(snap(tmp_path, both))
 
 
+def test_the_first_problem_of_a_format_is_the_one_reported(tmp_path):
+    files = {"config.json": "{}", "a-00001-of-00002.safetensors": "x",                       # stem a: no index
+             "b-00001-of-00002.safetensors": "x", "b.safetensors.index.json": ST_INDEX}      # stem b: a shard missing
+    problem = cc.shard_problem(snap(tmp_path, files))
+    assert "a.safetensors.index.json" in problem
+
+
 def test_a_single_bin_file_needs_no_index(tmp_path):
     assert cc.shard_problem(snap(tmp_path, {"config.json": "{}", "pytorch_model.bin": "x"})) is None
 
@@ -189,6 +196,7 @@ def _refused(stdout, stderr):
 def test_the_exception_keeps_the_marker_whatever_the_streams_hold(stdout, stderr):
     message = _refused(stdout, stderr)
     assert blocked.CONTAINER_HOLDS_MARK in message.lower()
+    assert REFUSAL in message.lower()                 # the diagnostic keeps the refusal's own words (which chips), not only the marker
     assert blocked.retryable("coder-unusable", message) is False
     assert blocked.block_code({"decision": "pause", "reason": f"blocked: the coder did not start and answer; nothing is retried: {message}"}) \
         == "coder-unusable"
