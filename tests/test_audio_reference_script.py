@@ -217,6 +217,111 @@ def test_offline_environment_removes_every_token_and_sets_offline_mode():
     assert env == {"KEEP": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
 
 
+# Issue 408: a model server imports huggingface_hub before it calls offline_environment(), and the Hub client reads HF_HUB_OFFLINE once, at import. With
+# only the environment variable changed the process stayed online, and the tokenizer's lookups for optional files went out with no token.
+
+def hub_constants():
+    return pytest.importorskip("huggingface_hub.constants", reason="the fix sets the Hub client's own offline flag, which needs huggingface_hub")
+
+
+try:
+    from huggingface_hub import constants as _hub_constants
+    HUB_FLAG_AT_COLLECTION = _hub_constants.HF_HUB_OFFLINE
+except ImportError:                                  # the tests that need it skip through hub_constants()
+    HUB_FLAG_AT_COLLECTION = None
+
+
+def register_environment_restore(monkeypatch):
+    """offline_environment(os.environ) removes variables and adds two: have monkeypatch put the real environment back after the test."""
+    for name in (*mr.TOKEN_VARIABLES, "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        monkeypatch.setenv(name, "placeholder")
+
+
+def test_offline_environment_turns_off_a_hub_client_that_was_imported_first(monkeypatch):
+    c = hub_constants()
+    monkeypatch.setattr(c, "HF_HUB_OFFLINE", False)
+    register_environment_restore(monkeypatch)
+    mr.offline_environment(os.environ)
+    assert c.HF_HUB_OFFLINE is True
+    import huggingface_hub
+    assert huggingface_hub.is_offline_mode() is True
+
+
+def test_offline_environment_also_sets_the_copy_of_the_flag_that_transformers_4_kept(monkeypatch):
+    import types
+    fake = types.ModuleType("transformers.utils.hub")
+    fake._is_offline_mode = False
+    monkeypatch.setitem(sys.modules, "transformers.utils.hub", fake)
+    register_environment_restore(monkeypatch)
+    mr.offline_environment(os.environ)
+    assert fake._is_offline_mode is True
+
+
+def test_a_client_module_without_the_flag_is_left_without_it(monkeypatch):
+    import types
+    bare_hub, bare_transformers = types.ModuleType("huggingface_hub.constants"), types.ModuleType("transformers.utils.hub")
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", bare_hub)
+    monkeypatch.setitem(sys.modules, "transformers.utils.hub", bare_transformers)
+    register_environment_restore(monkeypatch)
+    mr.offline_environment(os.environ)
+    assert not hasattr(bare_hub, "HF_HUB_OFFLINE") and not hasattr(bare_transformers, "_is_offline_mode")
+
+
+def test_a_plain_dict_environment_does_not_change_the_hub_client_of_this_process(monkeypatch):
+    c = hub_constants()
+    monkeypatch.setattr(c, "HF_HUB_OFFLINE", False)
+    mr.offline_environment({"HF_TOKEN": "secret"})
+    assert c.HF_HUB_OFFLINE is False
+
+
+def tokenizer_load_attempts(tmp_path, monkeypatch, *, offline: bool):
+    """Load a tokenizer from a private cache that holds its two files and nothing else, with every network call recorded and refused and no token
+    anywhere. Returns (the tokenizer, the network attempts). `offline` runs offline_environment() first, as the server does."""
+    pytest.importorskip("transformers", reason="the load goes through transformers.AutoTokenizer")
+    tokenizers = pytest.importorskip("tokenizers", reason="the fake tokenizer is built with the tokenizers library")
+    import socket
+    from transformers import AutoTokenizer
+    c = hub_constants()
+    monkeypatch.setattr(c, "HF_HUB_OFFLINE", False)
+    register_environment_restore(monkeypatch)
+    for name in mr.TOKEN_VARIABLES + ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("HF_TOKEN_PATH", str(tmp_path / "no-token-file"))
+    commit = "c" * 40
+    repo = tmp_path / "cache" / "models--acme--tok"
+    snap = repo / "snapshots" / commit
+    snap.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text(commit)
+    tok = tokenizers.Tokenizer(tokenizers.models.WordLevel({"[UNK]": 0, "a": 1}, unk_token="[UNK]"))
+    tok.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+    tok.save(str(snap / "tokenizer.json"))
+    (snap / "tokenizer_config.json").write_text(json.dumps({"tokenizer_class": "PreTrainedTokenizerFast"}))
+    (snap / "config.json").write_text(json.dumps({"model_type": "t5"}))
+    attempts = []
+
+    def refused(*args, **kwargs):
+        attempts.append(args[:2])
+        raise ConnectionError("this test allows no network")
+    monkeypatch.setattr(socket, "getaddrinfo", refused)
+    monkeypatch.setattr(socket.socket, "connect", refused)
+    if offline:
+        mr.offline_environment(os.environ)
+    return AutoTokenizer.from_pretrained("acme/tok", cache_dir=str(tmp_path / "cache")), attempts
+
+
+def test_a_tokenizer_load_after_offline_environment_sends_no_request(tmp_path, monkeypatch):
+    tokenizer, attempts = tokenizer_load_attempts(tmp_path, monkeypatch, offline=True)
+    assert attempts == []
+    assert tokenizer("a")["input_ids"] == [1]
+
+
+def test_the_same_load_without_offline_environment_does_reach_for_the_network(tmp_path, monkeypatch):
+    """The control: the guard above could pass for the wrong reason if this load made no request anyway."""
+    _, attempts = tokenizer_load_attempts(tmp_path, monkeypatch, offline=False)
+    assert attempts
+
+
 def test_main_removes_the_token_before_anything_is_imported(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "secret")
     seen = {}
@@ -229,6 +334,12 @@ def test_main_removes_the_token_before_anything_is_imported(tmp_path, monkeypatc
     with pytest.raises(SystemExit):
         mr.main(["--model", "m", "--out", str(tmp_path / "o"), "--prompt", "p", "--steps", "3", "--cfg-scale", "1", "--seed", "1"])
     assert seen == {"token": None, "offline": "1"}
+
+
+def test_the_hub_flag_that_main_set_in_the_test_above_is_not_left_for_later_tests():
+    """The test above ran offline_environment() on the real environment, which sets the flag the Hub client holds; conftest puts it back."""
+    c = hub_constants()
+    assert c.HF_HUB_OFFLINE is HUB_FLAG_AT_COLLECTION
 
 
 def test_main_writes_a_manifest_with_the_model_revision_and_settings(tmp_path, monkeypatch):

@@ -40,11 +40,29 @@ LAYERS_PATH = ("model", "model", "model", "transformer", "layers")   # StableAud
 
 
 def offline_environment(environ=os.environ) -> None:
-    """No token, no network: the Hub client reads the local cache only."""
+    """No token, no network: the Hub client reads the local cache only.
+
+    The Hub client reads HF_HUB_OFFLINE once, when it is imported. A model server imports it before this runs, so changing the variable alone
+    leaves that process online, and the tokenizer's lookups for optional files go out with no token (a gated repository answers 401: issue 408).
+    For the real process environment the flag the client already holds is set as well. A plain dict (a test) leaves the process alone."""
     for name in TOKEN_VARIABLES:
         environ.pop(name, None)
     environ["HF_HUB_OFFLINE"] = "1"
     environ["TRANSFORMERS_OFFLINE"] = "1"
+    if environ is os.environ:
+        _offline_clients_already_imported()
+
+
+def _offline_clients_already_imported() -> None:
+    """Set the offline flag in the Hub client and transformers when they were imported before the variable was set. Only modules already in
+    sys.modules are touched: one imported later reads the variable itself. `huggingface_hub.constants.HF_HUB_OFFLINE` is what
+    `huggingface_hub.is_offline_mode()` returns and what the client's HTTP session checks; transformers 4.x kept its own copy of the flag."""
+    hub = sys.modules.get("huggingface_hub.constants")
+    if hub is not None and hasattr(hub, "HF_HUB_OFFLINE"):
+        hub.HF_HUB_OFFLINE = True
+    transformers_hub = sys.modules.get("transformers.utils.hub")
+    if transformers_hub is not None and hasattr(transformers_hub, "_is_offline_mode"):
+        transformers_hub._is_offline_mode = True
 
 
 def _numpy(value):

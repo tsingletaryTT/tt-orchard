@@ -1,0 +1,3 @@
+target = "0.9.100"
+summary = "offline_environment also sets the offline flag the Hub client already holds, so a model server that imported huggingface_hub first sends no tokenizer request without a token"
+kind = "fix"
