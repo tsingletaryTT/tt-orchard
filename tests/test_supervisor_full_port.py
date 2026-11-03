@@ -606,3 +606,19 @@ def test_a_skeleton_that_cannot_be_copied_leaves_the_facts_and_a_ledger_decision
     S._seed_full_port(stub, SimpleNamespace(number=2), sd)
     assert (sd / "port_facts.json").is_file() and stub._port_seed == {"facts": True, "skeleton": False}
     assert any(k.get("decision") == "port skeleton not copied" for _, k in entries)
+
+
+def test_an_evidence_record_the_ledger_refuses_leaves_a_ledger_decision_and_does_not_stop_the_stage(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from orchard import safeio
+    snap = _checkpoint(tmp_path)
+    sd = tmp_path / "stages" / "2"
+    sd.mkdir(parents=True)
+
+    def refuse(run_dir, path):
+        raise safeio.PathRefused("the evidence file is not inside the run directory")
+    monkeypatch.setattr(supervisor, "evidence_record", refuse)
+    stub, entries, S = _stub(tmp_path, snap)
+    S._seed_full_port(stub, SimpleNamespace(number=2), sd)
+    assert stub._port_seed["facts"] is False
+    assert any(k.get("decision") == "port facts not written" for _, k in entries)

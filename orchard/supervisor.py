@@ -2561,12 +2561,12 @@ class Supervisor:
             lookup = (lambda model_type: port_facts.reference_source(root, model_type)) if root is not None else None
             try:
                 facts = port_facts.build(snapshot, reference_lookup=lookup)
-                path = port_facts.write(stage_dir, facts)
-            except (port_facts.PortFactsError, OSError) as exc:
+                record = evidence_record(self.run_dir, port_facts.write(stage_dir, facts))
+            except (port_facts.PortFactsError, OSError, safeio.SafeReadError) as exc:
                 self.ledger.append("decision", spec.number, decision="port facts not written", problem=str(exc)[:300])
             else:
                 facts_written = True
-                self.ledger.append("decision", spec.number, decision="port facts written", facts=evidence_record(self.run_dir, path),
+                self.ledger.append("decision", spec.number, decision="port facts written", facts=record,
                                    tensor_groups=facts["tensor_groups"], tensors_left_out=facts["tensors_left_out"],
                                    conventions=[c["field"] for c in facts["conventions"]],
                                    reference_found=root is not None)
