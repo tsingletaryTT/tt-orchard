@@ -25,6 +25,7 @@ from pathlib import Path
 
 from orchard import audio_reference as ar
 from orchard import noise_floor as nf
+from orchard import safeio
 
 FLOOR_FILE = "noise_floor.json"
 MAX_BYTES = 8 * 1024 * 1024
@@ -62,12 +63,12 @@ def load_floor(stage_dir) -> Floor:
     path = Path(stage_dir) / FLOOR_FILE
     if not path.exists():
         return Floor(None, NO_FLOOR)
-    try:
-        if path.stat().st_size > MAX_BYTES:
-            raise ValueError("it is larger than 8 MiB")
-        raw = path.read_bytes()
+    try:                  # the file is stage 1's output and a program or an agent may have replaced it: a pinned open that does not block on a FIFO
+        raw = safeio.read_bytes(path, max_bytes=MAX_BYTES)       # (and refuses a link, a non-regular file and a file over the cap)
         res = json.loads(raw)
-    except (OSError, ValueError) as exc:
+    except safeio.SafeReadError as exc:
+        return Floor(None, f"the floor record {FLOOR_FILE} cannot be read ({type(exc).__name__}: {str(exc)[:200]}): the provisional bars decide this", None)
+    except ValueError as exc:
         return Floor(None, f"the floor record {FLOOR_FILE} cannot be read ({type(exc).__name__}): the provisional bars decide this", None)
     sha = hashlib.sha256(raw).hexdigest()
     try:
