@@ -672,7 +672,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
             return found
         return Check("base", WARN, "the model card names no base_model, so stage 0 has nothing to compare it "
                      "with. Pass --base <bundle or model id> to name the model to start from"
-                     + _closest(report) + _port_note(report),
+                     + _closest(report) + _port_note(report) + (f" {CHECKPOINT_NOTE}" if audio else ""),
                      data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": [], "report": report})
     if audio:
         found = _audio_base(model_id=model_id, base=base, inferred=inferred, report=report, accept_inferred=accept_inferred, audio=audio,
