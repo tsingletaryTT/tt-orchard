@@ -211,3 +211,33 @@ def test_the_shipped_http_port_declares_that_a_server_computes_and_names_its_add
     assert port.server_address({"host": "127.0.0.1", "port": 20000}) == "127.0.0.1:20000"
     assert port.server_address({"host": "localhost", "port": 7}) == "localhost:7"
     assert port.server_address({"host": "::1", "port": 20000}) == "[::1]:20000"
+
+
+# ---- Copilot round 1 on PR 423 ----------------------------------------------------------------------------------------------------------
+
+def test_the_time_the_port_takes_to_name_its_server_is_not_part_of_load_s(tmp_path, server):
+    """`load_s` is the time of the port's own load call. A server_address callback that takes two seconds must not be counted in it."""
+    src = SERVER_PORT_SRC.format(address=server.address).replace(
+        "def server_address(model):\n", "def server_address(model):\n    import time\n    time.sleep(2.0)\n")
+    run, stage, done = go(tmp_path, src)
+    assert done.returncode == 0, done.stdout + done.stderr
+    rec = record(stage)
+    assert rec["computed_on"]["server"]["address"] == server.address
+    assert rec["load_s"] < 1.5, rec["load_s"]
+    assert gate(run, stage) == []
+
+
+def test_a_port_whose_load_is_slow_still_has_that_time_in_load_s(tmp_path, server):
+    src = SERVER_PORT_SRC.format(address=server.address).replace(
+        "def load(model_dir, mesh_device):\n", "def load(model_dir, mesh_device):\n    import time\n    time.sleep(1.0)\n")
+    run, stage, done = go(tmp_path, src)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert record(stage)["load_s"] >= 1.0
+
+
+def test_a_server_address_callback_that_raises_fails_the_run_with_its_error(tmp_path, server):
+    src = SERVER_PORT_SRC.format(address=server.address).replace(
+        "def server_address(model):\n", "def server_address(model):\n    raise RuntimeError('no address yet')\n")
+    run, stage, done = go(tmp_path, src)
+    assert done.returncode == 2 and "no address yet" in done.stdout
+    assert not (stage / "evidence" / "scoring-check.json").exists()

@@ -51,7 +51,7 @@ Port module interface (stages/2/port/port_model.py):
     COMPUTES_ON = "in-process" | "server"                        optional, default "in-process"
     server_address(model) -> "127.0.0.1:PORT"                    required when COMPUTES_ON is "server"
         A port that forwards the prompts to a model server, and does not run the model in this worker, says so (issue 407). The address
-        is a loopback host (127.0.0.1, localhost or [::1]) and a port, called after `load`. The record then says the scores were
+        is a loopback host (127.0.0.1, localhost or [::1]) and a port, called after `load` in a request of its own, so its time is not in load_s. The record then says the scores were
         computed by a server at that address, with the result of this file's own probe of /health and /v1/models; it does not say the
         chip this check opened ran them.
 
@@ -388,10 +388,9 @@ def worker(read_fd: int, write_fd: int) -> int:
                 reply({"ok": True, "computes_on": getattr(mod, "COMPUTES_ON", "in-process")})
             elif op == "load":           # timed: only the port's own load
                 model = mod.load(req["model_dir"], device)
-                out = {"ok": True}
-                if getattr(mod, "COMPUTES_ON", "in-process") == "server":
-                    out["server_address"] = str(mod.server_address(model))
-                reply(out)
+                reply({"ok": True})
+            elif op == "address":        # untimed: a server-backed port names its server after the load timer has stopped
+                reply({"ok": True, "server_address": str(mod.server_address(model))})
             elif op == "score":
                 ids_list = [[int(i) for i in ids] for ids in req["pairs"]]
                 if req.get("media") is None:
@@ -765,9 +764,9 @@ def main() -> int:
     try:
         declared = w.ask(op="init", n_chips=len(chips)).get("computes_on")
         t0 = time.monotonic()
-        loaded = w.ask(op="load", model_dir=model_dir)
-        load_s = max(time.monotonic() - t0, MIN_LOAD_S)
-        computed_on = computed_on_record(declared, loaded.get("server_address"))     # full precision; a rounded value could be 0.0, which the gate refuses
+        w.ask(op="load", model_dir=model_dir)
+        load_s = max(time.monotonic() - t0, MIN_LOAD_S)        # stops before the address is asked for: load_s is the port's load call
+        computed_on = computed_on_record(declared, w.ask(op="address").get("server_address") if declared == "server" else None)     # full precision; a rounded value could be 0.0, which the gate refuses
         print(f"loaded in {load_s}s", flush=True)
         t1 = time.monotonic()
         if kind == "reranker":
