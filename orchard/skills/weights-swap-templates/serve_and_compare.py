@@ -613,7 +613,7 @@ def unrecoverable_ids(tokenizer, model_dir: Path, ids) -> set[int]:
         if i in stops:
             out.add(i)
             continue
-        text = tokenizer.decode([i], skip_special_tokens=False)
+        text = tokenizer.decode([i])         # every special token is in `stops` already, so the default skipping of special tokens changes nothing here
         back = tokenizer.encode(text, add_special_tokens=False).ids if text else []
         if not text or "\ufffd" in text or back[:1] != [i]:
             out.add(i)
@@ -829,7 +829,7 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
     server started; it is required, so a caller cannot forget it (issue 319). `extra` adds keys to the report;
     serve_and_compare_container.py records its docker command there."""
     prompt_ids, generated_ids, generated_text = reference
-    n_compared = N_TOKENS - len(m["positions_skipped"])
+    n_compared = N_TOKENS - len(m.get("positions_skipped", []))
     top1 = m["matches"] / n_compared if n_compared else 0.0
     coh = coherence(m["free_run_text"])
     swap_json = log_path.parent / "swap-check.json"
@@ -845,7 +845,7 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
               "model_dir": weights_env["MODEL_WEIGHTS_DIR"], "port": cfg["port"],
               "weights_dir_env": weights_env, "hf_model_env": weights_env["HF_MODEL"],
               "server_ready_s": m["server_ready_s"], "tensor_cache_at_start": cache_at_start, "n_tokens": n_compared,
-              "positions_skipped": m["positions_skipped"], "matches": m["matches"], "top1_agreement": top1, **coh,
+              "positions_skipped": m.get("positions_skipped", []), "matches": m["matches"], "top1_agreement": top1, **coh,
               "prompt_ids": prompt_ids, "reference_generated_ids": generated_ids[:N_TOKENS],
               "reference_generated_text": generated_text, "free_run_text": m["free_run_text"],
               "free_run_ids": tokenizer.encode(m["free_run_text"], add_special_tokens=False).ids,
