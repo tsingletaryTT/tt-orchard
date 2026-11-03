@@ -31,12 +31,13 @@ class Result:
     detail: str = ""
 
 
-def _read(stream, cap: int, sink: list, over: threading.Event, name: str, stop: threading.Event) -> None:
-    """Read `stream` in chunks into `sink` until the end, the cap or `stop`. Crossing the cap sets `over` (and stops reading)."""
+def _read(stream, cap: int, sink: list, over: threading.Event) -> None:
+    """Read `stream` in chunks into `sink` until the end or the cap. Crossing the cap sets `over` and stops reading, so at most one chunk
+    beyond the cap is held. The thread ends at the end of the stream, which the group's stop brings about."""
     held = 0
     try:
-        while not stop.is_set():
-            chunk = stream.read1(CHUNK) if hasattr(stream, "read1") else stream.read(CHUNK)
+        while True:
+            chunk = stream.read1(CHUNK)
             if not chunk:
                 return
             sink.append(chunk)
@@ -104,26 +105,21 @@ def run(argv, request: str, *, timeout_s: float, out_max: int, err_max: int, env
     except (OSError, ValueError) as exc:
         return Result("start", None, "", "", type(exc).__name__)
     out, err = [], []
-    over_out, over_err, stop = threading.Event(), threading.Event(), threading.Event()
-    threads = [threading.Thread(target=_read, args=(proc.stdout, out_max, out, over_out, "stdout", stop), daemon=True),
-               threading.Thread(target=_read, args=(proc.stderr, err_max, err, over_err, "stderr", stop), daemon=True),
+    over_out, over_err = threading.Event(), threading.Event()
+    threads = [threading.Thread(target=_read, args=(proc.stdout, out_max, out, over_out), daemon=True),
+               threading.Thread(target=_read, args=(proc.stderr, err_max, err, over_err), daemon=True),
                threading.Thread(target=_write, args=(proc.stdin, request.encode("utf-8")), daemon=True)]
     for t in threads:
         t.start()
-    problem = None
     try:
         problem = _wait_for_end(proc, time.monotonic() + timeout_s, over_out, over_err)
-    except BaseException:
-        stop.set()
-        _stop(proc)
-        raise
     finally:
+        # Every way out (the child ended, a deadline, a cap, an exception such as an interrupt) leaves no process of the child's group behind.
         if proc.poll() is None:
             _stop(proc)
     # The child has ended (by itself or by the stop). Let the readers drain what is already in the pipes, then close them.
     for t in threads[:2]:
         t.join(timeout=2.0)
-    stop.set()
     for stream in (proc.stdout, proc.stderr):
         try:
             stream.close()

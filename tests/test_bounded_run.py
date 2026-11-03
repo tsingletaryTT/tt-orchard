@@ -170,14 +170,15 @@ def test_a_program_that_cannot_start_is_a_problem_and_not_an_exception(tmp_path)
     assert got["problem"] == "start" and got["detail"]
 
 
-def test_a_large_request_does_not_deadlock_a_helper_that_answers_first():
-    """The request goes in from a thread of its own: a helper that writes before it reads cannot block the caller."""
+def test_a_large_request_does_not_deadlock_a_helper_that_writes_before_it_reads():
+    """The helper writes a megabyte (more than a pipe holds) before it reads its 4 MiB request, so the caller has to read the output while the
+    request is still going in: the request is written from a thread of its own."""
     got = limited("""
-        child = "import sys; sys.stdout.write('done'); sys.stdout.flush(); sys.stdin.read()"
-        res = br.run([sys.executable, "-I", "-c", child], "r" * (4 << 20), timeout_s=30, out_max=1000, err_max=1000)
+        child = "import sys; sys.stdout.write('o' * (1 << 20)); sys.stdout.flush(); sys.stdin.read()"
+        res = br.run([sys.executable, "-I", "-c", child], "r" * (4 << 20), timeout_s=30, out_max=2 << 20, err_max=1000)
         show(res)
     """)
-    assert got["problem"] is None and got["stdout"] == "done"
+    assert got["problem"] is None and got["stdout_len"] == 1 << 20
 
 
 def test_the_limited_child_is_what_stops_a_scenario_that_has_lost_its_cap():
