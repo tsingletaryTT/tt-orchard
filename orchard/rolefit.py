@@ -22,6 +22,13 @@ What it does, in order:
    The live failures came from a model that circled in its reasoning (docs/run-logs).
 4. Throughput. End-to-end prefill and decode speed at 8K and 32K prompt tokens. It has no bar: the result
    file records it, because the loop's step budgets depend on it.
+5. Prefix reuse (issue 360). A coding agent resends its whole context every turn, so a server that serves a repeated
+   long prefix from a cache answers sooner than one that does not. Three one-token requests with a long prompt: A,
+   a different prompt B of the same size (the control), and A again. The server's cached-token count decides when it
+   reports one; otherwise the repeat's time against the control's, and the result says which. Recorded, with no bar.
+6. Tokens per reply (issue 361). Each replayed reply's completion tokens, and the reasoning tokens and answer tokens
+   of a model that reasons (reported by the server, or estimated from the share of reasoning characters, and the
+   result says which), with the distribution and the cap those counts support. Recorded, with no bar.
 
 The endpoint must be on this machine, as with the tier config. Nothing here talks to a remote service.
 """
@@ -36,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from orchard import defaults
+from orchard import defaults, served_chat, served_verify
 from orchard.agent import TOOL_SCHEMAS
 from orchard.canary import post_json
 
@@ -156,11 +163,15 @@ def _one(endpoint, model, turn: Turn, temperature, http, clock, kwargs) -> dict:
     try:
         data = _chat(endpoint, body, http)
         choice = data["choices"][0]
+        split = served_verify.reasoning_split(data)
         row.update(verdict=classify(choice.get("message") or {}, choice.get("finish_reason")),
                    finish_reason=choice.get("finish_reason"),
-                   completion_tokens=(data.get("usage") or {}).get("completion_tokens"), detail="")
+                   completion_tokens=(data.get("usage") or {}).get("completion_tokens"), detail="",
+                   reasoning_tokens=split["reasoning_tokens"] if split else None, answer_tokens=split["answer_tokens"] if split else None,
+                   token_basis=split["basis"] if split else None)
     except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
-        row.update(verdict="error", finish_reason=None, completion_tokens=None, detail=f"{type(exc).__name__}: {exc}")
+        row.update(verdict="error", finish_reason=None, completion_tokens=None, detail=f"{type(exc).__name__}: {exc}",
+                   reasoning_tokens=None, answer_tokens=None, token_basis=None)
     row["seconds"] = round(max(clock() - start, 0.0), 3)
     return row
 
@@ -251,6 +262,46 @@ def throughput(endpoint, model, *, sizes=(8192, 32768), out_tokens: int = 256, h
             "note": "end to end through the server, one request at a time, temperature 0"}
 
 
+def token_report(results: list[dict]) -> dict:
+    """Completion, reasoning and answer tokens of the replayed replies (issue 361), their distribution, the basis of each split (reported by
+    the server, estimated by characters, or no reasoning text) and the cap the counts support (served_chat.token_summary)."""
+    rows = [r for r in results if r.get("verdict") != "error"]
+    out = served_chat.token_summary([r.get("completion_tokens") for r in rows], [r.get("reasoning_tokens") for r in rows],
+                                    [r.get("answer_tokens") for r in rows], defaults.AGENT_MAX_TOKENS)
+    bases: dict[str, int] = {}
+    for r in rows:
+        if r.get("token_basis"):
+            bases[r["token_basis"]] = bases.get(r["token_basis"], 0) + 1
+    out["split_basis"] = bases
+    out["note"] = ("reasoning tokens are the server's count when it reports one and otherwise an estimate from the share of reasoning "
+                   "characters; the cap is the largest reply with a margin, a figure to read and not a setting")
+    return out
+
+
+def prefix_reuse(endpoint, model, *, tokens: int = 1500, http=post_json, clock=time.time, chat_template_kwargs=None) -> dict:
+    """Does the server serve a repeated long prefix faster (issue 360)? Three one-token chat requests with a long prompt: A, a different
+    prompt of the same size B (the control, so warm kernels are not taken for a cache), and A again. The judge is
+    served_verify.check_prefix_reuse; nothing here fails the test, because a server without prefix caching is a fact to record."""
+    text = "The quick brown fox jumps over the lazy dog. " * (tokens * 4 // 45 + 1)
+    first_prompt = f"Document {uuid.uuid4()}.\n{text}\nSummarise the text above in one word."
+    other_prompt = f"Document {uuid.uuid4()}.\n{text}\nSummarise the text above in one word."
+
+    def timed(prompt):
+        body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 1, "stream": False}
+        if chat_template_kwargs:
+            body["chat_template_kwargs"] = chat_template_kwargs
+        t0 = clock()
+        data = _chat(endpoint, body, http)
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+        return {"seconds": max(clock() - t0, 0.0), "prompt_tokens": usage.get("prompt_tokens"), "cached_tokens": details.get("cached_tokens")}
+    try:
+        first, control, repeat = timed(first_prompt), timed(other_prompt), timed(first_prompt)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"name": "prefix_reuse", "state": "not_checked", "detail": f"a request failed: {type(exc).__name__}: {exc}"}
+    return served_verify.check_prefix_reuse(first, repeat, control, declared=False)
+
+
 def _canary(endpoint, model, http, kwargs) -> dict:
     body = {"model": model, "messages": [{"role": "user", "content": CANARY_PROMPT}], "temperature": 0,
             "max_tokens": 64, "stream": False}
@@ -283,13 +334,14 @@ def main(argv=None, *, http=post_json) -> int:
     turns = collect_turns(args.logs, limit=args.turns)
     fails = collect_failures(args.logs)
     parts = {"canary": _canary(args.endpoint, args.model, http, kwargs)}
-    parts["format"] = {**judge_format(replay(args.endpoint, args.model, turns, http=http,
-                                             chat_template_kwargs=kwargs)),
-                       "sources": sorted({t.source for t in turns})}
+    replayed = replay(args.endpoint, args.model, turns, http=http, chat_template_kwargs=kwargs)
+    parts["format"] = {**judge_format(replayed), "sources": sorted({t.source for t in turns})}
     parts["failures"] = judge_failures(replay_failures(args.endpoint, args.model, fails, repeats=args.repeats,
                                                        http=http, chat_template_kwargs=kwargs))
     parts["throughput"] = throughput(args.endpoint, args.model, sizes=tuple(int(s) for s in args.sizes.split(",")),
                                      http=http, chat_template_kwargs=kwargs)
+    parts["prefix_reuse"] = prefix_reuse(args.endpoint, args.model, http=http, chat_template_kwargs=kwargs)
+    parts["tokens"] = token_report(replayed)
     result = {"model": args.model, "endpoint": args.endpoint,
               "when": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **parts, "verdict": verdict(parts)}
     Path(args.out).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

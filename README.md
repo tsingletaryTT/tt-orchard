@@ -2077,7 +2077,10 @@ tt-orchard verify-package REPO_ID [--scratch DIR] [--staged DIR] [--revision SHA
 scratch directory (`--scratch`, or a temporary one that stays in place), and runs these checks: the pulled bytes match the Hub's sha256 for the large files;
 the scrub finds no weights, caches, symbolic links, tokens, home paths or host names; a license file or a `license:` line is present; the package's own
 `package-record.json` or `SHA256SUMS` matches every file and lists every file; JSON manifests parse and `tt-model.yaml` names this repository; the weights
-revision in the card matches the package record, `tt-model.yaml` and the launchers, and the weights repository has that revision. `--staged DIR` also compares
+revision in the card matches the package record, `tt-model.yaml` and the launchers, and the weights repository has that revision. A card that pins more than one
+commit (the weights and a code bundle) names each on one line with its repository, `owner/name @ <40-character commit>`, one line per repository (the older
+`owner/name (revision <commit>)` also works; the `@` needs a space before it, so a Git URL such as `git+https://host/org/lib.git@<commit>` is not a pin). A repository named on a different line is never attached to a commit. A commit without its repository on its line
+is a warning that names this form, and a card that pins the weights repository at two commits is a warning too. `--staged DIR` also compares
 the pulled files and hashes with a local staged directory. `--plan` prints the commit, file count and the largest files and pulls nothing. `--revision` pulls a
 commit or branch other than main. A private repository is pulled with `HF_TOKEN` from the environment, which is never printed. A failing check
 makes the exit status 1 only with `--check`; a Hub that cannot be read is a refusal (exit 2).

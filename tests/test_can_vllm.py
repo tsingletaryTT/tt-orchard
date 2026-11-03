@@ -264,7 +264,14 @@ SERVER = textwrap.dedent('''
                 self.wfile.write(b"data: [DONE]\\n\\n"); self.wfile.flush()
                 self.close_connection = True
             else:
-                self._send(200, {"choices": [{"message": {"content": "Paris"}}], "usage": {"completion_tokens": 1}})
+                prompt = req["messages"][0]["content"]
+                if "is_prime" in prompt:         # the code probe of can boot (issue 369)
+                    content = "def is_prime(n):\\n    return n > 1 and all(n % d for d in range(2, n))\\n"
+                elif "secret word" in prompt:    # the long-prompt probe (issue 371): two tokens a word
+                    content = "tangerine"
+                else:
+                    content = "Paris"
+                self._send(200, {"choices": [{"message": {"content": content}}], "usage": {"completion_tokens": 1, "prompt_tokens": 2 * len(prompt.split())}})
         def log_message(self, *a): pass
     print("Application startup complete.", "listening on", os.environ["PORT"], flush=True)
     HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
