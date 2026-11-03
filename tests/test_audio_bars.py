@@ -153,3 +153,52 @@ def test_a_kind_the_floor_does_not_cover_is_named_in_the_label(tmp_path):
     floor = ab.load_floor(ref_dir)
     assert "no measured bar for step_latent" in floor.describe({"layer", "step_latent"})
     assert "no measured bar" not in floor.describe({"layer"})
+
+
+# ---- a floor file that something else controls (Copilot review of PR 419) ---------------------------------------------------------------
+
+REPO = Path(__file__).resolve().parent.parent
+CHILD = ("import sys\nsys.path.insert(0, sys.argv[2])\nfrom orchard import audio_bars as ab\nf = ab.load_floor(sys.argv[1])\n"
+         "print(f.measured, f.sha256, f.label[:200])\n")
+
+
+def load_floor_in_limited_child(stage_dir, *, timeout=20):
+    tmp_cwd = str(stage_dir)
+    """`load_floor` in a child with a memory limit and a hard timeout, so a read that blocks or never ends fails the test and does not hang it."""
+    import resource
+    import subprocess
+    import sys
+
+    def limit():
+        resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+
+    return subprocess.run([sys.executable, "-I", "-c", CHILD, str(stage_dir), str(REPO)], cwd=tmp_cwd, env={}, preexec_fn=limit,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def test_a_fifo_at_the_floor_path_is_refused_and_does_not_block(tmp_path):
+    import os
+    import subprocess
+    os.mkfifo(tmp_path / ab.FLOOR_FILE)
+    try:
+        r = load_floor_in_limited_child(tmp_path)
+    except subprocess.TimeoutExpired:
+        pytest.fail("load_floor blocked on a FIFO at the floor path")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("False None ") and "not a regular file" in r.stdout and "provisional" in r.stdout
+
+
+def test_a_symlink_at_the_floor_path_is_refused(tmp_path):
+    real = tmp_path / "elsewhere.json"
+    real.write_text("{}")
+    (tmp_path / "stage").mkdir()
+    (tmp_path / "stage" / ab.FLOOR_FILE).symlink_to(real)
+    f = ab.load_floor(tmp_path / "stage")
+    assert not f.measured and f.sha256 is None and "provisional" in f.label
+
+
+def test_a_floor_file_over_the_size_cap_is_refused_without_reading_it_all(tmp_path, monkeypatch):
+    monkeypatch.setattr(ab, "MAX_BYTES", 16)
+    (tmp_path / ab.FLOOR_FILE).write_text("x" * 64)
+    f = ab.load_floor(tmp_path)
+    assert not f.measured and "larger than" in f.label

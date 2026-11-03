@@ -1,4 +1,4 @@
-target = "0.9.100"
-summary = "spawn_checked stops helpers that a killed command started in a session of its own, through a tag in the command's environment, and names them in the command's output"
+target = "0.9.105"
+summary = "spawn_checked stops helpers that a killed command started in a session of its own, through a tag in the command's environment; the cleanup survives a second interrupt, freezes a forking helper before the last scan, and reports what it stopped to the ledger and the attempt record"
 kind = "fix"
 pr = 431

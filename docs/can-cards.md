@@ -140,13 +140,13 @@ that names the digest of the code in the image and says the tree was dirty.
 
 ### What the `card_profile = "catalog"` gate checks today
 
-`orchard/can.py` (`card_problems`) checks two things and nothing else about the card's content:
+`orchard/can.py` (`card_problems`) checks three things and nothing else about the card's content:
 
 | Item on the reference card | Checked by the gate today? |
 | --- | --- |
 | An `## Expected performance` section with a table row whose cell has a number | Yes |
 | A non-empty `## Limitations` section | Yes |
-| A parity table that names its reference | No |
+| A reference column that says what each row was compared with | Yes, for a table that has a column headed `reference`, `HF reference`, `CPU reference` or `baseline` (issue 366) |
 | The size of the sample behind each row | No |
 | An error count with the throughput rows | No |
 | The tool, run length and dies a throughput table came from | No |
@@ -154,9 +154,11 @@ that names the digest of the code in the image and says the tree was dirty.
 | A rejected tuning recorded with its reason | No |
 | Limitations that are specific (the gate accepts any text) | No |
 
-So a card with a single row such as `| decode | 12.5 |` and a one-line Limitations section passes. The gate does what `card_publish_gaps()` does and no more. Whether a
-number is a measurement, and what it was compared with, is left to the author and the reviewer. One cheap check that fits the gate is that an Expected performance
-table with a `reference` column fills that column with text in each row that has a number; it is proposed in a public issue and not built here.
+So a card with a single row such as `| decode | 12.5 |` and a one-line Limitations section still passes, because that table has no reference column and the gate does
+not ask a throughput-only card for one. When a table in `Expected performance` has a column headed `reference`, `HF reference`, `CPU reference` or `baseline`, each body row
+that has a number in another column needs text or a number in that column. A placeholder (`-`, `n/a`, `tbd`, `none`, `?`) is not a reference. The section may instead hold
+a sentence after the table that names the reference or the baseline, as the reference card does ("the reference ran on exactly the same token ids"). The gate does what
+`card_publish_gaps()` does and a little more. Whether a number is a measurement, and whether the reference is a fair one, is left to the author and the reviewer.
 
 ## Review questions for a performance claim
 

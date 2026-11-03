@@ -50,6 +50,12 @@ Port module interface (stages/2/port/port_model.py):
         length, finite numbers, and some non-zero value. The check calls it once for each input of the pair file.
     close(model) -> None                                         required
         Release what load took. The device itself is closed by this file.
+    COMPUTES_ON = "in-process" | "server"                        optional, default "in-process"
+    server_address(model) -> "127.0.0.1:PORT"                    required when COMPUTES_ON is "server"
+        A port that forwards the prompts to a model server, and does not run the model in this worker, says so (issue 407). The address
+        is a loopback host (127.0.0.1, localhost or [::1]) and a port, called after `load` in a request of its own, so its time is not in load_s. The record then says the scores were
+        computed by a server at that address, with the result of this file's own probe of /health and /v1/models; it does not say the
+        chip this check opened ran them.
 
 Images and video (issue 377). A row of the pair file may list `media`: files that belong to the prompt (an image or a video clip). The
 port's two functions then take a second argument, `media`: for `score_pairs` a list with one entry for each prompt, for `embed` the entry
@@ -57,6 +63,11 @@ for that one prompt; each entry is a list of {"kind": "image" or "video", "name"
 bytes are the file as stage 1 recorded it (this file reads it without following a link, checks its size and checks its sha256 against
 the pair file's before the port sees it). The port decodes them itself; the ids already hold the placeholder tokens. When no row has media
 the functions are called without the argument, so a text-only port needs no change.
+
+The record's `computed_on` says where the scores were computed (issue 407). `chips` and `load_s` keep their meaning: `chips` are the
+chips this check opened, and `load_s` is the time of the port's own `load` call. For a server-backed port neither says which chip ran
+the model or how long the model took to load, and the record says so. A declared server that answers the probe shows that something
+answers at the address, and does not show that it produced the scores.
 
 Inputs: stages/1/evidence/reference/scoring-pairs.json and scoring-reference.json (orchard/scoring_reference.py). Output:
 evidence/scoring-check.json (orchard-scoring-check/1, see orchard/scoring_check.py) and the last line of stdout. For kind "reranker"
@@ -66,10 +77,12 @@ This file uses the standard library only, and reads files through `read_regular`
 FIFO and stops at a size limit) because it runs alone in the run directory, where `orchard.safeio` is not importable.
 """
 import hashlib
+import http.client
 import importlib
 import json
 import math
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -105,6 +118,10 @@ JSON_MAX = 16 * 1024 * 1024      # choice: the pair file is a few MB at most (32
 REPLY_TIMEOUT_S = 3000.0         # the supervisor's own deadline is the limit that matters; this ends a worker that stopped answering
 MIN_LOAD_S = 1e-6                # a load the clock cannot resolve is reported as this, not as 0
 PREFIX = "port| "
+COMPUTES_ON_VALUES = ("in-process", "server")
+LOOPBACK_ADDRESS = re.compile(r"(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})")        # a server the port declares: loopback only
+PROBE_TIMEOUT_S = 10.0
+PROBE_REPLY_MAX = 1 << 20
 MARK = "SCORING_CHECK"           # the start of the line the parent prints last; a port that prints it fails the run
 FORGED = threading.Event()       # set when a line from the worker mentions MARK
 
@@ -370,10 +387,12 @@ def worker(read_fd: int, write_fd: int) -> int:
             if op == "init":             # untimed: open the device and import the port module
                 device, closer = open_device(ttnn, int(req["n_chips"]))
                 mod = importlib.import_module(PORT_MODULE)
-                reply({"ok": True})
+                reply({"ok": True, "computes_on": getattr(mod, "COMPUTES_ON", "in-process")})
             elif op == "load":           # timed: only the port's own load
                 model = mod.load(req["model_dir"], device)
                 reply({"ok": True})
+            elif op == "address":        # untimed: a server-backed port names its server after the load timer has stopped
+                reply({"ok": True, "server_address": str(mod.server_address(model))})
             elif op == "score":
                 ids_list = [[int(i) for i in ids] for ids in req["pairs"]]
                 if req.get("media") is None:
@@ -640,6 +659,51 @@ def read_inputs(kind: str) -> dict:
     return out
 
 
+def probe_server(host: str, port: int) -> dict:
+    """Ask the declared server /health and /v1/models without a proxy and without following a redirect. Returns {"health_status": int or None,
+    "models": [ids], "error": text or None}. A server that does not answer is recorded, and the gate refuses the record."""
+    out = {"health_status": None, "models": [], "error": None}
+    for path in ("/health", "/v1/models"):
+        conn = http.client.HTTPConnection(host, port, timeout=PROBE_TIMEOUT_S)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            raw = resp.read(PROBE_REPLY_MAX + 1)
+            if path == "/health":
+                out["health_status"] = resp.status
+            elif resp.status == 200 and len(raw) <= PROBE_REPLY_MAX:
+                try:
+                    data = json.loads(raw.decode("utf-8")).get("data")
+                    out["models"] = [str(m["id"])[:200] for m in data[:8] if isinstance(m, dict) and "id" in m] if isinstance(data, list) else []
+                except (ValueError, AttributeError, TypeError):
+                    out["models"] = []
+        except (OSError, http.client.HTTPException) as exc:
+            out["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            break
+        finally:
+            conn.close()
+    return out
+
+
+def computed_on_record(where, address) -> dict:
+    """The record's `computed_on` (issue 407) from what the port declared: where its scores are computed and, for a server, its address.
+    Refuses a value that is not one of COMPUTES_ON_VALUES and a server address that is not a loopback host and a port."""
+    if where not in COMPUTES_ON_VALUES:
+        raise CheckFailed(f"the port's COMPUTES_ON is {where!r}; it must be one of {COMPUTES_ON_VALUES}")
+    if where == "in-process":
+        return {"where": "in-process", "server": None,
+                "chips": "the chips this check opened; the port ran the model on them in the worker process",
+                "load_s": "the time of the port's own load call, which loaded the model in the worker process"}
+    m = LOOPBACK_ADDRESS.fullmatch(address) if isinstance(address, str) else None
+    if m is None or not 1 <= int(m.group(2)) <= 65535:
+        raise CheckFailed(f"the port declares a server at {address!r}; the address must be a loopback host and a port "
+                          "(127.0.0.1:PORT, localhost:PORT or [::1]:PORT)")
+    host = m.group(1)[1:-1] if m.group(1).startswith("[") else m.group(1)
+    return {"where": "server", "server": {"address": address, "probe": probe_server(host, int(m.group(2)))},
+            "chips": "the chips this check opened; the model ran in the server, which this record does not tie to them",
+            "load_s": "the time of the port's own load call; the server's own model-load time is not measured separately"}
+
+
 def port_sources() -> list:
     """Every .py file under the port directory with its sha256 as the worker saw it (the worker is stopped before this runs)."""
     out = []
@@ -700,10 +764,11 @@ def main() -> int:
     chip = [None] * len(rows)
     w = Worker()
     try:
-        w.ask(op="init", n_chips=len(chips))
+        declared = w.ask(op="init", n_chips=len(chips)).get("computes_on")
         t0 = time.monotonic()
         w.ask(op="load", model_dir=model_dir)
-        load_s = max(time.monotonic() - t0, MIN_LOAD_S)     # full precision; a rounded value could be 0.0, which the gate refuses
+        load_s = max(time.monotonic() - t0, MIN_LOAD_S)        # stops before the address is asked for: load_s is the port's load call
+        computed_on = computed_on_record(declared, w.ask(op="address").get("server_address") if declared == "server" else None)     # full precision; a rounded value could be 0.0, which the gate refuses
         print(f"loaded in {load_s}s", flush=True)
         t1 = time.monotonic()
         if kind == "reranker":
@@ -732,7 +797,7 @@ def main() -> int:
     common = {"schema": SCHEMA, "kind": kind,
               "reference": {"path": REFERENCE, "sha256": ref_sha, "precision": ref_doc.get("precision")},
               "pairs": {"path": PAIRS, "sha256": pairs_sha, "count": len(rows)}}
-    tail = {"chips": chips, "load_s": load_s, "score_s": score_s, "port_sources": sources, "template_sha256": sha_file(__file__),
+    tail = {"chips": chips, "load_s": load_s, "score_s": score_s, "computed_on": computed_on, "port_sources": sources, "template_sha256": sha_file(__file__),
             "config": {"path": str(CONFIG_FILE.relative_to(RUN_DIR)), "sha256": config_sha}}
     if kind == "reranker":
         groups = [p["group"] for p in rows]
