@@ -142,7 +142,7 @@ from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIP
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
-from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
+from orchard.hwtests import (PLAN, failed_tests, load_plan, move_aside, plan_refusal, pending, read_plan, suspect_caches,
                              unrecorded, write_plan, write_record, write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.package import PackageError, stage_all
@@ -155,12 +155,13 @@ from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
-                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, full_port_enabled, full_port_rehearsal, recorded_by_supervisor)
-from orchard import full_port, residency
+                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
+                            recorded_by_supervisor, run_model_kind, scoring_routed)
+from orchard import full_port, model_kind, residency, scoring_check
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -195,6 +196,12 @@ REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger dec
 FULL_PORT_STAGES_UNBUILT = ("stage 2 of the full-port route passed; stages 3 to 6 for a full-port model are not built yet "
                             "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md, slices 3 to 6), so a person reviews the "
                             "result and decides whether to go on")
+SCORING_STAGES_UNBUILT = ("stage 2 of the scoring route passed (the model is a reranker or an embedding model: stage 1 recorded Hugging Face scores or "
+                          "vectors and stage 2's check compared the port with them); stages 3 to 6 for a scoring model are not built yet "
+                          "(docs/superpowers/specs/2026-11-02-scoring-model-check-design.md), so a person reviews the result and decides whether to go on")
+SCORING_NOT_ROUTED = ("stage 0 found a scoring model (a reranker or an embedding model) that has no scoring route yet; the route runs for "
+                      "class weights-only, and for class full-port with --full-port, when the run has a model= input and no text runtime serves it, "
+                      "and the generic stages would compare generated tokens that this model does not produce, so a person decides whether to go on")
 RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted head (its lm_head is replaced by sidecar "
                    "rows); the harness does not serve that, so a person decides whether to go on")
 AUDIO_UNBUILT = ("stage 0 found an audio model; the audio path (its stage 1 and stage 2) is not built yet, and the text stages would "
@@ -573,6 +580,7 @@ def coder_tier(cfg, port: int) -> str:
 
 BUNDLE_BUILD_TIMEOUT_S = 600            # build_bundle.py reads files and copies packages; no network
 SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py", "prompt_suite.json")      # copied with a drafted swap_config.json
+AGREEMENT_TEMPLATES = ("agreement_core.py", "agreement_prompts.json")      # also copied when the config sets `agreement_set` (issue 15)
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
 GRAFT_TRIAL_ENV = "ORCHARD_TRIAL_DIR"      # in the environment of the trial's test: the trial directory, so its servers can be found
 GRAFT_TRIAL_TEMPLATE = "graft_trial.py"     # copied into stages/2/graft-trial/ when the trial starts (orchard/graft_trial.py)
@@ -591,11 +599,14 @@ class Supervisor:
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
-                 full_port_rehearsal: bool = False, stack_pins=None):
+                 full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None):
         self.run_dir = Path(run_dir).resolve()
         # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
         # supplied (the tests), and the record says nothing was compared. `_run_resumed` is set when a run starts on a ledger that has begun.
         self.stack_pins, self._run_resumed = stack_pins, False
+        # `--model-kind` (orchard/model_kind.py): the operator's word for what the model produces, used when stage 0 passes. The ledger's stage 0
+        # `stage_end` holds the answer and its source, so a resume without the flag keeps it.
+        self.kind_override = kind_override
         # `--full-port` (docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md): the operator lets a class `full-port` model go on
         # into the full-port stage 2. The ledger holds the answer (run_start, or a decision when the flag came on a resume); this is the
         # request. `full_port_added` is set when the flag came on a resume of a run that started without it.
@@ -939,11 +950,17 @@ class Supervisor:
             if p.next_stage == 1 and self._restricted_head_unacknowledged():
                 self.ledger.append("decision", 1, decision="pause", reason=RESTRICTED_HEAD)
                 continue
+            if p.next_stage == 1 and self._scoring_unrouted():
+                self.ledger.append("decision", 1, decision="pause", reason=SCORING_NOT_ROUTED)
+                continue
             if p.next_stage == 2 and self._full_port_unacknowledged():
                 self.ledger.append("decision", 2, decision="pause", reason=FULL_PORT)
                 continue
             if p.next_stage == 3 and self._full_port_stages_unbuilt():
                 self.ledger.append("decision", 3, decision="pause", reason=FULL_PORT_STAGES_UNBUILT)
+                continue
+            if p.next_stage == 3 and self._scoring_stages_unbuilt():
+                self.ledger.append("decision", 3, decision="pause", reason=SCORING_STAGES_UNBUILT)
                 continue
             # The spec follows the path stage 0 chose, read from the ledger each time, so a
             # resumed run picks the same skill and gate as the run that crashed.
@@ -951,9 +968,10 @@ class Supervisor:
             spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries),
                             run_class(entries, self.run_dir), stock=stock_params(entries) is not None,
                             audio_runtime=audio_runtime.selected(entries) is not None,
-                            text_runtime=text_runtime.selected(entries) is not None, full_port=full_port_enabled(entries))
+                            text_runtime=text_runtime.selected(entries) is not None, full_port=full_port_enabled(entries),
+                            kind=run_model_kind(entries))
             try:
-                if spec is FULL_PORT_STAGE_2:
+                if spec in (FULL_PORT_STAGE_2, SCORING_STAGE_2):
                     self._check_residency(spec)        # a model that cannot fit the box starts no prepare step (issue 327)
                 if spec.needs_coder or self._coder_in_use():
                     self._ensure_coder()
@@ -997,8 +1015,39 @@ class Supervisor:
             return False
         if text_runtime.selected(entries) is not None:
             return False
+        if self._scoring_route()[1]:
+            return False          # a scoring model of class full-port has its own pause after stage 2 (`_scoring_stages_unbuilt`, code scoring-route)
         return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") == FULL_PORT_STAGES_UNBUILT for e in entries)
+
+    def _scoring_route(self) -> tuple[str, bool]:
+        """(the run's model kind, whether the scoring route takes it), read from the ledger. A generative model never takes it. A run that
+        a text runtime serves (`spec_for` gives that runtime's stages precedence) and a run with no `model=` input (the check has no snapshot
+        to load, and the operator's input is the only snapshot it trusts) are not routed either."""
+        entries = self.ledger.read()
+        kind = run_model_kind(entries)
+        routed = (scoring_routed(kind, run_path(entries, self.run_dir), run_class(entries, self.run_dir), full_port_enabled(entries))
+                  and text_runtime.selected(entries) is None)
+        return kind, routed
+
+    def _scoring_unrouted(self) -> bool:
+        """Stage 0 found a reranker or an embedding model whose class has no scoring route, and the run has not yet paused for it. Unattended,
+        it always blocks, as the other unbuilt routes do."""
+        entries = self.ledger.read()
+        kind, routed = self._scoring_route()
+        # Without a `model=` input the check has no snapshot to load. This is judged before stage 1 only, from this invocation's inputs: once
+        # stage 2 has passed, the route (and the pause after it) follows the ledger, so a resume that omits the input cannot skip the pause.
+        if kind not in model_kind.SCORING_KINDS or (routed and self.inputs.get("model")):
+            return False
+        return self.unattended or not any(e["event"] == "decision" and e["data"].get("reason") == SCORING_NOT_ROUTED for e in entries)
+
+    def _scoring_stages_unbuilt(self) -> bool:
+        """A run on the scoring route has passed stage 2, and the stages after it are not built. It pauses once, so one attended resume goes
+        on into the generic stages. Unattended, it always blocks."""
+        entries = self.ledger.read()
+        if not self._scoring_route()[1]:
+            return False
+        return self.unattended or not any(e["event"] == "decision" and e["data"].get("reason") == SCORING_STAGES_UNBUILT for e in entries)
 
     def _audio_unacknowledged(self) -> bool:
         """Stage 0 recorded modality audio, and the run has not yet paused for it. The audio stages are not built (plan
@@ -1166,7 +1215,7 @@ class Supervisor:
         lease_rec, server_rec, canary = coder_state(entries)
         released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
                     and e["data"].get("decision") in ("hardware released", "coder left up")}
-        if (lease_rec is None or lease_rec["lease_id"] in released or boot_unfinished(entries)
+        if (lease_rec is None or lease_rec["lease_id"] in released or boot_unfinished(entries) or coder_start_blocked(entries)
                 or not isinstance(canary, dict) or not hasattr(self.adapter, "adopt")):
             return None
         lease = Lease.from_record(lease_rec)
@@ -1288,6 +1337,10 @@ class Supervisor:
                 return
             self._start_coder(None)
             return
+        if coder_start_blocked(entries):
+            # No coder was launched. Nothing is taken from the server record, so a foreign server on the coder's port is never used.
+            self._retry_blocked_start(entries, Lease.from_record(lease_rec), canary)
+            return
         if server_rec:
             self.coder.adopt(server_rec)
         lease = Lease.from_record(lease_rec)
@@ -1322,6 +1375,18 @@ class Supervisor:
                                lease_id=lease.lease_id)
             self._finish_boot(lease, canary)
 
+    def _retry_blocked_start(self, entries: list[dict], lease: Lease, canary: dict | None) -> None:
+        """The last start was blocked by the granted-board check (`coder start blocked`): retry the check and launch. When this process still
+        holds the recorded lease the launch is under it; otherwise (a restart: the lease belonged to a dead pid or was released) a lease is
+        taken and checked. No boot is completed, no canary compared and no coder death counted: there is no coder yet."""
+        self.ledger.append("decision", None, decision="retrying a blocked coder start", lease_id=lease.lease_id)
+        released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
+                    and e["data"].get("decision") in ("hardware released", "coder left up")}
+        mine = [c for c in self.adapter.status() if c.bdf in lease.chips]
+        ours = (lease.lease_id not in released and bool(mine) and all(c.lease_pid == self.adapter.owner_pid for c in mine)
+                and lease.lease_id not in self._adopted_ids(entries))
+        self._start_coder(canary, lease=lease if ours else None, check_granted=True)
+
     def _start_coder(self, baseline: dict | None, lease: Lease | None = None, *, check_granted: bool = False) -> None:
         """Take a lease if none is given, and start the coder under it. `check_granted` (the relaunch after a resume) asks
         docker about the devices of the lease that was granted before the start: gozer can grant a different board from
@@ -1339,16 +1404,26 @@ class Supervisor:
         # ledger, so the restart can stop that server and re-lease.
         # The pending record says "unknown" for this attempt. The live value changes only when the
         # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
-        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
-                           server={**self.coder.record(), "owned": None})
         if check_granted:
-            # After the record above, so a block here leaves the granted lease in the ledger: cleanup releases it and a
-            # resume relaunches under it. The check only reads docker; it never resets a device.
+            # Before "coder starting": a block here has launched nothing, and a "coder starting" record would tell a resume that a launch
+            # happened (it could take a foreign server that answers, or count the missing container as a coder death; issue 351).
+            # "coder start pending" is written before the check, so a signal or error during the check still leaves the granted lease in
+            # the ledger for cleanup. "coder start blocked" follows a failed check. Both carry owned=False: this attempt owns no container,
+            # so cleanup releases the lease without stopping or resetting anything (a container on the granted board is another
+            # session's). A resume retries the check and the launch (`_retry_blocked_start`). The check only reads docker.
+            unowned = {**self.coder.record(), "owned": False}
+            if hasattr(self.coder, "owned"):
+                self.coder.owned = False          # ServerControl.start sets it again for a real start
+            self.ledger.append("decision", None, decision="coder start pending", lease=lease.record(), server=unowned)
             check = self.coder.confirm_stopped()
             if not check.stopped:
+                self.ledger.append("decision", None, decision="coder start blocked", lease=lease.record(), server=unowned,
+                                   reason=f"a container holds a device of the granted board ({', '.join(lease.chips)})")
                 self._block(None, f"a container holds a device of the granted board ({', '.join(lease.chips)}); the coder was "
                                   "not started. Stop that container or wait for it, then resume",
                             checks=check.checks, evidence=check.evidence)
+        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
+                           server={**self.coder.record(), "owned": None})
         try:
             self.coder.start(lease)
         except ServerNotOwned as exc:
@@ -1629,6 +1704,9 @@ class Supervisor:
                     # The coder wrote the port; the check is the supervisor's. Its template, config and command are put back as shipped.
                     if problems := self._pin_full_port(spec, stage_dir, command=True):
                         return "fail", problems, None
+                if spec.draft == "scoring_check":
+                    if problems := self._pin_scoring(spec, stage_dir, command=True):
+                        return "fail", problems, None
                 test, problems = self._read_test(stage_dir)
                 if problems:
                     return "fail", problems, None
@@ -1636,11 +1714,16 @@ class Supervisor:
                 # label before the chips are given back, and block when one survives (_sweep).
                 self._hardware_phase(spec, stage_dir, test,
                                      after_test=(lambda: self._sweep(spec.number)) if self._container_config(stage_dir) else None)
-            out, step = self._step(spec, "finish", stage_dir, escalated, resumed)
-            out = self._wrap_up(spec, stage_dir, step, out)
-            if out.status != "done":
-                return out.status, [f"the finish step ended: {out.status} {out.detail}".strip()], None
+            if spec.draft == "scoring_check":
+                step = None          # the check's own record is the result: no agent writes a finish step for a scoring model
+            else:
+                out, step = self._step(spec, "finish", stage_dir, escalated, resumed)
+                out = self._wrap_up(spec, stage_dir, step, out)
+                if out.status != "done":
+                    return out.status, [f"the finish step ended: {out.status} {out.detail}".strip()], None
         gate = self._check_gate(spec, stage_dir)
+        if not gate.ok and spec.draft == "scoring_check":
+            return "fail", list(gate.reasons), gate          # nothing an agent could add would change the record the template wrote
         if not gate.ok and spec.boards and (failed := self._test_failure(spec, stage_dir)):
             # The finish step was told to record a failed test honestly. Its result cannot pass
             # the gate, and a continuation would ask the agent to make it pass. So the stage ends
@@ -2073,6 +2156,14 @@ class Supervisor:
             forged = unrecorded(self.ledger.read(), stage_dir, self.run_dir, spec.number)
             if forged:
                 return GateResult(False, gate.reasons + tuple(forged), gate.evidence)
+        if spec.skill in ("scoring-reference", "scoring-check"):
+            gate = self._scoring_gate(spec, stage_dir, gate)
+        if spec.skill == "scoring-check":
+            found = full_port.file_record(self.run_dir, stage_dir / "test-result.json")
+            if found is None or not recorded_by_supervisor(self.ledger, spec.number, found):
+                return GateResult(False, gate.reasons + (
+                    "test-result.json is not the file the supervisor recorded when the hardware test ended (the ledger holds no "
+                    "matching entry), so its exit code cannot be trusted",), gate.evidence)
         if spec.skill == "full-port-check":
             # One hardware test, one marker. The finish step can write in the stage directory, so the marker has to be the file the
             # supervisor wrote: its path and sha256 are in the ledger (`_run_test`). A marker edited after the test has no such entry.
@@ -2086,20 +2177,61 @@ class Supervisor:
                                    note="the model is a rehearsal with random weights; every other stage 2 check still applied")
         return gate
 
+    def _scoring_gate(self, spec, stage_dir: Path, gate: GateResult) -> GateResult:
+        """What only the supervisor can check for a scoring stage: the run's kind (from stage 0's ledger entry) is the kind of the files, and
+        stage 2's reference files are the ones stage 1's gate accepted (their path and sha256 are in the ledger)."""
+        kind = run_model_kind(self.ledger.read())
+        reasons = list(gate.reasons)
+        evidence = gate.evidence
+        if spec.number == 1:
+            try:
+                doc = safeio.read_json(self.run_dir / scoring_check.PAIRS_FILE, max_bytes=scoring_check.JSON_MAX, expect=dict)
+            except safeio.SafeReadError:
+                doc = {}
+            if doc.get("model_kind") != kind:
+                reasons.append(f"the pair file is for kind {doc.get('model_kind')!r}; the run's model kind, from stage 0, is {kind!r}")
+        else:
+            reasons2, evidence = scoring_check.check(stage_dir, self.run_dir, kind)
+            reasons += [r for r in reasons2 if r not in reasons]
+            accepted = {}
+            for e in self.ledger.read():
+                if e["event"] == "stage_end" and e["stage"] == 1 and e["data"].get("result") == "pass":
+                    accepted = {x.get("path"): x.get("sha256") for x in e["data"].get("evidence", []) if isinstance(x, dict)}
+            for rel in (scoring_check.REFERENCE_FILE, scoring_check.PAIRS_FILE):
+                try:
+                    now = evidence_record(self.run_dir, self.run_dir / rel)["sha256"]
+                except (safeio.SafeReadError, OSError, ValueError):
+                    now = None
+                if accepted.get(rel) is None or accepted[rel] != now:
+                    reasons.append(f"{rel} is not the file stage 1's gate accepted (the ledger's stage 1 entry holds a different sha256 or none): "
+                                   "it changed after stage 1 passed")
+        return GateResult(not reasons, tuple(reasons), tuple(evidence))
+
     def _copy_package(self, bundle: Path) -> None:
         """Put stage 7's record, publish commands and cards in the operator bundle's package/
         folder, so the operator reads them with the rest. Nothing is copied when no package was
         staged. The bundle scrub then searches these copies too."""
         s7 = self.run_dir / "stages" / "7"
-        if not (s7 / "package.json").is_file():
+        # Each file is read through a descriptor pinned on the run directory, one component at a time without following a link, with a size
+        # cap, and written with safeio.atomic_write. A file or a parent directory swapped for a link after a check, or a FIFO, is refused
+        # at the read and the file is not copied (review of PR 403). Nothing is copied when no package.json can be read.
+        wanted = [("stages/7/package.json", "package.json")]
+        wanted += [("stages/7/PUBLISH_COMMANDS.txt", "PUBLISH_COMMANDS.txt")]
+        wanted += [(os.path.relpath(card, self.run_dir), f"{card.parent.name}-README.md")
+                   for card in sorted((s7 / "package").glob("*/README.md"))]
+        got: dict[str, bytes] = {}
+        with safeio.pinned_root(self.run_dir) as pin:
+            for rel, name in wanted:
+                try:
+                    got[name] = safeio.read_bytes(rel, max_bytes=TEXT_MAX_BYTES, anchor=pin.fd)
+                except safeio.SafeReadError:
+                    continue
+        if "package.json" not in got:
             return
         dest = bundle / "package"
         dest.mkdir(exist_ok=True)
-        shutil.copyfile(s7 / "package.json", dest / "package.json")
-        if (s7 / "PUBLISH_COMMANDS.txt").is_file():
-            shutil.copyfile(s7 / "PUBLISH_COMMANDS.txt", dest / "PUBLISH_COMMANDS.txt")
-        for card in sorted((s7 / "package").glob("*/README.md")):
-            shutil.copyfile(card, dest / f"{card.parent.name}-README.md")
+        for name, data in got.items():
+            safeio.atomic_write(dest / name, data, mode=0o644)
 
     def _gate_feedback(self, spec, stage_dir: Path, step: AgentStep, gate):
         """The step ended "done" and the exit gate failed. Tell the same conversation what the gate
@@ -2168,12 +2300,19 @@ class Supervisor:
         except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
             self.ledger.append("decision", n, decision="decode record not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
-    def _stage_0_hazard_scan(self, stage_dir: Path) -> None:
+    def _classify_kind(self) -> dict:
+        """The model kind of this run (orchard/model_kind.py): the operator's `--model-kind`, else the model card's pipeline_tag, else the
+        architecture names, else generative. The record names which one decided and goes in stage 0's `stage_end`, where a resume reads it.
+        The snapshot is the run's `model=` input, else the one stage 0's triage config names (the directory stage 0 itself read)."""
+        model_dir = self.inputs.get("model") or stage0_scan._triage_dirs(self.run_dir / "stages" / "0")[0]
+        return model_kind.classify(model_dir, self.kind_override)
+
+    def _stage_0_hazard_scan(self, stage_dir: Path, kind: str = "generative") -> None:
         """Write stages/0/hazard-scan.json (orchard/stage0_scan.py) and record it in the ledger. The scan predicts kernel hazards from the
         model's config; a hit never stops the run, and a model directory it cannot read gives a record that says it was skipped."""
         model_dir = self.inputs.get("model")
         try:
-            rec = stage0_scan.write_scan(stage_dir, model_dir=model_dir)
+            rec = stage0_scan.write_scan(stage_dir, model_dir=model_dir, kind=kind)
             self.ledger.append("evidence", 0, what="hazard scan", scan=rec["scan"], hazards=[h["name"] for h in rec["hazards"]],
                                **evidence_record(self.run_dir, stage_dir / stage0_scan.FILE))
         except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
@@ -2273,10 +2412,11 @@ class Supervisor:
                 self._decode_floor_record(n, stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
+            kind_rec = self._classify_kind() if n == 0 else None
             if n == 0:
-                self._stage_0_hazard_scan(stage_dir)
+                self._stage_0_hazard_scan(stage_dir, kind_rec["kind"])
                 self._stage_0_residency(stage_dir)
-            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts()}
+            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts(), "model_kind": kind_rec}
                      if n == 0 else {})
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)
             return "pass"
@@ -2377,6 +2517,8 @@ class Supervisor:
             return self._draft_stock(spec, stage_dir)
         if spec.draft == "full_port":
             return self._pin_full_port(spec, stage_dir)
+        if spec.draft == "scoring_check":
+            return self._pin_scoring(spec, stage_dir)
         if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
             return
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
@@ -2386,11 +2528,17 @@ class Supervisor:
         if cfg is None:
             self.ledger.append("decision", spec.number, decision="swap config not drafted", problems=problems)
             return
+        # Stage 1 may have written the CPU reference for the agreement set (issue 15). When it did, the run uses the set: the hash of that file goes
+        # into the ledger now, before any stage 2 test, and the gate compares the file with it later.
+        reference = agreement_reference_record(self.run_dir)
+        if reference is not None:
+            cfg["agreement_set"] = True
+            self.ledger.append("decision", spec.number, decision=AGREEMENT_LEDGER_DECISION, **reference)
         target = stage_dir / "swap_config.json"
         _put(target, json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
         copied = []
-        for name in (STAGE4_TEMPLATES if "package" in cfg else SWAP_TEMPLATES):      # a container package also needs its script
+        for name in (*(STAGE4_TEMPLATES if "package" in cfg else SWAP_TEMPLATES), *(AGREEMENT_TEMPLATES if cfg.get("agreement_set") else ())):      # a container package also needs its script
             shutil.copy2(templates / name, stage_dir / name)
             copied.append(name)
         self.ledger.append("decision", spec.number, decision="swap config drafted",
@@ -2418,6 +2566,35 @@ class Supervisor:
             _put(stage_dir / "hw_test.json", json.dumps({"command": full_port.COMMAND, "deadline_s": deadline}) + "\n")
         else:
             self.ledger.append("decision", spec.number, decision="port check template copied", copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME])
+        return []
+
+    def _pin_scoring(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
+        """Stage 2 of a scoring model (orchard/scoring_check.py): put the supervisor's template and its config (the snapshot, the run's kind and
+        the bounds in force) in the stage directory, replacing any copy there. Called before the prepare step and again after it, so an edit
+        made while the coder worked is undone. With `command` set, hw_test.json is rewritten to the template's fixed command (the coder's
+        deadline is kept when it is a positive number no larger than the default). The ledger entry holds the sha256 of each file as written.
+        Returns the problems that stop the stage (no model snapshot, or a kind the check does not run)."""
+        snapshot = self.inputs.get("model")
+        if not snapshot:
+            return ["the run has no model snapshot (inputs `model=`), so the scoring check has nothing to load"]
+        kind = run_model_kind(self.ledger.read())
+        if kind not in scoring_check.KINDS:
+            return [f"the run's model kind is {kind!r}; the scoring check runs {scoring_check.KINDS}"]
+        shipped = scoring_check.TEMPLATE
+        safeio.atomic_write(stage_dir / scoring_check.TEMPLATE_NAME, safeio.read_bytes(shipped, max_bytes=RUN_JSON_MAX), mode=os.stat(shipped).st_mode & 0o777)
+        config = stage_dir / scoring_check.CONFIG_NAME
+        _put(config, json.dumps(scoring_check.draft_config(str(Path(snapshot).absolute()), kind), indent=2) + "\n")
+        if command:
+            deadline = scoring_check.DEADLINE_S
+            given = self._run_json(stage_dir / "hw_test.json", "hw_test.json", spec.number).value
+            given = given.get("deadline_s") if isinstance(given, dict) else None
+            if isinstance(given, (int, float)) and not isinstance(given, bool) and 0 < given <= scoring_check.DEADLINE_S:
+                deadline = given
+            _put(stage_dir / "hw_test.json", json.dumps({"command": scoring_check.COMMAND, "deadline_s": deadline}) + "\n")
+        else:
+            self.ledger.append("decision", spec.number, decision="scoring check template copied", kind=kind,
+                               template=evidence_record(self.run_dir, stage_dir / scoring_check.TEMPLATE_NAME),
+                               config=evidence_record(self.run_dir, config))
         return []
 
     def _draft_stock(self, spec, stage_dir: Path) -> None:
@@ -2489,7 +2666,7 @@ class Supervisor:
             cdir = stage_dir / "configs" / str(n)
             cdir.mkdir(parents=True, exist_ok=True)
             _put((cdir / "swap_config.json"), json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-            for name in STAGE4_TEMPLATES:
+            for name in (*STAGE4_TEMPLATES, *(AGREEMENT_TEMPLATES if cfg.get("agreement_set") else ())):
                 shutil.copy2(templates / name, cdir / name)
         if tests is not None:
             _put((stage_dir / "hw_tests.json"), json.dumps(tests, indent=2) + "\n", encoding="utf-8")
@@ -3132,6 +3309,10 @@ class Supervisor:
         finish step should run."""
         n = spec.number
         tests = load_plan(stage_dir) if resumed else None
+        if resumed and tests is None and (why := plan_refusal(stage_dir)):
+            # A plan that is there and refused (NaN, a link out of the run, over the cap, not a list of tests) is not a missing plan. The
+            # prepare step below replaces it, so the file name and the reason go in the ledger first (issue 386).
+            self.ledger.append("decision", n, decision="hardware test plan refused, so the prepare step runs again", file=PLAN, reason=why)
         if tests is not None and (wrong := swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
                                                                               operator_home=self.paths.operator_home,
                                                                               counts=[t.chips for t in tests])):
@@ -3500,6 +3681,14 @@ def parse(argv=None):
                         "not built yet, so the run then pauses (unattended: ends blocked, code full-port-stages-unbuilt). The ledger records "
                         "the flag and a resume keeps it. It can be added on a resume only before stage 2 has started. It changes nothing for "
                         "any other class, and `unknown` and `restricted-head` still stop")
+    r.add_argument("--model-kind", choices=model_kind.KINDS, default=None,
+                   help="what the model produces (issue 378): generative (text from tokens, the default for a model whose card and config say "
+                        "nothing else), reranker (a yes/no score for a query and document) or embedding (a vector). Without this flag stage 0 reads "
+                        "the model card's pipeline_tag (text-ranking is a reranker; feature-extraction and sentence-similarity are embedding "
+                        "models), then the architecture names, and records which one decided. A reranker or embedding model of class weights-only, "
+                        "or of class full-port with --full-port, takes the scoring route: stage 1 records Hugging Face scores or vectors and stage 2 "
+                        "runs the supervisor's scoring check on the coder's port module (skill scoring-check). Stages 3 to 6 are not built for it, so "
+                        "the run then pauses. The ledger's stage 0 entry holds the answer and a resume keeps it")
     r.add_argument("--full-port-rehearsal", action="store_true",
                    help="for a rehearsal model with random weights (scripts/tiny_qwen4): stage 2 of a full port waives its `coherent` field and "
                         "no other check, and the ledger says so. Needs --full-port, is given when the run starts, and is recorded in run_start; "
@@ -3688,6 +3877,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       sampling=sampling_mode,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req, stack_pins=stack_pins,
+                      kind_override=getattr(args, "model_kind", None),
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
                       keep_up=bool(getattr(args, "coder_keep_up", False)),

@@ -160,14 +160,26 @@ def write_plan(stage_dir, tests: list[HwTest]) -> Path:
 
 
 def load_plan(stage_dir) -> list[HwTest] | None:
-    """The validated list from tests/plan.json, or None when the file is missing or unreadable."""
+    """The validated list from tests/plan.json, or None when the file is missing or unusable. `plan_refusal` says which."""
+    return _load_plan(stage_dir)[0]
+
+
+def plan_refusal(stage_dir) -> str | None:
+    """Why tests/plan.json is there and cannot be used (NaN, a FIFO, a link out of the run, over the cap, not a list of tests), or None when
+    it is missing or usable. A refused plan and a missing plan both make `load_plan` return None; a caller that is about to replace the plan
+    asks this first and records the reason (issue 386)."""
+    return _load_plan(stage_dir)[1]
+
+
+def _load_plan(stage_dir) -> tuple[list[HwTest] | None, str | None]:
     got = safeio.read_json_checked(Path(stage_dir) / PLAN, max_bytes=JSON_MAX, expect=dict)
     if not got.ok:
-        return None
+        # A file that is not there is not a refusal; anything else the bounded reader turned away is.
+        return None, (got.reason if got.refused else None)
     try:
-        return [HwTest(**t) for t in got.value["tests"]]
-    except (KeyError, TypeError):
-        return None
+        return [HwTest(**t) for t in got.value["tests"]], None
+    except (KeyError, TypeError) as exc:
+        return None, f"the plan is not a list of tests ({type(exc).__name__}: {exc})"
 
 
 def pending(stage_dir, tests: list[HwTest]) -> list[HwTest]:

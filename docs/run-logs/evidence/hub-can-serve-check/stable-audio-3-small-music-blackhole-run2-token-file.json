@@ -1,0 +1,107 @@
+{
+ "can": "stable-audio-3-small-music-blackhole",
+ "repo": "episod/stable-audio-3-small-music-blackhole",
+ "port": 20170,
+ "ready_timeout_s": 1800,
+ "tt_visible_devices": "0000:01:00.0,0000:02:00.0",
+ "serve_pid": 625338,
+ "ready": true,
+ "start_to_ready_s": 105.1,
+ "loadavg_at_ready": [
+  95.4921875,
+  81.8583984375,
+  76.353515625
+ ],
+ "requests": [
+  {
+   "label": "first 10 s",
+   "asked_s": 10,
+   "latency_s": 213.244,
+   "status": "done",
+   "server_stats": {
+    "audio_s": 10.0,
+    "total_s": 212.755,
+    "audio_format": "flac",
+    "stages": {
+     "conditioning_s": 26.394,
+     "generate_and_decode_s": 186.142,
+     "chip_transformer_call_s": 108.309,
+     "chip_decoder_call_s": 73.296,
+     "chip_decoder_layers_s": 72.714
+    }
+   },
+   "error": "",
+   "bytes": 915718,
+   "codec": "flac",
+   "sample_rate": 44100,
+   "channels": 2,
+   "duration_s": 10.0,
+   "peak": 1.0,
+   "windows_above_-40dBFS": 0.97,
+   "finite": true,
+   "rtf_latency_per_audio_s": 21.324
+  },
+  {
+   "label": "10 s run 2",
+   "asked_s": 10,
+   "latency_s": 20.461,
+   "status": "done",
+   "server_stats": {
+    "audio_s": 10.0,
+    "total_s": 19.721,
+    "audio_format": "flac",
+    "stages": {
+     "conditioning_s": 5.813,
+     "generate_and_decode_s": 13.782,
+     "chip_transformer_call_s": 3.464,
+     "chip_decoder_call_s": 2.05,
+     "chip_decoder_layers_s": 0.908
+    }
+   },
+   "error": "",
+   "bytes": 915718,
+   "codec": "flac",
+   "sample_rate": 44100,
+   "channels": 2,
+   "duration_s": 10.0,
+   "peak": 1.0,
+   "windows_above_-40dBFS": 0.97,
+   "finite": true,
+   "rtf_latency_per_audio_s": 2.046
+  },
+  {
+   "label": "30 s",
+   "asked_s": 30,
+   "latency_s": 92.083,
+   "status": "done",
+   "server_stats": {
+    "audio_s": 30.0,
+    "total_s": 91.385,
+    "audio_format": "flac",
+    "stages": {
+     "conditioning_s": 13.348,
+     "generate_and_decode_s": 76.595,
+     "chip_transformer_call_s": 63.455,
+     "chip_decoder_call_s": 5.13,
+     "chip_decoder_layers_s": 2.145
+    }
+   },
+   "error": "",
+   "bytes": 2430779,
+   "codec": "flac",
+   "sample_rate": 44100,
+   "channels": 2,
+   "duration_s": 30.0,
+   "peak": 1.0,
+   "windows_above_-40dBFS": 0.977,
+   "finite": true,
+   "rtf_latency_per_audio_s": 3.069
+  }
+ ],
+ "loadavg_at_end": [
+  97.55908203125,
+  83.7373046875,
+  78.15771484375
+ ],
+ "stop": "stopped on SIGTERM"
+}

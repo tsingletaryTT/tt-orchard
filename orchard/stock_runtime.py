@@ -246,11 +246,11 @@ def triage(*, stage_dir, run_dir, model_id: str, snapshot, params_dir, support: 
     cls = "stock-runtime" if not reasons else "full-port"
     params_b = sum(_count(s) for _d, s in tensors.values()) / 1e9 if tensors else 0.0
     layers = mcfg.get("num_hidden_layers") if isinstance(mcfg, dict) else None
-    (evidence / "stock-config-compare.json").write_text(json.dumps({
+    safeio.atomic_write(evidence / "stock-config-compare.json", json.dumps({
         "name": name, "keys_compared": list(DECISIVE), "keys_differing": differing,
         "model": {k: effective(mcfg, k) for k in DECISIVE} if mcfg is not None else None,
         "tt_transformers": {k: effective(pcfg, k) for k in DECISIVE} if pcfg is not None else None}, indent=2, default=str) + "\n")
-    (evidence / "stock-layout.json").write_text(json.dumps({
+    safeio.atomic_write(evidence / "stock-layout.json", json.dumps({
         "tensors": len(tensors), "params_b": params_b, "problems": problems,
         "dtypes": sorted({d for d, _s in tensors.values()})}, indent=2) + "\n")
     dirty = tt_metal.get("dirty")
@@ -282,7 +282,7 @@ def triage(*, stage_dir, run_dir, model_id: str, snapshot, params_dir, support: 
                                "tt_metal": {"tag": tt_metal.get("tag"), "dirty": tt_metal.get("dirty")}}}
     if reasons:
         delta["path_reasons"] = reasons
-    (stage_dir / "delta.json").write_text(json.dumps(delta, indent=2) + "\n")
+    safeio.atomic_write(stage_dir / "delta.json", json.dumps(delta, indent=2) + "\n")
     return delta
 
 

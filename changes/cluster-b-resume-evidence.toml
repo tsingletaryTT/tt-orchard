@@ -1,0 +1,3 @@
+target = "0.9.98"
+summary = "Resume markers for the plan and stage 1 reference need a ledger entry; a blocked granted-board check is its own record; run-file writers replace their path"
+pr = 403

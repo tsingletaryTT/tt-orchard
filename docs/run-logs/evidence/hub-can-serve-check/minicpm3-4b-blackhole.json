@@ -1,0 +1,64 @@
+{
+ "can": "minicpm3-4b-blackhole",
+ "repo": "episod/minicpm3-4b-blackhole",
+ "port": 20130,
+ "ready_timeout_s": 1800,
+ "tt_visible_devices": "0000:01:00.0,0000:02:00.0",
+ "serve_pid": 3365736,
+ "ready": true,
+ "start_to_ready_s": 639.6,
+ "loadavg_at_ready": [
+  98.90234375,
+  99.25244140625,
+  87.1376953125
+ ],
+ "first_request": {
+  "latency_s": 2.557,
+  "http": 200,
+  "reply": "The three primary colors are red, blue, and yellow. These colors cannot be created by mixing other colors together. Instead, all other colors can be created by combining different combinations of these three primary colors.",
+  "finish": "stop",
+  "usage": {
+   "prompt_tokens": 15,
+   "completion_tokens": 41,
+   "total_tokens": 56
+  },
+  "timings": {
+   "first_token_s": 0.8021,
+   "decode_tok_s": 27.3
+  }
+ },
+ "stream_runs": [
+  {
+   "latency_s": 3.247,
+   "ttft_s": 0.925,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 27.53,
+   "text": "Mountain ranges are formed due to the movement of tectonic plates beneath the Earth's surface. These plates are constantly moving, and when they collide or push against each other, they can cause the land to rise and form mountains. This process is known as orogeny. Over time, erosion and weather"
+  },
+  {
+   "latency_s": 3.239,
+   "ttft_s": 0.833,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 26.64,
+   "text": "Mountain ranges are formed due to the movement of tectonic plates beneath the Earth's surface. These plates are constantly moving, and when they collide or push against each other, they can cause the land to rise and form mountains. This process is known as orogeny. Over time, erosion and weather"
+  },
+  {
+   "latency_s": 2.873,
+   "ttft_s": 0.767,
+   "tokens": 64,
+   "chunks": 64,
+   "decode_tps": 30.43,
+   "text": "Mountain ranges are formed due to the movement of tectonic plates beneath the Earth's surface. These plates are constantly moving, and when they collide or push against each other, they can cause the land to rise and form mountains. This process is known as orogeny. Over time, erosion and weather"
+  }
+ ],
+ "decode_tps_median": 27.53,
+ "card_decode_tps": 32.7,
+ "loadavg_at_end": [
+  95.42919921875,
+  98.50146484375,
+  87.02294921875
+ ],
+ "stop": "stopped on SIGTERM"
+}

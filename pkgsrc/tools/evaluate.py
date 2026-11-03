@@ -10,6 +10,7 @@ LONG.npz holds `tokens`, `fp32` and `bf16` logits of one 1024-token natural-lang
 """
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -42,7 +43,8 @@ ap.add_argument("--prefill-sizes", default="128,512", help="prompt lengths for t
 a = ap.parse_args()
 
 dev = ttnn.open_device(device_id=0, trace_region_size=400 * 1024 * 1024)
-res = {"cmd": a.cmd, "max_len": a.max_len, "ssd": a.ssd, "ssd_precision": a.ssd_precision, "traced": not a.no_trace}
+res = {"cmd": a.cmd, "max_len": a.max_len, "ssd": a.ssd, "ssd_precision": a.ssd_precision, "traced": not a.no_trace,
+       "host_load_before": list(os.getloadavg())}      # speed moves with the host load (issue 301); the load after the run is added below
 try:
     t0 = time.time()
     m = GraniteChip(dev, a.model_dir, max_len=a.max_len, ssd=a.ssd, kernel_dir=a.kernel_dir, trace=not a.no_trace, ssd_precision=a.ssd_precision, fast_prefill=not a.no_fast_prefill, chunked_prefill=not a.no_chunked_prefill)
@@ -146,6 +148,7 @@ try:
             res["long"]["chip_vs_bf16_cpu_top1"] = float((mine.argmax(-1) == b16.argmax(-1)).float().mean())
             print(json.dumps(res["long"]), flush=True)
 finally:
+    res["host_load_after"] = list(os.getloadavg())
     json.dump(res, open(a.out, "w"), indent=1)
     try:
         m.close()

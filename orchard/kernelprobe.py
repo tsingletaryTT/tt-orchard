@@ -221,8 +221,8 @@ def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
         shutil.copy2(TEMPLATES / name, adir / name)
     shutil.copy2(TEMPLATES / "ops" / f"{op}.json", adir / "kernel_spec.json")
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
-    (adir / "check_config.json").write_text(json.dumps({"sim": str(env.sim), "timeout_s": BUDGET["sim_timeout_s"],
-                                                        "tt_lang": facts}, indent=2) + "\n", encoding="utf-8")
+    safeio.atomic_write(adir / "check_config.json", json.dumps({"sim": str(env.sim), "timeout_s": BUDGET["sim_timeout_s"],
+                                                                "tt_lang": facts}, indent=2) + "\n", mode=0o644)
     if references is not None:
         return write_references(adir, references)
     ref = Path(env.src_dir) / "examples" / "eltwise_add.py"
@@ -507,6 +507,11 @@ def child_env(home_run_dir, adir=None, *, hardware: bool, source=None) -> dict:
     if hardware:
         for k in DEVICE_VARS:
             env.pop(k, None)
+        # The wrapper of orchard/hwtool.py picks its chip from this variable (probe_chip). The allow-list above drops it, so the
+        # validated value is put back: without it the agent's hardware_check leased chip 1 beside the coder (issue 218). A value
+        # that is not a plain number raises ValueError here, before anything is launched, and is never copied.
+        if "ORCHARD_PROBE_CHIP" in source:
+            env["ORCHARD_PROBE_CHIP"] = hwtool.probe_chip(source)
     return env
 
 
@@ -1941,7 +1946,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
             for a in sorted(ran, key=lambda a: a["attempt"]):
                 if isinstance(a["hw"].get("watch"), dict):
                     lines.append(f"attempt {a['attempt']} on hardware: {_watch_text(a['hw']['watch'])}")
-    (probe_dir / "kernel-probe-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    safeio.atomic_write(probe_dir / "kernel-probe-report.md", "\n".join(lines) + "\n", mode=0o644)
     return data
 
 

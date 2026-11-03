@@ -225,7 +225,7 @@ def subprocess_runner(base_env: dict):
 
     def run(argv, env_extra, timeout_s, log_path):
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "wb") as log:
+        with safeio.create_for_write(log_path) as log:
             proc = subprocess.Popen(argv, env={**base_env, **env_extra}, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 return proc.wait(timeout=timeout_s)

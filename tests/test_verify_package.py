@@ -525,3 +525,73 @@ def test_a_quoted_base_model_in_the_card_front_matter_matches_the_manifests_repo
     files.pop("package-record.json")
     _, text = run(FakeHub(files), tmp_path)
     assert line(text, "manifests").strip().startswith("ok"), text
+
+
+def test_a_trailing_comment_on_a_launcher_assignment_is_not_a_pin(tmp_path):
+    """Issue 288 (1): the whole-line comment was skipped, but `WEIGHTS_REVISION=<good>  # was WEIGHTS_REVISION=<old>` still scanned the comment."""
+    files = good_files()
+    files["run.sh"] = f"#!/bin/sh\nWEIGHTS_REVISION={REV}   # was WEIGHTS_REVISION={OTHER}\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert not line(text, "revision").strip().startswith("FAIL"), text
+
+
+def test_a_hash_inside_quotes_does_not_hide_a_launcher_pin(tmp_path):
+    files = good_files()
+    files["run.sh"] = f"#!/bin/sh\necho 'a # b'; WEIGHTS_REVISION={OTHER}\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "revision") and OTHER in line(text, "revision"), text
+
+
+@pytest.mark.parametrize("yaml", ["weights:\n  repo: other/model\n  revision: \"{rev}\"\n", "weights: {{repo: other/model, revision: {rev}}}\n"])
+def test_a_tt_model_yaml_weights_repo_other_than_the_model_fails(tmp_path, yaml):
+    """Issue 288 (3): only the weights revision was read from tt-model.yaml; the weights repository was not."""
+    files = good_files()
+    files["tt-model.yaml"] = (f"schema: \"5.1\"\nrepo: {REPO}\n" + yaml.format(rev=REV)).encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests") and "other/model" in line(text, "manifests"), text
+
+
+@pytest.mark.parametrize("script", [
+    'echo "a \\" # b"; WEIGHTS_REVISION={other}',          # an escaped quote does not end the double-quoted string
+    "echo $'a \\' # b'; WEIGHTS_REVISION={other}",          # $'...' allows escaped quotes
+    "echo a\\ \\# b; WEIGHTS_REVISION={other}",             # an escaped # is not a comment
+])
+def test_an_escaped_quote_or_hash_does_not_hide_a_conflicting_launcher_pin(tmp_path, script):
+    """PR 396 review: the scanner ended its quoted state at an escaped quote and removed the live assignment at the next #."""
+    files = good_files()
+    files["run.sh"] = ("#!/bin/sh\n" + script.format(other=OTHER) + "\n").encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "revision") and OTHER in line(text, "revision"), text
+
+
+def test_a_single_quoted_backslash_does_not_escape_the_closing_quote(tmp_path):
+    files = good_files()
+    files["run.sh"] = f"#!/bin/sh\necho 'a\\'; WEIGHTS_REVISION={OTHER}\n".encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "revision"), text
+
+
+@pytest.mark.parametrize("header", ["weights: # upstream model", "weights:   #x", "weights:"])
+def test_a_weights_mapping_header_with_a_comment_still_has_its_repo_compared(tmp_path, header):
+    """PR 396 review: `weights: # note` failed the header pattern, the repo was never read, and a matching revision passed."""
+    files = good_files()
+    files["tt-model.yaml"] = (f"schema: \"5.1\"\nrepo: {REPO}\n{header}\n  repo: other/model\n  revision: \"{REV}\"\n").encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests") and "other/model" in line(text, "manifests"), text
+
+
+def test_a_weights_table_whose_repo_cannot_be_read_is_never_a_pass(tmp_path):
+    files = good_files()
+    files["tt-model.yaml"] = (f"schema: \"5.1\"\nrepo: {REPO}\nweights: *shared\n").encode()
+    files.pop("package-record.json")
+    _, text = run(FakeHub(files), tmp_path)
+    assert "FAIL" in line(text, "manifests") and "weights repo" in line(text, "manifests"), text
+    files["tt-model.yaml"] = (f"schema: \"5.1\"\nrepo: {REPO}\nweights:\n  revision: \"{REV}\"\n").encode()
+    _, text = run(FakeHub(files), tmp_path / "again")
+    assert "FAIL" in line(text, "manifests") and "weights repo" in line(text, "manifests"), text

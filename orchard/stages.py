@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -39,10 +40,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime, full_port, safeio
+from orchard import audio_decision, audio_facts, audio_runtime, full_port, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import prompt_suite, sampling_choice, sampling_probe
+from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -552,6 +553,28 @@ def gate_full_port(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult
     return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
 
 
+def gate_scoring_reference(stage_dir, run_dir) -> GateResult:
+    """Stage 1 of a scoring model (a reranker or an embedding model, issue 378): the pair set and the Hugging Face scores or vectors that
+    `python3 -m orchard.scoring_reference` writes under stages/1/evidence/reference/. The kind is the one the pair file names; the supervisor
+    checks that it is the run's kind (`Supervisor._check_gate`)."""
+    kind = None
+    try:
+        doc = _safe_json(Path(run_dir) / scoring_check.PAIRS_FILE, max_bytes=scoring_check.JSON_MAX, expect=dict)
+        kind = doc.get("model_kind")
+    except safeio.SafeReadError as exc:
+        return GateResult(False, (f"{scoring_check.PAIRS_FILE} is not readable JSON: {exc.reason}",))
+    reasons, seen = scoring_check.reference_reasons(run_dir, kind if isinstance(kind, str) else "")
+    return _done(reasons, seen)
+
+
+def gate_scoring(stage_dir, run_dir) -> GateResult:
+    """Stage 2 of a scoring model (issue 378): the supervisor's own scoring check ran the port on the leased chip and its scores or vectors
+    match the stage 1 reference within the bounds. orchard/scoring_check.py holds the checks; the kind is the config's (the supervisor
+    passes the run's kind when it checks the gate itself)."""
+    reasons, seen = scoring_check.check(stage_dir, run_dir)
+    return _done(reasons, seen)
+
+
 def _delta_refusal(run_dir) -> str | None:
     """A reason when stages/0/delta.json is there and the safe reader refuses it (NaN, a repeated key, over the cap, a link, a FIFO), else None.
     A missing file is not a refusal. The readers that take the class or the nearest model from delta.json answer None for a refused file, and
@@ -907,13 +930,128 @@ def _hub_fetch_reasons(report, where: str = "") -> list[str]:
             f"the package ignores MODEL_WEIGHTS_DIR, and its numbers describe the fetched model"]
 
 
-def _suite_reasons(report, run_dir, where: str = "") -> list[str]:
+AGREEMENT_PROMPTS_FILE = Path(__file__).resolve().parent / "skills" / "weights-swap-templates" / "agreement_prompts.json"
+AGREEMENT_REFERENCE_PATH = ("stages", "1", "evidence", "reference", "agreement-reference.json")
+AGREEMENT_REFERENCE_MAX_BYTES = 8 * 1024 * 1024
+AGREEMENT_LEDGER_DECISION = "agreement reference recorded"     # the supervisor writes it when it drafts stage 2's config (Supervisor._record_agreement_reference)
+
+
+def _shipped_agreement_ids() -> list[str] | None:
+    """The prompt ids of the shipped agreement set, or None when the file cannot be read."""
+    try:
+        data = safeio.read_json(AGREEMENT_PROMPTS_FILE, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError:
+        return None
+    prompts = data.get("prompts") if isinstance(data, dict) else None
+    ids = [p.get("id") for p in prompts if isinstance(p, dict)] if isinstance(prompts, list) else []
+    return ids if ids and all(isinstance(i, str) for i in ids) else None
+
+
+def _ledger_reference_sha(run_dir) -> str | None:
+    """The sha256 of stage 1's agreement reference file as the supervisor recorded it in the ledger before any stage 2 test ran, or None
+    when no such entry exists (or the ledger cannot be read). The last entry wins."""
+    from orchard.ledger import LedgerCorrupt, read_entries
+    try:
+        entries = read_entries(Path(run_dir) / "ledger.jsonl")
+    except (LedgerCorrupt, OSError):
+        return None
+    found = None
+    for e in entries:
+        data = e.get("data")
+        if e.get("event") == "decision" and isinstance(data, dict) and data.get("decision") == AGREEMENT_LEDGER_DECISION \
+                and isinstance(data.get("sha256"), str):
+            found = data["sha256"]
+    return found
+
+
+def agreement_reference_record(run_dir) -> dict | None:
+    """{path, sha256} of stage 1's agreement reference file when it exists and can be hashed, else None. The supervisor calls this when it
+    drafts stage 2's config: a record means the run can use the agreement set, and the sha256 goes into the ledger as the trusted value
+    the gate compares the file with later."""
+    path = Path(run_dir).joinpath(*AGREEMENT_REFERENCE_PATH)
+    if not os.path.lexists(path):
+        return None
+    try:
+        return evidence_record(run_dir, path)
+    except safeio.SafeReadError:
+        return None
+
+
+def _agreement_binding_reasons(record, run_dir) -> list[str]:
+    """The agreement-set record must have been scored against the reference stage 1 wrote and the prompt set the repository ships. The
+    reference file's sha256 is checked against the one the supervisor put in the ledger, so a file replaced after stage 1 (together with the
+    hash the template recorded) is refused. The prompt ids must be the shipped ids, each once, in the reference, the record and the control;
+    every reference id list is compared with stage 1's, and the control must have been served from the nearest model."""
+    if not isinstance(record, dict) or record.get("ran") is not True:
+        return []
+    out = []
+    shipped_ids = _shipped_agreement_ids()
+    try:
+        shipped = safeio.sha256_file(AGREEMENT_PROMPTS_FILE, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return [f"the shipped agreement prompt set cannot be read: {exc.reason}"]
+    if shipped_ids is None:
+        return ["the shipped agreement prompt set has no usable prompt ids"]
+    if record.get("prompt_set_sha256") != shipped:
+        out.append("the agreement set was run with a prompt set that is not the one the repository ships (its sha256 differs)")
+    path = Path(run_dir).joinpath(*AGREEMENT_REFERENCE_PATH)
+    try:
+        raw = safeio.read_bytes(path, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+        ref = safeio.parse_json_bytes(raw, max_bytes=AGREEMENT_REFERENCE_MAX_BYTES)
+    except safeio.SafeReadError as exc:
+        return out + [f"the agreement set's CPU reference (stage 1 {AGREEMENT_REFERENCE_PATH[-1]}) cannot be read: {exc.reason}"]
+    actual = hashlib.sha256(raw).hexdigest()
+    recorded = _ledger_reference_sha(run_dir)
+    if recorded is None:
+        out.append("the ledger has no record of stage 1's agreement reference (the supervisor writes it before stage 2's test), so the file cannot be trusted")
+    elif recorded != actual:
+        out.append("stage 1's agreement reference file is not the one the supervisor recorded in the ledger (its sha256 differs)")
+    if record.get("reference_sha256") != actual:
+        out.append("the agreement set was scored against a reference file other than the one stage 1 wrote (its sha256 differs)")
+    entries = ref.get("entries") if isinstance(ref, dict) else None
+    out += [f"stage 1's agreement reference: {r}" for r in agreement_core.id_problems(entries, shipped_ids)]
+    wanted = ({e["id"]: e.get("generated_ids") for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
+              if isinstance(entries, list) else {})
+
+    def check(rows, label):
+        for e in rows if isinstance(rows, list) else []:
+            pid = e.get("id") if isinstance(e, dict) else None
+            ids = e.get("reference_ids") if isinstance(e, dict) else None
+            full = wanted.get(pid) if isinstance(pid, str) else None
+            if not isinstance(ids, list) or not isinstance(full, list) or full[:len(ids)] != ids:
+                out.append(f"the {label}'s reference ids for prompt {pid if isinstance(pid, str) else None!r} are not stage 1's")
+
+    check(record.get("entries"), "agreement set")
+    control = record.get("control")
+    if isinstance(control, dict):
+        check(control.get("entries"), "control")
+        problem = prompt_suite.control_identity_problem(_nearest_model_of(run_dir), control.get("model_id"))
+        if problem:
+            out.append(f"the agreement control is not a control of the nearest model: {problem}")
+    return out
+
+
+def _agreement_reasons(record, run_dir, requested: bool) -> list[str]:
+    """All gate reasons for one swap-check.json's `agreement_set`. A run whose swap_config.json asked for the set (`requested`) needs a
+    completed record; a run that did not ask has none unless a record is present, in which case it is judged like any other."""
+    ran = isinstance(record, dict) and record.get("ran") is True
+    if requested and not ran:
+        return ["swap_config.json asks for the agreement set and swap-check.json holds no completed agreement_set record (missing, malformed or ran false)"]
+    if not ran:
+        return []
+    return agreement_core.judge(record, expected_ids=_shipped_agreement_ids() or [])["reasons"] + _agreement_binding_reasons(record, run_dir)
+
+
+def _suite_reasons(report, run_dir, where: str = "", agreement_requested: bool = False) -> list[str]:
     """The prompt-suite reasons (orchard/prompt_suite.py) in one swap-check.json report, each prefixed with `where`.
     A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
     result.json: the record holds the raw replies, and the verdict is computed here from them. A control in the record has
     to have been served from the run's nearest model (stage 0's), which is checked here again whatever the template did."""
     probe = [where + r for r in sampling_probe.problems(report.get("sampling_probe") if isinstance(report, dict) else None)]
-    return (_hub_fetch_reasons(report, where) + probe
+    # The agreement set (issue 15): every number is recomputed from the raw ids in the record, with the same file the template used.
+    record = report.get("agreement_set") if isinstance(report, dict) else None
+    agreement = [where + r for r in _agreement_reasons(record, run_dir, agreement_requested)]
+    return (_hub_fetch_reasons(report, where) + probe + agreement
             + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons])
 
 
@@ -922,13 +1060,23 @@ def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
     is not an object: the other checks of the gate already say what they need of those. A file that is there and that the safe
     reader refuses (not JSON, NaN, over the size cap, a link, a FIFO) is a reason: the report could have held a failing record
     (a non-empty hub_fetch, a suite finding), and a refused read must not drop it."""
+    # Whether the run asked for the agreement set is read from the swap_config.json beside the evidence directory, which the supervisor
+    # drafts; a config that cannot be read counts as not asking.
+    requested = False
+    try:
+        cfg = _safe_json(Path(path).parent.parent / "swap_config.json")
+        requested = isinstance(cfg, dict) and cfg.get("agreement_set") is True
+    except safeio.SafeReadError:
+        pass
     try:
         report = _safe_json(path)
     except safeio.SafeReadError as exc:
         if _is_missing(exc):
-            return []
+            return [f"{where}swap_config.json asks for the agreement set and swap-check.json is missing"] if requested else []
         return [f"{where}swap-check.json is not readable JSON: {exc.reason}"]
-    return _suite_reasons(report, run_dir, where) if isinstance(report, dict) else []
+    if not isinstance(report, dict):
+        return [f"{where}swap_config.json asks for the agreement set and swap-check.json is not an object"] if requested else []
+    return _suite_reasons(report, run_dir, where, requested)
 
 
 def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
@@ -1477,6 +1625,27 @@ FULL_PORT_STAGE_2 = dataclasses.replace(
     gate=gate_full_port, draft="full_port")
 
 
+# A scoring model (a reranker or an embedding model, issue 378, docs/superpowers/specs/2026-11-02-scoring-model-check-design.md): stage 1 records
+# a pair set and the Hugging Face scores or vectors instead of generated ids, and stage 2 runs the supervisor's scoring check on the coder's port
+# module (skill scoring-check, orchard/scoring_check.py). No agent writes a finish step for stage 2: the check's own record is the result, so
+# the gate file is that record.
+SCORING_STAGE_1 = dataclasses.replace(
+    STAGES[1], name="CPU reference scores or vectors for a scoring model", skill="scoring-reference", refs=(),
+    gate_file=scoring_check.PAIRS_FILE.removeprefix("stages/1/"), gate=gate_scoring_reference)
+SCORING_STAGE_2 = dataclasses.replace(
+    STAGES[2], name="scoring model on one board and parity with the CPU reference", skill="scoring-check",
+    gate_file=scoring_check.RECORD_FILE, gate=gate_scoring, draft="scoring_check")
+
+
+def scoring_routed(kind, path, cls, full_port: bool) -> bool:
+    """Whether a run of a scoring kind takes the scoring route: class `weights-only` (the backbone is the nearest model's and a port module
+    reads its output), or class `full-port` with the operator's `--full-port` (the port also carries new model code). Any other class has
+    no scoring route yet, and the supervisor pauses (SCORING_NOT_ROUTED)."""
+    if kind not in model_kind.SCORING_KINDS:
+        return False
+    return (path == "weights-only" and cls == "weights-only") or (full_port and path == "full-port" and cls == "full-port")
+
+
 # The weights+sidecar class (orchard/classes.py): stage 2 also measures the sidecar head's parity in the same
 # hardware lease (the weights-sidecar-check skill), and its gate checks both. Every other stage is the
 # weights-only spec: the backbone is what those stages test.
@@ -1772,9 +1941,22 @@ def run_facts(entries: list[dict], run_dir) -> dict | None:
     return dict(facts) if not audio_facts.facts_problems(facts) else None
 
 
+def run_model_kind(entries: list[dict]) -> str:
+    """The model kind of the run (orchard/model_kind.py), read from stage 0's passing `stage_end` like the class: a resumed run keeps the kind
+    the first attempt decided. A ledger written before kinds, or one whose record is malformed, gives "generative", which is every run
+    before the scoring check."""
+    end = None
+    for e in entries:
+        if e["event"] == "stage_end" and e["stage"] == 0 and e["data"].get("result") == "pass":
+            end = e["data"]
+    rec = end.get("model_kind") if end is not None else None
+    kind = rec.get("kind") if isinstance(rec, dict) else None
+    return kind if kind in model_kind.KINDS else "generative"
+
+
 def spec_for(number: int, path: str | None, package_format: str | None = None,
              cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False, text_runtime: bool = False,
-             full_port: bool = False) -> StageSpec:
+             full_port: bool = False, kind: str = "generative") -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
@@ -1785,6 +1967,8 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         return STOCK_STAGE_0
     if audio_runtime and number in AUDIO_TABLE:
         return AUDIO_TABLE[number]
+    if number in (1, 2) and scoring_routed(kind, path, cls, full_port):
+        return SCORING_STAGE_1 if number == 1 else SCORING_STAGE_2       # a scoring model has no generated tokens to compare
     if full_port and number == 2 and path == "full-port" and cls == "full-port":
         return FULL_PORT_STAGE_2          # only stage 0's own `full-port` answer: `unknown` and `restricted-head` keep their pauses
     if path == "stock-runtime":
@@ -2076,7 +2260,7 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     for e in entries:
         d = e["data"]
         own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder adopted", "coder started",
-                                                             "coder container started", "coder not started")
+                                                             "coder container started", "coder not started", "coder start pending", "coder start blocked")
         if e["event"] in ("park", "restore") or own:
             if isinstance(d.get("lease"), dict):
                 lease = d["lease"]
@@ -2087,12 +2271,45 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     return lease, server, canary
 
 
+CODER_START_DECISIONS = ("coder starting", "coder adopted", "coder started", "coder container started", "coder not started",
+                         "coder start pending", "coder start blocked")
+
+
+def coder_start_blocked(entries: list[dict]) -> bool:
+    """True when the latest coder start decision is "coder start pending" or "coder start blocked": the granted-board check was under way or
+    blocked before `ServerControl.start` ran
+    (issue 351). No coder was launched, so a resume retries the check and the launch under that lease. It does not finish a boot, compare
+    a canary or count a coder death: nothing of the coder's exists to compare or to have died."""
+    last = None
+    for e in entries:
+        if e["event"] == "decision" and e["data"].get("decision") in CODER_START_DECISIONS:
+            last = e["data"]["decision"]
+    return last in ("coder start pending", "coder start blocked")
+
+
 SUPERVISOR_MARKER = "test-result.json"      # written by Supervisor._run_test, which then appends an evidence entry with its path and sha256
 
 
-def recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
+# Resume markers other than test-result.json that the supervisor writes itself (or whose writer it records), each with the `what` of the
+# evidence entry that vouches for it (issue 344). Supervisor._run_test_list appends "hardware test list" after it writes tests/plan.json;
+# the text and audio stage 1 bodies append "text stage record" or "audio stage record" after the reference file is written.
+VOUCHED_MARKERS = {
+    "tests/plan.json": ("hardware test list",),
+    "text_reference.json": ("text stage record",),
+    "audio_reference.json": ("audio stage record",),
+}
+
+
+# Both entries of a move-aside are boundaries between attempts. "moving ..." is written before the rename, so a kill after the rename and a second
+# kill after the fresh directory is made still leave a boundary in the ledger (review of PR 403). "moved ..." follows the rename.
+MOVE_ASIDE_DECISIONS = ("moving the partial stage directory aside", "moved the partial stage directory aside")
+
+
+def recorded_by_supervisor(ledger, n: int, rec: dict, *, whats: tuple = ()) -> bool:
     """Does the ledger hold an evidence entry for stage `n` with this file's path and sha256? Supervisor._run_test appends one right
-    after it writes the file. A file an agent wrote, or one changed after the record, has none."""
+    after it writes the file. A file an agent wrote, or one changed after the record, has none.
+
+    With `whats`, the entry must have one of those `what` values instead (the markers of VOUCHED_MARKERS)."""
     # Only _run_test's entry has `returncode` and `timed_out`. AgentStep's "evidence file" entries (an agent can link the marker from
     # evidence/) never do, so they do not count.
     entries = ledger.read()
@@ -2102,10 +2319,11 @@ def recorded_by_supervisor(ledger, n: int, rec: dict) -> bool:
     # boundary too: a kill between the rename and the move-aside entry leaves no entry, and the next attempt then starts a fresh
     # directory. A stage_start with resumed=True is not one: it comes after the record the attempt resumed from.
     start = max((i for i, e in enumerate(entries) if e.get("stage") == n and (
-        (e.get("event") == "decision" and e["data"].get("decision") == "moved the partial stage directory aside")
+        (e.get("event") == "decision" and e["data"].get("decision") in MOVE_ASIDE_DECISIONS)
         or (e.get("event") == "stage_start" and e["data"].get("resumed") is False))), default=-1) + 1
     return any(e.get("event") == "evidence" and e.get("stage") == n and e["data"].get("path") == rec["path"]
-               and e["data"].get("sha256") == rec["sha256"] and "returncode" in e["data"] and "timed_out" in e["data"]
+               and e["data"].get("sha256") == rec["sha256"]
+               and ((e["data"].get("what") in whats) if whats else ("returncode" in e["data"] and "timed_out" in e["data"]))
                for e in entries[start:])
 
 
@@ -2132,12 +2350,18 @@ def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple
             elif marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, spec.number, rec):
                 # An agent can write this file. Only the supervisor's own record of its hardware test vouches for it.
                 ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
+            elif spec.marker in VOUCHED_MARKERS and not recorded_by_supervisor(ledger, spec.number, rec, whats=VOUCHED_MARKERS[spec.marker]):
+                # The plan and the stage 1 reference files are written by the supervisor too (issue 344). A file with no matching entry
+                # after the stage's latest move-aside is not a resume point; the stage directory is moved aside and the step runs again.
+                ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
             else:
                 ledger.append("decision", spec.number, decision="resume from marker", marker=rec)
                 return d, True
         k = 1
         while (aside := d.with_name(f"{spec.number}.partial-{k}")).exists():
             k += 1
+        ledger.append("decision", spec.number, decision="moving the partial stage directory aside",
+                      path=os.path.relpath(aside, run_dir))
         os.rename(d, aside)
         ledger.append("decision", spec.number, decision="moved the partial stage directory aside",
                       path=os.path.relpath(aside, run_dir))

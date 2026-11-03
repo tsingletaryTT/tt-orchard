@@ -208,10 +208,7 @@ def per_step_commands(item: dict, paths, stage_dir, reference_run_dir) -> list[d
 
 def write_json(path, value) -> None:
     """Write a JSON file whole or not at all."""
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(value, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    safeio.atomic_write(path, json.dumps(value, indent=1, sort_keys=True) + "\n")
 
 
 def chip_plan(model_id, base_id) -> list[dict]:

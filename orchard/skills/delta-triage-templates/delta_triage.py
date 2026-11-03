@@ -791,6 +791,22 @@ def _unit_rows(x):
     return x / np.where(n == 0, 1.0, n)
 
 
+# Architecture names of models that read a vocabulary head (issue 380). A config whose architectures all lack these endings, on a model with no
+# lm_head tensor, is a bare backbone: an embedding model such as Qwen3-Embedding or Qwen3-VL-Embedding, whose output is a hidden state.
+HEAD_ARCH = re.compile(r"(ForCausalLM|ForConditionalGeneration|LMHeadModel|ForMaskedLM|ForSeq2SeqLM|ForPreTraining)$")
+
+
+def has_no_output_head(model_dir: Path, model_tensors: dict) -> bool:
+    """True when the model has no output head to compare: its config lists architectures, none of them a model that reads a vocabulary head
+    (HEAD_ARCH), and no tensor of it is an lm_head. Tied embeddings do not count as a missing head: a `ForCausalLM` model with tied weights
+    names a head architecture, so it is not matched here. False when the config cannot be read or lists no architecture."""
+    cfg, _ = read_json(model_dir / "config.json")
+    archs = cfg.get("architectures") if isinstance(cfg, dict) else None
+    if not isinstance(archs, list) or not archs or not all(isinstance(a, str) for a in archs):
+        return False
+    return not any(HEAD_ARCH.search(a) for a in archs) and not any(HEAD_NAME.search(n) for n in model_tensors)
+
+
 def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
     """Is a sidecar a head restricted to some of the nearest model's lm_head rows (a decision model's answer codes, for example)?
     restricted is True when every row of a sidecar matrix is a copy (cosine at least HEAD_MATCH_COSINE) of a base head row;
@@ -2201,8 +2217,8 @@ def decide_path(c: dict, t: dict) -> list[str]:
         reasons.append(f"tensor {x['name']} has dtype {x['model']} in the new model and {x['base']} in the nearest model")
     for side, who in (("model", "the new model"), ("base", "the nearest model")):
         extra = ns[f"unexplained_only_in_{side}"]
-        if side == "base" and (t.get("head") or {}).get("restricted"):
-            extra = [k for k in extra if not HEAD_NAME.search(k)]      # the readout rows stand in for lm_head
+        if side == "base" and ((t.get("head") or {}).get("restricted") or (t.get("head") or {}).get("not_used")):
+            extra = [k for k in extra if not HEAD_NAME.search(k)]      # the readout rows stand in for lm_head, or the model has no head to use (issue 380)
         if extra:
             reasons.append(f"{len(extra)} text tensors exist only in {who}: {short(extra, 5)}")
     return reasons
@@ -3434,6 +3450,7 @@ def main() -> int:
     write_json("value-compare.json", values)
     say(f"wrote evidence/value-compare.json ({len(values['samples'])} tensors sampled: {fmt(values['summary'])})")
     head = detect_restricted_head(model_dir, base_dir, sc)
+    head["not_used"] = has_no_output_head(model_dir, model_tensors)       # an embedding model's backbone has no head: the nearest model's is not missing
     if head.get("restricted"):
         head["tokens"] = token_names(base_dir, head["token_ids"])
         head["readout"] = readout_facts(model_dir, code)
@@ -3493,6 +3510,13 @@ def main() -> int:
                                              "not exercise it. Its output must be checked on the host against "
                                              "the CPU reference, with the exact file hash recorded.")})
     delta["hazards"].extend(tolerated_dtype_hazards(t, ev))
+    if head.get("not_used"):
+        delta["hazards"].append({"area": "other", "evidence": [ev("head-compare.json")],
+                                 "finding": ("The new model has no lm_head tensor and its architecture is not one that reads a vocabulary head "
+                                             "(an embedding model's output is a hidden state). The nearest model's lm_head is not counted as a "
+                                             "missing tensor. Stage 2's generated-token check does not apply to such a model: a scoring model "
+                                             "is checked on its vectors against the Hugging Face vectors (docs/superpowers/specs/"
+                                             "2026-11-02-scoring-model-check-design.md).")})
     if ns["aligned"]["pairs"]:
         # Names paired by prefix count as the nearest model's tensors, so the path stays weights-only. Only the stage 1 CPU reference
         # loader and the restricted-head parity script apply the name map. The swap and serve templates of stages 2 and 4 link the

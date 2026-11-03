@@ -39,6 +39,7 @@ REPS = 3
 TAIL_LINES = 12
 SHIPPED = ("prepare_swap.py", "serve_and_compare.py")
 SUITE_FILE = "prompt_suite.json"
+AGREEMENT_FILES = ("agreement_core.py", "agreement_prompts.json")     # serve_and_compare.py imports these when `agreement_set` is on
 # The drafter's acceptance as measure_serving.py records it (accepted over drafted tokens, from the server log or /metrics; None when the drafter
 # is off or the server reports nothing). Same names as orchard/drafter_log.py SUMMARY_KEYS; a test keeps the two equal.
 DRAFTER_KEYS = ("accept_rate", "accepted_per_iter", "draft_length", "iters", "sessions")
@@ -47,7 +48,7 @@ DRAFTER_KEYS = ("accept_rate", "accepted_per_iter", "draft_length", "iters", "se
 def shipped(cfg: dict) -> tuple[str, ...]:
     """The files the variant needs next to its scripts: the two swap scripts, and the prompt suite when the stage's config asks for it
     (serve_and_compare.py exits 2 at its first step when `prompt_suite` is set and the file is not beside it)."""
-    return SHIPPED + ((SUITE_FILE,) if cfg.get("prompt_suite") else ())
+    return SHIPPED + ((SUITE_FILE,) if cfg.get("prompt_suite") else ()) + (AGREEMENT_FILES if cfg.get("agreement_set") else ())
 
 
 def fail(message: str) -> None:
