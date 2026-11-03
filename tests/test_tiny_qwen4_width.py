@@ -216,10 +216,25 @@ def test_an_override_of_the_wrong_type_is_refused_even_when_its_number_would_til
     ({"linear_num_key_heads": 16, "linear_num_value_heads": 40}, "linear_num_value_heads"),   # 40 is not a multiple of 16 key heads
     ({"indexer_n_heads": 2}, "indexer_n_heads"),                  # 2 heads trip qsa_heads_not_divisible_by_dies
     ({"indexer_n_heads": 6}, "indexer_n_heads"),
+    ({"indexer_kv_heads": 3}, "indexer_kv_heads"),                # neither divides nor is divided by 4 dies (review of PR 434, round 1)
+    ({"indexer_kv_heads": 6}, "indexer_kv_heads"),
+    ({"indexer_kv_heads": 5}, "indexer_kv_heads"),
 ])
 def test_a_width_a_two_or_four_die_mesh_cannot_tile_is_refused_with_the_key_named(overrides, fragment):
     with pytest.raises(ValueError, match=fragment):
         mk.build_config("dense", 4, width="27b", overrides=overrides)
+
+
+@pytest.mark.parametrize("kv", [1, 2, 4, 8, 12, 16])
+def test_an_indexer_kv_head_count_that_splits_or_replicates_over_the_dies_is_accepted(kv):
+    """The same rule as num_key_value_heads: a count that divides by the 4 dies splits, a count that divides 4 replicates."""
+    assert mk.build_config("dense", 4, width="27b", overrides={"indexer_kv_heads": kv})["indexer_kv_heads"] == kv
+
+
+def test_the_indexer_kv_head_rule_names_the_two_ways_out():
+    with pytest.raises(ValueError) as err:
+        mk.build_config("dense", 4, width="27b", overrides={"indexer_kv_heads": 3})
+    assert "indexer_kv_heads 3" in str(err.value) and "divides" in str(err.value) and "replication" in str(err.value)
 
 
 def test_the_moe_widths_are_checked_when_the_variant_has_them():
@@ -317,6 +332,70 @@ def test_the_free_space_margin_refuses_even_under_max_gb(tmp_path, monkeypatch, 
     fake_torch_stack(monkeypatch, 8 * GB, 45 * GB)
     assert mk.main(["--out", str(tmp_path / "big"), "--width", "27b", "--max-gb", "40"]) == 2
     assert "free space" in capsys.readouterr().err and not (tmp_path / "big").exists()
+
+
+class FakeTorch:
+    """Just what write_weights touches: no_grad, bfloat16."""
+    bfloat16 = "bf16"
+
+    class no_grad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+
+class FakeModel:
+    """A model whose save_pretrained writes model.safetensors into the directory it is given, and records where that was."""
+    saved_to: list = []
+    shard_size = None
+
+    def parameters(self):
+        return []
+
+    def to(self, dtype):
+        return self
+
+    def save_pretrained(self, directory, safe_serialization=True, max_shard_size=None):
+        FakeModel.saved_to.append(Path(directory))
+        FakeModel.shard_size = max_shard_size
+        (Path(directory) / "model.safetensors").write_bytes(b"weights")
+        (Path(directory) / "config.json").write_text("{}")
+
+
+def test_the_weights_are_written_beside_the_output_and_moved_not_copied(tmp_path, monkeypatch):
+    """Review of PR 434, round 1: `save_pretrained` wrote to the system temp directory and the file was copied into `out`, so a
+    checkpoint needed its size twice on one filesystem, and the temp filesystem was never checked at all. The size rule budgets the
+    filesystem of `out` once, so the only temporary copy allowed is one on that filesystem that is renamed into place."""
+    FakeModel.saved_to = []
+    monkeypatch.setattr(mk, "build_model", lambda *a, **k: FakeModel())
+
+    def no_copy(*a, **k):
+        raise AssertionError("the weights were copied; a rename keeps one copy on the checked filesystem")
+    monkeypatch.setattr(mk.shutil, "copy", no_copy)
+    monkeypatch.setattr(mk.shutil, "copyfile", no_copy)
+    monkeypatch.setattr(mk.shutil, "copy2", no_copy)
+    out = tmp_path / "ckpt"
+    out.mkdir()
+    mk.write_weights(FakeTorch, None, {}, 1, out, 1.0)
+    assert (out / "model.safetensors").read_bytes() == b"weights"
+    assert len(FakeModel.saved_to) == 1 and FakeModel.saved_to[0].parent == out         # the filesystem the size rule checked
+    assert sorted(p.name for p in out.iterdir()) == ["model.safetensors"]                 # the temporary directory is gone
+    assert FakeModel.shard_size >= 1 << 40                                                # one file: the default 50 GB shard size split a bigger checkpoint
+
+
+def test_a_failed_save_leaves_no_temporary_directory_in_the_output(tmp_path, monkeypatch):
+    class Boom(FakeModel):
+        def save_pretrained(self, directory, safe_serialization=True, max_shard_size=None):
+            (Path(directory) / "model.safetensors").write_bytes(b"half")
+            raise OSError(28, "No space left on device")
+    monkeypatch.setattr(mk, "build_model", lambda *a, **k: Boom())
+    out = tmp_path / "ckpt"
+    out.mkdir()
+    with pytest.raises(OSError):
+        mk.write_weights(FakeTorch, None, {}, 1, out, 1.0)
+    assert list(out.iterdir()) == []
 
 
 def test_the_estimate_is_printed_before_anything_is_written(tmp_path, monkeypatch, capsys):

@@ -25,7 +25,8 @@ width keys in WIDTH_KEYS, only keys the variant already has, only positive whole
 Size. Before anything is written the script counts the parameters of the model on torch's meta device (nothing is allocated), prints
 `estimated size`, and refuses when the estimate is over `--max-gb` (default 12) or over the free space of the output filesystem minus a
 40 GB margin. The `27b` dense checkpoint is 8.2 GB (4.12 billion parameters); `mixed` is 37 GB and `moe` 47 GB, so those two need a raised
-`--max-gb` and the disk to match.
+`--max-gb` and the disk to match. The weights are written once, into a temporary directory inside `--out` and renamed into place, so the
+estimate is the disk the run needs on the output filesystem; they are always one `model.safetensors` file.
 
 It never imports ttnn or ttml, opens no device and uses no network.
 
@@ -46,7 +47,8 @@ Guards (each has a test in tests/test_tiny_qwen4.py or tests/test_tiny_qwen4_wid
   - the layer count is a positive multiple of 4 (the 3:1 schedule);
   - a scaled config (a preset other than `tiny`, or any `--set`) must tile on 2 and 4 dies: the hidden, feed-forward, expert and
     vocabulary widths are multiples of 128, the head widths multiples of 32, the attention, delta-net and indexer head counts divide
-    by 4 (a key-value head count divides by 4 or divides 4), and each count of value heads is a multiple of the key heads;
+    by 4 (a key-value head count, the attention's and the indexer's, divides by 4 or divides 4), and each count of value heads is a multiple
+    of the key heads;
   - an override may name only a width key the variant already has (an expert key on a dense config would make transformers fill in
     512 experts and build a different model without an error);
   - the size estimate must be within `--max-gb` and within the free space minus 40 GB, checked before the directory is created;
@@ -67,6 +69,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import platform
 import random
 import shutil
@@ -133,6 +136,7 @@ MAX_OVERRIDE_BY_KEY = {"num_experts": 4096}    # one module per expert is built,
 DIES = (2, 4)                                  # the mesh sizes the widths must tile on
 TILE = 32                                      # columns in a tile
 DEFAULT_MAX_GB = 12.0
+SINGLE_FILE_BYTES = 1 << 50                    # `max_shard_size` for save_pretrained: one safetensors file, whatever the size
 SPACE_MARGIN_GB = 40                           # free space that must remain after the checkpoint is written
 GB = 10 ** 9
 HEADER_BYTES_PER_TENSOR = 128                  # safetensors header: measured 114 per tensor on the tiny model, rounded up
@@ -165,8 +169,9 @@ def check_widths(cfg: dict) -> None:
         problems.append(f"num_attention_heads {heads} does not divide by {max(DIES)} dies")
     if heads % kv:
         problems.append(f"num_attention_heads {heads} is not a multiple of num_key_value_heads {kv}")
-    if kv % max(DIES) and max(DIES) % kv:
-        problems.append(f"num_key_value_heads {kv} neither divides by {max(DIES)} dies nor divides {max(DIES)} (replication)")
+    for key in ("num_key_value_heads", "indexer_kv_heads"):          # the indexer's KV heads are sharded across the dies like the attention's
+        if key in cfg and cfg[key] % max(DIES) and max(DIES) % cfg[key]:
+            problems.append(f"{key} {cfg[key]} neither divides by {max(DIES)} dies nor divides {max(DIES)} (replication)")
     for key in ("linear_num_key_heads", "linear_num_value_heads", "indexer_n_heads"):
         if cfg[key] % max(DIES):
             problems.append(f"{key} {cfg[key]} does not divide by {max(DIES)} dies")
@@ -362,15 +367,21 @@ def estimate_bytes(torch, transformers, cfg: dict, *, seed: int = 1234, tokenize
 
 def write_weights(torch, transformers, cfg: dict, seed: int, out: Path, weight_scale: float) -> None:
     """Build the model (through the dense shim when a layer is dense) under `manual_seed(seed)`, cast floats to bf16 and save.
-    `save_pretrained` writes the keys in the format `from_pretrained` reads back; only its safetensors file is kept."""
+    `save_pretrained` writes the keys in the format `from_pretrained` reads back; only its safetensors file is kept.
+
+    The temporary directory is made inside `out`, so the weights are written once on the filesystem that `check_size` measured, and the
+    file is renamed into place. A copy from the system temp directory needed the checkpoint's size twice on one filesystem, or filled a
+    filesystem nobody had checked (review of PR 434, round 1). `max_shard_size` is set above any checkpoint this script can write, so
+    the weights are one `model.safetensors` whatever `--max-gb` allows; the default of 50 GB split a larger one into shards, and the
+    rename found no file after the whole checkpoint was written."""
     model = build_model(torch, transformers, cfg, seed)
     with torch.no_grad():
         for p in model.parameters():
             p.mul_(weight_scale)
     model = model.to(torch.bfloat16)                 # integer buffers keep their dtype
-    with tempfile.TemporaryDirectory() as tmp:
-        model.save_pretrained(tmp, safe_serialization=True)
-        shutil.copy(Path(tmp) / "model.safetensors", out / "model.safetensors")
+    with tempfile.TemporaryDirectory(dir=out, prefix=".weights-") as tmp:
+        model.save_pretrained(tmp, safe_serialization=True, max_shard_size=SINGLE_FILE_BYTES)
+        os.replace(Path(tmp) / "model.safetensors", out / "model.safetensors")
 
 
 # ---- the tokenizer --------------------------------------------------------------------------------------------------

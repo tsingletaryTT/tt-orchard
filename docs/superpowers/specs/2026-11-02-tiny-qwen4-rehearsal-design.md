@@ -107,7 +107,7 @@ of the output filesystem minus 40 GB, before it creates the directory.
 schedule, the per-layer embedding or the n-gram table), only keys the variant already has (an expert key on a dense config would make
 transformers fill in 512 experts), and positive whole numbers. A scaled config (a preset other than `tiny`, or any `--set`) must
 tile on 2 and 4 dies: hidden, feed-forward, expert and vocabulary widths are multiples of 128 (whole 32-column tiles on 4 dies); head
-widths are multiples of 32; the attention, delta-net and indexer head counts divide by 4; a KV head count divides by 4 or divides 4
+widths are multiples of 32; the attention, delta-net and indexer head counts divide by 4; a KV head count (the attention's and the indexer's) divides by 4 or divides 4
 (replication); the value heads are a multiple of the key heads; the vocabulary holds the 260 special and byte tokens. The tiny default
 is not held to these rules and is written exactly as before: the config, prompts, weights and tokenizer files are byte-identical to the
 output of the script before the presets existed (the manifest gained `width`, `overrides` and `size`).
