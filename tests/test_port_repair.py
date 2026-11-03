@@ -82,6 +82,11 @@ def test_parse_refuses_a_line_with_the_wrong_shape(line):
     assert port_repair.parse_failure(line + "\n") is None
 
 
+def test_a_prefixed_line_after_the_real_one_does_not_replace_it():
+    text = 'PORT_CHECK_FAILURE {"kind": "port", "op": "load"}\nport| PORT_CHECK_FAILURE {"kind": "setup", "op": null}\n'
+    assert port_repair.parse_failure(text) == {"kind": "port", "op": "load"}
+
+
 def test_parse_returns_none_for_no_line_or_a_non_string():
     assert port_repair.parse_failure("FAILED: x\n") is None and port_repair.parse_failure(None) is None
 
@@ -217,4 +222,12 @@ def test_the_fingerprint_of_a_missing_directory_is_empty_and_a_link_counts_as_a_
     before = port_repair.fingerprint(tmp_path)
     (tmp_path / "a.py").unlink()
     os.symlink("/etc/hostname", tmp_path / "a.py")
+    assert port_repair.changed(before, port_repair.fingerprint(tmp_path)) == ["a.py"]
+
+
+def test_a_link_that_points_somewhere_else_is_a_change(tmp_path):
+    os.symlink("/etc/hostname", tmp_path / "a.py")
+    before = port_repair.fingerprint(tmp_path)
+    (tmp_path / "a.py").unlink()
+    os.symlink("/etc/passwd", tmp_path / "a.py")
     assert port_repair.changed(before, port_repair.fingerprint(tmp_path)) == ["a.py"]
