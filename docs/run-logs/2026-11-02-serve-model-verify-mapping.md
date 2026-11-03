@@ -82,3 +82,23 @@ that `serve_and_compare.py` recorded. It sends no request, and the swap check do
 probe or the engine counter. Those checks need the live server, so they belong in `serve_and_compare.py` (a template copied into the stage
 directory and unable to import `orchard`). That is the largest remaining gap and has its own issue (368). Stage 7's `verify_bundle.py` already
 checks the listing against the copy's model directory.
+
+## Update after issues 360, 368 to 373 and 385
+
+Built since the table above. Probe code is in `orchard/served_probes.py` (requests) and `orchard/served_verify.py` (judges and log filters). Verdicts that changed:
+
+| Id | Now |
+|---|---|
+| V2 | covered at stage 2 and stage 4 too (issue 368): `serve_and_compare.py` records `GET /v1/models` and `served_chat.check_live_probe` judges it against the name the swap test asked for and the `--max-model-len` that `run.sh` passes. `can boot` also reads a `--served-model-name` alias from `extra_args` (issue 385) |
+| V4, V5 | covered at stage 2 and stage 4 (the two raw completions are recorded and judged by `served_verify.judge_completion`) |
+| V6 | built: `served_probes.check_generated_code` (parse, function present, a returned value, no undefined name, no endless loop; static, never run) |
+| V8 | covered at stage 2 and stage 4 when `/metrics` exists |
+| V9 | built for the KV cache (`GPU KV cache size`, `Maximum concurrency`, `# GPU blocks`) and for a layer line (`loaded N layers`). The layer line of a tt-metal model has not been read from a real server log, so a log without it is `not_checked` (issue 370 stays open for that) |
+| V11 | built: `served_probes.probe_batching` (aggregate tokens per second against the single-stream rate, and `vllm:num_requests_running` when the server reports it) |
+| V12 | built: `served_probes.probe_long_prefill` (a prompt sized from `usage.prompt_tokens`) |
+| V13, V14, V16, V17 | built for a can that declares `[check] reasoning = true`: `reasoning_field`, `reasoning_parser`, `thinking_switch`, `budget_sweep` |
+| V22 | built: `served_verify.log_warnings`, recorded under `log_warnings`, never a failure |
+
+Not built: the resume-equals-full-prefill check and the ten continuation invariants of tenstorrent/skills PR 42 (issue 360), which is still open upstream, and a card row for reasoning tokens (issue 361).
+
+Where the stage 2 and stage 4 probes run: the swap template cannot import `orchard`, so it records the raw answers under `live_probe` in `swap-check.json` and `served_chat.py` judges them. A `swap-check.json` from before this change has no record, and the check reports it as not checked.

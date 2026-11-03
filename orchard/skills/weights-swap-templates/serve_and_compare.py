@@ -70,6 +70,15 @@ Steps:
     reference's, or an unusable control exits 2 before any server starts. A request the server refuses becomes `None` ids for the rest of
     that prompt (an error is recorded) and the run goes on. The 32-token result stays in the record as `baseline`.
 
+(k) The live probe record (issue 368), unless swap_config.json has `"live_probe": false`. After the other steps the script sends a few
+    read-only requests and records the answers raw under `live_probe`: GET /v1/models (status and body), the two raw completions at temperature 0
+    that orchard/served_verify.py judges (arithmetic and a counting sequence), the lines of GET /metrics that hold vllm:generation_tokens_total
+    before and after the first completion, and the `--max-model-len` that run.sh passes. The script judges nothing and imports nothing from
+    orchard: orchard/served_chat.py reads the record with the rules of orchard/served_verify.py (a test holds the two prompts equal). A
+    request that fails is that probe's recorded error and the run goes on. A swap-check.json from before this step has no `live_probe`
+    and the stage check reports it as not checked.
+    Each suite reply also records `completion_tokens` (from usage) and, with the tokenizer, `reasoning_tokens` and `answer_tokens` (issue 361).
+
 Exit codes: 0 when the measurements completed, whatever they say. 3 cache guard. 4 the server
 exited, or never became healthy. 5 the server answered a request with an HTTP error (its body is
 printed). Any other error in this script exits non-zero through Python's traceback; the finally
@@ -621,19 +630,36 @@ def unrecoverable_ids(tokenizer, model_dir: Path, ids) -> set[int]:
     return out
 
 
-def ask_suite_prompt(port: int, model: str, prompt: dict, mode: str, max_tokens: int) -> dict:
-    """One prompt, one reply, recorded raw."""
+def token_count(tokenizer, text: str) -> int | None:
+    """Tokens of `text` with the model's own tokenizer (the tokenizers package), or None when there is no tokenizer or it fails."""
+    if tokenizer is None or not text:
+        return 0 if tokenizer is not None else None
+    try:
+        return len(tokenizer.encode(text, add_special_tokens=False).ids)
+    except Exception:                                  # noqa: BLE001  a record of counts must never end the run
+        return None
+
+
+def ask_suite_prompt(port: int, model: str, prompt: dict, mode: str, max_tokens: int, tokenizer=None) -> dict:
+    """One prompt, one reply, recorded raw. Also the completion tokens the server reports and, when `tokenizer` is given, the tokens of the
+    reasoning text and of the answer text (issue 361: how much of a reply's budget the thinking used)."""
     entry = {"id": prompt["id"], "mode": mode, "content": "", "reasoning": "", "tool_calls": [],
-             "finish_reason": None, "error": None}
+             "finish_reason": None, "error": None, "completion_tokens": None, "reasoning_tokens": None, "answer_tokens": None}
     try:
         if mode == "chat":
             body = {"model": model, "messages": prompt["messages"], "max_tokens": max_tokens, "temperature": 0}
             if prompt.get("needs_tools"):
                 body["tools"] = prompt["tools"]
-            choice = post_json(port, "/v1/chat/completions", body)["choices"][0]
+            data = post_json(port, "/v1/chat/completions", body)
+            choice = data["choices"][0]
             msg = choice["message"]
+            usage = data.get("usage")
+            tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+            entry["completion_tokens"] = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
             entry["content"] = msg.get("content") or ""
             entry["reasoning"] = msg.get("reasoning_content") or msg.get("reasoning") or ""
+            entry["reasoning_tokens"] = token_count(tokenizer, entry["reasoning"])
+            entry["answer_tokens"] = token_count(tokenizer, entry["content"])
             entry["tool_calls"] = [{"name": c["function"]["name"], "arguments": c["function"].get("arguments")}
                                    for c in msg.get("tool_calls") or []]
         else:
@@ -649,7 +675,7 @@ def ask_suite_prompt(port: int, model: str, prompt: dict, mode: str, max_tokens:
     return entry
 
 
-def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict) -> dict:
+def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict, tokenizer=None) -> dict:
     """Step (h): send the suite and return the record that goes under `prompt_suite` in swap-check.json."""
     template = chat_template_info(model_dir)
     mode = "chat" if template["present"] else "completion"
@@ -660,7 +686,7 @@ def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict) ->
             skipped.append({"id": prompt["id"], "reason": "the chat template does not mention tools"
                             if template["present"] else "there is no chat template, so no tool format"})
             continue
-        entries.append(ask_suite_prompt(port, model, prompt, mode, max_tokens))
+        entries.append(ask_suite_prompt(port, model, prompt, mode, max_tokens, tokenizer))
     return {"ran": True, "model_id": cfg.get("new_model_id"), "suite_sha256": setup["suite_sha256"], "mode": mode,
             "max_tokens": max_tokens,
             "chat_template": template, "special_tokens": special_tokens(model_dir), "served_files": served_files(model_dir), "entries": entries,
@@ -739,6 +765,80 @@ def run_sampling_probe(cfg: dict, port: int, model: str, log_path: Path, refresh
             "requests": requests}
 
 
+# ---- the live probe record (step j, issue 368) ------------------------------------------------------------------
+
+LIVE_BODY_BYTES = 1 << 20                 # a listing, a completion or a metrics page is small; more is not read
+LIVE_COMPLETIONS = (("arithmetic", "17*24="), ("sequence", "1 2 3 4 5 6 7 8"))    # orchard/served_verify.COMPLETION_PROBES holds the same two (a test holds them equal)
+LIVE_COUNTER = "vllm:generation_tokens_total"
+LIVE_METRIC_LINES = 20
+
+
+def live_request(port: int, path: str, body: dict | None = None, timeout: float = 120.0) -> dict:
+    """One request, recorded raw: {"status", "body"} with the body parsed as JSON when it is (None otherwise), or {"status": None, "error"}. Never raises."""
+    url = f"http://127.0.0.1:{port}{path}"
+    req = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"}, method="GET" if body is None else "POST")
+    try:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status, raw = resp.status, resp.read(LIVE_BODY_BYTES + 1)[:LIVE_BODY_BYTES]
+        except urllib.error.HTTPError as exc:
+            status, raw = exc.code, exc.read(LIVE_BODY_BYTES + 1)[:LIVE_BODY_BYTES]
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
+        return {"status": None, "error": f"{type(exc).__name__}: {exc}"[:300]}
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        parsed = None
+    return {"status": status, "body": parsed if isinstance(parsed, dict) else None}
+
+
+def counter_lines(port: int) -> list[str] | None:
+    """The lines of GET /metrics that hold the generation-token counter (at most LIVE_METRIC_LINES), or None when /metrics gives no 200."""
+    url = f"http://127.0.0.1:{port}/metrics"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            if resp.status != 200:
+                return None
+            text = resp.read(LIVE_BODY_BYTES + 1)[:LIVE_BODY_BYTES].decode("utf-8", errors="replace")
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
+        return None
+    return [ln[:300] for ln in text.splitlines() if ln.startswith(LIVE_COUNTER)][:LIVE_METRIC_LINES]
+
+
+def declared_max_model_len(run_sh_text: str | None) -> int | None:
+    """The `--max-model-len` (or `--max_model_len`) value run.sh passes, the last one, or None. Reads run.sh text only."""
+    if not run_sh_text:
+        return None
+    found = re.findall(r"--max[-_]model[-_]len[ =]+(\d{1,12})\b", run_sh_text)
+    return int(found[-1]) if found else None
+
+
+def live_declared_context(proc, run_sh: Path) -> int | None:
+    """The context length the server was told to serve: the `declared_max_model_len` that a launcher put on `proc` (the container route reads it from
+    its edited `docker run` command, because it has no run.sh), else the `--max-model-len` in run.sh."""
+    declared = getattr(proc, "declared_max_model_len", None)
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared > 0:
+        return declared
+    try:
+        text = run_sh.read_text(encoding="utf-8")  # hardening: ok run.sh was written into the stage directory by prepare_swap.py; only a regex reads it
+    except (OSError, UnicodeDecodeError):
+        return None
+    return declared_max_model_len(text)
+
+
+def run_live_probe(cfg: dict, port: int, model: str, declared: int | None) -> dict:
+    """Step (j): the record that goes under `live_probe` in swap-check.json. Nothing here judges."""
+    listing = live_request(port, "/v1/models")
+    completions, metrics = {}, {"before": counter_lines(port), "after": None}
+    for i, (name, prompt) in enumerate(LIVE_COMPLETIONS):
+        completions[name] = live_request(port, "/v1/completions", {"model": model, "prompt": prompt, "temperature": 0, "max_tokens": 10})
+        if i == 0:
+            metrics["after"] = counter_lines(port)
+    return {"ran": True, "model_id": cfg.get("new_model_id"), "model": model, "declared_max_model_len": declared,
+            "listing": listing, "completions": completions, "metrics": metrics}
+
+
 def coherence(text: str) -> dict:
     """Step (f). Returns the numbers and the verdict."""
     ok_chars = sum(1 for c in text if c.isalpha() or c.isdigit() or c.isspace() or c in PUNCTUATION)
@@ -777,11 +877,13 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
     out = {"server_ready_s": round(ready_s, 1), "free_run_text": free_text,
            "matches": matches, "forced": forced, "mismatches": mismatches, "positions_skipped": skipped}
     if suite_setup is not None:
-        out["prompt_suite"] = run_suite(cfg, port, model, STAGE_DIR / "model-dir", suite_setup)
+        out["prompt_suite"] = run_suite(cfg, port, model, STAGE_DIR / "model-dir", suite_setup, tokenizer)
     if cfg.get("_agreement") is not None:
         out["agreement_set"] = run_agreement_set(cfg, port, model, tokenizer, cfg["_agreement"])
     if cfg.get("sampling_probe"):
         out["sampling_probe"] = run_sampling_probe(cfg, port, model, log_path, refresh=getattr(proc, "save_log", None))
+    if cfg.get("live_probe", True):
+        out["live_probe"] = run_live_probe(cfg, port, model, live_declared_context(proc, STAGE_DIR / "run.sh"))
     return out
 
 
@@ -860,6 +962,8 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
                                                                     "n_tokens": n_compared}}
     if "sampling_probe" in m:
         report["sampling_probe"] = m["sampling_probe"]
+    if "live_probe" in m:
+        report["live_probe"] = m["live_probe"]
     swap_json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(draft, indent=2, ensure_ascii=False))
     return draft
