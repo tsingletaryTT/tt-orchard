@@ -4039,3 +4039,12 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Run: `tt-orchard bringup local/tiny-qwen4-dense --full-port --full-port-rehearsal`; stages 0 and 1 passed, stage 2 failed on the port reading one-indexed `ple_layer_ids` as zero-indexed. Details in `docs/run-logs/2026-11-03-tiny-qwen4-rehearsal-first-run.md`.
 - Setup mistakes found on the way (issue 417): a scratch `HF_HOME` is mounted into the coder and made it download 80 GB; a killed coder container blocks the next boot until removed.
 - Issue filed for a bounded repair round after a quick port-check failure.
+
+## 2026-11-03 Scoring record says where the scores were computed (branch `fix-407-scoring-computed-where`, issue 407)
+- Prompt (operator): recently filed issues are to be considered for fixing.
+- Change: the scoring check template reads `COMPUTES_ON` ("in-process" default, or "server") and `server_address(model)` from the port, validates a loopback host and port, probes `/health` and `/v1/models` itself, and writes `computed_on` into the record. The gate (`orchard/scoring_check.py`) refuses a record without `computed_on`, a non-loopback address and a server that did not answer, and asks a server-backed port for those and does not ask it to mention ttnn; an in-process port still needs the mention. The shipped HTTP port (`scripts/scoring_check/port_model.py`) declares itself a server port.
+- Limit: the record shows a server answered at the address the port declared. It does not show that server produced the scores, and the bundle server has no known call that names its device, so the "ask the server for its device" option of the issue is not done.
+- Mutations: 15 guards, each turned a test red; the check of the `where` value survived once because another reason carried the same word, and its test now asks for the specific reason.
+
+- Copilot round 1 on PR 423 (issue 407): `server_address(model)` is asked for in a request of its own after the load timer stops, so `load_s` stays the time of the port's load call; tests: a two-second address callback, a slow load, a raising callback. Three mutations turned tests red.
+- Copilot round 2 on PR 423 (issue 407): the server record's load_s label describes the timed load call and says the server's own model-load time is not measured separately; it no longer claims the model was loaded before the check. The test failed against the old label first.
