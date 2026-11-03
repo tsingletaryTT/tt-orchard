@@ -1,0 +1,3 @@
+target = "0.9.100"
+summary = "audio_result_derive judges a later chip run by the noise floor the base result used, so a result made with a measured floor can still build a package."
+pr = 419
