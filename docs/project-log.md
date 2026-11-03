@@ -4035,3 +4035,4 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Mutations: 15 guards, each turned a test red; the check of the `where` value survived once because another reason carried the same word, and its test now asks for the specific reason.
 
 - Copilot round 1 on PR 423 (issue 407): `server_address(model)` is asked for in a request of its own after the load timer stops, so `load_s` stays the time of the port's load call; tests: a two-second address callback, a slow load, a raising callback. Three mutations turned tests red.
+- Copilot round 2 on PR 423 (issue 407): the server record's load_s label describes the timed load call and says the server's own model-load time is not measured separately; it no longer claims the model was loaded before the check. The test failed against the old label first.

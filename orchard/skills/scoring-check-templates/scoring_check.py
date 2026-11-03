@@ -699,7 +699,7 @@ def computed_on_record(where, address) -> dict:
     host = m.group(1)[1:-1] if m.group(1).startswith("[") else m.group(1)
     return {"where": "server", "server": {"address": address, "probe": probe_server(host, int(m.group(2)))},
             "chips": "the chips this check opened; the model ran in the server, which this record does not tie to them",
-            "load_s": "the time of the port's own load call; the server had loaded its model before this check began"}
+            "load_s": "the time of the port's own load call; the server's own model-load time is not measured separately"}
 
 
 def port_sources() -> list:

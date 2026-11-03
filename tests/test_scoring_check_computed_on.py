@@ -241,3 +241,19 @@ def test_a_server_address_callback_that_raises_fails_the_run_with_its_error(tmp_
     run, stage, done = go(tmp_path, src)
     assert done.returncode == 2 and "no address yet" in done.stdout
     assert not (stage / "evidence" / "scoring-check.json").exists()
+
+
+def test_the_load_label_describes_the_timed_call_and_does_not_claim_the_server_was_preloaded(tmp_path, server):
+    """A server-backed port may start or load the server's model inside `load()`, and the health probe cannot say when the model was loaded.
+    The label says what is timed and that the server's own model-load time is not measured separately."""
+    run, stage, done = go(tmp_path, SERVER_PORT_SRC.format(address=server.address))
+    assert done.returncode == 0, done.stdout + done.stderr
+    label = record(stage)["computed_on"]["load_s"]
+    assert "before this check began" not in label and "had loaded" not in label
+    assert "load call" in label and "not measured separately" in label
+
+
+def test_the_in_process_load_label_is_unchanged_in_meaning(tmp_path):
+    run, stage, done = go(tmp_path, HONEST)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "load call" in record(stage)["computed_on"]["load_s"]
