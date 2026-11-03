@@ -25,8 +25,14 @@ free-run text of at least 20 non-space characters and 4 different words (`orchar
 random weights emits byte noise, so a correct port of it fails stage 2 on that one field. The rehearsal therefore cannot end in a stage 2
 pass without either a gate change or a false `coherent`. This note takes this policy: the pilot is read for the other gate reasons
 (top-1 agreement, token count, provenance, port sources), and a failure whose only reason is `coherent` counts as a pass of the
-rehearsal. The agent must never write `coherent: true` for noise; a run where it does is a finding about the agent. A rehearsal switch
-that waives the coherence field is a supervisor change, filed as an issue and not part of this PR.
+rehearsal. The agent must never write `coherent: true` for noise; a run where it does is a finding about the agent.
+
+Update (issue 357): `tt-orchard bringup ... --full-port --full-port-rehearsal` (or `python3 -m orchard.supervisor run ... --full-port
+--full-port-rehearsal`) waives the `coherent` field and no other check. The option is given when the run starts, is recorded in
+`run_start` as `full_port_rehearsal`, and a resume keeps it and cannot add it. The supervisor passes it to the gate from the ledger; a
+field in `result.json` does nothing. When stage 2 passes with `coherent` not true, the ledger gets a decision
+`full-port rehearsal: coherence waived`. The text floor (20 non-space characters, 4 different words) still applies: a free run of
+noise that is shorter than that fails, and that failure is data about the port.
 
 ## 2. What the model is
 
@@ -171,9 +177,9 @@ CPU reference. Cost: one board for each hardware test, a few minutes each.
    with no hub entry, stop and file an issue; do not work around it.
 4. Run: `tt-orchard bringup local/tiny-qwen4-dense --no-fetch --offline --full-port --base ...` under the operator's usual
    coder and lease settings. Expected end state: the run stops after stage 2 with code `full-port-stages-unbuilt` (the design's
-   slice 1) only if the gate accepts the port, and it cannot while the free-run text is noise (see the known blocker in section 1). The
-   expected end state is a stage 2 failure whose reasons are exactly the coherence ones (`coherent must be true`, and possibly the
-   free-run word count). Any other reason (top-1 agreement, token count, provenance, port sources) is data about the coder or the
+   slice 1) only if the gate accepts the port. Run it with `--full-port-rehearsal` (issue 357), which waives the `coherent` field. Without
+   that option the expected end state is a stage 2 failure whose reasons are exactly the coherence ones (`coherent must be true`, and
+   possibly the free-run word count). Any other reason (top-1 agreement, token count, provenance, port sources) is data about the coder or the
    supervisor. Read the gate's full list of reasons in the run's ledger before deciding.
 5. Review `stages/2/port/` by hand. The gate checks provenance and agreement, and a person decides whether the port is what it
    claims to be (design section 3.3 lists what the gate does not prove).

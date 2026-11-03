@@ -10,6 +10,7 @@ time to the first content chunk), a long prompt, and two requests the server mus
 Exit status 0 when every check passed."""
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -44,6 +45,9 @@ def main():
     a = ap.parse_args()
     base = f"http://127.0.0.1:{a.port}"
     res, checks = {}, []
+    # Decode speed through the server falls with the host load (18.6 tok/s above load 20, 33.6 at load 5), so the load average is
+    # recorded before and after the requests (issue 301).
+    load_before = list(os.getloadavg())
 
     def check(name, ok, detail=""):
         checks.append({"check": name, "ok": bool(ok), "detail": str(detail)[:200]})
@@ -76,6 +80,7 @@ def main():
     code, r, _ = post(base, {"messages": []})
     check("an empty messages list is refused with 400", code == 400, code)
     res["checks"] = checks
+    res["host_load"] = {"before": load_before, "after": list(os.getloadavg())}
     if a.out:
         json.dump(res, open(a.out, "w"), indent=1)
     sys.exit(0 if all(c["ok"] for c in checks) else 1)

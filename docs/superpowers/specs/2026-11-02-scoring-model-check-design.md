@@ -1,7 +1,10 @@
 # Scoring models: a stage 2 check on score parity
 
-Date: 2026-11-02. Issue 358. Status: the first slice is built (a stage 1 recorder for a Qwen3-style reranker, a supervisor-owned check
-template, and a gate). It runs against fakes on the CPU. Nothing here ran on a chip, and nothing is wired into the stage machine yet.
+Date: 2026-11-02, updated 2026-11-03. Issue 358. Status: built and run against fakes on the CPU. Issue 375 ran the first slice once on a chip,
+through a model server and not through the supervisor (section 9). Nothing else here ran on a chip.
+Slice 1 (PR 383): a stage 1 recorder for a Qwen3-style reranker, a supervisor-owned check template, and a gate. Slice 2 (issues 376 to 380):
+the embedding kind, the model kind in stage 0 and the stage machine, the stage 0 rule for a model with no output head, retrieval rows
+(NDCG and Hit@1) computed from the recorded scores, and media (image and video files) in the pair set. Section 8 lists what is left.
 
 ## 1. The problem
 
@@ -17,27 +20,39 @@ writes the model code, the supervisor writes the check and the record).
 A model has a kind: `generative` (every model before this note), `reranker` or `embedding`. The kind decides which stage 1 reference is
 recorded and which stage 2 check runs. This slice builds `reranker` only. The check template refuses `embedding` with a message.
 
-How the kind is chosen is not built. The proposal is that stage 0 reads it from the model card (`pipeline_tag` of `text-ranking`,
-`feature-extraction` or `sentence-similarity`) and the architecture name, writes `model_kind` into `delta.json`, and the operator can
-override it with a flag. The kind is a fact about how the model is used. It is not an outcome class (`classes.py`), because a reranker
+How the kind is chosen (`orchard/model_kind.py`, issue 378). The supervisor decides it when stage 0 passes, in this order: the operator's
+`--model-kind`; the model card's `pipeline_tag` (`text-ranking` is a reranker, `feature-extraction` and `sentence-similarity` are embedding
+models); an architecture name that contains `Embedding`; otherwise `generative`. The answer and its source go into stage 0's passing
+`stage_end` (`model_kind`), where a resume reads it, and into `hazard-scan.json` (`facts.model_kind`). It is not written into `delta.json`,
+which the triage template writes and an agent can edit. A bare backbone architecture alone does not make a model an embedding model,
+because vision and audio encoders are also bare backbones. Qwen3-Reranker names `Qwen3ForCausalLM`, so only the card or the operator can
+say it is a reranker. The kind is a fact about how the model is used. It is not an outcome class (`classes.py`), because a reranker
 with the same tensors as its base model is `weights-only` and one with a different encoder is `full-port`. The two choices are
 independent.
 
 ## 3. What stage 0 does for a scoring model
 
-Stage 0 is unchanged in this slice. What it would do, from reading `hazards.py`, `nearest.py` and `preflight.py`:
+The notes below were written from reading `hazards.py`, `nearest.py` and `preflight.py` before slice 2. Slice 2 builds the two changes marked
+"built".
 
 - Nearest bundle. Today stage 0 names the closest installed bundle and compares tensors and config with it. The 4B reranker is a
   Qwen3 dense decoder with tied embeddings, so a Qwen3 text bundle of similar size is its nearest bundle, and the tensor comparison
   finds no difference. Class `weights-only`: the swap path loads the new weights into that bundle. What differs is how the output is
   read, and no weights-only stage knows that. The bundles solve this with a separate serving stack (a `/v1/rerank` API over a two-row
   head). A scoring model therefore needs the check in this note and a serving route that stage 5 does not have yet (section 8).
-- The embedding model has no `lm_head` and no tied output head to compare. Stage 0 would list the nearest bundle's `lm_head` under "only
-  in the nearest model". How that should classify is an open question (section 8). The 8B VL embedding bundle is a Qwen3-VL with its text
-  tower read at the last position after the final norm, so the nearest bundle would be a Qwen3-VL one.
-- Hazard scan. The scan predicts failures from the config alone. Its vocabulary-per-die hazard (65,536 columns per die) concerns a full
-  output head, and a reranker reads two rows of it. The scan keeps running and a hit on that row needs a note for this kind: "reads two
-  rows, so the sampler limit does not apply". The tile and mixer checks apply as they are, because the backbone is the same.
+- The embedding model has no `lm_head` and no tied output head to compare. Before slice 2 stage 0 listed the nearest bundle's `lm_head`
+  under "only in the nearest model", which made the class `full-port`. Built (issue 380): the triage template reads the architecture names
+  of the new model's config. When none of them reads a vocabulary head (`ForCausalLM`, `ForConditionalGeneration`, `LMHeadModel`,
+  `ForMaskedLM`, `ForSeq2SeqLM`, `ForPreTraining`) and no tensor of the model is an `lm_head`, the model has no output head to use
+  (`head.not_used` in `delta.json`). The nearest model's `lm_head` is then not a missing tensor, the class follows the backbone (`weights-only`
+  when the backbone matches), and a hazard in `delta.json` says the generated-token check does not apply. The class says nothing about how the
+  output is read: the scoring check, chosen by the kind, does that. A `ForCausalLM` model with tied embeddings names a head architecture and is
+  unchanged. The 8B VL embedding bundle is a Qwen3-VL with its text tower read at the last position after the final norm, so the nearest bundle
+  would be a Qwen3-VL one.
+- Hazard scan. The scan predicts failures from the config alone. Its vocabulary hazards (65,536 columns per die, and a vocabulary that is not
+  whole tiles) concern a full output head. Built (issue 380): for a reranker (two rows of the head), for an embedding model (no head) and for a
+  config that describes a bare backbone, `scan_model_hazards` leaves out those two hazards and its notes say which would have hit and why they
+  do not apply. The tile, expert and mixer checks apply as they are, because the backbone is the same.
 
 ## 4. Stage 1: the reference
 
@@ -73,7 +88,8 @@ The supervisor copies `orchard/skills/scoring-check-templates/scoring_check.py` 
 |---|---|---|
 | `load(model_dir, mesh_device) -> model` | all kinds | called, timed as `load_s` |
 | `score_pairs(model, pairs: list[list[int]]) -> list[float]` | `reranker` | called, one group of prompts at a time |
-| `embed(model, ids: list[int]) -> list[float]` | `embedding` | documented, not called |
+| a `media=` argument on `score_pairs` and `embed` | rows that name files | passed only when the pair file has media (issue 377) |
+| `embed(model, ids: list[int]) -> list[float]` | `embedding` | called once for each input (issue 376) |
 | `close(model) -> None` | all kinds | called |
 
 The template runs the port in a second process and takes only a list of finite numbers per request. The parent holds the pair set, the
@@ -95,6 +111,27 @@ The numbers, computed by the parent and recomputed by the gate from the scores i
 
 These are the four measurements the 4B and 8B VL reranker bundles report.
 
+For an embedding model (issue 376) the parent computes the cosine of each chip vector to the Hugging Face vector (the last position's
+final-normed hidden state, L2 normalised, fp32, recorded by `python3 -m orchard.scoring_reference embed`), and the mean and the minimum over all
+inputs and for each input kind (text, multilingual, code, long). The check refuses a vector of the wrong length, a value that is not a finite
+number, and a vector of all zeros. The record keeps the chip's vectors, because the gate recomputes every cosine. The reference vectors stay in the
+stage 1 file, which the record names by sha256. A record of 24 inputs of 4,096 numbers is about 2 MB, and the limit is 500,000 numbers (about 10 MB).
+The shape of the bounds is the public 8B VL embedding bundle's accuracy table (section 6). The nearest-document count that bundle also reports
+(3 of 29 queries had a different nearest document) is not built.
+
+Retrieval rows (issue 379). When the pair file labels each pair relevant or not, the check computes NDCG@10 and Hit@1 of the reference ranking
+and of the chip ranking from the recorded scores, per group, and records both with their difference. The gate recomputes them and bounds how far
+the chip falls below the reference (`ndcg_drop_max`, `hit1_drop_max`). The set is the shipped 8 groups of 4 documents, so these are parity rows
+on a small set. The bundles' rows on subsets of MTEB reranking, MIRACL, ViDoRe and MMEB are not built: they need datasets whose licences and
+sizes have to be checked before any text goes into the repository.
+
+Media (issue 377). A row of the pair file may list up to 8 `media` entries (`kind` image or video, `path` under
+`stages/1/evidence/reference/media/`, `sha256`). The recorder stores a file there and the hash in the row, so the reference and the port get
+the same bytes. The check opens each file one path component at a time without following a link in any component, and reads it under 16 MiB (at most 64 files and 128 MiB in all), checks the sha256,
+and hands the bytes to the port through `media=`; the worker checks the sha256 again when it reads the file. The gate reads the files again and
+refuses one that changed, was removed or became a link after the run. The record stays small because it holds the media hashes and none of the media. The recorder for
+a vision-language model (a processor that turns an image into the model's tensors on the CPU) is not built, so the interface runs against fakes only.
+
 The gate (`orchard/scoring_check.py`) refuses: a test that did not exit 0 or ran another command; an output file that is not the one the
 supervisor recorded or has other than one mark line that matches the record; a template copy that is not the shipped file; a record
 without the shipped template's sha256; a config that is not the one the record names; a record whose pair file, reference file, scores or
@@ -112,13 +149,26 @@ the leased ones; port files that changed, were added, are links, do not mention 
 | order kept at least | 0.98 | both bundles 1.0 |
 | pairs, groups, separated pairs at least | 24, 6, 10 | the shipped set has 32 pairs and 8 groups |
 
+Two more reranker bounds are choices with no public table behind them: NDCG@10 of the chip may fall below the reference's by at most 0.03, and
+Hit@1 by at most 0.15 (one group in the shipped 8 is 0.125).
+
+The embedding bounds (`EMBEDDING_BOUNDS`) come from the public card of the 8B VL embedding bundle (raahemnabeel/qwen3-vl-embedding-8b,
+`doc/accuracy.md`): over 81 inputs the cosine to the Hugging Face fp32 vector is 0.9977 on average and 0.9926 at the minimum, and 0.9960 on
+average for the image and the video inputs.
+
+| Bound | Default | Evidence |
+|---|---|---|
+| mean cosine at least, overall and for each kind | 0.995 | the bundle's 0.9977 overall and 0.9960 for image and video |
+| minimum cosine at least, overall and for each kind | 0.985 | the bundle's 0.9926 |
+| inputs, kinds at least | 24, 3 | the shipped set has 24 inputs of 4 kinds |
+
 The defaults are `DEFAULT_BOUNDS` in `orchard/scoring_check.py`. The supervisor copies them into `scoring_check_config.json` under
 `bounds`. The gate applies the default for each key and replaces it with the config's value only when the config is stricter. A looser
 value, a value that is not a finite number and an unknown key are each a reason. So a coder who edits the config cannot loosen a bound,
 and an operator who wants a stricter bar for one model can set it there. Letting an operator loosen a bound for one model (for example a
 bfp8 weight policy that costs more score error) needs a ledger entry and a card line that says so. That is not built.
 
-These numbers are choices made from the public tables. They have not been compared with a run through this supervisor on a chip. The
+These numbers are choices made from the public tables. Section 9 compares them with one chip run (not run by the supervisor). The
 bundles' absolute differences depend on the score scale of their model, and a model with a different scale needs its own review of the
 two absolute bounds.
 
@@ -132,15 +182,55 @@ A process the port starts in a session of its own (`setsid`, a double fork) surv
 an abort, because the template's cleanup dies in the same kill. That needs a cgroup or a PID namespace (issue 390).
 
 Parity with Hugging Face on 32 pairs is not a quality measure. The bundles also report retrieval benchmarks (NDCG@10 on subsets of MTEB
-reranking and MIRACL) as parity rows, and this slice has none.
+reranking and MIRACL) as parity rows. Slice 2 computes NDCG and Hit@1 on the shipped set only (section 5).
 
-## 8. Out of scope for this slice (filed as issues)
+## 8. What is built and what is left
 
-1. (issue 375) A real run on a board: the 4B reranker port under `--full-port` or the weights-swap path, with the recorder run on the real snapshot.
-2. (issue 376) Embedding models: `embed` in the template, cosine to the Hugging Face vector (mean and minimum) per input kind, bounds, and the
-   recorder for an embedding model (the last-token hidden state after the final norm, L2 normalised).
-3. (issue 377) Vision pairs and video inputs: the pair set carries ids only, and a vision-language reranker or embedder needs pixel inputs.
-4. (issue 378) Stage machine wiring: the `model_kind` field in stage 0, the route to this check, a finish step and `result.json`, and a stage 5
-   serving check for a `/v1/rerank` style API.
-5. (issue 379) Retrieval benchmark parity rows (NDCG, Hit@1) as an optional second stage 2 record.
-6. (issue 380) How stage 0 classifies a model with no `lm_head`.
+Built in slice 2 (CPU and fakes only):
+
+1. (issue 376) The embedding kind: the recorder (`embed`), `embed` in the template, cosine mean and minimum per input kind, bounds, the gate.
+   The embedding bounds in section 6.
+2. (issue 378) The model kind in stage 0 and the stage machine: `--model-kind`, the card and architecture rules, `stage_end` `model_kind`,
+   stage 1 (skill `scoring-reference`, gate `gate_scoring_reference`) and stage 2 (skill `scoring-check`, gate `gate_scoring`, draft
+   `scoring_check`) for class `weights-only`, or `full-port` with `--full-port`; no finish step (the check's record is the result); the
+   ledger holds the sha256 of the template and the config as copied, and stage 2 refuses a reference that is not the file stage 1's gate
+   accepted; a pause before stage 3 and a pause before stage 1 for a class with no route (block code `scoring-route`).
+3. (issue 379) NDCG@10 and Hit@1 from the recorded scores, with bounds.
+4. (issue 380) The stage 0 rule for a model with no output head, and the hazard scan's handling of it (section 3).
+5. (issue 377) Media in the pair set and in the port interface, with size bounds and hash checks, against fakes.
+
+Left, each in a public issue:
+
+1. (issue 375, done in part: section 9) A real run on a board. The recorder ran on the real snapshot and the check ran against the bundle's server. What is left: the check run by the supervisor with a port the coder wrote, under `--full-port` or the weights-swap path.
+2. A stage 5 serving check for a `/v1/rerank` style API, and stages 3, 4 and 6 for a scoring model (the run pauses after stage 2).
+3. A recorder for a vision-language reranker or embedding model (a processor and real image and video inputs) and a real run of one.
+4. Retrieval benchmark subsets (MTEB reranking, MIRACL, ViDoRe, MMEB) with their licences checked, and the nearest-document count.
+5. A scoring route for the classes other than `weights-only` and `full-port` (`weights+sidecar`, `vocab-trim`, `stock-runtime`).
+
+## 9. The first chip run (issue 375, 2026-11-02)
+
+Run log: `docs/run-logs/2026-11-02-scoring-check-chip-run.md`. The recorder ran on the CPU for Qwen/Qwen3-Reranker-4B (fp32 and bf16). The
+chip scores came from the public bundle's own server (`raahemnabeel/qwen3-reranker-4b`, profile p150, one chip of a board). The port
+module `scripts/scoring_check/port_model.py` decodes the prompt ids to text, checks that the prompt built again from the texts has the
+same ids, sends the texts to the server on the loopback interface, checks the server's token count, and returns the raw scores. The
+shipped template ran under a lease and the gate passed.
+
+| number | this run (32 pairs, 8 groups) | the 4B bundle's table (188 pairs, 33 groups) | bound |
+|---|---|---|---|
+| Pearson r | 0.99940 | 0.9997 | at least 0.998 |
+| mean absolute difference | 0.189 | 0.140 | at most 0.25 |
+| max absolute difference | 0.543 | 0.64 | at most 1.0 |
+| top-1 groups | 8 of 8 | 33 of 33 | at least 0.95 |
+| order kept | 43 of 43 | 100% of 449 | at least 0.98 |
+
+The numbers were the same in a second run (the chip scores are bit-identical). Against a bf16 CPU reference they are 0.99938, 0.202, 0.474,
+8 of 8 and 43 of 43. The bounds held. No bound was too tight for the policy the bundle ships. A bound that is too loose cannot be shown
+with one passing build. Two points for the operator:
+
+- The top-1 and order floors allow no flip on this set. With 8 groups, 7 of 8 is 0.875. With 43 separated pairs, 42 of 43 is 0.977. The
+  smallest top-1 margin in the reference is 7.3 logits, so no flip is near. The smallest separated gap is 0.66 logits and three pairs
+  have a gap under 1.1, so one flip is possible from an error that the mean bound still accepts. If the operator wants the order floor to
+  allow one flip on this set, it is 0.97. Nothing here shows a build that flips, so the default is unchanged.
+- The mean difference is 1.35 times the bundle's table on a different set (long documents of about 1,400 tokens carry the largest
+  differences, 0.258 mean). The bundle's bfp8 policy (0.217 on its own set) would likely exceed 0.25 here. That is a prediction. No
+  other policy was run.

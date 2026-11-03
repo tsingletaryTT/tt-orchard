@@ -239,9 +239,14 @@ def test_a_relative_bundle_dir_is_read_from_the_run_directory(tmp_path):
     assert msg and "Qwen/Qwen3.8-27B" in msg
 
 
-def test_a_resumed_stage_4_checks_its_saved_plan_before_any_hardware(tmp_path):
-    """_run_test_list loaded tests/plan.json on a resume and never read the configurations again."""
+def test_a_resumed_stage_4_checks_its_saved_plan_before_any_hardware(tmp_path, monkeypatch):
+    """_run_test_list loaded tests/plan.json on a resume and never read the configurations again.
+
+    Issue 334: this test used to assign `sup_mod.load_plan` and then call `importlib.reload(sup_mod)` to undo it. A reload makes a new
+    `Supervisor` class in the same module, so every test that patched the class it imported at collection (test_swap_prepare patches
+    `_draft`) patched a class `build()` no longer used, and failed in any run where this test came first on the same worker."""
     import orchard.supervisor as sup_mod
+    cls_before = sup_mod.Supervisor
     write_delta(tmp_path)
     stage = tmp_path / "stages" / "4"
     write_cfg(stage / "configs" / "4" / "swap_config.json", "Qwen/Qwen3.8-27B")
@@ -250,13 +255,10 @@ def test_a_resumed_stage_4_checks_its_saved_plan_before_any_hardware(tmp_path):
     sup.paths = type("P", (), {"tt_model_root": tmp_path / "models", "operator_home": tmp_path / "op"})()
     sup.lab = None
     spec = type("S", (), {"number": 4})()
-    sup_mod.load_plan = lambda d: [type("T", (), {"chips": 4})()]       # a saved plan with a 4-chip test exists
-    try:
-        status, reasons, gate = sup._run_test_list(spec, stage, False, True)
-    finally:
-        import importlib
-        importlib.reload(sup_mod)
+    monkeypatch.setattr(sup_mod, "load_plan", lambda d: [type("T", (), {"chips": 4})()])       # a saved plan with a 4-chip test exists
+    status, reasons, gate = sup._run_test_list(spec, stage, False, True)
     assert status == "fail" and any("4-chip" in r and "Qwen/Qwen3.8-27B" in r for r in reasons), (status, reasons)
+    assert sup_mod.Supervisor is cls_before is Supervisor       # no reload: the class other tests patched is the class build() makes
 
 
 # ---- review of PR 70, fourth round --------------------------------------------------------------------------------------

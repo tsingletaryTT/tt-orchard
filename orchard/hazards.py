@@ -337,7 +337,13 @@ def _division_hits(d: mc.ModelDims, dies: int, x: dict) -> dict[str, tuple]:
     return hits
 
 
-def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, limits=None, tile_multiples=None) -> HazardScan:
+# The hazards of a full vocabulary projection: the LM head and the sampler that reads it (issue 380). A reranker reads two rows of the head
+# (yes and no), and an embedding model has no head, so neither runs the projection or the sampler these two rows describe.
+FULL_HEAD_HAZARDS = ("vocab_per_die_above_65536", "vocab_not_whole_tiles")
+
+
+def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, limits=None, tile_multiples=None,
+                       kind: str = "generative", has_output_head: bool | None = None) -> HazardScan:
     """Scan `model_config` against the hazard table and the nearest bundle's config (None when there is none).
 
     `dies` is the number of dies the vocabulary is split over (default 2, one p300 board). `limits` supplies the limits that are not
@@ -345,9 +351,15 @@ def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, li
     the fused kernels accept, when the caller knows it. Raises HazardInputError for an unusable config or option.
 
     A hazard the nearest bundle's own config also hits is marked `also_on_nearest`. Mixers and the top-k and KV-head comparisons need
-    the nearest config; without it they are skipped and the notes say so."""
+    the nearest config; without it they are skipped and the notes say so.
+
+    `kind` is the model kind (orchard/model_kind.py): for a `reranker` or an `embedding` model, and for any model whose config describes
+    a bare backbone (`has_output_head` False), the two hazards of a full vocabulary projection (FULL_HEAD_HAZARDS) are left out, and a
+    note says so. Every other hazard is scanned as before, because the backbone is the same."""
     if isinstance(dies, bool) or not isinstance(dies, int) or dies < 1:
         raise HazardInputError("dies must be a whole number of at least 1")
+    if kind not in ("generative", "reranker", "embedding"):
+        raise HazardInputError(f"kind must be generative, reranker or embedding, got {kind!r}")
     lim, mult = _limits(limits), _tile_multiples(tile_multiples)
     d = _dims(model_config, "model config")
     n = _dims(nearest_bundle_config, "nearest bundle config") if nearest_bundle_config is not None else None
@@ -356,6 +368,16 @@ def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, li
     mine = _hits(d, dies, lim, mult, xm)
     theirs = _hits(n, dies, lim, mult, xn) if n is not None else {}
     notes: list[str] = []
+    if kind != "generative" or has_output_head is False:
+        skipped = [h for h in FULL_HEAD_HAZARDS if h in mine]
+        for h in FULL_HEAD_HAZARDS:
+            mine.pop(h, None)
+            theirs.pop(h, None)
+        why = ("it reads two rows of the output head (yes and no), so the full-vocabulary projection and the sampler do not run" if kind == "reranker"
+               else "it has no output head, so no vocabulary projection or sampler runs")
+        notes.append(f"the model kind is {kind}" + (" with a bare backbone" if has_output_head is False and kind == "generative" else "")
+                     + f": {why}, and the vocabulary hazards ({', '.join(FULL_HEAD_HAZARDS)}) were not applied"
+                     + (f" (they would have hit: {', '.join(skipped)})" if skipped else ""))
     if xm["hc_count"] and xm["hc_lowrank"] is None:
         notes.append("the config has hc_count but no hc_lowrank; the scan does not assume one (a full-size reading is 640, a TP2 shard 320)")
     if xm["hc_lowrank"] and xm["hc_count"] is None:
@@ -399,7 +421,7 @@ def scan_model_hazards(model_config, nearest_bundle_config, *, dies: int = 2, li
              "tiles": {k: {"value": v, "tiles": v / TILE, "whole": v % TILE == 0} for k, v in _dimension_values(d).items()},
              "routed_experts": d.routed_experts, "router_top_k": d.top_k, "vocab_per_die": math.ceil(d.vocab / dies),
              "mixers": _mixers(d), "hyper_connections": hc if (hc["hc_count"] or hc["hc_lowrank"]) else None,
-             "qsa_heads": xm["qsa_heads"], "dies_checked": _dies_checked(dies), "dense": not d.routed_experts}
+             "qsa_heads": xm["qsa_heads"], "dies_checked": _dies_checked(dies), "dense": not d.routed_experts, "model_kind": kind}
     return HazardScan(tuple(found), facts, tuple(notes), dies)
 
 

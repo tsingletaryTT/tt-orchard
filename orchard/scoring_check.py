@@ -5,8 +5,13 @@
 The supervisor copies skills/scoring-check-templates/scoring_check.py to stages/2/scoring_check.py, drafts
 stages/2/scoring_check_config.json (`draft_config`), and runs COMMAND under a lease. The template writes evidence/scoring-check.json
 (RECORD_SCHEMA) and prints `SCORING_CHECK_SHA256 <hex>` of it as its last line. This module reads the files that run leaves and returns
-the reasons the result cannot be believed. It holds no state and starts nothing. Slice 1 has no stage-machine wiring and no result.json:
-`check(stage_dir, run_dir)` is the whole gate.
+the reasons the result cannot be believed. It holds no state and starts nothing. `check(stage_dir, run_dir, kind=None)` is the whole gate; the stage machine (orchard/stages.py, `gate_scoring`) calls it and
+passes the model kind it took from stage 0 (issue 378).
+
+Two kinds. A `reranker` is judged on its scores (Pearson, absolute differences, top document, order, and NDCG and Hit@1 computed from the
+scores and the pair file's relevance labels). An `embedding` model is judged on its vectors: the cosine to the Hugging Face vector, as a
+mean and a minimum, overall and for each input kind (issue 376). The record keeps the chip's vectors, because the gate recomputes every
+cosine; the reference vectors stay in the stage 1 file the record names by sha256.
 
 What it checks, each as a named reason:
 
@@ -23,7 +28,8 @@ What it checks, each as a named reason:
 
 What this does not show: the same limits as the full-port check. The numbers come from a test the supervisor ran, and a port that returns
 the reference's scores without computing them looks the same as one that computed them. The bounds are choices made from two public
-bundles' accuracy tables and have not been checked against a chip run through the supervisor.
+bundles' accuracy tables. One chip run (issue 375, docs/run-logs/2026-11-02-scoring-check-chip-run.md) passed them: it was not run by the
+supervisor, and it covers the one weight policy the 4B bundle ships.
 """
 from __future__ import annotations
 
@@ -37,7 +43,8 @@ from orchard import safeio
 from orchard.full_port import _inside, _json, _sha
 
 RECORD_SCHEMA = "orchard-scoring-check/1"
-KIND = "reranker"
+KIND = "reranker"                     # the default kind; `check` takes the kind from the caller or the config
+KINDS = ("reranker", "embedding")
 REFERENCE_FILE = "stages/1/evidence/reference/scoring-reference.json"
 PAIRS_FILE = "stages/1/evidence/reference/scoring-pairs.json"
 PORT_DIR = "stages/2/port/"
@@ -57,13 +64,24 @@ JSON_MAX = 16 * 1024 * 1024           # choice: the pair file is a few MB at mos
 SOURCE_MAX = 2 * 1024 * 1024
 MAX_PAIRS = 4096                      # the same limit as the template's: more pairs than this are not the set the recorder wrote
 MAX_VALUE = 1e6                       # the same limit as the template's, for one score
+MAX_VECTOR_NUMEL = 500_000            # the same limit as the template's: numbers in all chip vectors of one record (a record this size is about 10 MB)
+MAX_DIM = 16384                       # the same limit as the template's: the length of one vector
+RETRIEVAL_K = 10                      # the same value as the template's (the bundles report NDCG@10)
+MEDIA_DIR = "stages/1/evidence/reference/media/"      # the same values as the template's, for the media files a pair file names
+MEDIA_KINDS = ("image", "video")
+MEDIA_PER_ROW = 8
+MEDIA_FILES_MAX = 64
+MEDIA_MAX = 16 * 1024 * 1024
+MAX_IDS = 1 << 20                     # the same limit as the template's: token ids in one prompt
 TOLERANCE = 1e-9                      # the gate's recomputed number against the number the record reports
 
 # Bounds, with the evidence each is drawn from. The 4B reranker bundle (raahemnabeel/qwen3-reranker-4b, doc/accuracy.md) reports Pearson r
 # 0.9997, mean/max absolute difference 0.140/0.64 logits, top-1 33/33 groups and 100% of separated pairs in order; the 8B VL bundle reports
 # 0.9991, 0.107/0.39 and 41/41. Each bound below leaves room around those numbers and sits at or inside the policies the 4B bundle
-# measured and did not select (bfp8 MLP: 0.217/0.63 with top-1 31/32; MLP LoFi: 0.359/0.93 with r 0.99885). They are choices, not
-# measurements of this repository's own port runs. "min" bounds are floors, "max" bounds are ceilings.
+# measured and did not select (bfp8 MLP: 0.217/0.63 with top-1 31/32; MLP LoFi: 0.359/0.93 with r 0.99885). They are choices made from
+# those tables. The one chip run so far (issue 375: the bundle's selected policy, on the 32-pair set) measured Pearson 0.99940, mean/max
+# 0.189/0.543 logits, top-1 8/8 groups and 43/43 separated pairs in order, so it passes each bound. On a set of 8 groups and 43 separated
+# pairs the top-1 and order floors allow no flip at all (7/8 is 0.875, 42/43 is 0.977). "min" bounds are floors, "max" bounds are ceilings.
 DEFAULT_BOUNDS = {
     "pearson_min": 0.998,             # the 4B bundle's selected policy: 0.9997; its LoFi policy: 0.99885
     "mean_abs_diff_max": 0.25,        # logits; the selected policy 0.14, the bfp8 policy 0.217
@@ -73,8 +91,26 @@ DEFAULT_BOUNDS = {
     "min_pairs": 24,                  # a set smaller than the shipped one (32) cannot carry the shares above
     "min_groups": 6,
     "min_order_pairs": 10,            # separated pairs needed for the order share to mean something
+    # Retrieval rows (issue 379), judged only when the pair file labels which documents are relevant. The shipped set has 8 groups of 4, so
+    # one group is 0.125 of Hit@1. These two are choices: no public table gives a chip-minus-Hugging-Face NDCG on this set.
+    "ndcg_drop_max": 0.03,            # NDCG@10 of the chip may fall below the reference's by at most this
+    "hit1_drop_max": 0.15,            # Hit@1 of the chip may fall below the reference's by at most this (one group in 8 is 0.125)
 }
 _FLOORS = ("pearson_min", "top1_match_min", "order_kept_min", "min_pairs", "min_groups", "min_order_pairs")
+
+# The embedding bounds, from the public card of the 8B vision-language embedding bundle (raahemnabeel/qwen3-vl-embedding-8b, doc/accuracy.md):
+# over 81 inputs the cosine to the Hugging Face fp32 vector is 0.9977 on average and 0.9926 at the minimum, and 0.9960 on average for the image
+# and the video inputs. The floors sit below those numbers, so a port that matches the bundle passes and one with a clear error does not.
+# They are choices. No run through this supervisor has measured them. They apply to the mean and the minimum of every input kind and of all
+# inputs together.
+EMBEDDING_BOUNDS = {
+    "cosine_mean_min": 0.995,         # the bundle's overall mean is 0.9977 and its image and video means are 0.9960
+    "cosine_min_min": 0.985,          # the bundle's overall minimum is 0.9926
+    "min_inputs": 24,                 # the shipped set has 24 inputs of 4 kinds; fewer cannot carry a per-kind minimum
+    "min_kinds": 3,
+}
+_EMBEDDING_FLOORS = tuple(EMBEDDING_BOUNDS)           # every embedding bound is a floor
+BOUNDS_OF = {"reranker": (DEFAULT_BOUNDS, _FLOORS), "embedding": (EMBEDDING_BOUNDS, _EMBEDDING_FLOORS)}
 
 
 def template_sha256() -> str | None:
@@ -84,9 +120,11 @@ def template_sha256() -> str | None:
         return None
 
 
-def draft_config(model_snapshot: str) -> dict:
+def draft_config(model_snapshot: str, kind: str = KIND) -> dict:
     """The config the supervisor writes next to the template: the snapshot, the kind and the bounds in force."""
-    return {"model_snapshot": model_snapshot, "kind": KIND, "bounds": dict(DEFAULT_BOUNDS)}
+    if kind not in BOUNDS_OF:
+        raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
+    return {"model_snapshot": model_snapshot, "kind": kind, "bounds": dict(BOUNDS_OF[kind][0])}
 
 
 def _num(x) -> bool:
@@ -146,24 +184,84 @@ def parity(reference, chip, groups) -> dict:
             "order_pairs": total, "order_pairs_kept": kept, "order_kept": (kept / total) if total else None}
 
 
+def cosine(a, b) -> float:
+    """Cosine of two equal-length vectors. 0.0 when either is all zeros (the cosine is undefined). Clamped to [-1, 1]. Each vector is divided by
+    its largest absolute value first, so a vector of tiny finite numbers (squares that would underflow to 0.0) has the same cosine as the same
+    vector scaled up, and one whose largest value is 1 has a norm of at least 1."""
+    ma = max((abs(x) for x in a), default=0.0)
+    mb = max((abs(y) for y in b), default=0.0)
+    if ma <= 0.0 or mb <= 0.0:
+        return 0.0
+    a = [x / ma for x in a]
+    b = [y / mb for y in b]
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return max(-1.0, min(1.0, dot / na / nb))
+
+
+def embed_numbers(reference, chip, kinds) -> dict:
+    """The cosine of each chip vector to its reference vector: the mean and the minimum over all inputs and for each input kind. `kinds[i]`
+    is the kind name of input i. Lists of equal, non-zero length."""
+    cos = [cosine(r, c) for r, c in zip(reference, chip)]
+    by_kind: dict = {}
+    for k, v in zip(kinds, cos):
+        by_kind.setdefault(k, []).append(v)
+    return {"count": len(cos), "cosine_mean": sum(cos) / len(cos), "cosine_min": min(cos),
+            "by_kind": {k: {"count": len(v), "mean": sum(v) / len(v), "min": min(v)} for k, v in by_kind.items()}}
+
+
+def ndcg_at_k(scores, relevant, idx, k: int = RETRIEVAL_K) -> float | None:
+    """NDCG@k of one group with binary relevance: the documents `idx` ranked by `scores` (a tie keeps the earlier document first). None when
+    the group has no relevant document (the group is left out of the mean)."""
+    order = sorted(idx, key=lambda i: (-scores[i], i))
+    gains = sum(1.0 / math.log2(rank + 2) for rank, i in enumerate(order[:k]) if relevant[i])
+    ideal = sum(1.0 / math.log2(rank + 2) for rank in range(min(k, sum(1 for i in idx if relevant[i]))))
+    return gains / ideal if ideal > 0 else None
+
+
+def retrieval(reference, chip, groups, relevant, k: int = RETRIEVAL_K) -> dict | None:
+    """NDCG@k and Hit@1 of the reference ranking and of the chip ranking against the pair file's relevance labels (issue 379). The numbers
+    come from recorded scores only. None when no group has a relevant document."""
+    members: dict = {}
+    for i, g in enumerate(groups):
+        members.setdefault(g, []).append(i)
+    n_ref, n_chip, h_ref, h_chip, queries = [], [], 0, 0, 0
+    for idx in members.values():
+        a = ndcg_at_k(reference, relevant, idx, k)
+        if a is None:
+            continue
+        queries += 1
+        n_ref.append(a)
+        n_chip.append(ndcg_at_k(chip, relevant, idx, k))
+        h_ref += 1 if relevant[_first_max(reference, idx)] else 0
+        h_chip += 1 if relevant[_first_max(chip, idx)] else 0
+    if not queries:
+        return None
+    nr, nc = sum(n_ref) / queries, sum(n_chip) / queries
+    return {"k": k, "queries": queries, "ndcg_reference": nr, "ndcg_chip": nc, "ndcg_delta": nc - nr,
+            "hit1_reference": h_ref / queries, "hit1_chip": h_chip / queries, "hit1_delta": (h_chip - h_ref) / queries}
+
+
 # ---- bounds ------------------------------------------------------------------------------------------------------------------
 
-def effective_bounds(config_bounds, reasons: list) -> dict:
-    """The bounds to apply: the default for each key, replaced by the config's value when that is at least as strict. A looser value, a
-    value that is not a finite number and a key nobody defined are each a reason."""
-    out = dict(DEFAULT_BOUNDS)
+def effective_bounds(config_bounds, reasons: list, kind: str = KIND) -> dict:
+    """The bounds to apply: the default for each key of the kind, replaced by the config's value when that is at least as strict. A looser
+    value, a value that is not a finite number and a key nobody defined are each a reason."""
+    defaults, floors = BOUNDS_OF[kind]
+    out = dict(defaults)
     if config_bounds is None:
         return out
     if not isinstance(config_bounds, dict):
         reasons.append(f"{CONFIG_NAME} bounds must be an object, got {type(config_bounds).__name__}")
         return out
     for key, val in config_bounds.items():
-        if key not in DEFAULT_BOUNDS:
+        if key not in defaults:
             reasons.append(f"{CONFIG_NAME} bounds has an unknown key {str(key)[:60]!r}")
         elif not _num(val):
             reasons.append(f"{CONFIG_NAME} bound {key} must be a finite number, got {val!r}")
-        elif (val < DEFAULT_BOUNDS[key]) if key in _FLOORS else (val > DEFAULT_BOUNDS[key]):
-            reasons.append(f"{CONFIG_NAME} bound {key} {val} is looser than the shipped {DEFAULT_BOUNDS[key]}: a config may tighten a bound and never loosen it")
+        elif (val < defaults[key]) if key in floors else (val > defaults[key]):
+            reasons.append(f"{CONFIG_NAME} bound {key} {val} is looser than the shipped {defaults[key]}: a config may tighten a bound and never loosen it")
         else:
             out[key] = val
     return out
@@ -192,10 +290,67 @@ def bound_reasons(m: dict, bounds: dict, n_pairs: int) -> list[str]:
     return r
 
 
+def retrieval_bound_reasons(rt: dict, bounds: dict) -> list[str]:
+    """The reasons the retrieval rows (`retrieval`) miss the bounds."""
+    r = []
+    if -rt["ndcg_delta"] > bounds["ndcg_drop_max"]:
+        r.append(f"NDCG@{rt['k']} of the chip {rt['ndcg_chip']:.4f} is {-rt['ndcg_delta']:.4f} below the reference's {rt['ndcg_reference']:.4f}, "
+                 f"more than the allowed {bounds['ndcg_drop_max']}")
+    if -rt["hit1_delta"] > bounds["hit1_drop_max"]:
+        r.append(f"Hit@1 of the chip {rt['hit1_chip']:.3f} is {-rt['hit1_delta']:.3f} below the reference's {rt['hit1_reference']:.3f}, "
+                 f"more than the allowed {bounds['hit1_drop_max']}")
+    return r
+
+
+def embed_bound_reasons(m: dict, bounds: dict) -> list[str]:
+    """The reasons the embedding numbers (`embed_numbers`) miss the bounds."""
+    r = []
+    if m["count"] < bounds["min_inputs"]:
+        r.append(f"the record embeds {m['count']} inputs; at least {bounds['min_inputs']} are needed")
+    if len(m["by_kind"]) < bounds["min_kinds"]:
+        r.append(f"the record has {len(m['by_kind'])} input kinds; at least {bounds['min_kinds']} are needed")
+    rows = [("all inputs", m["cosine_mean"], m["cosine_min"])] + [(f"kind {k}", v["mean"], v["min"]) for k, v in sorted(m["by_kind"].items())]
+    for name, mean, low in rows:
+        if mean < bounds["cosine_mean_min"]:
+            r.append(f"mean cosine to the reference vector for {name} is {mean:.5f}, below the minimum of {bounds['cosine_mean_min']}")
+        if low < bounds["cosine_min_min"]:
+            r.append(f"minimum cosine to the reference vector for {name} is {low:.5f}, below the minimum of {bounds['cosine_min_min']}")
+    return r
+
+
 # ---- the gate ----------------------------------------------------------------------------------------------------------------
 
-def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
-    """(reasons, evidence paths) for a stage 2 directory of a scoring model. No reasons means the check passes."""
+def reference_reasons(run_dir, kind: str) -> tuple[list[str], list[str]]:
+    """(reasons, evidence paths) for the stage 1 files of a scoring model (the stage machine's stage 1 gate): both files are regular files
+    in the run directory, the reference names the pair file as it is on disk, both are for `kind`, and the reference holds a finite score
+    (reranker) or vector (embedding) for every pair, in the shapes the stage 2 check reads. The stage 2 gate checks the same files again
+    against its record."""
+    run_dir = Path(run_dir)
+    reasons: list[str] = []
+    if kind not in KINDS:
+        return [f"the model kind must be one of {KINDS}, got {kind!r}"], []
+    if kind == "embedding":
+        _disk_embed_reasons(None, run_dir, reasons)
+    else:
+        _disk_reasons(None, run_dir, reasons)
+    seen = [f for f in (REFERENCE_FILE, PAIRS_FILE) if _inside(run_dir, f) is not None]
+    for f in seen[:]:
+        if f.endswith("scoring-pairs.json"):
+            try:
+                rows = safeio.read_json(_inside(run_dir, f), max_bytes=JSON_MAX, expect=dict).get("pairs")
+            except safeio.SafeReadError:
+                continue
+            for row in rows[:MAX_PAIRS] if isinstance(rows, list) else []:
+                for e in (row.get("media") if isinstance(row, dict) and isinstance(row.get("media"), list) else []):
+                    if isinstance(e, dict) and isinstance(e.get("path"), str) and _inside(run_dir, e["path"]) is not None and e["path"] not in seen:
+                        seen.append(e["path"])
+    return reasons, seen
+
+def check(stage_dir, run_dir, kind=None) -> tuple[list[str], list[str]]:
+    """(reasons, evidence paths) for a stage 2 directory of a scoring model. No reasons means the check passes.
+
+    `kind` is the model kind the stage machine took from stage 0 ("reranker" or "embedding"). Without it the kind is the config's. The
+    record, the config and the stage 1 files must all name the same kind."""
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
     reasons: list[str] = []
     seen: list[str] = []
@@ -205,39 +360,25 @@ def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
     if record is None:
         return reasons, seen
     seen.append(os.path.relpath(stage_dir / RECORD_FILE, run_dir))
+    if kind is None:
+        kind = config.get("kind") if isinstance(config, dict) else None
+    if kind not in KINDS:
+        reasons.append(f"the model kind must be one of {KINDS}, got {kind!r}")
+        return reasons, seen
     if isinstance(marker, dict):
         _marker_reasons(marker, reasons)
     if record.get("schema") != RECORD_SCHEMA:
         reasons.append(f"{RECORD_FILE} schema must be {RECORD_SCHEMA!r}, got {record.get('schema')!r}")
-    if record.get("kind") != KIND:
-        reasons.append(f"{RECORD_FILE} kind must be {KIND!r}, got {record.get('kind')!r}")
-    if isinstance(config, dict) and config.get("kind") != KIND:
-        reasons.append(f"{CONFIG_NAME} kind must be {KIND!r}, got {config.get('kind')!r}")
-    bounds = effective_bounds(config.get("bounds") if isinstance(config, dict) else None, reasons)
+    if record.get("kind") != kind:
+        reasons.append(f"{RECORD_FILE} kind must be {kind!r}, got {record.get('kind')!r}")
+    if isinstance(config, dict) and config.get("kind") != kind:
+        reasons.append(f"{CONFIG_NAME} kind must be {kind!r}, got {config.get('kind')!r}")
+    bounds = effective_bounds(config.get("bounds") if isinstance(config, dict) else None, reasons, kind)
 
-    ref_scores, groups = _disk_reasons(record, run_dir, reasons)
-    chip = record.get("chip_scores")
-    ok_scores = (isinstance(chip, list) and 0 < len(chip) <= MAX_PAIRS and all(_score(s) for s in chip)
-                 and ref_scores is not None and groups is not None and len(chip) == len(ref_scores) == len(groups))
-    if not ok_scores:
-        reasons.append(f"chip_scores must be a list of 1 to {MAX_PAIRS} finite numbers of size at most {MAX_VALUE:g}, one for each pair of the stage 1 pair file")
+    if kind == "embedding":
+        _embedding_reasons(record, run_dir, bounds, reasons)
     else:
-        m = parity(ref_scores, chip, groups)
-        reported = record.get("metrics")
-        if not isinstance(reported, dict):
-            reasons.append(f"{RECORD_FILE} reports no metrics object")
-        else:
-            for key in ("pearson", "mean_abs_diff", "max_abs_diff", "order_kept"):
-                got = reported.get(key)
-                want = m[key]
-                if want is None and got is None:
-                    continue
-                if not _num(got) or want is None or abs(got - want) > TOLERANCE:
-                    reasons.append(f"{RECORD_FILE} metrics.{key} {got!r} differs from the {want!r} the gate recomputed from the record's scores")
-            for key in ("top1_groups_matching", "top1_groups", "order_pairs", "order_pairs_kept"):
-                if reported.get(key) != m[key] or type(reported.get(key)) is not int:
-                    reasons.append(f"{RECORD_FILE} metrics.{key} {reported.get(key)!r} differs from the {m[key]!r} the gate recomputed")
-        reasons += bound_reasons(m, bounds, len(chip))
+        _reranker_reasons(record, run_dir, bounds, reasons)
     if isinstance(marker, dict):
         rc, mc = record.get("chips"), marker.get("chips")
         if not all(isinstance(c, list) and c and all(isinstance(x, str) for x in c) for c in (rc, mc)) or sorted(rc) != sorted(mc):
@@ -250,6 +391,78 @@ def check(stage_dir, run_dir) -> tuple[list[str], list[str]]:
     _template_reasons(record, stage_dir, reasons)
     _source_reasons(record, stage_dir, run_dir, reasons)
     return reasons, seen
+
+
+def _same_number(got, want) -> bool:
+    """A reported number against the gate's own: both absent, or both finite and within TOLERANCE."""
+    if want is None and got is None:
+        return True
+    return _num(got) and want is not None and abs(got - want) <= TOLERANCE
+
+
+def _reranker_reasons(record: dict, run_dir: Path, bounds: dict, reasons: list) -> None:
+    ref_scores, groups, relevant = _disk_reasons(record, run_dir, reasons)
+    chip = record.get("chip_scores")
+    ok_scores = (isinstance(chip, list) and 0 < len(chip) <= MAX_PAIRS and all(_score(s) for s in chip)
+                 and ref_scores is not None and groups is not None and len(chip) == len(ref_scores) == len(groups))
+    if not ok_scores:
+        reasons.append(f"chip_scores must be a list of 1 to {MAX_PAIRS} finite numbers of size at most {MAX_VALUE:g}, one for each pair of the stage 1 pair file")
+        return
+    m = parity(ref_scores, chip, groups)
+    reported = record.get("metrics")
+    if not isinstance(reported, dict):
+        reasons.append(f"{RECORD_FILE} reports no metrics object")
+    else:
+        for key in ("pearson", "mean_abs_diff", "max_abs_diff", "order_kept"):
+            if not _same_number(reported.get(key), m[key]):
+                reasons.append(f"{RECORD_FILE} metrics.{key} {reported.get(key)!r} differs from the {m[key]!r} the gate recomputed from the record's scores")
+        for key in ("top1_groups_matching", "top1_groups", "order_pairs", "order_pairs_kept"):
+            if reported.get(key) != m[key] or type(reported.get(key)) is not int:
+                reasons.append(f"{RECORD_FILE} metrics.{key} {reported.get(key)!r} differs from the {m[key]!r} the gate recomputed")
+    reasons += bound_reasons(m, bounds, len(chip))
+    if relevant is not None:                 # the pair file labels the relevant documents: the retrieval rows are part of the result
+        rt = retrieval(ref_scores, chip, groups, relevant)
+        got = record.get("retrieval")
+        if rt is None:
+            reasons.append(f"{PAIRS_FILE} labels no group with a relevant document, so the retrieval rows cannot be computed")
+        elif not isinstance(got, dict):
+            reasons.append(f"{RECORD_FILE} reports no retrieval object, and {PAIRS_FILE} labels the relevant documents")
+        else:
+            for key, want in rt.items():
+                if got.get(key) != want and not (key not in ("k", "queries") and _same_number(got.get(key), want)):
+                    reasons.append(f"{RECORD_FILE} retrieval.{key} {got.get(key)!r} differs from the {want!r} the gate recomputed")
+            reasons += retrieval_bound_reasons(rt, bounds)
+
+
+def _embedding_reasons(record: dict, run_dir: Path, bounds: dict, reasons: list) -> None:
+    ref_vectors, kinds = _disk_embed_reasons(record, run_dir, reasons)
+    chip = record.get("chip_vectors")
+    ok = (isinstance(chip, list) and ref_vectors is not None and kinds is not None and len(chip) == len(ref_vectors) == len(kinds)
+          and all(isinstance(v, list) and len(v) == len(ref_vectors[0]) and all(_score(x) for x in v) and any(v) for v in chip))   # a zero vector has no direction
+    if not ok:
+        reasons.append(f"chip_vectors must hold one vector of finite numbers (size at most {MAX_VALUE:g}, not all zero) of the reference's length for each "
+                       "input of the stage 1 file")
+        return
+    m = embed_numbers(ref_vectors, chip, kinds)
+    reported = record.get("metrics")
+    if not isinstance(reported, dict):
+        reasons.append(f"{RECORD_FILE} reports no metrics object")
+    else:
+        for key in ("cosine_mean", "cosine_min"):
+            if not _same_number(reported.get(key), m[key]):
+                reasons.append(f"{RECORD_FILE} metrics.{key} {reported.get(key)!r} differs from the {m[key]!r} the gate recomputed from the record's vectors")
+        if reported.get("count") != m["count"] or type(reported.get("count")) is not int:
+            reasons.append(f"{RECORD_FILE} metrics.count {reported.get('count')!r} differs from the {m['count']!r} the gate recomputed")
+        got_kinds = reported.get("by_kind")
+        if not isinstance(got_kinds, dict) or set(got_kinds) != set(m["by_kind"]):
+            reasons.append(f"{RECORD_FILE} metrics.by_kind does not list the input kinds of the stage 1 file")
+        else:
+            for k, want in m["by_kind"].items():
+                have = got_kinds[k]
+                if (not isinstance(have, dict) or have.get("count") != want["count"] or type(have.get("count")) is not int
+                        or not _same_number(have.get("mean"), want["mean"]) or not _same_number(have.get("min"), want["min"])):
+                    reasons.append(f"{RECORD_FILE} metrics.by_kind[{str(k)[:40]!r}] {have!r} differs from the {want!r} the gate recomputed")
+    reasons += embed_bound_reasons(m, bounds)
 
 
 def _marker_reasons(marker: dict, reasons: list) -> None:
@@ -266,11 +479,14 @@ def _marker_reasons(marker: dict, reasons: list) -> None:
         reasons.append(f"test-result.json: the hardware test ran {marker.get('command')!r}; the supervisor's command for this stage is {COMMAND!r}")
 
 
-def _disk_reasons(record: dict, run_dir: Path, reasons: list):
-    """The record against the stage 1 files on disk. Returns (reference scores, group names) from disk, or None for each that cannot be read."""
+def _stage1_docs(record, run_dir: Path, reasons: list, kind: str):
+    """The record's reference and pair files against the stage 1 files on disk: path, sha256, readable JSON, kind. Returns (reference
+    document, pair document), each None when it cannot be used. With `record` None only the files are checked (stage 1's gate has no
+    record yet): the reference must name the pair file as it is on disk."""
     ref_doc = pairs_doc = None
+    shas: dict = {}
     for key, want in (("reference", REFERENCE_FILE), ("pairs", PAIRS_FILE)):
-        entry = record.get(key)
+        entry = record.get(key) if record is not None else {"path": want}
         if not isinstance(entry, dict) or entry.get("path") != want:
             reasons.append(f"{key}.path must be {want!r}, the stage 1 file, got {entry.get('path') if isinstance(entry, dict) else entry!r}")
             continue
@@ -278,7 +494,8 @@ def _disk_reasons(record: dict, run_dir: Path, reasons: list):
         if f is None:
             reasons.append(f"{key}: {want} is not a file in the run directory")
             continue
-        if entry.get("sha256") != _sha(f):
+        shas[key] = _sha(f)
+        if record is not None and entry.get("sha256") != shas[key]:
             reasons.append(f"{key}.sha256 does not match {want} as it is on disk")
         try:
             doc = safeio.read_json(f, max_bytes=JSON_MAX, expect=dict)
@@ -289,33 +506,127 @@ def _disk_reasons(record: dict, run_dir: Path, reasons: list):
             ref_doc = doc
         else:
             pairs_doc = doc
-    scores = groups = None
+    if ref_doc is not None:
+        if ref_doc.get("model_kind") != kind:
+            reasons.append(f"{REFERENCE_FILE} is for kind {ref_doc.get('model_kind')!r}, not {kind!r}")
+        named = ref_doc.get("pairs")
+        used = record.get("pairs") if record is not None else {"sha256": shas.get("pairs")}
+        if not isinstance(named, dict):
+            reasons.append(f"{REFERENCE_FILE} pairs must be an object that names the pair file")
+        elif pairs_doc is not None and isinstance(used, dict) and named.get("sha256") != used.get("sha256"):
+            reasons.append(f"{REFERENCE_FILE} names a pair file other than the one " + ("the record used" if record is not None else "on disk"))
+    if pairs_doc is not None and pairs_doc.get("model_kind") != kind:
+        reasons.append(f"{PAIRS_FILE} is for kind {pairs_doc.get('model_kind')!r}, not {kind!r}")
+    if pairs_doc is not None:
+        _media_reasons(pairs_doc, run_dir, reasons)
+    return ref_doc, pairs_doc
+
+
+def _media_reasons(pairs_doc: dict, run_dir: Path, reasons: list) -> None:
+    """The media files the pair file names (issue 377) as they are on disk now: under the media directory, regular files, and the sha256
+    the pair file gives. A file changed after the run is a reason, because the port was given the earlier bytes."""
+    rows = pairs_doc.get("pairs")
+    if not isinstance(rows, list):
+        return
+    files = 0
+    for i, p in enumerate(rows[:MAX_PAIRS]):
+        entries = p.get("media") if isinstance(p, dict) else None
+        if entries is None:
+            continue
+        if not isinstance(entries, list) or len(entries) > MEDIA_PER_ROW:
+            reasons.append(f"{PAIRS_FILE} row {i} media must be a list of at most {MEDIA_PER_ROW} entries")
+            continue
+        for e in entries:
+            files += 1
+            path = e.get("path") if isinstance(e, dict) else None
+            if files > MEDIA_FILES_MAX:
+                reasons.append(f"{PAIRS_FILE} lists more than {MEDIA_FILES_MAX} media files")
+                return
+            if (not isinstance(e, dict) or e.get("kind") not in MEDIA_KINDS or not isinstance(path, str) or not path.startswith(MEDIA_DIR)
+                    or ".." in Path(path).parts):
+                reasons.append(f"{PAIRS_FILE} row {i} has a media entry that needs a kind {MEDIA_KINDS} and a path under {MEDIA_DIR}")
+                continue
+            name = path[len(MEDIA_DIR):]
+            if not name or "/" in name or "\0" in path:
+                reasons.append(f"{PAIRS_FILE} row {i}: the media path {path[:80]!r} is not a file directly under {MEDIA_DIR}")
+                continue
+            # The path as written, opened one component at a time beneath the run directory without following a link, and read under the
+            # size cap: a file replaced by a link to identical bytes, a file over the cap and a file that cannot be read are each a refusal.
+            try:
+                with safeio.pinned_root(run_dir) as pin:
+                    digest = safeio.sha256_file(path, max_bytes=MEDIA_MAX, anchor=pin.fd)
+            except (safeio.SafeReadError, OSError, ValueError) as exc:
+                why = exc.reason if isinstance(exc, safeio.SafeReadError) else type(exc).__name__
+                reasons.append(f"{PAIRS_FILE} row {i}: the media file {path[:80]!r} is not a regular file directly under {MEDIA_DIR} that can be "
+                               f"read within {MEDIA_MAX} bytes ({why})")
+                continue
+            if e.get("sha256") != digest:
+                reasons.append(f"{PAIRS_FILE} row {i}: the media file {path} does not match its sha256 as it is on disk now")
+
+
+def _ids_ok(p) -> bool:
+    """A pair row's token ids as the template reads them: a non-empty list of at most MAX_IDS non-negative ints (a bool is not an int here)."""
+    ids = p.get("input_ids") if isinstance(p, dict) else None
+    return isinstance(ids, list) and 1 <= len(ids) <= MAX_IDS and all(type(t) is int and t >= 0 for t in ids)
+
+
+def _disk_reasons(record, run_dir: Path, reasons: list):
+    """A reranker record against the stage 1 files on disk. Returns (reference scores, group names, relevance labels) from disk: each None
+    when it cannot be read, and the labels None also when the pair file does not label every pair."""
+    ref_doc, pairs_doc = _stage1_docs(record, run_dir, reasons, "reranker")
+    scores = groups = relevant = None
     if ref_doc is not None:
         s = ref_doc.get("scores")
         if isinstance(s, list) and 0 < len(s) <= MAX_PAIRS and all(_score(x) for x in s):
             scores = s
         else:
             reasons.append(f"{REFERENCE_FILE} holds no list of 1 to {MAX_PAIRS} finite scores of size at most {MAX_VALUE:g}")
-        if ref_doc.get("model_kind") != KIND:
-            reasons.append(f"{REFERENCE_FILE} is for kind {ref_doc.get('model_kind')!r}, not {KIND!r}")
-        named, used = ref_doc.get("pairs"), record.get("pairs")
-        if not isinstance(named, dict):
-            reasons.append(f"{REFERENCE_FILE} pairs must be an object that names the pair file")
-        elif pairs_doc is not None and isinstance(used, dict) and named.get("sha256") != used.get("sha256"):
-            reasons.append(f"{REFERENCE_FILE} names a pair file other than the one the record used")
     if pairs_doc is not None:
         rows = pairs_doc.get("pairs")
-        if isinstance(rows, list) and 0 < len(rows) <= MAX_PAIRS and all(isinstance(p, dict) and isinstance(p.get("group"), str) for p in rows):
+        if (isinstance(rows, list) and 0 < len(rows) <= MAX_PAIRS
+                and all(isinstance(p, dict) and isinstance(p.get("group"), str) and _ids_ok(p) for p in rows)):
             groups = [p["group"] for p in rows]
-            if record.get("groups") != groups:
+            if any("relevant" in p and type(p["relevant"]) is not bool for p in rows):
+                reasons.append(f"{PAIRS_FILE} has a pair whose relevant is not true or false")
+            if all(type(p.get("relevant")) is bool for p in rows):
+                relevant = [p["relevant"] for p in rows]
+            if record is not None and record.get("groups") != groups:
                 reasons.append(f"{RECORD_FILE} groups are not the groups of {PAIRS_FILE}: the comparison was made on another grouping")
             if scores is not None and len(scores) != len(rows):
                 reasons.append(f"{REFERENCE_FILE} has {len(scores)} scores for the {len(rows)} pairs of {PAIRS_FILE}")
         else:
-            reasons.append(f"{PAIRS_FILE} holds no list of 1 to {MAX_PAIRS} pairs with group names")
-    if scores is not None and record.get("reference_scores") != scores:
+            reasons.append(f"{PAIRS_FILE} holds no list of 1 to {MAX_PAIRS} pairs, each with a group name and a non-empty list of token ids")
+    if record is not None and scores is not None and record.get("reference_scores") != scores:
         reasons.append(f"{RECORD_FILE} reference_scores are not the scores in {REFERENCE_FILE}: the comparison was made against numbers the reference did not produce")
-    return scores, groups
+    return scores, groups, relevant
+
+
+def _disk_embed_reasons(record, run_dir: Path, reasons: list):
+    """An embedding record against the stage 1 files on disk. Returns (reference vectors, input kind names) from disk, each None when it
+    cannot be read."""
+    ref_doc, pairs_doc = _stage1_docs(record, run_dir, reasons, "embedding")
+    vectors = kinds = None
+    if ref_doc is not None:
+        v = ref_doc.get("vectors")
+        if (isinstance(v, list) and 0 < len(v) <= MAX_PAIRS and isinstance(v[0], list) and 0 < len(v[0]) <= MAX_DIM
+                and len(v) * len(v[0]) <= MAX_VECTOR_NUMEL
+                and all(isinstance(x, list) and len(x) == len(v[0]) and all(_score(y) for y in x) and any(y for y in x) for x in v)):
+            vectors = v
+        else:
+            reasons.append(f"{REFERENCE_FILE} holds no list of 1 to {MAX_PAIRS} vectors of one length (1 to {MAX_DIM}, at most {MAX_VECTOR_NUMEL} numbers in "
+                           f"all) of finite numbers of size at most {MAX_VALUE:g}, none all zero")
+    if pairs_doc is not None:
+        rows = pairs_doc.get("pairs")
+        if (isinstance(rows, list) and 0 < len(rows) <= MAX_PAIRS
+                and all(isinstance(p, dict) and isinstance(p.get("kind"), str) and _ids_ok(p) for p in rows)):
+            kinds = [p["kind"] for p in rows]
+            if record is not None and record.get("input_kinds") != kinds:
+                reasons.append(f"{RECORD_FILE} input_kinds are not the input kinds of {PAIRS_FILE}: the comparison was made on another grouping")
+            if vectors is not None and len(vectors) != len(rows):
+                reasons.append(f"{REFERENCE_FILE} has {len(vectors)} vectors for the {len(rows)} inputs of {PAIRS_FILE}")
+        else:
+            reasons.append(f"{PAIRS_FILE} holds no list of 1 to {MAX_PAIRS} inputs, each with a kind name and a non-empty list of token ids")
+    return vectors, kinds
 
 
 def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list) -> None:

@@ -39,16 +39,26 @@ Port module interface (stages/2/port/port_model.py):
 
     load(model_dir: str, mesh_device) -> model                   required
         Load the weights from the Hugging Face snapshot directory onto the open device. The time this takes is the record's load_s.
-    score_pairs(model, pairs: list[list[int]]) -> list[float]    required for kind "reranker"
+    score_pairs(model, pairs: list[list[int]], media=None) -> list[float]    required for kind "reranker"
         `pairs` holds the token ids of whole prompts (prefix, query, document and suffix already in place). Return one number per
         prompt: logit("yes") - logit("no") at the prompt's last position. A list of floats or a torch or numpy array of that length.
-    embed(model, ids: list[int]) -> list[float]                  reserved for kind "embedding"; not called in this slice
-        Return the unit-length vector for one prompt. The check refuses kind "embedding" until a later slice builds it.
+    embed(model, ids: list[int], media=None) -> list[float]                  required for kind "embedding"
+        Return the vector for one prompt: the last token's hidden state after the final norm, L2 normalised, as the Hugging Face
+        reference computes it. The check takes the cosine, so the length does not matter, but the vector must have the reference's
+        length, finite numbers, and some non-zero value. The check calls it once for each input of the pair file.
     close(model) -> None                                         required
         Release what load took. The device itself is closed by this file.
 
+Images and video (issue 377). A row of the pair file may list `media`: files that belong to the prompt (an image or a video clip). The
+port's two functions then take a second argument, `media`: for `score_pairs` a list with one entry for each prompt, for `embed` the entry
+for that one prompt; each entry is a list of {"kind": "image" or "video", "name": the file's name, "sha256": hex, "data": bytes}. The
+bytes are the file as stage 1 recorded it (this file reads it without following a link, checks its size and checks its sha256 against
+the pair file's before the port sees it). The port decodes them itself; the ids already hold the placeholder tokens. When no row has media
+the functions are called without the argument, so a text-only port needs no change.
+
 Inputs: stages/1/evidence/reference/scoring-pairs.json and scoring-reference.json (orchard/scoring_reference.py). Output:
-evidence/scoring-check.json (orchard-scoring-check/1, see orchard/scoring_check.py) and the last line of stdout.
+evidence/scoring-check.json (orchard-scoring-check/1, see orchard/scoring_check.py) and the last line of stdout. For kind "reranker"
+the record holds the chip's scores; for kind "embedding" it holds the chip's vectors (the gate recomputes each cosine from them).
 
 This file uses the standard library only, and reads files through `read_regular` below (it does not follow a link, does not wait on a
 FIFO and stops at a size limit) because it runs alone in the run directory, where `orchard.safeio` is not importable.
@@ -75,8 +85,17 @@ CONFIG_FILE = HERE / "scoring_check_config.json"
 RECORD = HERE / "evidence" / "scoring-check.json"
 PAIRS = "stages/1/evidence/reference/scoring-pairs.json"
 REFERENCE = "stages/1/evidence/reference/scoring-reference.json"
-KIND = "reranker"                # the only kind this slice runs
-ORDER_GAP = 0.5                  # choice: the bundles count a pair of documents as ordered when the reference separates them by this much (logits)
+KINDS = ("reranker", "embedding")
+RETRIEVAL_K = 10                 # choice: the bundles report NDCG@10; the gate's copy has the same value (a test checks the two agree)
+MAX_DIM = 16384                  # choice: the length of one vector; the largest public embedding models are 8192
+MAX_VECTOR_NUMEL = 500_000       # choice: numbers in all chip vectors of one record (a record this size is about 10 MB, under JSON_MAX)
+MEDIA_DIR = "stages/1/evidence/reference/media/"      # media files named by the pair file live here and nowhere else
+MEDIA_KINDS = ("image", "video")
+MEDIA_MAX = 16 * 1024 * 1024     # choice: one media file; the gate reads it through a reader capped at JSON_MAX (16 MiB)
+MEDIA_TOTAL_MAX = 128 * 1024 * 1024
+MEDIA_PER_ROW = 8
+MEDIA_FILES_MAX = 64
+ORDER_GAP = 0.5                 # choice: the bundles count a pair of documents as ordered when the reference separates them by this much (logits)
 MAX_PAIRS = 4096                 # choice: the fixed set has a few dozen pairs; more than this is not the set the recorder wrote
 MAX_IDS = 1 << 20                # choice: ids in one prompt; the model card's limit is 8192
 MAX_VALUE = 1e6                  # a score beyond this is not a logit difference
@@ -193,6 +212,65 @@ def parity(reference: list, chip: list, groups: list) -> dict:
             "order_pairs": total, "order_pairs_kept": kept, "order_kept": (kept / total) if total else None}
 
 
+def cosine(a: list, b: list) -> float:
+    """Cosine of two equal-length vectors. 0.0 when either is all zeros (the cosine is undefined). Clamped to [-1, 1]. Each vector is divided by
+    its largest absolute value first, so a vector of tiny finite numbers (squares that would underflow to 0.0) has the same cosine as the same
+    vector scaled up, and one whose largest value is 1 has a norm of at least 1."""
+    ma = max((abs(x) for x in a), default=0.0)
+    mb = max((abs(y) for y in b), default=0.0)
+    if ma <= 0.0 or mb <= 0.0:
+        return 0.0
+    a = [x / ma for x in a]
+    b = [y / mb for y in b]
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return max(-1.0, min(1.0, dot / na / nb))
+
+
+def embed_numbers(reference: list, chip: list, kinds: list) -> dict:
+    """The cosine of each chip vector to its reference vector: the mean and the minimum over all inputs and for each input kind. `kinds[i]`
+    is the kind name of input i. Lists of equal, non-zero length."""
+    cos = [cosine(r, c) for r, c in zip(reference, chip)]
+    by_kind: dict = {}
+    for k, v in zip(kinds, cos):
+        by_kind.setdefault(k, []).append(v)
+    return {"count": len(cos), "cosine_mean": sum(cos) / len(cos), "cosine_min": min(cos),
+            "by_kind": {k: {"count": len(v), "mean": sum(v) / len(v), "min": min(v)} for k, v in by_kind.items()}}
+
+
+def ndcg_at_k(scores: list, relevant: list, idx: list, k: int = RETRIEVAL_K):
+    """NDCG@k of one group with binary relevance: the documents `idx` ranked by `scores` (a tie keeps the earlier document first). None when
+    the group has no relevant document (the group is left out of the mean)."""
+    order = sorted(idx, key=lambda i: (-scores[i], i))
+    gains = sum(1.0 / math.log2(rank + 2) for rank, i in enumerate(order[:k]) if relevant[i])
+    ideal = sum(1.0 / math.log2(rank + 2) for rank in range(min(k, sum(1 for i in idx if relevant[i]))))
+    return gains / ideal if ideal > 0 else None
+
+
+def retrieval(reference: list, chip: list, groups: list, relevant: list, k: int = RETRIEVAL_K):
+    """NDCG@k and Hit@1 of the reference ranking and of the chip ranking against the pair file's relevance labels (issue 379), from the
+    recorded scores only. None when no group has a relevant document."""
+    members: dict = {}
+    for i, g in enumerate(groups):
+        members.setdefault(g, []).append(i)
+    n_ref, n_chip, h_ref, h_chip, queries = [], [], 0, 0, 0
+    for idx in members.values():
+        a = ndcg_at_k(reference, relevant, idx, k)
+        if a is None:
+            continue
+        queries += 1
+        n_ref.append(a)
+        n_chip.append(ndcg_at_k(chip, relevant, idx, k))
+        h_ref += 1 if relevant[first_max(reference, idx)] else 0
+        h_chip += 1 if relevant[first_max(chip, idx)] else 0
+    if not queries:
+        return None
+    nr, nc = sum(n_ref) / queries, sum(n_chip) / queries
+    return {"k": k, "queries": queries, "ndcg_reference": nr, "ndcg_chip": nc, "ndcg_delta": nc - nr,
+            "hit1_reference": h_ref / queries, "hit1_chip": h_chip / queries, "hit1_delta": (h_chip - h_ref) / queries}
+
+
 # ---- the worker: the port module's side of the pipes --------------------------------------------------------------------------
 
 def as_floats(values) -> list:
@@ -201,6 +279,53 @@ def as_floats(values) -> list:
     if hasattr(values, "tolist"):
         values = values.tolist()
     return list(values)
+
+
+def read_media(path, max_bytes: int = MEDIA_MAX) -> bytes:
+    """The bytes of the media file a pair row names: a plain relative path of one file directly under MEDIA_DIR, opened one component at a time
+    beneath the run directory with O_NOFOLLOW on every component (a directory or the file replaced by a link, between one read and the next,
+    is refused and nothing outside the run directory is read), no blocking, regular files only, under `max_bytes`. Raises OSError."""
+    if not isinstance(path, str) or not path.startswith(MEDIA_DIR) or "\0" in path or ".." in Path(path).parts:
+        raise OSError(f"media path {str(path)[:80]!r} is not a plain path under {MEDIA_DIR}")
+    name = path[len(MEDIA_DIR):]
+    if not name or "/" in name:
+        raise OSError(f"media path {path} is not a file directly under {MEDIA_DIR}")
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(RUN_DIR, os.O_RDONLY | os.O_DIRECTORY | cloexec)          # the run directory itself is the anchor
+    try:
+        for part in MEDIA_DIR.strip("/").split("/"):
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | cloexec, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | cloexec, dir_fd=fd)
+    finally:
+        os.close(fd)
+    try:
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(file_fd, 1 << 16)
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > max_bytes:
+                raise OSError(f"{path} is larger than {max_bytes} bytes")
+            chunks.append(chunk)
+    finally:
+        os.close(file_fd)
+
+
+def load_media(entries: list) -> list:
+    """The media of one prompt as the port receives it: the bytes of each file, read without following a link and under MEDIA_MAX, and
+    checked against the sha256 the pair file names (a file changed after the parent hashed it is refused here, at the point of use)."""
+    out = []
+    for e in entries:
+        data = read_media(e["path"])
+        if sha_bytes(data) != e["sha256"]:
+            raise OSError(f"media file {e['path']} does not match the sha256 in the pair file")
+        out.append({"kind": e["kind"], "name": Path(e["path"]).name, "sha256": e["sha256"], "data": data})
+    return out
 
 
 def open_device(ttnn, n_chips: int):
@@ -248,7 +373,19 @@ def worker(read_fd: int, write_fd: int) -> int:
                 model = mod.load(req["model_dir"], device)
                 reply({"ok": True})
             elif op == "score":
-                reply({"ok": True, "scores": as_floats(mod.score_pairs(model, [[int(i) for i in ids] for ids in req["pairs"]]))})
+                ids_list = [[int(i) for i in ids] for ids in req["pairs"]]
+                if req.get("media") is None:
+                    scores = mod.score_pairs(model, ids_list)
+                else:
+                    scores = mod.score_pairs(model, ids_list, media=[load_media(m) for m in req["media"]])
+                reply({"ok": True, "scores": as_floats(scores)})
+            elif op == "embed":          # one request holds a few inputs; the port is called once for each
+                vectors = []
+                for n, ids in enumerate(req["inputs"]):
+                    ids = [int(i) for i in ids]
+                    vec = mod.embed(model, ids) if req.get("media") is None else mod.embed(model, ids, media=load_media(req["media"][n]))
+                    vectors.append(as_floats(vec))
+                reply({"ok": True, "vectors": vectors})
             elif op == "close":
                 if mod is not None and model is not None:
                     mod.close(model)
@@ -317,9 +454,30 @@ class Worker:
             raise CheckFailed(f"the port failed at {req['op']!r}: {answer.get('error') if isinstance(answer, dict) else answer!r}")
         return answer
 
-    def score(self, group: str, pairs: list) -> list:
+    def embed(self, label: str, inputs: list, dim: int, media=None) -> list:
+        """The vectors for a few inputs: one list of `dim` finite numbers (not all zero) for each, or the run fails. `media` is None or one
+        list of media entries for each input."""
+        req = {"op": "embed", "inputs": inputs}
+        if media is not None:
+            req["media"] = media
+        vectors = self.ask(**req).get("vectors")
+        if not isinstance(vectors, list) or len(vectors) != len(inputs):
+            raise CheckFailed(f"the port returned {len(vectors) if isinstance(vectors, list) else vectors!r} vectors for the {len(inputs)} inputs of {label}")
+        for v in vectors:
+            if not isinstance(v, list) or len(v) != dim:
+                raise CheckFailed(f"the port returned a vector of length {len(v) if isinstance(v, list) else v!r} in {label}; the reference's vectors have length {dim}")
+            if not all(finite_score(x) for x in v):
+                raise CheckFailed(f"the port returned a vector with a value that is not a finite number in {label}")
+            if not any(v):
+                raise CheckFailed(f"the port returned a vector of all zeros in {label}: it has no direction")
+        return [[float(x) for x in v] for v in vectors]
+
+    def score(self, group: str, pairs: list, media=None) -> list:
         """The scores for one group of prompts: exactly one finite number per prompt, or the run fails."""
-        scores = self.ask(op="score", pairs=pairs).get("scores")
+        req = {"op": "score", "pairs": pairs}
+        if media is not None:
+            req["media"] = media
+        scores = self.ask(**req).get("scores")
         if not isinstance(scores, list) or len(scores) != len(pairs):
             raise CheckFailed(f"the port returned {len(scores) if isinstance(scores, list) else scores!r} scores for the {len(pairs)} prompts of group {group!r}")
         for s in scores:
@@ -404,29 +562,80 @@ def load_json(rel_or_path, what: str):
         raise CheckFailed(f"{what} cannot be read as JSON: {exc}")
 
 
-def read_inputs() -> tuple:
-    """(pairs, reference scores, pairs sha256, reference sha256), each checked for type and size. The reference names the pair file's
-    sha256, and it must be the file on disk."""
+def check_media(rows: list) -> list:
+    """Check each row's `media` entries and hash the files. Returns, for each row, the list of entries the worker is sent (kind, path,
+    sha256), or None for every row when no row has media. A kind other than image or video, a path outside MEDIA_DIR, a file that is a link,
+    a FIFO or over MEDIA_MAX, a hash that differs from the pair file's, too many files or too many bytes in all each fail the run."""
+    per_row, files, total, any_media = [], 0, 0, False
+    for i, p in enumerate(rows):
+        entries = p.get("media")
+        if entries is None:
+            per_row.append([])
+            continue
+        if not isinstance(entries, list) or len(entries) > MEDIA_PER_ROW:
+            raise CheckFailed(f"{PAIRS} row {i} media must be a list of at most {MEDIA_PER_ROW} entries")
+        sent = []
+        for e in entries:
+            if (not isinstance(e, dict) or e.get("kind") not in MEDIA_KINDS or not isinstance(e.get("path"), str)
+                    or not isinstance(e.get("sha256"), str) or len(e["sha256"]) != 64):
+                raise CheckFailed(f"{PAIRS} row {i} has a media entry that needs a kind ({'/'.join(MEDIA_KINDS)}), a path and a sha256")
+            files += 1
+            if files > MEDIA_FILES_MAX:
+                raise CheckFailed(f"{PAIRS} lists more than {MEDIA_FILES_MAX} media files")
+            try:
+                data = read_media(e["path"])
+            except OSError as exc:
+                raise CheckFailed(f"{PAIRS} row {i}: the media file {str(e['path'])[:80]!r} cannot be read: {exc}")
+            total += len(data)
+            if total > MEDIA_TOTAL_MAX:
+                raise CheckFailed(f"the media files of {PAIRS} are larger than {MEDIA_TOTAL_MAX} bytes in all")
+            if sha_bytes(data) != e["sha256"]:
+                raise CheckFailed(f"{PAIRS} row {i}: the media file {e['path']} does not match the sha256 the pair file names")
+            sent.append({"kind": e["kind"], "path": e["path"], "sha256": e["sha256"]})
+        any_media = any_media or bool(sent)
+        per_row.append(sent)
+    return per_row if any_media else None
+
+
+def read_inputs(kind: str) -> dict:
+    """The inputs of a run of `kind`, each checked for type and size: the pair rows, the reference (scores for a reranker, vectors for an
+    embedding model), the sha256 of both files, and the media each row names. The reference names the pair file's sha256, and it must be
+    the file on disk."""
     pairs_doc, pairs_sha = load_json(PAIRS, PAIRS)
     ref_doc, ref_sha = load_json(REFERENCE, REFERENCE)
     rows = pairs_doc.get("pairs") if isinstance(pairs_doc, dict) else None
     if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_PAIRS:
         raise CheckFailed(f"{PAIRS} holds no list of 1 to {MAX_PAIRS} pairs")
+    name_key = "group" if kind == "reranker" else "kind"          # a reranker's rows are grouped by query; an embedding input has a kind
     for i, p in enumerate(rows):
         ids = p.get("input_ids") if isinstance(p, dict) else None
-        if (not isinstance(p.get("group") if isinstance(p, dict) else None, str) or not isinstance(ids, list) or not 1 <= len(ids) <= MAX_IDS
+        if (not isinstance(p.get(name_key) if isinstance(p, dict) else None, str) or not isinstance(ids, list) or not 1 <= len(ids) <= MAX_IDS
                 or not all(type(t) is int and t >= 0 for t in ids)):
-            raise CheckFailed(f"{PAIRS} pair {i} needs a group name and a non-empty list of token ids")
-    scores = ref_doc.get("scores") if isinstance(ref_doc, dict) else None
-    if (not isinstance(scores, list) or len(scores) != len(rows)
-            or not all(finite_score(s) for s in scores)):
-        raise CheckFailed(f"{REFERENCE} holds no list of {len(rows)} finite scores")
-    named = ref_doc.get("pairs")
+            raise CheckFailed(f"{PAIRS} pair {i} needs a {name_key} name and a non-empty list of token ids")
+        if kind == "reranker" and "relevant" in p and type(p["relevant"]) is not bool:
+            raise CheckFailed(f"{PAIRS} pair {i} relevant must be true or false when it is present")
+    named = ref_doc.get("pairs") if isinstance(ref_doc, dict) else None
     if not isinstance(named, dict) or named.get("sha256") != pairs_sha:
-        raise CheckFailed(f"{REFERENCE} does not name {PAIRS} as it is on disk (its pair file changed after the scores were recorded)")
-    if ref_doc.get("model_kind") != KIND or pairs_doc.get("model_kind") != KIND:
-        raise CheckFailed(f"the reference files are for kind {ref_doc.get('model_kind')!r}, and this check runs kind {KIND!r}")
-    return rows, [float(s) for s in scores], pairs_sha, ref_sha, ref_doc
+        raise CheckFailed(f"{REFERENCE} does not name {PAIRS} as it is on disk (its pair file changed after the reference was recorded)")
+    if ref_doc.get("model_kind") != kind or pairs_doc.get("model_kind") != kind:
+        raise CheckFailed(f"the reference files are for kind {ref_doc.get('model_kind')!r}, and this check runs kind {kind!r}")
+    out = {"rows": rows, "pairs_sha": pairs_sha, "ref_sha": ref_sha, "ref_doc": ref_doc, "media": check_media(rows)}
+    if kind == "reranker":
+        scores = ref_doc.get("scores")
+        if not isinstance(scores, list) or len(scores) != len(rows) or not all(finite_score(s) for s in scores):
+            raise CheckFailed(f"{REFERENCE} holds no list of {len(rows)} finite scores")
+        out["reference"] = [float(s) for s in scores]
+        out["relevant"] = [p["relevant"] for p in rows] if all("relevant" in p for p in rows) else None
+        return out
+    vectors = ref_doc.get("vectors")
+    if (not isinstance(vectors, list) or len(vectors) != len(rows) or not isinstance(vectors[0], list) or not 1 <= len(vectors[0]) <= MAX_DIM
+            or len(vectors) * len(vectors[0]) > MAX_VECTOR_NUMEL):
+        raise CheckFailed(f"{REFERENCE} holds no list of {len(rows)} vectors of one length (1 to {MAX_DIM}, at most {MAX_VECTOR_NUMEL} numbers in all)")
+    for i, v in enumerate(vectors):
+        if not isinstance(v, list) or len(v) != len(vectors[0]) or not all(finite_score(x) for x in v) or not any(v):
+            raise CheckFailed(f"{REFERENCE} vector {i} is not a list of {len(vectors[0])} finite numbers with some value that is not zero")
+    out["reference"] = [[float(x) for x in v] for v in vectors]
+    return out
 
 
 def port_sources() -> list:
@@ -453,27 +662,33 @@ def refuse_links() -> None:
                 raise CheckFailed(f"{os.path.relpath(os.path.join(root, name), RUN_DIR)} is a link: files under stages/2/port/ must be regular files")
 
 
+EMBED_BATCH = 4                  # choice: inputs in one request; the reply for four vectors of 8192 numbers is well under a megabyte
+
+
 def main() -> int:
     config, config_sha = load_json(CONFIG_FILE, CONFIG_FILE.name)
     model_dir = config.get("model_snapshot") if isinstance(config, dict) else None
     if not isinstance(model_dir, str) or not model_dir or "\0" in model_dir:
         raise CheckFailed(f"{CONFIG_FILE.name} names no model_snapshot")
-    if config.get("kind") != KIND:
-        raise CheckFailed(f"{CONFIG_FILE.name} kind is {config.get('kind')!r}; this slice of the check runs {KIND!r} only "
-                          "(embedding models are a later slice)")
+    kind = config.get("kind")
+    if kind not in KINDS:
+        raise CheckFailed(f"{CONFIG_FILE.name} kind is {kind!r}; this check runs one of {KINDS}")
     chips = [c for c in os.environ.get("TT_VISIBLE_DEVICES", "").split(",") if c]
     if not chips:
         raise CheckFailed("TT_VISIBLE_DEVICES names no chip: this test runs only under the supervisor's lease")
     if not (PORT_DIR / f"{PORT_MODULE}.py").is_file():
         raise CheckFailed(f"stages/2/port/{PORT_MODULE}.py does not exist: the port module is the file the coder writes")
     refuse_links()
-    rows, reference, pairs_sha, ref_sha, ref_doc = read_inputs()
-    order: list = []                       # group names in order of first appearance
+    inputs = read_inputs(kind)
+    rows, reference, media = inputs["rows"], inputs["reference"], inputs["media"]
+    pairs_sha, ref_sha, ref_doc = inputs["pairs_sha"], inputs["ref_sha"], inputs["ref_doc"]
+    order: list = []                       # group names in order of first appearance (a reranker's requests go one group at a time)
     by_group: dict = {}
-    for i, p in enumerate(rows):
-        if p["group"] not in by_group:
-            order.append(p["group"])
-        by_group.setdefault(p["group"], []).append(i)
+    if kind == "reranker":
+        for i, p in enumerate(rows):
+            if p["group"] not in by_group:
+                order.append(p["group"])
+            by_group.setdefault(p["group"], []).append(i)
     RECORD.parent.mkdir(parents=True, exist_ok=True)
     if os.path.lexists(RECORD):
         os.unlink(RECORD)
@@ -489,10 +704,18 @@ def main() -> int:
         load_s = max(time.monotonic() - t0, MIN_LOAD_S)     # full precision; a rounded value could be 0.0, which the gate refuses
         print(f"loaded in {load_s}s", flush=True)
         t1 = time.monotonic()
-        for g in order:
-            idx = by_group[g]
-            for i, s in zip(idx, w.score(g, [rows[i]["input_ids"] for i in idx])):
-                chip[i] = s
+        if kind == "reranker":
+            for g in order:
+                idx = by_group[g]
+                for i, s in zip(idx, w.score(g, [rows[i]["input_ids"] for i in idx], None if media is None else [media[i] for i in idx])):
+                    chip[i] = s
+        else:
+            dim = len(reference[0])
+            for start in range(0, len(rows), EMBED_BATCH):
+                idx = list(range(start, min(start + EMBED_BATCH, len(rows))))
+                for i, v in zip(idx, w.embed(f"inputs {idx[0]} to {idx[-1]}", [rows[i]["input_ids"] for i in idx], dim,
+                                             None if media is None else [media[i] for i in idx])):
+                    chip[i] = v
         score_s = max(time.monotonic() - t1, MIN_LOAD_S)
         w.ask(op="close")
     finally:
@@ -504,21 +727,29 @@ def main() -> int:
     if FORGED.is_set():
         raise CheckFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
 
-    groups = [p["group"] for p in rows]
-    numbers = parity(reference, chip, groups)
-    record = {"schema": SCHEMA, "kind": KIND,
+    common = {"schema": SCHEMA, "kind": kind,
               "reference": {"path": REFERENCE, "sha256": ref_sha, "precision": ref_doc.get("precision")},
-              "pairs": {"path": PAIRS, "sha256": pairs_sha, "count": len(rows)},
-              "groups": groups, "pair_kinds": [p.get("kind") for p in rows],
-              "reference_scores": reference, "chip_scores": chip, "metrics": numbers,
-              "chips": chips, "load_s": load_s, "score_s": score_s,
-              "port_sources": sources, "template_sha256": sha_file(__file__),
-              "config": {"path": str(CONFIG_FILE.relative_to(RUN_DIR)), "sha256": config_sha}}
-    data = (json.dumps(record, indent=2) + "\n").encode("utf-8")
+              "pairs": {"path": PAIRS, "sha256": pairs_sha, "count": len(rows)}}
+    tail = {"chips": chips, "load_s": load_s, "score_s": score_s, "port_sources": sources, "template_sha256": sha_file(__file__),
+            "config": {"path": str(CONFIG_FILE.relative_to(RUN_DIR)), "sha256": config_sha}}
+    if kind == "reranker":
+        groups = [p["group"] for p in rows]
+        numbers = parity(reference, chip, groups)
+        record = {**common, "groups": groups, "pair_kinds": [p.get("kind") for p in rows],
+                  "reference_scores": reference, "chip_scores": chip, "metrics": numbers, **tail}
+        if inputs["relevant"] is not None:
+            record["retrieval"] = retrieval(reference, chip, groups, inputs["relevant"])
+        summary = (f"pearson {numbers['pearson']:.5f}, mean |diff| {numbers['mean_abs_diff']:.4f}, max |diff| {numbers['max_abs_diff']:.4f}, "
+                   f"top-1 {numbers['top1_groups_matching']}/{numbers['top1_groups']} groups, "
+                   f"order kept {numbers['order_pairs_kept']}/{numbers['order_pairs']}")
+    else:
+        kinds = [p["kind"] for p in rows]
+        numbers = embed_numbers(reference, chip, kinds)
+        record = {**common, "input_kinds": kinds, "dim": len(reference[0]), "chip_vectors": chip, "metrics": numbers, **tail}
+        summary = f"cosine mean {numbers['cosine_mean']:.5f}, min {numbers['cosine_min']:.5f} over {numbers['count']} inputs"
+    data = (json.dumps(record, indent=1) + "\n").encode("utf-8")
     write_atomic(RECORD, data)
-    print(f"pearson {numbers['pearson']:.5f}, mean |diff| {numbers['mean_abs_diff']:.4f}, max |diff| {numbers['max_abs_diff']:.4f}, "
-          f"top-1 {numbers['top1_groups_matching']}/{numbers['top1_groups']} groups, "
-          f"order kept {numbers['order_pairs_kept']}/{numbers['order_pairs']}", flush=True)
+    print(summary, flush=True)
     print("SCORING_CHECK_SHA256", sha_bytes(data), flush=True)
     return 0
 

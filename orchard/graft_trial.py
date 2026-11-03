@@ -143,9 +143,7 @@ def write_decision(stage_dir, decision: dict, *, candidate: dict | None, trial: 
     sd = Path(stage_dir)
     record = {**decision, "candidate": candidate, "trial": f"{TRIAL_DIR}/{TRIAL_RESULT}" if trial else None}
     path = sd / DECISION_FILE
-    tmp = sd / (DECISION_FILE + ".tmp")
-    tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    safeio.atomic_write(path, json.dumps(record, indent=2) + "\n")
     return path
 
 

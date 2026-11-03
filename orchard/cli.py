@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
-    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port]
+    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port] [--model-kind generative|reranker|embedding]
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
@@ -16,7 +16,7 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
-    tt-orchard updates [--json] [--offline] [--refresh] [--tt-metal-dir DIR] [--updates-config FILE]
+    tt-orchard updates [--json] [--offline] [--refresh] [--print-timer] [--fail-when-unknown] [--tt-metal-dir DIR] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
@@ -132,6 +132,14 @@ def _parser() -> argparse.ArgumentParser:
                         "compares the chip's tokens with the CPU reference. Stages 3 to 6 for a full port are not built yet, so the run ends "
                         "blocked after stage 2 (code full-port-stages-unbuilt). A run that already ran stage 2 without the flag refuses it. "
                         "No other class changes")
+    b.add_argument("--model-kind", choices=("generative", "reranker", "embedding"), default=None,
+                   help="what the model produces. Without it stage 0 reads the model card's pipeline_tag (text-ranking is a reranker; "
+                        "feature-extraction and sentence-similarity are embedding models), then the architecture names. A reranker or embedding "
+                        "model takes the scoring route (stage 1 records Hugging Face scores or vectors, stage 2 runs the scoring check on the "
+                        "coder's port); stages 3 to 6 are not built for it, so the run ends blocked after stage 2 (code scoring-route)")
+    b.add_argument("--full-port-rehearsal", action="store_true",
+                   help="with --full-port, for a rehearsal model with random weights: stage 2 waives its `coherent` field and no other check, "
+                        "and the ledger says so. Given when the run starts; a resume keeps it and cannot add it")
     b.add_argument("--prune-caches", action="store_true",
                    help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
                         "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
@@ -324,6 +332,8 @@ def _parser() -> argparse.ArgumentParser:
     up_.add_argument("--json", action="store_true", help="print the rows as JSON")
     up_.add_argument("--offline", action="store_true", help="make no network call; show the last cached result")
     up_.add_argument("--refresh", action="store_true", help="ignore the cache (default: reuse a result under 6 hours old)")
+    up_.add_argument("--print-timer", action="store_true", help="print a systemd timer and a cron line that run the check daily, as text; installs nothing")
+    up_.add_argument("--fail-when-unknown", action="store_true", help="exit 3 when every row is unknown (for a scheduled run)")
     up_.add_argument("--tt-metal-dir", help="the host tt-metal tree, read only (default ~/tt-metal, or $ORCHARD_TT_METAL_DIR)")
     up_.add_argument("--updates-config", metavar="FILE", help="TOML with family, coder_packages, authors, repos, cache_hours "
                                                               "(default config/updates.toml when it exists)")
@@ -1301,7 +1311,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               accept_credentials=not args.refuse_credentials_visible,
                                               graft_trial=not args.no_graft_trial,
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
-                                              full_port=args.full_port)
+                                              full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)

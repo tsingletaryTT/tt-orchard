@@ -126,8 +126,15 @@ def run_dir(tmp_path, *, floor=True, chips2=None, stage4=(), graft=None, cfg=DEN
         write(run / f"stages/4/configs/{n}/evidence/swap-check.json", {"sampling_probe": probe(seconds=1.0)})
         write(run / f"stages/4/configs/{n}/swap_config.json", {"chips": n})
     if graft:
-        write(run / "stages/2/graft-decision.json", {"choice": "graft", "reason": "x", "numbers": graft})
+        write_trial(run, graft)
     return run
+
+
+def write_trial(run, numbers):
+    """The graft trial's own record (`graft-trial/trial-result.json`) from the old `numbers` spelling, and a decision file that agrees."""
+    side = lambda key: {"decode_tok_s": numbers[key]} if key in numbers else {}      # noqa: E731
+    write(run / "stages/2/graft-trial/trial-result.json", {"safe": side("safe_decode_tok_s"), "variant": side("variant_decode_tok_s")})
+    write(run / "stages/2/graft-decision.json", {"choice": "graft", "reason": "x", "numbers": numbers})
 
 
 def test_the_stage_2_probe_speed_is_a_share_of_the_floor_for_the_boards_dies(tmp_path):
@@ -158,6 +165,39 @@ def test_the_graft_trial_speeds_are_rows_and_the_variant_row_says_a_drafter_can_
     safe = next(v for k, v in rows.items() if "safe" in k)
     var = next(v for k, v in rows.items() if "graft" in k and "safe" not in k)
     assert safe["tok_s"] == 20.0 and var["tok_s"] == 60.0 and "drafter" in var["basis"]
+
+
+def test_graft_rows_read_the_trial_record_and_cite_it_not_the_decision_file(tmp_path):
+    """Issue 297: the stage gate does not check the decision file's `numbers` against the trial, so a decision that claims a faster
+    variant than the trial measured must not make a row."""
+    run = run_dir(tmp_path)
+    write(run / "stages/2/graft-trial/trial-result.json", {"safe": {"decode_tok_s": 20.0}, "variant": {"decode_tok_s": 30.0}})
+    write(run / "stages/2/graft-decision.json", {"choice": "graft", "reason": "x", "numbers": {"safe_decode_tok_s": 20.0, "variant_decode_tok_s": 999.0}})
+    rows = {r["source"]: r for r in fr.share_rows(run)}
+    var = rows["stage 2 graft trial, grafted variant"]
+    assert var["tok_s"] == 30.0 and var["evidence"] == "stages/2/graft-trial/trial-result.json"
+    assert rows["stage 2 graft trial, safe configuration"]["evidence"] == "stages/2/graft-trial/trial-result.json"
+
+
+def test_a_decision_file_alone_with_no_trial_record_makes_no_graft_row(tmp_path):
+    run = run_dir(tmp_path)
+    write(run / "stages/2/graft-decision.json", {"choice": "graft", "reason": "x", "numbers": {"safe_decode_tok_s": 20.0, "variant_decode_tok_s": 60.0}})
+    assert [r["stage"] for r in fr.share_rows(run)] == [2] and not any("graft" in r["source"] for r in fr.share_rows(run))
+
+
+def test_every_row_basis_states_both_biases():
+    """Issue 297: a smaller on-chip weight dtype makes the share too high; prefill and HTTP time make it too low."""
+    for basis in (fr.PROBE_BASIS, fr.GRAFT_BASIS, fr.GRAFT_DRAFTER_BASIS):
+        assert "share shown is too high" in basis and "share shown is too low" in basis, basis
+
+
+def test_a_probe_taken_with_the_drafter_on_says_so_on_its_row(tmp_path):
+    run = run_dir(tmp_path)
+    write(run / "stages/2/evidence/swap-check.json", {"sampling_probe": probe(), "serving": {"drafter": "on (/x/drafter)", "sampling": "host"}})
+    row = fr.share_rows(run)[0]
+    assert "speculative drafter on" in row["basis"] and "on (/x/drafter)" in row["basis"]
+    write(run / "stages/2/evidence/swap-check.json", {"sampling_probe": probe(), "serving": {"drafter": "off", "sampling": "host"}})
+    assert "speculative drafter" not in fr.share_rows(run)[0]["basis"]
 
 
 def test_a_share_above_the_floor_says_an_input_is_wrong_or_the_run_decodes_several_tokens_per_read(tmp_path):
@@ -308,8 +348,7 @@ def test_a_record_that_says_it_was_skipped_gives_no_rows_even_when_it_holds_floo
 def test_a_speed_just_above_the_floor_is_flagged_and_one_below_is_not(tmp_path):
     run = run_dir(tmp_path)
     floor = fr.read_floor(run)["floors"]["2"]["floor_tok_s"]
-    write(run / "stages/2/graft-decision.json", {"choice": "graft", "reason": "x",
-                                                  "numbers": {"safe_decode_tok_s": floor * 1.5, "variant_decode_tok_s": floor * 0.5}})
+    write_trial(run, {"safe_decode_tok_s": floor * 1.5, "variant_decode_tok_s": floor * 0.5})
     rows = {r["source"]: r for r in fr.share_rows(run)}
     assert "above the floor" in rows["stage 2 graft trial, safe configuration"]["note"]
     assert rows["stage 2 graft trial, grafted variant"]["note"] is None

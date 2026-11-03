@@ -221,8 +221,8 @@ def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
         shutil.copy2(TEMPLATES / name, adir / name)
     shutil.copy2(TEMPLATES / "ops" / f"{op}.json", adir / "kernel_spec.json")
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
-    (adir / "check_config.json").write_text(json.dumps({"sim": str(env.sim), "timeout_s": BUDGET["sim_timeout_s"],
-                                                        "tt_lang": facts}, indent=2) + "\n", encoding="utf-8")
+    safeio.atomic_write(adir / "check_config.json", json.dumps({"sim": str(env.sim), "timeout_s": BUDGET["sim_timeout_s"],
+                                                                "tt_lang": facts}, indent=2) + "\n", mode=0o644)
     if references is not None:
         return write_references(adir, references)
     ref = Path(env.src_dir) / "examples" / "eltwise_add.py"
@@ -1941,7 +1941,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
             for a in sorted(ran, key=lambda a: a["attempt"]):
                 if isinstance(a["hw"].get("watch"), dict):
                     lines.append(f"attempt {a['attempt']} on hardware: {_watch_text(a['hw']['watch'])}")
-    (probe_dir / "kernel-probe-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    safeio.atomic_write(probe_dir / "kernel-probe-report.md", "\n".join(lines) + "\n", mode=0o644)
     return data
 
 

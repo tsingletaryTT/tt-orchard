@@ -410,3 +410,34 @@ def test_support_row_takes_the_readme_boards_of_the_same_matched_model_only(tmp_
     (run_dir / "research" / "base-candidates.json").write_text(json.dumps({"tt_transformers": [rows[0], rows[1]]}))
     got = sr.support_row(run_dir, "Llama-3.2-1B-Instruct")
     assert got["boards"] == [] and got["blackhole"] is None
+
+
+@pytest.mark.parametrize("kind", ["fifo", "link"])
+def test_triage_replaces_a_fifo_or_link_at_each_file_it_writes(tmp_path, kind):
+    """Issue 355 / review of PR 403: the production writers of `triage`, not `safeio` alone. A FIFO at an output path blocked write_text; a
+    link made it write through to the link's target."""
+    import os
+    import threading
+    snap, pdir = snapshot(tmp_path), params(tmp_path)
+    stage = tmp_path / "run" / "stages" / "0"
+    (stage / "evidence").mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    targets = [stage / "evidence" / "stock-config-compare.json", stage / "evidence" / "stock-layout.json", stage / "delta.json"]
+    for t in targets:
+        os.mkfifo(t) if kind == "fifo" else os.symlink(outside, t)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(delta=run(tmp_path, snap, pdir)), daemon=True)
+    worker.start()
+    worker.join(15)
+    if worker.is_alive():                        # a blocked writer: open each FIFO for reading so the thread ends, then fail
+        for t in targets:
+            try:
+                os.close(os.open(t, os.O_RDONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+        worker.join(5)
+        pytest.fail("triage blocked writing into a FIFO")
+    assert outside.read_text() == "keep"
+    assert all(t.is_file() and not t.is_symlink() for t in targets)
+    assert json.loads(targets[2].read_text())["class"] == "stock-runtime"

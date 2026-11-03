@@ -884,8 +884,10 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--package-format` | no | `v6` makes stage 7 build a v6 thin package on the weights-only path (see [5.3](#53-what-each-stage-does)). `v5.1` is refused at start, because it needs a container image build. Without this flag stage 7 is skipped. The ledger records it, and a resume with different options is refused. A run that started without it can be given it on a resume, as long as stage 7 has not started |
 | `--package-namespace` | with `--package-format` | Your Hugging Face namespace. Stage 7 writes it into the package card and the publish commands. The run never publishes |
 | `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
-| `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `full-port-stages-unbuilt`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `package-missing`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
+| `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `full-port-stages-unbuilt`, `scoring-route`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `package-missing`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
 | `--full-port` | no | Let a model that stage 0 classed `full-port` go on into the full-port stage 2 (see the class table). The ledger records it, and a resume keeps it. It can be added on a resume only before stage 2 has started, so a run that ended blocked with `needs-new-model-code` can be continued. It changes nothing for another class, and `unknown` and `restricted-head` still stop. `tt-orchard bringup` takes the same flag |
+| `--full-port-rehearsal` | no | For a rehearsal model with random weights (`scripts/tiny_qwen4`): stage 2 of a full port waives its `coherent` field and no other check, and the ledger records a decision that says so. Needs `--full-port`, is given when the run starts, and is kept on a resume. A resume cannot add it. `tt-orchard bringup` takes the same flag |
+| `--model-kind` | no | What the model produces: `generative`, `reranker` or `embedding` (issue 378). Without it stage 0 reads the model card's `pipeline_tag` (`text-ranking` is a reranker; `feature-extraction` and `sentence-similarity` are embedding models), then the architecture names (a name with `Embedding`), and records in its `stage_end` which one decided. A reranker or embedding model of class `weights-only`, or of class `full-port` with `--full-port`, takes the scoring route (see Scoring models below). A resume keeps the ledger's answer. `tt-orchard bringup` takes the same flag |
 | `--no-graft-trial` | no | Skip stage 2's graft trial (section 5.5c). The run records the choice, and a resume keeps it. `tt-orchard bringup` takes the same flag |
 | `--sampling` | no | `auto` (default), `needed` or `not-needed`: whether the model's purpose needs sampling (section 5.5d). With `auto`, stage 2 reads the model's files; with a drafter that ignores sampling and a model that needs it, stage 2 serves a drafter-off variant once and chooses by measurement. The run records the setting and a resume keeps it (a different value on a resume is refused). `tt-orchard bringup` takes the same flag |
 | `--resume-aborted` | no | Carry on with a run that an operator or a signal aborted. An abort is terminal otherwise: running the command again returns exit 4 and starts nothing. The ledger records `resume` with `after: abort`, then the run starts its coder again and continues from the ledger. A finished run and an abort of any other kind are left as they are. `tt-orchard bringup` takes the same flag, and the web page's `Resume run` passes it |
@@ -1167,6 +1169,18 @@ does not change.
 | `stock-runtime` | tt-transformers already supports the model: research found an exact `models/tt_transformers/model_params/<name>` for it (or its base) on this box, and no installed bundle serves the base. Chosen with no flag: the `base` preflight row warns, `bringup` passes `--input stock_params=<dir>`, and stage 0 is supervisor code that compares the config and the tensor layout with tt-transformers' own | `stock-runtime` | Stage 2 serves the model through tt-transformers on one board from a scratch copy of the host tt-metal tree's `models/` (`<run>/tt-metal-scratch`, the only place beyond the stage directory the `write_file` tool reaches; the template never writes the host tree, and shell commands are not confined by any mount) and checks teacher-forced top-1 and top-5 against the bars in `orchard/defaults.py` (`STOCK_*`, choices). Stages 3 to 7 are skipped (stage 4's 2-chip and 4-chip checks are not built). No package, no push, no publish |
 | `full-port` | The model needs new model code | `full-port` | An unattended run ends blocked (`needs-new-model-code`); an attended run pauses before stage 2. With `--full-port` the run goes on: stage 2 has the coder write the port under `stages/2/port/` and one hardware test compares the chip's tokens with the stage 1 reference (skill `full-port-check`, gate in `orchard/full_port.py`, design in [docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md](docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md)). Stages 3 to 6 for a full port are not built, so the run then pauses (unattended: ends blocked, `full-port-stages-unbuilt`) |
 | `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
+
+**Scoring models (a reranker or an embedding model).** These models give a score or a vector, so the generated-token comparison of stages 1 and 2 has
+nothing to compare. Stage 0 records a model kind (`generative`, `reranker` or `embedding`: `--model-kind`, else the model card's `pipeline_tag`, else the
+architecture names) in its `stage_end` and in `stages/0/hazard-scan.json` (`facts.model_kind`). For a scoring kind the hazard scan leaves out the two
+vocabulary hazards of a full output head, because a reranker reads two rows of the head and an embedding model has none, and says so in its notes. Stage 0's tensor
+comparison does not count the nearest model's `lm_head` as missing from a model whose architecture is a bare backbone (`head.not_used` in `delta.json`). Class
+`weights-only`, or class `full-port` with `--full-port`, takes the scoring route: stage 1 (skill `scoring-reference`, `python3 -m orchard.scoring_reference
+rerank|embed`) records a fixed input set and the Hugging Face scores or vectors, and stage 2 (skill `scoring-check`, gate `orchard/scoring_check.py`) has the
+coder write a port module and runs the supervisor's own check on one leased board: Pearson, absolute differences, top document, order, NDCG@10 and Hit@1 for a
+reranker; the cosine to the Hugging Face vector, mean and minimum for each input kind, for an embedding model. A pair file may name image or video files that the
+check hands to the port with their sha256. Stages 3 to 6 are not built for this route, so the run pauses after stage 2 (block code `scoring-route`). Design:
+[docs/superpowers/specs/2026-11-02-scoring-model-check-design.md](docs/superpowers/specs/2026-11-02-scoring-model-check-design.md). No port has run through the check on a chip.
 
 **Audio models.** A model in the stable-audio-tools layout (`model_config.json`, one combined `model.safetensors`, no `config.json`) is read by an
 audio branch of the stage 0 template. Stage 0 records three facts in its ledger entry: `form` (`adapter` or `full`), `serving` (`thin-bundle`,
@@ -1586,6 +1600,41 @@ supervisor reads the record and, when the box (or stage 2's one-board lease, whi
 than the estimate needs, blocks with the numbers (block code `model-does-not-fit`) and starts no prepare step. The generic stage 2
 only records the estimate. A checkpoint whose `model.safetensors.index.json` names a shard or tensor that is missing is refused as
 incomplete.
+
+#### Stack freshness at stage 0
+
+Stage 0 writes `stages/0/stack-pins.json` before its agent starts (`orchard/stack_pins.py`, from tenstorrent/skills PR 44). It compares
+four parts with upstream and uses the states of the skills check (`current`, `behind` with a count, `ahead`, `differs`, `unknown`). A
+checkout is compared only when its origin is the project it should be (case-insensitive); another origin (a fork, an unrelated clone) makes the
+part `unknown`.
+
+- the tt-metal checkout (`tenstorrent/tt-metal`) against upstream main (`$ORCHARD_TT_METAL_DIR`, else `tt-metal` under the run's operator home, `--operator-home`);
+- the TT vLLM plugin checkout (`tenstorrent/vllm-tt-plugin`) against its upstream branch (`$ORCHARD_TT_VLLM_DIR`, branch `$ORCHARD_TT_VLLM_BRANCH`, default `main`);
+- each tenstorrent/skills clone named with `--skills-dir`, against upstream main;
+- the `transformers` installed in the reference interpreter (the run's `reference_python` input, else `$ORCHARD_REFERENCE_PYTHON`, as an absolute
+  path) against the checkpoint's `transformers_version` (the run's `model` input, its `config.json`) and the table `KNOWN_MINIMUMS` in
+  `orchard/stack_pins.py`, and whether that `transformers` has each class the checkpoint's `architectures` names (up to 64; an entry that is not
+  a plain class name, or more than 64, is an unchecked finding and never `ok`), looked up the way the stage 1 reference loader does (the top
+  level, then `transformers.models.<model_type>.modeling_<model_type>`). Versions are compared in PEP 440 order (dev, a, b, rc, the release,
+  post); a form the check does not know is reported as not compared. A checkpoint whose config names `model_type` `qwen4_exp` (or the flat `qwen4_exp_text`) needs
+  `transformers` 5.19.0 or later for `Qwen4ExpForCausalLM`.
+
+The interpreter is asked with a fixed script that imports `transformers` only. The probe does not load files an agent can write: it sets
+`PYTHONNOUSERSITE=1`, starts in an empty temporary directory, and drops relative, current-directory and run-directory `PYTHONPATH` entries. It
+therefore can differ from the reference step; every record lists what it cannot match under `probe_limits` (a user-site install, `LD_LIBRARY_PATH`
+and other import settings, the interpreter stage 1 or a text-runtime reference selects, and the inputs of a resumed stage).
+
+The record is always written. A checkout more than 7 days behind, a `transformers` below the minimum, a `transformers` that cannot be imported
+and a missing architecture class are critical findings with a named reason. By default they are recorded as `would_block` advisories, with
+the reasons, in the file, in the ledger entry and in the run narration. With `ORCHARD_STACK_PINS_BLOCK=1`, a critical finding of a new run
+blocks stage 0 with those reasons (block code `stack-stale`, which `bringup` does not retry by itself, because a retry would be a resume).
+Running the command again is a resume (as is a second attempt at stage 0): the same findings are advisories and the stage goes on. An upstream
+that cannot be reached, a part nobody named, a `differs` result and a gap whose age could not be told are advisories in every mode. Nothing in
+the record counts an unmade comparison as current. `ORCHARD_STACK_PINS_OFFLINE=1` makes no network call (every upstream part is then
+`unknown`). The supervisor adds a `stack pins` evidence entry with the file's sha256, and the stage 0 gate reads the file through `safeio` and
+accepts only the file that hash names. The supervisor removes an earlier attempt's record before it writes a new one, and a record that cannot be
+written blocks the stage. No URL, user information or token is copied into the record, and home directories are shown as `~` or `<home>` (an
+update hint that names `<home>` says what to replace). The check changes nothing: it does not pull, install or upgrade.
 
 ### 5.9b Op inventory
 
@@ -2341,7 +2390,7 @@ timeout and a shared 60-second budget.
 | Coder candidates | the configured packages | repos by the same authors, and search hits, whose id contains a name in `family` (default `qwen3-coder`, `qwen3.5-coder`, `coder-next`) and that are not configured |
 | tt-lang | the pin in `orchard/ttlang_pin.py` | newest tag, newest S3 dev wheel, public PyPI |
 | tt-metal | `git describe` of the host tree | latest release |
-| tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag |
+| tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag, else the `[project] version` in `pyproject.toml` on the default branch (the row says so) |
 | Skills checkout | `orchard.skillsfresh` | upstream main |
 
 To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`. The flag `--updates-config` reads a different file.
@@ -2359,6 +2408,13 @@ The "ready to farm" line says `verified` only when `config/verifications.json` (
 whose versions equal the new combination. Otherwise it says `unverified` and points at the smoke and probe kernel run. The file is
 written by a person or a verification run after a real run, never by `updates`. Preflight prints one informational line when the
 cache shows something behind or a candidate; it reads the cache only and never blocks.
+
+The Models view of `tt-orchard ui` shows the same rows under "Updates", read from the cache file (`GET /api/updates`). The page makes no
+request and runs nothing; it shows `tt-orchard updates --refresh` as text to run in a terminal.
+
+To check once a day, run `tt-orchard updates --print-timer`. It prints a systemd user service and timer and a cron line as text and installs nothing.
+The scheduled command is `updates --refresh --fail-when-unknown --json`: it needs the network and no lease, and it exits 3 when every row is unknown,
+so a failed run shows in the status of the `tt-orchard-updates` service (the printed text names the command) and in the journal.
 
 ## 6. Lessons that will bite you
 

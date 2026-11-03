@@ -329,6 +329,12 @@ def check_manifests(root: Path, repo: str, card: str | None = None) -> Finding:
         named = _yaml_scalar(text, r"^repo:\s*(\S+)")
         if named is not None and named != repo:
             problems.append(f"tt-model.yaml names repo {named}; the package is {repo}")
+        weights_repo = _yaml_weights_repo(text)
+        if weights_repo is not None and model and weights_repo != model:
+            problems.append(f"tt-model.yaml's weights repo is {weights_repo}; the package serves {model}")
+        elif weights_repo is None and re.search(r"^weights:", text, re.MULTILINE):
+            # a weights table is present and its repo could not be read (an alias, a form this reader does not parse): never a pass
+            problems.append("tt-model.yaml has a weights table and its weights repo could not be read, so it was not compared with the model")
         rev = _yaml_scalar(text, r"^  revision:\s*(\S+)")
         if rev is None:                          # the inline form: weights: {repo: ORG/NAME, revision: <commit>}
             rev = _yaml_scalar(text, r"^weights:\s*\{[^}\n]*\brevision:\s*[\"']?([^\s,}\"']+)")
@@ -366,6 +372,53 @@ def _repo_named_before(card: str | None, rev: str) -> str | None:
 LAUNCHER_WEIGHTS_PIN = re.compile(r"\b(?:\w+_)?(?:WEIGHTS|MODEL)_REV(?:ISION)?\s*[=:]\s*[\"']?(?:\$\{\w+:?-)?([0-9a-f]{40})\b", re.IGNORECASE)
 
 
+def _without_comment(line: str) -> str:
+    """`line` up to a shell comment: a `#` at the start of a word (after whitespace or at the line start) outside quotes. Quoting follows
+    the shell: inside single quotes nothing escapes; inside double quotes and `$'...'` a backslash escapes the next character; outside
+    quotes a backslash escapes the next character, so `\\#` and `\\ ` are not a comment or a word break."""
+    quote = None            # None, "'" (single), '"' (double) or "$" (ANSI-C $'...')
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote in ('"', "$"):
+            if ch == "\\":
+                i += 1                      # the next character is escaped
+            elif ch == ('"' if quote == '"' else "'"):
+                quote = None
+        elif ch == "\\":
+            i += 1
+        elif ch == "'" or ch == '"':
+            quote = ch
+        elif ch == "$" and line[i + 1:i + 2] == "'":
+            quote = "$"
+            i += 1
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+        i += 1
+    return line
+
+
+def _launcher_active_text(text: str) -> str:
+    """The launcher text with whole-line and trailing comments removed (issue 288)."""
+    return "\n".join(_without_comment(l) for l in text.splitlines())
+
+
+def _yaml_weights_repo(text: str) -> str | None:
+    """The `repo` of tt-model.yaml's `weights` mapping, in the block form (`weights:` then an indented `repo:`) or the inline form
+    (`weights: {repo: ORG/NAME, revision: <commit>}`). None when the file names none."""
+    inline = re.search(r"^weights:\s*\{[^}\n]*\brepo:\s*[\"']?([^\s,}\"']+)", text, re.MULTILINE)
+    if inline:
+        return inline.group(1)
+    block = re.search(r"^weights:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+.*\n?)+)", text, re.MULTILINE)
+    if block:
+        m = re.search(r"^[ \t]+repo:\s*[\"']?([^\s\"']+)", block.group(1), re.MULTILINE)
+        return m.group(1) if m else None
+    return None
+
+
 def _graft_pin(root: Path) -> tuple[str | None, str | None]:
     """(repo, revision) of the nearest model's head that graft.json names, or (None, None). The card's pin for that head is
     checked against this repository and not against the primary one."""
@@ -397,7 +450,7 @@ def check_revision(root: Path, card: str | None, record, hub: Hub | None) -> Fin
         for rev in sorted({m.lower() for m in REVISION_NEAR.findall(t)} - named):
             notes.append(f"{fname} names revision {rev}, which the card does not")
     for fname in ("run.sh", "install.sh"):
-        active = "\n".join(l for l in (_text(root / fname) or "").splitlines() if not l.lstrip().startswith("#"))
+        active = _launcher_active_text(_text(root / fname) or "")
         for rev in sorted({m.lower() for m in LAUNCHER_WEIGHTS_PIN.findall(active)} - want):
             problems.append(f"{fname} pins the weights at {rev}; the card's primary weights pin is {', '.join(sorted(want))}")
     graft_repo, graft_rev = _graft_pin(root)

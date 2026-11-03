@@ -15,7 +15,7 @@ asked anything.
 | (a) CPU reference | a hand-written one-token step model agrees with transformers fp32 to 1e-6 relative L2 on 4 prompts (all greedy tokens equal); op-level arrays recorded for two mamba layers |
 | (b) port on one chip, conv and SSD on the host | greedy tokens: 3 of 3, 24 of 24, 8 of 24, 24 of 24; the bf16 CPU run gives the same 3, 24, 8, 24 |
 | composed baseline (conv and SSD from stock ttnn ops on the chip) | works at the same agreement; 22.6 tok/s |
-| (c) coder kernels, simulator | `ssd_state_update` 4 of 5; `ssd_readout` 4 of 10 (0 of 5 at temperature 0, 4 of 5 at 0.7) |
+| (c) coder kernels, simulator | `ssd_state_update` 4 of 5 by the loop's tally (all five archived checks pass; see the note under the round table); `ssd_readout` 4 of 10 (0 of 5 at temperature 0, 4 of 5 at 0.7) |
 | (c) coder kernels, hardware | `ssd_state_update`: runs on the chip and is in the model. `ssd_readout`: 0 of 7 simulator-passing kernels compile on the chip's tt-lang |
 | (c) compact state update (`ssd_state_update_bcast`) | simulator 2 of 10; hardware 1 of those 2 |
 | (d) kernel in the model | state-update kernel: agreement at the bf16 floor, 16.7 tok/s; compact kernel 18.0 tok/s; composed baseline 22.6 to 23.5 tok/s. Both kernels are slower than the baseline. Floor share 9.5% to 10.3% against 12.9% to 13.4% |
@@ -74,8 +74,14 @@ package, p300 profile.
 
 | round | op | attempts | simulator pass | failure classes |
 |---|---|---|---|---|
-| state-r1 | `ssd_state_update` (elementwise) | 5, temperature 0 | 4 | 1 `no_kernel` |
+| state-r1 | `ssd_state_update` (elementwise) | 5, temperature 0 | 4 by the loop's tally; 5 in the archived `check.json` files | 1 `no_kernel` in the tally, not in the archive |
 | readout-r1 | `ssd_readout` (row reduction) | 10 (5 at 0, 5 at 0.7) | 4 (0 of 5 at 0, 4 of 5 at 0.7) | 3 `numeric_mismatch` (PCC 0.09 to 0.18), 3 `tt_lang_error` (incomplete dataflow-buffer operations, a store shape mismatch, a copy from a reserved block) |
+
+Note on the state-r1 tally (issue 225): the loop's tally recorded 4 passes and 1 `no_kernel` (a check that found no kernel file, so it never ran
+the simulator). The five `kernels/state-r1/attempt-N/check.json` files in the evidence directory all report `phase: sim`, `passed: true`
+and PCC 1.0 on all six sets. The initial failed check was not archived, so this log cannot say which attempt it
+belonged to or why the kernel file was missing at that time. Read the pass count as 4 of 5 by the loop's own record and 5 of 5 by the
+archived checks.
 
 The passing readout kernels follow the library's rmsnorm kernel (`reduce_sum` over the row, then `broadcast`). The library was on, so
 the reduction pattern came from a worked example and was not derived from the specification.

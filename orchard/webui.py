@@ -68,6 +68,7 @@ from orchard import __version__, bringup_config, caches, lexicon, machine_checks
 from orchard import telegraph as _telegraph
 from orchard import telegraph_view
 from orchard import cans_view
+from orchard import updates_view
 from orchard import virtualspend as _virtualspend
 from orchard import virtualspend_view
 from orchard.preflight import _lab_status
@@ -526,6 +527,11 @@ class WebApp:
         """The Cans view: each can's spec, staged bundle, SHA256SUMS check, recorded gate and boot, and card rows. Read only: no path in
         the answer, no write, no chip, no request to the Hub (orchard/cans_view.py)."""
         return self.cans_view().build()
+
+    def updates(self) -> dict:
+        """The Models view's updates table: the rows `tt-orchard updates` cached. Read only: no network call, no process, no write, no
+        path in the answer (orchard/updates_view.py)."""
+        return updates_view.build(redact=self.redact, clock=self.clock)
 
     def _lab_group(self) -> dict:
         """The lab's chips from its `gozer status` (over ssh), asked at most every LAB_TTL_S seconds."""
@@ -1226,6 +1232,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.telegraph())
         if segs == ["api", "cans"]:
             return self._json(200, app.cans())
+        if segs == ["api", "updates"]:
+            return self._json(200, app.updates())
         if segs == ["api", "virtual-spend"]:
             return self._json(200, app.virtual_spend(q.get("run")))
         if segs == ["api", "health"]:

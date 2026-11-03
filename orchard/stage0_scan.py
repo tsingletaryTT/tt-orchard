@@ -20,7 +20,7 @@ import json
 import os
 from pathlib import Path
 
-from orchard import hazards, model_config as mc, safeio
+from orchard import hazards, model_config as mc, model_kind, safeio
 
 FILE = "hazard-scan.json"
 MAX_TRIAGE_CONFIG_BYTES = 1 << 20
@@ -45,8 +45,11 @@ def _config_of(directory) -> dict:
     return mc.read_model_config(resolved)
 
 
-def build_record(stage_dir, model_dir=None, nearest_dir=None, *, dies: int = 2) -> dict:
-    """The scan record for a stage directory. Never raises for an unreadable input: that is a record with `scan: skipped`."""
+def build_record(stage_dir, model_dir=None, nearest_dir=None, *, dies: int = 2, kind: str = "generative") -> dict:
+    """The scan record for a stage directory. Never raises for an unreadable input: that is a record with `scan: skipped`.
+
+    `kind` is the run's model kind (orchard/model_kind.py). For a reranker or an embedding model, and for a model whose config describes a
+    bare backbone, the vocabulary hazards of a full output head are left out and a note says so (issue 380)."""
     stage_dir = Path(stage_dir)
     t_model, t_nearest = _triage_dirs(stage_dir)
     model_dir = model_dir or t_model
@@ -71,7 +74,7 @@ def build_record(stage_dir, model_dir=None, nearest_dir=None, *, dies: int = 2) 
         except mc.ModelConfigError as exc:
             nearest, note = None, f"the nearest model's config.json has unusable dimensions ({exc}), so the comparisons with it were skipped"
     try:
-        scan = hazards.scan_model_hazards(model, nearest, dies=dies)
+        scan = hazards.scan_model_hazards(model, nearest, dies=dies, kind=kind, has_output_head=model_kind.has_output_head(model))
     except hazards.HazardInputError as exc:
         return skipped(f"the model's config.json could not be used: {exc}")
     rec = scan.as_record()
@@ -81,8 +84,8 @@ def build_record(stage_dir, model_dir=None, nearest_dir=None, *, dies: int = 2) 
     return rec
 
 
-def write_scan(stage_dir, model_dir=None, nearest_dir=None, *, dies: int = 2) -> dict:
+def write_scan(stage_dir, model_dir=None, nearest_dir=None, *, dies: int = 2, kind: str = "generative") -> dict:
     """Build the record and write it to `stage_dir/hazard-scan.json` (all or nothing). Returns the record."""
-    rec = build_record(stage_dir, model_dir, nearest_dir, dies=dies)
+    rec = build_record(stage_dir, model_dir, nearest_dir, dies=dies, kind=kind)
     safeio.atomic_write(Path(stage_dir) / FILE, json.dumps(rec, indent=1, sort_keys=True) + "\n")
     return rec

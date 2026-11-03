@@ -20,12 +20,12 @@ import json
 import time
 from pathlib import Path
 
-from orchard import narrate
+from orchard import narrate, safeio
 from orchard.stages import STAGES
 from orchard.status import classify_pause, stage_rows
 
-REASONS = ("needs-new-model-code", "model-does-not-fit", "full-port-stages-unbuilt", "restricted-head", "audio-path-unbuilt", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
-           "hardware-unhealthy", "coder-unusable", "package-missing", "blocked", "unclassified")
+REASONS = ("needs-new-model-code", "model-does-not-fit", "full-port-stages-unbuilt", "restricted-head", "scoring-route", "audio-path-unbuilt", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
+           "hardware-unhealthy", "coder-unusable", "package-missing", "stack-stale", "blocked", "unclassified")
 
 # Blocks that `tt-orchard bringup` retries by itself (orchard/cli.py). A retry resumes from the ledger with a fresh
 # coder context. These three can clear on their own: a coder that did not come up, a chip or lease that settled after a
@@ -45,6 +45,7 @@ def retryable(code: str, reason: str = "") -> bool:
 
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
 _BLOCKED_WORDS = (
+    ("stack-stale", ("the stack is stale for a new run", "the stack freshness record", "the stack record of an earlier attempt")),   # first: its text names paths and parts that hold hardware words
     ("model-does-not-fit", ("does not fit this box", "does not fit stage")),                     # before the hardware words: its text says `chips`
     ("package-missing", ("no installed bundle or container package",)),     # before the hardware words: its text says `chip`
     ("disk-full", ("disk", "free space", " gb free")),
@@ -64,6 +65,8 @@ def block_code(pause: dict) -> str | None:
         return "full-port-stages-unbuilt"
     if kind == "restricted_head":
         return "restricted-head"
+    if kind == "scoring":
+        return "scoring-route"
     if kind == "audio_unbuilt":
         return "audio-path-unbuilt"
     if kind == "budget":
@@ -110,7 +113,7 @@ def write_bundle(run_dir, entries: list[dict], code: str, reason: str, *, now: f
     stage = at if at is not None else open_stage
     facts = {"code": code, "reason": reason, "model": model, "stage": stage, "stages": rows,
              "written": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
-    (run_dir / "blocked.json").write_text(json.dumps(facts, indent=2) + "\n", encoding="utf-8")
+    safeio.atomic_write(run_dir / "blocked.json", json.dumps(facts, indent=2) + "\n", mode=0o644)
     lines = [f"# Blocked: {code}", "",
              f"Model: {model or 'not recorded (the run never started)'}", "",
              f"The harness stopped at stage {stage}." if stage is not None else "The harness stopped before a stage began.",
@@ -125,4 +128,4 @@ def write_bundle(run_dir, entries: list[dict], code: str, reason: str, *, now: f
     lines += ["", f"The run resumes from its ledger when `tt-orchard bringup {model}` is run again. The ledger, each "
               "stage's evidence and the agent logs are in this run directory.",
               "Nothing was published, pushed or uploaded."]
-    (run_dir / "BLOCKED.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    safeio.atomic_write(run_dir / "BLOCKED.md", "\n".join(lines) + "\n", mode=0o644)

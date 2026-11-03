@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from orchard.supervisor import EXIT_READY, parse
-from run_fakes import FakeContainers, argv
+from run_fakes import FILES, FakeContainers, argv, bringup
 from test_supervisor import Rig, Stop
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
@@ -58,6 +58,37 @@ def test_stage_2_is_drafted_from_the_container_package_when_no_bundle_fits(tmp_p
         cfg = json.loads((sd / "swap_config.json").read_text())
         assert cfg["package"] == "someone/qwen3.8-27b-p300" and cfg["chips"] == 2 and "bundle_dir" not in cfg
         assert (sd / "serve_and_compare_container.py").is_file()
+    finally:
+        r.close()
+
+
+def test_stage_2_uses_the_agreement_set_when_stage_1_wrote_its_reference_and_records_the_hash(tmp_path):
+    r = container_rig(tmp_path, bundle=True)
+    ref = r.run_dir / "stages" / "1" / "evidence" / "reference" / "agreement-reference.json"
+    stage_1 = {**FILES[(1, "run")], "evidence/reference/agreement-reference.json": '{"entries": []}'}     # stage 1 writes the set's reference too
+    r.script = lambda request: bringup(request, overrides={(1, "run"): stage_1})
+    try:
+        # The rig's fake hardware test writes no agreement record, so the gate (which now needs one, because the config asks for the set)
+        # keeps failing stage 2 and the rig's simulated clock stops the run. What this test reads is what the supervisor wrote before that.
+        with pytest.raises(AssertionError, match="stuck"):
+            r.run()
+        sd = r.run_dir / "stages" / "2"
+        assert json.loads((sd / "swap_config.json").read_text())["agreement_set"] is True
+        assert (sd / "agreement_core.py").is_file() and (sd / "agreement_prompts.json").is_file()
+        recs = [e for e in r.entries() if e["data"].get("decision") == "agreement reference recorded"]
+        assert recs and all(e["stage"] == 2 and e["data"]["sha256"] == hashlib.sha256(ref.read_bytes()).hexdigest() for e in recs)
+    finally:
+        r.close()
+
+
+def test_stage_2_does_not_use_the_agreement_set_without_the_reference(tmp_path):
+    r = container_rig(tmp_path, bundle=True)
+    try:
+        assert r.run() == EXIT_READY
+        sd = r.run_dir / "stages" / "2"
+        assert "agreement_set" not in json.loads((sd / "swap_config.json").read_text())
+        assert not (sd / "agreement_core.py").exists()
+        assert not [e for e in r.entries() if e["data"].get("decision") == "agreement reference recorded"]
     finally:
         r.close()
 
