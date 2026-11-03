@@ -3978,3 +3978,9 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Issue 288: item 1 and the weights-repo part of item 3 were fixed in PR 396. Item 2 (repository and commit on different lines of a card) stays open because it needs a decision on the card format.
 - Issue 173: the remaining code item is in `orchard/audio_package.py`, which PR 397's area touches; the other two items need a board. Left open with the blocker in a comment.
 - Review round 1 (Copilot): the no-base warning in `check_base` returned before `_audio_base`, so an audio model with no base had no checkpoint note. The warning now carries `CHECKPOINT_NOTE` when the model is audio (`tests/test_audio_preflight.py`); removing it turns that test red.
+
+## 2026-11-03 First unattended tiny Qwen4 rehearsal (branch `pilot-qwen4-tiny-run-notes`)
+- Prompt (operator): use the hardware, try the next bring-up unattended.
+- Run: `tt-orchard bringup local/tiny-qwen4-dense --full-port --full-port-rehearsal`; stages 0 and 1 passed, stage 2 failed on the port reading one-indexed `ple_layer_ids` as zero-indexed. Details in `docs/run-logs/2026-11-03-tiny-qwen4-rehearsal-first-run.md`.
+- Setup mistakes found on the way (issue 417): a scratch `HF_HOME` is mounted into the coder and made it download 80 GB; a killed coder container blocks the next boot until removed.
+- Issue filed for a bounded repair round after a quick port-check failure.
