@@ -112,7 +112,7 @@ It fails the brief's most important quality in two places. During the softmax st
 - **Device time or wall time.** Wall time throughout. The split into decode and prefill is derived from token counts and separately measured rates and is labelled as derived.
 - **Same harness on both sides.** Not applicable: nothing is compared with another setup.
 - **Absolute figures.** Seconds, tokens and tokens per second. Shares of wall time appear only next to the totals they come from.
-- **Agreement with the decode bound.** The decode rate used (18.5 tokens/s) is the one measured on this package through its endpoint. This run did not compare it with the board's bandwidth floor.
+- **Agreement with the decode bound.** The decode rate used (18.5 tokens/s) was measured on this package through its endpoint. This run did not compare it with the board's bandwidth floor.
 - **Precision policy.** The package's own, unchanged. Its tensor cache is bfp8.
 
 ## Limits
