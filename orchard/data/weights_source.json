@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "note": "What each installed tt-model container package does with MODEL_WEIGHTS_DIR (issue 73). A weights-only bring-up swaps the new weights into a model directory and serves the package against it. A package whose generator downloads a constant repository ignores that directory and serves the base model, so its test measures the wrong model. Status hard-coded blocks the base check. Status honours and status unprobed pass. To probe a package, follow docs/weights-source.md and change its row with the evidence.",
+  "packages": {
+    "raahemnabeel/qwen3-coder-30b-a3b": {
+      "status": "hard-coded",
+      "evidence": "Stage 2 of a weights-only bring-up of a Qwen3-Coder-30B-A3B fine-tune (the validation run of issue 60): the container's server log shows 'Fetching 28 files' from the Hub while the swap check reported 32 of 32 tokens matching, so the test measured the base model. The package's generator calls snapshot_download with a constant repository and revision.",
+      "issue": 73
+    },
+    "changh95/qwen3.8-27b-p300x2": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded. Issue 73 says the Qwen3.8-27B packages kept an isolated, empty /hf over five runs, but it does not name the packages.",
+      "issue": 73
+    },
+    "changh95/qwen3.8-27b-p150x2": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded. Issue 73 says the Qwen3.8-27B packages kept an isolated, empty /hf over five runs, but it does not name the packages.",
+      "issue": 73
+    },
+    "changh95/qwen3.8-27b-dflash2-p300x2": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded. Issue 73 says the Qwen3.8-27B packages kept an isolated, empty /hf over five runs, but it does not name the packages.",
+      "issue": 73
+    },
+    "tt-hous/qwen3.8-27b-p150x4": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded. Issue 73 says the Qwen3.8-27B packages kept an isolated, empty /hf over five runs, but it does not name the packages.",
+      "issue": 73
+    },
+    "mando2222/qwen3.8-27b-dflash2-p300x2-q4kv": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded.",
+      "issue": 73
+    },
+    "mando2222/qwen3.8-27b-dflash2-vision-p300x2-q4kv": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded.",
+      "issue": 73
+    },
+    "raahemnabeel/qwen3-coder-next": {
+      "status": "honours",
+      "evidence": "Probe on 2026-11-03 (image tt-model/qwen3-coder-next:0c170421ca1b, profile p300, 2 chips): the container started with the Hub off, an empty /hf and MODEL_WEIGHTS_DIR set to a stub directory that held the base model's config, tokenizer files and shard index but no shard. Within 50 seconds the engine failed with FileNotFoundError for the first shard inside the stub directory. The isolated /hf stayed empty and the log shows no fetch. Not shown: what it does when a tokenizer or config file is missing from the directory, and the packages with other images (-blackhole, -blackhole-fast) are separate rows.",
+      "issue": 73
+    },
+    "raahemnabeel/qwen3-coder-next-blackhole": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded. Its publisher also made the 30B-A3B package, which hard-codes its repository; whether this one does too is not known, so probe it early.",
+      "issue": 73
+    },
+    "raahemnabeel/qwen3-coder-next-blackhole-fast": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded. Its publisher also made the 30B-A3B package, which hard-codes its repository; whether this one does too is not known, so probe it early.",
+      "issue": 73
+    },
+    "raahemnabeel/qwen3-reranker-4b": {
+      "status": "unprobed",
+      "evidence": "No probe of this package is recorded.",
+      "issue": 73
+    }
+  }
+}
