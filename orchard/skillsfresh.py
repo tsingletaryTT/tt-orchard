@@ -328,7 +328,9 @@ def _age_text(seconds: float) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
-_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]*@")
+# The scheme is limited to 32 characters (the longest in use is far shorter). With no limit, a long run of letters made the pattern read to the end of
+# the run from every start position, which is quadratic: 100,000 letters took over 5 s, and a captured check output can be 16 MiB (PR 425, round 4).
+_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]{0,31}://)[^/\s@]*@")
 _TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{8,}")
 
 
