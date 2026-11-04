@@ -3637,7 +3637,12 @@ class Supervisor:
         (an oversize output, a link) ends the test as a record that says so, never as an exception: the callers go on to the sweep, the lease
         release and the restore of the coder, and the gate reads the record."""
         try:
-            self._run_listed_test_body(spec, stage_dir, test, leases)
+            try:
+                self._run_listed_test_body(spec, stage_dir, test, leases)
+            finally:
+                # Stage 4 runs its configurations here, not through `_run_test`, so the mask-input digests are written here too (PR 422, round 5):
+                # once, after the final attempt, before any agent step or the finish step can touch the files. Also after a refused run file.
+                self._record_mask_inputs(spec.number, stage_dir)
         except safeio.SafeReadError as exc:
             n = spec.number
             reason = f"not completed: a run file was refused: {exc.reason}"

@@ -38,14 +38,41 @@ def show(res):
 """
 
 
+TAG_VAR = "ORCHARD_TEST_SCENARIO_TAG"
+
+
+def reap_tagged(tag: str) -> int:
+    """SIGKILL every process whose environment carries TAG_VAR=<tag>, by exact pid, and return how many it killed. A helper that `bounded_run`
+    started in a session of its own is outside the scenario's process group, so the group kill in `limited()` misses it; it still inherits the
+    scenario's environment, which is how it is found (PR 422, round 5)."""
+    needle = f"{TAG_VAR}={tag}".encode()
+    killed = 0
+    for name in os.listdir("/proc"):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{name}/environ", "rb") as fh:
+                env = fh.read(1 << 20)
+        except OSError:
+            continue
+        if needle in env.split(b"\0"):
+            try:
+                os.kill(int(name), signal.SIGKILL)
+                killed += 1
+            except ProcessLookupError:
+                pass
+    return killed
+
+
 def limited(code: str, deadline_s: float = DEADLINE_S) -> dict:
     """Run `code` (Python source; it prints one JSON line with show(res), or its own) in a child of this test that has LIMIT_BYTES of address
     space, is a session of its own, and is killed as a group at the deadline. A child that dies (MemoryError, a signal) or runs past the deadline
     fails the test with what it printed."""
     def limit():
         resource.setrlimit(resource.RLIMIT_AS, (LIMIT_BYTES, LIMIT_BYTES))
+    tag = f"{os.getpid()}-{time.monotonic_ns()}"
     proc = subprocess.Popen([sys.executable, "-I", "-c", PRELUDE + textwrap.dedent(code)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, preexec_fn=limit, start_new_session=True)
+                            text=True, preexec_fn=limit, start_new_session=True, env={**os.environ, TAG_VAR: tag})
     try:
         out, err = proc.communicate(timeout=deadline_s)
     except subprocess.TimeoutExpired:
@@ -57,6 +84,7 @@ def limited(code: str, deadline_s: float = DEADLINE_S) -> dict:
             os.killpg(proc.pid, signal.SIGKILL)         # whatever the scenario left behind
         except ProcessLookupError:
             pass
+        reap_tagged(tag)                                # and the helpers it started in sessions of their own
     if proc.returncode != 0 or not out.strip():
         pytest.fail(f"the scenario died (exit {proc.returncode}); stderr ends: {err.strip()[-400:]}")
     return json.loads(out.strip().splitlines()[-1])

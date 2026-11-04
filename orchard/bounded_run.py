@@ -14,6 +14,8 @@ What `run` guarantees, and what it does not:
   that ended while a descendant held the pipes used to hold `run` until the descendant ended, because the readers were blocked in a buffered
   read and `BufferedReader.close()` waits for the lock that read holds. The readers now poll raw descriptors and look at a stop flag every
   `POLL_S`, and nothing closes a descriptor a reader may still use.)
+- The request writer polls a non-blocking descriptor and looks at the stop flag, and `run` joins it with the readers. A descendant that kept
+  stdin without reading it (round 5) cannot hold the writer thread, the pipe or the request after `run` has returned.
 - Every process of the child's group is gone when it returns, unless one ignores SIGKILL (it cannot) or sits in uninterruptible sleep, in which
   case `run` returns after the bound and the process stays. A descendant that left the group (its own `setsid`) is not reached.
 - The group is signalled only while the leader has not been reaped: the child's end is detected with `waitid(WNOWAIT)`, so its pid, which is
@@ -73,9 +75,25 @@ def _read(fd: int, cap: int, sink: list, over: threading.Event, stop: threading.
         return
 
 
-def _write(stream, data: bytes) -> None:
+def _write(stream, data: bytes, stop: threading.Event) -> None:
+    """Write the request to the helper's stdin without ever blocking for good. The descriptor is non-blocking and polled, so a helper (or a
+    descendant that kept the pipe and never reads it) cannot hold this thread, the pipe and the request bytes after `run` has returned: the stop
+    flag is looked at every POLL_S. The pipe is closed when the request has been written, so a helper that reads to the end sees the end."""
+    fd = stream.fileno()
+    view = memoryview(data)
     try:
-        stream.write(data)
+        os.set_blocking(fd, False)
+        poller = select.poll()
+        poller.register(fd, select.POLLOUT)
+        while view:
+            if stop.is_set():
+                return
+            if not poller.poll(POLL_S * 1000):
+                continue
+            try:
+                view = view[os.write(fd, view[:CHUNK]):]
+            except BlockingIOError:
+                continue
     except (OSError, ValueError):                  # a helper that exits before it reads its request closes the pipe
         pass
     finally:
@@ -196,7 +214,7 @@ def run(argv, request: str, *, timeout_s: float, out_max: int, err_max: int, env
     over_out, over_err, stop = threading.Event(), threading.Event(), threading.Event()
     threads = [threading.Thread(target=_read, args=(proc.stdout.fileno(), out_max, out, over_out, stop), daemon=True),
                threading.Thread(target=_read, args=(proc.stderr.fileno(), err_max, err, over_err, stop), daemon=True),
-               threading.Thread(target=_write, args=(proc.stdin, request.encode("utf-8")), daemon=True)]
+               threading.Thread(target=_write, args=(proc.stdin, request.encode("utf-8"), stop), daemon=True)]
     for t in threads:
         t.start()
     problem = None
@@ -211,7 +229,7 @@ def run(argv, request: str, *, timeout_s: float, out_max: int, err_max: int, env
             stop.set()
     # The group is gone. The readers take what is already in the pipes (up to the cap) and end within POLL_S; only then are the descriptors closed.
     end = time.monotonic() + JOIN_S
-    for t in threads[:2]:
+    for t in threads:                              # the writer too: it sees the stop flag within POLL_S, so it ends and closes stdin
         t.join(timeout=max(0.0, end - time.monotonic()))
     for t, stream in zip(threads[:2], (proc.stdout, proc.stderr)):
         if t.is_alive():                           # never close a descriptor a thread may still read

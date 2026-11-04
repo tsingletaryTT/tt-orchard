@@ -660,6 +660,7 @@ LISTED_TEST_SETUP = '''
                            ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
     stub._moved_aside_record = lambda p: S._moved_aside_record(stub, p)
     stub._run_listed_test_body = lambda *a: S._run_listed_test_body(stub, *a)
+    stub._record_mask_inputs = lambda *a: S._record_mask_inputs(stub, *a)
     test = SimpleNamespace(chips=4, boards=2, command=lambda n: "cmd", deadline_s=10.0, cache="/c")
     lease = SimpleNamespace(chips=["a", "b", "c", "d"], dev_indices=[0, 1, 2, 3], lease_id="L")
 '''
