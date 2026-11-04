@@ -446,8 +446,8 @@ def test_a_fifo_left_where_a_skill_file_belongs_does_not_hang_the_collection(tmp
     target.unlink()
     os.mkfifo(target)
     src = trusted_skill(tmp_path)
-    (run / "logs" / "skill.sha256").write_text(
-        subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
+    # the recorded hash is that of EMPTY content, which is also what a read of an idle FIFO returns: only the regular-file check tells them apart
+    (run / "logs" / "skill.sha256").write_text("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  ./scripts/check_video.sh\n")
     s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path, timeout=20)
     assert s["skill_files_changed_by_run"] == ["scripts/check_video.sh"]
     assert any(r["path"].endswith("check_video.sh") and "not a regular file" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
