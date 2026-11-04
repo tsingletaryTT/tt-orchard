@@ -1,0 +1,4 @@
+target = "0.9.103"
+summary = "End-to-end boot tests for a --served-model-name alias set only through extra_args, including an alias that omits max_model_len; the code is main's"
+kind = "chore"
+pr = 429

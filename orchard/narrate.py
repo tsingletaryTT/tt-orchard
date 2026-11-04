@@ -113,6 +113,12 @@ def _decision(e: dict, d: dict) -> list[Line]:
     if what == "graft trial started":
         return [Line(o, "graft trial: serving the nearest model's mtp.* head grafted onto this model, beside the safe configuration "
                         "(this test can take 10 to 35 minutes on the chips)")]
+    if what in ("coder container removed", "coder container left"):
+        r = d.get("result") if isinstance(d.get("result"), dict) else {}
+        name = _clip(str(r.get("container", "?")), 80)
+        if what == "coder container removed":
+            return [Line(o, f"removed the stopped coder container {name}, so the next start is not refused for the name")]
+        return [Line(o, f"left the coder container {name} in place: {_clip(str(r.get('why') or r.get('stderr') or 'unknown'), 120)}", True)]
     if what == "graft decision":
         kept = d.get("choice") == "graft"
         return [Line(o, ("graft decision: the grafted drafter is kept: " if kept else "graft decision: the safe configuration stays: ")
@@ -321,8 +327,12 @@ DONE_DECISIONS = ("ready for operator review", "blocked")
 
 class Narrator:
     def __init__(self, run_dir, style: Style, out, *, replay=False, clock=time.time,
-                 heartbeat_s: float = HEARTBEAT_S, tz=None):
+                 heartbeat_s: float = HEARTBEAT_S, tz=None, boot_watch=None):
         self.run = Path(run_dir)
+        # boot_watch() -> coder_cache.BootWatch, made when a coder boot starts. The heartbeat then says when the boot is writing to the
+        # Hugging Face cache (issue 417). None: the heartbeat is as before. Only a narrator in the supervisor's own environment can know
+        # which cache the coder mounts, so `tt-orchard watch` does not pass one.
+        self._boot_watch_factory, self._boot_watch = boot_watch, None
         self.style, self.out = style, out
         self.replay = replay                       # False, True (everything) or N (the last N entries)
         self.clock, self.heartbeat_s, self.tz = clock, heartbeat_s, tz
@@ -380,6 +390,7 @@ class Narrator:
         elif ev == "decision" and what == "coder starting":
             s = d.get("server") or {}
             self._activity = (f"waiting for the coder {s.get('target', '?')} to boot", now, None, False)
+            self._boot_watch = self._boot_watch_factory() if self._boot_watch_factory else None
         elif ev == "decision" and what == "hardware test started":
             self._activity = (f"hardware test running: {_clip(d.get('command', ''), 80)}", now, st, True)
         elif (ev == "evidence" and what in ("hardware test", "graft trial test", "sampling trial test", "transcript")) or ev == "stage_end" \
@@ -459,6 +470,11 @@ class Narrator:
             return
         text, since, stage, hardware = self._activity
         msg = f"still {text} ({duration(self.clock() - since)})"
+        if self._boot_watch is not None and text.startswith("waiting for the coder"):
+            try:
+                msg += self._boot_watch.report() or ""
+            except Exception:                      # a broken probe must not stop the narration
+                self._boot_watch = None
         if hardware and stage is not None:
             tail = _last_output_line(self.run, stage)
             if tail:
