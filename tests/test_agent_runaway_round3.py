@@ -288,3 +288,40 @@ def test_the_transcript_shows_the_truncated_call_the_coder_sent(run):
     first = rows(run_dir / "stages" / "0" / "log" / "run-1.jsonl")[0]
     ids = [c["id"] for c in first["received"].get("tool_calls", [])]
     assert ids == ["ok1", "cut2"], "the log must show what the coder sent, including the call that was cut off"
+
+
+# ---- review of PR 462, round 4: a capped reply whose tool calls are all complete is still a capped reply ----
+
+def complete_calls_capped(tokens=16384):
+    """finish_reason "length" with two complete calls: the server's parser dropped whatever it could not finish, so no cut call is visible."""
+    calls = [{"id": f"ok{i}", "type": "function", "function": {"name": "shell", "arguments": json.dumps({"command": f"echo kept{i}"})}} for i in (1, 2)]
+    return {"role": "assistant", "content": "", "finish_reason": "length", "completion_tokens": tokens, "tool_calls": calls}
+
+
+def test_a_capped_reply_with_only_complete_calls_runs_them_and_is_counted(run):
+    run_dir, ledger = run
+    with FakeModel(by_request(complete_calls_capped(), final("ok"))) as fm:
+        out = step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick()).run("s", "u")
+    assert out.status == "done"
+    second = fm.requests[1]["messages"]
+    assert [m["tool_call_id"] for m in second if m.get("role") == "tool"] == ["ok1", "ok2"], "the complete calls must still run"
+    notices = [e["data"] for e in ledger.read() if e["event"] == "notice" and e["data"].get("reply_capped")]
+    assert len(notices) == 1, "a reply that hit max_tokens left no reply_capped notice"
+    assert notices[0]["capped_in_step"] == 1 and notices[0]["incomplete_tool_calls"] == 0 and notices[0]["complete_tool_calls"] == 2
+    assert notices[0]["completion_tokens"] == 16384
+
+
+def test_a_capped_reply_with_only_complete_calls_arms_the_retry_profile(run):
+    run_dir, ledger = run
+    with FakeModel(by_request(complete_calls_capped(), final("ok"))) as fm:
+        step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick()).run("s", "u")
+    assert fm.requests[0]["temperature"] == 0
+    assert fm.requests[1]["temperature"] == 0.5 and fm.requests[1]["max_tokens"] == 8192, "the cap did not arm the retry sampling"
+
+
+def test_a_normal_reply_with_complete_calls_leaves_no_capped_notice_and_no_retry_profile(run):
+    run_dir, ledger = run
+    with FakeModel(by_request(call("shell", command="echo hi"), final("ok"))) as fm:
+        step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick()).run("s", "u")
+    assert not [e for e in ledger.read() if e["event"] == "notice" and e["data"].get("reply_capped")]
+    assert fm.requests[1]["temperature"] == 0

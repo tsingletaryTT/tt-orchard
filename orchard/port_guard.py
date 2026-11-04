@@ -25,7 +25,8 @@ What it cannot do: stop another process that owns a directory on the way from re
   list, so it drops nothing;
 - the backups together never exceed PORT_GUARD_BACKUP_BYTES: the oldest are evicted first. A file whose backup was evicted is never put
   back to a wrong version and never removed: if it later becomes unacceptable it is left as the agent wrote it and the agent is told
-  that its previous version was not kept;
+  that its previous version was not kept. The marker stays through further unacceptable edits and goes only when an acceptable version is
+  backed up again or a complete scan finds the file gone;
 - the table of stamps (which only saves a re-read) holds at most PORT_GUARD_STAMPS entries, the oldest forgotten first, and the markers
   of evicted backups the same number.
 """
@@ -290,7 +291,9 @@ class PortGuard:
                         self._set_backup(f.parts, raw)
                     else:
                         self._backup.pop(f.parts, None)
-                        self._evicted.pop(f.parts, None)        # no acceptable version exists: that is a fact, not an eviction
+                        # The eviction marker stays. A file that is unacceptable now may still have held accepted work before its backup
+                        # was evicted, and a second unacceptable edit would otherwise remove it (review of PR 462, round 4). The marker
+                        # goes when an acceptable version is backed up again (`_set_backup`) or a complete scan finds the file gone.
                 self._prune({f.parts for f in files})
         except safeio.SafeReadError:
             return

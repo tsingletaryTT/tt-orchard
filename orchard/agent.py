@@ -791,14 +791,16 @@ class AgentStep:
                 messages.append({"role": "user",
                                  "content": (LOOP_NUDGE if loop else TRUNCATION_NUDGE) if bad == "truncated" else EMPTY_NUDGE})
                 continue
-            if cut_calls:
-                # Some calls in this reply were complete and ran; one was cut inside its arguments. The cap still counts, and the next
-                # request gets the retry profile.
+            if finish == "length":
+                # The reply hit max_tokens but ran at least one complete call. Some calls may have been cut inside their arguments; or the
+                # server's parser dropped what it could not finish and every call left is complete, so no cut call is visible. The cap
+                # counts either way and the next request gets the retry profile (review of PR 462, round 4).
                 tokens = usage.get("completion_tokens") or self.max_tokens
                 capped, _ = self._note_capped(content if content.strip() else cut_text, tokens)
                 self.ledger.append("notice", self.stage, watchdog=True, agent=self.agent,
-                                   what="reply cut off at max_tokens (a tool call's arguments were incomplete)", phase=self.phase,
-                                   turn=turn, finish_reason=finish, completion_tokens=tokens, in_a_row=0,
+                                   what=("reply cut off at max_tokens (a tool call's arguments were incomplete)" if cut_calls
+                                         else "reply cut off at max_tokens (every tool call in it was complete and ran)"),
+                                   phase=self.phase, turn=turn, finish_reason=finish, completion_tokens=tokens, in_a_row=0,
                                    incomplete_tool_calls=len(cut_calls), complete_tool_calls=len(calls), **capped)
             else:
                 self._after_cap = False

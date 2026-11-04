@@ -156,3 +156,51 @@ def test_the_markers_of_evicted_backups_are_bounded_too(stage, monkeypatch):
         put(stage, f"m{i}.py", varied(120, f"m{i}"))
         settle(guard)
     assert len(guard._evicted) <= 3
+
+
+# ---- review of PR 462, round 4: the eviction marker survives the next shell call ----
+
+def test_the_eviction_marker_survives_a_rejected_edit_and_the_next_remember(stage, monkeypatch):
+    """After a rejected edit to a file whose backup was evicted, the next command's `remember()` used to clear the marker (the file was
+    unacceptable, so "no acceptable version exists"). A second unacceptable edit then removed a file that held accepted work."""
+    monkeypatch.setattr(port_guard, "PORT_GUARD_BACKUP_BYTES", 400_000)
+    guard = PortGuard(stage)
+    first = put(stage, "first.py", varied(120, "first"))
+    settle(guard)
+    for i in range(6):
+        put(stage, f"later{i}.py", varied(160, f"later{i}"))
+        settle(guard)
+    assert guard.backup_evicted(("first.py",)), "the test needs the first backup to have been evicted"
+    for loop in (1500, 1600, 1700):                                          # three unacceptable edits in a row, one command each
+        guard.remember()
+        first.write_text("def f():\n    return 1\n" * loop)
+        notes = guard.judge()
+        assert first.exists(), f"the file was removed after unacceptable edit {loop}"
+        assert guard.backup_evicted(("first.py",)), "the eviction marker was cleared"
+    assert first.read_text().startswith("def f():"), "it must not be rolled back to a wrong version either"
+    assert any("first.py" in n and "not kept" in n for n in notes), notes
+
+
+def test_the_eviction_marker_is_dropped_when_the_file_is_accepted_again_or_gone(stage, monkeypatch):
+    monkeypatch.setattr(port_guard, "PORT_GUARD_BACKUP_BYTES", 400_000)
+    guard = PortGuard(stage)
+    first = put(stage, "first.py", varied(120, "first"))
+    settle(guard)
+    for i in range(6):
+        put(stage, f"later{i}.py", varied(160, f"later{i}"))
+        settle(guard)
+    assert guard.backup_evicted(("first.py",))
+    guard.remember()
+    first.write_text("def f():\n    return 1\n" * 1500)
+    guard.judge()
+    guard.remember()
+    first.write_text("def g():\n    return 2\n")                              # acceptable again: backed up, marker dropped
+    guard.remember()
+    guard.judge()
+    assert not guard.backup_evicted(("first.py",)) and guard.cache_stats()[0] >= 1
+    guard.remember()
+    first.write_text("def f():\n    return 1\n" * 1500)
+    assert any("restored" in n for n in guard.judge()) and first.read_text() == "def g():\n    return 2\n"
+    first.unlink()                                                           # gone: a complete scan drops what it knew
+    settle(guard)
+    assert ("first.py",) not in guard._evicted and ("first.py",) not in guard._backup
