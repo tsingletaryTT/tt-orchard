@@ -233,8 +233,8 @@ def _cleanup(proc, tag: str, stdout) -> BaseException | None:
     The stop signals are held back while this runs (_HeldStopSignals): one that arrives meanwhile is acted on when the cleanup is done. A step
     that an exception still stops (a thread that is not the main one) is run again, up to CLEANUP_TRIES times. Returns the first exception that
     came up during the cleanup, or None; the caller decides whether it replaces anything."""
-    held = _HeldStopSignals()                # never raises: an interrupt during its setup is in held.exc and goes on after the cleanup
-    late = held.exc
+    held = _HeldStopSignals()                # never raises: an interrupt during its setup is kept, and release() returns it after the cleanup
+    late = None
     try:
         for step in (lambda: _kill_session(proc), lambda: _sweep_helpers(tag, stdout)):
             for _ in range(CLEANUP_TRIES):

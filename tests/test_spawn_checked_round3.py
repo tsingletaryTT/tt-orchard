@@ -53,8 +53,9 @@ class FlakySignal:
     """A stand-in for the `signal` module in orchard.agent: the named call raises `Cut` before it takes effect (a stop signal arrived and the
     handler that was still in place raised), every other call passes through."""
 
-    def __init__(self, fail_on):
+    def __init__(self, fail_on, fail_after=()):
         self.fail_on = list(fail_on)      # [(signum, "install" | "restore")], each used once
+        self.fail_after = list(fail_after)   # the same, but the swap takes effect first and the exception comes after it
         self.calls = []
 
     def __getattr__(self, name):
@@ -66,7 +67,11 @@ class FlakySignal:
         if (signum, kind) in self.fail_on:
             self.fail_on.remove((signum, kind))
             raise Cut()
-        return signal.signal(signum, handler)
+        previous = signal.signal(signum, handler)
+        if (signum, kind) in self.fail_after:
+            self.fail_after.remove((signum, kind))
+            raise Cut()
+        return previous
 
 
 def test_an_interrupt_during_the_install_is_kept_and_both_signals_end_up_held_and_then_restored(handlers, monkeypatch):
@@ -80,6 +85,16 @@ def test_an_interrupt_during_the_install_is_kept_and_both_signals_end_up_held_an
     assert getattr(signal.getsignal(signal.SIGTERM), "__name__", "") == "_hold"      # the second try took effect
     late = held.release()
     assert isinstance(late, Cut)                                                     # the interrupt is not lost
+    assert signal.getsignal(signal.SIGINT) is handlers[signal.SIGINT]
+    assert signal.getsignal(signal.SIGTERM) is handlers[signal.SIGTERM]
+
+
+def test_an_interrupt_that_arrives_after_a_handler_was_swapped_does_not_lose_the_original(handlers, monkeypatch):
+    """The swap took effect and the exception came after it. The retry must not read the held handler as if it were the original."""
+    monkeypatch.setattr(agent, "signal", FlakySignal([], fail_after=[(signal.SIGINT, "install")]))
+    held = agent._HeldStopSignals()
+    assert isinstance(held.exc, Cut)
+    assert held.release() is held.exc
     assert signal.getsignal(signal.SIGINT) is handlers[signal.SIGINT]
     assert signal.getsignal(signal.SIGTERM) is handlers[signal.SIGTERM]
 
@@ -243,6 +258,7 @@ def test_an_interrupt_in_the_first_scan_does_not_skip_the_sweep(fake, monkeypatc
     with pytest.raises(Cut):
         fake.sweep(into=records)
     assert [r["pid"] for r in records] == [7001]
+    assert signal.SIGTERM in fake.sent_to(7001)                    # the scan was repeated, so the process still gets its grace
     assert signal.SIGKILL in fake.sent_to(7001)
 
 
