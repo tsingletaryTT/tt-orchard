@@ -46,6 +46,25 @@ CURL_COULD_NOT_CONNECT = 7     # curl's exit code when nothing accepts the conne
 MESH_RESET_TEXT = re.compile(r"\breset", re.IGNORECASE)
 # `tt-model serve` refuses with "<container> is already running" when that container exists.
 ALREADY_RUNNING = re.compile(r"already running", re.IGNORECASE)
+# `tt-model serve` refuses with "chip(s) 0, 1 already in use by another container" when a container holds those chips. tt-model counts a
+# stopped container too, so a coder container left as `Exited` by an earlier boot produces this text with the chips healthy (issue 417).
+IN_USE = re.compile(r"already in use by another container", re.IGNORECASE)
+
+
+# The refusal's own words, which the block classifier reads to tell a container that holds the chips from a chip that is at fault
+# (orchard/blocked.py `CONTAINER_HOLDS_MARK`; tests/test_coder_cache_round3.py checks that the two agree). The message starts with them, so
+# the diagnostic that follows can be cut or can miss the line without losing the classification.
+IN_USE_MARK = "in use by another container"
+CHIPS_HELD_WINDOW = 200       # characters kept on each side of the refusal in the output that held it
+
+
+def chips_held_message(returncode: int, stderr: str, stdout: str) -> str:
+    """The text of a `ServerChipsHeld`: the fixed marker first, then the stretch of output around the refusal (found in either stream, in any
+    case), so a long warning in the other stream, or a refusal late in a long line, still gives an exact and bounded diagnostic."""
+    both = f"{stderr}\n{stdout}"
+    found = IN_USE.search(both)
+    around = both[max(0, found.start() - CHIPS_HELD_WINDOW):found.end() + CHIPS_HELD_WINDOW] if found else both[:CHIPS_HELD_WINDOW]
+    return f"chips already {IN_USE_MARK} (tt-model serve exited {returncode}): {' '.join(around.split())}"
 
 
 class ServerError(Exception):
@@ -61,10 +80,21 @@ class ServerNotOwned(ServerError):
     owns it, so this run must not stop it."""
 
 
+class ServerChipsHeld(ServerNotOwned):
+    """`tt-model serve` refused because a container (running or stopped) holds the chips it was asked to use. It is a kind of not-owned
+    refusal, so every handler that records a refusal (the park and restore path as well as the supervisor's start) persists it."""
+
+
 class NotReady(ServerError):
     def __init__(self, waited_s: float, detail: str = ""):
         super().__init__(f"not ready after {waited_s} s {detail}".strip())
         self.waited_s = waited_s
+
+
+def container_name_for(target: str, profile: str) -> str:
+    """The name tt-model gives the container of a package: tt-model-<name>-<profile> (gozer-park skill). The preflight uses it to look
+    for a leftover container before a start."""
+    return f"tt-model-{target.rsplit('/', 1)[-1]}-{profile}"
 
 
 @dataclass(frozen=True)
@@ -91,8 +121,7 @@ class ServerSpec:
 
     @property
     def container_name(self) -> str:
-        # tt-model names the container tt-model-<name>-<profile> (gozer-park skill).
-        return f"tt-model-{self.target.rsplit('/', 1)[-1]}-{self.profile}"
+        return container_name_for(self.target, self.profile)
 
 
 @dataclass(frozen=True)
@@ -250,6 +279,10 @@ class ServerControl:
                     raise ServerNotOwned(
                         f"{s.container_name} already runs and another process owns it; this run did "
                         f"not start it and will not stop it ({text})")
+                if IN_USE.search(res.stderr + "\n" + res.stdout):
+                    # Someone's container holds the chips, so this start launched nothing. Not ours to stop or to reset under.
+                    self.owned = False
+                    raise ServerChipsHeld(chips_held_message(res.returncode, res.stderr, res.stdout))
                 raise ServerError(f"tt-model serve exited {res.returncode}: "
                                   f"{(res.stderr.strip() or res.stdout.strip())[:500]}")
         else:
@@ -337,6 +370,49 @@ class ServerControl:
             self._check_process(checks, ev)
         self._check_port(checks, ev)
         return StopCheck(all(checks.values()), checks, ev)
+
+    def find_container_rows(self) -> list[tuple[str, str, str]] | None:
+        """(name, state, id) of each container whose name is exactly this server's container name, from `docker ps -a`; None when docker
+        did not answer. Read only."""
+        name = self.spec.container_name
+        ls = self.run([self.docker, "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}} {{.State}} {{.ID}}"], self.timeout)
+        if ls.returncode != 0:
+            return None
+        rows = [ln.split() for ln in ls.stdout.splitlines()]
+        return [(p[0], p[1] if len(p) > 1 else "", p[2] if len(p) > 2 else "") for p in rows if p[:1] == [name]]
+
+    def find_container(self) -> list[tuple[str, str]] | None:
+        """(name, state) of each container whose name is exactly this server's container name; None when docker did not answer."""
+        rows = self.find_container_rows()
+        return None if rows is None else [(n, st) for n, st, _ in rows]
+
+    def remove_container(self, *, even_if_unowned: bool = False, only_id: str | None = None) -> dict | None:
+        """Remove the stopped container of this server, once the caller has confirmed the stop (issue 417). A container that docker killed
+        without an exit event, or that died during a boot, stays on disk under its name, and `tt-model serve` refuses to start while that
+        name exists. Only a container package is touched, only a container whose name is exactly ours, never one that is running (the
+        listing is checked here and `docker rm` runs without `-f`), and not after a refusal that said another process owns the container
+        (`owned` is False) unless the caller knows the container is this run's own (`even_if_unowned`). An unknown owner (a start that
+        failed for another reason, or a ledger record without the field) counts as ours: tt-model made the container under our name.
+        `only_id` makes the removal conditional on the listed container having that id (the id this run recorded when it created the container), so a
+        container that took the name since is left alone. Returns what was found and done, or None when there was nothing to do."""
+        name = self.spec.container_name
+        if self.spec.kind != "container" or (self.owned is False and not even_if_unowned):
+            return None
+        found = self.find_container_rows()
+        if found is None:
+            return {"container": name, "listed": False}
+        states = [st for _, st, _ in found]
+        if not states:
+            return None
+        if "running" in states:
+            return {"container": name, "removed": False, "why": "it is running"}
+        verified = [i for _, _, i in found if i and (only_id is None or i.startswith(only_id) or only_id.startswith(i))]
+        if only_id is not None and not verified:
+            return {"container": name, "removed": False, "why": "it is not the container this run created"}
+        # `docker rm` runs on the id that was listed and checked: the name can move to another container between the listing and the
+        # removal. A listing without ids (an older docker format) falls back to the exact name.
+        rm = self.run([self.docker, "rm", verified[0] if verified else name], self.timeout)
+        return {"container": name, "state": states[0], "removed": rm.returncode == 0, "stderr": rm.stderr.strip()[-200:]}
 
     def _is_mine(self, line: str) -> bool:
         parts = line.split(None, 3)
