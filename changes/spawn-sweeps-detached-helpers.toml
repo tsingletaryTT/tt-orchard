@@ -1,4 +1,4 @@
 target = "0.9.105"
-summary = "spawn_checked stops helpers that a killed command started in a session of its own, through a tag in the command's environment; the cleanup survives a second interrupt (the handlers are swapped and restored safely, and the kill pass runs after any interrupt), freezes a forking helper before the last scan and says when the set never settled, reports what it stopped to the ledger and the attempt record on every way out, and the supervisor keeps the test lease and the coder back while a helper that could not be stopped still runs"
+summary = "spawn_checked stops helpers a killed command started in its own session; the cleanup survives repeated interrupts, reports an unsettled or failed sweep, keeps its records on every exit, and the supervisor holds the lease and the coder back while a helper still runs"
 kind = "fix"
 pr = 431
