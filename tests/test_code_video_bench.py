@@ -450,6 +450,7 @@ def test_a_fifo_left_where_a_skill_file_belongs_does_not_hang_the_collection(tmp
         subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
     s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path, timeout=20)
     assert s["skill_files_changed_by_run"] == ["scripts/check_video.sh"]
+    assert any(r["path"].endswith("check_video.sh") and "not a regular file" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
 
 
 def test_a_timed_out_container_is_removed_by_its_id_and_collection_goes_on(tmp_path, stubs):
@@ -786,7 +787,7 @@ def test_an_out_directory_that_is_a_symlink_is_not_followed(tmp_path, stubs):
     s = collect(run, e, tmp_path)
     assert s["final_mp4_delivered"] is False and s["measured_file"] is None, s
     assert not any("elsewhere" in json.dumps(c) for c in calls(log)), "no container call may name the outside path"
-    assert any(r["path"] == "out" for r in s["refused_paths"]), s["refused_paths"]
+    assert any(r["path"] == "out" and "link" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
 
 
 def test_a_final_mp4_that_is_a_symlink_to_an_outside_file_is_not_measured(tmp_path, stubs):
@@ -815,7 +816,7 @@ def test_a_linked_skill_directory_is_not_hashed_through_the_link_and_the_files_c
     shutil.copytree(src, pristine)
     s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path)
     assert s["skill_files_changed_by_run"] == ["scripts/check_video.sh"], s["skill_files_changed_by_run"]
-    assert any(r["path"].startswith(".qwen") for r in s["refused_paths"]), s["refused_paths"]
+    assert any(r["path"].startswith(".qwen") and "link" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
 
 
 def test_a_symlinked_file_inside_the_skill_copy_is_listed_as_added_and_not_followed(tmp_path, stubs):
@@ -983,3 +984,30 @@ def test_a_file_the_run_added_inside_a_skill_subdirectory_is_listed(tmp_path, st
     s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path)
     assert s["skill_files_added_by_run"] == ["crafts/notes.md", "scripts/helper.py"], s["skill_files_added_by_run"]
     assert s["skill_files_changed_by_run"] == [], s["skill_files_changed_by_run"]
+
+
+def test_a_recorded_skill_file_over_the_read_cap_is_not_hashed_and_counts_as_changed(tmp_path, stubs):
+    env, log = stubs
+    src = trusted_skill(tmp_path)
+    run = make_run(tmp_path)
+    (run / "logs" / "skill.sha256").write_text(
+        subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
+    big = run / "task" / ".qwen" / "skills" / "code-video" / "scripts" / "check_video.sh"
+    with open(big, "wb") as f:
+        f.truncate(17 << 20)                                                       # a sparse file over the 16 MiB cap
+    s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path, timeout=30)
+    assert s["skill_files_changed_by_run"] == ["scripts/check_video.sh"], s["skill_files_changed_by_run"]
+    assert any(r["path"].endswith("check_video.sh") and "read cap" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
+
+
+def test_a_skill_copy_with_more_files_than_the_limit_is_cut_and_says_so(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    root = run / "task" / ".qwen" / "skills" / "code-video" / "many"
+    root.mkdir()
+    for i in range(5100):
+        (root / f"f{i:05d}.txt").write_text("")
+    (run / "logs" / "skill.sha256").write_text("")
+    s = collect(run, e, tmp_path, timeout=60)
+    assert any("more than 5000 entries" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
+    assert len(s["skill_files_added_by_run"]) <= 5000, len(s["skill_files_added_by_run"])
