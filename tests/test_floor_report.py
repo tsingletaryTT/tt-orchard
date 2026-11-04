@@ -492,7 +492,7 @@ def test_the_first_test_probe_stays_as_its_own_labelled_row_when_another_variant
     run = drafter_off_run(tmp_path)
     first = [r for r in fr.share_rows(run) if r["evidence"] == "stages/2/evidence/swap-check.json"]
     assert len(first) == 1 and first[0]["tok_s"] == pytest.approx(48.0) and "first test" in first[0]["source"]
-    assert "not the configuration the package serves" in first[0]["basis"]
+    assert "serves another configuration" in first[0]["basis"]
 
 
 def test_with_no_other_variant_chosen_there_is_one_stage_2_probe_row(tmp_path):

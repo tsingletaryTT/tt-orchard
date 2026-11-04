@@ -205,7 +205,7 @@ def measured(run_dir) -> list[dict]:
         out.append({"stage": 2, "source": "stage 2 sampling probe, greedy request" if chosen == first
                     else "stage 2 first test sampling probe, greedy request", "evidence": first, "dies": dies2, "tok_s": v,
                     "basis": _probe_basis(run / first) + ("" if chosen == first else
-                                                           " This is the first test's speed, not the configuration the package serves.")})
+                                                           " The package serves another configuration than the one this speed was measured on.")})
     # Stage 4 gets a row only for a configuration its result says passed: a failed configuration's swap check is not evidence of a working one.
     result = _json(run / "stages" / "4" / "result.json")
     cfgs = result.get("configs") if result else None
