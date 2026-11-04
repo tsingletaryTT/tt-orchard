@@ -110,3 +110,28 @@ def test_stage_4_says_a_named_four_chip_package_is_refused_and_not_that_it_is_mi
     home = _containers(tmp_path / "op", {HARD: (NEAREST, 4)})
     configs, _tests, notes = stage4(run, home, (4,), four_chip_package=HARD)
     assert configs == {} and any(HARD in n and "swapped weights" in n for n in notes), notes
+
+
+def test_a_bundle_named_relative_to_the_run_directory_is_judged_where_the_test_will_run_it(run, tmp_path, records):
+    _bundle_dir(run["run_dir"], "rel-bundle", NEAREST, 2, BAD_NEAREST)
+    path = _config(run, bundle_dir="rel-bundle")                                    # the test runs from the run directory
+    msg = sd.nearest_problem(run["run_dir"], path, tt_model_root=run["tt_model_root"], operator_home=None)
+    assert msg and "rel-bundle" in msg and "run.sh" in msg
+
+
+def test_a_broken_record_file_is_named_by_the_config_check_and_does_not_raise(run, tmp_path, monkeypatch):
+    def broken():
+        raise ValueError("weights_source record: schema must be 1, got 2")
+    monkeypatch.setattr(ws, "_shipped", broken)
+    home = _containers(tmp_path / "op", {OPEN: (NEAREST, 2)})
+    path = _config(run, package=OPEN, profile="default", chips=2, operator_home=str(home))
+    msg = sd.nearest_problem(run["run_dir"], path, tt_model_root=run["tt_model_root"], operator_home=home)
+    assert msg and "schema must be 1" in msg
+
+
+def test_a_config_that_names_neither_a_package_nor_a_bundle_does_not_read_the_record(run, tmp_path, monkeypatch):
+    def boom():
+        raise AssertionError("the record must not be read for a config that names neither")
+    monkeypatch.setattr(ws, "_shipped", boom)
+    path = _config(run)
+    assert sd.nearest_problem(run["run_dir"], path, tt_model_root=run["tt_model_root"], operator_home=None) is None
