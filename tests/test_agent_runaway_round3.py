@@ -230,3 +230,61 @@ def test_the_narrator_still_narrates_a_complete_call_in_a_capped_reply():
     rec = {"turn": 1, "sent": [], "finish_reason": "length", "received": msg}
     text = " | ".join(getattr(l, "text", str(l)) for l in narrate.TurnNarrator().lines_for(rec, actor="a"))
     assert "echo kept" in text and "cut off" in text
+
+
+def test_a_continuation_outlives_newer_nudges_when_the_carried_list_is_full(run):
+    run_dir, ledger = run
+    s = step(run_dir, ledger, "http://127.0.0.1:9", control=Control(), unstick=runaway.Unstick(), restart_on_caps=1)
+    s._carry_instruction("continuation", "CONTINUATION: change the result file")
+    for i in range(5):
+        s._carry_instruction("nudge", f"NUDGE {i}")
+    kinds = [k for k, _ in s._carry]
+    assert len(kinds) == 4 and "continuation" in kinds, kinds
+    assert [x for k, x in s._carry if k == "nudge"] == ["NUDGE 2", "NUDGE 3", "NUDGE 4"], "the oldest nudges must go first"
+
+
+def test_a_second_restart_does_not_nest_the_first_restarts_text(run):
+    run_dir, ledger = run
+    answers = [truncated(16384, content=LOOP)] * 2 + [truncated(16384, content=LOOP)] * 2 + [final("ok")]
+    with FakeModel(by_request(*answers)) as fm:
+        out = step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick(), restart_on_caps=2).run("s", "task text")
+    assert out.status == "done"
+    second = fm.requests[4]["messages"][1]["content"]
+    assert second.count("The conversation was restarted") == 1, "the first restart's note was copied into the second restart"
+    assert second.startswith("task text")
+
+
+def test_a_refused_retry_profile_is_recorded_as_the_plain_request_that_was_served(run):
+    run_dir, ledger = run
+    seen = []
+
+    def script(request):
+        seen.append(request)
+        if "frequency_penalty" in request:
+            return 400                                                       # the server does not take the profile
+        return truncated(16384, content=LOOP) if len(seen) == 1 else final("ok")
+    with FakeModel(script) as fm:
+        out = step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick()).run("s", "u")
+    assert out.status == "done"
+    last = rows(run_dir / "stages" / "0" / "log" / "run-1.jsonl")[-1]
+    assert "frequency_penalty" not in last["request"] and last["request"]["temperature"] == 0, last["request"]
+
+
+def test_a_reply_that_ended_normally_with_bad_arguments_still_reaches_the_tool_for_its_error(run):
+    run_dir, ledger = run
+    bad = {"role": "assistant", "content": "", "tool_calls": [{"id": "b1", "type": "function",
+                                                                 "function": {"name": "shell", "arguments": "{not json"}}]}
+    with FakeModel(by_request(bad, final("ok"))) as fm:
+        out = step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick()).run("s", "u")
+    assert out.status == "done"
+    tool = [m for m in fm.requests[1]["messages"] if m.get("role") == "tool"]
+    assert len(tool) == 1 and tool[0]["tool_call_id"] == "b1", "a call that ended normally must get its answer from the tool"
+
+
+def test_the_transcript_shows_the_truncated_call_the_coder_sent(run):
+    run_dir, ledger = run
+    with FakeModel(by_request(two_calls(True), final("ok"))) as fm:
+        step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick()).run("s", "u")
+    first = rows(run_dir / "stages" / "0" / "log" / "run-1.jsonl")[0]
+    ids = [c["id"] for c in first["received"].get("tool_calls", [])]
+    assert ids == ["ok1", "cut2"], "the log must show what the coder sent, including the call that was cut off"

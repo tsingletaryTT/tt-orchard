@@ -115,3 +115,31 @@ def test_the_stamp_table_is_bounded_when_the_scan_never_completes(stage, monkeyp
         settle(guard)
         os.unlink(stage / "port" / f"n{i}.py")
     assert len(guard._stamp) <= 5, "the stamp table grew without limit"
+
+
+def test_a_file_that_was_evicted_and_then_accepted_again_is_restored_again(stage, monkeypatch):
+    monkeypatch.setattr(port_guard, "PORT_GUARD_BACKUP_BYTES", 400_000)
+    guard = PortGuard(stage)
+    first = put(stage, "first.py", varied(120, "first"))
+    settle(guard)
+    for i in range(6):
+        put(stage, f"later{i}.py", varied(160, f"later{i}"))
+        settle(guard)
+    assert guard.backup_evicted(("first.py",))
+    guard.remember()
+    first.write_text(varied(100, "first2"))                                   # an acceptable edit: judged, accepted, backed up again
+    assert guard.judge() == [] and not guard.backup_evicted(("first.py",))
+    guard.remember()
+    first.write_text("def f():\n    return 1\n" * 1500)
+    notes = guard.judge()
+    assert any("restored" in n for n in notes) and first.read_text().startswith("value_first2_0"), notes
+
+
+def test_the_markers_of_evicted_backups_are_bounded_too(stage, monkeypatch):
+    monkeypatch.setattr(port_guard, "PORT_GUARD_BACKUP_BYTES", 200_000)
+    monkeypatch.setattr(port_guard, "PORT_GUARD_STAMPS", 3)
+    guard = PortGuard(stage)
+    for i in range(10):
+        put(stage, f"m{i}.py", varied(120, f"m{i}"))
+        settle(guard)
+    assert len(guard._evicted) <= 3
