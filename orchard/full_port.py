@@ -56,22 +56,29 @@ COMMAND = "python3 -P -s stages/2/port_check.py"
 DEADLINE_S = 3600
 PORT_MODULE = "stages/2/port/port_model.py"
 STAGES = (2, 3)                       # the stages that run the template: 2 on one board, 3 on the configured chips (issue 326)
+ENTRY_STAGE = 4                       # stage 4 runs it once per required chip count, each in its own directory stages/4/configs/<N>/ (issue 454)
 
 
-def port_dir(stage: int = 2) -> str:
-    """The directory the coder writes the port in, for stage `stage` (run-relative, with the trailing slash)."""
-    return f"stages/{stage}/port/"
+def stage_path(stage: int = 2, entry: int | None = None) -> str:
+    """The run-relative directory a run of the template lives in (no trailing slash): `stages/<stage>`, or for stage 4's entry for a chip
+    count `stages/4/configs/<entry>`. The port, the template copy, its config, the record and the marker are all beneath it."""
+    return f"stages/{stage}" if entry is None else f"stages/{stage}/configs/{entry}"
 
 
-def port_module(stage: int = 2) -> str:
-    """The file the template calls, for stage `stage`."""
-    return f"{port_dir(stage)}port_model.py"
+def port_dir(stage: int = 2, entry: int | None = None) -> str:
+    """The directory the coder writes the port in, for stage `stage` (or its entry `entry`; run-relative, with the trailing slash)."""
+    return f"{stage_path(stage, entry)}/port/"
 
 
-def command(stage: int = 2) -> str:
-    """The only command the supervisor runs for stage `stage`. The template finds the port, its config and its record next to itself, so the same
-    shipped file serves every stage that runs it."""
-    return f"python3 -P -s stages/{stage}/port_check.py"
+def port_module(stage: int = 2, entry: int | None = None) -> str:
+    """The file the template calls, for stage `stage` (or its entry `entry`)."""
+    return f"{port_dir(stage, entry)}port_model.py"
+
+
+def command(stage: int = 2, entry: int | None = None) -> str:
+    """The only command the supervisor runs for stage `stage` (or its entry `entry`). The template finds the port, its config and its record
+    next to itself, so the same shipped file serves every stage and every entry that runs it."""
+    return f"python3 -P -s {stage_path(stage, entry)}/port_check.py"
 EVIDENCE_NAMES = ("port-check.json", "hw-test-output.txt")     # result.json's evidence list must name both
 JSON_MAX = 16 * 1024 * 1024
 SOURCE_MAX = 2 * 1024 * 1024
@@ -147,8 +154,13 @@ def agreement(reference: list, chip: list) -> float:
 
 
 def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = None, stage: int = 2,
-          expected_chips: int | None = None) -> tuple[list[str], list[str]]:
+          expected_chips: int | None = None, entry: int | None = None) -> tuple[list[str], list[str]]:
     """(reasons, evidence paths) for a stage 2 or stage 3 directory of a full port. No reasons means the result passes.
+
+    `entry`, when given, is the second form (issue 454): `stage_dir` is the directory of stage 4's entry for that chip count
+    (`stages/4/configs/<entry>/`), `stage` must be 4, and the port directory, the command, the template copy, the config and the sources are
+    all checked beneath that directory. The entry's chip count is the number of chips the test must have run on, so `expected_chips`
+    must be that number (or None, which means it).
 
     `stage` is 2 (the port on one board) or 3 (the same port and the same template on the chip count the run is configured for, issue 326):
     it names the port directory and the command the supervisor's test ran. `expected_chips`, when the caller gives it (the supervisor does for
@@ -161,7 +173,13 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     argument is a keyword the caller sets; nothing in the stage directory can set it. `waived`, when given, receives the name of each
     field the option waived, taken from the same read of result.json that the checks use, so the caller never reopens the file."""
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
-    if stage not in STAGES:
+    if entry is not None:
+        if stage != ENTRY_STAGE or type(entry) is not int or entry < 1:
+            return [f"an entry of the full-port check is a chip count of at least 1 in stage {ENTRY_STAGE}, not entry {entry!r} of stage {stage!r}"], []
+        if expected_chips is not None and expected_chips != entry:
+            return [f"the entry for {entry} chips cannot be checked against an expected count of {expected_chips!r}"], []
+        expected_chips = entry          # the entry's own count: a record that lists another number of chips is not this entry's
+    elif stage not in STAGES:
         return [f"the full-port check runs in stages {list(STAGES)}, not stage {stage!r}"], []
     reasons: list[str] = []
     seen: list[str] = []
@@ -185,8 +203,8 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
             else:
                 why = f"the hardware test exited with code {code!r}"
             reasons.append(f"test-result.json: {why}")
-        if marker.get("command") != command(stage):
-            reasons.append(f"test-result.json: the hardware test ran {marker.get('command')!r}; the supervisor's command for this stage is {command(stage)!r}")
+        if marker.get("command") != command(stage, entry):
+            reasons.append(f"test-result.json: the hardware test ran {marker.get('command')!r}; the supervisor's command for this stage is {command(stage, entry)!r}")
 
     # ---- result.json: each field on its own ----
     if result.get("runs") is not True:
@@ -285,7 +303,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
         reasons.append(f"free_run_text must be at least {MIN_FREE_RUN_CHARS} non-space characters and {MIN_FREE_RUN_WORDS} different words")
 
     _template_reasons(record, stage_dir, run_dir, reasons)
-    _source_reasons(record, stage_dir, run_dir, reasons, stage)
+    _source_reasons(record, stage_dir, run_dir, reasons, stage, entry)
     return reasons, seen
 
 
@@ -364,9 +382,9 @@ def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list)
                        "written by the test the supervisor ran")
 
 
-def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list, stage: int = 2) -> None:
+def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list, stage: int = 2, entry: int | None = None) -> None:
     """The port's source files: named, unchanged since the record, and not obviously a way to avoid the chip."""
-    PORT_DIR, PORT_MODULE = port_dir(stage), port_module(stage)          # this stage's own; the module constants are stage 2's
+    PORT_DIR, PORT_MODULE = port_dir(stage, entry), port_module(stage, entry)          # this stage's (or entry's) own; the module constants are stage 2's
     sources = record.get("port_sources")
     if not isinstance(sources, list) or not sources:
         reasons.append(f"port_sources must list the port's source files ({PORT_DIR})")

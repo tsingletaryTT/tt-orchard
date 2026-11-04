@@ -145,7 +145,7 @@ from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (PLAN, failed_tests, load_plan, move_aside, plan_refusal, pending, read_plan, suspect_caches,
-                             unrecorded, write_plan, write_record, write_summary)
+                             unrecorded, write_plan, write_record, write_summary, write_test_record)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.package import PackageError, stage_all
 from orchard.package import finish as package_finish
@@ -163,9 +163,9 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
                             open_stage_dir, marker_state, package_format, package_options, resolve_endpoint, SUPERVISOR_MARKER,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
-                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, SKIP_3_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
+                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, FULL_PORT_STAGE_4, SKIP_3_FULL_PORT, SKIP_4_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
-from orchard import full_port, model_kind, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
+from orchard import full_port, full_port_entries, full_port_stage4, model_kind, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
 from orchard.stages import UNVERIFIED_LEDGER_DECISION
@@ -219,9 +219,9 @@ STAGE_3_SEED_ENTRIES = 1000               # the scan stops after this many entri
                                           # would let a directory of a million subdirectories be read to the end before anything refused it
 STAGE_3_SEED_DEPTH = 8                    # and at this many directory levels below the port directory
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
-FULL_PORT_STAGES_UNBUILT = ("stage 3 of the full-port route passed or was skipped; stages 4 to 6 for a full-port model are not built yet "
-                            "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md: stage 4 is the rest of issue 326, stages 5 and "
-                            "6 are issue 329), so a person reviews the result and decides whether to go on")
+FULL_PORT_STAGES_UNBUILT = ("stage 4 of the full-port route passed or was skipped; stages 5 and 6 for a full-port model are not built yet "
+                            "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md: stages 5 and 6 are issue 329), so a person "
+                            "reviews the result and decides whether to go on")
 SCORING_STAGES_UNBUILT = ("stage 2 of the scoring route passed (the model is a reranker or an embedding model: stage 1 recorded Hugging Face scores or "
                           "vectors and stage 2's check compared the port with them); stages 3 to 6 for a scoring model are not built yet "
                           "(docs/superpowers/specs/2026-11-02-scoring-model-check-design.md), so a person reviews the result and decides whether to go on")
@@ -1194,8 +1194,8 @@ class Supervisor:
                           else FULL_PORT)
                 self.ledger.append("decision", 2, decision="pause", reason=reason)
                 continue
-            if p.next_stage == 4 and self._full_port_stages_unbuilt():
-                self.ledger.append("decision", 4, decision="pause", reason=FULL_PORT_STAGES_UNBUILT)
+            if p.next_stage == 5 and self._full_port_stages_unbuilt():
+                self.ledger.append("decision", 5, decision="pause", reason=FULL_PORT_STAGES_UNBUILT)
                 continue
             if p.next_stage == 3 and self._scoring_stages_unbuilt():
                 self.ledger.append("decision", 3, decision="pause", reason=SCORING_STAGES_UNBUILT)
@@ -1210,6 +1210,8 @@ class Supervisor:
                             kind=run_model_kind(entries))
             if spec is FULL_PORT_STAGE_3 and self._stage_3_chips() is None:
                 spec = dataclasses.replace(spec, skip=SKIP_3_FULL_PORT)       # stage 2's board is the configured chip count: nothing new to show
+            if spec is FULL_PORT_STAGE_4 and not self.required_chips:
+                spec = dataclasses.replace(spec, skip=SKIP_4_FULL_PORT)       # no chip count was listed: stage 4 has no entry
             try:
                 if spec in (FULL_PORT_STAGE_2, SCORING_STAGE_2):
                     # a model that cannot fit the box starts no prepare step (issue 327)
@@ -1998,6 +2000,9 @@ class Supervisor:
     def _gate(self, spec):
         """The stage's gate. Stage 4's also gets the run's required chip counts; no other gate
         changes its call."""
+        if spec.draft == "full_port_entries":
+            # Both are the supervisor's own: the run's --required-chips and the rehearsal flag from the ledger. The coder can write neither.
+            return functools.partial(spec.gate, required=self.required_chips, **({"rehearsal": True} if full_port_rehearsal(self.ledger.read()) else {}))
         if spec.number == 4 and self.required_chips:
             return functools.partial(spec.gate, required=self.required_chips)
         if spec.number == 0:
@@ -2092,6 +2097,8 @@ class Supervisor:
             if spec in (AUDIO_STAGE_1, AUDIO_STAGE_2):
                 return self._audio_body(spec, stage_dir, resumed)
             return self._package_body(spec, stage_dir, resumed)
+        if spec.draft == "full_port_entries":
+            return full_port_stage4.run(self, spec, stage_dir, escalated, resumed)       # one prepare step, test and record per required chip count
         derived = False         # the supervisor wrote this stage's result itself (issue 456)
         if spec.boards == 0:
             out, step = self._step(spec, "run", stage_dir, escalated, resumed)
@@ -2245,6 +2252,8 @@ class Supervisor:
         """Why the stage's hardware testing failed, or None. One test: its test-result.json. A list
         of tests: the records of the tests that must pass (`failed_tests`), so an optional
         configuration that failed still leaves the gate feedback for a malformed result file."""
+        if spec.draft == "full_port_entries":
+            return full_port_entries.failed(stage_dir, self.required_chips)
         if spec.tests:
             return failed_tests(stage_dir, self.required_chips)
         return hardware_test_failure(stage_dir)
@@ -2797,6 +2806,8 @@ class Supervisor:
             if gate.ok and "coherent" in gate.waived:      # the gate's own read: result.json is not opened again
                 self.ledger.append("decision", spec.number, decision=REHEARSAL_WAIVED, field="coherent", by="--full-port-rehearsal",
                                    note=f"the model is a rehearsal with random weights; every other stage {spec.number} check still applied")
+        if spec.draft == "full_port_entries":
+            gate = full_port_stage4.vouch(self, spec, stage_dir, gate, waived_decision=REHEARSAL_WAIVED)       # the plan, the markers and the results are the supervisor's (the ledger holds them)
         self._note_unverified(spec.number, gate)
         return gate
 
@@ -3037,7 +3048,8 @@ class Supervisor:
         unreadable declaration is a notice in the ledger. A lab run converts on the lab, so this box's disk is not read for it."""
         decl = port_cache.read(stage_dir / "port")
         self.ledger.append("decision", spec.number, decision="port cache declaration", state=decl["state"], why=decl["reason"],
-                           cache_dir=decl["cache_dir"], sha256=decl["sha256"], path=f"stages/{spec.number}/port/{port_cache.FILE_NAME}")
+                           cache_dir=decl["cache_dir"], sha256=decl["sha256"],
+                           path=os.path.relpath(Path(stage_dir) / "port" / port_cache.FILE_NAME, self.run_dir))
         if decl["state"] in ("absent", "unreadable"):
             self._note("notice", what="the port declared no converted-weight cache",
                        detail=(decl["reason"] or f"the port has no {port_cache.FILE_NAME}") + ". The disk is not checked for a cache this port may write "
@@ -3401,8 +3413,10 @@ class Supervisor:
             self.ledger.append("decision", spec.number, decision="port skeleton copied")
         self._port_seed = {"facts": facts_written, "skeleton": skeleton, **({"excerpts": True} if excerpts_written else {})}
 
-    def _seed_stage_3_port(self, spec, stage_dir: Path) -> None:
-        """What the coder starts stage 3 of a full port from: the port that passed stage 2, copied into stages/3/port/ (issue 326). Regular
+    def _seed_stage_3_port(self, spec, stage_dir: Path, *, source: int = 2) -> None:
+        """What the coder starts stage 3 of a full port from: the port that passed stage 2, copied into stages/3/port/ (issue 326). Stage 4's
+        entries (issue 454) call this with their own directory as `stage_dir` and the stage whose port passed as `source` (3, or 2 when
+        stage 3 was skipped); the copy is the same and its ledger entries name the entry's paths. Regular
         files only, with a count and a size cap, and no `__pycache__`; a link (never followed), a file over the cap, too many files, too many
         entries of any kind or too many directory levels stop the copy, the ledger says why and how many entries were read, and the coder
         writes the port again from stage 2's. The directory is read lazily (`_SeedScan`), so a hostile port directory is refused after about
@@ -3416,7 +3430,7 @@ class Supervisor:
             self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem="the stage directory is not inside the run directory")
             self._port_seed = {"copied": 0, "kept": False}
             return
-        src_parts, dst_parts = ("stages", "2", "port"), (*stage_parts, "port")
+        src_parts, dst_parts = ("stages", str(source), "port"), (*stage_parts, "port")
         copied, problem = [], None
         # Both sides are anchored beneath one descriptor of the run directory. The earlier version pinned only the last name of each path, so
         # a coder that replaced `stages/2` or `stages/3` with a link made the copy read from, or write to, a directory outside the run
@@ -3448,13 +3462,13 @@ class Supervisor:
                             problem = f"{rel} is not a regular file"
                             break
                         if len(copied) >= STAGE_3_SEED_FILES:
-                            problem = f"stages/2/port/ holds more than {STAGE_3_SEED_FILES} files (the scan stopped after reading {scan.seen} entries)"
+                            problem = f"stages/{source}/port/ holds more than {STAGE_3_SEED_FILES} files (the scan stopped after reading {scan.seen} entries)"
                             break
                         data = scan.read(parts, identity, STAGE_3_SEED_FILE_BYTES)
                         safeio.write_beneath(run.fd, (*dst_parts, *parts), data, mode=0o644)
-                        copied.append({"path": f"stages/3/port/{rel.as_posix()}", "sha256": hashlib.sha256(data).hexdigest()})
+                        copied.append({"path": "/".join((*dst_parts, rel.as_posix())), "sha256": hashlib.sha256(data).hexdigest()})
             except _SeedLimit as exc:
-                problem = f"stages/2/port/ {exc} (the scan stopped after reading {scan.seen} entries)"
+                problem = f"stages/{source}/port/ {exc} (the scan stopped after reading {scan.seen} entries)"
             except (OSError, safeio.SafeReadError) as exc:
                 # The class and the reason only: an OSError's own text carries the absolute path of the file, which does not belong in the ledger.
                 problem = f"{exc.__class__.__name__}: {getattr(exc, 'reason', None) or getattr(exc, 'strerror', None) or 'error'}"[:200]
@@ -3463,10 +3477,11 @@ class Supervisor:
         problem = problem[:300] if problem else problem
         copied.sort(key=lambda f: f["path"])                  # the walk has no order of its own; the record has one
         if problem or not copied:
-            self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem=problem or "stages/2/port/ holds no file")
+            self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem=problem or f"stages/{source}/port/ holds no file",
+                               **({"source_stage": source} if source != 2 else {}))
             self._port_seed = {"copied": 0, "kept": False}
             return
-        self.ledger.append("decision", spec.number, decision="stage 2 port copied", files=copied)
+        self.ledger.append("decision", spec.number, decision="stage 2 port copied", files=copied, **({"source_stage": source} if source != 2 else {}))
         self._port_seed = {"copied": len(copied), "kept": False}
 
     def _pin_reference_ids(self, spec) -> None:
@@ -3481,10 +3496,10 @@ class Supervisor:
         if record is not None:
             self.ledger.append("decision", spec.number, decision=REFERENCE_IDS_LEDGER_DECISION, **record)
 
-    def _pin_full_port(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
+    def _pin_full_port(self, spec, stage_dir: Path, *, command: bool = False, entry: int | None = None) -> list[str]:
         """Stage 2 of a full port (orchard/full_port.py): put the supervisor's template and its config in the stage directory, replacing any
         copy there. Called before the prepare step (so the coder can read the template) and again after it (so an edit made during prepare
-        is undone). With `command` set, hw_test.json is also rewritten to the template's fixed command; the coder's deadline is kept when
+        is undone). `entry` is stage 4's chip count when `stage_dir` is that entry's directory (issue 454). With `command` set, hw_test.json is also rewritten to the template's fixed command; the coder's deadline is kept when
         it is a positive number no larger than the default. Returns the problems that stop the stage (no model snapshot in the run)."""
         snapshot = self.inputs.get("model")
         if not snapshot:
@@ -3499,7 +3514,7 @@ class Supervisor:
             given = given.get("deadline_s") if isinstance(given, dict) else None
             if isinstance(given, (int, float)) and not isinstance(given, bool) and 0 < given <= full_port.DEADLINE_S:
                 deadline = given
-            _put(stage_dir / "hw_test.json", json.dumps({"command": full_port.command(spec.number), "deadline_s": deadline}) + "\n")
+            _put(stage_dir / "hw_test.json", json.dumps({"command": full_port.command(spec.number, entry), "deadline_s": deadline}) + "\n")
         else:
             self.ledger.append("decision", spec.number, decision="port check template copied", copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME])
         return []
@@ -4617,8 +4632,8 @@ class Supervisor:
         except safeio.SafeReadError as exc:
             n = spec.number
             reason = f"not completed: a run file was refused: {exc.reason}"
-            path = write_record(stage_dir, test.chips, {"config": test.chips, "command": test.command(n), "returncode": None,
-                                                        "timed_out": False, "seconds": 0, "chips": [], "not_run": reason})
+            path = write_test_record(stage_dir, test, {"config": test.chips, "command": test.command(n), "returncode": None,
+                                                       "timed_out": False, "seconds": 0, "chips": [], "not_run": reason})
             self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache, returncode=None,
                                timed_out=False, not_run=reason, **self._moved_aside_record(path))
 
@@ -4628,11 +4643,11 @@ class Supervisor:
         n = spec.number
         held = sorted((i, c) for lease in leases for c, i in zip(lease.chips, lease.dev_indices))
         chosen = held[:test.chips]
-        out_dir = stage_dir / "tests" / str(test.chips)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = test.output_path(stage_dir)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         def spawn() -> dict:
             return self._spawn(n, test.command(n), [c for _, c in chosen], [i for i, _ in chosen],
-                               min(test.deadline_s, spec.budget_s), out_dir / "output.txt",
+                               min(test.deadline_s, spec.budget_s), out_path,
                                config=test.chips, cache=test.cache,
                                lease_ids=[lease.lease_id for lease in leases])
         result = spawn()
@@ -4642,8 +4657,8 @@ class Supervisor:
             # Timeout`, seen after 13 to 57 s and gone after the chips were reset together). The cause is not
             # isolated, so reset every chip the test holds and run it once more. Its record is the second try's.
             # The second try writes output.txt again. The first try's text says why it failed, so it is kept beside it.
-            first = out_dir / "output-first-try.txt"
-            os.replace(out_dir / "output.txt", first)
+            first = out_path.with_name("output-first-try.txt")
+            os.replace(out_path, first)
             self.ledger.append("decision", n, decision="test failed at startup; resetting the test chips and trying once more",
                                config=test.chips, returncode=result["returncode"], seconds=result["seconds"],
                                first_output=self._moved_aside_record(first))
@@ -4652,8 +4667,8 @@ class Supervisor:
             for lease in order:
                 self._reset_test_chips(n, test, lease)
             result = spawn()
-        path = write_record(stage_dir, test.chips, {"config": test.chips, **result,
-                                                    "device_ids": [i for i, _ in chosen]})
+        path = write_test_record(stage_dir, test, {"config": test.chips, **result,
+                                                   "device_ids": [i for i, _ in chosen]})
         self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache,
                            returncode=result["returncode"], timed_out=result["timed_out"],
                            **evidence_record(self.run_dir, path))
@@ -4839,7 +4854,8 @@ def parse(argv=None):
                         "Without the option, or with the helper off, nothing is sent")
     r.add_argument("--full-port", action="store_true",
                    help="let a model that stage 0 classed `full-port` go on: the local coder writes the port in stage 2 and one hardware "
-                        "test compares the chip's tokens with the CPU reference (skill full-port-check). Stages 3 to 6 for a full port are "
+                        "test compares the chip's tokens with the CPU reference (skill full-port-check). Stage 3 runs the port on the largest "
+                        "of --required-chips and stage 4 on each other count. Stages 5 and 6 for a full port are "
                         "not built yet, so the run then pauses (unattended: ends blocked, code full-port-stages-unbuilt). The ledger records "
                         "the flag and a resume keeps it. It can be added on a resume only before stage 2 has started. It changes nothing for "
                         "any other class, and `unknown` and `restricted-head` still stop")

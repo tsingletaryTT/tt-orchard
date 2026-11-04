@@ -135,8 +135,12 @@ def build_messages(*, spec: StageSpec, phase: str, run_dir, stage_dir, skill_pat
     task = PHASE_TASKS[f"{phase}-tests" if spec.tests and phase in ("prepare", "finish") else phase]
     user = ["## Task", task.format(gate=spec.gate_file, n=n), "", "## Run"]
     user += [f"- {k}: {v}" for k, v in facts.items()]
-    user += [f"- stage directory: stages/{n}"]
-    if n == 4 and facts.get("required chip configurations"):
+    try:
+        shown_dir = stage_dir.relative_to(run_dir).as_posix()       # stage 4 of a full port runs its steps in stages/4/configs/<N>/ (issue 454)
+    except ValueError:
+        shown_dir = f"stages/{n}"
+    user += [f"- stage directory: {shown_dir}"]
+    if n == 4 and facts.get("required chip configurations") and spec.skill != "full-port-shrink":
         user += ["", "## Chip configurations", MESH_NOTE.format(counts=facts["required chip configurations"])]
     user += ["", "## Ledger so far"]
     user += [f"- {line}" for line in ledger_excerpt(entries, n)] or ["- nothing yet"]

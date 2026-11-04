@@ -55,7 +55,8 @@ and a gate that checks the evidence and does not trust the agent's summary.
 | Which classes | Only stage 0's class `full-port`. `unknown` and `restricted-head` keep their pauses, because for those stage 0 either could not decide or the operator ruled the harness does not serve them. |
 | Stage 2 | `full-port-check` skill and `gate_full_port` (slice 1). One board, one hardware test. |
 | Stage 3 | Built (issue 326). The port that passed stage 2 runs on the chip count the run is configured for: the largest of `--required-chips`. See section 3.6. |
-| Stages 4 to 6 | Not built. After stage 3 passes (or is skipped), the run pauses before stage 4 with a reason that names the unbuilt stages, and an unattended run ends blocked with code `full-port-stages-unbuilt`. The rest of slice 3 (stage 4) and slice 6 (stages 5 and 6) replace the pause. |
+| Stage 4 | Built (issue 454). The port on each required chip count that stages 2 and 3 did not show, one record and one marker per entry. See section 3.7. |
+| Stages 5 and 6 | Not built. After stage 4 passes (or is skipped), the run pauses before stage 5 with a reason that names the unbuilt stages, and an unattended run ends blocked with code `full-port-stages-unbuilt`. Slice 6 (stages 5 and 6) replaces the pause. |
 
 ### 3.2 Who writes what in stage 2
 
@@ -161,13 +162,37 @@ Stage 2 shows the port on one board. Stage 3 shows the same port on the chip cou
 Not shown by stage 3: that the port is correct on every mesh shape the box can make, or that it is fast. A port that ignores the extra
 chips and runs on one passes. The skill tells the coder this is not the stage's purpose, and a person who wants the proof reads the port.
 
+### 3.7 Stage 4: the port on each required chip count (issue 454)
+
+Stage 2 shows the port on one board and stage 3 on the largest of `--required-chips`. Stage 4 shows it on every other count the operator
+listed, the way the weights-only stage 4 runs one test per count (`orchard/hwtests.py`). The check is the one of stages 2 and 3, with an
+entry's directory in place of a stage's directory. The files and the checks are described in `orchard/full_port_entries.py` and the
+supervisor's side in `orchard/full_port_stage4.py`.
+
+| Piece | Rule |
+|---|---|
+| When it runs | Stage 0's class is `full-port`, the operator started the run with `--full-port`, and the run lists at least one chip count. With none, stage 4 is skipped and the `stage_end` entry carries the reason (`SKIP_4_FULL_PORT`). |
+| The plan | `stages/4/tests/plan.json` is written by the supervisor from `--required-chips`: one entry per distinct count, in order of chip count, with its board count. An agent never chooses a count. It is the stage's resume marker, and the ledger holds its sha256 (`hardware test list`). A resumed stage goes on at the first entry that has no vouched marker. |
+| One directory per entry | `stages/4/configs/<N>/` holds the entry's copy of the shipped `port_check.py`, its config, its port (`port/`), its evidence, its marker (`test-result.json`) and its `result.json`. The port is seeded from the port that passed the stage before (stage 3's, or stage 2's when stage 3 was skipped), with the stage 3 seed rules: regular files, capped in number and size, the sha256 of each file in the ledger. |
+| Who writes what | The supervisor writes the plan, the template copies, the markers, each entry's `result.json` (from the record, `orchard/full_port_result.py`) and the stage's `result.json`. The coder has one prepare step per entry that runs a test (skill `full-port-shrink`): it adapts the seeded port to the smaller mesh. There is no finish step. |
+| A covered entry | A count equal to the number of chips that stage 3 or stage 2 ran on (its marker is the supervisor's, and the stage passed) is written as `covered.json` with the path and sha256 of that stage's marker and record. No test runs. With the default tiers of four chips and two, both counts are covered and stage 4 runs no test. |
+| The gate | `gate_full_port_4` takes the counts from the run's `--required-chips`. Each entry goes through `full_port.check(..., entry=N)`: the command is `python3 -P -s stages/4/configs/<N>/port_check.py`, the record and the marker must list exactly N chips, and the template copy, the config and the port sources are checked under the entry. The stage's `result.json` must equal the summary the gate builds from the records. The supervisor adds the ledger checks the gate cannot make: the plan, each marker, each covered file and each result are files the supervisor recorded. |
+| Leases | The existing paths of the weights-only stage 4 (`_run_listed`): one board for a count of two or less; for a larger count the further board is leased first, the coder is parked and its board joins the test, and both boards go back and the coder is restored. A test uses the first N chips of its lease. |
+| Failure | Every entry comes from `--required-chips`, so every entry is required. An entry that does not pass ends the stage, and no later entry starts. Repair rounds stay in stage 2; the stage's normal attempt and escalation rules retry it. |
+| Rehearsal | `--full-port-rehearsal` waives `coherent` in each entry and nothing else. |
+
+Not shown by stage 4: that the port is fast, or that it splits its weights on the smaller mesh as the coder intended. A covered entry
+shows its count only as far as the covering stage's record does. Not done: stage 4 on a lab box has the code path of the weights-only
+list but no test of its own.
+
 ## 4. Slices
 
 | Slice | Content | Issue |
 |---|---|---|
 | 1 (this PR) | Opt-in flag, route for class `full-port`, stage 2 skill and gate, pause before stage 3, block code | this PR |
 | 2 (built) | Supervisor-owned `port_check.py` template and a port module interface (load, prefill, decode step, close), so the agent writes only model code | #325 |
-| 3 | Stage 3 (full model on the configured chips) and stage 4 (shrink) for full ports, using the hardware test list (`hwtests.py`) | #326 |
+| 3 | Stage 3 (full model on the configured chips) for full ports | #326 |
+| 3b | Stage 4 (the port on each required chip count) for full ports, using the hardware test list's runner (`hwtests.py`) | #454 |
 | 4 | Residency estimator from safetensors headers, used before stage 2 to say how many chips a port needs | #327 |
 | 5 | Stage 0: a weight-repack class for models like Sage-A1.5 whose only difference is the tensor layout of experts | #328 |
 | 6 | Stages 5 and 6 for full ports: a serving check with a pinned acceptance corpus that the server replays at boot, then quality and benchmark with repeats | #329 |
