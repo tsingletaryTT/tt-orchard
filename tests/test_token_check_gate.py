@@ -361,3 +361,102 @@ def test_reference_ids_record_hashes_the_file_and_is_none_when_it_is_absent(tmp_
     p = write(run, REF_PATH, {"generated_ids": REF})
     got = stages.reference_ids_record(run)
     assert got["sha256"] == hashlib.sha256(p.read_bytes()).hexdigest() and got["path"].endswith("generated-ids.json")
+
+
+# ---- review of PR 444, round 2 ------------------------------------------------------------------------------------------------------
+# A run whose ledger holds the reference ids' hash was governed by the supervisor from the start. Its swap-check.json cannot go missing,
+# and cannot be replaced by a JSON value that is not an object, without a refusal: the recompute is what the ledger binding is for.
+
+def sidecar_stage(tmp_path):
+    r = served_report()
+    sd, run = stage(tmp_path, 2, "result.json", {**RESULT, **result_of(r)})
+    write(run, "stages/0/delta.json", SIDE_DELTA)
+    write(run, "stages/2/evidence/swap-check.json", r)
+    write(run, REF_PATH, {"generated_ids": REF})
+    record_ids(run)
+    return sd, run
+
+
+@pytest.mark.parametrize("gate_name", ["stage2", "sidecar"])
+def test_a_bound_run_refuses_a_swap_check_that_is_missing(tmp_path, gate_name):
+    if gate_name == "stage2":
+        g, sd, run = stage2(tmp_path)
+        assert g.ok, g.reasons
+        gate = gate_weights_swap
+    else:
+        sd, run = sidecar_stage(tmp_path)
+        gate = gate_weights_swap_sidecar
+    (sd / "evidence" / "swap-check.json").unlink()
+    got = gate(sd, run)
+    assert not got.ok
+    assert mentions(got.reasons, "swap-check.json is missing", "ledger"), got.reasons
+
+
+@pytest.mark.parametrize("gate_name", ["stage2", "sidecar"])
+@pytest.mark.parametrize("raw", ["null", "[]", "3", '"x"'])
+def test_a_bound_run_refuses_a_swap_check_that_is_not_an_object(tmp_path, gate_name, raw):
+    if gate_name == "stage2":
+        g, sd, run = stage2(tmp_path)
+        gate = gate_weights_swap
+    else:
+        sd, run = sidecar_stage(tmp_path)
+        gate = gate_weights_swap_sidecar
+    (sd / "evidence" / "swap-check.json").write_text(raw)
+    got = gate(sd, run)
+    assert not got.ok
+    assert mentions(got.reasons, "swap-check.json is not an object", "recomputed"), got.reasons
+
+
+def test_an_unbound_run_keeps_the_old_judgement_for_a_missing_swap_check(tmp_path):
+    """A run from before the check has no ledger record: a missing swap-check.json is judged as before (by the other checks), not by this one."""
+    g, sd, run = stage2(tmp_path, record=False)
+    (sd / "evidence" / "swap-check.json").unlink()
+    assert not mentions(gate_weights_swap(sd, run).reasons, "recomputed")
+
+
+@pytest.mark.parametrize("position", [[], {}, None, "7", 7.5, True, [3], {"a": 1}])
+def test_a_mismatch_list_with_any_json_value_as_a_position_is_refused_not_raised(position):
+    """The positions are JSON: a list or an object is unhashable and a mix of null, text and numbers cannot be sorted. Neither may raise."""
+    r = served_report()
+    r["mismatches"] = [*r["mismatches"], {"position": position}]
+    out = token_check.problems(r, [], REF)
+    assert mentions(out, "mismatches are not the positions"), out
+
+
+def test_a_mismatch_list_with_mixed_junk_positions_is_refused_and_names_each_once():
+    r = served_report()
+    r["mismatches"] = [{"position": None}, {"position": "x"}, {"position": []}, {"position": None}, 5, {"position": 99}]
+    out = token_check.problems(r, [], REF)
+    text = " ".join(mentions(out, "mismatches are not the positions"))
+    assert "None" in text and "'x'" in text and "[]" in text and "99" in text, out
+    assert text.count("None") == 1, text                                     # the repeat of a value is named once
+
+
+def test_the_real_mismatch_list_still_agrees():
+    assert token_check.problems(served_report(), [], REF) == []
+
+
+@pytest.mark.parametrize("raw", ["null", "[]", "3"])
+def test_stage_4_refuses_a_swap_check_that_is_not_an_object_on_a_bound_run(tmp_path, raw):
+    g, sd, run = mesh(tmp_path, served_report())
+    assert g.ok, g.reasons
+    (sd / "configs" / "2" / "evidence" / "swap-check.json").write_text(raw)
+    got = gate_mesh_swap(sd, run)
+    assert not got.ok and mentions(got.reasons, "the 2-chip configuration", "swap-check.json"), got.reasons
+
+
+@pytest.mark.parametrize("bad", [None, [], 3, "x"])
+def test_the_sampling_correctness_check_fails_a_variant_report_that_is_not_an_object(tmp_path, bad):
+    from orchard import sampling_choice
+    run = tmp_path / "run"
+    write(run, REF_PATH, {"generated_ids": REF})
+    record_ids(run)
+    assert sampling_choice._correctness_failures(bad, run)
+
+
+@pytest.mark.parametrize("raw", ["null", "[]", "3"])
+def test_an_unbound_run_keeps_the_old_judgement_for_a_swap_check_that_is_not_an_object(tmp_path, raw):
+    """No ledger record (a run from before the check): the recompute is not demanded, and this check adds no reason of its own."""
+    g, sd, run = stage2(tmp_path, record=False)
+    (sd / "evidence" / "swap-check.json").write_text(raw)
+    assert not mentions(gate_weights_swap(sd, run).reasons, "recomputed")

@@ -115,10 +115,15 @@ def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, wh
     else:
         seen = [m.get("position") if isinstance(m, dict) else None for m in listed]
         if seen != got["mismatch_positions"]:
-            hidden = sorted(set(got["mismatch_positions"]) - set(p for p in seen if _whole(p)))
-            extra = sorted(p for p in set(seen) if not _whole(p) or p not in got["mismatch_positions"])
+            # The positions are JSON values. A list or an object is unhashable and a mix of null, text and numbers cannot be sorted, so only the
+            # whole numbers are put in sets or sorted; every other value is named by its repr, once, in the order it first appears.
+            whole = {p for p in seen if _whole(p)}
+            hidden = sorted(set(got["mismatch_positions"]) - whole)
+            odd = list(dict.fromkeys(repr(p) for p in seen if not _whole(p)))
+            wrong = [repr(p) for p in sorted(whole - set(got["mismatch_positions"]))]
+            extra = odd + wrong
             detail = (f"it leaves out positions {_positions(hidden)}" if hidden else "") + (" and " if hidden and extra else "") \
-                + (f"it lists positions that are not mismatches: {_positions(map(repr, extra))}" if extra else "")
+                + (f"it lists positions that are not mismatches: {_positions(extra)}" if extra else "")
             out.append(f"{where}swap-check.json mismatches are not the positions teacher_forced disagrees on ({detail or 'the order or a repeat differs'})")
     ids = report.get("reference_generated_ids")
     if ids != reference_ids[:n]:

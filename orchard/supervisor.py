@@ -2522,6 +2522,9 @@ class Supervisor:
             return self._pin_scoring(spec, stage_dir)
         if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
             return
+        # Before the config is drafted and before any agent step of this stage: a bundle that cannot be chosen (the draft gives None) still
+        # leaves the prepare agent and the hardware test to run, and the gate must hold the reference ids' hash for those runs too.
+        self._pin_reference_ids(spec)
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
                                          cache_root=self.paths.cache_root, hf_home=self.paths.hf_home,
                                          inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD,
@@ -2535,11 +2538,6 @@ class Supervisor:
         if reference is not None:
             cfg["agreement_set"] = True
             self.ledger.append("decision", spec.number, decision=AGREEMENT_LEDGER_DECISION, **reference)
-        # The 32-token check's reference ids get the same treatment (issue 433): their hash goes into the ledger before any stage 2 test, and the
-        # gate recomputes the check from the raw replies and these ids, so a swap-check.json and a result.json edited together are caught.
-        ids_record = reference_ids_record(self.run_dir)
-        if ids_record is not None:
-            self.ledger.append("decision", spec.number, decision=REFERENCE_IDS_LEDGER_DECISION, **ids_record)
         target = stage_dir / "swap_config.json"
         _put(target, json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
@@ -2550,6 +2548,18 @@ class Supervisor:
         self.ledger.append("decision", spec.number, decision="swap config drafted",
                            config=evidence_record(self.run_dir, target), bundle_dir=cfg.get("bundle_dir"),
                            copied=copied, **({"package": cfg["package"]} if "package" in cfg else {}))
+
+    def _pin_reference_ids(self, spec) -> None:
+        """The 32-token check's reference ids (issue 433): the hash of stage 1's generated-ids.json goes into the ledger before any stage 2 test,
+        and the gate recomputes the check from the raw replies and these ids, so a swap-check.json and a result.json edited together are caught.
+        Recorded once: a retried draft finds the record and keeps the first hash, so a file changed after the first pin is never taken as the
+        new truth. Nothing is recorded when stage 1 wrote no ids (the gate then judges the run as before)."""
+        for e in self.ledger.read():
+            if e["event"] == "decision" and e["data"].get("decision") == REFERENCE_IDS_LEDGER_DECISION:
+                return
+        record = reference_ids_record(self.run_dir)
+        if record is not None:
+            self.ledger.append("decision", spec.number, decision=REFERENCE_IDS_LEDGER_DECISION, **record)
 
     def _pin_full_port(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
         """Stage 2 of a full port (orchard/full_port.py): put the supervisor's template and its config in the stage directory, replacing any

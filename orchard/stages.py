@@ -1116,6 +1116,11 @@ def _token_check_reasons(report, results, run_dir, where: str = "") -> list[str]
     its raw `teacher_forced` records give against stage 1's reference ids (issue 433, orchard/token_check.py). Empty when the report is not an
     object (the other checks say so) or when the run has no stage 1 reference to compare with."""
     if not isinstance(report, dict):
+        # A run whose ledger holds the reference ids' hash was governed from the start: a swap-check.json that is not an object is what an
+        # edit would leave, and the recompute is what the binding is for (review of PR 444). An unbound run is judged as before.
+        if _ledger_decision_sha(run_dir, REFERENCE_IDS_LEDGER_DECISION) is not None:
+            return [f"{where}swap-check.json is not an object, though the supervisor recorded stage 1's reference ids in the ledger, so the "
+                    "32-token check cannot be recomputed"]
         return []
     ids, reasons, bound = _reference_ids(run_dir)
     if ids is None:
@@ -1124,11 +1129,15 @@ def _token_check_reasons(report, results, run_dir, where: str = "") -> list[str]
 
 
 def _token_check_reasons_in(path, results, run_dir, where: str = "") -> list[str]:
-    """`_token_check_reasons` for the swap-check.json at `path`. A file that is missing or that the safe reader refuses has none here:
-    `_suite_reasons_in` already says why such a file fails, and a result with no swap check is judged as before."""
+    """`_token_check_reasons` for the swap-check.json at `path`. A file that the safe reader refuses has none here: `_suite_reasons_in`
+    already says why. A file that is missing is a reason when the ledger holds the reference ids' hash (the run was governed from the start,
+    so the recompute cannot be skipped by deleting the report); otherwise a result with no swap check is judged as before."""
     try:
         report = _safe_json(path)
-    except safeio.SafeReadError:
+    except safeio.SafeReadError as exc:
+        if _is_missing(exc) and _ledger_decision_sha(run_dir, REFERENCE_IDS_LEDGER_DECISION) is not None:
+            return [f"{where}swap-check.json is missing, though the supervisor recorded stage 1's reference ids in the ledger, so the "
+                    "32-token check cannot be recomputed"]
         return []
     return _token_check_reasons(report, results, run_dir, where)
 
