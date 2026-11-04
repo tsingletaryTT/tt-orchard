@@ -226,7 +226,7 @@ The suite has 7,177 passing tests and 3 skipped (measured with `python3 -m pytes
 | 1 | Environment and CPU reference | A template script (`reference_gate.py`) loads the model on CPU, runs four checks and drafts `reference.json`. The gate compares the agent's file with the script's own evidence, so a reference whose weights did not load fails. Passed on the runs since Hemmingway-1 (which used the earlier open-ended skill), in 4 to 11 minutes |
 | 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed for every weights-only, sidecar and vocab-trim model: the chips agreed with the CPU reference on 29 to 32 of 32 tokens (and, on runs since 2026-10-23, the eight-prompt suite found nothing blocking). For a model whose nearest model has only a container package, it serves through the container on the package's own chip count (4 chips in the one real run) |
 | 3 | Full model | Skipped by design on the weights-only path. Never run on the full-port path |
-| 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | Passed on 2 and 4 chips (1 chip optional) for Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim. The 4-chip test has hit fabric timeouts that a reset does not always clear (issue 26). Did not pass for a container-only package with no 2-chip configuration (issue 68) |
+| 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | Passed on 2 and 4 chips (1 chip optional) for Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim. The 4-chip test has hit fabric timeouts that a reset does not always clear; the order of the two boards' resets is one cause (issue 26). Did not pass for a container-only package with no 2-chip configuration (issue 68) |
 | 5 | Serving integration | Skipped by design on the weights-only path, because stage 4's tests boot each configuration and compare the output with the CPU reference. Never run on the full-port path |
 | 6 | Qualitative check and benchmark | Skipped on the weights-only path. The full benchmark that exists (bytkim) was run by hand with `orchard.bench_session` and is described in `docs/run-logs`. Never run on the full-port path |
 | 7 | Package and container build | Supervisor code, opt-in with `--package-format v6`, or run on a finished run with `tt-orchard package`. Staged and boot-checked packages for Hemmingway-1, openthai, Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim, with a gate that checks the card against the package's files (drafter state, borrowed generation config, grafted head, reported scores kept apart from measured ones). A v5.1 container package is refused at start |
@@ -1389,7 +1389,21 @@ failure. The block text names each chip and the cause, and BLOCKED.md carries it
 
 Before a multi-board hardware test (stage 4's 4-chip test) the supervisor also resets the chips it leased, in place and
 through gozer. The 4-chip test failed twice with fabric router timeouts on chips that earlier tests had used and passed
-after all four were reset. The cause was not isolated, so this is a precaution that costs about 42 seconds per board.
+after all four were reset. This costs about 42 seconds per board.
+
+When the chips are leased as two separate leases (the coder's lease and a further lease), the order of the two resets matters
+(issue 26). On 2026-11-03, with a 1x4 mesh opened on the 1-D fabric with strict init after a fresh lease, resetting the lease
+whose chips have the lowest PCI address last failed 0 of 12 trials, one lease on all four chips with one reset failed 0 of 11,
+and resetting that lease first failed 6 of 12 with `Fabric Router Sync: Timeout after 10000 ms on Device 0`. The supervisor
+therefore resets the lease whose chips have the lowest PCI address last: on the retry after a startup failure, and once more
+after the park when the further lease has the lower address. The ledger records which key ordered the resets
+(`test chips reset order`: `pci_address`, or `device_index` when a lease carries no usable address).
+
+On this box the trials fit three keys equally: the lowest device index, the lowest PCI address, and the higher board serial
+first. The rule uses the PCI address because it follows the physical slot, and a device index is a position the driver assigns
+in probe order. No reboot and no second box has been tried. Stable names for boards and chips are the longer-term fix
+([tt-gozer issue 4](https://github.com/tsingletaryTT/tt-gozer/issues/4)). A hang while loading a warm tensor cache after a
+passing fabric start (seen on 2026-10-18) is a separate finding that this does not address.
 
 ### 5.5b Freeing disk with `--prune-caches`
 
