@@ -19,6 +19,7 @@ from orchard.adapters import Lease
 from orchard.supervisor import EXIT_READY, build, parse
 from run_fakes import Machine, MachineAdapter, argv
 from test_supervisor import Rig
+from swap_run_sh import valid_run_sh
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
 
@@ -265,7 +266,7 @@ def _installed_for_draft(rig):
     b.mkdir(parents=True)
     (b / "tt_kernel_manifest.json").write_text(json.dumps(
         {"schema_version": "6", "device_count": 2, "weights": {"repo_id": "Qwen/Qwen3.8-27B"}}))
-    (b / "run.sh").write_text("#!/bin/bash\n")
+    (b / "run.sh").write_text(valid_run_sh("Qwen/Qwen3.8-27B"))
     return b
 
 
@@ -441,7 +442,7 @@ def test_stage_4_starts_from_drafted_configs_for_the_counts_the_lab_can_hold(rig
     one.mkdir(parents=True)
     (one / "tt_kernel_manifest.json").write_text(json.dumps(
         {"schema_version": "6", "device_count": 1, "weights": {"repo_id": "Qwen/Qwen3.8-27B"}}))
-    (one / "run.sh").write_text("#!/bin/bash\n")
+    (one / "run.sh").write_text(valid_run_sh("Qwen/Qwen3.8-27B"))
     rig.lab.chips = 2
     rig.args.required_chips = (1, 2)
     rig.args.unattended = True

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from orchard import swap_draft as sd
+from swap_run_sh import valid_run_sh
 
 NEAREST = "Qwen/Qwen3.8-27B"
 MODEL = "Altworld/Hemmingway-1@1a5f363a"
@@ -25,7 +26,7 @@ def bundle(root: Path, name: str, repo: str, chips: int, schema="6", run_sh=True
     (d / "tt_kernel_manifest.json").write_text(json.dumps(
         {"schema_version": schema, "device_count": chips, "weights": {"repo_id": repo}}))
     if run_sh:
-        (d / "run.sh").write_text("#!/bin/bash\n")
+        (d / "run.sh").write_text(valid_run_sh(repo))
     return d
 
 
