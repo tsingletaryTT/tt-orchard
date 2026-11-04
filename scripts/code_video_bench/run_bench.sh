@@ -11,7 +11,9 @@
 # The run directory is reserved with one atomic `mkdir` before anything slow starts, so two invocations with the same WORK_ROOT and run
 # name cannot both proceed: the second is refused and touches nothing of the first. The container is named cvbench-RUN_NAME-HASH, where HASH
 # comes from the reserved directory's path, so two work roots that use the same run name do not collide on the container name either.
-# Every python call here uses `python3 -I` (no current directory or PYTHON* variables on the import path).
+# Every python call here uses `python3 -I -S` (no current directory, PYTHON* variable, user site or site-packages on the import path), and the
+# script first unsets every PYTHON* variable, so nothing a model could write onto a path reaches a host interpreter. A container removal in
+# the exit trap is bounded by CVBENCH_CLEANUP_TIMEOUT_S (default 60); one that fails or times out is written to logs/cleanup.log with the id.
 #
 # The run name may use letters, digits, dots, underscores and hyphens. WORK_ROOT may be relative (it is made absolute); neither it nor
 # the resolved path may contain a colon or a line break, because they become a docker mount source and destination.
@@ -20,6 +22,7 @@
 # dropped, no new privileges, a read-only root file system, memory and process limits. It shares the host network namespace only because
 # the endpoint listens on loopback; the host's loopback services are therefore reachable from inside.
 set -euo pipefail
+for v in $(env | sed -n 's/^\(PYTHON[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
 NAME=${1:?run name}; BRIEF=${2:?brief file}; WALL_MIN=${3:-120}; MAX_TURNS=${4:-1500}
 : "${WORK_ROOT:?}"; : "${SKILL_SRC:?}"
 case $NAME in *[!A-Za-z0-9._-]*|"") echo "run name '$NAME' may use letters, digits, '.', '_' and '-' only"; exit 1;; esac
@@ -38,7 +41,7 @@ RUN=$WORK_ROOT/$NAME; TASK=$RUN/task; LOGS=$RUN/logs; CIDFILE=$LOGS/container.id
 mkdir "$RUN" 2>/dev/null || { echo "refusing to reuse $RUN: that run name is already taken under $WORK_ROOT"; exit 1; }
 trap 'rmdir "$RUN" 2>/dev/null || true' EXIT
 RUN_ID=$(printf '%s' "$RUN" | sha256sum | cut -c1-8); CNAME="cvbench-$NAME-$RUN_ID"
-MODEL=$(curl -sf -m 20 "$ENDPOINT/v1/models" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
+MODEL=$(curl -sf -m 20 "$ENDPOINT/v1/models" | python3 -I -S -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
 PROMPT=${PROMPT:-"Use the project code-video skill. Read .qwen/skills/code-video/SKILL.md and dense_prompt.md, then the relevant craft guides. This directory is the project root. Produce the complete video, run the rendering tools, and deliver out/final.mp4, SPEC.md and VERIFY.md."}
 
 mkdir -p "$TASK/.qwen/skills" "$TASK/home/.qwen" "$TASK/out" "$TASK/assets" "$LOGS"
@@ -49,7 +52,7 @@ printf '%s\n' "$SKILL_SRC" > "$LOGS/skill_src"
 ( cd "$SKILL_SRC" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$LOGS/skill.sha256"
 ln -s /opt/pw/node_modules "$TASK/node_modules"          # resolves inside the image: Playwright and @napi-rs/canvas
 cp "$BRIEF" "$TASK/dense_prompt.md"
-ENDPOINT="$ENDPOINT" MODEL="$MODEL" python3 -I - "$TASK/home/.qwen/settings.json" <<'PY'
+ENDPOINT="$ENDPOINT" MODEL="$MODEL" python3 -I -S - "$TASK/home/.qwen/settings.json" <<'PY'
 import json, os, sys
 m, base = os.environ["MODEL"], os.environ["ENDPOINT"].rstrip("/") + "/v1"
 json.dump({
@@ -68,16 +71,24 @@ json.dump({
 PY
 cp "$TASK/home/.qwen/settings.json" "$LOGS/qwen-settings.json"
 
-python3 -I "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics.jsonl" 15 & POLL=$!
+python3 -I -S "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics.jsonl" 15 & POLL=$!
 # Remove only the container this invocation created: docker writes its id to $CIDFILE after the daemon made it. A start that failed (a
 # name already used by another run, say) leaves the file empty, and then there is nothing of ours to remove.
 cleanup() {
   kill "$POLL" 2>/dev/null || true
   cid=""; if [ -s "$CIDFILE" ]; then cid=$(cat "$CIDFILE"); fi
-  if [ -n "$cid" ]; then docker rm -f "$cid" >/dev/null 2>&1 || true; fi
+  if [ -n "$cid" ]; then
+    limit=${CVBENCH_CLEANUP_TIMEOUT_S:-60}
+    # Bounded: a daemon that never answers must not hang the exit trap. A removal that fails is written down with the id, so it can be done by hand.
+    if timeout -k 5 "$limit" docker rm -f "$cid" >/dev/null 2>&1; then :; else
+      rc=$?
+      case $rc in 124|137) why="timed out after $limit s";; *) why="docker rm exited $rc";; esac
+      printf 'cleanup of container %s failed: %s\n' "$cid" "$why" >> "$LOGS/cleanup.log" 2>/dev/null || true
+    fi
+  fi
 }
 trap cleanup EXIT
-python3 -I "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-start.json" once
+python3 -I -S "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-start.json" once
 date -u +%FT%TZ > "$LOGS/started_at"
 
 set +e
@@ -93,5 +104,6 @@ systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
 echo $? > "$LOGS/exit_code"
 set -e
 date -u +%FT%TZ > "$LOGS/ended_at"
-python3 -I "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-end.json" once
+python3 -I -S "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-end.json" once
 echo "run finished, exit $(cat "$LOGS/exit_code"); task in $TASK, logs in $LOGS"
+echo "summarize it with: $HERE/collect.sh $RUN WIDTH HEIGHT FPS MIN_DUR MAX_DUR"

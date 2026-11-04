@@ -2,8 +2,14 @@
 With an interval, append one JSON line per sample to OUT_FILE until killed; with `once`, write one JSON object to OUT_FILE.
 Keeps the counters and gauges that show how busy the server was and who else used it. The engine and model_name labels are dropped, so
 series that differ only in those are added together (two engines with one running request each are two running requests); every other
-label stays in the key, in sorted order."""
-import json, re, sys, time, urllib.request
+label stays in the key, in sorted order.
+Start it with `python3 -I -S` (run_bench.sh does). It refuses to run otherwise: code python runs at startup from a PYTHON* variable or a
+directory on the import path has already run by the time this file's first line does."""
+import sys
+if not sys.flags.isolated:
+    sys.stderr.write("poll_metrics.py refuses to run without `python3 -I -S`\n")
+    raise SystemExit(2)
+import json, re, time, urllib.request
 
 DROP = ("engine", "model_name")
 KEEP = ("vllm:num_requests_running", "vllm:num_requests_waiting", "vllm:prompt_tokens_total", "vllm:generation_tokens_total",

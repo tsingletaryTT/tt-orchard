@@ -32,6 +32,7 @@ def note(rec):
         f.write(json.dumps(rec) + "\n")
 if args[:1] == ["rm"]:
     note({"cmd": "rm", "args": args[1:]})
+    time.sleep(float(os.environ.get("DOCKER_STUB_RM_SLEEP", "0")))
     sys.exit(0)
 if args[:1] != ["run"]:
     note({"cmd": args[:1], "args": args[1:]})
@@ -74,6 +75,13 @@ if cidfile:
 if mode == "sleep":
     time.sleep(60)
     sys.exit(0)
+if mode in ("flood", "floodE"):                 # endless output until the client is killed: the collector must stop reading at its cap
+    stream = sys.stdout.buffer if mode == "flood" else sys.stderr.buffer
+    try:
+        while True:
+            stream.write(b"x" * 65536); stream.flush()
+    except (BrokenPipeError, OSError):
+        sys.exit(1)
 if "sh" in args and args[args.index("sh") + 1:args.index("sh") + 2] == ["-c"]:
     cmd = args[args.index("sh") + 2]
     for v in vols:                              # the host path stands in for the container path when they differ
@@ -90,7 +98,7 @@ if "sh" in args and args[args.index("sh") + 1:args.index("sh") + 2] == ["-c"]:
         host_cwd = tempfile.mkdtemp(prefix="stub-empty-")
     env = {"PATH": os.environ["PATH"], "HOME": "/nonexistent", **envs}      # a container does not inherit the host's environment
     for k, v in os.environ.items():             # except the knobs of the ffprobe and ffmpeg stand-ins, which stand for what the image holds
-        if k.startswith(("FFPROBE_", "FFMPEG_STUB_")):
+        if k.startswith(("FFPROBE_", "FFMPEG_STUB_")) or k == "CVBENCH_REAL_PYTHON":
             env[k] = v
     r = subprocess.run(["sh", "-c", cmd], cwd=host_cwd, env=env, capture_output=True, text=True)
     sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
@@ -108,6 +116,14 @@ exec "$@"
 '''
 
 # ffprobe and ffmpeg refuse anything but one existing file argument: an unquoted name with a space reaches them as two words.
+PYTHON_STUB = r'''#!/bin/sh
+if [ -n "$STUB_LOG" ]; then
+  echo "ARGS $*" >> "$STUB_LOG.python"
+  env | grep '^PYTHON' | sed 's/^/ENV /' >> "$STUB_LOG.python"
+fi
+exec "$CVBENCH_REAL_PYTHON" "$@"
+'''
+
 FFPROBE_STUB = r'''#!/bin/sh
 for last; do :; done
 if [ ! -f "$last" ]; then echo "ffprobe: no such file: $last" >&2; exit 1; fi
@@ -144,11 +160,13 @@ def stubs(tmp_path):
     write_exec(bin_dir / "systemd-run", SYSTEMD_RUN_STUB)
     write_exec(bin_dir / "ffprobe", FFPROBE_STUB)
     write_exec(bin_dir / "ffmpeg", FFMPEG_STUB)
+    write_exec(bin_dir / "python3", PYTHON_STUB)
     log = tmp_path / "stub.log"
     log.write_text("")
-    env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", STUB_LOG=str(log))
+    env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", STUB_LOG=str(log), CVBENCH_REAL_PYTHON=sys.executable)
     for k in ("DOCKER_STUB_MODE", "DOCKER_STUB_CONFLICT", "CVBENCH_DOCKER_TIMEOUT_S", "SKILL_SRC", "WORK_ROOT", "FFPROBE_NO_FRAMES", "FFPROBE_FRAMES",
-          "FFMPEG_STUB_FAIL", "FFMPEG_STUB_FRAMES", "FFMPEG_STUB_GARBAGE", "FFMPEG_STUB_WARN", "FFPROBE_GARBAGE", "CURL_STUB_SLEEP", "CURL_STUB_FAIL"):
+          "FFMPEG_STUB_FAIL", "FFMPEG_STUB_FRAMES", "FFMPEG_STUB_GARBAGE", "FFMPEG_STUB_WARN", "FFPROBE_GARBAGE", "CURL_STUB_SLEEP", "CURL_STUB_FAIL",
+          "DOCKER_STUB_RM_SLEEP", "CVBENCH_CLEANUP_TIMEOUT_S", "CVBENCH_STREAM_CAP_BYTES", "CVBENCH_LINE_CAP_BYTES", "CVBENCH_OUTPUT_CAP_BYTES", "CVBENCH_PYTHON"):
         env.pop(k, None)
     return env, log
 
@@ -285,7 +303,7 @@ def poll_once(tmp_path, text):
     srv = serve_metrics(text)
     try:
         out = tmp_path / "once.json"
-        rc, so, se = run_cmd([sys.executable, str(BENCH / "poll_metrics.py"), f"http://127.0.0.1:{srv.server_port}", str(out), "once"], dict(os.environ), tmp_path, 30)
+        rc, so, se = run_cmd([sys.executable, "-I", "-S", str(BENCH / "poll_metrics.py"), f"http://127.0.0.1:{srv.server_port}", str(out), "once"], dict(os.environ), tmp_path, 30)
         assert rc == 0, se
         return json.loads(out.read_text())
     finally:
@@ -620,19 +638,6 @@ def test_a_good_run_reports_no_measurement_failures(tmp_path, stubs):
     assert s["frame_hashes"]["error"] is None and s["frame_hashes"]["invalid_lines"] == 0, s["frame_hashes"]
 
 
-def test_the_collector_runs_itself_isolated_even_when_started_without_the_flag(tmp_path, stubs):
-    """Started as `python3 collect.py` with PYTHONPATH pointing at a directory that holds a shlex.py, it must still import the real module."""
-    env, log = stubs
-    shadow = tmp_path / "shadow"
-    shadow.mkdir()
-    (shadow / "shlex.py").write_text('import sys\\nsys.stderr.write("SHADOWED-shlex\\\\n")\\nsys.exit(3)\\n')
-    run = make_run(tmp_path)
-    e = dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), PYTHONPATH=str(shadow))
-    rc, out, err = run_cmd([sys.executable, str(BENCH / "collect.py"), str(run), "1280", "720", "24", "9", "11"], e, tmp_path, 60)
-    assert rc == 0 and "SHADOWED" not in err, (rc, err)
-    assert json.loads((run / "logs" / "summary.json").read_text())["video"]["frames"] == 240
-
-
 def test_a_failed_start_gives_the_run_name_back(tmp_path, stubs):
     env, log = stubs
     skill, brief = bench_setup(tmp_path)
@@ -676,5 +681,305 @@ def test_more_frame_records_than_the_cap_allows_is_a_failure(tmp_path, stubs):
     env, log = stubs
     e = dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), CVBENCH_OUTPUT_CAP_BYTES="1000")
     s = collect(make_run(tmp_path), e, tmp_path)
-    assert s["frame_hashes"]["frames"] is None and "more than 1000 bytes" in s["frame_hashes"]["error"], s["frame_hashes"]
+    assert s["frame_hashes"]["frames"] is None and "stdout exceeded 1000 bytes" in s["frame_hashes"]["error"], s["frame_hashes"]
     failed(s, "frame_hashes")
+
+
+# ---- PR 450, Copilot round 3 (the limit): isolation findings ---------------------------------------------------------------------
+
+def evil_startup(tmp_path, marker):
+    """Directories and files that would run model-controlled (or planted) code if the host interpreter honoured them at startup."""
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    code = f'open({str(marker)!r}, "a").write(__file__ + "\\n")\n'
+    for name in ("sitecustomize.py", "usercustomize.py", "startup.py"):
+        (evil / name).write_text(code)
+    return evil
+
+
+def test_the_control_proves_that_startup_code_on_pythonpath_really_runs_in_a_plain_interpreter(tmp_path):
+    marker = tmp_path / "MARKER"
+    evil = evil_startup(tmp_path, marker)
+    subprocess.run([sys.executable, "-c", "pass"], env=dict(os.environ, PYTHONPATH=str(evil)), check=True)
+    assert marker.exists(), "the sitecustomize hook does not fire here, so the isolation test below would prove nothing"
+
+
+def test_the_collector_wrapper_starts_python_isolated_so_startup_code_cannot_run(tmp_path, stubs):
+    env, log = stubs
+    marker = tmp_path / "MARKER"
+    evil = evil_startup(tmp_path, marker)
+    cwd = tmp_path / "caller"
+    cwd.mkdir()
+    for name in ("sitecustomize.py", "json.py"):
+        (cwd / name).write_text(f'open({str(marker)!r}, "a").write("cwd " + __file__ + "\\n")\nraise SystemExit(9)\n')
+    # the interpreter the wrapper starts is a script that writes down how it was started, then runs the real one
+    spy = write_exec(tmp_path / "spy-python", '#!/bin/sh\n{ echo "PWD $(pwd)"; echo "ARGS $*"; env | grep \'^PYTHON\' | sed \'s/^/ENV /\'; } >> "$STUB_LOG.wrapper"\n'
+                                              'exec "$CVBENCH_REAL_PYTHON" "$@"\n')
+    run = make_run(tmp_path)
+    e = dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), CVBENCH_PYTHON=str(spy), PYTHONPATH=str(evil), PYTHONSTARTUP=str(evil / "startup.py"),
+             PYTHONUSERBASE=str(evil), PYTHONINSPECT="1")
+    rc, out, err = run_cmd(["sh", str(BENCH / "collect.sh"), os.path.relpath(run, cwd), "1280", "720", "24", "9", "11"], e, cwd, 60)
+    assert rc == 0, (rc, err)
+    assert not marker.exists(), marker.read_text()
+    assert json.loads((run / "logs" / "summary.json").read_text())["video"]["frames"] == 240
+    rows = Path(str(log) + ".wrapper").read_text().splitlines()
+    assert "PWD /" in rows, rows                                                      # the caller's directory (and its json.py) is left behind
+    assert [r for r in rows if r.startswith("ARGS ")][0].startswith("ARGS -I -S "), rows
+    assert not [r for r in rows if r.startswith("ENV ")], rows                         # no PYTHON* variable reaches the interpreter
+
+
+def test_the_collector_refuses_to_start_without_isolation_and_says_how_to_start_it(tmp_path, stubs):
+    """A script cannot undo startup code that ran before its first line, so it refuses and does not pretend to re-exec."""
+    env, log = stubs
+    run = make_run(tmp_path)
+    rc, out, err = run_cmd([sys.executable, str(BENCH / "collect.py"), str(run), "1280", "720", "24", "9", "11"],
+                           dict(env, SKILL_SRC=str(trusted_skill(tmp_path))), tmp_path, 30)
+    assert rc == 2 and "collect.sh" in err and "-I" in err, (rc, err)
+    assert not (run / "logs" / "summary.json").exists()
+
+
+def test_poll_metrics_refuses_to_start_without_isolation(tmp_path):
+    rc, out, err = run_cmd([sys.executable, str(BENCH / "poll_metrics.py"), "http://127.0.0.1:9", str(tmp_path / "o.json"), "once"], dict(os.environ), tmp_path, 30)
+    assert rc == 2 and "-I" in err, (rc, err)
+    assert not (tmp_path / "o.json").exists()
+
+
+def test_every_host_python_in_the_shell_script_is_isolated_and_gets_no_python_variables(tmp_path, stubs):
+    env, log = stubs
+    marker = tmp_path / "MARKER"
+    evil = evil_startup(tmp_path, marker)
+    rc, out, err = run_bench(tmp_path, dict(env, PYTHONPATH=str(evil), PYTHONSTARTUP=str(evil / "startup.py"), PYTHONHOME=""), tmp_path / "work")
+    assert rc == 0, (out, err)
+    rows = (Path(str(log) + ".python")).read_text().splitlines()
+    starts = [r for r in rows if r.startswith("ARGS ") and "/stubbin/" not in r]       # the docker stand-in is itself a python script: its start is not the shell script's
+    assert len(starts) >= 3, rows
+    assert all(r.startswith("ARGS -I -S ") for r in starts), starts
+    assert not [r for r in rows if r.startswith("ENV ")], [r for r in rows if r.startswith("ENV ")]
+    assert not marker.exists()
+
+
+def beneath_setup(tmp_path, env, **kw):
+    run = make_run(tmp_path)
+    return run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), **kw)
+
+
+def test_a_symlinked_spec_file_is_refused_and_its_target_size_is_not_reported(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret " * 1000)
+    (run / "task" / "SPEC.md").symlink_to(outside)
+    s = collect(run, e, tmp_path)
+    assert s["files"]["SPEC.md"] is None, s["files"]
+    assert any(r["path"] == "SPEC.md" and "link" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
+
+
+def test_an_out_directory_that_is_a_symlink_is_not_followed(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "final.mp4").write_bytes(b"x")
+    import shutil
+    shutil.rmtree(run / "task" / "out")
+    (run / "task" / "out").symlink_to(outside)
+    s = collect(run, e, tmp_path)
+    assert s["final_mp4_delivered"] is False and s["measured_file"] is None, s
+    assert not any("elsewhere" in json.dumps(c) for c in calls(log)), "no container call may name the outside path"
+    assert any(r["path"] == "out" for r in s["refused_paths"]), s["refused_paths"]
+
+
+def test_a_final_mp4_that_is_a_symlink_to_an_outside_file_is_not_measured(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    outside = tmp_path / "other.mp4"
+    outside.write_bytes(b"x")
+    (run / "task" / "out" / "final.mp4").unlink()
+    (run / "task" / "out" / "final.mp4").symlink_to(outside)
+    s = collect(run, e, tmp_path)
+    assert s["final_mp4_delivered"] is False and s["measured_file"] is None, s
+    assert not [c for c in calls(log) if c["cmd"] == "run"], "nothing should have been sent to a container"
+    assert any(r["path"] == "out/final.mp4" for r in s["refused_paths"]), s["refused_paths"]
+
+
+def test_a_linked_skill_directory_is_not_hashed_through_the_link_and_the_files_count_as_changed(tmp_path, stubs):
+    env, log = stubs
+    src = trusted_skill(tmp_path)
+    run = make_run(tmp_path)
+    (run / "logs" / "skill.sha256").write_text(
+        subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
+    import shutil
+    shutil.rmtree(run / "task" / ".qwen")
+    (run / "task" / ".qwen").symlink_to(tmp_path)                 # a link whose target holds a pristine copy under skills/code-video
+    pristine = tmp_path / "skills" / "code-video"
+    shutil.copytree(src, pristine)
+    s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path)
+    assert s["skill_files_changed_by_run"] == ["scripts/check_video.sh"], s["skill_files_changed_by_run"]
+    assert any(r["path"].startswith(".qwen") for r in s["refused_paths"]), s["refused_paths"]
+
+
+def test_a_symlinked_file_inside_the_skill_copy_is_listed_as_added_and_not_followed(tmp_path, stubs):
+    env, log = stubs
+    src = trusted_skill(tmp_path)
+    run = make_run(tmp_path)
+    (run / "logs" / "skill.sha256").write_text(
+        subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
+    (run / "task" / ".qwen" / "skills" / "code-video" / "scripts" / "check_video.sh").write_text("echo trusted-check-ok\n")
+    outside = tmp_path / "o.txt"
+    outside.write_text("x")
+    (run / "task" / ".qwen" / "skills" / "code-video" / "loot.txt").symlink_to(outside)
+    s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path)
+    assert s["skill_files_changed_by_run"] == [], s["skill_files_changed_by_run"]
+    assert any(r["path"].endswith("loot.txt") for r in s["refused_paths"]), s["refused_paths"]
+
+
+def test_a_dangling_symlink_among_the_candidates_does_not_stop_the_collection(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    out = run / "task" / "out"
+    (out / "final.mp4").unlink()
+    (out / "old.mp4").write_bytes(b"x")
+    (out / "dangling.mp4").symlink_to("/nonexistent/target.mp4")
+    os.mkfifo(out / "pipe.mp4")
+    s = collect(run, e, tmp_path, timeout=30)
+    assert s["final_mp4_delivered"] is False and s["measured_file"] == "out/old.mp4", s
+    assert {r["path"] for r in s["refused_paths"]} >= {"out/dangling.mp4", "out/pipe.mp4"}, s["refused_paths"]
+
+
+def test_only_dangling_candidates_means_nothing_is_measured_and_no_crash(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    out = run / "task" / "out"
+    (out / "final.mp4").unlink()
+    (out / "dangling.mp4").symlink_to("/nonexistent/target.mp4")
+    s = collect(run, e, tmp_path, timeout=30)
+    assert s["measured_file"] is None and "video" not in s, s
+
+
+def test_a_final_mp4_that_is_a_fifo_is_not_opened_and_does_not_hang(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    (run / "task" / "out" / "final.mp4").unlink()
+    os.mkfifo(run / "task" / "out" / "final.mp4")
+    s = collect(run, e, tmp_path, timeout=30)
+    assert s["final_mp4_delivered"] is False and s["measured_file"] is None, s
+
+
+def test_a_container_that_floods_stdout_is_stopped_at_the_cap_and_removed_by_id(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env, DOCKER_STUB_MODE="flood", CVBENCH_OUTPUT_CAP_BYTES="200000", CVBENCH_DOCKER_TIMEOUT_S="40")
+    s = collect(run, e, tmp_path, timeout=60)
+    assert "exceeded" in json.dumps(s["video"]) and "stdout" in json.dumps(s["video"]), s["video"]
+    assert any(c["cmd"] == "rm" for c in calls(log)), "the container of a call that overran its cap must be removed by id"
+    assert s["frame_hashes"]["frames"] is None and s["frame_hashes"]["error"], s["frame_hashes"]
+
+
+def test_a_container_that_floods_stderr_is_stopped_at_the_cap(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env, DOCKER_STUB_MODE="floodE", CVBENCH_OUTPUT_CAP_BYTES="200000", CVBENCH_DOCKER_TIMEOUT_S="40")
+    s = collect(run, e, tmp_path, timeout=60)
+    assert "stderr" in json.dumps(s["video"]) and "exceeded" in json.dumps(s["video"]), s["video"]
+
+
+def test_a_huge_agent_stream_is_read_to_a_cap_and_says_so(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env, CVBENCH_STREAM_CAP_BYTES="100000")
+    line = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 500}], "usage": {"input_tokens": 5, "output_tokens": 1}}}) + "\n"
+    (run / "logs" / "stream.jsonl").write_text(line * 2000)               # about 1 MB
+    s = collect(run, e, tmp_path)
+    info = s["stream"]["read"]
+    assert info["truncated"] is True and info["bytes_read"] <= 100000 + len(line), info
+    assert 0 < s["stream"]["assistant_messages"] < 2000, s["stream"]["assistant_messages"]
+
+
+def test_one_enormous_stream_line_is_skipped_and_counted_and_the_rest_is_read(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env, CVBENCH_LINE_CAP_BYTES="10000")
+    good = json.dumps({"type": "assistant", "message": {"content": [], "usage": {}}}) + "\n"
+    (run / "logs" / "stream.jsonl").write_text(good + "y" * 3_000_000 + "\n" + good)
+    s = collect(run, e, tmp_path)
+    assert s["stream"]["assistant_messages"] == 2, s["stream"]
+    assert s["stream"]["read"]["long_lines_skipped"] == 1 and s["stream"]["read"]["truncated"] is False, s["stream"]["read"]
+
+
+def test_a_container_removal_that_times_out_is_recorded_and_collection_goes_on(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env, DOCKER_STUB_MODE="sleep", CVBENCH_DOCKER_TIMEOUT_S="2", DOCKER_STUB_RM_SLEEP="30", CVBENCH_CLEANUP_TIMEOUT_S="1")
+    s = collect(run, e, tmp_path, timeout=90)
+    assert s["cleanup_failures"], s.get("cleanup_failures")
+    f = s["cleanup_failures"][0]
+    assert f["container"].startswith("STUBID-") and "timed out" in f["reason"], f
+    assert "measurement_failures" in s and s["measurement_failures"]["count"] >= 1
+
+
+def test_a_removal_that_docker_refuses_is_recorded_too(tmp_path, stubs):
+    env, log = stubs
+    (tmp_path / "stubbin").joinpath("docker").write_text(DOCKER_STUB.replace('time.sleep(float(os.environ.get("DOCKER_STUB_RM_SLEEP", "0")))\n    sys.exit(0)',
+                                                                           'print("Error response from daemon: removal in progress", file=sys.stderr)\n    sys.exit(1)'))
+    run, e = beneath_setup(tmp_path, env, DOCKER_STUB_MODE="sleep", CVBENCH_DOCKER_TIMEOUT_S="2")
+    s = collect(run, e, tmp_path, timeout=60)
+    assert s["cleanup_failures"] and "exit" in s["cleanup_failures"][0]["reason"], s["cleanup_failures"]
+
+
+def test_the_shell_script_cleanup_is_bounded_and_records_a_removal_that_hangs(tmp_path, stubs):
+    env, log = stubs
+    import time
+    t0 = time.time()
+    rc, out, err = run_bench(tmp_path, env, tmp_path / "work", extra={"DOCKER_STUB_RM_SLEEP": "40", "CVBENCH_CLEANUP_TIMEOUT_S": "1"})
+    assert rc == 0, (out, err)
+    assert time.time() - t0 < 30, "the exit trap waited for the hanging removal"
+    text = (tmp_path / "work" / "r1" / "logs" / "cleanup.log").read_text()
+    assert "STUBID-" in text and "timed out" in text, text
+
+
+def test_a_recorded_skill_file_replaced_by_a_link_to_a_pristine_copy_still_counts_as_changed(tmp_path, stubs):
+    env, log = stubs
+    src = trusted_skill(tmp_path)
+    run = make_run(tmp_path)
+    (run / "logs" / "skill.sha256").write_text(
+        subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
+    target = run / "task" / ".qwen" / "skills" / "code-video" / "scripts" / "check_video.sh"
+    target.unlink()
+    target.symlink_to(src / "scripts" / "check_video.sh")                      # the link's target has exactly the recorded content
+    s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path)
+    assert s["skill_files_changed_by_run"] == ["scripts/check_video.sh"], s["skill_files_changed_by_run"]
+    assert any(r["path"].endswith("check_video.sh") and "link" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
+
+
+def test_a_directory_with_more_entries_than_the_limit_is_cut_and_says_so(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    out = run / "task" / "out"
+    (out / "final.mp4").unlink()
+    for i in range(5100):
+        (out / f"r{i:05d}.mp4").write_bytes(b"")
+    s = collect(run, e, tmp_path, timeout=60)
+    assert s["measured_file"] and s["measured_file"].startswith("out/r"), s["measured_file"]
+    assert any("more than 5000 entries" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
+
+
+def test_a_skill_copy_nested_deeper_than_the_limit_is_cut_and_says_so(tmp_path, stubs):
+    env, log = stubs
+    run, e = beneath_setup(tmp_path, env)
+    deep = run / "task" / ".qwen" / "skills" / "code-video" / "d1" / "d2" / "d3" / "d4" / "d5" / "d6" / "d7" / "d8" / "d9"
+    deep.mkdir(parents=True)
+    (deep / "x.txt").write_text("x")
+    (run / "logs" / "skill.sha256").write_text("")
+    s = collect(run, e, tmp_path)
+    assert any("deeper than 8 levels" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
+    assert not any(a.endswith("x.txt") for a in s["skill_files_added_by_run"]), s["skill_files_added_by_run"]
+
+
+def test_a_file_the_run_added_inside_a_skill_subdirectory_is_listed(tmp_path, stubs):
+    env, log = stubs
+    src = trusted_skill(tmp_path)
+    run = make_run(tmp_path)
+    (run / "logs" / "skill.sha256").write_text(
+        subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
+    (run / "task" / ".qwen" / "skills" / "code-video" / "scripts" / "check_video.sh").write_text("echo trusted-check-ok\n")
+    (run / "task" / ".qwen" / "skills" / "code-video" / "scripts" / "helper.py").write_text("print(1)\n")
+    (run / "task" / ".qwen" / "skills" / "code-video" / "crafts").mkdir()
+    (run / "task" / ".qwen" / "skills" / "code-video" / "crafts" / "notes.md").write_text("n\n")
+    s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path)
+    assert s["skill_files_added_by_run"] == ["crafts/notes.md", "scripts/helper.py"], s["skill_files_added_by_run"]
+    assert s["skill_files_changed_by_run"] == [], s["skill_files_changed_by_run"]
