@@ -1722,7 +1722,11 @@ class Supervisor:
             # escalate entry and the stage_end, and the escalated attempt starts afresh with its own prepare and its own rounds.
             self.ledger.append("decision", n, decision="not resuming from a failed hardware test", marker=self._moved_aside_record(marker))
             resuming = False
-        stage_dir, resumed = open_stage_dir(self.run_dir, spec, resuming=resuming, ledger=self.ledger)
+        # A port repair rerun in flight keeps the stage directory even when its record has no evidence entry yet (a kill between the file and
+        # the entry. A rerun in flight and an `escalate` entry cannot both belong to one attempt, so there is nothing else to ask here.
+        owed = (resuming and spec.draft == "full_port" and bool(self.port_repair_rounds)
+                and port_repair.rerun_inflight(self.ledger.read(), n) is not None)
+        stage_dir, resumed = open_stage_dir(self.run_dir, spec, resuming=resuming, ledger=self.ledger, rerun_owed=owed)
         self.ledger.append("stage_start", n, escalated=escalated, resumed=resumed)
         if n == 0:
             self._stage_0_stack_pins(stage_dir)
@@ -2020,8 +2024,13 @@ class Supervisor:
             if port_repair.stopped_noted(entries, n):
                 return None
             owed = port_repair.rerun_inflight(entries, n)
-            if owed is not None and self._seal(stage_dir, port_repair.MARKER) != owed.get("record"):
-                # The rerun wrote its record and the supervisor died before it wrote the `tested` entry: the test ran. Say so and read its record.
+            ran = port_repair.rerun_recorded(entries, n) if owed is not None else None
+            sealed_now = self._seal(stage_dir, port_repair.MARKER) if ran is not None else None
+            if ran is not None and sealed_now is not None and sealed_now.get("sha256") == ran.get("sha256"):
+                # The rerun's own evidence entry follows its `rerun started` entry and vouches for the record on disk: the test ran, and the
+                # supervisor died before it wrote the `tested` entry. Say so and read its record. The entry says it, not the record's bytes, which an
+                # unchanged failure can leave equal to the sealed ones. A record that is replaced and has no such entry (a kill between the file and
+                # its entry) is not trusted: the owed check runs again below, on the repaired port (review of PR 432).
                 self.ledger.append("decision", n, decision=port_repair.TESTED,
                                    sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
                 continue

@@ -6,6 +6,8 @@ the fingerprint that shows what a repair step changed. tests/test_supervisor_por
 import hashlib
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -89,6 +91,49 @@ def test_a_runtime_that_cannot_be_imported_at_init_is_setup_and_earns_no_round(t
     assert port_repair.parse_failure(done.stdout) == {"kind": "setup", "op": "init"}
 
 
+def straddling(secret: str, prefix: str = "KeyError: '") -> str:
+    """An exception text whose password starts a few characters before the worker's 2,000-character cut (the worker puts `prefix` in front of the
+    text), with the `@` far beyond it."""
+    pad = 2000 - len(prefix) - len("https://bob:") - 11
+    return "x" * pad + f"https://bob:{secret}@host/model"
+
+
+def test_a_secret_cut_by_the_workers_2000_character_limit_never_leaves_the_worker(tmp_path):
+    # The worker used to cut the message first, so the closing `@` was gone and no pattern downstream could tell what the prefix was (review of PR 432).
+    secret = "S3CRETpassword" + "p" * 400
+    run, stage, _ = make_run(tmp_path, BROKEN_LOAD.replace("model.layers.2.ple.conv1d.weight", straddling(secret)))
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "KeyError" in done.stdout
+    assert "S3CRET" not in done.stdout + done.stderr and "bob" not in done.stdout
+
+
+def test_a_secret_cut_by_the_limit_in_a_setup_error_never_leaves_the_worker_either(tmp_path):
+    secret = "S3CRETpassword" + "p" * 400
+    run, stage, _ = make_run(tmp_path)
+    (tmp_path / "fake-ttnn" / "ttnn.py").write_text(f"raise ModuleNotFoundError({straddling(secret, 'ModuleNotFoundError: ')!r})\n")
+    done = run_template(tmp_path, run, stage)
+    assert port_repair.parse_failure(done.stdout) == {"kind": "setup", "op": "init"}
+    assert "S3CRET" not in done.stdout + done.stderr
+
+
+def test_the_workers_clip_takes_secrets_out_before_the_cut_and_stays_fast_on_hostile_text():
+    # Loaded by path in a child process with a hard timeout: a pattern that went quadratic would hang here, not in a worker the supervisor waits for.
+    code = r"""
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("port_check_under_test", sys.argv[1])
+m = importlib.util.module_from_spec(spec); sys.argv = ["x"]; spec.loader.exec_module(m)
+worst = 0.0
+for text in ("a" * 300000, "ab://" * 60000, "https://" + "u" * 300000, "a+." * 100000, "x" * 1989 + " hf_" + "A" * 30, "x" * 1975 + "https://bob:SECRETSECRET@host"):
+    t0 = time.time(); out = m.clip(text); worst = max(worst, time.time() - t0)
+    assert len(out) <= m.REPLY_CHARS
+    assert "hf_A" not in out and "SECRET" not in out, out[-60:]
+print("ok", round(worst, 3))
+"""
+    done = subprocess.run([sys.executable, "-I", "-c", code, str(full_port.TEMPLATE)], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0 and done.stdout.startswith("ok"), done.stdout + done.stderr
+    assert float(done.stdout.split()[1]) < 5.0
+
+
 def test_a_runtime_that_exits_while_it_is_imported_is_setup_too(tmp_path):
     # A broken install can end the interpreter from inside the import (SystemExit). That is the runtime's failure as well.
     run, stage, _ = make_run(tmp_path)
@@ -108,6 +153,49 @@ def test_a_port_that_cannot_be_imported_at_init_stays_repairable(tmp_path):
     run, stage, _ = make_run(tmp_path, "import module_that_does_not_exist\n" + HONEST)
     done = run_template(tmp_path, run, stage)
     assert done.returncode == 2 and port_repair.parse_failure(done.stdout) == {"kind": "port", "op": "init"}
+
+
+# ---- the evidence entry that says a rerun ran (review of PR 432) ------------------------------------------------------------------
+
+def entry(event, **data):
+    return {"event": event, "stage": 2, "data": data}
+
+
+HW = dict(what="hardware test", path="stages/2/test-result.json", sha256="a" * 64, returncode=0, timed_out=False)
+
+
+def test_a_hardware_test_entry_after_the_rerun_decision_says_the_rerun_ran():
+    entries = [entry("stage_start", resumed=False), entry("decision", decision=port_repair.RERUN, round=1, record=None), entry("evidence", **HW)]
+    assert port_repair.rerun_recorded(entries, 2) == HW
+
+
+@pytest.mark.parametrize("name,evidence", [
+    ("an agent's evidence file", dict(what="evidence file", path="stages/2/test-result.json", sha256="a" * 64)),
+    ("a hardware test entry with no exit code", {k: v for k, v in HW.items() if k != "returncode"}),
+    ("a hardware test entry with no timeout flag", {k: v for k, v in HW.items() if k != "timed_out"}),
+    ("another kind of entry", dict(HW, what="transcript"))])
+def test_only_the_supervisors_hardware_test_entry_counts(name, evidence):
+    entries = [entry("stage_start", resumed=False), entry("decision", decision=port_repair.RERUN, round=1, record=None), entry("evidence", **evidence)]
+    assert port_repair.rerun_recorded(entries, 2) is None, name
+
+
+def test_an_entry_before_the_rerun_decision_or_after_its_tested_decision_does_not_count():
+    before = [entry("stage_start", resumed=False), entry("evidence", **HW), entry("decision", decision=port_repair.RERUN, round=1, record=None)]
+    assert port_repair.rerun_recorded(before, 2) is None
+    closed = before[:1] + before[2:] + [entry("evidence", **HW), entry("decision", decision=port_repair.TESTED, sources="x")]
+    assert port_repair.rerun_recorded(closed, 2) is None
+
+
+def test_a_hardware_test_entry_with_no_rerun_decision_at_all_does_not_count():
+    assert port_repair.rerun_recorded([entry("stage_start", resumed=False), entry("evidence", **HW)], 2) is None
+
+
+def test_an_entry_of_an_earlier_attempt_or_another_stage_does_not_count():
+    earlier = [entry("stage_start", resumed=False), entry("decision", decision=port_repair.RERUN, round=1, record=None), entry("evidence", **HW),
+               entry("stage_start", resumed=False)]
+    assert port_repair.rerun_recorded(earlier, 2) is None
+    other = [dict(e, stage=4) for e in earlier[:3]]
+    assert port_repair.rerun_recorded(other, 2) is None
 
 
 # ---- parse_failure ---------------------------------------------------------------------------------------------------------------
