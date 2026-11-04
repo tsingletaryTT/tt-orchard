@@ -242,14 +242,20 @@ class Redactor:
 
 # ---- what the run produced --------------------------------------------------------------------------
 
+def read_capped_json_why(path: Path, *, max_bytes: int = 4 << 20) -> tuple[dict | None, str | None]:
+    """(data, why): the JSON object at `path` through orchard/safeio.py (size cap, no link followed, no FIFO read, strict JSON). (None, None)
+    when the file is absent; ({}, reason) when it exists and cannot be read as an object, with safeio's short reason (it never holds content)."""
+    from orchard import safeio
+    try:
+        return safeio.read_json(path, max_bytes=max_bytes, expect=dict), None
+    except safeio.SafeReadError as exc:
+        return (None, None) if "ENOENT" in str(exc.reason) else ({}, str(exc.reason))
+
+
 def read_capped_json(path: Path, *, max_bytes: int = 4 << 20) -> dict | None:
     """The JSON object at `path` through orchard/safeio.py (size cap, no link followed, no FIFO read, strict JSON). None when the file is
     absent, {} when it exists and cannot be read as an object."""
-    from orchard import safeio
-    try:
-        return safeio.read_json(path, max_bytes=max_bytes, expect=dict)
-    except safeio.SafeReadError as exc:
-        return None if "ENOENT" in str(exc.reason) else {}
+    return read_capped_json_why(path, max_bytes=max_bytes)[0]
 
 
 class Run:
@@ -283,7 +289,7 @@ class Run:
         # Stage 0's hazard scan (orchard/stage0_scan.py, issue 183): None when the run has none (an older run), {} when the file is unreadable.
         self.scan_file = s / "0" / "hazard-scan.json"
         self.scan = read_capped_json(self.scan_file)
-        self.gguf = read_capped_json(s / "0" / "evidence" / "gguf-header.json")      # issue 440: None when stage 0 ignored no GGUF file
+        self.gguf, self.gguf_why = read_capped_json_why(s / "0" / "evidence" / "gguf-header.json")   # issue 440: None when stage 0 ignored no GGUF file
         self.reference = {} if (self.audio_run or self.text_run) else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
@@ -2187,7 +2193,11 @@ def gguf_risks(run: Run, redact: Redactor) -> list[str]:
              "weights. Stage 0 read each header without the weights. That gives an independent reading of the architecture and a hint about "
              f"which tensors are sensitive to precision. Evidence: `{GGUF_FILE}`.", ""]
     if not files:
-        return lines + ["The evidence file could not be read, or holds no usable record.", ""]
+        why = getattr(run, "gguf_why", None)
+        if why:
+            return lines + [f"The evidence file `{GGUF_FILE}` could not be read: {cap(why, 200)}. Stage 0 keeps it under 3 MiB, so a file this "
+                            "size or shape was not written by stage 0 as it stands. The header details are not shown.", ""]
+        return lines + [f"The evidence file `{GGUF_FILE}` was read and holds no usable record.", ""]
     for f in files:
         lines += [f"### {cap(f['file'])}", ""]
         if f["status"] != "ok":

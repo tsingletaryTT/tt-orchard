@@ -94,6 +94,7 @@ import re
 import stat
 import struct
 import sys
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -1057,10 +1058,19 @@ GGUF_MAX_ELEMENTS = 8_000_000     # array elements walked in one header
 GGUF_KEEP_ARRAY = 1024            # a numeric array this short is kept; a longer one, and any array of strings, is counted
 GGUF_MAX_FILES = 8                # headers read in one run
 GGUF_MAX_HYPERPARAMETERS = 256    # architecture keys kept per file
+GGUF_MAX_BY_KIND = 64             # tensor kinds listed in the quantization histogram; the rest are summed into `by_kind_other`
+GGUF_MAX_KINDS_TRACKED = 4096     # distinct kinds counted while walking the tensors; a later new kind goes straight to `by_kind_other`
+GGUF_MAX_KIND_CHARS = 120         # characters of a kind name kept
+GGUF_MAX_FULL_PRECISION = 200     # full-precision kinds listed per file
+GGUF_EVIDENCE_MAX_BYTES = 3 << 20  # the whole evidence file; the operator bundle reads at most 4 MiB, so this leaves room
+GGUF_FILE_TIME_S = 8.0            # seconds one header may take to read (a real header takes about 1 s; the worst legal one about 6 s)
+GGUF_TIME_BUDGET_S = 20.0         # seconds all GGUF headers of one run may take together
+GGUF_CLOCK_EVERY = 4096           # the clock is read once per this many elements of a loop a hostile header can make long
 GGUF_MAX_VALUE_CHARS = 200        # characters of a string value kept
 GGUF_VERSIONS = (2, 3)
 GGUF_SCALARS = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}   # value type -> struct code
 GGUF_STRING, GGUF_ARRAY = 8, 9
+_now = time.monotonic             # tests replace this with a fake clock
 GGUF_TYPES = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8: "Q8_0", 9: "Q8_1", 10: "Q2_K", 11: "Q3_K", 12: "Q4_K",
               13: "Q5_K", 14: "Q6_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS", 19: "IQ1_S", 20: "IQ4_NL", 21: "IQ3_S",
               22: "IQ2_S", 23: "IQ4_XS", 24: "I8", 25: "I16", 26: "I32", 27: "I64", 28: "F64", 29: "IQ1_M", 30: "BF16", 34: "TQ1_0",
@@ -1084,10 +1094,18 @@ class GgufStream:
     A read asks the file for exactly the n bytes of the field that `_room` has just validated (inside the file and inside the cap), so no byte
     past the header and no byte past the cap is ever asked for. There is no read-ahead: a read-ahead cannot know where the header ends."""
 
-    def __init__(self, fd: int, size: int, cap: int):
-        self.fd, self.size, self.cap = fd, size, cap
+    def __init__(self, fd: int, size: int, cap: int, deadline: float | None = None):
+        self.fd, self.size, self.cap, self.deadline = fd, size, cap, deadline
         self.pos = 0
         self.elements = 0
+        self.ticks = 0
+
+    def tick(self) -> None:
+        """Called once per element of a loop that a hostile header can make long. After every GGUF_CLOCK_EVERY calls the clock is compared with
+        the deadline, so a header that is legal but slow to walk is refused as too slow (review of PR 441 after round 3)."""
+        self.ticks += 1
+        if self.deadline is not None and self.ticks % GGUF_CLOCK_EVERY == 0 and _now() > self.deadline:
+            raise GgufError("too slow: reading the header took longer than its time limit")
 
     def _room(self, n: int, what: str) -> None:
         if n < 0 or self.pos + n > self.size:
@@ -1147,6 +1165,7 @@ def _gguf_value(st: GgufStream, typ: int):
         raise GgufError("the header holds too many array elements")
     if etype == GGUF_STRING:
         for _ in range(count):
+            st.tick()
             n = st.unpack("Q", "an array")
             if n > GGUF_MAX_STRING:
                 raise GgufError("a string in an array is too long")
@@ -1160,7 +1179,26 @@ def _gguf_value(st: GgufStream, typ: int):
     return [x if not isinstance(x, float) or math.isfinite(x) else None for x in items]
 
 
-def read_gguf_header(path, *, max_header: int = GGUF_MAX_HEADER) -> dict:
+def _check_inside(fd: int, path, roots) -> None:
+    """Refuse a descriptor that does not point inside one of `roots`. The kernel is asked where the OPEN descriptor points (/proc/self/fd), so a
+    link swapped between a path check and the open cannot lead outside. Where /proc cannot say, the path is resolved instead."""
+    try:
+        target = Path(os.readlink(f"/proc/self/fd/{fd}").removesuffix(" (deleted)"))
+    except OSError:
+        try:
+            target = Path(path).resolve()
+        except (OSError, RuntimeError, ValueError):
+            raise GgufError("the file is a link whose target cannot be resolved, so it was not read") from None
+    for root in roots:
+        try:
+            target.relative_to(root)
+            return
+        except ValueError:
+            continue
+    raise GgufError("the file is a link to a place outside the snapshot and its cache's blobs directory, so it was not read")
+
+
+def read_gguf_header(path, *, max_header: int = GGUF_MAX_HEADER, deadline: float | None = None, allowed_roots=None) -> dict:
     """{"version", "kv", "tensors": [(name, dims, type name)], "header_bytes", "file_size", "alignment"} from a GGUF file's header.
 
     The file is opened once with O_NONBLOCK (a FIFO does not block) and a link is followed (a snapshot is made of links). The descriptor must be a
@@ -1181,8 +1219,10 @@ def read_gguf_header(path, *, max_header: int = GGUF_MAX_HEADER) -> dict:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise GgufError("the file is not a regular file")
+        if allowed_roots is not None:
+            _check_inside(fd, path, allowed_roots)        # before the size is taken: a refused link leaks not even the size of its target
         size = info.st_size
-        return _read_gguf(fd, size, max_header)
+        return _read_gguf(fd, size, max_header, deadline)
     except GgufError as exc:
         exc.size = exc.size if exc.size is not None else size
         raise
@@ -1192,8 +1232,8 @@ def read_gguf_header(path, *, max_header: int = GGUF_MAX_HEADER) -> dict:
         os.close(fd)
 
 
-def _read_gguf(fd: int, size: int, cap: int) -> dict:
-    st = GgufStream(fd, size, cap)
+def _read_gguf(fd: int, size: int, cap: int, deadline: float | None = None) -> dict:
+    st = GgufStream(fd, size, cap, deadline)
     if st.take(4, "the GGUF marker") != b"GGUF":
         raise GgufError("the file does not start with GGUF")
     version = st.unpack("I", "the version")
@@ -1206,6 +1246,7 @@ def _read_gguf(fd: int, size: int, cap: int) -> dict:
         raise GgufError(f"the tensor count {n_tensors} is above the cap of {GGUF_MAX_TENSORS}")
     kv: dict = {}
     for _ in range(n_kv):
+        st.tick()
         key = st.string(GGUF_MAX_KEY, "a key", strict=True)
         if key in kv:
             raise GgufError("a key is repeated")
@@ -1215,6 +1256,7 @@ def _read_gguf(fd: int, size: int, cap: int) -> dict:
         raise GgufError("the alignment must be a power of two")
     tensors, seen, offsets = [], set(), []
     for _ in range(n_tensors):
+        st.tick()
         name = st.string(GGUF_MAX_KEY, "a tensor name", strict=True)
         if name in seen:
             raise GgufError("a tensor name is repeated")
@@ -1399,7 +1441,7 @@ def _vocabulary_head(config):
 
 
 def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config, template_text, mtp_tensors=None,
-                   inventory_complete: bool = True, headless: bool = False) -> list[dict]:
+                   inventory_complete: bool = True, headless: bool = False, template_reason: str | None = None) -> list[dict]:
     """The agreement table of one GGUF file against config.json (and the repository's chat template). A row is listed when either side has
     a value. A difference is a finding to read and never a gate failure."""
     rows = []
@@ -1487,7 +1529,10 @@ def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config
     elif gguf_sha is None and repo_sha is not None:
         row["note"] = "the GGUF has no embedded chat template"
     elif repo_sha is None and gguf_sha is not None:
-        row["note"] = "the repository has no chat_template.jinja or tokenizer_config.json chat_template to compare"
+        row["note"] = {
+            "unreadable": "the repository's chat_template.jinja exists but cannot be read (too large, or not text), so its template is unknown",
+            "list-form": "the repository's tokenizer_config.json holds a list of named chat templates, which this row does not compare",
+        }.get(template_reason, "the repository has no chat_template.jinja or tokenizer_config.json chat_template to compare")
     if gguf_sha is not None or repo_sha is not None:
         rows.append(row)
     return rows
@@ -1502,12 +1547,14 @@ def _fold_kind(name: str) -> str:
     return re.sub(r"\.\d+\.", ".N.", name)
 
 
-def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> dict:
+def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None, *, deadline: float | None = None, allowed_roots=None,
+                       template_reason: str | None = None) -> dict:
     """The evidence for one GGUF file: a summary of its header and its agreement with config.json, or {"status": "unreadable", "reason"}.
-    Never raises for a bad file."""
+    Never raises for a bad file. `deadline` (a clock reading) bounds the time spent reading the header, and `allowed_roots` limits where a link
+    may lead (see `read_gguf_header`). `template_reason` says why the repository's chat template is None (absent, list-form, unreadable)."""
     path = Path(path)
     try:
-        h = read_gguf_header(path)
+        h = read_gguf_header(path, deadline=deadline, allowed_roots=allowed_roots)
     except GgufError as exc:
         return {"file": path.name, "size": exc.size, "status": "unreadable", "reason": exc.reason}
     kv = h["kv"]
@@ -1522,12 +1569,25 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> d
                     cut = True
                     break
                 hyper[key] = _brief(v)
-    by_type, by_kind = collections.Counter(), collections.defaultdict(collections.Counter)
+    by_type, by_kind, other, stopped = collections.Counter(), {}, collections.Counter(), False
     for name, _dims, type_name in h["tensors"]:
         by_type[type_name] += 1
-        by_kind[_fold_kind(name)][type_name] += 1
-    full = [{"kind": kind, "type": t, "count": n} for kind, c in sorted(by_kind.items()) for t, n in sorted(c.items())
-            if t in GGUF_FULL_PRECISION]
+        kind = _fold_kind(name)[:GGUF_MAX_KIND_CHARS]
+        counts = by_kind.get(kind)
+        if counts is None:
+            if len(by_kind) >= GGUF_MAX_KINDS_TRACKED:      # memory and the evidence stay bounded whatever the names are
+                stopped = True
+                other[type_name] += 1
+                continue
+            counts = by_kind[kind] = collections.Counter()
+        counts[type_name] += 1
+    ranked = sorted(by_kind.items(), key=lambda kc: (-sum(kc[1].values()), kc[0]))
+    shown, rest = ranked[:GGUF_MAX_BY_KIND], ranked[GGUF_MAX_BY_KIND:]
+    for _kind, counts in rest:
+        other.update(counts)
+    full_all = [{"kind": kind, "type": t, "count": n} for kind, c in sorted(by_kind.items()) for t, n in sorted(c.items())
+                if t in GGUF_FULL_PRECISION]
+    full = full_all[:GGUF_MAX_FULL_PRECISION]
     names = {t[0] for t in h["tensors"]}
     complete = tensor_inventory_complete(kv, len(h["tensors"]))
     # A tensor that is present shows the model is untied even in one shard of a split file. A tensor that is missing shows tying only when
@@ -1549,15 +1609,21 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> d
         "tokenizer": {"model": text("tokenizer.ggml.model"), "pre": text("tokenizer.ggml.pre"), "tokens": tokens, "merges": merges,
                       "chat_template_sha256": sha256_text(template) if template else None,
                       "chat_template_chars": len(template) if template else None},
-        "quantization": {"by_type": dict(sorted(by_type.items())), "by_kind": {k: dict(sorted(c.items())) for k, c in sorted(by_kind.items())},
+        "quantization": {"by_type": dict(sorted(by_type.items())),
+                         "by_kind": {k: dict(sorted(c.items())) for k, c in sorted(shown)},
+                         "by_kind_other": dict(sorted(other.items())),
+                         "by_kind_cut": {"kinds_seen": len(by_kind), "kinds_shown": len(shown), "kinds_in_other": len(rest),
+                                         "tensors_in_other": sum(other.values()), "tracking_stopped": stopped},
                          "full_precision": full,
                          "note": ("Kinds of tensor the tool that quantized this file left at full precision, with the layer number folded "
                                   "into N. A hint about which tensors are sensitive to precision, from llama.cpp's choice for this file. "
                                   "It was not measured on Tenstorrent hardware.")},
         "tied_embeddings": tied, "tensor_inventory_complete": complete, "nextn_predict_layers": nextn,
     }
+    if len(full_all) > len(full):
+        entry["quantization"]["full_precision_cut"] = {"kinds": len(full_all), "shown": len(full)}
     rows = gguf_agreement(role, arch, kv, tied, tokens, template_sha, config, template_text, mtp_tensors, inventory_complete=complete,
-                          headless=headless and role == "language model")
+                          headless=headless and role == "language model", template_reason=template_reason)
     entry["agreement"] = rows
     entry["agreement_summary"] = {v: sum(1 for r in rows if r["verdict"] == v) for v in ("agree", "differ", "not comparable")}
     return entry
@@ -1567,9 +1633,78 @@ def _plain_file_name(name) -> bool:
     return isinstance(name, str) and bool(name) and name not in (".", "..") and "/" not in name and "\0" not in name
 
 
-def gguf_evidence(model_dir: Path, ignored_files, config, template_text, mtp_tensors=None) -> dict | None:
+def _link_roots(model_dir) -> tuple:
+    """Where a link in the snapshot may lead: the snapshot directory itself and, in a Hugging Face cache (`.../snapshots/<revision>`), the cache's
+    own `blobs` directory next to `snapshots`."""
+    try:
+        snap = Path(model_dir).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return (Path(model_dir),)
+    roots = [snap]
+    if snap.parent.name == "snapshots":
+        roots.append((snap.parent.parent / "blobs").resolve())
+    return tuple(roots)
+
+
+def _fit_evidence(out: dict) -> dict:
+    """Make the evidence file smaller than GGUF_EVIDENCE_MAX_BYTES, which is below what the operator bundle reads, so a hostile repository
+    cannot make a file the bundle drops whole (review of PR 441 after round 3). Detail goes in a fixed order, the largest file first within each
+    step, and every drop is listed in `detail_dropped`: the by-kind histogram, the full-precision list (to 20), the hyperparameters (to 32), the
+    agreement notes; then each file is reduced to its summary; then the file list is cut from the end. The agreement rows (the verdicts) go
+    last."""
+    cap = GGUF_EVIDENCE_MAX_BYTES
+    size = lambda: len(json_bytes(out))
+    if size() <= cap:
+        return out
+    dropped = out.setdefault("detail_dropped", [])
+    ok = lambda: sorted((f for f in out["files"] if f.get("status") == "ok"), key=lambda f: -len(json_bytes(f)))
+
+    def by_kind(f):
+        f["quantization"].pop("by_kind", None)
+        f["quantization"].pop("by_kind_other", None)
+
+    def full_precision(f):
+        full = f["quantization"].get("full_precision") or []
+        f["quantization"]["full_precision"] = full[:20]
+        f["quantization"]["full_precision_cut"] = {"kinds": len(full), "shown": min(len(full), 20)}
+
+    def hyperparameters(f):
+        keep = dict(list((f.get("hyperparameters") or {}).items())[:32])
+        f["hyperparameters"], f["hyperparameters_cut"] = keep, True
+
+    def notes(f):
+        for r in f.get("agreement") or []:
+            r.pop("note", None)
+
+    for what, step in (("by_kind", by_kind), ("full_precision", full_precision), ("hyperparameters", hyperparameters), ("agreement_notes", notes)):
+        for f in ok():
+            if size() <= cap:
+                return out
+            step(f)
+            dropped.append({"file": f.get("file"), "what": what})
+    keep = ("file", "size", "status", "role", "architecture", "tensor_count", "agreement_summary", "reason")
+    for f in ok():
+        if size() <= cap:
+            return out
+        small = {k: f[k] for k in keep if k in f}
+        small["detail"] = "reduced to its summary because the evidence file reached its size cap"
+        f.clear()
+        f.update(small)
+        dropped.append({"file": small.get("file"), "what": "file_detail"})
+    if size() > cap:
+        out.pop("note", None)
+        dropped.append({"what": "note"})
+    while size() > cap and out["files"]:
+        out["files"].pop()
+        out["files_cut"] = out.get("files_cut", 0) + 1
+    return out
+
+
+def gguf_evidence(model_dir: Path, ignored_files, config, template_text, mtp_tensors=None, *, template_reason: str | None = None) -> dict | None:
     """evidence/gguf-header.json: one entry per ignored GGUF file (at most GGUF_MAX_FILES), or None when there is none. A listed name that is
-    not a plain file name is recorded as unreadable and never opened."""
+    not a plain file name is recorded as unreadable and never opened. The headers of one run share a time budget (GGUF_TIME_BUDGET_S) and each
+    has its own (GGUF_FILE_TIME_S); a link is followed only inside the snapshot or its cache's blobs directory; and the whole file is kept under
+    GGUF_EVIDENCE_MAX_BYTES (`_fit_evidence`)."""
     if not isinstance(ignored_files, list):
         return None
     wanted = []
@@ -1580,14 +1715,21 @@ def gguf_evidence(model_dir: Path, ignored_files, config, template_text, mtp_ten
         wanted.append(name)
     if not wanted:
         return None
-    files = []
+    files, roots = [], _link_roots(model_dir)
+    run_deadline = _now() + GGUF_TIME_BUDGET_S
     for name in wanted[:GGUF_MAX_FILES]:
         if not _plain_file_name(name):
             shown = name.replace("\0", " ")[:100] if isinstance(name, str) else ""
             files.append({"file": shown, "size": None, "status": "unreadable", "reason": "the listed name is not a plain file name"})
             continue
-        files.append(gguf_file_evidence(Path(model_dir) / name, config, template_text, mtp_tensors))
-    return {"schema": 1, "note": GGUF_NOTE, "files": files, "files_cut": max(len(wanted) - GGUF_MAX_FILES, 0)}
+        now = _now()
+        if now >= run_deadline:
+            files.append({"file": name, "size": None, "status": "unreadable",
+                          "reason": "the time budget for reading GGUF headers in this run was spent before this file"})
+            continue
+        files.append(gguf_file_evidence(Path(model_dir) / name, config, template_text, mtp_tensors,
+                                        deadline=min(now + GGUF_FILE_TIME_S, run_deadline), allowed_roots=roots, template_reason=template_reason))
+    return _fit_evidence({"schema": 1, "note": GGUF_NOTE, "files": files, "files_cut": max(len(wanted) - GGUF_MAX_FILES, 0)})
 
 
 def c_config(model_dir: Path):
@@ -1620,24 +1762,35 @@ def read_small_text(path, cap: int = REPORT_MAX_BYTES):
         os.close(fd)
 
 
-def repo_chat_template(model_dir: Path):
-    """The repository's effective chat template: chat_template.jinja whenever that file exists, else the `chat_template` string of
-    tokenizer_config.json. transformers 5.19.0 reads the file when it exists and assigns its text even when the text is empty ("If independent
-    chat template file(s) exist, they take priority over template entries in the tokenizer config"), so an empty file gives "" and does not fall
-    back (review of PR 441, round 3). A file that exists but cannot be read (too large, bad bytes) gives None: the template is unknown, and the
-    inline one is not assumed. None as well when neither source is there."""
+def repo_chat_template_state(model_dir: Path):
+    """(text, reason): the repository's effective chat template and why it is None when it is. chat_template.jinja whenever that file exists, else
+    the `chat_template` string of tokenizer_config.json. transformers 5.19.0 reads the file when it exists and assigns its text even when the
+    text is empty ("If independent chat template file(s) exist, they take priority over template entries in the tokenizer config"), so an empty
+    file gives ("", None) and does not fall back (review of PR 441, round 3). The reason is None when there is a text, "unreadable" when
+    chat_template.jinja exists but cannot be read (too large, bad bytes; the inline template is not assumed), "list-form" when the
+    tokenizer_config.json template is a list of named templates, and "absent" otherwise (review of PR 441 after round 3: all three were
+    described as "absent")."""
     jinja = Path(model_dir) / "chat_template.jinja"
     if jinja.is_file():                                   # a link is followed (a snapshot is made of links); the same test as `template_variants`
         text = read_small_text(jinja)
         if text:
-            return text
+            return text, None
         try:
-            return "" if jinja.stat().st_size == 0 else None
+            return ("", None) if jinja.stat().st_size == 0 else (None, "unreadable")
         except OSError:
-            return None
+            return None, "unreadable"
     cfg, _ = read_json(Path(model_dir) / "tokenizer_config.json")
     t = cfg.get("chat_template") if isinstance(cfg, dict) else None
-    return t if isinstance(t, str) and 0 < len(t) <= REPORT_MAX_BYTES else None
+    if isinstance(t, str) and 0 < len(t) <= REPORT_MAX_BYTES:
+        return t, None
+    if isinstance(t, str) and t:
+        return None, "unreadable"                         # an inline template over the cap
+    return (None, "list-form") if isinstance(t, list) and t else (None, "absent")
+
+
+def repo_chat_template(model_dir: Path):
+    """The text of `repo_chat_template_state`, or None."""
+    return repo_chat_template_state(model_dir)[0]
 
 
 def gguf_finding(g: dict) -> str:
@@ -4104,7 +4257,9 @@ def main() -> int:
     write_json("sidecar-compare.json", sc)
     code = code_files(model_dir)
     say(f"wrote evidence/sidecar-compare.json ({len(sc['sidecars'])} sidecars, {len(sc['ignored_files'])} ignored files, {len(code)} code files)")
-    gh = gguf_evidence(model_dir, sc["ignored_files"], c_config(model_dir), repo_chat_template(model_dir), t["mtp_tensors"]["model"])
+    template_text, template_reason = repo_chat_template_state(model_dir)
+    gh = gguf_evidence(model_dir, sc["ignored_files"], c_config(model_dir), template_text, t["mtp_tensors"]["model"],
+                       template_reason=template_reason)
     stale = EVIDENCE / "gguf-header.json"
     if gh is None:
         # The operator bundle reads this file on its own, so a file left by an earlier run in this directory (the GGUF files are gone, or the
