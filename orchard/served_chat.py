@@ -41,7 +41,7 @@ import os
 import re
 from pathlib import Path
 
-from orchard import safeio, served_verify
+from orchard import safeio, scrub, served_verify
 
 FILE = "served-chat.json"
 MAX_JSON_BYTES = 64 << 20            # a tokenizer.json is tens of megabytes
@@ -200,21 +200,38 @@ RECORD_TEXT_MAX = 600          # one problem detail, incomplete line or note in 
 RECORD_LIST_MAX = 50           # entries in each list of the written record
 
 
+SCRUB_WINDOW = 256              # characters read past a cut so a credential that starts before the cut is matched whole (the patterns need 30)
+
+
+def _scrubbed_prefix(text: str, limit: int) -> str:
+    """The first `limit` characters of `text` with every credential in them replaced by a label, found in the text BEFORE it is cut.
+
+    A token that starts before the cut and ends after it would leave a fragment (`hf_` and 17 payload characters at a cut of 500) that no
+    pattern matches, because the patterns need 30 payload characters (issue 297, review of PR 466). The scan covers the cut plus
+    SCRUB_WINDOW characters, so a token that starts inside the shown part is matched with at least SCRUB_WINDOW characters of its payload; the
+    work stays bounded however long the text is. A replacement is shorter than any match, so the cut text is never longer than `limit`."""
+    head = text[:limit + SCRUB_WINDOW]
+    for _what, pattern in scrub.TOKEN_PATTERNS:
+        head = pattern.sub("<token removed>", head)
+    return head[:limit]
+
+
 def _shown(value) -> str:
     """The repr of a token's text for a problem or an incomplete line, cut to SHOWN_CHARS characters. Token text comes from a tokenizer file
     (up to MAX_JSON_BYTES), and the bundle refuses a record over 8 MiB as unreadable, so one huge token must not reach a detail whole (issue 297,
-    review of PR 466). A cut text says how many characters it had."""
+    review of PR 466). A cut text says how many characters it had. Credentials are removed before the cut (`_scrubbed_prefix`)."""
     text = value if isinstance(value, str) else str(value)
     if len(text) <= SHOWN_CHARS:
-        return repr(text)
-    r = repr(text[:SHOWN_CHARS])
+        return repr(_scrubbed_prefix(text, SHOWN_CHARS))
+    r = repr(_scrubbed_prefix(text, SHOWN_CHARS))
     return f"{r[:-1]}...{r[-1]} ({len(text)} characters)"
 
 
 def _cut_text(value, limit: int):
-    """`value` itself when it is not text or fits; otherwise its first `limit` characters and the full length."""
+    """`value` itself when it is not text or fits; otherwise its first `limit` characters (credentials removed before the cut) and the full
+    length."""
     if isinstance(value, str) and len(value) > limit:
-        return f"{value[:limit]}... ({len(value)} characters)"
+        return f"{_scrubbed_prefix(value, limit)}... ({len(value)} characters)"
     return value
 
 
@@ -463,7 +480,7 @@ def check_replies(record, end_tokens=(), start_tokens=()) -> dict:
         for text in texts:
             lead = text.lstrip()
             if ROLE_HEADER.match(text) or any(lead.startswith(t) for t in specials):
-                add("role_header_start", f"the reply to {_shown(e.get('id'))} begins with a role header or a special token: {lead[:30]!r}")
+                add("role_header_start", f"the reply to {_shown(e.get('id'))} begins with a role header or a special token: {_scrubbed_prefix(lead, 30)!r}")
         for text in texts + _call_texts(e):
             for t in ends:
                 if t in text:

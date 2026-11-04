@@ -1210,7 +1210,7 @@ def txt(redact: Redactor, value, limit: int = 300) -> str:
     """A recorded string as one line for a table cell, shortened and redacted; a non-string is "not recorded"."""
     if not isinstance(value, str) or not value.strip():
         return NOT_RECORDED
-    line = one_line(value)
+    line = one_line(redact(value[:SERVED_CHAT_READ_MAX]))     # redact the WHOLE string first: a token that straddles the cut would leave a fragment no pattern matches (issue 297)
     if len(line) > limit:
         line = line[:limit] + "..."
     return reported_cell(redact, line)
@@ -1931,12 +1931,17 @@ def _served_chat_shape(rec) -> bool:
 SERVED_CHAT_TEXT_MAX = 500           # a line copied out of a served-chat record into RISKS.md: records are read up to 8 MiB
 
 
-def _clip_record_text(text) -> str:
-    """`text` on one line, cut to SERVED_CHAT_TEXT_MAX characters with its full length (the writer caps its own record, but an older record or
-    one written by another writer is believed once its sha256 matches the ledger, and its text must not make RISKS.md large)."""
-    raw = str(text)
-    s = " ".join(raw[:SERVED_CHAT_TEXT_MAX * 4].split())
-    return s if len(s) <= SERVED_CHAT_TEXT_MAX and len(raw) <= SERVED_CHAT_TEXT_MAX * 4 else f"{s[:SERVED_CHAT_TEXT_MAX]}... ({len(raw)} characters)"
+SERVED_CHAT_READ_MAX = 8 << 20       # the most characters of one record string that are looked at: a record is read up to 8 MiB
+
+
+def _record_text(text, redact, *, limit: int = SERVED_CHAT_TEXT_MAX) -> str:
+    """`text` as one line for RISKS.md: the WHOLE string redacted first, then its whitespace collapsed, then cut to `limit` characters with the
+    line's length. The order matters: cutting first leaves a fragment of a credential that straddles the cut (`hf_` and 17 payload characters at
+    a cut of 500) that no pattern matches (issue 297, review of PR 466). The writer caps its own record, but an older record or one written by
+    another writer is believed once its sha256 matches the ledger, so the text is bounded here too: only the first SERVED_CHAT_READ_MAX
+    characters are read, and a record cannot hold more."""
+    line = " ".join(redact(str(text)[:SERVED_CHAT_READ_MAX]).split())
+    return line if len(line) <= limit else f"{line[:limit]}... ({len(line)} characters)"
 
 
 def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | None:
@@ -1966,7 +1971,7 @@ def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | 
     ok, why, problems = True, [], []
     for rel in sorted(failed):
         ok = False
-        why.append(f"The supervisor failed to write `{rel}` ({redact(_clip_record_text(failed[rel]))}).")
+        why.append(f"The supervisor failed to write `{rel}` ({_record_text(failed[rel], redact)}).")
     for rel in sorted(required):
         if rel in failed:
             continue
@@ -1985,16 +1990,16 @@ def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | 
             why.append(f"`{rel}` does not match the sha256 the ledger recorded for it" if rel in latest else
                        f"`{rel}` has no ledger entry, so it cannot be tied to the supervisor's check.")
             continue
-        names = sorted({_clip_record_text(p.get("name")) for p in rec["problems"] if isinstance(p, dict)})
+        names = sorted({_record_text(p.get("name"), redact) for p in rec["problems"] if isinstance(p, dict)})
         if names:
             ok = False
-            problems.append(f"`{rel}` found: " + ", ".join(redact(n) for n in names) + ".")
+            problems.append(f"`{rel}` found: " + ", ".join(names) + ".")
         if rec["incomplete"]:
             ok = False
-            why.append(f"`{rel}` is incomplete: " + redact(_clip_record_text("; ".join(_clip_record_text(i) for i in rec["incomplete"][:3]))) + ".")
+            why.append(f"`{rel}` is incomplete: " + _record_text("; ".join(_record_text(i, redact, limit=SERVED_CHAT_READ_MAX) for i in rec["incomplete"][:3]), redact) + ".")
         if rec["replies"].get("checked") is not True:
             ok = False
-            why.append(f"`{rel}` checked no chat reply" + (f" ({redact(_clip_record_text(rec['replies'].get('why_not')))})"
+            why.append(f"`{rel}` checked no chat reply" + (f" ({_record_text(rec['replies'].get('why_not'), redact)})"
                                                            if rec["replies"].get("why_not") else "") + ".")
         if rec.get("ok") is not True and not names and not rec["incomplete"] and rec["replies"].get("checked") is True:
             ok = False
