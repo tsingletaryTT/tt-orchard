@@ -1216,17 +1216,52 @@ def _read_gguf(fd: int, size: int, cap: int) -> dict:
     return {"version": version, "kv": kv, "tensors": tensors, "header_bytes": header_bytes, "file_size": size, "alignment": alignment}
 
 
-def _brief(v):
-    """A value from an outside file, small enough to put in evidence."""
-    if isinstance(v, str):
-        return v[:GGUF_MAX_VALUE_CHARS].replace("\0", " ")
-    if isinstance(v, (list, dict)):
-        return v if len(json.dumps(v)) <= 4000 else f"<{type(v).__name__} of {len(v)} items>"
+INT_LIMIT = 1 << 64                     # the widest integer a GGUF key holds; a wider one in config.json is not a count, a size or an index
+FINITE_MAX_DEPTH = 24                  # nesting a value from an outside file may have before it is replaced by a short text
+
+
+def _finite(v, _depth: int = 0):
+    """`v` made safe to write as strict JSON (review of PR 441, round 2). Every non-finite float, at any depth, becomes None (`1e400` in a config
+    is read as infinity, and `json.dumps` would write `Infinity`, which the operator bundle's reader refuses, losing the whole file). An integer
+    wider than 64 bits becomes a short text (Python cannot write an integer of thousands of digits as text at all). Nesting deeper than
+    FINITE_MAX_DEPTH becomes a short text, so a hostile config cannot make this walk or the writer recurse without a bound."""
+    if v is None or isinstance(v, (bool, str)):
+        return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, int):
+        return v if -INT_LIMIT < v < INT_LIMIT else f"<integer of {v.bit_length()} bits>"
+    if isinstance(v, (list, tuple, dict)):
+        if _depth >= FINITE_MAX_DEPTH:
+            return f"<{type(v).__name__} nested deeper than {FINITE_MAX_DEPTH}>"
+        if isinstance(v, dict):
+            return {str(k): _finite(x, _depth + 1) for k, x in v.items()}
+        return [_finite(x, _depth + 1) for x in v]
     return v
 
 
+def _brief(v):
+    """A value from an outside file, small enough to put in evidence, and valid in strict JSON (non-finite floats and integers wider than 64 bits
+    are replaced, see `_finite`)."""
+    if isinstance(v, str):
+        return v[:GGUF_MAX_VALUE_CHARS].replace("\0", " ")
+    if isinstance(v, (list, dict)):
+        v = _finite(v)
+        return v if len(json.dumps(v, allow_nan=False)) <= 4000 else f"<{type(v).__name__} of {len(v)} items>"
+    return _finite(v)
+
+
 def _whole(v):
-    return v if isinstance(v, int) and not isinstance(v, bool) else None
+    """`v` when it is a whole number a header or a config could hold (at most 64 bits wide), else None: a wider integer is not comparable."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and -INT_LIMIT < v < INT_LIMIT else None
+
+
+def _list_element_ok(x) -> bool:
+    if isinstance(x, bool):
+        return True
+    if isinstance(x, int):
+        return _whole(x) is not None
+    return isinstance(x, float) and math.isfinite(x)
 
 
 def _number(v):
@@ -1296,7 +1331,7 @@ def _agreement_row(item, gguf, config, kind, note=None):
         if kind == "bool":
             return v if isinstance(v, bool) else None
         if kind == "list":
-            return v if isinstance(v, list) and all(isinstance(x, (int, float, bool)) for x in v) else None
+            return v if isinstance(v, list) and all(_list_element_ok(x) for x in v) else None
         if kind == "strings":
             return v if isinstance(v, list) and all(isinstance(x, str) for x in v) else None
         return v
@@ -1362,8 +1397,13 @@ def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config
         factor, note = 1.0, "partial_rotary_factor is absent from the config and is taken as 1.0"
     rot = None
     if _whole(head_dim) is not None and _number(factor) is not None:
-        product = head_dim * factor
-        rot = int(round(product)) if abs(product - round(product)) < 1e-6 else None
+        try:
+            product = head_dim * factor
+        except OverflowError:                      # cannot happen for a head dimension of at most 64 bits; kept so an arithmetic fault never stops stage 0
+            product = None
+        # A product of 2**53 or more is no longer exact in a float, and an infinite one cannot be rounded (review of PR 441, round 2): not comparable.
+        if product is not None and math.isfinite(product) and abs(product) < 2 ** 53:
+            rot = int(round(product)) if abs(product - round(product)) < 1e-6 else None
     add("rope dimension", g("rope.dimension_count"), rot, "int", note if rot is not None else None)
     sections, conf_sections = g("rope.dimension_sections"), _rope_value(config, "mrope_section")
     if isinstance(sections, list) and isinstance(conf_sections, list):
@@ -4003,8 +4043,18 @@ def main() -> int:
     code = code_files(model_dir)
     say(f"wrote evidence/sidecar-compare.json ({len(sc['sidecars'])} sidecars, {len(sc['ignored_files'])} ignored files, {len(code)} code files)")
     gh = gguf_evidence(model_dir, sc["ignored_files"], c_config(model_dir), repo_chat_template(model_dir), t["mtp_tensors"]["model"])
-    if gh is not None:
-        write_json("gguf-header.json", gh)
+    stale = EVIDENCE / "gguf-header.json"
+    if gh is None:
+        # The operator bundle reads this file on its own, so a file left by an earlier run in this directory (the GGUF files are gone, or the
+        # snapshot changed) would be read as describing this repository (review of PR 441, round 2). A directory planted there is named and left.
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            say(f"could not remove the earlier evidence/gguf-header.json ({type(exc).__name__}); this run has no GGUF evidence")
+    else:
+        write_json("gguf-header.json", _finite(gh))
         ok = [f for f in gh["files"] if f["status"] == "ok"]
         say(f"wrote evidence/gguf-header.json ({len(ok)} of {len(gh['files'])} GGUF headers read; "
             f"{sum(f['agreement_summary']['differ'] for f in ok)} rows differ from config.json)")

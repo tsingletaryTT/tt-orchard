@@ -677,6 +677,21 @@ def test_the_repository_template_is_the_jinja_file_else_the_tokenizer_config_str
 
 CHILD = r"""
 import importlib.util, json, resource, sys
+
+
+def own_peak_kb():
+    # The high-water mark of THIS process's memory since it started (VmHWM). `ru_maxrss` is not used: on Linux it also carries the memory the
+    # parent had when it started this child, so it measured the pytest worker (856,160 KB in one parallel run), not the reader.
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
 spec = importlib.util.spec_from_file_location("t", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
@@ -688,7 +703,7 @@ for p in sys.argv[2:]:
         out[p] = "read:%d" % len(h["tensors"])
     except m.GgufError as e:
         out[p] = "refused: " + str(e)
-print(json.dumps({"results": out, "peak_kb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
+print(json.dumps({"results": out, "peak_kb": own_peak_kb()}))
 """
 
 
@@ -698,6 +713,23 @@ def child_run(paths):
     r = subprocess.run([sys.executable, "-c", CHILD, str(TEMPLATE), *map(str, paths)], capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, r.stderr[-2000:]
     return json.loads(r.stdout)
+
+
+def test_the_childs_reported_peak_is_its_own_and_not_the_parents(tmp_path):
+    """Round 3 of PR 441: the peak-size test failed once in a parallel run at 856,160 KB although the reader holds a few megabytes. On Linux a
+    child's `ru_maxrss` carries the memory its parent had when it started the child, so the figure was the size of the pytest worker, which grows
+    with every test the worker has run. The child now reports its own high-water mark (`VmHWM`); this test holds 400 MiB in the parent and
+    requires the child's figure to stay far below it."""
+    ballast = bytearray(400 << 20)
+    for i in range(0, len(ballast), 4096):                    # touch every page, so the parent really holds 400 MiB
+        ballast[i] = 1
+    try:
+        out = child_run([write(tmp_path, gguf(hybrid_kvs(), hybrid_tensors()))])
+    finally:
+        del ballast
+    if out["peak_kb"] is None:
+        pytest.skip("no /proc/self/status on this system: the child's own peak cannot be read")
+    assert 0 < out["peak_kb"] < 200_000, out["peak_kb"]
 
 
 def big_strings_header(path: Path, count: int, each: int) -> None:
@@ -735,7 +767,11 @@ def test_hostile_headers_are_refused_by_a_reader_limited_to_2_gib_and_it_stays_s
             assert v.startswith("refused: "), (label, v)
     assert "larger than" in by_label["a header of 200 MiB"]
     assert "regular file" in by_label["a link to /dev/zero"] and "regular file" in by_label["a FIFO"]
-    assert out["peak_kb"] < 600_000, out["peak_kb"]                                   # well under the 2 GiB limit
+    if out["peak_kb"] is None:
+        pytest.skip("no /proc/self/status on this system: the child's own peak cannot be read")
+    # The child's own peak is about 98,500 KB (three runs: 98,516, 98,576, 98,592), mostly the interpreter and the template module. A reader that
+    # held the 200 MiB header, or the sparse 8 GiB file, would be far above this bound (and the 2 GiB limit would stop it).
+    assert out["peak_kb"] < 250_000, out["peak_kb"]
 
 
 def test_the_element_budget_stops_a_header_of_many_arrays(tmp_path, monkeypatch):

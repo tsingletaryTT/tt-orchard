@@ -1923,6 +1923,41 @@ def test_a_repository_without_gguf_files_gets_no_header_evidence_and_no_finding(
     assert not any("gguf-header" in " ".join(x["evidence"]) for x in delta(stage)["differences"])
 
 
+def test_a_rerun_without_gguf_files_removes_the_header_evidence_of_the_earlier_run(text_case):
+    """Round 3 of PR 441: stage 0 reruns in the same directory (a retry, a changed snapshot). The operator bundle reads evidence/gguf-header.json
+    on its own, so a file left from a run that did see GGUF files would be read as describing a repository that no longer has them."""
+    stage = text_case()
+    model = add_real_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    path = stage / "evidence" / "gguf-header.json"
+    assert path.is_file()
+    (model / "Model-Q4_K_M.gguf").unlink()
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not path.exists() and not path.is_symlink()
+    assert not any("gguf-header" in " ".join(x["evidence"]) for x in delta(stage)["differences"])
+    assert delta(stage)["ignored_files"] == []
+
+
+def test_a_rerun_with_a_different_gguf_replaces_the_header_evidence(text_case):
+    stage = text_case()
+    model = add_real_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    (model / "Model-Q4_K_M.gguf").unlink()
+    add_real_gguf(stage, name="Other-Q8_0.gguf")
+    assert run_triage(stage).returncode == 0
+    assert [f["file"] for f in evidence(stage, "gguf-header.json")["files"]] == ["Other-Q8_0.gguf"]
+
+
+def test_a_stale_header_evidence_that_cannot_be_removed_does_not_stop_stage_0(text_case):
+    """A directory where the file belongs (an agent can write there) is left alone and named; stage 0 goes on."""
+    stage = text_case()
+    (stage / "evidence" / "gguf-header.json").mkdir(parents=True)
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (stage / "evidence" / "gguf-header.json").is_dir() and "gguf-header.json" in r.stdout
+
+
 def test_the_mtp_row_carries_the_tensor_count_stage_0_found_in_the_safetensors(text_case):
     stage = text_case()
     model = add_real_gguf(stage)
