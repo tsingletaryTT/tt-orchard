@@ -439,6 +439,26 @@ def _stages_reference_ids(base: Path):
     return stages._reference_ids(base)
 
 
+def _raw_evidence_read(base: Path):
+    """The raw evidence file a gate recomputes a number from (issue 445): (document, reasons, bound)."""
+    from orchard import raw_evidence
+    return raw_evidence.read(base, base, 2, "input.json")
+
+
+def _sidecar_numbers_gate(base: Path):
+    """The sidecar parity recompute on a hostile evidence file (issue 445): (reasons, unverified), bound to a ledger hash of the file."""
+    import hashlib
+    from orchard import raw_evidence, stages
+    from orchard.ledger import Ledger
+    path = base / "input.json"
+    led = Ledger(base / "ledger.jsonl")
+    try:
+        led.append("evidence", 2, what=raw_evidence.RAW_EVIDENCE_WHAT, path="input.json", sha256=hashlib.sha256(b"x").hexdigest())
+    finally:
+        led.close()
+    return stages.sidecar_numbers_reasons_at(base, base, "input.json", {"sidecar_parity": {}})
+
+
 def _stages_read_checked(base: Path):
     from orchard import stages
     reasons: list = []
@@ -927,6 +947,8 @@ READERS: list[Reader] = [
     Reader("stages.hw_record_problem", _stages_hw_record, rel="tests/2/test-result.json"),
     Reader("stages._suite_reasons_in", _stages_suite_reasons_in),
     Reader("stages._reference_ids", _stages_reference_ids, rel="stages/1/evidence/reference/generated-ids.json"),
+    Reader("raw_evidence.read", _raw_evidence_read),
+    Reader("stages.sidecar_numbers_reasons (bound, hostile evidence file)", _sidecar_numbers_gate),
     Reader("hwtests.load_plan", _hwtests_load_plan, rel="tests/plan.json"),
     Reader("hwtests.read_plan", _hwtests_read_plan, rel="hw_tests.json"),
     Reader("port_repair.read_failure (test record)", _port_repair_marker, rel="stages/2/test-result.json"),

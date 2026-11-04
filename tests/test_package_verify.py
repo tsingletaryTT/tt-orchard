@@ -100,6 +100,8 @@ def test_the_installed_copy_serves_the_new_weights_and_agrees(boot):
     v = verify_json(boot)
     md = str(boot["verify"] / "bundle" / "model-dir")
     assert v["top1_agreement"] == 1.0 and v["coherent"] is True and v["n_tokens"] == 32
+    # The raw record the gate recomputes the count from (issue 445): one first token for each of the 32 positions.
+    assert [t["position"] for t in v["teacher_forced"]] == list(range(32))
     assert v["served_model"] == md
     assert v["server_weights_env"] == {"MODEL_WEIGHTS_DIR": md, "HF_MODEL": md}
     assert v["model_dir_weights"] == f"{NEW}@{NEW_REV}"
@@ -130,6 +132,19 @@ def test_low_agreement_is_measured_and_reported(boot):
     r = boot["check"]("every4")
     assert r.returncode == 0, r.stdout + r.stderr
     assert verify_json(boot)["top1_agreement"] == 0.75
+
+
+def test_the_real_template_output_is_what_the_gate_recomputes(boot, tmp_path):
+    """verify.json from the real template against the fake server (not a record built by a test): token_check.boot_problems finds the
+    numbers equal to what the raw records give against the reference ids the template read (issue 445)."""
+    from orchard import token_check
+    r = boot["check"]("every4")
+    assert r.returncode == 0, r.stdout + r.stderr
+    v = verify_json(boot)
+    ref = json.loads((boot["run"] / "stages/1/evidence/reference/generated-ids.json").read_text())["generated_ids"]
+    assert token_check.boot_problems(v, ref, require_records=True) == []
+    v["top1_agreement"] = 1.0
+    assert token_check.boot_problems(v, ref, require_records=True)
 
 
 def test_a_copy_whose_run_sh_lost_the_weights_directory_is_caught(boot):

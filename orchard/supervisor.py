@@ -166,6 +166,8 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             recorded_by_supervisor, run_model_kind, scoring_routed)
 from orchard import full_port, model_kind, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
+from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
+from orchard.stages import UNVERIFIED_LEDGER_DECISION
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -2737,6 +2739,7 @@ class Supervisor:
             if gate.ok and "coherent" in gate.waived:      # the gate's own read: result.json is not opened again
                 self.ledger.append("decision", spec.number, decision=REHEARSAL_WAIVED, field="coherent", by="--full-port-rehearsal",
                                    note=f"the model is a rehearsal with random weights; every other stage {spec.number} check still applied")
+        self._note_unverified(spec.number, gate)
         return gate
 
     def _scoring_gate(self, spec, stage_dir: Path, gate: GateResult) -> GateResult:
@@ -4133,7 +4136,17 @@ class Supervisor:
         os.replace(tmp, marker)         # the resume marker appears whole or not at all
         self.ledger.append("evidence", n, what=what, returncode=result["returncode"],
                            timed_out=result["timed_out"], **self._moved_aside_record(marker))
+        # The raw files the gates recompute a number from (orchard/raw_evidence.py) are hashed now, before the agent's finish step can write in
+        # the stage directory (issue 445). A file the test did not write, or that cannot be read within the cap, gets no entry.
+        for rec in raw_evidence.record_after_test(self.run_dir, stage_dir, n):
+            self.ledger.append("evidence", n, what=raw_evidence.RAW_EVIDENCE_WHAT, **rec)
         return result
+
+    def _note_unverified(self, n: int, gate) -> None:
+        """A passing gate that accepted numbers nothing recomputes (`GateResult.unverified`) leaves one ledger decision that lists them,
+        for the operator bundle's thin-evidence section (issue 445). A gate with none leaves nothing."""
+        if gate.ok and gate.unverified:
+            self.ledger.append("decision", n, decision=UNVERIFIED_LEDGER_DECISION, numbers=list(gate.unverified))
 
     def _spawn(self, n: int, command: str, chips, ids, deadline: float, out_path: Path,
                env_extra: dict | None = None, **record) -> dict:
