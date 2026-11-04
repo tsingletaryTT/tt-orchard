@@ -103,6 +103,7 @@ The other keys in swap_config.json are for serve_and_compare.py and serve_and_co
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import os
@@ -122,7 +123,23 @@ FALLBACK_COPY = "generation_config.json"      # copied from base_snapshot when n
 GRAFT_SHARD = "model-mtp-from-base.safetensors"
 
 
+class SwapFail(SystemExit):
+    """What `fail` raises in quiet mode: a SystemExit with exit status 2 that carries the message, so a caller that runs an edit in
+    memory (orchard/weights_source.py) reads it from the exception and the process's stderr is not touched."""
+
+    def __init__(self, message: str):
+        super().__init__(2)
+        self.message = message
+
+
+# True inside one caller's context (a thread, or an asyncio task) that asked for quiet failures. A ContextVar keeps the choice per
+# caller: two preflights on two threads cannot see each other's, which a redirect of the process-wide stderr could not promise.
+QUIET = contextvars.ContextVar("prepare_swap_quiet", default=False)
+
+
 def fail(message: str) -> None:
+    if QUIET.get():
+        raise SwapFail(message)
     print(f"prepare_swap: {message}", file=sys.stderr)
     sys.exit(2)
 
