@@ -813,6 +813,7 @@ def _types():
 from orchard.audio_package import AudioPackageError as _AudioPackageError  # noqa: E402
 from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
 from orchard.stack_pins import StackPinsError as _StackPinsError  # noqa: E402
+from orchard.port_facts import PortFactsError as _PortFactsError  # noqa: E402
 from orchard.profile_summary import ProfileError as _ProfileError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
@@ -850,6 +851,34 @@ def _stack_pins_config_facts(base: Path):
     """The checkpoint's config.json is `base/model/config.json`; a refused file is StackPinsError, never another exception."""
     from orchard import stack_pins
     return stack_pins.config_facts(str(base / "model"))
+
+
+def _port_facts_weights(base: Path):
+    """A checkpoint directory `base/snap` with one valid safetensors file: the hostile item is the config.json beside it."""
+    import json
+    import struct
+    snap = base / "snap"
+    snap.mkdir(parents=True, exist_ok=True)
+    header = json.dumps({"w": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}}).encode()
+    (snap / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + b"\0" * 8)
+
+
+def _port_facts_config(base: Path):
+    """A checkpoint directory `base/snap` with a valid config.json: the hostile item is the weights file beside it."""
+    import json
+    snap = base / "snap"
+    snap.mkdir(parents=True, exist_ok=True)
+    (snap / "config.json").write_text(json.dumps({"model_type": "toy", "num_hidden_layers": 1}))
+
+
+def _port_facts_build(base: Path):
+    from orchard import port_facts
+    return port_facts.build(base / "snap")
+
+
+def _port_facts_reference_source(base: Path):
+    from orchard import port_facts
+    return port_facts.reference_source(base, "toy")
 
 
 def _profile_analyze_raw_file(base: Path):
@@ -945,6 +974,11 @@ READERS: list[Reader] = [
     Reader("skillsfresh.Cache", _skillsfresh_cache),
     Reader("stack_pins.read_record", _stack_pins_read_record, rel="stack-pins.json", documented=(_SafeReadError,)),
     Reader("stack_pins.config_facts", _stack_pins_config_facts, rel="model/config.json", documented=(_StackPinsError,)),
+    Reader("port_facts.build (hostile config)", _port_facts_build, rel="snap/config.json", setup=_port_facts_weights,
+           documented=(_PortFactsError,)),
+    Reader("port_facts.build (hostile weights file)", _port_facts_build, rel="snap/model.safetensors", setup=_port_facts_config,
+           documented=(_PortFactsError,)),
+    Reader("port_facts.reference_source", _port_facts_reference_source, rel="models/toy/configuration_toy.py"),
     Reader("toolcall_bench._rows", _toolcall_bench_rows, suffix=b"\n", documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("stock_runtime._load_config", _stock_runtime_load_config),
     Reader("model_config.read_model_config", _model_config_read, documented=(_ModelConfigError,)),
