@@ -2325,7 +2325,7 @@ class Supervisor:
             bundle.mkdir(exist_ok=True)
             shutil.copyfile(self.ledger.path, bundle / "ledger.jsonl")
             self._copy_package(bundle)
-        gate = self._gate(spec)(stage_dir, self.run_dir)
+        gate = self._run_gate(spec, stage_dir)
         if spec.tests:
             # The gate reads the test records from the stage directory, where the agent can write
             # too. The ledger holds the sha256 of each record the supervisor wrote.
@@ -2931,7 +2931,23 @@ class Supervisor:
             if spec.tests:
                 return lambda: not self._read_plan(spec, stage_dir)[1]
             return lambda: not self._read_test(stage_dir)[1]
-        return lambda: self._gate(spec)(stage_dir, self.run_dir).ok
+        return lambda: self._run_gate(spec, stage_dir).ok
+
+    def _run_gate(self, spec, stage_dir: Path) -> GateResult:
+        """The stage's gate, as a result that is always returned. A gate reads files an agent can write, and an exception from it (a value
+        no one thought of: an integer too large for a float, a type nobody checked) must not escape the supervisor, so it becomes a failed
+        gate. The reason and the one ledger notice name the exception's class and never its message, because the message can carry the
+        file's own text. An interrupt (KeyboardInterrupt, SystemExit) is not an `Exception` and goes through. The gate is chosen outside the
+        try: the choice reads the ledger, and a ledger that cannot be read is a supervisor failure, not a gate refusal (issue 433, review of
+        PR 444, limit round)."""
+        gate = self._gate(spec)
+        try:
+            return gate(stage_dir, self.run_dir)
+        except Exception as exc:
+            name = type(exc).__name__
+            self._note("notice", what="a gate raised", for_stage=spec.number, error_class=name)      # `stage` is the ledger's own argument
+            return GateResult(False, (f"the gate of stage {spec.number} raised {name} while reading the stage's files, so the stage cannot "
+                                      "pass: a value in a file it reads is one the gate does not handle",), ())
 
     # ---- the hardware test ----------------------------------------------------------------------
 

@@ -43,7 +43,15 @@ CARD_MARKERS = {"keep": "kept the configuration it served", "drafter-off": "chos
 
 
 def _number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    """A finite number that a float can hold (a speed or a setting). `math.isfinite` raises OverflowError on an integer of more than about 308
+    digits, which JSON can carry, and `speed` converts the value to a float: such an integer is not a speed, so it is refused here (issue 433,
+    review of PR 444, limit round)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(v))
+    except OverflowError:
+        return False
 
 
 DECISION_MAX_BYTES = 4 << 20   # the size limit of every stage 2 decision file (sampling-decision.json, graft-decision.json) wherever it is read

@@ -48,7 +48,14 @@ def _whole(v: Any) -> bool:
 
 
 def _number(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    """A finite number: an integer of any size, or a float that is neither NaN nor infinite. A boolean is not a number here. An integer is
+    finite whatever its size, and `math.isfinite` would raise OverflowError on one that does not fit a float (JSON parses integers up to 4300
+    digits, so an agent can write one; review of PR 444, limit round), so integers never reach it."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return True
+    return isinstance(v, float) and math.isfinite(v)
 
 
 def show(value: Any) -> str:
@@ -115,14 +122,26 @@ def recompute(forced: Any, reference_ids: Any) -> tuple[dict | None, list[str]]:
 
 
 def _same_fraction(recorded: Any, expected: float) -> bool:
-    return _number(recorded) and abs(float(recorded) - expected) <= FRACTION_TOLERANCE
+    """Whether a recorded fraction is `expected` (a float from 0 to 1) to within `FRACTION_TOLERANCE`. An integer is compared as an integer:
+    it can only be 0 or 1 here, and it is never converted to a float (a 400-digit integer does not fit one)."""
+    if not _number(recorded):
+        return False
+    if isinstance(recorded, int):
+        return recorded in (0, 1) and abs(recorded - expected) <= FRACTION_TOLERANCE
+    return abs(recorded - expected) <= FRACTION_TOLERANCE
 
 
 def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, where: str = "", *, require_records: bool = True,
              required_positions: int | None = None) -> list[str]:
-    """`_problems`, with each reason cut at `MAX_REASON_CHARS` (a safety net: every value a reason shows is already bounded)."""
-    return [cut_text(r) for r in _problems(report, results, reference_ids, where, require_records=require_records,
-                                           required_positions=required_positions)]
+    """`_problems`, with each reason cut at `MAX_REASON_CHARS` (a safety net: every value a reason shows is already bounded). The report is a
+    file an agent wrote, so this never raises: an exception from the recompute (a value no one thought of) becomes one refusal that names
+    the exception's class and not its message (the message can carry the report's own text). Every gate that calls it is total because of it."""
+    try:
+        found = _problems(report, results, reference_ids, where, require_records=require_records, required_positions=required_positions)
+    except Exception as exc:
+        return [f"{where}swap-check.json: the 32-token check could not read the report ({type(exc).__name__}), so its numbers cannot be "
+                "recomputed from the server's replies"]
+    return [cut_text(r) for r in found]
 
 
 def _problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, where: str = "", *, require_records: bool = True,
