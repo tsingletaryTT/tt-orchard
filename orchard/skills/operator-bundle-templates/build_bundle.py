@@ -1928,9 +1928,20 @@ def _served_chat_shape(rec) -> bool:
             and isinstance(rec.get("replies"), dict))
 
 
+SERVED_CHAT_TEXT_MAX = 500           # a line copied out of a served-chat record into RISKS.md: records are read up to 8 MiB
+
+
+def _clip_record_text(text) -> str:
+    """`text` on one line, cut to SERVED_CHAT_TEXT_MAX characters with its full length (the writer caps its own record, but an older record or
+    one written by another writer is believed once its sha256 matches the ledger, and its text must not make RISKS.md large)."""
+    raw = str(text)
+    s = " ".join(raw[:SERVED_CHAT_TEXT_MAX * 4].split())
+    return s if len(s) <= SERVED_CHAT_TEXT_MAX and len(raw) <= SERVED_CHAT_TEXT_MAX * 4 else f"{s[:SERVED_CHAT_TEXT_MAX]}... ({len(raw)} characters)"
+
+
 def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | None:
-    """What the served-chat.json records (orchard/served_chat.py, issue 17) say, as (dealt with, why), or None when stage 2 has no record and
-    the ledger names no failed write.
+    """What the served-chat.json records (orchard/served_chat.py, issue 17) say, as (dealt with, why), or None when stage 2 has no record,
+    the ledger names no record and no failed write.
 
     A record is believed only when the bytes read once from it (size capped, no link followed, regular files only) have a sha256 equal to the
     latest `served chat check` evidence entry the supervisor wrote for that path; the same bytes are parsed. The hazard is dealt with only when
@@ -1946,15 +1957,16 @@ def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | 
             failed.pop(d["path"], None)
         elif e.get("event") == "decision" and d.get("decision") == "served chat check not written":
             failed[d.get("path") if isinstance(d.get("path"), str) else SERVED_CHAT] = d.get("reason")
-    # A record that was written and then deleted still counts: the ledger names it, so the check below reports it as missing (issue 297).
-    if not (run.dir / SERVED_CHAT).exists() and not failed and SERVED_CHAT not in latest:
+    # A record that was written and then deleted still counts: the ledger names it, so the check below reports it as missing (issue 297). That
+    # holds for every path the ledger names (stage 4 and the trials too), not only stage 2's: stage 2's record is then required as well.
+    if not (run.dir / SERVED_CHAT).exists() and not failed and not latest:
         return None
     required = {SERVED_CHAT, *latest}
     required |= {f"stages/4/configs/{c.get('chips')}/served-chat.json" for c in run.configs() if c.get("pass") is True}
     ok, why, problems = True, [], []
     for rel in sorted(failed):
         ok = False
-        why.append(f"The supervisor failed to write `{rel}` ({redact(one_line(str(failed[rel])))}).")
+        why.append(f"The supervisor failed to write `{rel}` ({redact(_clip_record_text(failed[rel]))}).")
     for rel in sorted(required):
         if rel in failed:
             continue
@@ -1973,16 +1985,16 @@ def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | 
             why.append(f"`{rel}` does not match the sha256 the ledger recorded for it" if rel in latest else
                        f"`{rel}` has no ledger entry, so it cannot be tied to the supervisor's check.")
             continue
-        names = sorted({str(p.get("name")) for p in rec["problems"] if isinstance(p, dict)})
+        names = sorted({_clip_record_text(p.get("name")) for p in rec["problems"] if isinstance(p, dict)})
         if names:
             ok = False
             problems.append(f"`{rel}` found: " + ", ".join(redact(n) for n in names) + ".")
         if rec["incomplete"]:
             ok = False
-            why.append(f"`{rel}` is incomplete: " + redact(one_line("; ".join(str(i) for i in rec["incomplete"][:3]))) + ".")
+            why.append(f"`{rel}` is incomplete: " + redact(_clip_record_text("; ".join(_clip_record_text(i) for i in rec["incomplete"][:3]))) + ".")
         if rec["replies"].get("checked") is not True:
             ok = False
-            why.append(f"`{rel}` checked no chat reply" + (f" ({redact(one_line(str(rec['replies'].get('why_not'))))})"
+            why.append(f"`{rel}` checked no chat reply" + (f" ({redact(_clip_record_text(rec['replies'].get('why_not')))})"
                                                            if rec["replies"].get("why_not") else "") + ".")
         if rec.get("ok") is not True and not names and not rec["incomplete"] and rec["replies"].get("checked") is True:
             ok = False

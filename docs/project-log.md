@@ -4128,3 +4128,9 @@ Prompt: work issue 297 (follow-ups from the reviews of PRs 292, 294 and 295) to 
 - Tests, written first (each failed on the unfixed code): `tests/test_served_chat_issue297.py`, one test in `tests/test_prompt_suite_http_errors.py`, six in `tests/test_floor_report.py`. The `suite()` helper and two supervisor tests now write the new fields.
 - Mutations: 18 guards removed one at a time, each turned a test red. The runner refuses to start on a dirty tree and restores each file in a `finally`.
 - Targeted run only; the coordinator runs the full suite on the pushed head.
+
+## 2026-11-04 PR 466, Copilot round 1 (issue 297 follow-ups)
+- Finding 1 (confirmed): token text from a tokenizer file (read up to 64 MiB) went into check details and into `served-chat.json` whole. A 9 MiB token made the record larger than the bundle's 8 MiB read cap, so the bundle called it unreadable and hid every mismatch. Displays now cut text at 80 characters and say the full length (`_shown`). The written record is bounded (`bounded_record`: 50 entries per list, 600 characters per detail, 200 per token). The checks themselves still compare the full text.
+- Finding 2 (confirmed): `served_chat_verdict` returned None when stage 2 had no record, even when the ledger named a stage 4 or trial record, so a deleted stage 4 record was not reported. The condition is now "the ledger names no record at all". A record read from disk is also cut to 500 characters per copied line when it goes into RISKS.md (`_clip_record_text`).
+- Tests, written first: `tests/test_served_chat_review1.py` (13 failed on the old code). Mutations: 13 guards removed one at a time, each turned a test red. A planned cap on the number of problems read in the bundle had no effect on the output (a later cap already limits the block), so it was not added.
+- Targeted run only; the coordinator runs the full suite on the pushed head.
