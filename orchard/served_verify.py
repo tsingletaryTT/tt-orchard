@@ -362,6 +362,12 @@ def _whole(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _count(value) -> bool:
+    """A usable declared count or length: a whole number above zero (a boolean, a float, text, zero and a negative number are not one, and a
+    comparison with them is left unset and not recorded as False; review of PR 443, round 3)."""
+    return _whole(value) and value > 0
+
+
 def _announcements(log_text: str) -> list[tuple[int, int, bool]]:
     """(position, layer count, intent) of every line that states a layer count, in log order. `intent` is true for `Loading N ... layers`
     (the present continuous that a tt-metal model prints before its layer loop), false for the past-tense and `layers loaded: N` forms that
@@ -447,7 +453,7 @@ def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=
     at, capacity = None, None
     if tokens:
         at, capacity = tokens[-1]
-    elif blocks and _whole(block_size) and block_size > 0:
+    elif blocks and _count(block_size):
         at, capacity = blocks[-1][0], blocks[-1][1] * block_size
     if at is None:
         conc = [(per_request, factor) for _, per_request, factor in all_conc[-1:]]
@@ -468,13 +474,13 @@ def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=
             parts.append(f"the plugin set the block count to {overrides[-1]}, so this figure is the size it asked for and not a measured allocation")
     if conc:
         parts.append(f"concurrency {conc[-1][1]:g}x at {conc[-1][0]} tokens per request")
-    if max_num_seqs is not None:
+    if _count(max_num_seqs):
         parts.append(f"the can's max_num_seqs is {max_num_seqs}")
     # A sequence takes whole blocks, so with a usable block size a request of `max_model_len` tokens needs ceil(max_model_len / block) of them and the
     # cache holds floor(capacity / block) of them; without one, the unrounded division stays (issue 370, review of PR 443).
-    block = block_size if _whole(block_size) and block_size > 0 else None
+    block = block_size if _count(block_size) else None
     sequences = blocks_per_sequence = None
-    if capacity is not None and _whole(max_model_len) and max_model_len > 0:
+    if capacity is not None and _count(max_model_len):
         if block is not None:
             blocks_per_sequence = -(-max_model_len // block)
             sequences = (capacity // block) // blocks_per_sequence
@@ -482,7 +488,7 @@ def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=
                 parts.append(f"a sequence of {max_model_len} tokens takes {blocks_per_sequence} whole blocks of {block} tokens")
         else:
             sequences = capacity // max_model_len
-    fewer = sequences < max_num_seqs if sequences is not None and _whole(max_num_seqs) else None
+    fewer = sequences < max_num_seqs if sequences is not None and _count(max_num_seqs) else None
     if fewer:
         parts.append(f"only {sequences} full-length sequence{'' if sequences == 1 else 's'} {'fits' if sequences == 1 else 'fit'}, so requests that all approach "
                      f"max_model_len wait or are preempted")

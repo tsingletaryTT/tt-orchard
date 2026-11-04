@@ -316,3 +316,26 @@ def test_announcements_in_the_two_line_forms_are_read_in_log_order_not_pattern_o
     log = "layers loaded: 32\n" + _loading(64) + _bar(64, 64)
     r = run(log)["layers_loaded"]
     assert r["state"] == "pass" and r["layers"] == 64 and r["layer_counts_seen"] == [32, 64]
+
+
+# ---- a nonpositive or non-whole max_num_seqs on its own (review of PR 443, round 3) ---------------------------------------------------
+
+@pytest.mark.parametrize("bad", [0, -1, -4, True, False, "4", 4.0, [4], {}])
+def test_an_unusable_max_num_seqs_alone_leaves_the_comparison_unset(bad):
+    """The declared length is fine here, so the sequences that fit are known (1); only the count is unusable. The old code compared `1 < 0` and
+    recorded `False`, which says 'the cache holds every declared sequence' for a count that means nothing."""
+    r = run(REAL_TT_V1, max_num_seqs=bad)["kv_cache"]
+    assert r["state"] == "pass" and r["full_length_sequences"] == 1
+    assert r["fewer_than_max_num_seqs"] is None
+    assert "only" not in r["detail"]
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "4", 4.0, None])
+def test_an_unusable_max_num_seqs_is_not_printed_as_if_it_were_a_declared_count(bad):
+    r = run(REAL_TT_V1, max_num_seqs=bad)["kv_cache"]
+    assert "max_num_seqs is" not in r["detail"]
+
+
+def test_a_usable_max_num_seqs_of_one_still_compares():
+    r = run(REAL_TT_V1, max_num_seqs=1)["kv_cache"]
+    assert r["full_length_sequences"] == 1 and r["fewer_than_max_num_seqs"] is False
