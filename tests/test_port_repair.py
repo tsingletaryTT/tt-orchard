@@ -303,6 +303,30 @@ def test_safe_failure_text_hides_a_home_path_and_a_token():
     assert "/home/x" not in text and "hf_abcdefgh" not in text
 
 
+# ---- the sanitizer is linear (review of PR 432, round 4) -------------------------------------------------------------------------
+
+LONG_LINES = {"letters": "a" * 300_000, "dotted": "a." * 150_000, "sk": "sk-" + "a" * 300_000, "bearer": "Bearer " + "a" * 300_000,
+              "scheme": "https://" + "a" * 300_000}
+
+
+@pytest.mark.parametrize("name", sorted(LONG_LINES))       # names, not the lines: pytest puts the test id in the child's environment
+def test_safe_text_finishes_on_one_very_long_line(name):
+    shape = LONG_LINES[name]
+    """A failing port's stdout is not cut before it reaches `safe_text`. The URL pattern tried every start of a long run of scheme
+    characters and scanned to the end of the run each time, so 300,000 characters took about a minute. Run in a child with a timeout so a
+    regression fails this test and does not hang the suite."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = f"import sys; sys.path.insert(0, {root!r}); from orchard import port_repair; port_repair.safe_text(sys.stdin.read(), ('/home/x',))"
+    done = subprocess.run([sys.executable, "-I", "-c", code], input=shape, capture_output=True, text=True, timeout=20)
+    assert done.returncode == 0, done.stderr
+
+
+def test_user_information_after_a_scheme_is_still_removed_wherever_the_scheme_starts():
+    for text in ("1https://bob:pw@host/x", "x_ftp://bob:pw@host/x", "see (git+ssh://bob:pw@host/x)"):
+        assert "pw@" not in port_repair.safe_text(text) and "bob" not in port_repair.safe_text(text)
+    assert port_repair.safe_text("https://host/x user@example") == "https://host/x user@example"
+
+
 # ---- rounds_used -----------------------------------------------------------------------------------------------------------------
 
 def entry(event, stage, **data):
