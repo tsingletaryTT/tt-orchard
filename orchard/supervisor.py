@@ -157,7 +157,7 @@ from orchard.classes import CLASS_UNKNOWN
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, REFERENCE_IDS_LEDGER_DECISION, agreement_reference_record,
+from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, MASK_INPUTS_DECISION, mask_input_entries, REFERENCE_IDS_LEDGER_DECISION, agreement_reference_record,
                             reference_ids_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
                             open_stage_dir, marker_state, package_format, package_options, resolve_endpoint, SUPERVISOR_MARKER,
@@ -4130,6 +4130,7 @@ class Supervisor:
             held = sorted((i, c) for each in (lease, extra) for c, i in zip(each.chips, each.dev_indices))
             result = self._spawn(n, test["command"], [c for _, c in held], [i for i, _ in held], deadline, out_path,
                                  env_extra=env_extra, lease_ids=[lease.lease_id, extra.lease_id])
+        self._record_mask_inputs(n, stage_dir)
         marker = stage_dir / record
         tmp = marker.with_name(marker.name + ".tmp")
         _put(tmp, json.dumps(result, indent=2))
@@ -4147,6 +4148,14 @@ class Supervisor:
         for the operator bundle's thin-evidence section (issue 445). A gate with none leaves nothing."""
         if gate.ok and gate.unverified:
             self.ledger.append("decision", n, decision=UNVERIFIED_LEDGER_DECISION, numbers=list(gate.unverified))
+
+    def _record_mask_inputs(self, n: int, stage_dir: Path) -> None:
+        """When a hardware test ends, write the sha256 of the files each `model-dir` under the stage directory holds that skip masks are rebuilt
+        from (stages.mask_input_entries). The gate rebuilds a mask only from files that still have these digests (PR 422, round 3), so this has
+        to happen before any agent step runs again: the hardware test is the last thing that ran the template, and nothing else runs between it
+        and this call."""
+        for entry in mask_input_entries(self.run_dir, stage_dir):
+            self.ledger.append("decision", n, decision=MASK_INPUTS_DECISION, **entry)
 
     def _spawn(self, n: int, command: str, chips, ids, deadline: float, out_path: Path,
                env_extra: dict | None = None, **record) -> dict:
@@ -4393,7 +4402,12 @@ class Supervisor:
         (an oversize output, a link) ends the test as a record that says so, never as an exception: the callers go on to the sweep, the lease
         release and the restore of the coder, and the gate reads the record."""
         try:
-            self._run_listed_test_body(spec, stage_dir, test, leases)
+            try:
+                self._run_listed_test_body(spec, stage_dir, test, leases)
+            finally:
+                # Stage 4 runs its configurations here, not through `_run_test`, so the mask-input digests are written here too (PR 422, round 5):
+                # once, after the final attempt, before any agent step or the finish step can touch the files. Also after a refused run file.
+                self._record_mask_inputs(spec.number, stage_dir)
         except safeio.SafeReadError as exc:
             n = spec.number
             reason = f"not completed: a run file was refused: {exc.reason}"

@@ -439,13 +439,13 @@ def probe_source(stage_dir) -> str:
     return served_source(stage_dir)
 
 
-def _correctness_failures(report, run_dir) -> list[str]:
+def _correctness_failures(report, run_dir, model_dir=None) -> list[str]:
     """Why a swap check does not pass the checks every swap check must pass (stage 2's swap fields, and the prompt suite when `run_dir` is given)."""
     from orchard import stages          # imported here: orchard.stages imports this module
     draft = report.get("result_draft") if isinstance(report, dict) else None
     out = stages._swap_reasons(draft if isinstance(draft, dict) else {})
     if run_dir is not None and isinstance(report, dict):
-        out += stages._suite_reasons(report, run_dir)
+        out += stages._suite_reasons(report, run_dir, model_dir=model_dir)
         # The variant's 32-token numbers are recomputed from its raw replies as the stage 2 gate does (issue 433): a choice made on the draft's
         # top1_agreement alone could be moved by editing the report.
         out += stages._token_check_reasons(report, [], run_dir)
@@ -474,7 +474,8 @@ def variant_side(stage_dir, run_dir=None) -> dict | None:
     if isinstance(v, dict) and v.get("served") is False:
         return {"drafter": "off", "verdict": "not-run", "greedy_tok_s": None, "sampled_tok_s": None, "served": False}
     if from_report is not None:
-        failures = _correctness_failures(_read_json(sd / TRIAL_DIR / "variant" / "evidence" / "swap-check.json"), run_dir)
+        failures = _correctness_failures(_read_json(sd / TRIAL_DIR / "variant" / "evidence" / "swap-check.json"), run_dir,
+                                         sd / TRIAL_DIR / "variant" / "model-dir")
         if failures:
             return {"drafter": "off", "verdict": "not-run", "greedy_tok_s": None, "sampled_tok_s": None, "served": False,
                     "failure": "; ".join(failures)[:400]}

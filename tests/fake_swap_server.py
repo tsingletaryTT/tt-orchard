@@ -18,6 +18,9 @@ Modes (config key "mode"):
 - "die": print 70 log lines and exit 1 before serving anything.
 - "slow": like "perfect", but each completion waits the config's "delay_s" first, so a check can run past its deadline.
 
+Config key "silent_ids" (issue 406) lists vocabulary ids whose teacher-forced answer is the empty text, as a real server answers when the
+token it generated is half of a character or a stop token it leaves out of the response.
+
 The prompt suite (issue 15) adds two things, both off unless the config asks:
 - POST /v1/chat/completions answers with the first of the config's "chat_replies" ([[substring, reply], ...], reply
   being {"content", "reasoning_content" or "reasoning", "tool_calls", "finish_reason"}) whose substring is in the last
@@ -120,13 +123,14 @@ class Handler(BaseHTTPRequestHandler):
                 every = hit.get("wrong_every")
                 if every and k % every == every - 1:
                     wanted = (wanted + 1) % len(vocab)
-                self._send(200, json.dumps({"choices": [{"text": " " + vocab[wanted], "index": 0}]}).encode())
+                silent = wanted in cfg.get("silent_ids", [])
+                self._send(200, json.dumps({"choices": [{"text": "" if silent else " " + vocab[wanted], "index": 0}]}).encode())
                 return
             k = len(prompt) - len(prompt_ids)
             wanted = gen[k]
             if cfg["mode"] == "every4" and k % 4 == 3:
                 wanted = (wanted + 1) % len(vocab)
-            text = " " + vocab[wanted]
+            text = "" if wanted in cfg.get("silent_ids", []) else " " + vocab[wanted]
         self._send(200, json.dumps({"choices": [{"text": text, "index": 0}]}).encode())
 
     def _sampling_probe(self, req):

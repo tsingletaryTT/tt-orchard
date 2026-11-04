@@ -481,6 +481,137 @@ def _stages_locate(base: Path):
     return stages.locate(base, "input.json")[1]
 
 
+# ----- PR 422: the readers behind the skip-mask gate (a mask is rebuilt from files that something else wrote)
+
+def _stages_mask_input_digest(base: Path):
+    """The digest the supervisor records for a file the mask helper will read: a string, None for a file that is not there, or the named
+    non-digest. It never raises, whatever the file is."""
+    from orchard import stages
+    return stages._mask_input_digest(base / "input.json")
+
+
+def _mask_digest_check(result):
+    from orchard import stages
+    if result is None or (isinstance(result, str) and (result == stages.MASK_INPUT_UNREADABLE or len(result) == 64)):
+        return None
+    return "not a sha256, None or the named unreadable marker"
+
+
+def _stages_mask_input_entries(base: Path):
+    """One entry per `model-dir` under the stage directory; each model file is a digest or a named non-digest, never an exception."""
+    from orchard import stages
+    return stages.mask_input_entries(base, base)
+
+
+def _stages_recorded_mask_inputs(base: Path):
+    from orchard import stages
+    return stages._recorded_mask_inputs(base, base / "model-dir")
+
+
+def _stages_mask_python(base: Path):
+    from orchard import stages
+    return stages._mask_python(base)
+
+
+def _skip_mask_read_regular(base: Path):
+    """The helper's bounded read of one file: the bytes of a regular file, or an OSError for a device, a FIFO, a missing file or a file over
+    the cap. The cap is the helper's own configuration-file cap, so the 50 MB item is refused and never held."""
+    from orchard import skip_mask_helper
+    return len(skip_mask_helper.read_regular(base / "input.json", skip_mask_helper.CONFIG_MAX))
+
+
+def _skip_mask_run(payload: bytes):
+    """skip_mask_helper.main() as the gate runs it: the request on stdin, one JSON line on stdout. Whatever goes wrong comes back as text."""
+    import contextlib
+    import io
+    import json
+    import sys
+    from orchard import agreement_core, skip_mask_helper
+    out = io.StringIO()
+    old_argv, old_stdin = sys.argv, sys.stdin
+    sys.argv = ["skip_mask_helper.py", str(Path(agreement_core.__file__).resolve())]
+    sys.stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="utf-8")
+    try:
+        with contextlib.redirect_stdout(out):
+            code = skip_mask_helper.main()
+    finally:
+        sys.argv, sys.stdin = old_argv, old_stdin
+    if code != 0:
+        raise AssertionError(f"the helper exited {code}")
+    return json.loads(out.getvalue().splitlines()[-1])
+
+
+# A valid two-word tokenizer written as text, so the reader does not import `tokenizers` itself: without that package the helper answers in
+# band (ok false, ModuleNotFoundError), which still meets the contract.
+_SMALL_TOKENIZER_JSON = ('{"version": "1.0", "truncation": null, "padding": null, "added_tokens": [], "normalizer": null, "pre_tokenizer": null, '
+                         '"post_processor": null, "decoder": null, "model": {"type": "WordLevel", "vocab": {"a": 0, "b": 1}, "unk_token": "a"}}')
+
+
+def _skip_mask_run_with_file(name: str, payload: bytes):
+    """The helper on a model directory where `name` holds the hostile bytes (and a small valid tokenizer stands in for any other file)."""
+    import json
+    import shutil
+    import tempfile
+    model_dir = Path(tempfile.mkdtemp(prefix="skipmask-"))
+    try:
+        if name != "tokenizer.json":
+            (model_dir / "tokenizer.json").write_text(_SMALL_TOKENIZER_JSON, encoding="utf-8")
+        (model_dir / name).write_bytes(payload)
+        return _skip_mask_run(json.dumps({"model_dir": str(model_dir), "lists": [[0, 1]]}).encode("utf-8"))
+    finally:
+        shutil.rmtree(model_dir, ignore_errors=True)
+
+
+def _skip_mask_run_request(payload: bytes):
+    return _skip_mask_run(payload)
+
+
+def _skip_mask_run_tokenizer(payload: bytes):
+    return _skip_mask_run_with_file("tokenizer.json", payload)
+
+
+def _skip_mask_run_config(payload: bytes):
+    return _skip_mask_run_with_file("config.json", payload)
+
+
+def _skip_mask_check(result):
+    """The helper answers with one object: ok true with masks and digests, or ok false with a short error text, whatever it was given."""
+    if not isinstance(result, dict) or result.get("ok") not in (True, False):
+        return "the answer is not an object with a boolean ok"
+    if result["ok"]:
+        return None if isinstance(result.get("masks"), list) and isinstance(result.get("digests"), dict) else "ok without masks and digests"
+    error = result.get("error")
+    if not isinstance(error, str) or len(error) > 320 or "masks" in result:
+        return "a failure must carry one short error text and no masks"
+    return None
+
+
+def _bounded_run_hostile_output(payload: bytes):
+    """bounded_run.run on a child that prints `payload` (the hostile bytes stand for a helper's output): the caller gets the text up to the
+    cap or a named problem, never a hang, and the child's group is stopped and reaped."""
+    import os
+    import sys
+    import tempfile
+    from orchard import bounded_run
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(payload)
+        path = f.name
+    try:
+        res = bounded_run.run([sys.executable, "-I", "-c", "import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read()); sys.stdout.flush()", path],
+                              "", timeout_s=20.0, out_max=1 << 20, err_max=1 << 16, env={"PATH": os.environ.get("PATH", "")})
+    finally:
+        os.unlink(path)
+    return {"problem": res.problem, "stdout_chars": len(res.stdout), "returncode": res.returncode}
+
+
+def _bounded_run_check(result):
+    if not isinstance(result, dict) or result.get("problem") not in (None, "stdout"):
+        return f"unexpected problem {result!r}"
+    if result["stdout_chars"] > (1 << 20) + (1 << 20):
+        return "held far more than the cap"
+    return None
+
+
 def _graft_trial_read_decision(base: Path):
     from orchard import graft_trial
     return graft_trial.read_decision(base)
@@ -957,6 +1088,15 @@ READERS: list[Reader] = [
     Reader("stages.evidence_record", _stages_evidence_record, documented=(_SafeReadError,)),
     Reader("stages._sha256", _stages_sha256, documented=(_SafeReadError,)),
     Reader("stages.locate", _stages_locate),
+    Reader("stages._mask_input_digest", _stages_mask_input_digest, check=_mask_digest_check),
+    Reader("stages.mask_input_entries (hostile model file)", _stages_mask_input_entries, rel="model-dir/tokenizer.json"),
+    Reader("stages._recorded_mask_inputs (hostile ledger)", _stages_recorded_mask_inputs, rel="ledger.jsonl", suffix=b"\n"),
+    Reader("stages._mask_python (hostile ledger)", _stages_mask_python, rel="ledger.jsonl", suffix=b"\n"),
+    Reader("skip_mask_helper.read_regular", _skip_mask_read_regular, documented=(OSError,)),
+    Reader("skip_mask_helper.main (hostile request)", _skip_mask_run_request, feed="bytes", check=_skip_mask_check),
+    Reader("skip_mask_helper.main (hostile tokenizer.json)", _skip_mask_run_tokenizer, feed="bytes", check=_skip_mask_check),
+    Reader("skip_mask_helper.main (hostile config.json)", _skip_mask_run_config, feed="bytes", check=_skip_mask_check),
+    Reader("bounded_run.run (hostile child output)", _bounded_run_hostile_output, feed="bytes", check=_bounded_run_check),
     Reader("graft_trial.read_decision", _graft_trial_read_decision, rel="graft-decision.json"),
     Reader("graft_trial._read_json", _graft_trial_read_json),
     Reader("graft_trial.decision_problems", _graft_trial_decision_problems, rel="graft-decision.json"),
