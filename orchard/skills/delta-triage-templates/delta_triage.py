@@ -103,6 +103,15 @@ HERE_DIR = Path(__file__).resolve().parent
 # The sha256 of this file, written into delta.json so the stage gate can compare it with the shipped template.
 THIS_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 EVIDENCE = HERE_DIR / "evidence"
+# Every evidence file this script writes. Some are written only when their check applies (readout-facts.json for a restricted head,
+# vocab-compare.json for a vocabulary trim, audio-compare.json on the audio route), so a file from an earlier attempt of the same run would
+# stay in the directory when a later attempt skips the check. clear_own_evidence() removes these at the start of an attempt (issue 452).
+# A test fails when a name passed to write_json is missing here.
+EVIDENCE_FILES = (
+    "audio-compare.json", "config-compare.json", "disk-free.json", "files-compare.json", "genconfig-license.json", "head-compare.json",
+    "readout-facts.json", "sidecar-compare.json", "tensor-compare.json", "tokenizer-compare.json", "tokenizer-encode.json",
+    "value-compare.json", "vocab-compare.json",
+)
 CONFIG_KEYS = ("run_dir", "model_id", "model_snapshot", "nearest_model_id", "nearest_snapshot")
 REPORT_MAX_BYTES = 2 * 1024 * 1024        # the research report is read only up to this size
 OPTIONAL_KEYS = ("base_candidates",)      # read when present: the research report (research/base-candidates.json)
@@ -331,6 +340,19 @@ def read_json(path: Path):
         return json.loads(path.read_text(encoding="utf-8")), None
     except (OSError, ValueError) as exc:
         return None, f"{path.name} is not readable JSON: {exc}"
+
+
+def clear_own_evidence() -> None:
+    """Remove each file in EVIDENCE_FILES from evidence/ before this attempt writes its own, so no file from an earlier attempt can be taken for
+    this snapshot's. A link is removed as a link (its target is never touched). Files the script does not own (an agent's notes) stay. A file
+    that cannot be removed stops the attempt: leaving it would bring the problem back unseen."""
+    for name in EVIDENCE_FILES:
+        try:
+            os.unlink(EVIDENCE / name)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            fail(f"cannot remove the earlier evidence/{name} ({type(exc).__name__}); remove it and run again")
 
 
 def write_json(name: str, data) -> Path:
@@ -3420,6 +3442,7 @@ def audio_main(cfg: dict) -> int:
 
 def main() -> int:
     cfg = load_config()
+    clear_own_evidence()
     run_dir = os.path.realpath(cfg["run_dir"])
     model_dir, base_dir = Path(cfg["model_snapshot"]), Path(cfg["nearest_snapshot"])
     if looks_like_audio(model_dir):
