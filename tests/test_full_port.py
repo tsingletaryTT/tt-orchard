@@ -28,15 +28,15 @@ def put(run, rel, content):
     return p
 
 
-def build(tmp_path, *, result=None, record=None, marker=None, output=None, model_src="import ttnn\n", ref_ids=REF_IDS):
-    """A stage 2 directory a passing full-port run would leave. Each argument replaces a part (a dict is merged over the good one)
+def build(tmp_path, *, result=None, record=None, marker=None, output=None, model_src="import ttnn\n", ref_ids=REF_IDS, stage=2):
+    """A stage 2 directory (or, with `stage=3`, a stage 3 directory: issue 326) a passing full-port run would leave. Each argument replaces a part (a dict is merged over the good one)
     so a test changes one fact and watches the gate name it."""
     run = tmp_path / "run"
     ref = put(run, "stages/1/evidence/reference/generated-ids.json", {"generated_ids": ref_ids, "generated_text": "x"})
     prm = put(run, "stages/1/evidence/reference/prompt-ids.json", {"prompt_ids": [1, 2, 3], "prompt_text": "p"})
-    model = put(run, "stages/2/port/port_model.py", model_src)
-    template = put(run, "stages/2/" + full_port.TEMPLATE_NAME, full_port.TEMPLATE.read_text())      # the supervisor's copy of the shipped file
-    config = put(run, "stages/2/" + full_port.CONFIG_NAME, {"model_snapshot": "snapshot"})
+    model = put(run, f"stages/{stage}/port/port_model.py", model_src)
+    template = put(run, f"stages/{stage}/" + full_port.TEMPLATE_NAME, full_port.TEMPLATE.read_text())      # the supervisor's copy of the shipped file
+    config = put(run, f"stages/{stage}/" + full_port.CONFIG_NAME, {"model_snapshot": "snapshot"})
     good_record = {
         "schema": full_port.RECORD_SCHEMA,
         "reference": {"path": "stages/1/evidence/reference/generated-ids.json", "sha256": sha(ref.read_bytes())},
@@ -44,19 +44,19 @@ def build(tmp_path, *, result=None, record=None, marker=None, output=None, model
         "reference_ids": list(ref_ids), "chip_ids": list(ref_ids[:30]) + [0, 0],
         "top1_agreement": 30 / 32, "chips": list(CHIPS), "load_s": 120.5,
         "free_run_ids": [ref_ids[0]] + list(range(1, 48)), "free_run_text": TEXT, "template_sha256": sha(template.read_bytes()),
-        "config": {"path": "stages/2/" + full_port.CONFIG_NAME, "sha256": sha(config.read_bytes())},
-        "port_sources": [{"path": "stages/2/port/port_model.py", "sha256": sha(model.read_bytes()), "role": "model"}]}
+        "config": {"path": f"stages/{stage}/" + full_port.CONFIG_NAME, "sha256": sha(config.read_bytes())},
+        "port_sources": [{"path": f"stages/{stage}/port/port_model.py", "sha256": sha(model.read_bytes()), "role": "model"}]}
     rec = {**good_record, **(record or {})}
-    rec_path = put(run, "stages/2/evidence/port-check.json", rec)
+    rec_path = put(run, f"stages/{stage}/evidence/port-check.json", rec)
     out_text = f"loading\nPORT_CHECK_SHA256 {sha(rec_path.read_bytes())}\ndone\n" if output is None else output
-    out_path = put(run, "stages/2/evidence/hw-test-output.txt", out_text)
-    good_marker = {"command": full_port.COMMAND, "returncode": 0, "timed_out": False, "seconds": 5.0, "chips": list(CHIPS),
-                   "output": {"path": "stages/2/evidence/hw-test-output.txt", "sha256": sha(out_path.read_bytes())}}
-    put(run, "stages/2/test-result.json", {**good_marker, **(marker or {})})
+    out_path = put(run, f"stages/{stage}/evidence/hw-test-output.txt", out_text)
+    good_marker = {"command": full_port.command(stage), "returncode": 0, "timed_out": False, "seconds": 5.0, "chips": list(CHIPS),
+                   "output": {"path": f"stages/{stage}/evidence/hw-test-output.txt", "sha256": sha(out_path.read_bytes())}}
+    put(run, f"stages/{stage}/test-result.json", {**good_marker, **(marker or {})})
     good_result = {"runs": True, "coherent": True, "n_tokens": 32, "top1_agreement": 30 / 32, "load_s": 120.5, "free_run_text": TEXT,
-                   "evidence": ["stages/2/evidence/port-check.json", "stages/2/evidence/hw-test-output.txt"]}
-    put(run, "stages/2/result.json", {**good_result, **(result or {})})
-    return run / "stages" / "2", run
+                   "evidence": [f"stages/{stage}/evidence/port-check.json", f"stages/{stage}/evidence/hw-test-output.txt"]}
+    put(run, f"stages/{stage}/result.json", {**good_result, **(result or {})})
+    return run / "stages" / str(stage), run
 
 
 def reasons(tmp_path, **kw):
@@ -206,7 +206,7 @@ def test_with_the_opt_in_a_full_port_class_gets_the_full_port_stage_2():
 
 
 def test_the_opt_in_changes_no_other_stage_and_no_other_class():
-    for n in (0, 1, 3, 4, 5, 6, 7, 8):
+    for n in (0, 1, 4, 5, 6, 7, 8):      # stage 3 changes too since issue 326: tests/test_full_port_stage3.py
         assert spec_for(n, "full-port", None, "full-port", full_port=True) == spec_for(n, "full-port", None, "full-port")
     assert spec_for(2, "full-port", None, "unknown", full_port=True).skill == "functional-decoder"
     assert spec_for(2, "weights-only", None, "weights-only", full_port=True).skill == "weights-swap-check"

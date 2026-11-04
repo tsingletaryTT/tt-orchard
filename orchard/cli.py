@@ -140,8 +140,9 @@ def _parser() -> argparse.ArgumentParser:
                    help="go on with a run that an operator or a signal aborted (the web page's Resume run does this). The ledger records the resume and the run continues from there. Without it an aborted run stays aborted. A finished run, and an abort of any other kind, are left as they are")
     b.add_argument("--full-port", action="store_true",
                    help="let a model that stage 0 classes `full-port` go on: the local coder writes the port in stage 2 and one hardware test "
-                        "compares the chip's tokens with the CPU reference. Stages 3 to 6 for a full port are not built yet, so the run ends "
-                        "blocked after stage 2 (code full-port-stages-unbuilt). A run that already ran stage 2 without the flag refuses it. "
+                        "compares the chip's tokens with the CPU reference. Stage 3 runs the same port on the largest of --required-chips (skipped, "
+                        "with a recorded reason, when none is above one board). Stages 4 to 6 for a full port are not built yet, so the run ends "
+                        "blocked after stage 3 (code full-port-stages-unbuilt). A run that already ran stage 2 without the flag refuses it. "
                         "No other class changes")
     b.add_argument("--model-kind", choices=("generative", "reranker", "embedding"), default=None,
                    help="what the model produces. Without it stage 0 reads the model card's pipeline_tag (text-ranking is a reranker; "
