@@ -157,13 +157,15 @@ from orchard.classes import CLASS_UNKNOWN
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, REFERENCE_IDS_LEDGER_DECISION, agreement_reference_record,
+                            reference_ids_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
                             open_stage_dir, marker_state, package_format, package_options, resolve_endpoint, SUPERVISOR_MARKER,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, SKIP_3_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
 from orchard import full_port, model_kind, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
+from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -567,6 +569,22 @@ def wrapup_text(spec, name: str, files: list[str]) -> str:
               "a field, say so in that field. When the file is written, reply with a short summary "
               "and no tool call."]
     return "\n".join(lines)
+
+
+def bound_reasons(reasons) -> list[str]:
+    """The reasons of one gate, as text that is safe to write to the ledger and into a message: each reason cut at `token_check.MAX_REASON_CHARS`
+    with the count of what was cut, a value that is not text named by its shape, and at most `token_check.MAX_REASONS_WRITTEN` reasons, then
+    one line that says how many reasons and characters were left out. A list that is already short is returned as it is. A gate quotes values
+    from files an agent or a model wrote, the ledger refuses to read a file over 16 MiB, and a refusal that makes the ledger unreadable ends
+    the run (review of PR 444, limit round)."""
+    items = list(reasons)
+    keep = items[:token_check.MAX_REASONS_WRITTEN]
+    out = [token_check.cut_text(r) if isinstance(r, str) else token_check.show(r) for r in keep]
+    if len(items) > len(keep):
+        left = items[len(keep):]
+        chars = sum(len(r) if isinstance(r, str) else 0 for r in left)
+        out.append(f"{len(left)} more reasons ({chars} characters) are not shown; the gate gave {len(items)} reasons in all")
+    return out
 
 
 def gate_feedback_text(spec, reasons) -> str:
@@ -2693,7 +2711,7 @@ class Supervisor:
             bundle.mkdir(exist_ok=True)
             shutil.copyfile(self.ledger.path, bundle / "ledger.jsonl")
             self._copy_package(bundle)
-        gate = self._gate(spec)(stage_dir, self.run_dir)
+        gate = self._run_gate(spec, stage_dir)
         if spec.tests:
             # The gate reads the test records from the stage directory, where the agent can write
             # too. The ledger holds the sha256 of each record the supervisor wrote.
@@ -2781,9 +2799,10 @@ class Supervisor:
         """The step ended "done" and the exit gate failed. Tell the same conversation what the gate
         found and run it once more, with its own turn cap and its own log."""
         n = spec.number
+        reasons = bound_reasons(gate.reasons)
         entry = self.ledger.append("decision", n, decision="gate feedback", phase=step.phase,
-                                   reasons=list(gate.reasons), file=f"stages/{n}/{spec.gate_file}")
-        text = gate_feedback_text(spec, gate.reasons)
+                                   reasons=reasons, file=f"stages/{n}/{spec.gate_file}")
+        text = gate_feedback_text(spec, reasons)
         log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
         return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
@@ -3030,6 +3049,7 @@ class Supervisor:
             return "pause"
         if status == "abort":
             return "abort"
+        reasons = bound_reasons(reasons)
         if spec.harness:
             # Supervisor code failed: another model cannot fix it, so it is not escalated.
             self.ledger.append("decision", n, decision="pause",
@@ -3255,6 +3275,9 @@ class Supervisor:
             return self._pin_scoring(spec, stage_dir)
         if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
             return
+        # Before the config is drafted and before any agent step of this stage: a bundle that cannot be chosen (the draft gives None) still
+        # leaves the prepare agent and the hardware test to run, and the gate must hold the reference ids' hash for those runs too.
+        self._pin_reference_ids(spec)
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
                                          cache_root=self.paths.cache_root, hf_home=self.paths.hf_home,
                                          inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD,
@@ -3384,6 +3407,18 @@ class Supervisor:
             return
         self.ledger.append("decision", spec.number, decision="stage 2 port copied", files=copied)
         self._port_seed = {"copied": len(copied), "kept": False}
+
+    def _pin_reference_ids(self, spec) -> None:
+        """The 32-token check's reference ids (issue 433): the hash of stage 1's generated-ids.json goes into the ledger before any stage 2 test,
+        and the gate recomputes the check from the raw replies and these ids, so a swap-check.json and a result.json edited together are caught.
+        Recorded once: a retried draft finds the record and keeps the first hash, so a file changed after the first pin is never taken as the
+        new truth. Nothing is recorded when stage 1 wrote no ids (the gate then judges the run as before)."""
+        for e in self.ledger.read():
+            if e["event"] == "decision" and e["data"].get("decision") == REFERENCE_IDS_LEDGER_DECISION:
+                return
+        record = reference_ids_record(self.run_dir)
+        if record is not None:
+            self.ledger.append("decision", spec.number, decision=REFERENCE_IDS_LEDGER_DECISION, **record)
 
     def _pin_full_port(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
         """Stage 2 of a full port (orchard/full_port.py): put the supervisor's template and its config in the stage directory, replacing any
@@ -3582,7 +3617,23 @@ class Supervisor:
             if spec.tests:
                 return lambda: not self._read_plan(spec, stage_dir)[1]
             return lambda: not self._read_test(stage_dir)[1]
-        return lambda: self._gate(spec)(stage_dir, self.run_dir).ok
+        return lambda: self._run_gate(spec, stage_dir).ok
+
+    def _run_gate(self, spec, stage_dir: Path) -> GateResult:
+        """The stage's gate, as a result that is always returned. A gate reads files an agent can write, and an exception from it (a value
+        no one thought of: an integer too large for a float, a type nobody checked) must not escape the supervisor, so it becomes a failed
+        gate. The reason and the one ledger notice name the exception's class and never its message, because the message can carry the
+        file's own text. An interrupt (KeyboardInterrupt, SystemExit) is not an `Exception` and goes through. The gate is chosen outside the
+        try: the choice reads the ledger, and a ledger that cannot be read is a supervisor failure, not a gate refusal (issue 433, review of
+        PR 444, limit round)."""
+        gate = self._gate(spec)
+        try:
+            return gate(stage_dir, self.run_dir)
+        except Exception as exc:
+            name = type(exc).__name__
+            self._note("notice", what="a gate raised", for_stage=spec.number, error_class=name)      # `stage` is the ledger's own argument
+            return GateResult(False, (f"the gate of stage {spec.number} raised {name} while reading the stage's files, so the stage cannot "
+                                      "pass: a value in a file it reads is one the gate does not handle",), ())
 
     # ---- the hardware test ----------------------------------------------------------------------
 
