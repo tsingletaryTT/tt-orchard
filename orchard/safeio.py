@@ -547,6 +547,27 @@ def _iter_lines(path, max_bytes: int, max_line_bytes: int, anchor: int | None, e
         os.close(fd)
 
 
+def sample_blocks(path, *, block: int) -> tuple[int, int, bytes, bytes]:
+    """(size, modification time in ns, first `block` bytes, last `block` bytes) of the regular file at `path`, for a file too large to
+    read whole (issue 453). Opened as `read_bytes` opens (`O_NOFOLLOW | O_NONBLOCK`, `fstat` on the same descriptor, regular files only).
+    At most `2 * block` bytes are read, whatever the size. It says nothing about the bytes between the two blocks except through the size
+    and the modification time, so a caller uses it to notice a change, never to prove that nothing changed. Raises only SafeReadError."""
+    if isinstance(block, bool) or not isinstance(block, int) or block < 1:
+        raise ValueError("block must be a whole number, one or more")
+    fd = _open_for_read(path, None)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise NotRegular("the file is not a regular file")
+        head = os.pread(fd, min(block, st.st_size), 0)
+        tail = os.pread(fd, min(block, st.st_size), max(0, st.st_size - block)) if st.st_size else b""
+        return st.st_size, st.st_mtime_ns, head, tail
+    except OSError as exc:
+        raise _os_failure(exc) from None
+    finally:
+        os.close(fd)
+
+
 def read_prefix(path, *, max_bytes: int) -> bytes:
     """The bytes of the regular file at `path` up to the size it had when it was opened, for a file that another process appends to
     (a ledger). Opened as `read_bytes` opens (`O_NOFOLLOW | O_NONBLOCK`, `fstat` on the same descriptor, regular files only, a size over

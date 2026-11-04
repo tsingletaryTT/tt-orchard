@@ -140,6 +140,9 @@ def stopped_noted(entries: list[dict], n: int) -> bool:
     return seen
 
 
+LARGE_BLOCK = 1024 * 1024  # bytes sampled from each end of a file over the read cap
+
+
 def fingerprint(directory) -> dict[str, str]:
     """{relative path: sha256, or "link: <target>", or "unreadable: <reason>"} for every file under `directory` (none when it is missing).
     A link is a difference, never a file that is followed: the check refuses a link under the port directory."""
@@ -148,6 +151,8 @@ def fingerprint(directory) -> dict[str, str]:
     if not root.is_dir() or root.is_symlink():
         return out
     for here, dirs, files in os.walk(root):
+        # bytecode a coder's own python run leaves behind is not an edit (issue 453); a link named __pycache__ is still listed below
+        dirs[:] = [d for d in dirs if d != "__pycache__" or os.path.islink(os.path.join(here, d))]
         dirs.sort()
         for name in sorted(files + [d for d in dirs if os.path.islink(os.path.join(here, d))]):
             path = Path(here) / name
@@ -157,6 +162,14 @@ def fingerprint(directory) -> dict[str, str]:
                 continue
             try:
                 out[rel] = hashlib.sha256(safeio.read_bytes(path, max_bytes=full_port.JSON_MAX)).hexdigest()
+            except safeio.TooLarge:
+                # a file over the read cap (a weights file in port/) is told apart by its size, modification time and first and last block,
+                # so an edit to it is a change; it is a notice of a change, never a proof of none (issue 453)
+                try:
+                    size, mtime_ns, head, tail = safeio.sample_blocks(path, block=LARGE_BLOCK)
+                    out[rel] = f"large: size={size} mtime_ns={mtime_ns} head={hashlib.sha256(head).hexdigest()} tail={hashlib.sha256(tail).hexdigest()}"
+                except (safeio.SafeReadError, OSError, ValueError) as exc:
+                    out[rel] = f"unreadable: {type(exc).__name__}"
             except (safeio.SafeReadError, OSError, ValueError) as exc:
                 out[rel] = f"unreadable: {type(exc).__name__}"
     return out
