@@ -109,8 +109,6 @@ def identical(a: Any, b: Any) -> bool:
             return True
         if isinstance(x, list):
             return len(x) == len(y) and all(walk(i, j, depth + 1) for i, j in zip(x, y))
-        if isinstance(x, float) and x != x:
-            return False                                     # NaN is never the evidence's own number
         return x == y
 
     try:
