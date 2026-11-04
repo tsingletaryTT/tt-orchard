@@ -253,3 +253,64 @@ def test_a_step_without_restarts_ends_after_two_as_before(run):
     with FakeModel(by_request(truncated(8192), truncated(8192), final("never"))) as fm:
         out = step(run_dir, ledger, fm.endpoint).run("s", "u")
     assert out.status == "error" and len(fm.requests) == 2
+
+
+@pytest.mark.timeout(30)
+def test_a_fifo_or_a_link_to_a_device_in_the_port_directory_does_not_block_or_confuse_the_shell_guard(run):
+    run_dir, _ = run
+    sd = run_dir / "stages" / "0"
+    tools = Tools(run_dir, sd, agent_env(run_dir))
+    tools.write_file("port/port_model.py", "def f():\n    return 1\n")
+    os.mkfifo(sd / "port" / "pipe")                                   # a reader that opened it would wait for a writer
+    os.symlink("/dev/zero", sd / "port" / "zero")                     # a reader that followed it would read forever
+    out = tools.shell("echo hi")
+    assert out.startswith("exit 0") and "refused" not in out
+    assert (sd / "port" / "port_model.py").read_text() == "def f():\n    return 1\n"
+
+
+@pytest.mark.timeout(60)
+def test_a_port_tree_with_many_entries_is_scanned_within_the_bound(run):
+    run_dir, _ = run
+    sd = run_dir / "stages" / "0"
+    tools = Tools(run_dir, sd, agent_env(run_dir))
+    for i in range(2500):
+        (sd / "port" / f"f{i}.py").write_text("x = 1\n")
+    seen = tools._port_files()
+    assert len(seen) <= 200                                           # PORT_GUARD_FILES: the scan stops, whatever the tree holds
+
+
+def test_the_scan_stops_after_the_entry_bound_whatever_a_directory_lists(run, monkeypatch):
+    """The bound is on entries of any kind, so a directory of ten thousand subdirectories and no files cannot make the guard slow."""
+    from orchard import agent as agent_module
+    run_dir, _ = run
+    sd = run_dir / "stages" / "0"
+    tools = Tools(run_dir, sd, agent_env(run_dir))
+    consumed = []
+
+    class Entry:
+        def __init__(self, i):
+            self.name, self.path = f"d{i}", f"/nonexistent/d{i}"
+            consumed.append(i)
+
+        def is_symlink(self):
+            return False
+
+        def is_dir(self, follow_symlinks=True):
+            return False
+
+        def is_file(self, follow_symlinks=True):
+            return False
+
+    class Listing:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            return (Entry(i) for i in range(10_000))
+
+    monkeypatch.setattr(agent_module.os, "scandir", lambda d: Listing())
+    assert tools._port_files() == []
+    assert len(consumed) <= 2001                                      # the documented bound: 2,000 entries, and the one that crosses it
