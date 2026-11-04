@@ -229,6 +229,16 @@ def test_the_totals_block_only_when_the_snapshot_the_run_uses_is_the_revision_th
     assert pf.check_fit(hub, 4, local_sha="").status == "block"                    # an empty name is no local snapshot
 
 
+def test_a_hub_answer_with_no_revision_cannot_vouch_for_a_local_snapshot():
+    payload = hub_payload()
+    del payload["sha"]
+    hub = pf.parse_hub(payload)
+    hub.host_table = False
+    assert hub.sha == ""
+    assert pf.check_fit(hub, 4, local_sha="0123456789abcdef").status == "warn"             # nothing to compare the local revision with
+    assert pf.check_fit(hub, 4).status == "block"                                          # no local snapshot: the download is what the Hub has
+
+
 def test_run_preflight_does_not_block_a_local_snapshot_of_another_revision_on_the_hubs_current_counts(tmp_path):
     import test_preflight as tp
     info = pf.parse_hub(hub_payload())
