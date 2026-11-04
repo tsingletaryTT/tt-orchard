@@ -48,6 +48,9 @@ MAX_LIST = 32                     # elements of a list kept in the summary
 MAX_STR = 60
 MAX_NOTES = 12
 MAX_NOTE_CHARS = 300
+MAX_KEY_CHARS = 80                # a config key, a class name or a field name longer than this is counted and not copied into the file
+MAX_LEFT_NAMES = 100              # names listed in a `*_left_out` list; the rest are counted
+MAX_INDEX_FIELDS = 24             # id-list fields described in `index_fields`; the rest are counted
 MAX_SHARDS_LISTED = 8
 MAX_SCHEDULE = 4096
 MAX_NAME_CHARS = 200              # a tensor name longer than this is counted and not listed: the header reader bounds names only by the header's size
@@ -56,7 +59,13 @@ MAX_NUMBER_DIGITS = 6             # a numeric name component of more digits is n
 INDEX_FIELD = re.compile(r"(layer|block|expert|position).*(_ids?|_idx|_indices|_numbers?)$|_layers?$")
 CONVENTION = re.compile(r"\b(?:one|zero|1|0)[- ]?(?:based|indexed)\b", re.I)
 _FIELD_HEAD = re.compile(r"^\s{4,8}(\w+) \(`")                       # `    name (`type`, *optional*):` in a configuration docstring
+_CLASS_HEAD = re.compile(r"^class (\w+)")                            # a configuration module holds a text, a vision and a wrapper class
+_ONE_BASED = re.compile(r"\b(?:one|1)[- ]?(?:based|indexed)\b", re.I)
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 _MODEL_TYPE = re.compile(r"[a-z0-9_]{1,64}")
+_SHOWN_MODEL_TYPE = re.compile(r"[A-Za-z0-9_.-]{1,64}")              # a model type the file shows; anything else is counted and not copied
+_KEY = re.compile(rf"[A-Za-z_][A-Za-z0-9_]{{0,{MAX_KEY_CHARS - 1}}}")  # a config key the file copies: a plain identifier of bounded length
+ELISION = " [...] "
 SUB_CONFIG_SUFFIXES = ("text", "vision", "audio")                    # `qwen4_exp_text` lives in models/qwen4_exp/configuration_qwen4_exp.py
 _NUMBER_IN_NAME = re.compile(rf"(?<=\.)\d{{1,{MAX_NUMBER_DIGITS}}}(?=\.|$)")
 UNKNOWN_CONVENTION = ("not stated in the reference configuration source (or that source was not found): compare these ids with the "
@@ -76,25 +85,67 @@ class PortFactsError(Exception):
 
 # ---- the reference's conventions ---------------------------------------------------------------------------------------------
 
+def _note_text(text: str) -> tuple[str, bool, bool]:
+    """(the note, whether the description was shortened, whether the sentence that states the convention was itself cut). The note is at
+    most MAX_NOTE_CHARS and always holds the whole phrase that matched CONVENTION. A description that fits is kept as it is. A longer one
+    keeps its start when the convention is stated early; otherwise it keeps the start that fits, an elision mark and the sentence that
+    states the convention (cut around the phrase only when that sentence alone is longer than the cap). Cutting the description at a fixed
+    length lost a convention stated late, and the field then looked as if it had none: `ple_layer_ids` is one-indexed."""
+    if len(text) <= MAX_NOTE_CHARS:
+        return text, False, False
+    found = CONVENTION.search(text)
+    if found is None or found.end() <= MAX_NOTE_CHARS:
+        return text[:MAX_NOTE_CHARS], True, False
+    sentence, offset = text, 0
+    for part in _SENTENCE_END.split(text):
+        start = text.index(part, offset)
+        offset = start + len(part)
+        if start <= found.start() < offset:
+            sentence = part
+            break
+    if len(sentence) <= MAX_NOTE_CHARS:
+        room = MAX_NOTE_CHARS - len(sentence) - len(ELISION)
+        lead = text[:room].rsplit(" ", 1)[0].rstrip() if room >= 20 else ""
+        return (lead + ELISION + sentence if lead else sentence), True, False
+    match = CONVENTION.search(sentence)
+    width = MAX_NOTE_CHARS - 6                                          # room for an elision mark at each end
+    middle = (match.start() + match.end()) // 2
+    lo = max(0, min(middle - width // 2, len(sentence) - width))
+    hi = lo + width
+    return ("..." if lo else "") + sentence[lo:hi] + ("..." if hi < len(sentence) else ""), True, True
+
+
 def convention_notes(source, left_out: list | None = None) -> list[dict]:
     """The fields of a configuration docstring whose description says how they are numbered (one-indexed, zero-based and the like):
-    [{"field", "note"}] in file order, at most MAX_NOTES, each note at most MAX_NOTE_CHARS. A field the cap leaves out is appended to
-    `left_out` when that list is given, so the file can say how many there were."""
+    [{"class", "field", "note"}] in file order, at most MAX_NOTES, each note at most MAX_NOTE_CHARS (see `_note_text`; a note whose
+    description was shortened has `cut`, one whose convention sentence was cut has `convention_cut`). A configuration module holds several
+    classes (the text, vision and wrapper configurations), so a field is noted once per class and each note names its class. A field the
+    cap leaves out is appended to `left_out` when that list is given, so the file can say how many there were. A class or field name
+    longer than MAX_KEY_CHARS is not copied: it is counted in `left_out` under its first MAX_KEY_CHARS characters."""
     if not isinstance(source, str):
         return []
-    notes, field, body = [], None, []
+    notes, seen, cls, field, body = [], set(), None, None, []
 
     def close():
         text = " ".join(body).strip()
-        if field and text and CONVENTION.search(text) and all(n["field"] != field for n in notes) and (left_out is None or field not in left_out):
-            if len(notes) < MAX_NOTES:
-                notes.append({"field": field, "note": text[:MAX_NOTE_CHARS]})
-            elif left_out is not None:
-                left_out.append(field)
+        if not (field and cls and text and CONVENTION.search(text)) or (cls, field) in seen:
+            return
+        seen.add((cls, field))
+        if len(notes) >= MAX_NOTES or len(cls) > MAX_KEY_CHARS or len(field) > MAX_KEY_CHARS:
+            if left_out is not None:
+                left_out.append(field[:MAX_KEY_CHARS])
+            return
+        note, cut, convention_cut = _note_text(text)
+        notes.append({"class": cls, "field": field, "note": note, **({"cut": True} if cut else {}),
+                      **({"convention_cut": True} if convention_cut else {})})
 
     for line in source.splitlines():
+        head_class = _CLASS_HEAD.match(line)
         head = _FIELD_HEAD.match(line)
-        if head:
+        if head_class:
+            close()
+            cls, field, body = head_class.group(1), None, []
+        elif head:
             close()
             field, body = head.group(1), []
         elif field is not None:
@@ -105,6 +156,34 @@ def convention_notes(source, left_out: list | None = None) -> list[dict]:
                 body.append(line.strip())
     close()
     return notes
+
+
+def _class_kind(name: str) -> str:
+    """Which config section a configuration class describes, from its name: `text`, `vision`, `audio`, or `top` (the wrapper class)."""
+    lower = name.lower()
+    return next((k for k in ("text", "vision", "audio") if k in lower), "top")
+
+
+def _pick_convention(notes: list, field: str, where: str) -> str:
+    """The convention text for `field` of the config section `where` ("config" for the top level, "text_config"): the note of the class that
+    matches the section, with its class name first. A class of another section that states a different numbering is named too, so
+    the porter sees the disagreement. When no class of the section documents the field, the classes that do are named and the note says
+    they belong to another section."""
+    candidates = [n for n in notes if n["field"] == field]
+    if not candidates:
+        return UNKNOWN_CONVENTION
+    wanted = "text" if where == "text_config" else "top"
+    mine = [n for n in candidates if _class_kind(n["class"]) == wanted]
+    if not mine:
+        listed = "; ".join(f"{n['class']}: {n['note']}" for n in candidates[:2])
+        return (f"the reference states this only in classes for other sections than {where} ({listed}): compare these ids with the "
+                "layer numbers of the tensors below before using them as layer indexes")
+    first = mine[0]
+    text = f"{first['class']}: {first['note']}"
+    first_one = bool(_ONE_BASED.search(first["note"]))
+    for other in (n for n in candidates if n is not first and bool(_ONE_BASED.search(n["note"])) != first_one):
+        text += f" | A different class, {other['class']}, states: {other['note'][:120]}"
+    return text
 
 
 def reference_root(run, python) -> Path | None:
@@ -149,19 +228,35 @@ def _config(snapshot: Path) -> dict:
         raise PortFactsError(f"config.json is not usable ({exc.reason})") from None
 
 
-def _scalars(section: dict) -> tuple[dict, list]:
-    """The small scalar and list-of-scalar fields of a config section (sorted, at most MAX_CONFIG_FIELDS), and the names left out."""
-    kept, left = {}, []
+def _scalars(section: dict) -> tuple[dict, list, int, int]:
+    """The small scalar and list-of-scalar fields of a config section (sorted, at most MAX_CONFIG_FIELDS) and, for the rest:
+
+      * the names left out (at most MAX_LEFT_NAMES; the number beyond that is counted),
+      * the number of keys that are not copied at all because they are not a plain identifier of at most MAX_KEY_CHARS characters.
+    A key comes from the model's own config, and the agent reads this file first, so a long or odd key is never copied: neither as a field
+    nor in a left-out list. Values are capped by MAX_STR and MAX_LIST."""
+    kept, left, more, unlisted = {}, [], 0, 0
     for key in sorted(section):
+        if not _KEY.fullmatch(key):
+            unlisted += 1
+            continue
         v = section[key]
         simple = isinstance(v, (bool, int, float)) or (isinstance(v, str) and len(v) <= MAX_STR)
         if isinstance(v, list) and len(v) <= MAX_LIST and all(isinstance(x, (bool, int, float)) or (isinstance(x, str) and len(x) <= MAX_STR) for x in v):
             simple = True
         if simple and len(kept) < MAX_CONFIG_FIELDS:
             kept[key] = v
-        else:
+        elif len(left) < MAX_LEFT_NAMES:
             left.append(key)
-    return kept, left
+        else:
+            more += 1
+    return kept, left, more, unlisted
+
+
+def _is_flag_list(values: list) -> bool:
+    """A list of three or more 0s and 1s is one flag per layer (`no_rope_layers: [1, 1, 1, 0]`), not a set of layer ids: a set of ids has no
+    repeats, and a list of only 0 and 1 with three entries or more must repeat. Two entries (`[0, 1]`) stay ids."""
+    return len(values) >= 3 and all(isinstance(x, int) and not isinstance(x, bool) and x in (0, 1) for x in values)
 
 
 def _ranges(numbers) -> str:
@@ -244,37 +339,47 @@ def build(snapshot, *, reference_source=None, reference_lookup=None) -> dict:
     except residency.ResidencyError as exc:
         raise PortFactsError(str(exc)) from None
     nested = config.get("text_config") if isinstance(config.get("text_config"), dict) else None
-    top, top_left = _scalars({k: v for k, v in config.items() if k != "text_config"})
-    text, text_left = _scalars(nested) if nested is not None else ({}, [])
+    top, top_left, top_more, top_unlisted = _scalars({k: v for k, v in config.items() if k != "text_config"})
+    text, text_left, text_more, text_unlisted = _scalars(nested) if nested is not None else ({}, [], 0, 0)
     model_types = [m for m in (config.get("model_type"), (nested or {}).get("model_type")) if isinstance(m, str)]
+    shown_types = [m for m in model_types if _SHOWN_MODEL_TYPE.fullmatch(m)]       # the model's own text is shown only as a short identifier
     if reference_source is None and reference_lookup is not None:
-        reference_source = next((s for s in (reference_lookup(m) for m in model_types) if s), None)
+        reference_source = next((s for s in (reference_lookup(m) for m in shown_types) if s), None)
     unlisted: list = []
     notes = convention_notes(reference_source, unlisted)
-    by_field = {n["field"]: n["note"] for n in notes}
-    index_fields = []
+    index_fields, flag_fields, index_more = [], [], 0
     for where, section in (("config", top), ("text_config", text)):
         for key, v in section.items():
             if INDEX_FIELD.search(key) and isinstance(v, list) and v and all(isinstance(x, int) and not isinstance(x, bool) for x in v):
-                index_fields.append({"field": key, "in": where, "values": v, "convention": by_field.get(key, UNKNOWN_CONVENTION)})
+                if _is_flag_list(v):
+                    flag_fields.append(key)
+                elif len(index_fields) < MAX_INDEX_FIELDS:
+                    index_fields.append({"field": key, "in": where, "values": v, "convention": _pick_convention(notes, key, where)})
+                else:
+                    index_more += 1
     lines, long_names = _groups(headers.tensors)
     schedule, schedule_note = _schedule(nested if nested is not None else config)
-    facts = {"schema": SCHEMA, "model_type": model_types[0] if model_types else None, "config": top,
-             "config_left_out": sorted(top_left)}
+    facts = {"schema": SCHEMA, "model_type": shown_types[0] if shown_types else None,
+             "model_type_not_listed": bool(model_types) and not shown_types, "config": top,
+             "config_left_out": sorted(top_left), "config_left_out_more": top_more, "config_keys_not_listed": top_unlisted}
     if nested is not None:
-        facts["text_config"], facts["text_config_left_out"] = text, sorted(text_left)
+        facts.update({"text_config": text, "text_config_left_out": sorted(text_left), "text_config_left_out_more": text_more,
+                      "text_config_keys_not_listed": text_unlisted})
     facts.update({"layer_schedule": schedule, "layer_schedule_note": schedule_note, "index_fields": index_fields,
+                  "index_fields_left_out": index_more, "layer_flag_fields": sorted(flag_fields),
                   "conventions": notes, "conventions_left_out": len(unlisted), "weights": _weights(snap, headers),
                   "tensor_groups": len(lines), "tensors": lines, "tensors_left_out": 0, "tensors_with_long_names": long_names,
                   "reading": ("Tensor lines are one per name pattern ({i} stands for a number in the name) with dtype, shape, how many "
                               "tensors and, when the name has a number, which numbers. Layer ids in the config may be counted from 0 or "
-                              "from 1: see index_fields.")})
+                              "from 1: see index_fields. layer_flag_fields hold one 0 or 1 per layer, not layer ids. A config key that is "
+                              "not a plain identifier of at most 80 characters is counted (`*_keys_not_listed`) and never copied.")})
     return _fit(facts)
 
 
 def _fit(facts: dict) -> dict:
     """Drop tensor lines from the end, then config fields, until the file fits MAX_CHARS. Every field dropped is named in the matching
-    `*_left_out` list, so the coder can tell a setting the summary dropped from one the checkpoint does not have.
+    `*_left_out` list (up to MAX_LEFT_NAMES names; the rest are counted in `*_left_out_more`), so the coder can tell a setting the summary
+    dropped from one the checkpoint does not have.
 
     The header reader allows a million tensors, so the tensor lines are cut in one pass over their own encoded lengths (each costs its
     text, a four-space indent, a comma and a newline) to the longest prefix that can fit; the exact check then removes at most the few lines
@@ -300,7 +405,10 @@ def _fit(facts: dict) -> dict:
     for section, left_out in (("text_config", "text_config_left_out"), ("config", "config_left_out")):
         while size() > MAX_CHARS and facts.get(section):
             key, _ = facts[section].popitem()
-            facts[left_out] = sorted([*facts[left_out], key])
+            if len(facts[left_out]) < MAX_LEFT_NAMES:                     # the list of names stays capped; the rest are counted
+                facts[left_out] = sorted([*facts[left_out], key])
+            else:
+                facts[left_out + "_more"] += 1
     if size() > MAX_CHARS:
         raise PortFactsError("the facts do not fit one read_file page even without tensors")
     return facts
