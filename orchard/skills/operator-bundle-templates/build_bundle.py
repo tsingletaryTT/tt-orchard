@@ -271,8 +271,14 @@ class Run:
                       for n in range(9)}
         self.outcome = {}          # stage -> the data of its last stage_end
         self.attempts = {}         # stage -> stage_start entries that were not a skip
+        # The numbers a passing gate accepted as the agent reported them (issue 445): the supervisor wrote one decision for each such gate.
+        self.unverified = []
         for e in entries:
             n = e.get("stage")
+            data = e.get("data")
+            if e.get("event") == "decision" and isinstance(n, int) and isinstance(data, dict) \
+                    and data.get("decision") == stages_mod.UNVERIFIED_LEDGER_DECISION and isinstance(data.get("numbers"), list):
+                self.unverified.append({"stage": n, "numbers": [x for x in data["numbers"] if isinstance(x, str)]})
             if e.get("event") == "stage_end" and isinstance(n, int):
                 self.outcome[n] = e["data"]
             elif e.get("event") == "stage_start" and isinstance(n, int) and not e["data"].get("skip"):
@@ -2097,6 +2103,12 @@ def thin_evidence(run: Run, redact: Redactor) -> list[str]:
         if isinstance(c, dict) and "form check" in str(c.get("note", "")).lower():
             items.append(f"Stage 1's check \"{c.get('name')}\" is a form check only. Evidence: "
                          f"{ev(c.get('evidence'))}.")
+    seen_numbers = set()
+    for u in getattr(run, "unverified", []):
+        for text in u["numbers"]:
+            if text not in seen_numbers:
+                seen_numbers.add(text)
+                items.append(f"Unverified: {redact(one_line(text))} (stage {u['stage']}, recorded in `ledger.jsonl`).")
     items.append("Each gate checks the shape of a result file and that its evidence files exist. "
                  "A gate cannot tell whether a claim is true.")
     return items

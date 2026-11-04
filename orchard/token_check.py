@@ -221,3 +221,57 @@ def _problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, w
             out.append(f"{where}{label} top1_agreement {show(obj.get('top1_agreement'))} is not what swap-check.json teacher_forced gives "
                        f"({top1:.6g}: {truth})")
     return out
+
+
+# ---- the stage 7 boot check (issue 445) ----------------------------------------------------------------------------------------------
+
+def boot_problems(report: Any, reference_ids: Any, where: str = "", *, require_records: bool = True) -> list[str]:
+    """The reasons the numbers of the boot check's verify.json (`report`) are not what its raw `teacher_forced` records give against stage 1's
+    reference ids. `verify_bundle.py` (orchard/package_templates/) writes, for each of its 32 positions, the first token the served model chose
+    when it was fed the reference tokens before that position, plus `n_tokens`, `matches`, `top1_agreement` and the mismatches. The card's
+    boot-check row cites those numbers, so they are recomputed here the way the stage 2 numbers are (`problems`).
+
+    A report with no `teacher_forced` is refused when `require_records` is set (the supervisor hashed the file when the test ended, so the
+    template that wrote it records them) and judged as before otherwise. Never raises: an exception becomes one refusal that names its class."""
+    try:
+        found = _boot_problems(report, reference_ids, where, require_records=require_records)
+    except Exception as exc:
+        return [f"{where}verify.json: the boot check could not be read ({type(exc).__name__}), so its numbers cannot be recomputed from the "
+                "server's replies"]
+    return [cut_text(r) for r in found]
+
+
+def _boot_problems(report: Any, reference_ids: Any, where: str, *, require_records: bool) -> list[str]:
+    if not isinstance(report, dict):
+        return [f"{where}verify.json is not an object, so the boot check cannot be recomputed"] if require_records else []
+    forced = report.get("teacher_forced")
+    if forced is None:
+        if not require_records:
+            return []
+        return [f"{where}verify.json has no teacher_forced records, so the boot check's top1 agreement cannot be recomputed from the "
+                "server's replies"]
+    got, why = recompute(forced, reference_ids)
+    if got is None:
+        return [f"{where}verify.json: {r}" for r in why]
+    n, matches, top1 = got["n_tokens"], got["matches"], got["top1_agreement"]
+    out = []
+    if require_records and n != TEMPLATE_POSITIONS:
+        out.append(f"{where}verify.json teacher_forced holds {n} records, but the boot check compares {TEMPLATE_POSITIONS} positions, so a "
+                   "deleted suffix cannot be told from a shorter run")
+    truth = f"{matches} of {n} positions match stage 1's reference ids"
+    if report.get("n_tokens") != n or isinstance(report.get("n_tokens"), bool):
+        out.append(f"{where}verify.json n_tokens {show(report.get('n_tokens'))} is not the {n} records in teacher_forced")
+    if report.get("matches") != matches or isinstance(report.get("matches"), bool):
+        out.append(f"{where}verify.json matches {show(report.get('matches'))} is not what teacher_forced gives ({truth})")
+    if not _same_fraction(report.get("top1_agreement"), top1):
+        out.append(f"{where}verify.json top1_agreement {show(report.get('top1_agreement'))} is not what teacher_forced gives "
+                   f"({top1:.6g}: {truth})")
+    listed = report.get("mismatches")
+    if not isinstance(listed, list):
+        out.append(f"{where}verify.json mismatches must be a list (it has {len(got['mismatch_positions'])} positions the replies disagree on)")
+    else:
+        seen = [m.get("position") if isinstance(m, dict) else None for m in listed]
+        if seen != got["mismatch_positions"]:
+            out.append(f"{where}verify.json mismatches are not the positions teacher_forced disagrees on (it should list "
+                       f"{_positions(got['mismatch_positions']) or 'none'})")
+    return out

@@ -232,6 +232,7 @@ def stub(tmp_path, gate):
     s = SimpleNamespace(ledger=ledger, run_dir=tmp_path, _gate=lambda spec: gate)
     s._note = functools.partial(Supervisor._note, s)
     s._run_gate = functools.partial(Supervisor._run_gate, s)
+    s._note_unverified = functools.partial(Supervisor._note_unverified, s)      # _check_gate notes unverified numbers (issue 445)
     return s, ledger
 
 
