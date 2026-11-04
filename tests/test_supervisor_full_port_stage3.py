@@ -17,7 +17,7 @@ from port_check_fakes import HONEST
 from run_fakes import note
 from test_supervisor import Rig, step_skills
 from test_supervisor_full_port import FULL_PORT, PREPARE, started, with_snapshot, never_wait
-from run_fakes import bringup
+from run_fakes import bringup, where
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
 
@@ -46,8 +46,12 @@ def make3(rig, *, stage3_port=None, stage2_port=None, coherent=True):
     if stage2_port:
         files[(2, "prepare")] = {**PREPARE, "port/port_model.py": stage2_port}
 
+    rig.prepare_3_task = []
+
     def script(request):
         f = dict(files)
+        if "tools" in request and where(request) == (3, "prepare"):
+            rig.prepare_3_task.append(" ".join(str(m.get("content") or "") for m in request["messages"]))
         for n in (2, 3):
             record = rig.run_dir / "stages" / str(n) / "evidence" / "port-check.json"
             if record.is_file() and "load_s" in record.read_text():          # not a record the coder wrote during prepare
@@ -128,6 +132,15 @@ def test_stage_3_starts_from_a_copy_of_the_stage_2_port_and_the_ledger_holds_its
     paths = {f["path"] for f in copied[0]["files"]}
     assert "stages/3/port/port_model.py" in paths and all(p.startswith("stages/3/port/") for p in paths)
     assert (rig.run_dir / "stages" / "2" / "port" / "port_model.py").is_file()           # stage 2's port is still there, untouched
+
+
+def test_the_prepare_task_tells_the_coder_the_chip_count_the_copied_port_and_the_stage_3_paths(rig):
+    make3(rig)
+    abort_at_pause(rig)
+    rig.run()
+    task = rig.prepare_3_task[0]
+    assert "on 4 chips (a mesh of 1 x 4" in task and "already holds the files of the stage 2 port" in task
+    assert full_port.command(3) in task and "write nothing under `stages/2/`" in task
 
 
 def test_the_hardware_test_json_stage_3_runs_is_the_fixed_stage_3_command(rig):
