@@ -4036,3 +4036,10 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 
 - Copilot round 1 on PR 423 (issue 407): `server_address(model)` is asked for in a request of its own after the load timer stops, so `load_s` stays the time of the port's load call; tests: a two-second address callback, a slow load, a raising callback. Three mutations turned tests red.
 - Copilot round 2 on PR 423 (issue 407): the server record's load_s label describes the timed load call and says the server's own model-load time is not measured separately; it no longer claims the model was loaded before the check. The test failed against the old label first.
+
+## 2026-11-03 SenseNova code-video benchmark under Qwen Code (branch `code-video-bench-pilot`)
+- Prompt (operator): "for our benchmark of sensenova-6.8 we should try the code-video skill it mentions in the model card. qwencode should be able to run and execute it".
+- Change: `scripts/code_video_bench/` (a Docker image, a run script, a metrics poller, a summary script and two briefs) and `docs/run-logs/2026-11-03-sensenova-code-video-qwen-code.md`. The model runs inside a container with only its task directory, no credentials, all capabilities dropped, a read-only root and memory and process limits; the host network is shared because the endpoint listens on loopback.
+- Result: the 10-second title-card pilot finished in 63 minutes and the film is correct. The 20-second math explainer hit the 120-minute limit with a complete render but no `final.mp4` or `VERIFY.md`, and some numbers on screen were mid-transition values. Another client used the server for part of the explainer.
+- Observations: the model cannot see images on this package, so it measured pixels; Qwen Code reported "model doesn't support image input" three times. The pilot brief had a conflict of my own making (cap height against word width) that the model resolved and disclosed.
+- Limit: one run per brief, silent films only, judged by me from stills and contact sheets.
