@@ -2535,9 +2535,13 @@ class Supervisor:
             # The first boot converts the weights on this box (a lab run converts on the lab, which this box cannot read): the converted cache
             # and a download need disk under the cache root, and the conversion needs host RAM. Each is the record's estimate against a reading.
             free, mem = residency.machine_facts(self.paths.cache_root)
-            why = residency.machine_shortfall(rec, free_disk_bytes=free, mem_available_bytes=mem)
+            why, notice = residency.machine_check(rec, free_disk_bytes=free, mem_available_bytes=mem)
+            fb = rec["estimated"]["first_boot"] if (why or notice) else None
+            if notice and not why:
+                # The converted cache is a notice here: no port exists yet to say it writes one (review of PR 435, round 3).
+                self._note("notice", what="the converted-weight cache may not fit", detail=notice, disk_bytes_needed=fb["disk_bytes"],
+                           free_disk_bytes=free, label=rec["label"])
             if why:
-                fb = rec["estimated"]["first_boot"]
                 self._block(spec.number, why, disk_bytes_needed=fb["disk_bytes"], free_disk_bytes=free, host_ram_bytes_needed=fb["host_ram_bytes"],
                             mem_available_bytes=mem, label=rec["label"])
 

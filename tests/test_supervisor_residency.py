@@ -175,13 +175,12 @@ def run_with_readings(rig, tmp_path, monkeypatch, readings, tensors=SMALL):
     return [d["reason"] for d in rig.decisions() if d.get("decision") == "pause"]
 
 
-def test_too_little_free_disk_blocks_stage_2_with_a_disk_code_and_starts_no_prepare_step(rig, tmp_path, monkeypatch):
+def test_too_little_free_disk_for_the_converted_cache_is_a_notice_and_stage_2_goes_on(rig, tmp_path, monkeypatch):
+    """The model is local, so there is no download, and no port exists yet to say it writes a converted cache (review of PR 435, round 3)."""
     pauses = run_with_readings(rig, tmp_path, monkeypatch, (1 << 20, 1 << 50))
-    assert pauses and pauses[0].startswith("blocked: the first boot needs about") and "free disk" in pauses[0]
-    assert blocked.block_code({"reason": pauses[0]}) == "disk-full"
-    assert not started(rig, 2)
-    notice = next(e["data"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked"))
-    assert notice["evidence"]["free_disk_bytes"] == 1 << 20 and notice["evidence"]["disk_bytes_needed"] > 1 << 20
+    assert not any(p.startswith("blocked: the first boot") for p in pauses) and started(rig, 2)
+    notice = next(e["data"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("what") == "the converted-weight cache may not fit")
+    assert notice["free_disk_bytes"] == 1 << 20 and notice["disk_bytes_needed"] > 1 << 20 and "not a block" in notice["detail"]
 
 
 def test_too_little_host_ram_blocks_stage_2_as_a_model_that_does_not_fit(rig, tmp_path, monkeypatch):
@@ -225,7 +224,7 @@ def test_a_lab_run_does_not_judge_the_first_boot_by_this_boxs_disk(tmp_path, mon
     Supervisor._check_residency(stub(object()), spec)
     assert blocks == [] and reads == []                                   # a lab: nothing read, nothing blocked
     Supervisor._check_residency(stub(None), spec)
-    assert len(blocks) == 1 and reads == [tmp_path / "cache"] and "free disk" in blocks[0]       # no lab: the cache root's disk is read
+    assert len(blocks) == 1 and reads == [tmp_path / "cache"] and "host RAM" in blocks[0]       # no lab: the cache root's disk is read
 
 
 # ---- a finish-only resume of stage 2 (review of PR 435, round 1) --------------------------------------------------------------------
@@ -285,7 +284,7 @@ def test_a_check_for_a_finish_only_attempt_reads_no_machine_figure_and_blocks_no
     Supervisor._check_residency(stub, spec, hardware_pending=False)
     assert blocks == [] and reads == []
     Supervisor._check_residency(stub, spec, hardware_pending=True)
-    assert len(blocks) == 1 and "free disk" in blocks[0] and reads == [tmp_path / "cache"]
+    assert len(blocks) == 1 and "host RAM" in blocks[0] and reads == [tmp_path / "cache"]
     Supervisor._check_residency(stub, spec)                                                    # the default is the strict one
     assert len(blocks) == 2
 

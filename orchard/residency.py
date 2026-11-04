@@ -118,6 +118,9 @@ MAX_TOTAL_PARAMS = 10 ** 15          # a count above this is not a model: a host
 MOE_NOTE = ("a mixture-of-experts model keeps every expert's weights resident on the chips although only a few experts run for each token, "
             "so the chip count follows all the experts. The number of experts used per token is not in the safetensors "
             "headers and was not read")
+MOE_NOTE_HOST = ("a mixture-of-experts model whose policy keeps the routed experts in host memory puts them on no chip: they take no chip memory "
+                 "and the host RAM figure includes them. The number of experts used per token is not in the safetensors headers and was "
+                 "not read")
 BOUND_POLICY_TEXT = ("if every weight were stored at bfp4, a lower bound: tensor names and shapes were not read, so norms and other "
                      "one-dimensional tensors are counted at the block size too")
 BOUND_NOT_MEASURED = (
@@ -591,26 +594,44 @@ def machine_facts(path) -> tuple[int | None, int | None]:
     return free, mem if isinstance(mem, int) and not isinstance(mem, bool) and mem >= 0 else None
 
 
-def machine_shortfall(record, *, free_disk_bytes, mem_available_bytes) -> str | None:
-    """A sentence when the record's first boot needs more disk or host RAM than the machine reads, else None. A reading that is None, a damaged
-    record and a record that was skipped are no claim. The record's `first_boot` figures are estimates (the converted cache, the download when
-    the snapshot is not local, and the conversion's host RAM); the machine's figures are readings. The weights' own cache is the disk need."""
+def machine_check(record, *, free_disk_bytes, mem_available_bytes, cache_declared: bool = False) -> tuple[str | None, str | None]:
+    """(a blocking sentence, a notice) about the record's first boot against the machine's readings; each is None when there is nothing to say.
+    A reading that is None, a damaged record and a record that was skipped are no claim. The record's `first_boot` figures are estimates (the
+    converted cache, the download when the snapshot is not local, and the conversion's host RAM); the machine's figures are readings.
+
+    Blocking: the host RAM of the conversion, and the download of the checkpoint (it needs the disk whatever the port does). The converted-weight
+    cache is a notice, unless the caller says the port writes one (`cache_declared`): a port's `load(model_dir, mesh_device)` may convert straight
+    onto the chips and write no cache, and the check runs before stage 2 has written the port, so nothing a port declares exists yet (review of
+    PR 435, round 3)."""
     if not usable(record):
-        return None
+        return None, None
     fb = record["estimated"].get("first_boot")
     whole = lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0      # noqa: E731
     if not isinstance(fb, dict) or not whole(fb.get("disk_bytes")) or not whole(fb.get("host_ram_bytes")):
-        return None
-    parts = []
+        return None, None
+    parts, notice = [], None
     if whole(mem_available_bytes) and fb["host_ram_bytes"] > mem_available_bytes:
         parts.append(f"the model does not fit this box: the first boot's conversion needs about {_gib(fb['host_ram_bytes'])} of host RAM "
                      f"and {_gib(mem_available_bytes)} is available")
     if whole(free_disk_bytes) and fb["disk_bytes"] > free_disk_bytes:
         download = fb.get("checkpoint_bytes_to_download")
-        extra = " and the download of the checkpoint" if whole(download) and download > 0 else ""
-        parts.append(f"the first boot needs about {_gib(fb['disk_bytes'])} of free disk for the converted weights{extra}, "
-                     f"and the cache disk has {_gib(free_disk_bytes)} free")
-    return "; ".join(parts) + " (estimates of the first boot against the machine's readings; the converted size was not measured)" if parts else None
+        if whole(download) and download > free_disk_bytes:
+            parts.append(f"the checkpoint download needs about {_gib(download)} of free disk and the cache disk has {_gib(free_disk_bytes)} free")
+        elif cache_declared:
+            extra = " and the download of the checkpoint" if whole(download) and download > 0 else ""
+            parts.append(f"the first boot needs about {_gib(fb['disk_bytes'])} of free disk for the converted weights{extra}, "
+                         f"and the cache disk has {_gib(free_disk_bytes)} free")
+        else:
+            notice = (f"the first boot would need about {_gib(fb['disk_bytes'])} of free disk if the port writes a converted-weight cache, and the "
+                      f"cache disk has {_gib(free_disk_bytes)} free. Nothing declares that this port writes a cache (a loader that converts "
+                      "straight onto the chips needs none), so this is a notice and not a block; the estimate was not measured")
+    block = ("; ".join(parts) + " (estimates of the first boot against the machine's readings; the converted size was not measured)") if parts else None
+    return block, notice
+
+
+def machine_shortfall(record, *, free_disk_bytes, mem_available_bytes, cache_declared: bool = False) -> str | None:
+    """The blocking sentence of `machine_check` (the host RAM of the conversion, the download, and the converted cache when `cache_declared`)."""
+    return machine_check(record, free_disk_bytes=free_disk_bytes, mem_available_bytes=mem_available_bytes, cache_declared=cache_declared)[0]
 
 
 def _validate_totals(parameters) -> dict:
@@ -791,8 +812,14 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
     need = _chips_needed(device, dram, reserve, kv)
     mesh = 1 << (need - 1).bit_length()
     routed = by_measured.get("routed_experts")
-    moe = ({"present": True, "routed_expert_tensors": routed["tensors"], "routed_expert_checkpoint_bytes": routed["bytes"],
-            "routed_expert_stored_bytes": stored["routed_experts"], "note": MOE_NOTE} if routed else {"present": False})
+    # Where the routed experts sit follows the policy (review of PR 435, round 3): under `routed_experts=host` they stay in host memory, take no chip
+    # memory, and the note and the text must not say they occupy the chips. `routed_expert_stored_bytes` is what the policy stores, wherever it sits.
+    experts_on_host = pol["routed_experts"] == "host"
+    moe = ({"present": True, "placement": "host" if experts_on_host else "device", "routed_expert_tensors": routed["tensors"],
+            "routed_expert_checkpoint_bytes": routed["bytes"], "routed_expert_stored_bytes": stored["routed_experts"],
+            "routed_expert_device_bytes": 0 if experts_on_host else stored["routed_experts"],
+            "routed_expert_host_bytes": stored["routed_experts"] if experts_on_host else 0,
+            "note": MOE_NOTE_HOST if experts_on_host else MOE_NOTE} if routed else {"present": False})
 
     flight = max(layer_groups.values(), default=0)      # the largest group: each tensor's source plus the larger of its source and converted size
     to_download = 0 if headers.local else headers.checkpoint_bytes
@@ -916,8 +943,9 @@ def _text(rec: dict, stated: list[int]) -> list[str]:
     lines += [f"    {r['precision']:<6}{_gib(r['device_bytes']):>13} on the chips  needs {r['chips_needed']} chips" for r in e["precision_options"]["rows"]]
     moe = e["mixture_of_experts"]
     if moe["present"]:
-        lines += ["", f"  mixture of experts: {moe['routed_expert_tensors']} routed-expert tensors, {_gib(moe['routed_expert_stored_bytes'])} on the chips "
-                      f"under the policy", f"    {moe['note']}"]
+        where = (f"{_gib(moe['routed_expert_host_bytes'])} in host memory" if moe.get("placement") == "host"
+                 else f"{_gib(moe['routed_expert_stored_bytes'])} on the chips")
+        lines += ["", f"  mixture of experts: {moe['routed_expert_tensors']} routed-expert tensors, {where} under the policy", f"    {moe['note']}"]
     lines += ["", f"  chips needed: at least {e['chips_needed']} (smallest mesh {e['smallest_mesh']})",
               f"  first boot: free disk {_gib(fb['disk_bytes'])} ({'snapshot already local' if fb['snapshot_local'] else 'includes the download'}), "
               f"host RAM {_gib(fb['host_ram_bytes'])}", "", "  assumptions:"]

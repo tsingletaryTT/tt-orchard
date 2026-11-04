@@ -1611,8 +1611,9 @@ a live reading would replace.
 Next to the policy it uses, the record lists the whole model at each of bf16, bfp8 and bfp4 (`estimated.precision_options`): the bytes on
 the chips and the chips that needs. A refusal names these, so it says which precision would fit ("the highest listed precision that fits is
 bfp8, which needs 3 chips") or that none does ("the model does not fit this box at any listed precision"). A model with routed experts is
-marked (`estimated.mixture_of_experts`): every expert stays resident on the chips, so the chip count follows all the experts. Only a few run
-for a token. The number of experts per token is in `config.json`, which the estimate does not read, because the headers do not hold it.
+marked (`estimated.mixture_of_experts`): under the default policy every expert stays resident on the chips, so the chip count follows all the
+experts, and under `--policy routed_experts=host` the mark says `placement: host`, the experts take no chip memory and the text puts them in host
+memory. Only a few run for a token. The number of experts per token is in `config.json`, which the estimate does not read, because the headers do not hold it.
 
 For a repository too large to read header by header, `tt-orchard residency owner/name --totals-only --chips 4` makes one Hub call for the
 parameter counts by dtype and prints a lower bound for each precision. It never reads a header, a tensor name or a shape, so it counts every
@@ -1632,9 +1633,12 @@ repository answers 401 to a request with no token, and a single-file model has n
 for `deep-principle/Hydrogen-1.0`, a gated repository, is a warning, and `tt-orchard residency deep-principle/Hydrogen-1.0 --totals-only` is
 what prints the refusal numbers. A lab run skips the row, because its tests run on another box.
 
-Before a full-port stage 2 the supervisor also compares the record's first-boot figures with this machine: the disk under the cache root
-(block code `disk-full`) and the host RAM available (`model-does-not-fit`). Each is the record's estimate against a reading of
-`/proc/meminfo` and the filesystem. A reading that cannot be taken is no claim (a MemAvailable of zero is a reading, and a cache root that does
+Before a full-port stage 2 the supervisor also compares the record's first-boot figures with this machine. Two of them block: the download of
+the checkpoint against the free disk under the cache root (block code `disk-full`), because a download needs the disk whatever the port does,
+and the host RAM available (`model-does-not-fit`). The third, the converted-weight cache, is a ledger notice (`the converted-weight cache may
+not fit`): a port's `load(model_dir, mesh_device)` may convert straight onto the chips and write no cache (`scripts/minicpm3/chip_model.py`
+does), and the check runs before stage 2 has written the port. `residency.machine_check(..., cache_declared=True)` gives the block back for a
+caller that knows the port writes a cache. Each figure is the record's estimate against a reading of `/proc/meminfo` and the filesystem. A reading that cannot be taken is no claim (a MemAvailable of zero is a reading, and a cache root that does
 not exist yet is measured at its nearest existing parent), and a lab run skips the check because the first boot happens on the lab. The check
 applies to the full-port stage 2 only: a scoring port loads a tokenizer and checks a server that is already running, so it converts nothing. It
 applies to an attempt that runs the hardware test (a first attempt, a resume before the test ended, a retry that reruns a failed test). A resume

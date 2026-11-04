@@ -273,8 +273,8 @@ def test_the_machine_check_is_quiet_when_disk_and_ram_hold_the_first_boot():
     assert rs.machine_shortfall(record(), free_disk_bytes=10 * GIB, mem_available_bytes=20 * GIB) is None      # exactly enough
 
 
-def test_too_little_disk_names_both_numbers_and_is_a_disk_block():
-    why = rs.machine_shortfall(record(disk=500 * GIB), free_disk_bytes=120 * GIB, mem_available_bytes=None)
+def test_too_little_disk_for_a_declared_cache_names_both_numbers_and_is_a_disk_block():
+    why = rs.machine_shortfall(record(disk=500 * GIB), free_disk_bytes=120 * GIB, mem_available_bytes=None, cache_declared=True)
     assert "500.0 GiB" in why and "120.0 GiB" in why and "free disk" in why
     assert blocked.block_code({"reason": "blocked: " + why}) == "disk-full"
 
