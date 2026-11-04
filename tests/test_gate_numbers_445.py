@@ -161,7 +161,7 @@ def test_a_bound_run_whose_evidence_file_was_deleted_is_refused(tmp_path):
     g, run = sidecar_stage(tmp_path, bind=True)
     (run / SP).unlink()
     g2 = gate_weights_swap_sidecar(run / "stages" / "2", run)
-    assert not g2.ok and mentions(g2.reasons, "sidecar-parity.json")
+    assert not g2.ok and mentions(g2.reasons, "sidecar-parity.json", "supervisor hashed")
 
 
 def test_an_unbound_legacy_evidence_file_passes_and_is_marked_unverified(tmp_path):
@@ -268,6 +268,16 @@ def test_editing_the_boot_records_and_the_numbers_together_is_refused_when_the_f
     write(run, "stages/7/verify/evidence/verify.json", boot_report(bad=()))
     reasons, _ = stages.boot_check_reasons(run / "stages" / "7", run, boot_report(bad=()))
     assert mentions(reasons, "verify.json", "supervisor hashed")
+
+
+def test_a_report_that_differs_from_the_hashed_file_is_refused(tmp_path):
+    """The gate's own read of verify.json and the hashed file must be the same document."""
+    run = tmp_path / "run"
+    write(run, REF_PATH, {"generated_ids": REF})
+    write(run, "stages/7/verify/evidence/verify.json", boot_report())
+    boot_ledger(run, ids=True, raw=True)
+    reasons, _ = stages.boot_check_reasons(run / "stages" / "7", run, boot_report(bad=()))
+    assert mentions(reasons, "changed while the gate was reading")
 
 
 def test_a_bound_boot_check_without_records_is_refused(tmp_path):
