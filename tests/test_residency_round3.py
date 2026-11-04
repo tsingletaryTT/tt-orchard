@@ -114,7 +114,10 @@ def test_no_available_ram_at_all_is_a_shortfall_not_a_skipped_check(tmp_path, mo
 # ---- 4. nesting that is deeper than the parser can read ----------------------------------------------------------------------------------------
 
 DEEP = "body = ('[' * 400000 + ']' * 400000).encode()"
-OPENER = ("class R:\n    def __enter__(s): return s\n    def __exit__(s, *a): return False\n    def read(s, n=-1): return body if n < 0 else body[:n]\n")
+# The response gives the body once and then ends, as a real one does. An earlier version returned the same bytes for every read, so the reader
+# stopped at its byte cap and the parser was never reached (review of PR 435, round 4).
+OPENER = ("import io\nclass R:\n    def __init__(s): s.f = io.BytesIO(body)\n    def __enter__(s): return s\n    def __exit__(s, *a): return False\n"
+          "    def read(s, n=-1): return s.f.read(n)\n")
 
 
 def test_a_config_nested_past_the_recursion_limit_is_unreadable_and_never_raises():
@@ -410,3 +413,52 @@ def test_a_scoring_stage_still_gets_the_chip_count_check(tmp_path, monkeypatch):
                            _block=lambda stage, why, **ev: blocked_with.append(why))
     Supervisor._check_residency(stub, SimpleNamespace(boards=1, number=2, draft="scoring_check"))
     assert blocked_with and "chips" in blocked_with[0]
+
+
+# ---- review of PR 435, round 4: a real response is read in single receives, so the deadline is checked after each one -------------------------
+
+def test_the_deep_nesting_fixtures_reach_the_parser_and_are_not_stopped_by_the_byte_cap():
+    done = in_limited_child(f"{DEEP}\n{OPENER}from orchard import preflight as pf\n"
+                            "r = R(); got = pf._read_capped(r, pf.CONFIG_FETCH_BYTES, lambda: 0.0)\n"
+                            "print(len(got) if got is not None else None, len(body))")
+    assert done.returncode == 0 and done.stdout.split()[0] == done.stdout.split()[1] != "None", done.stdout + done.stderr[-300:]
+
+
+def _drip_http_response(tick_state):
+    """A real http.client.HTTPResponse over a raw stream that gives its header at once and then one byte per receive, moving a fake clock one
+    second per receive. `read(n)` on it makes one receive after another until n bytes have come."""
+    import http.client
+    import io
+
+    class Raw(io.RawIOBase):
+        def __init__(self):
+            self.head = b"HTTP/1.1 200 OK\r\nContent-Length: 100000000\r\n\r\n"
+
+        def readable(self):
+            return True
+
+        def readinto(self, b):
+            if self.head:
+                n = min(len(b), len(self.head))
+                b[:n] = self.head[:n]
+                self.head = self.head[n:]
+                return n
+            tick_state["receives"] += 1
+            tick_state["now"] += 1.0
+            b[0:1] = b"x"
+            return 1
+
+    class Sock:
+        def makefile(self, *a, **k):
+            return io.BufferedReader(Raw(), buffer_size=1 << 16)
+
+    resp = http.client.HTTPResponse(Sock())
+    resp.begin()
+    return resp
+
+
+def test_a_real_response_that_drips_a_byte_per_receive_is_cut_off_near_the_total_deadline():
+    st = {"receives": 0, "now": 0.0}
+    resp = _drip_http_response(st)
+    assert pf._read_capped(resp, pf.CONFIG_FETCH_BYTES, lambda: st["now"]) is None
+    assert st["receives"] <= int(pf.HUB_TOTAL_S) + 3, st
