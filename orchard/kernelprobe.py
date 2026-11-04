@@ -810,14 +810,10 @@ def _cmdline(proc_root: str, pid: int) -> str:
 
 
 def _proc_state(proc_root: str, pid: int) -> tuple[str, int] | None:
-    """(state letter, start time in clock ticks) of a process from /proc/<pid>/stat, or None when it does not exist."""
-    try:
-        with open(os.path.join(proc_root, str(pid), "stat"), encoding="utf-8", errors="replace") as f:
-            text = f.read()
-        rest = text[text.rfind(")") + 2:].split()
-        return rest[0], int(rest[19])
-    except (OSError, ValueError, IndexError):
-        return None
+    """(state letter, start time in clock ticks) of a process from /proc/<pid>/stat, or None when it does not exist or cannot be read
+    (`_observe` tells the two apart)."""
+    st = _observe(proc_root, pid)
+    return None if st is None or st is _UNOBSERVABLE else st
 
 
 _UNOBSERVABLE = "unobservable"
