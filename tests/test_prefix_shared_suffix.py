@@ -243,3 +243,8 @@ def test_the_probe_does_not_run_for_a_can_that_does_not_declare_prefix_caching(m
         monkeypatch.setattr(sp, name, lambda *a, _n=name, **k: {"name": _n, "state": "pass", "detail": "ok"})
     can._live_probes("http://127.0.0.1:1", can.Check(expect="Paris", stream=False), _Spec(), {"model": "m"}, None, "", lambda *a, **k: None, {})
     assert called == []
+
+
+def test_the_judge_alone_does_not_decide_for_a_can_that_does_not_declare_prefix_caching():
+    r = sp.judge_prefix_shared_suffix("tangerine", "4417", "4417", cached_tokens=10, declared=False)
+    assert r["state"] == "not_checked" and r["advisory"] is True
