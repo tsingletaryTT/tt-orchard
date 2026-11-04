@@ -1845,3 +1845,167 @@ def test_a_smaller_embedding_whose_rows_are_not_the_nearest_models_is_a_full_por
     assert any("vocab_size differs" in r for r in d["path_reasons"])
     assert evidence(stage, "vocab-compare.json")["kept_subset"] is False        # the evidence is kept even when the class is not
     assert gate_delta(stage, stage.parent.parent).ok
+
+
+# ---- GGUF headers as evidence (issue 440, a slice of 439) -----------------------------------------
+# Stage 0 does not compare a GGUF file, but its header describes the model without the weights. The template reads each ignored file's header
+# (bounded, never the tensor data) into evidence/gguf-header.json and adds one finding. A file it cannot read is recorded, never fatal.
+from test_gguf_header import gguf as build_gguf, hybrid_kvs, hybrid_tensors  # noqa: E402
+
+
+def add_real_gguf(stage: Path, name="Model-Q4_K_M.gguf", **over) -> Path:
+    model = Path(json.loads((stage / "triage_config.json").read_text())["model_snapshot"])
+    (model / name).write_bytes(build_gguf(hybrid_kvs(**over), hybrid_tensors()))
+    return model
+
+
+def test_a_readable_gguf_gets_header_evidence_and_one_finding(text_case):
+    stage = text_case()
+    add_real_gguf(stage)
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    g = evidence(stage, "gguf-header.json")
+    [f] = g["files"]
+    assert f["file"] == "Model-Q4_K_M.gguf" and f["status"] == "ok" and f["architecture"] == "qwen35" and f["tied_embeddings"] is True
+    assert f["agreement_summary"]["agree"] + f["agreement_summary"]["differ"] + f["agreement_summary"]["not comparable"] == len(f["agreement"])
+    d = delta(stage)
+    [finding] = [x for x in d["differences"] if "gguf-header.json" in " ".join(x["evidence"])]
+    assert finding["area"] == "other" and "GGUF" in finding["finding"] and finding["evidence"] == ["stages/0/evidence/gguf-header.json"]
+    assert d["class"] == "weights-only" and d["ignored_files"][0]["file"] == "Model-Q4_K_M.gguf"
+
+
+def test_gguf_header_evidence_leaves_the_class_and_the_path_alone(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    a = delta(stage)
+    add_real_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    b = delta(stage)
+    assert (a["class"], a["path"], a["path_reasons"], a["sidecars"]) == (b["class"], b["path"], b["path_reasons"], b["sidecars"])
+
+
+def test_unreadable_gguf_files_are_recorded_one_by_one_and_change_nothing(text_case):
+    stage = text_case()
+    add_gguf(stage)                                         # the three one-line fake files of issue 437: none is a valid header
+    assert run_triage(stage).returncode == 0
+    g = evidence(stage, "gguf-header.json")
+    assert [f["file"] for f in g["files"]] == sorted(GGUF_FILES) and {f["status"] for f in g["files"]} == {"unreadable"}
+    assert all(f["reason"] for f in g["files"])
+    d = delta(stage)
+    assert d["class"] == "weights-only" and d["path_reasons"] == []
+    assert gate_delta(stage, stage.parent.parent).ok
+
+
+def test_a_gguf_that_disagrees_with_the_config_is_a_finding_and_not_a_failure(text_case):
+    stage = text_case()
+    add_real_gguf(stage, **{"qwen35.block_count": (4, 99)})
+    assert run_triage(stage).returncode == 0
+    [f] = evidence(stage, "gguf-header.json")["files"]
+    assert f["agreement_summary"]["differ"] >= 1 or f["agreement_summary"]["not comparable"] >= 1
+    d = delta(stage)
+    assert d["class"] == "weights-only"
+    gate = gate_delta(stage, stage.parent.parent)
+    assert gate.ok, gate.reasons
+
+
+def test_the_draft_with_gguf_header_evidence_passes_the_stage_0_gate(text_case):
+    stage = text_case()
+    add_real_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    gate = gate_delta(stage, stage.parent.parent)
+    assert gate.ok, gate.reasons
+
+
+def test_a_repository_without_gguf_files_gets_no_header_evidence_and_no_finding(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    assert not (stage / "evidence" / "gguf-header.json").exists()
+    assert not any("gguf-header" in " ".join(x["evidence"]) for x in delta(stage)["differences"])
+
+
+def test_a_rerun_without_gguf_files_removes_the_header_evidence_of_the_earlier_run(text_case):
+    """Round 3 of PR 441: stage 0 reruns in the same directory (a retry, a changed snapshot). The operator bundle reads evidence/gguf-header.json
+    on its own, so a file left from a run that did see GGUF files would be read as describing a repository that no longer has them."""
+    stage = text_case()
+    model = add_real_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    path = stage / "evidence" / "gguf-header.json"
+    assert path.is_file()
+    (model / "Model-Q4_K_M.gguf").unlink()
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not path.exists() and not path.is_symlink()
+    assert not any("gguf-header" in " ".join(x["evidence"]) for x in delta(stage)["differences"])
+    assert delta(stage)["ignored_files"] == []
+
+
+def test_a_config_float_that_overflows_reaches_the_evidence_as_strict_json(text_case):
+    """Round 3 of PR 441, end to end: `1e400` in config.json is read as infinity and `1e308` times a head dimension overflows. Neither may stop
+    stage 0 or put `Infinity` into evidence/gguf-header.json, which the operator bundle reads with a strict reader."""
+    stage = text_case()
+    model = add_real_gguf(stage)
+    cfg = json.loads((model / "config.json").read_text())
+    cfg.update({"rms_norm_eps": "@@INF@@", "head_dim": 128, "partial_rotary_factor": "@@HUGE@@"})
+    (model / "config.json").write_text(json.dumps(cfg).replace('"@@INF@@"', "1e400").replace('"@@HUGE@@"', "1e308"))
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    raw = (stage / "evidence" / "gguf-header.json").read_text()
+    json.loads(raw, parse_constant=lambda c: pytest.fail(f"a non-strict JSON constant, {c}, was written"))
+    assert "Infinity" not in raw and "NaN" not in raw
+    [f] = json.loads(raw)["files"]
+    rows = {x["item"]: x for x in f["agreement"]}
+    assert rows["rms norm epsilon"]["verdict"] == "not comparable" and rows["rms norm epsilon"]["config"] is None
+    assert rows["rope dimension"]["verdict"] == "not comparable"
+    assert gate_delta(stage, stage.parent.parent).ok
+
+
+def test_a_rerun_with_a_different_gguf_replaces_the_header_evidence(text_case):
+    stage = text_case()
+    model = add_real_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    (model / "Model-Q4_K_M.gguf").unlink()
+    add_real_gguf(stage, name="Other-Q8_0.gguf")
+    assert run_triage(stage).returncode == 0
+    assert [f["file"] for f in evidence(stage, "gguf-header.json")["files"]] == ["Other-Q8_0.gguf"]
+
+
+def test_a_stale_header_evidence_that_cannot_be_removed_does_not_stop_stage_0(text_case):
+    """A directory where the file belongs (an agent can write there) is left alone and named; stage 0 goes on."""
+    stage = text_case()
+    (stage / "evidence" / "gguf-header.json").mkdir(parents=True)
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (stage / "evidence" / "gguf-header.json").is_dir() and "gguf-header.json" in r.stdout
+
+
+def test_the_mtp_row_carries_the_tensor_count_stage_0_found_in_the_safetensors(text_case):
+    stage = text_case()
+    model = add_real_gguf(stage)
+    cfg = json.loads((model / "config.json").read_text())
+    cfg["mtp_num_hidden_layers"] = 1                       # the config declares a head; the fixture's safetensors and the GGUF have none
+    (model / "config.json").write_text(json.dumps(cfg))
+    assert run_triage(stage).returncode == 0
+    [f] = evidence(stage, "gguf-header.json")["files"]
+    [row] = [r for r in f["agreement"] if r["item"] == "multi-token prediction layers"]
+    d = delta(stage)
+    assert row["verdict"] == "differ" and row["gguf"] == 0 and row["config"] == 1
+    assert f"the safetensors carry {d['mtp']['new_tensors']} mtp tensors" in row["note"]
+
+
+# ---- PR 441, third Copilot review: text that cannot be encoded as UTF-8 never stops stage 0 -------------------------------------
+
+def test_a_gguf_named_with_bytes_that_are_not_utf8_does_not_stop_stage_0_and_delta_json_reads_back(text_case):
+    stage = text_case()
+    name = os.fsdecode(b"bad\xffname-Q4_K_M.gguf")                       # Python reads such a file name with a lone surrogate in it
+    add_gguf(stage, names=(name,))
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = delta(stage)
+    assert any(i["file"] == name for i in d["ignored_files"])
+
+
+def test_a_lone_surrogate_in_tokenizer_config_chat_template_does_not_stop_stage_0(text_case):
+    stage = text_case(extra_files={"tokenizer_config.json": '{"chat_template": "x\\ud800y"}'})
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert area(delta(stage), "chat_template")["finding"]

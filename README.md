@@ -1245,6 +1245,27 @@ sidecar, except a `.gguf` file: that is llama.cpp's format (a quantized copy of 
 top-level `.py` file in the repo with its sha256 (`code_files`). The triage script reads headers and
 hashes files. It never imports or runs a code file.
 
+**GGUF headers as evidence** (issue 440, a slice of 439). A GGUF header describes the model without the weights, so stage 0 reads the
+header of each ignored `.gguf` file into `evidence/gguf-header.json`. The read is bounded: one descriptor, at most 64 MiB of header, array and
+string lengths checked against the file size and a cap before they are used, and never the tensor data. A link is followed only when it leads inside the snapshot or the cache's own `blobs`
+directory (checked on the opened descriptor, so a link swapped after a path check cannot lead outside), and the opened file must be a regular
+file. One header may take 8 seconds and all headers of a run share 20; a slower file is recorded as too slow. The record lists at most 64 tensor
+kinds (the rest are summed under `by_kind_other`, with `by_kind_cut` giving the counts), and the whole evidence file stays under 3 MiB, dropping
+detail in a fixed order that `detail_dropped` names. For each file the record holds the architecture's
+hyperparameters, whether the output projection is tied, the multi-token-prediction count, a hash of the embedded chat template and the
+quantization of each kind of tensor (the layer number folded into `N`), with the kinds left at full precision listed. It also holds an
+`agreement` table against `config.json`: each row (block count, sizes, heads, rope settings, layer pattern, the linear-attention
+dimensions, tied embeddings, the multi-token-prediction count, vocabulary size, the chat template) says agree, differ or not comparable,
+with both values. Every physical read of the file asks for exactly the bytes of one validated field, so no byte past the header or past the
+cap is read. Integer rows compare exactly (a tolerance is kept for floats only), and a number too large for a float makes a row not comparable
+and never stops stage 0. A file of a split GGUF lists one shard's tensors: its record says `tensor_inventory_complete: false` and tying is
+reported as unknown unless that shard holds an `output.weight`. A header that cannot be read is listed as unreadable with its reason. Nothing
+here changes the class or the path, and a
+difference is a finding for the agent and the operator to read, never a gate failure. `delta.json` gets one finding that points at the
+file, and RISKS.md gets a section, "What the GGUF files show", which says no stage records using the full-precision list. That list is
+llama.cpp's choice for that file. It is a hint about which tensors are sensitive to precision, and it was not measured on this hardware. The TT
+stack and vLLM load safetensors; no stage loads or dequantizes a GGUF.
+
 **The sidecar parity check** (stage 2, class `weights+sidecar`; skill `weights-sidecar-check`). The sidecar
 head reads the backbone's final hidden state for every token, which the TT serving stack does not return.
 `hidden_parity.py` (in `orchard/skills/sidecar-parity-templates/`) loads the backbone on the leased board

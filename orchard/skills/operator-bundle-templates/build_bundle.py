@@ -242,14 +242,20 @@ class Redactor:
 
 # ---- what the run produced --------------------------------------------------------------------------
 
+def read_capped_json_why(path: Path, *, max_bytes: int = 4 << 20) -> tuple[dict | None, str | None]:
+    """(data, why): the JSON object at `path` through orchard/safeio.py (size cap, no link followed, no FIFO read, strict JSON). (None, None)
+    when the file is absent; ({}, reason) when it exists and cannot be read as an object, with safeio's short reason (it never holds content)."""
+    from orchard import safeio
+    try:
+        return safeio.read_json(path, max_bytes=max_bytes, expect=dict), None
+    except safeio.SafeReadError as exc:
+        return (None, None) if "ENOENT" in str(exc.reason) else ({}, str(exc.reason))
+
+
 def read_capped_json(path: Path, *, max_bytes: int = 4 << 20) -> dict | None:
     """The JSON object at `path` through orchard/safeio.py (size cap, no link followed, no FIFO read, strict JSON). None when the file is
     absent, {} when it exists and cannot be read as an object."""
-    from orchard import safeio
-    try:
-        return safeio.read_json(path, max_bytes=max_bytes, expect=dict)
-    except safeio.SafeReadError as exc:
-        return None if "ENOENT" in str(exc.reason) else {}
+    return read_capped_json_why(path, max_bytes=max_bytes)[0]
 
 
 class Run:
@@ -283,6 +289,7 @@ class Run:
         # Stage 0's hazard scan (orchard/stage0_scan.py, issue 183): None when the run has none (an older run), {} when the file is unreadable.
         self.scan_file = s / "0" / "hazard-scan.json"
         self.scan = read_capped_json(self.scan_file)
+        self.gguf, self.gguf_why = read_capped_json_why(s / "0" / "evidence" / "gguf-header.json")   # issue 440: None when stage 0 ignored no GGUF file
         self.reference = {} if (self.audio_run or self.text_run) else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
@@ -2156,6 +2163,80 @@ def scan_risks(run: Run, redact: Redactor) -> list[str]:
     return lines
 
 
+GGUF_FILE = "stages/0/evidence/gguf-header.json"
+GGUF_ROWS_SHOWN = 30            # differing rows listed per file
+GGUF_KINDS_SHOWN = 30           # full-precision tensor kinds listed per file
+
+
+def gguf_files(run: Run) -> list[dict] | None:
+    """The per-file records of evidence/gguf-header.json that have the expected shape. None when stage 0 wrote no such file (a run with no GGUF
+    file, or from before issue 440); [] when the file exists but cannot be read or holds no usable record. The file is outside data: each field
+    is checked here and each record that fails is dropped."""
+    g = run.gguf
+    if g is None:
+        return None
+    files = g.get("files") if isinstance(g, dict) else None
+    if not isinstance(files, list):
+        return []
+    return [f for f in files if isinstance(f, dict) and isinstance(f.get("file"), str) and f.get("status") in ("ok", "unreadable")][:16]
+
+
+def gguf_risks(run: Run, redact: Redactor) -> list[str]:
+    """The "What the GGUF files show" section of RISKS.md: an independent reading of the architecture, where it differs from config.json, and
+    the tensors the quantization left at full precision as a hint for the datatype choice. No stage records that it used the hint."""
+    files = gguf_files(run)
+    if files is None:
+        return []           # no GGUF file was ignored, or a run from before issue 440: the same RISKS.md as before
+    cap = lambda v, n=120: redact(one_line(v))[:n]
+    lines = ["## What the GGUF files show", "",
+             "The repository ships GGUF files (llama.cpp's format). The TT runtime and vLLM load safetensors, and no stage uses these files as "
+             "weights. Stage 0 read each header without the weights. That gives an independent reading of the architecture and a hint about "
+             f"which tensors are sensitive to precision. Evidence: `{GGUF_FILE}`.", ""]
+    if not files:
+        why = getattr(run, "gguf_why", None)
+        if why:
+            return lines + [f"The evidence file `{GGUF_FILE}` could not be read: {cap(why, 200)}. Stage 0 keeps it under 3 MiB, so a file this "
+                            "size or shape was not written by stage 0 as it stands. The header details are not shown.", ""]
+        return lines + [f"The evidence file `{GGUF_FILE}` was read and holds no usable record.", ""]
+    for f in files:
+        lines += [f"### {cap(f['file'])}", ""]
+        if f["status"] != "ok":
+            lines += [f"- The header could not be read: {cap(f.get('reason', 'no reason recorded'), 200)}.", ""]
+            continue
+        n = f.get("tensor_count")
+        lines.append(f"- {cap(f.get('role', 'unknown'))}, architecture {cap(f.get('architecture') or 'not stated')}"
+                     + (f", {n} tensors" if isinstance(n, int) and not isinstance(n, bool) else "")
+                     + (f", GGUF file type {f['file_type']}" if isinstance(f.get("file_type"), int) and not isinstance(f.get("file_type"), bool) else "") + ".")
+        rows = [r for r in (f.get("agreement") or []) if isinstance(r, dict) and isinstance(r.get("item"), str)] if isinstance(f.get("agreement"), list) else []
+        count = {v: sum(1 for r in rows if r.get("verdict") == v) for v in ("agree", "differ", "not comparable")}
+        summary = f.get("agreement_summary")
+        if not rows and isinstance(summary, dict) and all(isinstance(summary.get(v), int) and not isinstance(summary.get(v), bool) and summary[v] >= 0
+                                                          for v in count):
+            # Stage 0 reduces a file to its summary when the evidence reaches its size cap: the counts survive and the rows do not. The
+            # recorded counts are shown and the missing rows are said to be missing, so a recorded difference is not reported as zero.
+            count = {v: summary[v] for v in count}
+            lines.append(f"- Agreement with config.json: {count['agree']} agree, {count['differ']} differ, {count['not comparable']} not "
+                         "comparable (the individual rows are not available: stage 0 dropped them to keep the evidence file small).")
+        else:
+            lines.append(f"- Agreement with config.json: {count['agree']} agree, {count['differ']} differ, {count['not comparable']} not comparable.")
+        differing = [r for r in rows if r.get("verdict") == "differ"]
+        for r in differing[:GGUF_ROWS_SHOWN]:
+            note = f" {cap(r['note'], 300)}." if isinstance(r.get("note"), str) and r["note"] else ""
+            lines.append(f"  - {cap(r['item'])}: GGUF {cap(fmt(r.get('gguf')))}; config {cap(fmt(r.get('config')))}.{note}")
+        if len(differing) > GGUF_ROWS_SHOWN:
+            lines.append(f"  - {len(differing) - GGUF_ROWS_SHOWN} more differing rows are in the evidence file.")
+        quant = f.get("quantization") if isinstance(f.get("quantization"), dict) else {}
+        full = [x for x in (quant.get("full_precision") or []) if isinstance(x, dict) and isinstance(x.get("kind"), str)] if isinstance(quant.get("full_precision"), list) else []
+        if full:
+            shown = ", ".join(f"{cap(x['kind'], 60)} ({cap(x.get('type', '?'), 8)}, {x['count']})" if isinstance(x.get("count"), int) else cap(x["kind"], 60)
+                              for x in full[:GGUF_KINDS_SHOWN])
+            more = f", and {len(full) - GGUF_KINDS_SHOWN} more" if len(full) > GGUF_KINDS_SHOWN else ""
+            lines.append("- Kept at full precision by the tool that quantized this file (a hint for the datatype choice from llama.cpp's "
+                         f"decision for this file; it was not measured on Tenstorrent hardware): {shown}{more}.")
+        lines += ["- Used by a later stage: Not shown. No stage records that it used these files.", ""]
+    return lines
+
+
 def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
     repo, _ = run.model()
     lines = [f"# Risks: {repo}", "",
@@ -2174,6 +2255,7 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
     if not hazards:
         lines += ["Stage 0's delta triage listed no hazards.", ""]
     lines += scan_risks(run, redact)
+    lines += gguf_risks(run, redact)
     d = run.sampling_decision
     if d is not None and d.get("flag"):
         lines += ["## Sampling choice", "",
