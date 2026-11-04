@@ -68,6 +68,7 @@ from pathlib import Path
 
 from orchard import runaway, safeio
 from orchard.canary import CanaryError, post_json
+from orchard.port_guard import PORT_GUARD_DEPTH, PORT_GUARD_ENTRIES, PORT_GUARD_FILES, PortGuard  # noqa: F401  (names stay importable from here)
 from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_TIMEOUT_S,
                               AGENT_THINKING, TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
 from orchard.runner import Denied, check_string
@@ -178,10 +179,8 @@ LOOP_NUDGE = ("Your last reply repeated itself until it was cut off. Do not anal
               "Run one command or write one file now, and keep the reply short.")
 RESTART_NOTE = ("The conversation was restarted because earlier replies repeated themselves until they were cut off. Everything you "
                 "did is on disk; the files are listed below. Read only what you need, do one thing at a time, and keep every reply short.")
-# The files a stage directory holds that the shell guard looks at: only the port, and no more than this many files and entries.
-PORT_GUARD_FILES = 200
-PORT_GUARD_ENTRIES = 2000
-PORT_GUARD_DEPTH = 4
+# The files a stage directory holds that the shell guard looks at: only the port, and no more than this many files and entries
+# (orchard/port_guard.py holds the guard and the bounds; the names stay importable from here).
 # How many replies in a row may run no command (cut off or empty) before the step ends as "error".
 BAD_REPLIES_IN_A_ROW = 2
 # The words each kind of bad reply gets in the ledger notice and in the error detail.
@@ -225,9 +224,9 @@ class Tools:
         # host tt-metal tree's models/ that those stages may change. write_file reaches it by a path that starts with its name.
         self.scratch = Path(scratch) if scratch is not None else None
         self.env, self.timeout, self.limit = env, timeout, limit
-        # What the port files held before the last shell command, so a command that makes one a runaway can be undone (issue 458).
-        self._port_stamp: dict[str, tuple[int, int]] = {}
-        self._port_backup: dict[str, bytes] = {}
+        # What the port files held before the last shell command, so a command that makes one a runaway can be undone (issue 458). The
+        # guard works only through descriptors beneath the real port directory (orchard/port_guard.py).
+        self._guard = PortGuard(self.stage_dir, self.run_dir)
 
     def call(self, name: str, arguments: str) -> str:
         try:
@@ -263,7 +262,7 @@ class Tools:
             return "error: command must be a non-empty string"
         out_path = self.stage_dir / "log" / "last-shell-output.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        self._port_remember()
+        self._guard.remember()
         try:
             with open(out_path, "wb") as out:
                 code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out)
@@ -271,97 +270,35 @@ class Tools:
             return f"refused: {exc}"
         text = out_path.read_text(encoding="utf-8", errors="replace")
         head = f"killed after {self.timeout} s" if timed_out else f"exit {code}"
-        notes = self._port_judge()
+        notes = self._guard.judge()
         return f"{head}\n{clip(text, self.limit)}" + ("\n" + "\n".join(notes) if notes else "")
 
-    def _port_files(self) -> list[tuple[str, os.stat_result]]:
-        """The regular files under <stage>/port/ (links and caches left out), at most PORT_GUARD_FILES of them, visiting at most
-        PORT_GUARD_ENTRIES entries and PORT_GUARD_DEPTH levels, so a hostile tree cannot make the guard slow."""
-        out, stack, seen = [], [(str(self.stage_dir / "port"), 0)], 0
-        while stack and len(out) < PORT_GUARD_FILES:
-            directory, depth = stack.pop()
-            try:
-                entries = os.scandir(directory)
-            except OSError:
-                continue
-            with entries:
-                for e in entries:
-                    seen += 1
-                    if seen > PORT_GUARD_ENTRIES or len(out) >= PORT_GUARD_FILES:
-                        return out
+    def _port_files(self) -> list:
+        """The regular files under <stage>/port/ the guard looks at (orchard.port_guard.PortFile: links and caches left out, bounded)."""
+        return self._guard.files()
+
+    def restart_files(self, limit: int = 40) -> list[str]:
+        """Lines naming the files of the stage directory and of its port that a restarted step is told about, at most `limit`, read
+        with a bounded scan (at most PORT_GUARD_ENTRIES entries of the stage directory, and the guard's own bounds for the port). The port
+        is read beneath its pinned directory, so a link in place of it lists nothing."""
+        found: list[tuple[str, int]] = []
+        try:
+            with safeio.pinned_root(self.stage_dir) as stage, os.scandir(stage.fd) as entries:
+                for seen, e in enumerate(entries, 1):
+                    if seen > PORT_GUARD_ENTRIES or len(found) >= limit:
+                        break
                     try:
-                        if e.is_symlink():
-                            continue
-                        if e.is_dir(follow_symlinks=False):
-                            if depth < PORT_GUARD_DEPTH and e.name != "__pycache__":
-                                stack.append((e.path, depth + 1))
-                        elif e.is_file(follow_symlinks=False):
-                            out.append((e.path, e.stat(follow_symlinks=False)))
+                        if e.is_file(follow_symlinks=False):
+                            found.append((os.path.relpath(self.stage_dir / e.name, self.run_dir), e.stat(follow_symlinks=False).st_size))
                     except OSError:
                         continue
-        return out
-
-    @staticmethod
-    def _port_read(path: str, size: int) -> bytes | None:
-        """The bytes of a port file of at most MAX_FILE_BYTES bytes, through the bounded safe reader, or None (too large, or the reader
-        refuses it: a FIFO, a link, a device)."""
-        if size > runaway.MAX_FILE_BYTES:
-            return None
-        try:
-            return safeio.read_bytes(path, max_bytes=runaway.MAX_FILE_BYTES)
         except (safeio.SafeReadError, OSError):
-            return None
-
-    def _port_remember(self) -> None:
-        """Before a shell command: keep the bytes of each port file that changed since the last look, when the file is acceptable."""
-        for path, st in self._port_files():
-            stamp = (st.st_size, st.st_mtime_ns)
-            if self._port_stamp.get(path) == stamp:
-                continue
-            self._port_stamp[path] = stamp
-            raw = self._port_read(path, st.st_size)
-            if raw is not None and runaway.file_problem(raw.decode("utf-8", errors="replace")) is None:
-                self._port_backup[path] = raw
-            else:
-                self._port_backup.pop(path, None)
-
-    def _port_judge(self) -> list[str]:
-        """After a shell command: a port file that grew past the caps or became a loop is put back as it was (or removed, when it is new),
-        and the agent is told. The command's own output has already been read. Nothing outside <stage>/port/ is looked at."""
-        notes = []
-        for path, st in self._port_files():
-            stamp = (st.st_size, st.st_mtime_ns)
-            if self._port_stamp.get(path) == stamp:
-                continue
-            if st.st_size > runaway.MAX_FILE_BYTES:
-                problem = (f"it is {st.st_size:,} bytes; the limit for a file you write is {runaway.MAX_FILE_BYTES:,}")
-            else:
-                raw = self._port_read(path, st.st_size)
-                problem = None if raw is None else runaway.file_problem(raw.decode("utf-8", errors="replace"))
-            rel = os.path.relpath(path, self.run_dir)
-            if problem is None:
-                self._port_stamp[path] = stamp
-                continue
-            backup = self._port_backup.get(path)
-            try:
-                if backup is not None:
-                    safeio.atomic_write(path, backup, mode=0o644)
-                    what = "restored"
-                else:
-                    os.unlink(path)
-                    what = "removed"
-            except OSError as exc:
-                notes.append(f"refused: {rel} is not acceptable ({problem}) and could not be put back ({exc.__class__.__name__}); "
-                             "delete it or write a shorter file")
-                continue
-            try:
-                st2 = os.lstat(path)
-                self._port_stamp[path] = (st2.st_size, st2.st_mtime_ns)
-            except OSError:
-                self._port_stamp.pop(path, None)
-            notes.append(f"refused and {what}: {rel} {problem}. Write a shorter file: a port is tens of KB, so do not repeat blocks "
-                         "and do not generate text with a loop.")
-        return notes
+            pass
+        for f in self._guard.files():
+            if len(found) >= limit:
+                break
+            found.append((self._guard._display(f.parts), f.size))
+        return [f"- {name} ({size} bytes)" for name, size in sorted(found)[:limit]]
 
     def target(self, path) -> Path | None:
         """The real path `path` names inside the stage directory, or None (links resolved).
@@ -672,14 +609,7 @@ class AgentStep:
         at most `restart_on_caps` times in a step. The loops built up in a context of 35,000 tokens and more; a short context does not
         carry them."""
         messages = self.messages
-        files = []
-        for root in (self.tools.stage_dir, self.tools.stage_dir / "port"):
-            try:
-                for e in sorted(os.scandir(root), key=lambda e: e.name):
-                    if e.is_file(follow_symlinks=False) and len(files) < 40:
-                        files.append(f"- {os.path.relpath(e.path, self.run_dir)} ({e.stat(follow_symlinks=False).st_size} bytes)")
-            except OSError:
-                continue
+        files = self.tools.restart_files(40)
         task = messages[1]["content"] if len(messages) > 1 and isinstance(messages[1].get("content"), str) else ""
         text = f"{task}\n\n## From the supervisor\n{RESTART_NOTE}\n" + ("\n".join(files) if files else "(no files yet)")
         messages[:] = [messages[0], {"role": "user", "content": text}]

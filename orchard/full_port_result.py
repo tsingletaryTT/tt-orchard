@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import zlib
+from collections import Counter
 from pathlib import Path
 
 from orchard import full_port
@@ -30,23 +31,28 @@ MIN_DISTINCT = 0.35             # share of the words that differ from each other
 MAX_TOP_WORD = 0.25             # largest share of the words that one word may hold
 WORD_LENGTH = (2.0, 12.0)       # mean word length, in characters
 MIN_ZLIB = 0.20                 # compression ratio of a text of 400 or more characters (loops compress far below this)
+SAMPLE_CHARS = 200_000     # a longer text is judged on its first this many characters: the record may hold up to 16 MiB, and every step below is linear in the sample
 
 
 def readable(text) -> tuple[bool, str]:
     """(readable, basis): whether `text` passes the floor above, and a sentence that says what was measured. The floor checks form only."""
     if not isinstance(text, str):
         return False, "the free-run text is not text"
-    words = text.split()
+    sample = text[:SAMPLE_CHARS]
+    words = sample.split()
     if len(words) < MIN_WORDS:
         return False, f"{len(words)} words, fewer than the {MIN_WORDS} the floor needs"
-    chars = [c for c in text if not c.isspace()]
+    chars = [c for c in sample if not c.isspace()]
     printable = sum(1 for c in chars if c.isprintable()) / len(chars)
     wordy = sum(1 for w in words if any(c.isalpha() for c in w)) / len(words)
-    distinct = len(set(words)) / len(words)
-    top = max(words.count(w) for w in set(words)) / len(words)
+    counts = Counter(words)                                   # one pass; the sample bounds the number of distinct words
+    distinct = len(counts) / len(words)
+    top = counts.most_common(1)[0][1] / len(words)
     mean = sum(len(w) for w in words) / len(words)
-    ratio = len(zlib.compress(text.encode("utf-8", "replace"), 6)) / max(1, len(text.encode("utf-8", "replace")))
-    facts = (f"{len(words)} words; {printable:.0%} printable, {wordy:.0%} hold a letter, {distinct:.0%} different, the commonest word "
+    raw = sample.encode("utf-8", "replace")
+    ratio = len(zlib.compress(raw, 6)) / max(1, len(raw))
+    scope = f" (first {SAMPLE_CHARS:,} characters of {len(text):,})" if len(text) > SAMPLE_CHARS else ""
+    facts = (f"{len(words)} words{scope}; {printable:.0%} printable, {wordy:.0%} hold a letter, {distinct:.0%} different, the commonest word "
              f"{top:.0%}, mean length {mean:.1f}, compresses to {ratio:.2f}")
     if printable < MIN_PRINTABLE:
         return False, f"{facts}: below the printable floor of {MIN_PRINTABLE:.0%}"
@@ -58,7 +64,7 @@ def readable(text) -> tuple[bool, str]:
         return False, f"{facts}: one word holds more than {MAX_TOP_WORD:.0%} of the text"
     if not WORD_LENGTH[0] <= mean <= WORD_LENGTH[1]:
         return False, f"{facts}: the mean word length is outside {WORD_LENGTH[0]} to {WORD_LENGTH[1]}"
-    if len(text) >= 400 and ratio < MIN_ZLIB:
+    if len(sample) >= 400 and ratio < MIN_ZLIB:
         return False, f"{facts}: it repeats itself (a ratio under {MIN_ZLIB})"
     return True, facts
 
