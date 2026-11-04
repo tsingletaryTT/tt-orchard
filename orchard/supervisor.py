@@ -160,7 +160,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
-                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
+                            FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, SKIP_3_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
 from orchard import full_port, model_kind, port_facts, port_repair, residency, scoring_check
 from orchard.tiers import TierConfigError, load
@@ -207,10 +207,12 @@ def is_full_port_pause(reason) -> bool:
     return reason == FULL_PORT or (isinstance(reason, str) and reason.startswith(CLASS_UNKNOWN))
 
 
+STAGE_3_SEED_FILES = 200                  # stage 3 of a full port starts from stage 2's passed port: at most this many files are copied,
+STAGE_3_SEED_FILE_BYTES = 2 * 1024 * 1024  # each at most this big (the gate reads a source file up to the same size, full_port.SOURCE_MAX)
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
-FULL_PORT_STAGES_UNBUILT = ("stage 2 of the full-port route passed; stages 3 to 6 for a full-port model are not built yet "
-                            "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md, slices 3 to 6), so a person reviews the "
-                            "result and decides whether to go on")
+FULL_PORT_STAGES_UNBUILT = ("stage 3 of the full-port route passed or was skipped; stages 4 to 6 for a full-port model are not built yet "
+                            "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md: stage 4 is the rest of issue 326, stages 5 and "
+                            "6 are issue 329), so a person reviews the result and decides whether to go on")
 SCORING_STAGES_UNBUILT = ("stage 2 of the scoring route passed (the model is a reranker or an embedding model: stage 1 recorded Hugging Face scores or "
                           "vectors and stage 2's check compared the port with them); stages 3 to 6 for a scoring model are not built yet "
                           "(docs/superpowers/specs/2026-11-02-scoring-model-check-design.md), so a person reviews the result and decides whether to go on")
@@ -981,8 +983,8 @@ class Supervisor:
                           else FULL_PORT)
                 self.ledger.append("decision", 2, decision="pause", reason=reason)
                 continue
-            if p.next_stage == 3 and self._full_port_stages_unbuilt():
-                self.ledger.append("decision", 3, decision="pause", reason=FULL_PORT_STAGES_UNBUILT)
+            if p.next_stage == 4 and self._full_port_stages_unbuilt():
+                self.ledger.append("decision", 4, decision="pause", reason=FULL_PORT_STAGES_UNBUILT)
                 continue
             if p.next_stage == 3 and self._scoring_stages_unbuilt():
                 self.ledger.append("decision", 3, decision="pause", reason=SCORING_STAGES_UNBUILT)
@@ -995,6 +997,8 @@ class Supervisor:
                             audio_runtime=audio_runtime.selected(entries) is not None,
                             text_runtime=text_runtime.selected(entries) is not None, full_port=full_port_enabled(entries),
                             kind=run_model_kind(entries))
+            if spec is FULL_PORT_STAGE_3 and self._stage_3_chips() is None:
+                spec = dataclasses.replace(spec, skip=SKIP_3_FULL_PORT)       # stage 2's board is the configured chip count: nothing new to show
             try:
                 if spec in (FULL_PORT_STAGE_2, SCORING_STAGE_2):
                     self._check_residency(spec)        # a model that cannot fit the box starts no prepare step (issue 327)
@@ -1775,9 +1779,23 @@ class Supervisor:
             return functools.partial(spec.gate, required=self.required_chips)
         if spec.number == 0:
             return self._with_stack_pins(spec.gate)
+        if spec.skill == "full-port-mesh":
+            # The chip count is the supervisor's own (the run's --required-chips), and so is the rehearsal flag (from the ledger): the coder can
+            # write neither.
+            kwargs = {"expected_chips": self._stage_3_chips()}
+            if full_port_rehearsal(self.ledger.read()):
+                kwargs["rehearsal"] = True
+            return functools.partial(spec.gate, **kwargs)
         if spec.skill == "full-port-check" and full_port_rehearsal(self.ledger.read()):
             return functools.partial(spec.gate, rehearsal=True)       # from the ledger: the coder cannot write it
         return spec.gate
+
+    def _stage_3_chips(self) -> int | None:
+        """The chip count stage 3 of a full port runs the port on (issue 326): the largest of the run's `--required-chips` when it is more than
+        one board's chips, else None. With None, stage 2's one board is the configured chip count and stage 3 is skipped with a recorded reason
+        (`SKIP_3_FULL_PORT`). The value comes from the operator's option, which a resume keeps (`run_start`); nothing the coder writes is read."""
+        top = max(self.required_chips) if self.required_chips else 0
+        return top if top > CHIPS_PER_BOARD else None
 
     def _with_stack_pins(self, base):
         """Stage 0's gate plus the stack record's: the file must be the one the ledger recorded (its sha256), well formed, and hold no critical
@@ -1988,7 +2006,7 @@ class Supervisor:
           the output file fresh, so the old record may no longer match it; the ledger's entry is what says the test is owed;
         - the record shows a failure of the port (orchard/port_repair.py, `read_failure`) and the attempt's rounds are not all used;
         - the rounds are all used, but the last round's edit was never tested (the port differs from the one the latest test ran against)."""
-        if spec.draft != "full_port" or not self.port_repair_rounds:
+        if spec.draft != "full_port" or spec.number != 2 or not self.port_repair_rounds:
             return False
         n, entries = spec.number, self.ledger.read()
         if port_repair.stopped_noted(entries, n):
@@ -2032,7 +2050,7 @@ class Supervisor:
         nothing in the port ends the rounds: the same files would fail the same way. After the last round the stage goes on as it did before
         this option: the finish step records the failure, the gate fails, and the next attempt starts again."""
         n, limit = spec.number, self.port_repair_rounds
-        if not limit:
+        if not limit or n != 2:         # repair rounds belong to stage 2: stage 3 starts from a port that already passed (issue 326)
             return None
         # Each round takes at most two passes (a catch-up for a rerun whose `tested` entry is missing, then the round) and the last pass reads the
         # end. A loop whose exit depends on ledger entries gets a bound: a mutant of `rerun_inflight` that never closed spun here, appending forever.
@@ -2507,7 +2525,7 @@ class Supervisor:
                 return GateResult(False, gate.reasons + (
                     "test-result.json is not the file the supervisor recorded when the hardware test ended (the ledger holds no "
                     "matching entry), so its exit code cannot be trusted",), gate.evidence)
-        if spec.skill == "full-port-check":
+        if spec.skill in ("full-port-check", "full-port-mesh"):
             # One hardware test, one marker. The finish step can write in the stage directory, so the marker has to be the file the
             # supervisor wrote: its path and sha256 are in the ledger (`_run_test`). A marker edited after the test has no such entry.
             found = full_port.file_record(self.run_dir, stage_dir / "test-result.json")      # bounded read: a FIFO or /dev/zero link is None
@@ -2517,7 +2535,7 @@ class Supervisor:
                     "matching entry), so its exit code cannot be trusted",), gate.evidence)
             if gate.ok and "coherent" in gate.waived:      # the gate's own read: result.json is not opened again
                 self.ledger.append("decision", spec.number, decision=REHEARSAL_WAIVED, field="coherent", by="--full-port-rehearsal",
-                                   note="the model is a rehearsal with random weights; every other stage 2 check still applied")
+                                   note=f"the model is a rehearsal with random weights; every other stage {spec.number} check still applied")
         return gate
 
     def _scoring_gate(self, spec, stage_dir: Path, gate: GateResult) -> GateResult:
@@ -2802,6 +2820,9 @@ class Supervisor:
         (orchard/swap_prepare.py). Any other stage, and a stage with no drafted config, gets PrepareOutcome(False) and its agent step."""
         if spec.draft == "full_port":
             seed = getattr(self, "_port_seed", None) or {}
+            if spec.number == 3:
+                return swap_prepare.PrepareOutcome(False, note=port_facts.stage_3_note(chips=self._stage_3_chips() or 0,
+                                                                                       copied=bool(seed.get("copied") or seed.get("kept"))))
             return swap_prepare.PrepareOutcome(False, note=port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton"))))
         if spec.skill != "weights-swap-check" or spec.draft != "swap_config":
             return swap_prepare.PrepareOutcome(False)
@@ -2897,6 +2918,8 @@ class Supervisor:
         skeleton. Three unattended rehearsal runs showed the coder's first attempt reading for 20 turns and writing nothing. A checkpoint
         or config that cannot be read leaves no facts file, the ledger says why, and the coder works from its skill as before. A port
         already in the stage directory (a resumed stage) is kept."""
+        if spec.number == 3:
+            return self._seed_stage_3_port(spec, stage_dir)
         snapshot = self.inputs.get("model")
         facts_written = False
         if snapshot:
@@ -2925,6 +2948,41 @@ class Supervisor:
             self.ledger.append("decision", spec.number, decision="port skeleton copied")
         self._port_seed = {"facts": facts_written, "skeleton": skeleton}
 
+    def _seed_stage_3_port(self, spec, stage_dir: Path) -> None:
+        """What the coder starts stage 3 of a full port from: the port that passed stage 2, copied into stages/3/port/ (issue 326). Regular
+        files only, with a count and a size cap, and no `__pycache__`; a link, a file over the cap or too many files stop the copy, the ledger
+        says why, and the coder writes the port again from stage 2's. A port already in the stage directory (a resumed stage) is kept. The
+        ledger holds the sha256 of each file as copied, so a later reader can tell what the coder changed."""
+        src, dst = self.run_dir / "stages" / "2" / "port", stage_dir / "port"
+        if dst.is_dir() and any(dst.rglob("*.py")):
+            self._port_seed = {"copied": 0, "kept": True}
+            return
+        copied, problem = [], None
+        try:
+            for f in sorted(src.rglob("*")):
+                rel = f.relative_to(src)
+                if "__pycache__" in rel.parts or f.suffix == ".pyc" or f.is_dir():
+                    continue
+                if f.is_symlink() or not f.is_file():
+                    problem = f"{rel} is not a regular file"
+                    break
+                if len(copied) >= STAGE_3_SEED_FILES:
+                    problem = f"stages/2/port/ holds more than {STAGE_3_SEED_FILES} files"
+                    break
+                data = safeio.read_bytes(f, max_bytes=STAGE_3_SEED_FILE_BYTES)
+                (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+                safeio.atomic_write(dst / rel, data, mode=0o644)
+                copied.append({"path": f"stages/3/port/{rel.as_posix()}", "sha256": hashlib.sha256(data).hexdigest()})
+        except (OSError, safeio.SafeReadError) as exc:
+            problem = f"{exc.__class__.__name__}: {getattr(exc, 'reason', None) or exc}"[:200]
+        if problem or not copied:
+            shutil.rmtree(dst, ignore_errors=True)            # no half a port: the coder starts from stage 2's files, or from nothing
+            self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem=problem or "stages/2/port/ holds no file")
+            self._port_seed = {"copied": 0, "kept": False}
+            return
+        self.ledger.append("decision", spec.number, decision="stage 2 port copied", files=copied)
+        self._port_seed = {"copied": len(copied), "kept": False}
+
     def _pin_full_port(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
         """Stage 2 of a full port (orchard/full_port.py): put the supervisor's template and its config in the stage directory, replacing any
         copy there. Called before the prepare step (so the coder can read the template) and again after it (so an edit made during prepare
@@ -2943,7 +3001,7 @@ class Supervisor:
             given = given.get("deadline_s") if isinstance(given, dict) else None
             if isinstance(given, (int, float)) and not isinstance(given, bool) and 0 < given <= full_port.DEADLINE_S:
                 deadline = given
-            _put(stage_dir / "hw_test.json", json.dumps({"command": full_port.COMMAND, "deadline_s": deadline}) + "\n")
+            _put(stage_dir / "hw_test.json", json.dumps({"command": full_port.command(spec.number), "deadline_s": deadline}) + "\n")
         else:
             self.ledger.append("decision", spec.number, decision="port check template copied", copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME])
         return []
@@ -3442,7 +3500,10 @@ class Supervisor:
     def _phase_boards(self, spec, stage_dir: Path) -> int:
         """Boards the stage's single test holds: the stage's own, or more when the drafted swap config names a container package that
         needs more chips. Catalog container packages mostly report 2 boards (4 chips), so stage 2 serves them on that many, as
-        stage 4 does for its 4-chip test (issue 60)."""
+        stage 4 does for its 4-chip test (issue 60). Stage 3 of a full port holds the run's configured chips (issue 326)."""
+        if spec.skill == "full-port-mesh":
+            chips = self._stage_3_chips()
+            return max(spec.boards, -(-chips // CHIPS_PER_BOARD)) if chips else spec.boards
         try:
             cfg = safeio.read_json(stage_dir / "swap_config.json", max_bytes=RUN_JSON_MAX, expect=dict)
             chips = int(cfg["chips"]) if cfg.get("package") else 0
@@ -3462,7 +3523,8 @@ class Supervisor:
         chips = self.adapter.status()
         have = len({c.board for c in chips})
         if boards > have:
-            self._block(n, f"the container package needs {boards * CHIPS_PER_BOARD} chips and this box has {have * CHIPS_PER_BOARD}",
+            what = "the port's configured chip count" if spec.skill == "full-port-mesh" else "the container package"
+            self._block(n, f"{what} needs {boards * CHIPS_PER_BOARD} chips and this box has {have * CHIPS_PER_BOARD}",
                         need_chips=boards * CHIPS_PER_BOARD)
         d = decide_park(self.coder_lease.units, chips, boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action, chips=boards * CHIPS_PER_BOARD,
