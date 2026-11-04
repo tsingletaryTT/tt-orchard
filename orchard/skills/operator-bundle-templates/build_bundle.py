@@ -1946,7 +1946,8 @@ def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | 
             failed.pop(d["path"], None)
         elif e.get("event") == "decision" and d.get("decision") == "served chat check not written":
             failed[d.get("path") if isinstance(d.get("path"), str) else SERVED_CHAT] = d.get("reason")
-    if not (run.dir / SERVED_CHAT).exists() and not failed:
+    # A record that was written and then deleted still counts: the ledger names it, so the check below reports it as missing (issue 297).
+    if not (run.dir / SERVED_CHAT).exists() and not failed and SERVED_CHAT not in latest:
         return None
     required = {SERVED_CHAT, *latest}
     required |= {f"stages/4/configs/{c.get('chips')}/served-chat.json" for c in run.configs() if c.get("pass") is True}
@@ -1964,7 +1965,8 @@ def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | 
             rec = data = None
         if not _served_chat_shape(rec):
             ok = False
-            why.append(f"`{rel}` is missing or unreadable.")
+            why.append(f"`{rel}` is missing or unreadable" + (" (the ledger recorded it, so it was deleted or replaced after the check)."
+                                                                if rel in latest else "."))
             continue
         if latest.get(rel) != hashlib.sha256(data).hexdigest():
             ok = False

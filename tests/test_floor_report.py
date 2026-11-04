@@ -114,7 +114,7 @@ def probe(seconds=2.0, tokens=96):
     return record(greedy=entry(seconds=seconds, tokens=tokens))
 
 
-def run_dir(tmp_path, *, floor=True, chips2=None, stage4=(), graft=None, cfg=DENSE):
+def run_dir(tmp_path, *, floor=True, chips2=None, stage4=(), graft=None, cfg=DENSE, failed4=()):
     run = tmp_path / "run"
     if floor:
         (run / "stages/0").mkdir(parents=True)
@@ -122,9 +122,11 @@ def run_dir(tmp_path, *, floor=True, chips2=None, stage4=(), graft=None, cfg=DEN
     write(run / "stages/2/evidence/swap-check.json", {"sampling_probe": probe()})
     if chips2:
         write(run / "stages/2/swap_config.json", {"chips": chips2})
-    for n in stage4:
+    for n in (*stage4, *failed4):
         write(run / f"stages/4/configs/{n}/evidence/swap-check.json", {"sampling_probe": probe(seconds=1.0)})
         write(run / f"stages/4/configs/{n}/swap_config.json", {"chips": n})
+    if stage4 or failed4:                    # stage 4's result: only a configuration with pass true has a row (issue 297)
+        write(run / "stages/4/result.json", {"configs": [*({"chips": n, "pass": True} for n in stage4), *({"chips": n, "pass": False} for n in failed4)]})
     if graft:
         write_trial(run, graft)
     return run
@@ -325,6 +327,7 @@ def test_the_supervisor_writes_decode_share_when_stages_2_and_4_pass_and_records
         r.run()                                          # stage 0 wrote the floor record for the snapshot
         write(r.run_dir / "stages/2/evidence/swap-check.json", {"sampling_probe": probe()})
         write(r.run_dir / "stages/4/configs/4/evidence/swap-check.json", {"sampling_probe": probe(seconds=1.0)})
+        write(r.run_dir / "stages/4/result.json", {"configs": [{"chips": 4, "pass": True}]})          # stage 4's own result, as the gate leaves it
         sup, led = _supervisor(r)
         try:
             sup._decode_floor_record(2, r.run_dir / "stages/2")
@@ -362,6 +365,7 @@ def test_stage_2_and_stage_4_passing_each_write_their_share_through_the_real_end
         r.run()
         write(r.run_dir / "stages/2/evidence/swap-check.json", {"sampling_probe": probe()})
         write(r.run_dir / "stages/4/configs/4/evidence/swap-check.json", {"sampling_probe": probe(seconds=1.0)})
+        write(r.run_dir / "stages/4/result.json", {"configs": [{"chips": 4, "pass": True}]})          # stage 4's own result, as the gate leaves it
         for n in (2, 4):
             write(r.run_dir / f"stages/{n}/gate.json", {})
         sup, led = _supervisor(r)
@@ -450,3 +454,50 @@ def test_a_floor_record_with_a_key_that_is_not_a_die_count_is_refused_and_the_bu
 def test_a_text_models_own_dtype_wins_over_a_top_level_dtype_of_the_whole_config():
     policy, source = fr.policy_for({"torch_dtype": "float32", "text_config": {"dtype": "bfloat16"}})
     assert policy == {"default": "bf16"} and "dtype" in source
+
+
+# ---- issue 297 -------------------------------------------------------------------------------------------------------------
+
+def test_a_stage_4_configuration_that_did_not_pass_gets_no_row(tmp_path):
+    run = run_dir(tmp_path, stage4=(4,), failed4=(2,))
+    rows = [(r["stage"], r["dies"]) for r in fr.share_rows(run)]
+    assert (4, 4) in rows and (4, 2) not in rows
+
+
+def test_stage_4_rows_need_the_stage_result_to_say_the_configuration_passed(tmp_path):
+    run = run_dir(tmp_path, stage4=(4,))
+    (run / "stages/4/result.json").unlink()
+    assert not [r for r in fr.share_rows(run) if r["stage"] == 4]
+    write(run / "stages/4/result.json", {"configs": [{"chips": 4, "pass": "yes"}]})              # not the JSON true
+    assert not [r for r in fr.share_rows(run) if r["stage"] == 4]
+    write(run / "stages/4/result.json", {"configs": "x"})
+    assert not [r for r in fr.share_rows(run) if r["stage"] == 4]
+
+
+def drafter_off_run(tmp_path):
+    run = run_dir(tmp_path)
+    write(run / "stages/2/sampling-decision.json", {"choice": "drafter-off", "reason": "x"})
+    write(run / "stages/2/sampling-trial/variant/evidence/swap-check.json", {"sampling_probe": probe(seconds=1.0)})      # 96 tokens in 1 s
+    return run
+
+
+def test_stage_2_row_comes_from_the_variant_stage_2_chose(tmp_path):
+    run = drafter_off_run(tmp_path)
+    rows = [r for r in fr.share_rows(run) if r["stage"] == 2]
+    chosen = [r for r in rows if r["evidence"] == "stages/2/sampling-trial/variant/evidence/swap-check.json"]
+    assert len(chosen) == 1 and chosen[0]["tok_s"] == pytest.approx(96.0) and "serves" in chosen[0]["source"]
+
+
+def test_the_first_test_probe_stays_as_its_own_labelled_row_when_another_variant_was_chosen(tmp_path):
+    run = drafter_off_run(tmp_path)
+    first = [r for r in fr.share_rows(run) if r["evidence"] == "stages/2/evidence/swap-check.json"]
+    assert len(first) == 1 and first[0]["tok_s"] == pytest.approx(48.0) and "first test" in first[0]["source"]
+    assert "not the configuration the package serves" in first[0]["basis"]
+
+
+def test_with_no_other_variant_chosen_there_is_one_stage_2_probe_row(tmp_path):
+    run = run_dir(tmp_path)
+    assert [r["evidence"] for r in fr.share_rows(run) if r["stage"] == 2] == ["stages/2/evidence/swap-check.json"]
+    write(run / "stages/2/sampling-decision.json", {"choice": "drafter-off", "reason": "x"})          # chosen, but the variant has no probe
+    rows = [r for r in fr.share_rows(run) if r["stage"] == 2]
+    assert [r["evidence"] for r in rows] == ["stages/2/evidence/swap-check.json"] and "first test" in rows[0]["source"]      # no row for the chosen variant

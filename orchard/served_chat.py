@@ -182,8 +182,56 @@ def _vocab(directory, incomplete: list) -> tuple[dict, dict]:
     return to_id, {i: t for t, i in to_id.items()}
 
 
-def check_files(served_dir, new_snapshot) -> dict:
-    """The template, special tokens, eos id and stop ids of `served_dir` against the new model's `new_snapshot`. Never raises."""
+def _added_tokens(directory, incomplete: list) -> dict:
+    """{content: (id, special)} for the `added_tokens` list of tokenizer.json. The first entry for a content wins, as in `_vocab`. An entry
+    whose content is not a string or whose id is not a non-negative integer is skipped. `special` is True only for a JSON true."""
+    data = _json(Path(directory) / "tokenizer.json", incomplete, f"{Path(directory).name}/tokenizer.json") or {}
+    out: dict = {}
+    for item in data.get("added_tokens") if isinstance(data.get("added_tokens"), list) else []:
+        if (isinstance(item, dict) and isinstance(item.get("content"), str)
+                and isinstance(item.get("id"), int) and not isinstance(item.get("id"), bool) and item["id"] >= 0):
+            out.setdefault(item["content"], (item["id"], item.get("special") is True))
+    return out
+
+
+ADDED_TOKEN_SHOWN = 5          # a problem about added tokens names this many of them and counts the rest, so a hostile list gives a small record
+
+
+def _added_token_problems(served: dict, new: dict) -> list[dict]:
+    """One problem per kind of difference between the added tokens of the two tokenizers (issue 297: a token can keep its text and get another
+    id, or lose its `special` flag, and the named-token checks above would not see it)."""
+    kinds = {"added_token_id_differs": [], "added_token_special_differs": [], "added_token_missing_in_served": [], "added_token_extra_in_served": []}
+    for content, (nid, nspecial) in new.items():
+        if content not in served:
+            kinds["added_token_missing_in_served"].append(f"{content!r} (id {nid})")
+            continue
+        sid, sspecial = served[content]
+        if sid != nid:
+            kinds["added_token_id_differs"].append(f"{content!r}: served {sid}, new {nid}")
+        if sspecial != nspecial:
+            kinds["added_token_special_differs"].append(f"{content!r}: served special={sspecial}, new special={nspecial}")
+    kinds["added_token_extra_in_served"] = [f"{c!r} (id {i})" for c, (i, _s) in served.items() if c not in new]
+    what = {"added_token_id_differs": "added tokens with another id in the served tokenizer",
+            "added_token_special_differs": "added tokens whose special flag differs",
+            "added_token_missing_in_served": "added tokens of the new model that the served tokenizer lacks",
+            "added_token_extra_in_served": "added tokens in the served tokenizer that the new model does not have"}
+    out = []
+    for name, rows in kinds.items():
+        if rows:
+            more = f" and {len(rows) - ADDED_TOKEN_SHOWN} more" if len(rows) > ADDED_TOKEN_SHOWN else ""
+            out.append({"name": name, "detail": f"{len(rows)} {what[name]}: " + "; ".join(rows[:ADDED_TOKEN_SHOWN]) + more})
+    return out
+
+
+# The stop-id rule of each serving backend: which files the server reads for the ids that end a turn. Only the bundle's rule is known
+# (generation_config.json, then the top level of config.json). A backend that is not listed is compared on everything else and the record says the
+# stop ids could not be judged (issue 297).
+STOP_ID_RULES = {"bundle": "generation_config.json, then the top level of config.json"}
+
+
+def check_files(served_dir, new_snapshot, backend: str | None = "bundle") -> dict:
+    """The template, special tokens, eos id and stop ids of `served_dir` against the new model's `new_snapshot`. Never raises. `backend` names
+    the serving backend whose stop-id rule applies (a key of STOP_ID_RULES); with an unknown one the stop ids are listed and not judged."""
     notes: list[str] = []
     incomplete: list[str] = []
     problems: list[dict] = []
@@ -223,6 +271,8 @@ def check_files(served_dir, new_snapshot) -> dict:
             incomplete.append(f"the id of the {name} {tok!r} could not be found in the {'new' if a is None else 'served'} directory's tokenizer.json")
         elif a != b:
             problems.append({"name": "special_token_id_differs", "detail": f"{name} {tok!r} has id {b} in the served tokenizer and {a} in the new model's"})
+    problems += _added_token_problems(_added_tokens(served_dir, incomplete), _added_tokens(new_snapshot, incomplete))
+    rule = STOP_ID_RULES.get(backend) if isinstance(backend, str) else None
     served_ids = stop_ids_of(served_dir, incomplete)
     ends = stop_ids_of(new_snapshot, incomplete)
     nested = (_json(Path(new_snapshot) / "config.json", incomplete, f"{Path(new_snapshot).name}/config.json") or {}).get("text_config")
@@ -233,11 +283,14 @@ def check_files(served_dir, new_snapshot) -> dict:
         ends.append(ids["new"])
     if not ends:
         incomplete.append("the new model's snapshot names no end id (no eos_token_id in its generation_config.json or config.json and no eos token the tokenizer knows)")
-    missing = [i for i in ends if i not in served_ids]
+    if rule is None:
+        incomplete.append(f"the stop id rule of the {backend if isinstance(backend, str) else 'unknown'} serving backend is not known, so the stop ids "
+                          f"{served_ids} of the served directory were not compared with the new model's ({ends})")
+    missing = [i for i in ends if i not in served_ids] if rule else []
     if missing:
         problems.append({"name": "stop_id_missing",
                          "detail": f"the new model ends a turn with id {', '.join(map(str, missing))}, which the served directory's stop ids {served_ids} lack"})
-    extra = [i for i in served_ids if ends and i not in ends]
+    extra = [i for i in served_ids if ends and i not in ends] if rule else []
     if extra:
         problems.append({"name": "unexpected_stop_id",
                          "detail": f"the served directory stops on id {', '.join(map(str, extra))}, which the new model does not end a turn with "
@@ -252,7 +305,7 @@ def check_files(served_dir, new_snapshot) -> dict:
             problems.append({"name": "end_id_token_differs", "detail": f"end id {i} is {got!r} in the served tokenizer and {want!r} in the new model's"})
     return {"template": {"served_file": s_file, "served_sha256": s_sha, "new_file": n_file, "new_sha256": n_sha},
             "special_tokens": {"served": served_tokens, "new": new_tokens}, "eos_ids": ids,
-            "stop_ids": {"served": served_ids, "new_model_ends": ends},
+            "stop_ids": {"served": served_ids, "new_model_ends": ends}, "stop_id_rule": rule,
             "end_tokens": [n_to_tok[i] for i in ends if i in n_to_tok], "problems": problems, "incomplete": incomplete, "notes": notes}
 
 
@@ -398,17 +451,27 @@ def check_live_probe(record, *, native_context=None) -> dict:
 
 def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
     """Both checks joined. `swap_check_path` is a swap-check.json; one that cannot be read means the replies were not checked."""
-    files = check_files(served_dir, new_snapshot)
-    incomplete = list(files["incomplete"])
     suite = None
     live_record = None
+    backend: str | None = "bundle"                       # a swap check with no `kind` was written by the bundle's serve_and_compare.py
     try:
         report = safeio.read_json(_real(swap_check_path), max_bytes=MAX_JSON_BYTES, expect=dict)
         suite = report.get("prompt_suite")
         live_record = report.get("live_probe")
+        if "kind" in report:                             # the container's script writes kind "container"; its stop-id rule is not in STOP_ID_RULES
+            backend = report["kind"] if isinstance(report["kind"], str) else None
     except safeio.SafeReadError as exc:
+        report = None
         if not _absent(exc):
-            incomplete.append(f"the swap check could not be read: {exc.reason}")
+            incomplete_early = f"the swap check could not be read: {exc.reason}"
+        else:
+            incomplete_early = None
+    else:
+        incomplete_early = None
+    files = check_files(served_dir, new_snapshot, backend=backend)
+    incomplete = list(files["incomplete"])
+    if incomplete_early:
+        incomplete.append(incomplete_early)
     served_named = files["special_tokens"].get("served") if isinstance(files.get("special_tokens"), dict) else None
     named = [v for v in served_named.values() if isinstance(v, str)] if isinstance(served_named, dict) else []
     replies = check_replies(suite, files["end_tokens"], start_tokens=named)
@@ -434,6 +497,17 @@ def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
             incomplete.append("the swap check recorded no served_files digests, so the replies cannot be tied to the tokenizer and stop files compared here")
         else:
             here = file_digests(served_dir)
+            after = suite.get("served_files_after")
+            if not isinstance(after, dict):
+                incomplete.append("the swap check recorded no served_files_after digests, so a file changed while the replies were made would not be seen")
+            else:
+                moved = sorted(n for n in INPUT_FILES if seen.get(n) != after.get(n))
+                if moved:
+                    problems.append({"name": "inputs_changed_during_replies",
+                                     "detail": "these files differ between the start and the end of the swap test's replies: " + ", ".join(moved)})
+            if seen.get("tokenizer.json") is None or (isinstance(after, dict) and after.get("tokenizer.json") is None):
+                incomplete.append("tokenizer.json could not be hashed when the swap test ran (absent, refused or unreadable), so the replies cannot be "
+                                  "tied to it")
             changed = sorted(n for n in INPUT_FILES if n != "chat_template.jinja" and n in seen and seen.get(n) != here.get(n))
             if changed:
                 problems.append({"name": "inputs_changed_since_replies",
