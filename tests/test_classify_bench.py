@@ -373,6 +373,18 @@ def test_files_the_bench_cannot_read_by_design_are_not_a_gap_in_its_evidence(wor
         assert "evidence is incomplete" not in cb.render_packet(got["packet"])
 
 
+def test_gguf_copies_beside_the_safetensors_are_ignored_and_listed_as_stage_0_does(world):
+    """Issue 437: a quantized copy or a vision projector in GGUF is not a sidecar. The bench gave such a repo class unknown, as stage 0 did."""
+    t = {**backbone("model.", np.random.default_rng(5)), "lm_head.weight": world.head * 1.001}
+    make_repo(world.hub, "org/withgguf", t, extra={"M-Q4_K_M.gguf": b"GGUF" + b"\0" * 64, "mmproj-M.gguf": b"GGUF" + b"\0" * 32})
+    got = classify(world, "org/withgguf")
+    assert got["tool"]["class"] == "weights-only", got["tool"]["reasons"]
+    assert got["tool"]["sidecars"] == [] and got["tool"]["ignored_files"] == ["M-Q4_K_M.gguf", "mmproj-M.gguf"]
+    assert got["tool"]["evidence_complete"] is True
+    assert [f["file"] for f in got["packet"]["files"]["ignored_files"]] == ["M-Q4_K_M.gguf", "mmproj-M.gguf"]
+    assert "ignored (GGUF" in cb.render_packet(got["packet"]) and "other weight file: M-Q4" not in cb.render_packet(got["packet"])
+
+
 def test_a_sidecar_header_that_failed_to_fetch_is_a_gap(world):
     d = make_repo(world.hub, "org/badside", {**backbone("model."), "lm_head.weight": world.head}, extra={"aux.safetensors": b"\x01\x02"})
     got = classify(world, "org/badside")

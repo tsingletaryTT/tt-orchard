@@ -152,11 +152,12 @@ from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolut
                            recorded_paths)
 from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
+from orchard.classes import CLASS_UNKNOWN
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
-from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
+from orchard.server import ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
 from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
-                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
+                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
@@ -192,6 +193,20 @@ EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
+# CLASS_UNKNOWN (the fixed start of the unknown-class pause reason) lives in orchard/classes.py, so status.py can read it first without this module.
+
+
+def class_unknown_reason(reasons) -> str:
+    """The pause reason for stage 0's class `unknown` (issue 437): it says so, and quotes the first reasons from delta.json."""
+    shown = "; ".join(" ".join(str(r).split())[:200] for r in list(reasons)[:3])
+    return CLASS_UNKNOWN + (f": {shown}" if shown else "") + "; a person decides whether to go on"
+
+
+def is_full_port_pause(reason) -> bool:
+    """Whether a pause reason is the full-port pause (the older text) or the unknown-class pause."""
+    return reason == FULL_PORT or (isinstance(reason, str) and reason.startswith(CLASS_UNKNOWN))
+
+
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
 FULL_PORT_STAGES_UNBUILT = ("stage 2 of the full-port route passed; stages 3 to 6 for a full-port model are not built yet "
                             "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md, slices 3 to 6), so a person reviews the "
@@ -853,6 +868,7 @@ class Supervisor:
                     if not check["ok"]:
                         ok = False
                         continue
+                    self._remove_coder_container(record=False)
                 (self.adapter if is_coder else self.test_adapter).release(lease)
             except (AdapterError, ServerError, OSError):
                 ok = False
@@ -954,7 +970,9 @@ class Supervisor:
                 self.ledger.append("decision", 1, decision="pause", reason=SCORING_NOT_ROUTED)
                 continue
             if p.next_stage == 2 and self._full_port_unacknowledged():
-                self.ledger.append("decision", 2, decision="pause", reason=FULL_PORT)
+                reason = (class_unknown_reason(delta_path_reasons(self.run_dir)) if run_class(self.ledger.read(), self.run_dir) == "unknown"
+                          else FULL_PORT)
+                self.ledger.append("decision", 2, decision="pause", reason=reason)
                 continue
             if p.next_stage == 3 and self._full_port_stages_unbuilt():
                 self.ledger.append("decision", 3, decision="pause", reason=FULL_PORT_STAGES_UNBUILT)
@@ -1005,7 +1023,7 @@ class Supervisor:
         # into the full-port stages, and no unattended retry may do that. A pause for a restricted head
         # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
-            e["event"] == "decision" and e["data"].get("reason") in (FULL_PORT, RESTRICTED_HEAD) for e in entries)
+            e["event"] == "decision" and (is_full_port_pause(e["data"].get("reason")) or e["data"].get("reason") == RESTRICTED_HEAD) for e in entries)
 
     def _full_port_stages_unbuilt(self) -> bool:
         """A run the operator allowed to port (`--full-port`) has passed stage 2, and the stages after it for a full port are not built
@@ -1162,6 +1180,7 @@ class Supervisor:
                                    reason="the coder is not confirmed stopped; the lease was not "
                                           "released", evidence=check)
                 return False
+            self._remove_coder_container()
             self.adapter.release(lease)
             self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id)
             if adopted:
@@ -1424,8 +1443,20 @@ class Supervisor:
                             checks=check.checks, evidence=check.evidence)
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
                            server={**self.coder.record(), "owned": None})
+        before = self._coder_container_ids()      # the containers under the coder's name before this attempt: none of them is this run's
         try:
-            self.coder.start(lease)
+            try:
+                self.coder.start(lease)
+            except ServerChipsHeld as held:
+                # `tt-model serve` counts a stopped container as holding its chips. When this run launched a coder before (a retry), a
+                # stopped container under the coder's name is that launch's leftover: remove it and start once more. Anything else is
+                # not ours to remove, and the block says what holds the chips and how to clear it (issue 417).
+                if not self._remove_own_leftover(lease):
+                    self._block_chips_held(held, lease)
+                self.coder.start(lease)
+            self._note_created_container(lease, before)
+        except ServerChipsHeld as exc:
+            self._block_chips_held(exc, lease, retried=True)
         except ServerNotOwned as exc:
             # Another process owns the container of this name. Record that, so no later stop (this
             # run's cleanup, a resume) touches it, and block with the usual coder reason.
@@ -1433,6 +1464,7 @@ class Supervisor:
                                server=self.coder.record(), reason=str(exc))
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         except (ServerError, OSError) as exc:
+            self._note_created_container(lease, before)       # tt-model may have made the container before it failed: record it for the cleanup
             self._block_if_off_bus(None, f"the coder did not start and answer; nothing is retried: {exc}", lease.chips)
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry gives
@@ -1509,9 +1541,135 @@ class Supervisor:
                              accept=("CLAIMED", "STALE", "FREE"))
         if not check["ok"]:
             self._block(None, "the coder could not be confirmed stopped for the relaunch", **check)
+        self._remove_coder_container()
         if old.lease_id in self._adopted_ids(self.ledger.read()):
             self._release_kept_lease(old)
         self._start_coder(canary, check_granted=True)
+
+    def _remove_coder_container(self, record: bool = True) -> None:
+        """After the coder's stop is confirmed, remove its stopped container so the next `tt-model serve` does not find it holding the chips
+        (issue 417). Best effort: the stop already succeeded and the lease must still be released, so no failure of the removal or of the
+        ledger write that records it is allowed to escape. A control without the method (a fake, a bundle) does nothing. `record=False` is the
+        ledger-free shutdown (`_release_from_memory`), which writes nothing because the ledger is what failed."""
+        remove = getattr(self.coder, "remove_container", None)
+        if remove is None:
+            return
+        try:
+            rows = getattr(self.coder, "find_container_rows", None)
+            if getattr(self.coder, "owned", None) is False:
+                return                      # another process owns the container
+            if getattr(self.coder, "owned", None) is True or rows is None:
+                result = remove()           # its `tt-model serve` exited 0, so the container under the name is this run's
+            else:
+                # The owner is unknown (a start that failed, or a record without the field): remove only a container whose id this run
+                # recorded as created. One that was there before the attempt is not proven to be this run's.
+                found = rows() or []
+                created = self._known_created_ids(use_ledger=record)
+                if not found or any(cid not in created for _, _, cid in found):
+                    return
+                result = remove(only_id=found[0][2])
+        except Exception as exc:            # best effort: a docker or fake failure must not stop the release that follows
+            if record:
+                self._note("notice", what="removing the stopped coder container failed", error=str(exc))
+            return
+        if result and record:
+            self._note("decision", decision="coder container removed" if result.get("removed") else "coder container left", result=result)
+
+    def _note(self, event: str, **data) -> None:
+        """A ledger entry that may fail without failing the caller (a full disk is when these notes matter least)."""
+        try:
+            self.ledger.append(event, None, **data)
+        except Exception:
+            pass
+
+    def _coder_container_ids(self) -> set[str] | None:
+        """The ids of the containers under the coder's exact name now, or None when docker cannot say (nothing is then provable)."""
+        rows = getattr(self.coder, "find_container_rows", None)
+        if rows is None:
+            return None
+        try:
+            found = rows()
+        except Exception:
+            return None
+        return None if found is None else {cid for _, _, cid in found if cid}
+
+    def _known_created_ids(self, use_ledger: bool = True) -> set[str]:
+        """The ids this run created under the coder's name: those noted by this process, and with `use_ledger` those the ledger holds from
+        an earlier process of the run."""
+        known = set(getattr(self, "_created_ids", ()))
+        if use_ledger:
+            try:
+                known |= {e["data"].get("container_id") for e in self.ledger.read()
+                          if e["event"] == "decision" and e["data"].get("decision") == "coder container created"}
+            except Exception:
+                pass
+        known.discard(None)
+        return known
+
+    def _note_created_container(self, lease: Lease, before: set[str] | None) -> None:
+        """Record the id of the container this run's `tt-model serve` made under the coder's name, so a later removal can check that a leftover
+        is that container and not one that predates the run (issue 417). Only an id that was not there before the attempt counts: a start that
+        failed before it created anything (an image pull, say) leaves a pre-existing container, which is not this run's. With no listing from
+        before the attempt nothing is proven, so nothing is recorded. Best effort."""
+        now = self._coder_container_ids()
+        if before is None or now is None:
+            return
+        for cid in sorted(now - before):
+            if not hasattr(self, "_created_ids"):
+                self._created_ids = set()
+            self._created_ids.add(cid)
+            self._note("decision", decision="coder container created", container_id=cid, lease_id=lease.lease_id)
+
+    def _remove_own_leftover(self, lease: Lease) -> bool:
+        """A start was refused because a container holds the chips. True when a stopped container under the coder's exact name was found,
+        its id is one this run recorded as created by its own launch ("coder container created"), and it was removed. A container that runs,
+        one of another name, and one whose id this run did not record (it predates the run, or took the name since) are left alone, however
+        many earlier attempts the ledger shows (issue 417)."""
+        rows, remove = getattr(self.coder, "find_container_rows", None), getattr(self.coder, "remove_container", None)
+        if rows is None or remove is None:
+            return False
+        created = self._known_created_ids()
+        try:
+            found = rows()
+            if not found or any(state == "running" for _, state, _ in found) or any(cid not in created for _, _, cid in found):
+                return False
+            result = remove(even_if_unowned=True, only_id=found[0][2])
+        except (ServerError, OSError) as exc:
+            self._note("notice", what="removing the leftover coder container failed", error=str(exc))
+            return False
+        if not result:
+            return False
+        self._note("decision", decision="coder container removed" if result.get("removed") else "coder container left",
+                   result=result, before_start=True, lease_id=lease.lease_id)
+        return bool(result.get("removed"))
+
+    def _block_chips_held(self, exc: Exception, lease: Lease, retried: bool = False) -> None:
+        """Block after `tt-model serve` refused because a container holds the chips. The reason names the container that is left over and
+        the command that removes it, and says the chips are not at fault, so the block is classed as a coder problem and not a hardware one
+        (orchard/blocked.py). A chip that has in fact left the bus is still reported first, as for any failed boot."""
+        # Recorded before the block, as the not-owned refusal is: a fresh invocation adopts the latest server record, and the record written at
+        # "coder starting" says the owner is unknown, which would let a relaunch stop and remove the container that caused this refusal.
+        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(),
+                           reason=str(exc))
+        found = None
+        try:
+            found = self.coder.find_container() if hasattr(self.coder, "find_container") else None
+        except (ServerError, OSError):
+            found = None
+        stopped = [(n, st) for n, st in (found or []) if st != "running"]
+        if stopped:
+            n, st = stopped[0]
+            fix = f"A stopped container named {n} is left over ({st}); remove it with `docker rm {n}`, then resume."
+        elif found:
+            fix = f"A container named {found[0][0]} is running and holds them; stop it with `tt-model stop`, then resume."
+        else:
+            fix = ("No container with the coder's name was found; list containers with `docker ps -a`, remove or stop the container that holds "
+                   "the chips, then resume.")
+        again = " The leftover of this run's earlier launch was removed once and the start was refused again." if retried else ""
+        reason = (f"the coder did not start and answer; nothing is retried: {exc}. The chips are not at fault: another container holds "
+                  f"them. {fix}{again}")
+        self._block_if_off_bus(None, reason, lease.chips)
+        self._block(None, reason)
 
     def _release_kept_lease(self, lease: Lease) -> None:
         """A kept coder's lease stays (STALE) after its container stops; give it back before a new start."""

@@ -35,6 +35,12 @@ SERVER = textwrap.dedent('''
                 if FAULT == "empty_listing":
                     return self._send(200, {"object": "list", "data": []})
                 length = 2048 if FAULT == "wrong_context" else 4096
+                if FAULT == "two_names":
+                    return self._send(200, {"object": "list", "data": [{"id": "listed-first", "max_model_len": length}, {"id": "alias-name", "max_model_len": length}]})
+                if FAULT == "alias_no_context":      # the alias the can selects omits max_model_len; an unrelated model is listed first
+                    return self._send(200, {"object": "list", "data": [{"id": "listed-first", "max_model_len": length}, {"id": "alias-name"}]})
+                if FAULT == "alias_wrong_context":
+                    return self._send(200, {"object": "list", "data": [{"id": "listed-first", "max_model_len": length}, {"id": "alias-name", "max_model_len": 2048}]})
                 return self._send(200, {"object": "list", "data": [{"id": "served-name", "max_model_len": length}]})
             self._send(404, {"error": "no"})
         def do_POST(self):
@@ -74,6 +80,8 @@ SERVER = textwrap.dedent('''
             if FAULT != "frozen_counter":
                 TOKENS[0] += 5
             content = "" if FAULT == "spent_budget" else None if FAULT == "null_content" else "Paris"
+            if FAULT in ("two_names", "alias_no_context", "alias_wrong_context") and content:
+                content = "Paris asked-for=" + str(req.get("model"))       # lets a test see which name the chat request carried
             finish = "length" if FAULT in ("spent_budget", "null_content") else "stop"
             self._send(200, {"model": "other-model" if FAULT == "wrong_echo" else req.get("model"),
                              "choices": [{"message": {"content": content}, "finish_reason": finish}], "usage": {"completion_tokens": 5}})
@@ -164,3 +172,74 @@ def test_a_request_extra_model_name_is_the_name_the_listing_is_checked_for(tmp_p
     sp = replace(sp, check=replace(sp.check, request_extra={"model": "not-served"}))
     ev = can.boot_check(bundle(tmp_path), tmp_path / "work", sp, install=False, health_timeout=30)
     assert ev["checks"]["served_model"]["ok"] is False and "not-served" in ev["checks"]["served_model"]["detail"]
+
+
+# ---- issue 385: a --served-model-name alias that a spec sets only through extra_args ---------------------------------------------------------------
+
+from dataclasses import replace
+
+from orchard import served_verify
+
+
+def with_args(*args, **check):
+    sp = replace(spec_of(), extra_args=tuple(args))
+    return replace(sp, check=replace(sp.check, **check)) if check else sp
+
+
+def boot_spec(tmp_path, sp, fault="two_names"):
+    return can.boot_check(bundle(tmp_path, fault), tmp_path / "work", sp, install=False, health_timeout=30)
+
+
+def test_an_alias_set_only_in_extra_args_is_the_name_the_chat_request_carries(tmp_path):
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "alias-name"))
+    assert ev["passed"], ev
+    assert ev["checks"]["served_model"]["ok"] and "alias-name" in ev["checks"]["served_model"]["detail"]
+    assert "alias-name" in ev["answer"] and "listed-first" not in ev["answer"], ev["answer"]
+
+
+def test_an_alias_that_omits_max_model_len_is_still_the_name_the_chat_request_carries(tmp_path):
+    """Review of PR 429: with the context unchecked (the alias reports no max_model_len) the request went to the first listed model."""
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "alias-name"), fault="alias_no_context")
+    assert ev["passed"], ev
+    assert "served_model" in [n["name"] for n in ev["not_checked"]], ev["not_checked"]
+    assert "asked-for=alias-name" in ev["answer"] and "listed-first" not in ev["answer"], ev["answer"]
+
+
+def test_an_alias_with_the_wrong_context_still_gets_the_chat_request_and_fails_the_boot(tmp_path):
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "alias-name"), fault="alias_wrong_context")
+    assert not ev["passed"] and ev["checks"]["served_model"]["ok"] is False, ev
+    assert "asked-for=alias-name" in ev["answer"] and "listed-first" not in ev["answer"], ev["answer"]
+
+
+def test_without_a_declared_name_the_request_still_carries_the_first_listed_one(tmp_path):
+    ev = boot_spec(tmp_path, with_args())
+    assert ev["passed"], ev
+    assert "listed-first" in ev["answer"], ev["answer"]
+
+
+def test_a_listing_with_none_of_the_declared_names_fails_and_names_them(tmp_path):
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "gone-a", "gone-b"))
+    check = ev["checks"]["served_model"]
+    assert not ev["passed"] and check["ok"] is False
+    assert "gone-a" in check["detail"] and "gone-b" in check["detail"]
+
+
+def test_a_request_extra_model_name_beats_the_alias_in_extra_args(tmp_path):
+    ev = boot_spec(tmp_path, with_args("--served-model-name", "alias-name", request_extra={"model": "listed-first"}))
+    assert ev["passed"], ev
+    assert "listed-first" in ev["answer"] and "alias-name" not in ev["answer"], ev["answer"]
+
+
+def listing(*ids):
+    import json
+    return json.dumps({"object": "list", "data": [{"id": i, "max_model_len": 4096} for i in ids]}).encode()
+
+
+def test_the_first_declared_name_that_is_listed_is_chosen_whatever_the_listing_order():
+    r = served_verify.check_listing(200, listing("second", "first"), declared_names=["first", "second"], declared_context=4096)
+    assert r["state"] == "pass" and r["served"]["id"] == "first"
+
+
+def test_a_request_extra_name_is_used_alone_when_both_are_given():
+    r = served_verify.check_listing(200, listing("a", "b"), declared_name="b", declared_names=["a"], declared_context=4096)
+    assert r["state"] == "pass" and r["served"]["id"] == "b"
