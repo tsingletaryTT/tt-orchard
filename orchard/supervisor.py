@@ -209,6 +209,9 @@ def is_full_port_pause(reason) -> bool:
 
 STAGE_3_SEED_FILES = 200                  # stage 3 of a full port starts from stage 2's passed port: at most this many files are copied,
 STAGE_3_SEED_FILE_BYTES = 2 * 1024 * 1024  # each at most this big (the gate reads a source file up to the same size, full_port.SOURCE_MAX)
+STAGE_3_SEED_ENTRIES = 1000               # the scan stops after this many entries of any kind (files, directories, links, caches): the file count alone
+                                          # would let a directory of a million subdirectories be read to the end before anything refused it
+STAGE_3_SEED_DEPTH = 8                    # and at this many directory levels below the port directory
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
 FULL_PORT_STAGES_UNBUILT = ("stage 3 of the full-port route passed or was skipped; stages 4 to 6 for a full-port model are not built yet "
                             "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md: stage 4 is the rest of issue 326, stages 5 and "
@@ -604,6 +607,56 @@ STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # int
 GRAFT_TRIAL_ENV = "ORCHARD_TRIAL_DIR"      # in the environment of the trial's test: the trial directory, so its servers can be found
 GRAFT_TRIAL_TEMPLATE = "graft_trial.py"     # copied into stages/2/graft-trial/ when the trial starts (orchard/graft_trial.py)
 SAMPLING_TRIAL_TEMPLATE = "sampling_trial.py"   # copied into stages/2/sampling-trial/ when the drafter-off trial starts (orchard/sampling_choice.py)
+
+
+class _SeedLimit(Exception):
+    """A bound of the port scan was passed; the text is the reason the ledger records."""
+
+
+class _SeedScan:
+    """The entries of a port directory, read lazily, depth first, with every bound enforced as the entries arrive (issue 326).
+
+    Nothing is listed or sorted first: an entry is asked of the operating system only when the caller wants the next one, so a directory of
+    millions of entries is refused after about `max_entries` reads and holds one directory handle per level (at most `max_depth` + 1). A link is
+    reported and never followed; a cache directory (`__pycache__`) is reported nowhere and never entered. Yields `(parts, kind)` with `parts` the
+    names from the root and `kind` one of `file`, `link` or `other` (a device, a pipe, a socket); directories are walked, not yielded. `seen` is
+    the number of entries read so far. The order is the operating system's: callers that need a stable order sort what they kept."""
+
+    def __init__(self, root, max_entries: int = STAGE_3_SEED_ENTRIES, max_depth: int = STAGE_3_SEED_DEPTH):
+        self.root, self.max_entries, self.max_depth, self.seen = os.fspath(root), max_entries, max_depth, 0
+
+    def __iter__(self):
+        stack = [(self.root, (), 0)]
+        while stack:
+            top, rel, depth = stack.pop()
+            with os.scandir(top) as listing:
+                for entry in listing:
+                    self.seen += 1
+                    if self.seen > self.max_entries:
+                        raise _SeedLimit(f"holds more than {self.max_entries} entries")
+                    parts = rel + (entry.name,)
+                    if entry.is_symlink():
+                        yield parts, "link"
+                    elif entry.is_dir(follow_symlinks=False):
+                        if entry.name == "__pycache__":
+                            continue
+                        if depth + 1 > self.max_depth:
+                            raise _SeedLimit(f"is nested deeper than {self.max_depth} levels")
+                        stack.append((entry.path, parts, depth + 1))
+                    else:
+                        yield parts, "file" if entry.is_file(follow_symlinks=False) else "other"
+
+
+def _holds_python(root) -> bool | None:
+    """Whether a directory holds a `.py` file within the scan bounds; None when the bounds were passed first (too large to say)."""
+    scan = _SeedScan(root)
+    try:
+        with contextlib.closing(iter(scan)) as entries:
+            return any(kind == "file" and parts[-1].endswith(".py") for parts, kind in entries)
+    except _SeedLimit:
+        return None
+    except OSError:
+        return False
 
 
 class Supervisor:
@@ -2956,28 +3009,41 @@ class Supervisor:
         says why, and the coder writes the port again from stage 2's. A port already in the stage directory (a resumed stage) is kept. The
         ledger holds the sha256 of each file as copied, so a later reader can tell what the coder changed."""
         src, dst = self.run_dir / "stages" / "2" / "port", stage_dir / "port"
-        if dst.is_dir() and any(dst.rglob("*.py")):
-            self._port_seed = {"copied": 0, "kept": True}
-            return
+        if dst.is_dir():
+            held = _holds_python(dst)
+            if held is None:                 # the coder's directory is past the scan bounds: it is left as it is, and nothing is copied over it
+                self.ledger.append("decision", spec.number, decision="stage 3 port directory too large to scan",
+                                   limits={"entries": STAGE_3_SEED_ENTRIES, "depth": STAGE_3_SEED_DEPTH})
+                self._port_seed = {"copied": 0, "kept": True}
+                return
+            if held:
+                self._port_seed = {"copied": 0, "kept": True}
+                return
         copied, problem = [], None
+        scan = _SeedScan(src)
         try:
-            for f in sorted(src.rglob("*")):
-                rel = f.relative_to(src)
-                if "__pycache__" in rel.parts or f.suffix == ".pyc" or f.is_dir():
-                    continue
-                if f.is_symlink() or not f.is_file():
-                    problem = f"{rel} is not a regular file"
-                    break
-                if len(copied) >= STAGE_3_SEED_FILES:
-                    problem = f"stages/2/port/ holds more than {STAGE_3_SEED_FILES} files"
-                    break
-                data = safeio.read_bytes(f, max_bytes=STAGE_3_SEED_FILE_BYTES)
-                (dst / rel).parent.mkdir(parents=True, exist_ok=True)
-                safeio.atomic_write(dst / rel, data, mode=0o644)
-                copied.append({"path": f"stages/3/port/{rel.as_posix()}", "sha256": hashlib.sha256(data).hexdigest()})
+            with contextlib.closing(iter(scan)) as entries:
+                for parts, kind in entries:
+                    rel = Path(*parts)
+                    if rel.suffix == ".pyc":
+                        continue
+                    if kind != "file":
+                        problem = f"{rel} is not a regular file"
+                        break
+                    if len(copied) >= STAGE_3_SEED_FILES:
+                        problem = f"stages/2/port/ holds more than {STAGE_3_SEED_FILES} files (the scan stopped after reading {scan.seen} entries)"
+                        break
+                    data = safeio.read_bytes(src / rel, max_bytes=STAGE_3_SEED_FILE_BYTES)
+                    (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+                    safeio.atomic_write(dst / rel, data, mode=0o644)
+                    copied.append({"path": f"stages/3/port/{rel.as_posix()}", "sha256": hashlib.sha256(data).hexdigest()})
+        except _SeedLimit as exc:
+            problem = f"stages/2/port/ {exc} (the scan stopped after reading {scan.seen} entries)"
         except (OSError, safeio.SafeReadError) as exc:
             # The class and the reason only: an OSError's own text carries the absolute path of the file, which does not belong in the ledger.
             problem = f"{exc.__class__.__name__}: {getattr(exc, 'reason', None) or getattr(exc, 'strerror', None) or 'error'}"[:200]
+        problem = problem[:300] if problem else problem
+        copied.sort(key=lambda f: f["path"])                  # the walk has no order of its own; the record has one
         if problem or not copied:
             shutil.rmtree(dst, ignore_errors=True)            # no half a port: the coder starts from stage 2's files, or from nothing
             self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem=problem or "stages/2/port/ holds no file")
