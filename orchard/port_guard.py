@@ -221,8 +221,11 @@ class PortGuard:
                 for f in self._scan(pin):
                     if self._stamp.get(f.parts) == f.stamp:
                         continue
+                    oversize = f.size > runaway.MAX_FILE_BYTES
+                    raw = None if oversize else self._read(pin, f)
+                    if raw is None and not oversize:
+                        continue            # changed after the listing, or not a plain file: the stamp is not trusted, look again next time
                     self._stamp[f.parts] = f.stamp
-                    raw = self._read(pin, f)
                     if raw is not None and runaway.file_problem(raw.decode("utf-8", errors="replace")) is None:
                         self._backup[f.parts] = raw
                     else:
@@ -252,14 +255,13 @@ class PortGuard:
                     problem = f"it is {f.size:,} bytes; the limit for a file you write is {runaway.MAX_FILE_BYTES:,}"
                 else:
                     raw = self._read(pin, f)
-                    problem = None if raw is None else runaway.file_problem(raw.decode("utf-8", errors="replace"))
+                    if raw is None:
+                        continue            # changed after the listing, or not a plain file: it is judged again after the next command
+                    problem = runaway.file_problem(raw.decode("utf-8", errors="replace"))
                 rel = self._display(f.parts)
                 if problem is None:
                     self._stamp[f.parts] = f.stamp
-                    if raw is not None:
-                        self._backup[f.parts] = raw                    # the accepted bytes are what a later rejection puts back
-                    else:
-                        self._backup.pop(f.parts, None)
+                    self._backup[f.parts] = raw                        # the accepted bytes are what a later rejection puts back
                     continue
                 backup = self._backup.get(f.parts)
                 try:
