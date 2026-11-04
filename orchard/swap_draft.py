@@ -78,6 +78,31 @@ def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=N
     if served is not None and _repo(served) != want:
         return (f"{Path(config_path).name} uses {what}, which serves {_repo(served)}, but stage 0's nearest model is {want}. "
                 f"Weights are swapped into an installed bundle or package of {want}")
+    return _unfit_problem(cfg, Path(config_path).name, want, run_dir)
+
+
+def _unfit_problem(cfg: dict, name: str, want: str, run_dir) -> str | None:
+    """Why the package or bundle a config names cannot serve swapped weights, or None (issue 73). The drafts never choose one that cannot, and
+    this refuses an agent's edit that names one: a container package recorded as hard-coding its repository serves `want` whatever weights
+    are swapped in, and a bundle whose run.sh the swap cannot rewrite fails after the coder has booted. A record file that cannot be read is
+    named, as in the drafts."""
+    from orchard import weights_source
+    package, bundle = cfg.get("package"), cfg.get("bundle_dir")
+    if not (isinstance(package, str) and package) and not (isinstance(bundle, str) and bundle):
+        return None
+    try:
+        recs = weights_source.records()
+    except ValueError as exc:
+        return f"{name}: {exc}"
+    if isinstance(package, str) and package in weights_source.hard_coded_names(recs):
+        return (f"{name} names the container package {package}, which hard-codes its model repository ({recs[package].evidence}), so it "
+                f"serves {want} whatever weights are swapped in. Name a package or bundle that can take swapped weights")
+    if isinstance(bundle, str) and bundle:
+        path = Path(bundle) if Path(bundle).is_absolute() else Path(run_dir) / bundle         # the test runs from the run directory
+        why = weights_source.bundle_problem(str(path), want)
+        if why:
+            return (f"{name} names the bundle {path.name}, whose run.sh cannot take swapped weights: {why}. Name a bundle or package that "
+                    f"can take swapped weights")
     return None
 
 
@@ -190,8 +215,11 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
     fits = [b for b in read_installed(tt_model_root)
             if b.weights_repo == want and b.schema == "6" and b.chips == chips
             and (Path(tt_model_root) / b.name / "run.sh").is_file()]
-    boxes = _container_fits(installed_containers(operator_home), want, chips) if operator_home is not None else []
-    fits, boxes, record_problem = _eligible(tt_model_root, want, fits, boxes)
+    # Eligibility comes before the chip-count choice: a refused 2-chip package must not hide a usable 4-chip one that the larger-count
+    # fallback would take (review of PR 442, round 3).
+    installed = installed_containers(operator_home) if operator_home is not None else []
+    fits, installed, record_problem = _eligible(tt_model_root, want, fits, installed)
+    boxes = _container_fits(installed, want, chips)
     if record_problem:
         problems.append(record_problem)
     box_chips = boxes[0]["chips"] if boxes else chips
@@ -279,8 +307,9 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
               "prompt_suite": True, "sampling_probe": True}
     bundles = [b for b in read_installed(tt_model_root) if b.weights_repo == want and b.schema == "6"
                and (Path(tt_model_root) / b.name / "run.sh").is_file()]
-    containers = [c for c in installed_containers(operator_home) if c["repo"] == want]
-    bundles, containers, record_problem = _eligible(tt_model_root, want, bundles, containers)
+    every = [c for c in installed_containers(operator_home) if c["repo"] == want]
+    bundles, containers, record_problem = _eligible(tt_model_root, want, bundles, every)
+    refused = {c["name"] for c in every} - {c["name"] for c in containers}       # named in the note when four_chip_package picks one
     if record_problem:
         return {}, None, [record_problem]
     configs, notes = {}, []
@@ -302,8 +331,12 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
         if n == 4 and four_chip_package:
             pick = next((c for c in cfit if c["name"] == four_chip_package), None)
             if pick is None:
-                notes.append(f"four_chip_package {four_chip_package} is not an installed container package that "
-                             f"serves {want} on 4 chips")
+                if four_chip_package in refused:
+                    notes.append(f"four_chip_package {four_chip_package} cannot serve swapped weights: it is recorded as hard-coding its "
+                                 f"model repository (docs/weights-source.md). Name another package")
+                else:
+                    notes.append(f"four_chip_package {four_chip_package} is not an installed container package that "
+                                 f"serves {want} on 4 chips")
                 if not cfit and missing is not None:      # nothing at all serves 4 chips: the count is missing, whatever was named
                     missing.append(n)
                 continue
