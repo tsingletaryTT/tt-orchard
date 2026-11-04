@@ -1,3 +1,3 @@
 target = "0.9.108"
-summary = "Run log: issue 83 reproduced on the safe configuration; damage tracks requests arriving during decode"
+summary = "Run log: issue 83 reproduced on the safe configuration; the cause is the fused conv history rebuild at admission, and a test patch removes the damage"
 kind = "docs"
