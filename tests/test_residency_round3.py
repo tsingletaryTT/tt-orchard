@@ -157,6 +157,14 @@ def test_the_weight_index_is_read_without_a_token_pinned_to_the_revision_and_bou
     assert pf.read_hub_weight_index("owner/name/../x", "main", opener=lambda *a, **k: pytest.fail("requested")) is None
 
 
+def test_the_index_size_cap_is_what_refuses_a_valid_but_oversized_answer():
+    body = json.dumps({"weight_map": {"model.layers.0.q.weight": "a.safetensors"}}).encode()
+    at_the_cap = FakeResp(body + b" " * (pf.INDEX_FETCH_BYTES - len(body)))
+    over = FakeResp(body + b" " * (pf.INDEX_FETCH_BYTES + 1 - len(body)))
+    assert pf.read_hub_weight_index("owner/name", "main", opener=lambda *a, **k: at_the_cap) == ["model.layers.0.q.weight"]
+    assert pf.read_hub_weight_index("owner/name", "main", opener=lambda *a, **k: over) is None          # valid JSON, so only the cap refuses it
+
+
 @pytest.mark.parametrize("body", [b"not json", b"[]", b"{}", b'{"weight_map": []}', b'{"weight_map": {}}', b'{"weight_map": {"a": 1}, "x": [',
                                   json.dumps({"weight_map": {f"t{i}": "f" for i in range(3)}, "extra": {"1": 2}}).encode()[:-3]])
 def test_a_weight_index_that_is_not_a_name_map_is_unreadable(body):
@@ -335,6 +343,42 @@ def test_open_stage_dir_and_the_pending_check_agree_on_which_markers_resume(tmp_
         _, resumed = stages.open_stage_dir(run, spec, resuming=True, ledger=stub.ledger)
         assert resumed is (not pending(stub)), name
         assert resumed is (name == "recorded"), name
+
+
+def test_marker_state_names_each_way_a_marker_is_refused_and_vouches_the_plan_marker_by_its_own_entry(tmp_path):
+    from orchard import stages
+    run = tmp_path
+    plan = run / "stages" / "2" / "tests" / "plan.json"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("{}")
+    ledger = FakeLedger()
+    assert stages.marker_state(run, 2, "tests/plan.json", ledger)[0] == "not vouched"         # no "hardware test list" entry
+    assert stages.marker_state(run, 2, "nothing.json", ledger) == ("absent", None, None)
+    assert stages.marker_state(run, 2, None, ledger) == ("absent", None, None)
+    rec = stages.evidence_record(run, plan)
+    ledger.entries.append({"event": "evidence", "stage": 2, "data": {"path": rec["path"], "sha256": rec["sha256"], "what": "hardware test list"}})
+    state, got, reason = stages.marker_state(run, 2, "tests/plan.json", ledger)
+    assert state == "ok" and got == rec and reason is None
+    ledger.entries[-1]["data"]["what"] = "something else"
+    assert stages.marker_state(run, 2, "tests/plan.json", ledger)[0] == "not vouched"
+
+
+def test_open_stage_dir_records_why_a_marker_is_not_a_resume_point(tmp_path):
+    from orchard import stages
+    spec = stages.FULL_PORT_STAGE_2
+    unrecorded = marker_stub(tmp_path / "a", vouched=False)
+    _, resumed = stages.open_stage_dir(tmp_path / "a", spec, resuming=True, ledger=unrecorded.ledger)
+    assert resumed is False
+    assert [e["data"].get("decision") for e in unrecorded.ledger.entries if e["event"] == "decision"][:1] == ["marker not written by the supervisor"]
+    linked = marker_stub(tmp_path / "b", vouched=False)
+    marker = tmp_path / "b" / "stages" / "2" / "test-result.json"
+    marker.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    marker.symlink_to(outside)
+    _, resumed = stages.open_stage_dir(tmp_path / "b", spec, resuming=True, ledger=linked.ledger)
+    decisions = [e["data"] for e in linked.ledger.entries if e["event"] == "decision"]
+    assert resumed is False and decisions[0]["decision"] == "marker cannot be read and is not a resume point" and decisions[0]["reason"]
 
 
 # ---- 9. scoring ports convert nothing ---------------------------------------------------------------------------------------------------------

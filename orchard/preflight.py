@@ -114,7 +114,7 @@ MAX_INDEX_NAMES = 2_000_000
 def read_hub_weight_index(model_id: str, sha: str | None, *, opener=None) -> list[str] | None:
     """The tensor names of the model's `model.safetensors.index.json` (the keys of its `weight_map`) from the Hub, or None for any reason they
     cannot be had: an id that is not owner/name, a failed or slow request (a single-file model has no index, and a gated repository answers 401
-    to a request with no token), an answer over INDEX_FETCH_BYTES, text that is not JSON, a map that is not a non-empty object of text names, more
+    to a request with no token), an answer over INDEX_FETCH_BYTES, text that is not JSON, a map that is not a non-empty object, more
     than MAX_INDEX_NAMES names, or nesting past the parser's depth. No Authorization header is sent. The revision is the hash the Hub's answer
     gave, as for the config."""
     if not isinstance(model_id, str) or not _HUB_ID.match(model_id):
@@ -130,7 +130,7 @@ def read_hub_weight_index(model_id: str, sha: str | None, *, opener=None) -> lis
     except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return None
     wm = data.get("weight_map") if isinstance(data, dict) else None
-    if not isinstance(wm, dict) or not wm or len(wm) > MAX_INDEX_NAMES or not all(isinstance(k, str) for k in wm):
+    if not isinstance(wm, dict) or not wm or len(wm) > MAX_INDEX_NAMES:
         return None
     return list(wm)
 
