@@ -284,6 +284,105 @@ def check_port(port: int, in_use: bool, resuming: bool = False, kept: bool = Fal
     return Check("port", OK, f"coder port {port} is free")
 
 
+def _same_dir(a, b) -> bool:
+    """Whether two paths name one directory after links are resolved. A path that cannot be resolved compares as written."""
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return Path(a) == Path(b)
+
+
+def coder_model_id(load: Callable, tiers_path: Path, coder_port: int) -> str | None:
+    """The model the coder serves: the `model` of the single chips tier on the coder port. The supervisor needs the coder to list that id at
+    /v1/models, and the container's vLLM loads it by that id. None when the tiers file cannot be read or no chips tier uses the port (the
+    tiers row says so)."""
+    try:
+        tiers = load(tiers_path).tiers
+    except Exception:
+        return None
+    on_port = [t for t in tiers.values() if t.get("placement") == "chips"
+               and urlparse(str(t.get("endpoint", ""))).port == coder_port]
+    model = on_port[0].get("model") if len(on_port) == 1 else None
+    return model if isinstance(model, str) and "/" in model else None
+
+
+def check_coder_cache(*, cache: Path, model_id: str, present: bool, free_gb: float | None, need_gb: float, need_from: str,
+                      no_fetch: bool, hf_home_flag: Path | None = None, planned_gb: float = 0.0, counted_by_disk_row: bool = False) -> Check:
+    """Is the coder's base model in the cache the coder container will mount (issue 417)? `tt-model serve` mounts $HF_HOME from its own
+    environment, so `cache` is that directory and `hf_home_flag` (the run's --hf-home) is only compared with it.
+
+    A missing model is a block when the download cannot fit (`free_gb` under `need_gb` plus the headroom) or when --no-fetch forbids a
+    download, and a warning otherwise: on a new machine the first coder boot downloads its model by design, and a warning says how large
+    it is and where it goes. The size is the Hub's, or the stated fallback when the Hub could not be asked (`need_from`).
+
+    `planned_gb` is what the run itself downloads onto the same disk before the coder boots (the target and the base model, which the command
+    fetches after the preflight): it is taken from `free_gb` first. `counted_by_disk_row` says the coder's model is the target or the base,
+    whose download the disk row already counts, so this row adds none of its own."""
+    from orchard import coder_cache
+    note = ""
+    if hf_home_flag is not None and Path(hf_home_flag) != Path(cache):
+        note = (f". --hf-home is {hf_home_flag}, but the coder container mounts {cache} (tt-model reads HF_HOME from the environment), "
+                "so the model has to be there")
+    if present:
+        return Check("coder-cache", OK, f"the coder's base model {model_id} is in {cache}, which the coder container mounts{note}")
+    if counted_by_disk_row:
+        return Check("coder-cache", WARN, f"the coder's base model {model_id} is not in {cache}, which the coder container mounts. It is the "
+                     f"model this run downloads first, and the disk row counts that download; the coder boot finds it there only when "
+                     f"{cache} is the cache that download goes to{note}")
+    where = (f"the coder's base model {model_id} is not in {cache}, which the coder container mounts; its boot would download about "
+             f"{need_gb:.0f} GB ({need_from}) into it")
+    if free_gb is not None and free_gb - planned_gb < need_gb + coder_cache.HEADROOM_GB:
+        after = f" ({free_gb - planned_gb:.0f} GB after the {planned_gb:.0f} GB this run downloads onto it first)" if planned_gb > 0 else ""
+        return Check("coder-cache", BLOCK, f"{where}, and that disk has {free_gb:.0f} GB free{after} (the download needs {need_gb:.0f} GB "
+                     f"plus {coder_cache.HEADROOM_GB:.0f} GB of headroom). Put the snapshot in that cache, or point HF_HOME at the cache "
+                     f"that has it{note}", "disk-full")
+    if no_fetch:
+        return Check("coder-cache", BLOCK, f"{where}, and --no-fetch forbids a download. Put the snapshot in that cache, or point "
+                     f"HF_HOME at the cache that has it{note}", "coder-unusable")
+    free = "the free space could not be read" if free_gb is None else f"that disk has {free_gb:.0f} GB free"
+    return Check("coder-cache", WARN, f"{where}; {free}. The boot prints nothing while it downloads (10 to 25 minutes). Put the snapshot "
+                 f"in that cache first, or point HF_HOME at the cache that has it{note}")
+
+
+def coder_download_counted(model: str, *, model_id: str, base_id: str | None, target_local: bool, base_gb: float, cache: Path,
+                           hf_home: Path) -> bool:
+    """Whether the disk row already budgets a download of the coder's model into the cache the coder mounts (issue 417).
+
+    The disk row counts the target's download only when the target is not local, and the base's only when the base needs a download whose
+    size is known (`base_gb` above zero). The command downloads into the run's hf_home. So the coder's download is the same one only when
+    its model is the target with no local snapshot, or the base with a counted download, and the coder mounts that same directory. A model
+    the run does not download (a local target that the coder's stricter snapshot check still rejects, a base that is already cached) has
+    nothing in the disk row, and the coder row has to check the disk itself."""
+    if not _same_dir(cache, hf_home):
+        return False
+    if model == model_id and not target_local:
+        return True
+    return base_id is not None and model == base_id and base_gb > 0.0
+
+
+def check_coder_container(*, name: str, found: list | None, resuming: bool = False) -> Check:
+    """A container already named like the coder's blocks `tt-model serve` ("already in use" or "already running"). `found` is a list of
+    (name, state) from `docker ps -a`, or None when docker could not be asked. A stopped one is a leftover of an aborted run; `docker rm`
+    removes it. A running one is the port row's concern as well, and on a resume it may be this run's own coder."""
+    if found is None:
+        return Check("container", WARN, "docker did not answer `docker ps -a`, so a leftover coder container could not be looked for")
+    states = [str(st) for n, st in found if n == name]
+    if not states:
+        return Check("container", OK, f"no container named {name} exists")
+    if "running" in states:
+        if resuming:
+            return Check("container", WARN, f"a container named {name} is running. This run is resuming, so it may be this run's own "
+                         "coder; the supervisor checks it on recovery")
+        return Check("container", BLOCK, f"a container named {name} is already running; `tt-model serve` refuses to start a second one. "
+                     "Stop it with `tt-model stop` (its package and profile), or give the run another profile", "coder-unusable")
+    detail = (f"a leftover container named {name} exists ({', '.join(states)}); `tt-model serve` refuses to start while that name is "
+              f"taken. Remove it with `docker rm {name}`")
+    if resuming:
+        return Check("container", WARN, detail + ". This run is resuming: when the container is this run's own coder, the supervisor's "
+                     "stop path removes it after it confirms the stop; any other leftover has to be removed by hand")
+    return Check("container", BLOCK, detail, "coder-unusable")
+
+
 def _kept_on_port(cfg) -> bool:
     """A lab run with keep_up, and a kept coder recorded for this port (orchard/kept_coder.py)."""
     if getattr(cfg, "mode", "local") != "lab" or not getattr(cfg.coder, "keep_up", False):
@@ -790,6 +889,9 @@ class Signals:
     boards: Callable | None = None              # () -> orchard.boards_seen.Sources: gozer topology and status, and tt-smi -s when configured
     stock_params: Callable | None = None        # (name) -> Path of tt-transformers' model_params/<name> on this box, or None
     demo_env: Callable | None = None            # (python | None, tree | None) -> (orchard.demo_env results or None, the command that builds it)
+    coder_cache: Callable | None = None         # () -> Path: the Hugging Face cache the coder container mounts (coder_cache.effective_cache)
+    coder_snapshot: Callable | None = None      # (cache path, model id) -> True when that cache holds a complete snapshot of the model
+    coder_containers: Callable | None = None    # (container name) -> [(name, state)] from `docker ps -a`, or None when docker did not answer
 
 
 def check_lab(lab, status) -> Check:
@@ -1107,6 +1209,50 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             guarded("cpu", "coder-unusable", cpu)
         except Exception:
             pass
+    # The coder's own boot (issue 417): its base model has to be in the cache the container mounts, and no container of the same name may
+    # be left over. A text-runtime run and a lab run's kept coder start no coder here.
+    if not text_route and not _kept_on_port(cfg):
+        if s.coder_cache is not None and s.coder_snapshot is not None:
+            def coder_cache_row() -> Check | None:
+                from orchard import coder_cache as cc
+                model = coder_model_id(s.load_tiers, Path(cfg.tiers), cfg.coder.port)
+                if model is None:
+                    return None                           # the tiers row says why
+                cache = Path(s.coder_cache())
+                present = bool(s.coder_snapshot(cache, model))
+                base_id = (base_check.data or {}).get("base")
+                # The target and the base download into the run's hf_home. The coder's download is the same one only when its model is one
+                # of them, the disk row budgets that download (a local target and a cached base have none) and the cache it mounts is that
+                # directory; otherwise it needs a download of its own.
+                shared = coder_download_counted(model, model_id=model_id, base_id=base_id, target_local=local, base_gb=base_gb, cache=cache,
+                                                hf_home=hf_home_for(cfg))
+                # What the command downloads onto this disk before the coder boots: the target and the base, each only when missing. It
+                # fetches them after the preflight, so a disk that holds each download alone can still be short for all three.
+                planned_gb = 0.0
+                if not no_fetch and bool(s.same_device(cache, hf_home_for(cfg))):
+                    planned_gb = (hub.total_bytes / 1e9 if hub is not None and not local else 0.0) + base_gb
+                need_gb, need_from = cc.FALLBACK_BASE_GB, f"a fixed estimate, because the hub could not be asked about {model}"
+                if not present:
+                    try:
+                        coder_hub, _ = s.hub_info(model)
+                    except Exception:
+                        coder_hub = None
+                    if coder_hub is not None and coder_hub.total_bytes > 0:
+                        need_gb, need_from = coder_hub.total_bytes / 1e9, "the hub's size for it"
+                return check_coder_cache(cache=cache, model_id=model, present=present, free_gb=s.free_gb(cache), need_gb=need_gb,
+                                         need_from=need_from, no_fetch=no_fetch, hf_home_flag=Path(cfg.hf_home) if cfg.hf_home else None,
+                                         planned_gb=planned_gb, counted_by_disk_row=shared and not no_fetch)
+            try:
+                found = coder_cache_row()
+                if found is not None:
+                    out.append(found)
+            except Exception as exc:
+                out.append(Check("coder-cache", BLOCK, f"could not check: {type(exc).__name__}: {exc}", "coder-unusable"))
+        if s.coder_containers is not None and getattr(cfg.coder, "kind", "container") == "container":
+            from orchard.server import container_name_for
+            guarded("container", "coder-unusable", lambda: check_coder_container(
+                name=container_name_for(cfg.coder.target, cfg.coder.profile), found=s.coder_containers(
+                    container_name_for(cfg.coder.target, cfg.coder.profile)), resuming=resuming))
     gozer_seen: list[str] = []
 
     def gozer_text() -> str:
@@ -1354,6 +1500,31 @@ def default_signals(cfg, research_options=None) -> Signals:
             return done.returncode, done.stdout, done.stderr
         return boards_seen.read_sources(cfg.gozer, os.environ.get("ORCHARD_TT_SMI") or None, run)
 
+    def coder_cache() -> Path:
+        from orchard import coder_cache as cc
+        # `tt-model serve` runs in this process's environment and home, so the default is under this process's home. The configured operator
+        # home has no effect on it (the boot watch reads the same one).
+        return cc.effective_cache()
+
+    def coder_snapshot(cache: Path, model_id: str) -> bool:
+        org, name = model_id.split("/", 1)
+        snaps = Path(cache) / "hub" / f"models--{org}--{name}" / "snapshots"
+        try:
+            from orchard import coder_cache as cc
+            return any(d.is_dir() and snapshot_complete(d) and cc.shard_problem(d) is None for d in snaps.iterdir())
+        except OSError:
+            return False
+
+    def coder_containers(name: str):
+        try:
+            done = subprocess.run(["docker", "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}} {{.State}}"],
+                                  capture_output=True, text=True, timeout=GOZER_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if done.returncode != 0:
+            return None
+        return [(ln.split()[0], ln.split()[1] if len(ln.split()) > 1 else "") for ln in done.stdout.splitlines() if ln.split()]
+
     return Signals(
         cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus, boards=boards_sources,
         updates_hint=updates_hint,
@@ -1365,7 +1536,8 @@ def default_signals(cfg, research_options=None) -> Signals:
         credentials=lambda: supervisor.visible_credentials(cfg.operator_home or supervisor.operator_home()),
         port_in_use=port_in_use, gozer_status=gozer_status, load_tiers=tiers.load,
         reference_problem=reference_problem, lab_status=(lambda: _lab_status(cfg.lab)) if getattr(cfg, "lab", None) else None,
-        research=research, stock_params=stock_params, demo_env=demo_env)
+        research=research, stock_params=stock_params, demo_env=demo_env,
+        coder_cache=coder_cache, coder_snapshot=coder_snapshot, coder_containers=coder_containers)
 
 
 def _lab_status(lab) -> tuple[bool, str, str]:
