@@ -2327,12 +2327,16 @@ def recorded_by_supervisor(ledger, n: int, rec: dict, *, whats: tuple = ()) -> b
                for e in entries[start:])
 
 
-def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple[Path, bool]:
+def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger, rerun_owed: bool = False) -> tuple[Path, bool]:
     """The stage directory for this attempt, and whether it resumes from the stage's marker.
 
     A resumed stage with its marker present keeps its directory. Otherwise an existing directory
     is moved aside to `<n>.partial-<k>` (never deleted) and a fresh one is made (spec section 10).
-    """
+
+    `rerun_owed` is the supervisor's word that a port repair rerun is in flight in the ledger: its test may have replaced the supervisor's
+    marker before the entry that vouches for it was written (a kill between the two). That record is kept as the resume point so the repaired
+    port and the attempt's count stand, and it is not trusted: the supervisor runs the owed check again before anything reads it. The check
+    for a marker an agent could have written is unchanged for every other resume (review of PR 432)."""
     d = Path(run_dir) / "stages" / str(spec.number)
     if d.exists():
         marker = d / spec.marker if spec.marker else None
@@ -2347,6 +2351,10 @@ def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple
                               marker=spec.marker, reason=exc.reason)
             if rec is None:
                 pass
+            elif marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, spec.number, rec) and rerun_owed:
+                ledger.append("decision", spec.number, decision="resume from marker", marker=rec, unvouched=True,
+                              reason="a port repair rerun was in flight; its record is not trusted and the check runs again")
+                return d, True
             elif marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, spec.number, rec):
                 # An agent can write this file. Only the supervisor's own record of its hardware test vouches for it.
                 ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)

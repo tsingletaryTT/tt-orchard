@@ -47,6 +47,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -96,6 +97,20 @@ def argmax(logits) -> int:
     return int(at)
 
 
+# An exception's text goes into a reply line that the supervisor's ledger, prompt and narration quote. URL user information and token-shaped words
+# are taken out of it BEFORE it is cut to REPLY_CHARS: a cut between a password and its `@` would leave a password prefix that no pattern downstream
+# can recognise (review of PR 432). The scheme's length is bounded and the rest of the match stops at the next `/`, so the time is linear in the message and a hostile
+# one cannot make it quadratic; the supervisor scrubs the whole output again (orchard/port_repair.py `safe_text`).
+REPLY_CHARS = 2000
+_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]{0,31}://)[^/\s@]*@")
+_TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{8,}")
+
+
+def clip(text: str) -> str:
+    """The first REPLY_CHARS characters of `text`, with URL user information and token-shaped words removed from the whole text first."""
+    return _TOKEN.sub("[token removed]", _USERINFO.sub(r"\1", str(text)))[:REPLY_CHARS]
+
+
 def open_device(ttnn, n_chips: int):
     """One chip: a device. Several: a mesh with the 1-D fabric on (collectives such as all_reduce need it, and the port module is imported
     after the mesh is open, so it cannot set it up). The closer turns the fabric off again, as scripts/minicpm3/run_chip.py does."""
@@ -118,19 +133,22 @@ def worker(read_fd: int, write_fd: int) -> int:
         wr.write(json.dumps(obj) + "\n")
         wr.flush()
 
-    import ttnn      # before the port directory is on sys.path, so a file named ttnn.py there cannot stand in for the runtime
-    sys.path.insert(0, str(PORT_DIR))
     model = mod = device = closer = None
     for line in rd:
         try:
             req = json.loads(line)
             op = req["op"]
-            if op == "init":             # untimed: open the device and import the port module
+            if op == "init":             # untimed: import the runtime, open the device, import the port module
                 try:
+                    # The runtime is imported here, inside the guard, and before the port directory is on sys.path, so a file named ttnn.py
+                    # there cannot stand in for it. A failure of the import (a missing dependency, a broken install) is the runtime's, like a
+                    # failed device open: no edit to the port can fix it, so the parent calls it setup (issue 420, review of PR 425).
+                    import ttnn
                     device, closer = open_device(ttnn, int(req["n_chips"]))
-                except Exception as exc:     # the runtime's failure: no edit to the port can fix it, so the parent calls it setup (issue 420)
-                    reply({"ok": False, "kind": "setup", "error": f"{type(exc).__name__}: {exc}"[:2000]})
+                except (Exception, SystemExit) as exc:
+                    reply({"ok": False, "kind": "setup", "error": clip(f"{type(exc).__name__}: {exc}")})
                     continue
+                sys.path.insert(0, str(PORT_DIR))
                 mod = importlib.import_module(PORT_MODULE)
                 reply({"ok": True})
             elif op == "load":           # timed: only the port's own load
@@ -151,7 +169,7 @@ def worker(read_fd: int, write_fd: int) -> int:
             else:
                 reply({"ok": False, "error": f"unknown op {op!r}"})
         except BaseException as exc:             # the port's failure goes back as text; the parent decides what it means
-            reply({"ok": False, "error": f"{type(exc).__name__}: {exc}"[:2000]})
+            reply({"ok": False, "error": clip(f"{type(exc).__name__}: {exc}")})
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 return 1
     return 0

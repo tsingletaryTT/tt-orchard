@@ -229,6 +229,23 @@ def rerun_inflight(entries: list[dict], n: int) -> dict | None:
     return open_
 
 
+def rerun_recorded(entries: list[dict], n: int) -> dict | None:
+    """The supervisor's own `hardware test` evidence entry that follows the in-flight rerun's `port repair rerun started` decision, or None.
+
+    `Supervisor._run_test` writes this entry (the only one with `returncode` and `timed_out`) right after it writes the test's record, so an
+    entry after the rerun decision says the rerun ran and was recorded. The record's bytes cannot say it: an edit that leaves the same failure
+    output, with both durations rounding to the same millisecond, gives a record byte for byte equal to the sealed one (review of PR 432)."""
+    started, found = False, None
+    for event, data in _attempt_events(entries, n):
+        if event == "decision" and data.get("decision") == RERUN:
+            started, found = True, None
+        elif event == "decision" and data.get("decision") == TESTED:
+            started, found = False, None
+        elif started and event == "evidence" and data.get("what") == "hardware test" and "returncode" in data and "timed_out" in data:
+            found = data
+    return found
+
+
 def output_kept(entries: list[dict], n: int, k: int) -> bool:
     """Has this attempt already copied round `k`'s failed output to the evidence directory and recorded it? A rerun that was cut short has
     replaced the output file, so a resume must not copy it over the copy the repair step was shown."""

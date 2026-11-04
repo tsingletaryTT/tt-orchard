@@ -12,7 +12,7 @@ from fakes import Crash
 from orchard import full_port, port_repair
 from orchard.supervisor import EXIT_ABORTED, EXIT_BLOCKED, Control, parse
 from port_check_fakes import HONEST
-from run_fakes import argv, bringup, call, where
+from run_fakes import argv, bringup, call, turn, where
 from test_supervisor import Rig
 from test_supervisor_full_port import PREPARE, STAGE_1, make, never_wait, stage_2, started, with_snapshot
 
@@ -286,6 +286,120 @@ def test_a_resume_of_an_escalated_attempt_goes_on_in_its_stage_directory(rig):
     assert not any(d.get("decision") == "not resuming from a failed hardware test" for d in rig.decisions())
 
 
+def same_length(k):
+    """A port that still fails at load, a different file each round but of one size: write_file's reply (`wrote N characters`) is identical."""
+    return BROKEN + f"# edit {k:03d}\n"
+
+
+def test_independent_repair_rounds_do_not_share_loop_detection_history(rig):
+    # Each repair step is its own conversation. Six distinct edits of one size give six identical `wrote N characters` replies; one watchdog
+    # for the whole stage nudged at the third and escalated at the sixth, so --port-repair-rounds 8 never reached round 7 (review of PR 425).
+    rig.args.port_repair_rounds = 8
+    start(rig, per_round=[{"port/port_model.py": same_length(k)} for k in range(1, 10)])
+    rig.run()
+    assert attempts(rig)[0] == list(range(1, 9)), attempts(rig)
+    assert all(e["data"].get("by") == "stage machine" for e in rig.entries() if e["event"] == "escalate" and e["stage"] == 2)
+
+
+def test_a_long_check_between_repair_steps_does_not_read_as_no_progress(rig):
+    # The check that follows a repair step can take longer than the watchdog's no-progress window. Its evidence goes to the ledger, not to the
+    # watchdog, so one watchdog for the stage read the next step's first reply as an hour of responses with no evidence and nudged or escalated
+    # a stage that had just run a check (review of PR 425, round 3). Each repair step has its own detector clock.
+    rig.args.port_repair_rounds = 3
+    start(rig, per_round=[{"port/port_model.py": broken(k)} for k in range(1, 6)])
+    base = rig.script
+
+    def slow(request):
+        if "tools" in request and where(request) == (2, "repair") and turn(request) == 0:
+            rig.clock.now += 3700.0                    # more than NO_EVIDENCE_S (3600 s) since the last step; three of them stay inside stage 2's 14,400 s
+        return base(request)
+    rig.script = slow
+    rig.run()
+    assert attempts(rig)[0] == [1, 2, 3], attempts(rig)
+    entries = rig.entries()
+    first_end = next(i for i, e in enumerate(entries) if e["event"] == "stage_end" and e["stage"] == 2)
+    assert not [e for e in entries[:first_end] if e["data"].get("watchdog")], "the watchdog acted on an attempt that was running its checks"
+
+
+def test_a_long_check_before_the_finish_step_does_not_read_as_no_progress(rig):
+    # The same reasoning for the step after the last rerun: the repair step's passing rerun can take longer than the no-progress window, and the
+    # finish step must not inherit the repair step's detector clock (review of PR 425, round 3).
+    rig.args.port_repair_rounds = 3
+    start(rig)                                                  # round 1 writes the honest port, so the rerun passes and the finish step follows
+    base = rig.script
+
+    def slow(request):
+        if "tools" in request and where(request) == (2, "finish") and turn(request) == 0:
+            rig.clock.now += 3700.0
+        return base(request)
+    rig.script = slow
+    rig.run()
+    entries = rig.entries()
+    first_end = next(i for i, e in enumerate(entries) if e["event"] == "stage_end" and e["stage"] == 2)
+    assert entries[first_end]["data"]["result"] == "pass"
+    assert not [e for e in entries[:first_end] if e["data"].get("watchdog")], "the watchdog acted on a finish step that followed a long check"
+
+
+def watchdogs_made(monkeypatch):
+    """Count the watchdogs the supervisor makes for stage 2: the list grows by one entry for each."""
+    from orchard.supervisor import Supervisor
+    made, real = [], Supervisor._watchdog
+
+    def counting(self, spec):
+        if spec.number == 2:
+            made.append(spec.number)
+        return real(self, spec)
+    monkeypatch.setattr(Supervisor, "_watchdog", counting)
+    return made
+
+
+def test_without_the_option_an_attempt_has_one_watchdog_as_before(rig, monkeypatch):
+    made = watchdogs_made(monkeypatch)
+    start(rig, port=HONEST)
+    rig.args.port_repair_rounds = 0                             # the option off: the stage is what it was before issue 420
+    rig.run()
+    assert len(made) == len(started(rig, 2)) and made, (made, len(started(rig, 2)))
+
+
+def test_with_the_option_each_repair_step_and_the_finish_step_after_them_have_their_own_watchdog(rig, monkeypatch):
+    made = watchdogs_made(monkeypatch)
+    rig.args.port_repair_rounds = 3
+    start(rig, per_round=[{"port/port_model.py": broken(1)}, {"port/port_model.py": HONEST}])
+    rig.run()
+    first_attempt = len(rounds(rig)[:2])                         # two repair steps in the first attempt, then its finish step
+    assert len(made) >= len(started(rig, 2)) + first_attempt + 1, (made, len(started(rig, 2)))
+
+
+def never_finishes(rig):
+    """A repair step that reads a new file every turn and never gives a final answer, so the step ends without status `done`."""
+    base = rig.script
+
+    def script(request):
+        if "tools" in request and where(request) == (2, "repair"):
+            return call("read_file", path=f"stages/2/notes-{turn(request)}.txt")
+        return base(request)
+    rig.script = script
+
+
+def test_a_kill_between_the_escalate_entry_and_the_stage_end_gives_the_escalated_attempt_a_fresh_start(rig):
+    # A repair step that ends early with rounds left ends the attempt. The stage machine writes `escalate` and then `stage_end`; a kill between
+    # the two resumes the stage escalated while the latest `stage_start` is still the original attempt's. The failed port is still repairable
+    # (rounds left), but the escalated attempt must start fresh: its own prepare, its own rounds. Review of PR 425, round 3.
+    rig.args.port_repair_rounds = 3
+    start(rig, per_round=[{"port/port_model.py": broken(1)}])
+    never_finishes(rig)
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "escalate" and e["stage"] == 2)
+    assert started(rig, 2)[-1]["data"].get("escalated") is not True              # the latest start is the original attempt's
+    rig.run(pid=200)
+    entries = rig.entries()
+    cut = next(i for i, e in enumerate(entries) if e["event"] == "escalate" and e["stage"] == 2)
+    first = next(e for e in entries[cut:] if e["event"] == "stage_start" and e["stage"] == 2)["data"]
+    assert first.get("escalated") is True and first.get("resumed") is False, first             # the resume starts the escalated attempt afresh
+    assert any(e["event"] == "decision" and e["data"].get("decision") == "not resuming from a failed hardware test" for e in entries[cut:])
+    assert attempts(rig)[0] == [1]                  # the original attempt's count stopped at its one round; the escalated attempt did not continue it
+
+
 def test_a_resume_after_the_rounds_ended_as_unchanged_does_not_start_another(rig):
     start(rig, per_round=[{}])
     ended = lambda e: e["event"] == "decision" and e["data"].get("decision") == port_repair.STOPPED and e["data"].get("reason") == "unchanged"
@@ -321,11 +435,114 @@ def test_a_resume_with_another_count_is_refused_and_one_without_the_option_keeps
 
 # ---- review of PR 425 ------------------------------------------------------------------------------------------------------------
 
+def test_a_secret_the_worker_cut_at_2000_characters_does_not_reach_the_ledger_or_the_prompt(rig):
+    from test_port_repair import straddling
+    secret = "S3CRETpassword" + "p" * 400
+    seen = start(rig, port=BROKEN.replace("model.layers.2.ple.conv1d.weight", straddling(secret)), unattended=False)
+    rig.run()
+    assert rounds(rig) and "S3CRET" not in rounds(rig)[0]["failure"] and "S3CRET" not in seen[0]
+    assert "S3CRET" not in json.dumps(rig.entries())
+
+
 def test_a_secret_whose_at_sign_is_past_the_cut_does_not_reach_the_ledger_or_the_prompt(rig):
     secret = "S3CRETpassword" + "p" * 400
     seen = start(rig, port=BROKEN.replace("model.layers.2.ple.conv1d.weight", f"https://bob:{secret}@host/model"), unattended=False)
     rig.run()
     assert "S3CRET" not in rounds(rig)[0]["failure"] and "S3CRET" not in seen[0]
+
+
+def hardware_test_evidence(e):
+    return e["event"] == "evidence" and e["stage"] == 2 and e["data"].get("what") == "hardware test"
+
+
+def test_a_kill_after_the_rerun_replaced_the_record_and_before_its_evidence_entry_keeps_the_repaired_port(rig, monkeypatch):
+    # The rerun's test writes test-result.json and then the supervisor writes the evidence entry that vouches for it. A kill between the two
+    # leaves a record no entry vouches for. The resume must not read that as a forged marker and move the attempt aside (the repaired port and
+    # the attempt's count would be lost): it keeps the port, does not trust the unvouched record, and runs the owed check again (review of PR 432).
+    import test_supervisor as ts
+    from fakes import Crash
+
+    class CrashesBefore(ts.Ledger):
+        """A ledger whose process dies just BEFORE the first append for which `crash_if(entry)` is true."""
+        def __init__(self, path, crash_if=None):
+            super().__init__(path)
+            self.crash_if = crash_if
+
+        def append(self, event, stage, **data):
+            if self.crash_if and self.crash_if({"event": event, "stage": stage, "data": data}):
+                raise Crash(f"killed before the ledger event {event}")
+            return super().append(event, stage, **data)
+    monkeypatch.setattr(ts, "CrashingLedger", CrashesBefore)
+    seen = []
+
+    def before_the_reruns_evidence(e):
+        if hardware_test_evidence(e):
+            seen.append(e)
+        return hardware_test_evidence(e) and len(seen) == 2
+    start(rig, per_round=[{"port/port_model.py": HONEST}], unattended=False)
+    with pytest.raises(Crash):
+        rig.run(crash_if=before_the_reruns_evidence)
+    marker_after_the_kill = json.loads((stage_2(rig) / "test-result.json").read_text())
+    assert marker_after_the_kill["returncode"] == 0                       # the rerun's record is on disk, and no entry vouches for it
+    assert rig.run(pid=200) == EXIT_ABORTED
+    assert not any(d.get("decision") == "marker not written by the supervisor" for d in rig.decisions()), "the unvouched record was refused as a forgery"
+    assert attempts(rig) == [[1]]                                         # the attempt was not moved aside and did not start again
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    assert exit_codes(rig) == [2, 0]                                      # the interrupted rerun was never recorded; the check ran again and was
+
+
+def test_a_kill_after_a_rerun_with_identical_record_bytes_was_recorded_does_not_repeat_the_test(rig):
+    # An edit that leaves the same failure, with durations that round alike, gives a rerun record byte for byte equal to the sealed one. A kill
+    # after the rerun's evidence entry and before `port repair tested` must still read the rerun as done: the evidence entry says so, and the
+    # bytes cannot (review of PR 432). Repeating it would park the coder and reboot it again.
+    rig.args.port_repair_rounds = 1
+    start(rig, per_round=[{"port/port_model.py": broken(1)}], unattended=False)
+    seen = []
+
+    def at_the_reruns_evidence(e):
+        if hardware_test_evidence(e):
+            seen.append(e)
+        return hardware_test_evidence(e) and len(seen) == 2
+    with pytest.raises(Crash):
+        rig.run(crash_if=at_the_reruns_evidence)
+    assert seen[0]["data"]["sha256"] == seen[1]["data"]["sha256"], "the rerun's record is not byte for byte the sealed one, so this test does not show the case"
+    rig.run(pid=200)
+    first_end = next(i for i, e in enumerate(rig.entries()) if e["event"] == "stage_end" and e["stage"] == 2)
+    tests_in_first_attempt = [e for e in rig.entries()[:first_end] if hardware_test_evidence(e)]
+    assert len(tests_in_first_attempt) == 2, len(tests_in_first_attempt)      # the initial test and its one rerun; the rerun was not repeated
+
+
+def test_a_record_changed_after_the_reruns_evidence_entry_is_not_trusted(rig):
+    # The evidence entry vouches for one set of bytes (path and sha256). A record that differs by the time of the resume is not that record, so the
+    # owed check runs again instead of a changed file standing in for its result.
+    start(rig, per_round=[{"port/port_model.py": HONEST}], unattended=False)
+    seen = []
+
+    def at_the_reruns_evidence(e):
+        if hardware_test_evidence(e):
+            seen.append(e)
+        return hardware_test_evidence(e) and len(seen) == 2
+    with pytest.raises(Crash):
+        rig.run(crash_if=at_the_reruns_evidence)
+    marker = stage_2(rig) / "test-result.json"
+    record = json.loads(marker.read_text())
+    marker.write_text(json.dumps({**record, "seconds": record["seconds"] + 123.0}))
+    rig.run(pid=200)
+    assert exit_codes(rig) == [2, 0, 0], exit_codes(rig)                      # the initial test, the rerun that was recorded, and the check run again
+
+
+def test_a_record_changed_with_no_rerun_in_flight_is_still_refused_on_resume(rig):
+    # The exception for a rerun in flight is for that window only. With none in the ledger, a test record no entry vouches for is what it always
+    # was: possibly written by an agent, and no resume point.
+    start(rig, per_round=[{"port/port_model.py": HONEST}], unattended=False)
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "decision" and e["data"].get("decision") == port_repair.TESTED)      # after the first test, before any rerun
+    marker = stage_2(rig) / "test-result.json"
+    record = json.loads(marker.read_text())
+    marker.write_text(json.dumps({**record, "returncode": 0}))
+    rig.run(pid=200)
+    assert any(d.get("decision") == "marker not written by the supervisor" for d in rig.decisions())
+    assert not any(e["data"].get("unvouched") for e in rig.entries() if e["event"] == "decision")
 
 
 def test_a_crash_between_the_repair_edit_and_the_rerun_tests_the_fix_on_resume(rig):
@@ -462,4 +679,4 @@ def test_repair_rounds_that_cannot_settle_end_in_a_failure_and_do_not_loop(rig, 
     assert "pass" not in [d["result"] for d in rig.ends(2)]               # a loop that could not settle is not a pass
     assert "did not settle within" in (rig.run_dir / "ledger.jsonl").read_text()        # the attempt's failure says why, in the ledger
     tested = [d for d in rig.decisions() if d.get("decision") == port_repair.TESTED]
-    assert len(tested) <= len(started(rig, 2)) * (2 * port_repair.DEFAULT_ROUNDS + 2)         # each attempt has its passes and no more
+    assert len(tested) <= len(started(rig, 2)) * (2 * port_repair.DEFAULT_ROUNDS + 3)         # each attempt has its passes and its first entry, and no more
