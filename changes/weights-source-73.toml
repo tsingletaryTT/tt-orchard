@@ -1,4 +1,4 @@
-target = "0.9.106"
+target = "0.9.110"
 summary = "The base preflight row refuses an installed package that cannot serve swapped weights: a container package recorded as hard-coding its model repository, or a bundle whose run.sh the swap cannot rewrite."
 kind = "fix"
 pr = 442
