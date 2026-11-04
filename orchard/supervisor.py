@@ -1712,12 +1712,14 @@ class Supervisor:
                            f"{free} GB is free", need_gb=spec.disk_gb, free_gb=free)
         marker = self.run_dir / "stages" / str(n) / "test-result.json"
         if (resuming and escalated and spec.boards and marker.is_file() and self._test_failure(spec, marker.parent)
-                and not self._repair_pending(spec, marker.parent)):
+                and not (self._repair_pending(spec, marker.parent) and self._latest_start_escalated(n))):
             # A kill came after the escalate entry and before the stage_end. The escalated attempt
             # must run a fresh prepare and hardware test: its finish step cannot pass on a test
             # that failed, and it gets no gate feedback for one. So the failed record is not a
             # resume point, and open_stage_dir moves the directory aside. The exception is a full-port stage 2 whose failed test
-            # is one the coder still has repair rounds for (issue 420): the attempt goes on with them, and its count stands.
+            # is one the coder still has repair rounds for (issue 420) and whose latest attempt is already the escalated one: that attempt goes
+            # on with them, and its count stands. When the latest `stage_start` is still the original attempt's, the kill came between the
+            # escalate entry and the stage_end, and the escalated attempt starts afresh with its own prepare and its own rounds.
             self.ledger.append("decision", n, decision="not resuming from a failed hardware test", marker=self._moved_aside_record(marker))
             resuming = False
         stage_dir, resumed = open_stage_dir(self.run_dir, spec, resuming=resuming, ledger=self.ledger)
@@ -1870,6 +1872,11 @@ class Supervisor:
                 ended = self._port_repair_rounds(spec, stage_dir, escalated, resumed)
                 if ended:
                     return ended
+                if self.port_repair_rounds:
+                    # The finish step is a conversation of its own. The check that ran after the last repair step can take longer than the
+                    # no-progress window, and its evidence is in the ledger, not in the watchdog: the repair step's detector clock would read the
+                    # finish step's first reply as an hour with no evidence (review of PR 425, round 3).
+                    self.watchdog = self._watchdog(spec)
             if spec.draft == "scoring_check":
                 step = None          # the check's own record is the result: no agent writes a finish step for a scoring model
             else:
@@ -1943,6 +1950,14 @@ class Supervisor:
         return hardware_test_failure(stage_dir)
 
     # ---- repair rounds for a full-port stage 2 (issue 420) -------------------------------------
+
+    def _latest_start_escalated(self, n: int) -> bool:
+        """Whether the latest `stage_start` of stage `n` began an escalated attempt (False when there is none, or it began the original one)."""
+        latest = None
+        for e in self.ledger.read():
+            if e.get("event") == "stage_start" and e.get("stage") == n:
+                latest = e
+        return latest is not None and (latest.get("data") or {}).get("escalated") is True
 
     def _repair_pending(self, spec, stage_dir: Path) -> bool:
         """Does a full-port stage 2's failed test still owe the coder's work a test, or still have repair rounds? The option is not 0 and the
@@ -2037,6 +2052,11 @@ class Supervisor:
                 raw = port_repair.safe_text(self._read_output(stage_dir), self._homes())
                 self.ledger.append("decision", n, decision=port_repair.DECISION, round=k, of=limit, op=failure["op"], returncode=failure["returncode"],
                                    failure=port_repair.failed_line(raw))
+                # Each repair step is a conversation of its own. A watchdog made for the stage would carry the loop detectors' history from one
+                # round to the next: six distinct edits of one size give six identical `wrote N characters` replies, which read as a loop and
+                # escalated a stage that was making progress (review of PR 425). A new one keeps the attempt's start time, so the stage budget
+                # stands, and reads the ladder's rungs from the ledger, so a nudge or an escalation already recorded still counts.
+                self.watchdog = self._watchdog(spec)
                 try:
                     out, _ = self._step(spec, "repair", stage_dir, escalated, resumed, extra=self._repair_text(n, k, limit, failure, raw))
                 finally:

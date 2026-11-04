@@ -79,6 +79,31 @@ def test_a_device_open_failure_at_init_is_setup_and_earns_no_round(tmp_path):
     assert port_repair.parse_failure(done.stdout) == {"kind": "setup", "op": "init"}
 
 
+def test_a_runtime_that_cannot_be_imported_at_init_is_setup_and_earns_no_round(tmp_path):
+    # `import ttnn` is the runtime's own import (a missing dependency, a broken install). It used to run before the worker's first reply, so
+    # the worker died and the parent called that a port failure at init. No edit to stages/2/port/ can fix it (review of PR 425, round 3).
+    run, stage, _ = make_run(tmp_path)
+    (tmp_path / "fake-ttnn" / "ttnn.py").write_text("raise ModuleNotFoundError(\"No module named 'torch'\")\n")
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "No module named 'torch'" in done.stdout
+    assert port_repair.parse_failure(done.stdout) == {"kind": "setup", "op": "init"}
+
+
+def test_a_runtime_that_exits_while_it_is_imported_is_setup_too(tmp_path):
+    # A broken install can end the interpreter from inside the import (SystemExit). That is the runtime's failure as well.
+    run, stage, _ = make_run(tmp_path)
+    (tmp_path / "fake-ttnn" / "ttnn.py").write_text("import sys\nsys.exit('runtime library not found')\n")
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and port_repair.parse_failure(done.stdout) == {"kind": "setup", "op": "init"}
+
+
+def test_a_runtime_that_cannot_be_imported_does_not_stand_in_for_a_port_import_failure(tmp_path):
+    # Both failures happen at init. The runtime's is setup; the port module's own import error stays a port failure.
+    run, stage, _ = make_run(tmp_path, "import module_that_does_not_exist\n" + HONEST)
+    done = run_template(tmp_path, run, stage)
+    assert port_repair.parse_failure(done.stdout) == {"kind": "port", "op": "init"}
+
+
 def test_a_port_that_cannot_be_imported_at_init_stays_repairable(tmp_path):
     run, stage, _ = make_run(tmp_path, "import module_that_does_not_exist\n" + HONEST)
     done = run_template(tmp_path, run, stage)

@@ -118,19 +118,22 @@ def worker(read_fd: int, write_fd: int) -> int:
         wr.write(json.dumps(obj) + "\n")
         wr.flush()
 
-    import ttnn      # before the port directory is on sys.path, so a file named ttnn.py there cannot stand in for the runtime
-    sys.path.insert(0, str(PORT_DIR))
     model = mod = device = closer = None
     for line in rd:
         try:
             req = json.loads(line)
             op = req["op"]
-            if op == "init":             # untimed: open the device and import the port module
+            if op == "init":             # untimed: import the runtime, open the device, import the port module
                 try:
+                    # The runtime is imported here, inside the guard, and before the port directory is on sys.path, so a file named ttnn.py
+                    # there cannot stand in for it. A failure of the import (a missing dependency, a broken install) is the runtime's, like a
+                    # failed device open: no edit to the port can fix it, so the parent calls it setup (issue 420, review of PR 425).
+                    import ttnn
                     device, closer = open_device(ttnn, int(req["n_chips"]))
-                except Exception as exc:     # the runtime's failure: no edit to the port can fix it, so the parent calls it setup (issue 420)
+                except (Exception, SystemExit) as exc:
                     reply({"ok": False, "kind": "setup", "error": f"{type(exc).__name__}: {exc}"[:2000]})
                     continue
+                sys.path.insert(0, str(PORT_DIR))
                 mod = importlib.import_module(PORT_MODULE)
                 reply({"ok": True})
             elif op == "load":           # timed: only the port's own load
