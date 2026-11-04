@@ -6,10 +6,10 @@ import json
 
 import pytest
 
-from orchard import full_port, full_port_result
+from orchard import full_port, full_port_result, supervisor
 from orchard.supervisor import EXIT_BLOCKED, Control
 from port_check_fakes import HONEST, WRONG
-from test_supervisor_full_port import coder_writes, failure, make, never_wait, rig, stage_2   # noqa: F401  (rig is a fixture)
+from test_supervisor_full_port import coder_writes, failure, incoherent, make, never_wait, rig, stage_2   # noqa: F401  (rig is a fixture)
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
 
@@ -128,3 +128,65 @@ def test_a_derived_result_that_the_ledger_vouching_refuses_ends_the_stage_and_no
     assert rig.run() == EXIT_BLOCKED
     assert "not the file the supervisor recorded" in failure(rig)["reason"] and failure(rig)["code"] == "stage-failed"
     assert finish_steps(rig) == [] and len(derived_decisions(rig)) >= 1
+
+
+# ---- the derived result and the rehearsal waiver: the audit trail is the one the agent path leaves (review of PR 462 with PR 455) ----------
+
+
+def waivers(rig):
+    return [e for e in rig.entries() if e["event"] == "decision" and e["data"].get("decision") == supervisor.REHEARSAL_WAIVED]
+
+
+def test_a_rehearsal_result_derived_with_unreadable_text_records_the_waiver_once_for_stage_2(rig, monkeypatch):
+    """The gate waives `coherent` for a rehearsal model and the supervisor writes the ledger decision from the gate's own read. That decision
+    has to exist exactly once, with the field, the flag and the note the agent path leaves, whoever wrote result.json."""
+    monkeypatch.setattr(full_port_result, "readable", lambda text: (False, "random weights"))
+    rig.args.full_port_rehearsal = True
+    make(rig)
+    abort_at_the_pause(rig)
+    rig.run()
+    assert [d["result"] for d in rig.ends(2)] == ["pass"] and finish_steps(rig) == []
+    (w,) = waivers(rig)
+    assert w["stage"] == 2 and w["data"]["field"] == "coherent" and w["data"]["by"] == "--full-port-rehearsal"
+    assert w["data"]["note"] == "the model is a rehearsal with random weights; every other stage 2 check still applied"
+
+
+def test_a_rehearsal_result_derived_with_readable_text_waives_nothing_because_nothing_needs_it(rig):
+    rig.args.full_port_rehearsal = True
+    make(rig)
+    abort_at_the_pause(rig)
+    rig.run()
+    (d,) = derived_decisions(rig)
+    assert d["coherent"] is True and waivers(rig) == [] and finish_steps(rig) == []
+
+
+def test_without_the_rehearsal_option_unreadable_text_is_never_derived_waived_or_passed(rig, monkeypatch):
+    """The derivation must not turn into a way round the coherent check: nothing is written, nothing is waived, the agent path runs, and an
+    agent that says the text is incoherent fails the stage exactly as it did before issue 456."""
+    monkeypatch.setattr(full_port_result, "readable", lambda text: (False, "forced by the test"))
+    make(rig, over={(2, "finish"): incoherent})
+    rig.args.unattended = True
+    never_wait(rig)
+    assert rig.run() == EXIT_BLOCKED
+    assert derived_decisions(rig) == [] and waivers(rig) == []
+    assert "readable floor" in not_derived(rig)[0]["why"] and len(finish_steps(rig)) >= 1
+    assert failure(rig)["code"] == "stage-failed" and "coherent" in failure(rig)["reason"]
+    written = stage_2(rig) / "result.json"
+    assert not written.is_file() or "derived_by" not in json.loads(written.read_text())
+
+
+def test_the_derived_check_runs_the_stages_own_gate_and_not_a_copy_of_its_arguments(rig, monkeypatch):
+    """Stage 3 of a full port (another branch) gives its gate the chip count; a derived result there must be judged by that gate. So the
+    derived check asks `Supervisor._gate(spec)` for the gate: once for the derived result and once for the stage's own check."""
+    calls = []
+    real = supervisor.Supervisor._gate
+
+    def spy(self, spec):
+        calls.append(spec.number)
+        return real(self, spec)
+    monkeypatch.setattr(supervisor.Supervisor, "_gate", spy)
+    make(rig)
+    abort_at_the_pause(rig)
+    rig.run()
+    assert [d["result"] for d in rig.ends(2)] == ["pass"] and len(derived_decisions(rig)) == 1
+    assert calls.count(2) >= 2, calls

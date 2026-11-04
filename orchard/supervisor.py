@@ -1933,7 +1933,11 @@ class Supervisor:
         except OSError as exc:
             self.ledger.append("decision", n, decision="result not derived by the supervisor", why=f"could not write it ({exc.__class__.__name__})")
             return False
-        reasons, _seen = full_port.check(stage_dir, self.run_dir, rehearsal=rehearsal)
+        # The stage's own gate judges the derived file, with the arguments that stage's gate gets (the rehearsal flag from the ledger, and for
+        # a later full-port stage the chip count it is configured for). It is the pure gate: the ledger checks and the waiver decision stay in
+        # `_check_gate`, so the decision is written once, by the stage's one gate call, whoever wrote result.json.
+        checked = self._gate(spec)(stage_dir, self.run_dir)
+        reasons = [] if checked.ok else (list(checked.reasons) or ["the stage's gate refused the derived result"])
         if reasons:
             path.unlink(missing_ok=True)
             self.ledger.append("decision", n, decision="result not derived by the supervisor",
