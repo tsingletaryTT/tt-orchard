@@ -433,3 +433,59 @@ def test_an_unexpected_error_in_the_excerpts_step_does_not_stop_the_stage(tmp_pa
     assert stub._port_seed["facts"] is True and "excerpts" not in stub._port_seed
     problem = next(k for _, k in entries if k.get("decision") == "reference excerpts not written")["problem"]
     assert "ValueError" in problem and "99999" not in problem
+
+
+# --- PR 470 review round 1: every omission is named, and a rejected section does not hide a helper ---
+
+def _mlp(i, lines=1, uses=""):
+    """A matching MLP class of roughly `lines` lines of forward, optionally calling the helper `uses`."""
+    call = f"        z = {uses}(x)\n" if uses else ""
+    return (f"\nclass ToyExpMlp{i:02d}MLP(nn.Module):\n    def forward(self, x):\n{call}"
+            + "".join(f"        y{j} = x + {j}\n" for j in range(lines)) + "        return x\n")
+
+
+def test_classes_beyond_the_class_cap_are_listed_as_left_out_with_their_source_lines():
+    r = port_excerpts.build(CONFIG, MODELING + "".join(_mlp(i) for i in range(port_excerpts.MAX_CLASSES + 5)))
+    assert len(r.classes) <= port_excerpts.MAX_CLASSES
+    left = [x for x in r.left_out if "matching classes" in x]
+    assert len(left) >= 5 and all("source lines" in x for x in left)
+    assert "more than" in " ".join(r.left_out)
+
+
+def test_helpers_beyond_the_per_class_helper_cap_are_listed_as_left_out_with_their_source_lines():
+    n = port_excerpts.MAX_HELPERS_PER_CLASS + 2
+    helpers = "".join(f"\ndef helper_{i}(x):\n    return x + {i}\n" for i in range(n))
+    uses = "".join(f"        x = helper_{i}(x)\n" for i in range(n))
+    src = MODELING + helpers + f"\nclass ToyExpMlp99MLP(nn.Module):\n    def forward(self, x):\n{uses}        return x\n"
+    r = port_excerpts.build(CONFIG, src)
+    shown = [i for i in range(n) if f"def helper_{i}(" in r.text]
+    missing = [i for i in range(n) if i not in shown]
+    assert missing, "the fixture must exceed the helper cap"
+    for i in missing:
+        assert any(f"helper helper_{i} " in x and "source lines" in x for x in r.left_out)
+        assert f"helper_{i}" in r.text.split("\n## ", 1)[0]                     # and the header says so
+
+
+def test_a_section_rejected_for_the_total_cap_does_not_hide_its_helper_from_a_later_class():
+    helper = "\ndef shared_helper(x):\n    return x * 2\n"
+    big = [_mlp(i, lines=650) for i in range(6)]                                  # fills most of the total
+    # a class that uses the helper and is rejected for the total cap (its helper fits its own class cap), then a small retained one that uses it too
+    src = MODELING + helper + "".join(big) + _mlp(40, lines=300, uses="shared_helper") + _mlp(41, uses="shared_helper")
+    r = port_excerpts.build(CONFIG, src)
+    assert "ToyExpMlp41MLP" in r.classes and "ToyExpMlp40MLP" not in r.classes, (r.classes, r.left_out)
+    assert "def shared_helper(" in r.text
+
+
+def test_the_header_is_rebuilt_when_sections_are_cut_for_its_own_size(monkeypatch):
+    monkeypatch.setattr(port_excerpts, "HEADER_RESERVE", 0)
+    src = MODELING + "".join(_mlp(i, lines=650) for i in range(14))
+    r = port_excerpts.build(CONFIG, src)
+    assert len(r.text.encode()) <= port_excerpts.MAX_TOTAL_BYTES
+    head = r.text.split("\n## ", 1)[0]
+    dropped = [x for x in r.left_out if "total cap" in x]
+    assert dropped
+    more = [ln for ln in head.splitlines() if ln.startswith("- and ")]
+    named = sum(1 for x in dropped if x.split(":")[0] in head)
+    # every dropped class is named in the header, or counted in its "and N more" line when the list is past its cap
+    assert named + (int(more[0].split()[2]) if more else 0) >= len(dropped)
+    assert any(x.split(":")[0] in head for x in dropped)

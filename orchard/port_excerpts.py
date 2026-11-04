@@ -132,9 +132,9 @@ def _prefix(archs: list, types: list, names) -> str | None:
     return next((c for c in candidates if any(n.startswith(c) for n in names)), None)
 
 
-def _select(classes: dict, archs: list, kinds: list, types: list, with_other_sections: bool = False) -> list:
-    """[(class name, why)] in priority order, at most MAX_CLASSES. Classes for a vision or audio part are left out unless the config has such a
-    section (`with_other_sections`)."""
+def _select_all(classes: dict, archs: list, kinds: list, types: list, with_other_sections: bool = False) -> list:
+    """[(class name, why)] in priority order, every match. Classes for a vision or audio part are left out unless the config has such a
+    section (`with_other_sections`). `build` applies MAX_CLASSES and lists the classes beyond it as left out."""
     prefix = _prefix(archs, types, classes)
     pool = [n for n in classes if _NAME.fullmatch(n) and not _SKIP.search(n) and (prefix is None or n.startswith(prefix))
             and (with_other_sections or not _NON_TEXT.search(n))]
@@ -155,7 +155,12 @@ def _select(classes: dict, archs: list, kinds: list, types: list, with_other_sec
     for a in archs:                                    # the architecture class last: its forward is the generic wrapper
         if a in classes and a not in (c for c, _ in out):
             out.append((a, "architecture named in the config"))
-    return out[:MAX_CLASSES]
+    return out
+
+
+def _select(classes: dict, archs: list, kinds: list, types: list, with_other_sections: bool = False) -> list:
+    """The first MAX_CLASSES of `_select_all`."""
+    return _select_all(classes, archs, kinds, types, with_other_sections)[:MAX_CLASSES]
 
 
 def _top_level(tree: ast.Module) -> tuple:
@@ -245,7 +250,12 @@ def _section(name: str, why: str, cls: ast.ClassDef, funcs: dict, lines: list, h
                             f"the whole method is at source lines {fwd.lineno}-{fwd.end_lineno} of the modeling module")
         parts.append(src)
         budget -= len(src.encode("utf-8"))
-        for h in _helpers(fwd, funcs)[:MAX_HELPERS_PER_CLASS]:
+        every = _helpers(fwd, funcs)
+        for h in every[MAX_HELPERS_PER_CLASS:]:
+            if h not in helpers_done:
+                left_out.append(f"helper {h} (used by {name}): not included, more than {MAX_HELPERS_PER_CLASS} helpers; "
+                                f"source lines {funcs[h].lineno}-{funcs[h].end_lineno} of the modeling module")
+        for h in every[:MAX_HELPERS_PER_CLASS]:
             if h in helpers_done:
                 continue
             hsrc = _lines(lines, _start(funcs[h]), funcs[h].end_lineno)
@@ -280,11 +290,15 @@ def build(config, source) -> Excerpts:
     archs, kinds, types = _config_names(config)
     classes, funcs = _top_level(tree)
     with_other = any(isinstance(config.get(k), dict) for k in ("vision_config", "audio_config"))
-    chosen = _select(classes, archs, kinds, types, with_other)
+    every_match = _select_all(classes, archs, kinds, types, with_other)
+    chosen = every_match[:MAX_CLASSES]
     if not chosen:
         return Excerpts(reason="no class of the reference modeling module matches the config's architecture or layer types")
     lines = source.splitlines()
     left_out: list = []
+    for n, _ in every_match[MAX_CLASSES:]:
+        src = classes[n]
+        left_out.append(f"{n}: not included, more than {MAX_CLASSES} matching classes; source lines {src.lineno}-{src.end_lineno} of the modeling module")
     sections: list = []
     names: list = []
     helpers_done: set = set()
@@ -292,31 +306,36 @@ def build(config, source) -> Excerpts:
     room = MAX_TOTAL_BYTES - HEADER_RESERVE
     for name, why in chosen:
         mark = len(left_out)
-        sec = _section(name, why, classes[name], funcs, lines, helpers_done, left_out)
+        trial = set(helpers_done)            # a rejected section must not mark its helpers as shown
+        sec = _section(name, why, classes[name], funcs, lines, trial, left_out)
         size = len(sec.encode("utf-8")) + 1
         if total + size > room:
             del left_out[mark:]
             left_out.append(f"{name}: not included, the total cap of {MAX_TOTAL_BYTES} bytes would be passed")
             continue
+        helpers_done = trial
         total += size
         sections.append(sec)
         names.append(name)
-    shown = left_out[:MAX_LEFT_OUT_LISTED]
-    header = ["# Reference excerpts", "",
-              "Source text of the classes this model uses, copied from the installed `transformers` modeling module for its model type. "
-              "Each class shows its constructor signature, its `forward` method and the small helper functions `forward` calls. "
-              "Nothing here was run. Write your first `port_model.py` from this file before you read anything else.", ""]
-    if shown:
-        header += ["Left out or cut:"] + [f"- {_clean(x)[:LEFT_OUT_CHARS]}" for x in shown]
-        if len(left_out) > len(shown):
-            header.append(f"- and {len(left_out) - len(shown)} more")
-        header.append("")
-    text = "\n".join(header) + "\n" + "\n".join(sections)
-    if len(text.encode("utf-8")) > MAX_TOTAL_BYTES:           # the reserve was too small for a header this long: cut sections from the end
-        while sections and len(text.encode("utf-8")) > MAX_TOTAL_BYTES:
-            left_out.append(f"{names.pop()}: not included, the total cap of {MAX_TOTAL_BYTES} bytes would be passed")
-            sections.pop()
-            text = "\n".join(header) + "\n" + "\n".join(sections)
+    def render() -> str:
+        """The file text with a header that describes the sections kept now and everything left out so far."""
+        shown = left_out[:MAX_LEFT_OUT_LISTED]
+        header = ["# Reference excerpts", "",
+                  "Source text of the classes this model uses, copied from the installed `transformers` modeling module for its model type. "
+                  "Each class shows its constructor signature, its `forward` method and the small helper functions `forward` calls. "
+                  "Nothing here was run. Write your first `port_model.py` from this file before you read anything else.", ""]
+        if shown:
+            header += ["Left out or cut:"] + [f"- {_clean(x)[:LEFT_OUT_CHARS]}" for x in shown]
+            if len(left_out) > len(shown):
+                header.append(f"- and {len(left_out) - len(shown)} more")
+            header.append("")
+        return "\n".join(header) + "\n" + "\n".join(sections)
+
+    text = render()
+    while sections and len(text.encode("utf-8")) > MAX_TOTAL_BYTES:   # the reserve was too small for this header: cut sections from the end
+        left_out.append(f"{names.pop()}: not included, the total cap of {MAX_TOTAL_BYTES} bytes would be passed")
+        sections.pop()
+        text = render()                                             # rebuilt, so the header lists the class just removed
     return Excerpts(text=text, classes=names, left_out=left_out)
 
 
