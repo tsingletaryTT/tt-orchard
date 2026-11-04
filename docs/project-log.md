@@ -4157,7 +4157,7 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Tests, written first: `tests/test_token_check_numbers.py` has 214 tests. 28 fail on the unfixed code (the overflow in `_number` and `_same_fraction`, the missing safety net, the missing `_run_gate`); the other 186 are regression guards for values the code already handled and for the layering in front of the gates. They cover the helpers; every number the module reads (`top1_agreement`, `n_tokens`, `matches`, positions, `first_id`, the mismatch list, the reference ids copy) with huge, negative huge, infinite, NaN, boolean, text, list, object and null values in the report, its draft and the result; the three swap gates; the sampling readers; and the supervisor wrapper with a fake gate.
 - Mutations: 16 guards removed one at a time, each turned a test red (runner at `/tmp/claude-1000/fork444b-mut.py`, run in a memory-capped scope, files restored byte for byte).
 
-## 2026-11-04 Issue 445: four gates no longer read a number an agent typed without saying so
+## 2026-11-04 PR 469 (issue 445): four gates no longer read a number an agent typed without saying so
 
 Prompt (operator, through the PR 444 work): the stage 7 boot check (it feeds the card), the sidecar parity object, the stage 2 decoder PCC and the stage 3 `top1` were read as written. Recompute each from raw evidence where the supervisor keeps some, and where it keeps none, say so and write down what evidence a check step would need. Built on PR 444's branch (the 32-token recompute and `_run_gate`).
 
