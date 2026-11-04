@@ -55,14 +55,18 @@ user account or a mount namespace, which plan 4 does not set up.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import os
 import re
 import signal
 import subprocess
+import threading
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,6 +132,9 @@ def agent_env(run_dir, *, extra: dict | None = None, source=None) -> dict:
 
 # ---- running a checked command ------------------------------------------------------------------
 
+SPAWN_TAG_VAR = "ORCHARD_SPAWN_TAG"       # in every spawned command's environment: a value of its own, so a sweep finds what the command started
+
+
 def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> tuple[int | None, bool]:
     """Run one shell string after the runner's checks. Returns (exit code or None, timed out).
 
@@ -136,19 +143,111 @@ def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> t
     supervisor's SIGINT or SIGTERM handler, or an error): a terminal's Ctrl-C does not reach a
     process in another session, so without this the command would keep running, possibly with a
     device open, after the supervisor had released its lease.
+
+    A helper that the command put in a session of its own (`start_new_session=True`, a double fork
+    with `setsid`) is not in the command's group, so the group kill misses it (issue 390). Every
+    command carries ORCHARD_SPAWN_TAG with a value of its own, and after a kill the processes that
+    carry it are stopped and named in `stdout`. A process that replaced its environment is not found.
     """
     check_string(command, run_dir)
-    proc = subprocess.Popen(["bash", "-c", command], cwd=run_dir, env=env, stdin=subprocess.DEVNULL,
+    tag = str(Path(run_dir).resolve() / f".spawn-{uuid.uuid4().hex}")       # a value to match, never created as a path
+    proc = subprocess.Popen(["bash", "-c", command], cwd=run_dir, env={**env, SPAWN_TAG_VAR: tag}, stdin=subprocess.DEVNULL,
                             stdout=stdout, stderr=subprocess.STDOUT, start_new_session=True)
     try:
         proc.wait(timeout=timeout)
         return proc.returncode, False
     except subprocess.TimeoutExpired:
-        _kill_session(proc)
+        late = _cleanup(proc, tag, stdout)
+        if late is not None:
+            raise late                       # a stop signal arrived during the cleanup; nothing else is on its way, so it goes on now
         return None, True
     except BaseException:
-        _kill_session(proc)
+        _cleanup(proc, tag, stdout)          # the interrupt already on its way is the one that propagates, not one that arrives meanwhile
         raise
+
+
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)      # the supervisor's handlers for these raise a BaseException
+CLEANUP_TRIES = 3                                   # a step that an interrupt cut short is run again, this many times in all
+
+
+class _HeldStopSignals:
+    """While held, SIGINT and SIGTERM are recorded and not acted on. The handlers are swapped, not the signal mask: a mask covers one thread, and
+    in a process with other threads the signal can reach any of them while Python still runs the handler in the main thread. A handler can be
+    swapped in the main thread only, so in another thread nothing is held and the cleanup relies on its retries.
+
+    Both transitions can be cut short by a stop signal, because until a signal's handler is swapped the original one still runs and raises. So
+    the constructor never raises: each original handler is read before anything is swapped, an interrupt that arrives during the swapping is
+    kept in `exc` and the swapping goes on (a second try for each signal, CLEANUP_TRIES in all), and the cleanup then runs. `release` puts every
+    original handler back, repeating the whole restoration when an interrupt cuts it short (putting a handler back is idempotent), and returns
+    the first exception that came up (the one kept at the start, one raised while restoring, or one raised by the handler of a signal that
+    arrived while held, which is run as the signal would have been); None when nothing did."""
+
+    def __init__(self):
+        self.old: dict = {}
+        self.arrived: list = []
+        self.exc: BaseException | None = None
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for signum in STOP_SIGNALS:
+            for _ in range(CLEANUP_TRIES):
+                try:
+                    if signum not in self.old:
+                        self.old[signum] = signal.getsignal(signum)
+                    signal.signal(signum, self._hold)
+                    break
+                except (ValueError, OSError):
+                    self.old.pop(signum, None)
+                    break
+                except BaseException as exc:          # a stop signal arrived before this one was held: the cleanup still runs
+                    self.exc = self.exc or exc
+
+    def _hold(self, signum, frame) -> None:
+        self.arrived.append((signum, frame))
+
+    def release(self) -> BaseException | None:
+        first = self.exc
+        for _ in range(CLEANUP_TRIES):
+            try:
+                for signum, handler in self.old.items():
+                    try:
+                        signal.signal(signum, handler)
+                    except (ValueError, OSError, TypeError):
+                        pass
+                break
+            except BaseException as exc:              # cut short by a signal: every handler is put back again from the start
+                first = first or exc
+        for signum, frame in self.arrived:
+            handler = self.old.get(signum)
+            try:
+                if callable(handler):
+                    handler(signum, frame)
+                elif handler == signal.SIG_DFL:
+                    os.kill(os.getpid(), signum)          # the default action of the signal, after the cleanup
+            except BaseException as exc:
+                return first or exc
+        return first
+
+
+def _cleanup(proc, tag: str, stdout) -> BaseException | None:
+    """Kill the command's group, then sweep the helpers that carry `tag`, so that no interrupt skips either step.
+
+    The stop signals are held back while this runs (_HeldStopSignals): one that arrives meanwhile is acted on when the cleanup is done. A step
+    that an exception still stops (a thread that is not the main one) is run again, up to CLEANUP_TRIES times. Returns the first exception that
+    came up during the cleanup, or None; the caller decides whether it replaces anything."""
+    held = _HeldStopSignals()                # never raises: an interrupt during its setup is kept, and release() returns it after the cleanup
+    late = None
+    try:
+        for step in (lambda: _kill_session(proc), lambda: _sweep_helpers(tag, stdout)):
+            for _ in range(CLEANUP_TRIES):
+                try:
+                    step()
+                    break
+                except BaseException as exc:
+                    late = late or exc
+    finally:
+        replayed = held.release()
+        late = late or replayed
+    return late
 
 
 def _kill_session(proc) -> None:
@@ -157,6 +256,74 @@ def _kill_session(proc) -> None:
     except ProcessLookupError:
         pass
     proc.wait()
+
+
+_SURVIVORS: contextvars.ContextVar = contextvars.ContextVar("orchard_spawn_survivors", default=None)
+
+
+class Survivors(list):
+    """What collect_survivors yields: the records (a list of dicts), and in `problems` what stopped a sweep from being complete (a process list
+    that could not be read, a scan that never settled, an error). An empty list with no problems is a sweep that found nothing; an empty list
+    with problems is a sweep nobody can vouch for, and a caller that guards hardware has to treat the two differently."""
+
+    def __init__(self):
+        super().__init__()
+        self.problems: list[str] = []
+
+
+@contextlib.contextmanager
+def collect_survivors():
+    """Within this block, every spawn_checked call in this context adds what its sweep stopped to the list this yields: one record per process
+    ({"pid", "cmdline", "stopped", "boot_id", "start"}), with the identity it had before it was signalled. The sweep removes a process before
+    any later scan can see it, so the structured audit paths (the supervisor's ledger, a kernel-probe attempt's `swept` list) take the records
+    from here. `stopped` False means the process is still running. The records are added when the sweep ends, also when an interrupt cuts the
+    call short, so a caller that reads them in a `finally` sees them on every way out. `problems` lists what made a sweep incomplete."""
+    records = Survivors()
+    token = _SURVIVORS.set(records)
+    try:
+        yield records
+    finally:
+        _SURVIVORS.reset(token)
+
+
+def _sweep_helpers(tag: str, stdout) -> None:
+    """Stop the processes that carry `tag` (SIGTERM, a short grace, then SIGKILL) and say which in `stdout`. This runs on the way out of a kill,
+    so it does not raise an Exception: an error here must not replace the result or the interrupt that is already on its way. A collector
+    (collect_survivors) also gets the records, with the identity each process had before it was signalled, and the reasons the sweep could not be
+    completed (an error, a process list that could not be read, a scan that never settled), so the caller can tell a failed sweep from an empty one.
+    The records reach the collector and `stdout` when an interrupt cuts the sweep short as well; the interrupt then goes on."""
+    sink = _SURVIVORS.get()
+    records: list = []
+    status: dict = {}
+    try:
+        try:
+            from orchard import kernelprobe              # imported here: kernelprobe imports this module
+            result = kernelprobe.sweep_strays(tag, var=SPAWN_TAG_VAR, identity=sink is not None, into=records, status=status)
+            if isinstance(result, list) and result is not records:        # a sweep that returns its records and does not fill `into`
+                records.extend(r for r in result if r not in records)
+        finally:
+            _publish_sweep(sink, records, status, stdout)
+    except Exception as exc:
+        if sink is not None:
+            sink.problems.append(f"the sweep of the command's helpers failed ({type(exc).__name__})")
+
+
+def _publish_sweep(sink, records: list, status: dict, stdout) -> None:
+    """Hand a sweep's records and problems to the collector and name the helpers in `stdout`. Never raises an Exception."""
+    try:
+        if sink is not None:
+            sink.extend(r for r in records if isinstance(r, dict))
+            sink.problems.extend(str(p) for p in (status.get("problems") or []))
+        if records:
+            lines = "".join(f"orchard: a helper outlived the command and was stopped: pid {r['pid']} {r['cmdline']}"
+                            f"{'' if r['stopped'] else ' (still running)'}\n" for r in records)
+            try:
+                stdout.write(lines.encode("utf-8") if "b" in getattr(stdout, "mode", "b") else lines)
+                stdout.flush()
+            except (OSError, ValueError, TypeError):
+                pass
+    except Exception:
+        pass
 
 
 READ_FILE_MAX_BYTES = 16 * 1024 * 1024    # choice: read_file loads a file whole to page through it
@@ -255,6 +422,9 @@ class Tools:
         # What the port files held before the last shell command, so a command that makes one a runaway can be undone (issue 458). The
         # guard works only through descriptors beneath the real port directory (orchard/port_guard.py).
         self._guard = PortGuard(self.stage_dir, self.run_dir)
+        # What the sweeps after this tool's shell commands stopped (see collect_survivors); a kernel-probe attempt lists them under `swept`.
+        self.swept: list[dict] = []
+        self.sweep_problems: list[str] = []         # what made a sweep incomplete (see Survivors); a sweep nobody can vouch for
 
     def call(self, name: str, arguments: str) -> str:
         try:
@@ -292,8 +462,12 @@ class Tools:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         self._guard.remember()
         try:
-            with open(out_path, "wb") as out:
-                code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out)
+            with open(out_path, "wb") as out, collect_survivors() as swept:
+                try:
+                    code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out)
+                finally:                       # an interrupt that cut the wait short still leaves what its sweep stopped
+                    self.swept.extend(swept)
+                    self.sweep_problems.extend(swept.problems)
         except Denied as exc:
             return f"refused: {exc}"
         text = out_path.read_text(encoding="utf-8", errors="replace")

@@ -238,7 +238,8 @@ class Worker:
         """SIGKILL every process below the worker (children the port started), found through /proc before the worker exits and they are
         re-parented. The worker stays in this process's own process group on purpose: the supervisor kills that group when the test times
         out or the run is aborted, and SIGKILL skips this file's cleanup, so a worker in a group of its own would survive it. Processes that
-        detach themselves with a new session or a double fork are not reached here; they are in the supervisor's group kill or they are not."""
+        detach themselves with a new session or a double fork are not reached here. After a kill the supervisor stops them through the
+        ORCHARD_SPAWN_TAG its spawned commands carry (orchard/agent.py, `spawn_checked`, issue 390)."""
         parents = {}
         for entry in os.listdir("/proc"):
             if entry.isdigit():
