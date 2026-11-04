@@ -10,6 +10,8 @@ owner that is not alive on the lab.
 """
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from orchard import labclient, lab
+from waits import PATIENCE_S, wait_until
 from orchard.adapters import Lease
 
 REPO = Path(__file__).resolve().parent.parent
@@ -71,10 +74,34 @@ def labroot(tmp_path):
     return root, gz
 
 
+LABS: list = []                 # every connection this module has opened, so a test and its teardown can look at them
+
+
 def connect(root, gz, tmp_path, **kw):
     env = {"FAKE_GOZER_STATE": str(tmp_path / "gozer-state.json"),
            "PYTHONPATH": str(REPO)}
-    return labclient.Lab.local(root=root, gozer=str(gz), env=env, **kw)
+    lab_ = labclient.Lab.local(root=root, gozer=str(gz), env=env, **kw)
+    LABS.append(lab_)
+    return lab_
+
+
+def close_every_lab() -> None:
+    """Close every connection this module opened and forget them. A teardown must not hide the failure of the test itself, so a close that
+    raises does not stop the others from being closed."""
+    for lab_ in LABS:
+        try:
+            lab_.close()
+        except Exception:
+            pass
+    LABS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _close_every_lab():
+    """A test that opens a connection without `with` and fails before it closes it would leave the helper, and whatever the helper runs, up
+    until its own deadline. Whatever a test opened is closed when the test ends (review of PR 447, round 2)."""
+    yield
+    close_every_lab()
 
 
 def gozer_log(tmp_path) -> list[str]:
@@ -117,11 +144,17 @@ def test_a_command_is_killed_on_the_lab_at_its_deadline(labroot, tmp_path):
     root, gz = labroot
     pidfile = tmp_path / "child.pid"
     with connect(root, gz, tmp_path) as lab_, open(tmp_path / "o", "wb") as f:
-        t0 = time.time()
-        code, timed_out = lab_.shell(f"sleep 30 & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=1,
+        t0 = time.monotonic()
+        # The child sleeps for 120 s, so a command that is not killed at its deadline returns after 120 s with exit code 0 (and the
+        # check below fails on that). The stopwatch only has to tell 1 s from 120 s: 60 s holds on a box where everything is 30 times slower.
+        # The helper counts the deadline from the start of the shell, so the shell has to write its child's pid inside it: 5 s leaves room
+        # for a starved process (1 s did not).
+        code, timed_out = lab_.shell(f"sleep 120 & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=5,
                                      stdout=f)
-        assert time.time() - t0 < 10
+        assert time.monotonic() - t0 < 60
     assert timed_out and code is None
+    assert pidfile.exists() and pidfile.read_text().strip().isdigit(), \
+        "the shell was killed before it wrote the pid of its child, so the group kill could not be checked: the box was too slow for the 5 s deadline"
     assert not pid_alive(int(pidfile.read_text()))           # the whole group went, not just bash
 
 
@@ -129,20 +162,35 @@ def test_the_brain_going_away_kills_running_tests_and_releases_leases(labroot, t
     root, gz = labroot
     pidfile = tmp_path / "child.pid"
     lab_ = connect(root, gz, tmp_path)
-    adapter = labclient.LabGozerAdapter(lab_, gozer=str(gz))
-    lease = adapter.acquire(2, "orchard:supervisor", "test")
-    assert list(lease.chips) == ["0000:01:00.0", "0000:02:00.0"]
-    lab_.start_shell(f"sleep 60 & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=120)
-    deadline = time.time() + 5
-    while not pidfile.exists() and time.time() < deadline:
-        time.sleep(0.05)
-    child = int(pidfile.read_text())
-    lab_.drop()                                             # the ssh connection breaks
-    deadline = time.time() + 10
-    while time.time() < deadline and (pid_alive(child) or "release L1" not in " ".join(gozer_log(tmp_path))):
-        time.sleep(0.1)
-    assert not pid_alive(child)
-    assert "release L1 --json" in gozer_log(tmp_path)
+    child = None
+    try:
+        adapter = labclient.LabGozerAdapter(lab_, gozer=str(gz))
+        lease = adapter.acquire(2, "orchard:supervisor", "test")
+        assert list(lease.chips) == ["0000:01:00.0", "0000:02:00.0"]
+        # Two things must outlast both polling phases below (the wait for the pid and the wait for the cleanup, each `PATIENCE_S`). The command's
+        # own deadline: if it expired inside the second phase, the ordinary command timeout could kill the child and a helper that never kills it
+        # on a dropped connection would pass (review of PR 447). And the child itself, which must outlive the deadline so that nothing but the
+        # helper can end it inside the test.
+        command_deadline_s = 600
+        assert command_deadline_s > 2 * PATIENCE_S + 30
+        lab_.start_shell(f"sleep {command_deadline_s + 300} & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=command_deadline_s)
+        # `echo $! > file` creates the file before it writes the pid, so the file can exist and be empty: wait for the digits.
+        wait_until(lambda: pidfile.exists() and pidfile.read_text().strip().isdigit(), "the test's shell to write its child's pid")
+        child = int(pidfile.read_text())
+        lab_.drop()                                         # the ssh connection breaks
+        wait_until(lambda: not pid_alive(child) and "release L1 --json" in gozer_log(tmp_path),
+                   "the helper to kill the running test and release the lease after the connection broke")
+        assert not pid_alive(child)
+        assert "release L1 --json" in gozer_log(tmp_path)
+    finally:
+        # A run that fails anywhere above, the wait for the pid included, leaves nothing behind: closing the connection makes the helper stop what
+        # it runs and release what it holds (review of PR 447, round 2), and a child that is still there is killed by its pid, read from the file
+        # when the test never got that far.
+        lab_.close()
+        if child is None and pidfile.exists() and pidfile.read_text().strip().isdigit():
+            child = int(pidfile.read_text())
+        if child is not None and pid_alive(child):
+            os.kill(child, signal.SIGKILL)
 
 
 def test_a_released_lease_is_not_released_again_when_the_brain_leaves(labroot, tmp_path):
@@ -151,8 +199,11 @@ def test_a_released_lease_is_not_released_again_when_the_brain_leaves(labroot, t
     adapter = labclient.LabGozerAdapter(lab_, gozer=str(gz))
     lease = adapter.acquire(1, "orchard:supervisor", "test")
     adapter.release(lease)
+    helper = int(lab_.hello["pid"])
     lab_.close()
-    time.sleep(0.5)
+    # Nothing can be proved about a call that never comes by waiting a fixed time: the helper may not have started its clean-up yet.
+    # Its exit is the point after which it makes no more calls.
+    wait_until(lambda: not pid_alive(helper), "the helper to exit after the connection closed")
     assert [line.split()[0] for line in gozer_log(tmp_path) if line.split()[0] != "queue"] == ["acquire", "release"]
 
 
@@ -167,9 +218,7 @@ def test_when_the_brain_leaves_the_helper_cancels_its_own_queue_tickets(labroot,
         {"ticket": "T1", "pid": mine, "who": "orchard:supervisor", "min_chips": 4},
         {"ticket": "T2", "pid": mine + 1, "who": "someone-else", "min_chips": 1}]))
     lab_.close()
-    deadline = time.time() + 10
-    while time.time() < deadline and "cancel T1" not in gozer_log(tmp_path):
-        time.sleep(0.1)
+    wait_until(lambda: "cancel T1" in gozer_log(tmp_path), "the helper to cancel the queue ticket its pid owned")
     log = gozer_log(tmp_path)
     assert "cancel T1" in log and "cancel T2" not in log
 
@@ -374,3 +423,101 @@ def test_the_helper_makes_a_directory_only_under_its_root(labroot, tmp_path):
         assert not (tmp_path / "outside").exists()
     finally:
         lab_.close()
+
+
+def test_a_failed_wait_for_the_childs_pid_still_closes_the_connection(labroot, tmp_path, monkeypatch):
+    """Review of PR 447, round 2: when the wait for the child's pid timed out, the brain-going-away test left before its cleanup, with the lab
+    connection still open, so the helper and the child it ran stayed up until the command's own deadline (600 s) and held the fake lease.
+    Here the pid wait is made to fail at once, and the test checks that the helper has exited anyway and that nothing it ran is left."""
+    real_wait = wait_until
+
+    def failing_wait(condition, what, **kw):
+        if "child's pid" in what:
+            raise AssertionError("simulated: the wait for the child's pid timed out")
+        return real_wait(condition, what, **kw)
+
+    monkeypatch.setattr(sys.modules[__name__], "wait_until", failing_wait)
+    before = len(LABS)
+    pidfile = tmp_path / "child.pid"
+    try:
+        with pytest.raises(AssertionError, match="simulated"):
+            test_the_brain_going_away_kills_running_tests_and_releases_leases(labroot, tmp_path)
+        opened = LABS[before:]
+        assert opened, "the scenario opened no connection"
+        for lab_ in opened:
+            real_wait(lambda: lab_.proc.poll() is not None, "the helper to exit after the pid wait failed", timeout=20)
+        if pidfile.exists() and pidfile.read_text().strip().isdigit():
+            real_wait(lambda: not pid_alive(int(pidfile.read_text())), "the test's child to be gone after the pid wait failed", timeout=20)
+    finally:                                                # this test leaves nothing behind either, whatever it found
+        for lab_ in LABS[before:]:
+            if lab_.proc.poll() is None:
+                lab_.proc.kill()
+        if pidfile.exists() and pidfile.read_text().strip().isdigit() and pid_alive(int(pidfile.read_text())):
+            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+def test_a_failed_pid_wait_kills_the_child_by_the_pid_in_the_file_even_when_closing_the_connection_does_not(labroot, tmp_path, monkeypatch):
+    """The cleanup of the brain-going-away test has two parts: closing the connection (the helper then stops what it runs) and killing the child
+    by the pid its shell wrote, which covers a helper that does not stop it. Here closing is made to do nothing and the pid wait fails after
+    the pid was written, so only the second part can end the child."""
+    real_wait = wait_until
+    pidfile = tmp_path / "child.pid"
+
+    def failing_wait(condition, what, **kw):
+        value = real_wait(condition, what, **kw)
+        if "child's pid" in what:
+            raise AssertionError("simulated: the test failed right after its child wrote the pid")
+        return value
+
+    monkeypatch.setattr(sys.modules[__name__], "wait_until", failing_wait)
+    monkeypatch.setattr(labclient.Lab, "close", lambda self: None)          # closing the connection ends nothing here
+    before = len(LABS)
+    child = None
+    try:
+        with pytest.raises(AssertionError, match="simulated"):
+            test_the_brain_going_away_kills_running_tests_and_releases_leases(labroot, tmp_path)
+        child = int(pidfile.read_text())
+        real_wait(lambda: not pid_alive(child), "the child to be killed by the pid in the file", timeout=20)
+    finally:                                                # the helpers this test left running are ended here
+        for lab_ in LABS[before:]:
+            if lab_.proc.poll() is None:
+                lab_.proc.kill()
+        if child is not None and pid_alive(child):
+            os.kill(child, signal.SIGKILL)
+
+
+def test_closing_every_lab_closes_the_helpers_and_forgets_them(labroot, tmp_path):
+    lab_ = connect(labroot[0], labroot[1], tmp_path)
+    assert lab_.proc.poll() is None and lab_ in LABS
+    close_every_lab()
+    assert lab_.proc.poll() is not None and LABS == []
+
+
+def test_a_test_that_fails_after_opening_a_connection_has_it_closed_by_the_module_teardown(tmp_path):
+    """The wiring, not the helper: a separate pytest run with two tests. The first opens a connection, writes the helper's pid and fails. The
+    second runs after the first one's teardown, in the same process, and checks the helper is gone. (Looking after the run is over shows
+    nothing: the helper also exits when its pipe closes with the process.)"""
+    inner = tmp_path / "test_inner.py"
+    inner.write_text(
+        "import os, sys, time\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+        "from test_lab import _close_every_lab, labroot, connect, pid_alive  # noqa: F401  (the autouse fixture applies to this module too)\n"
+        f"PIDFILE = {str(tmp_path / 'helper.pid')!r}\n"
+        "def test_a_opens_and_fails(labroot, tmp_path):\n"
+        "    lab_ = connect(labroot[0], labroot[1], tmp_path)\n"
+        "    open(PIDFILE, 'w').write(str(lab_.proc.pid))\n"
+        "    assert False, 'this test fails on purpose'\n"
+        "def test_b_the_helper_is_gone_after_that_teardown():\n"
+        "    pid = int(open(PIDFILE).read())\n"
+        "    deadline = time.monotonic() + 5\n"
+        "    while pid_alive(pid) and time.monotonic() < deadline:\n"
+        "        time.sleep(0.05)\n"
+        "    assert not pid_alive(pid), 'the helper of the failed test is still running after its teardown'\n")
+    done = subprocess.run([sys.executable, "-m", "pytest", str(inner), "-q", "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'inner-bt'}"],
+                          capture_output=True, text=True, timeout=120, cwd=REPO)
+    helper_file = tmp_path / "helper.pid"
+    try:
+        assert "this test fails on purpose" in done.stdout and "1 failed, 1 passed" in done.stdout, done.stdout[-500:]
+    finally:
+        if helper_file.exists() and pid_alive(int(helper_file.read_text())):
+            os.kill(int(helper_file.read_text()), signal.SIGKILL)
