@@ -190,3 +190,24 @@ def test_the_derived_check_runs_the_stages_own_gate_and_not_a_copy_of_its_argume
     rig.run()
     assert [d["result"] for d in rig.ends(2)] == ["pass"] and len(derived_decisions(rig)) == 1
     assert calls.count(2) >= 2, calls
+
+
+def test_a_gate_that_refuses_without_a_reason_still_refuses_the_derived_result(rig, monkeypatch):
+    """`GateResult(ok=False)` with no reasons must not read as 'no reasons, so it passed': the derived file is deleted and the agent runs."""
+    from orchard.stages import GateResult
+    real = supervisor.Supervisor._gate
+    asked = []
+
+    def refuse_first(self, spec):
+        asked.append(spec.number)
+        if spec.number == 2 and asked.count(2) == 1:        # the derived check is the first gate call of stage 2
+            return lambda stage_dir, run_dir: GateResult(False, ())
+        return real(self, spec)
+    monkeypatch.setattr(supervisor.Supervisor, "_gate", refuse_first)
+    make(rig)
+    abort_at_the_pause(rig)
+    rig.run()
+    assert derived_decisions(rig) == [] and "refused" in not_derived(rig)[0]["why"]
+    assert len(finish_steps(rig)) == 1 and [d["result"] for d in rig.ends(2)] == ["pass"]
+    assert "derived_by" not in json.loads((stage_2(rig) / "result.json").read_text())
+
