@@ -34,6 +34,7 @@ class Installed(NamedTuple):
     weights_repo: str    # the Hugging Face repo its manifest serves
     schema: str          # "6" for a thin bundle, "5.1" for a container package
     chips: int
+    directory: str = ""  # a bundle's install directory (its run.sh is read from it); empty for a container package
 
 
 def family_query(model_id: str) -> str:
@@ -52,7 +53,7 @@ def read_installed(models_root) -> list[Installed]:
             m = json.loads(mf.read_text(encoding="utf-8"))
             repo = m["weights"]["repo_id"]
             out.append(Installed(f"{mf.parent.parent.name}/{mf.parent.name}", str(repo),
-                                 str(m.get("schema_version", "")), int(m.get("device_count") or 0)))
+                                 str(m.get("schema_version", "")), int(m.get("device_count") or 0), str(mf.parent)))
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return out

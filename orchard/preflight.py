@@ -573,8 +573,8 @@ def _class_note(report, repo: str) -> str:
     return ""
 
 
-def _closest(report) -> str:
-    choices = (report or {}).get("bundle_choices") or []
+def _closest(report, unoffered=()) -> str:
+    choices = [c for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in unoffered]
     if not choices:
         return ""
     return " Closest bundles found: " + ", ".join(
@@ -626,12 +626,12 @@ def _selection_basis(report) -> str:
     return "inferred from its architecture" if conf == "inferred" else conf
 
 
-def _confirm_inferred(base: str, serving, report) -> Check:
+def _confirm_inferred(base: str, serving, report, unoffered=()) -> Check:
     """An inferred base is a guess from the architecture. Using it means downloading its snapshot and basing the run
     on it, so it waits for the operator: a block that offers its bundle first, like a missing bundle does."""
     first = [{"name": b.name, "installed": True} for b in serving]
     names = {c["name"] for c in first}
-    rest = [dict(c) for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in names]
+    rest = [dict(c) for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in names and c.get("name") not in unoffered]
     return Check("base", BLOCK, f"the card names no base model; research infers {base} ({_selection_basis(report)}), "
                  f"served by the installed bundle {serving[0].name}. An inferred base is not downloaded or used "
                  f"without a confirmation: pass --base {serving[0].name} to use it, --accept-inferred-base to take "
@@ -840,7 +840,8 @@ def _text_runtime_check(model_id: str, base_override: str | None, *, allowed: bo
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
                installed: list, search: Callable | None, report: dict | None = None,
                accept_inferred: bool = False, stock: Callable | None = None, audio: str | None = None,
-               base_hub_info: Callable | None = None, audio_paths=None, text_runtime_ok: bool = True) -> Check:
+               base_hub_info: Callable | None = None, audio_paths=None, text_runtime_ok: bool = True,
+               weights_records: dict | None = None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
@@ -849,8 +850,10 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     class, ranked bundle choices and existing ports. Without a report the behaviour is the earlier one. A base
     research inferred (not stated by the card or its tags) blocks unless `accept_inferred` is set. `audio` is the evidence
     text from audio_facts.audio_evidence when the model counts as audio; the base row then needs no bundle (_audio_base),
-    and `base_hub_info(base)` returns the base's `(HubInfo | None, error)`."""
-    from orchard import nearest
+    and `base_hub_info(base)` returns the base's `(HubInfo | None, error)`. An installed package that cannot serve swapped weights
+    (a container package recorded as hard-coding its repository, a bundle whose run.sh the swap cannot rewrite; issue 73,
+    orchard/weights_source.py) does not count as serving the base. `weights_records` replaces the shipped record, for tests."""
+    from orchard import nearest, weights_source
     if (found := _text_runtime_check(model_id, base_override, allowed=text_runtime_ok)) is not None:
         return found
     base = base_override or (hub.base_models[0] if hub and hub.base_models else None)
@@ -860,22 +863,32 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     if not base:
         if (found := _stock_check(report, stock, model_id, hub, local_snapshot)) is not None:
             return found
+        try:
+            hidden = weights_source.unoffered_names(installed, weights_records if weights_records is not None else weights_source.records())
+        except ValueError:
+            hidden = set()
         return Check("base", WARN, "the model card names no base_model, so stage 0 has nothing to compare it "
                      "with. Pass --base <bundle or model id> to name the model to start from"
-                     + _closest(report) + _port_note(report) + (f" {CHECKPOINT_NOTE}" if audio else ""),
+                     + _closest(report, hidden) + _port_note(report) + (f" {CHECKPOINT_NOTE}" if audio else ""),
                      data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": [], "report": report})
     if audio:
         found = _audio_base(model_id=model_id, base=base, inferred=inferred, report=report, accept_inferred=accept_inferred, audio=audio,
                             local_snapshot=local_snapshot, base_hub_info=base_hub_info, audio_paths=audio_paths)
         if found is not None:
             return found
-    serving = [b for b in installed if b.weights_repo == base]
+    recs = weights_records if weights_records is not None else weights_source.records()
+    serving, refused = weights_source.judge([b for b in installed if b.weights_repo == base], base, recs)
+    refused_names = {p.name for p, _ in refused}
+    refused_data = [{"name": p.name, "reason": why} for p, why in refused]
+    # What no picker, search result or ranked choice offers: what was refused just now, and the recorded hard-coded containers that are
+    # not installed (their download would be refused by the next preflight).
+    unoffered = weights_source.unoffered_names(installed, recs, refused_names)
     if serving and inferred and report["selected"].get("confidence") != "stated" and not accept_inferred:
-        return _confirm_inferred(base, serving, report)
+        return _confirm_inferred(base, serving, report, unoffered)
     if serving:
         snap = local_snapshot(base)
         data = {"base": base, "snapshot": snap, "bundle": serving[0].name, "needs_fetch": snap is None,
-                "candidates": [], "report": report}
+                "candidates": [], "report": report, "refused": refused_data}
         where = "its snapshot is local" if snap else "its snapshot will be downloaded"
         note = _class_note(report, base)
         if inferred:
@@ -885,7 +898,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
             return Check("base", WARN, f"base {base}: {serving[0].name} is installed, but it is a "
                          f"{serving[0].schema} container package. Stages 2 and 4 serve the new weights through a container package's "
                          "default profile, and only when exactly one installed package serves the base on the chip count of the "
-                         f"stage; {where}{note}", data=data)
+                         f"stage; {where}{note}. {weights_source.status_note(serving[0], recs)}", data=data)
         return Check("base", OK, f"base {base}: bundle {serving[0].name} is installed; {where}{note}", data=data)
     if (stock_row := _stock_check(report, stock, model_id, hub, local_snapshot)) is not None:
         return stock_row
@@ -896,7 +909,9 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
             found = search(family)
         except Exception:
             found = None
-    choices = (report or {}).get("bundle_choices") or []
+    # A refused package is no choice for --base. When every ranked choice is one of them, the installed and searched candidates below are
+    # listed, not an empty "ranked bundles:".
+    choices = [c for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in unoffered]
     if choices:
         ordered = [dict(c) for c in choices]
         listing = "ranked bundles: " + ", ".join(
@@ -904,10 +919,10 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     else:
         cands: dict[str, dict] = {}
         for b in installed:
-            if nearest.family_query(b.weights_repo) == family and b.name != model_id:
+            if nearest.family_query(b.weights_repo) == family and b.name != model_id and b.name not in unoffered:
                 cands[b.name] = {"name": b.name, "installed": True}
         for c in found or []:
-            if c["name"] != model_id and c["name"] not in cands:
+            if c["name"] != model_id and c["name"] not in cands and c["name"] not in unoffered:
                 cands[c["name"]] = {"name": c["name"], "installed": c.get("installed")}
         ordered = sorted(cands.values(), key=lambda c: (not c["installed"], c["name"]))
         if found is None:
@@ -919,12 +934,15 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
         else:
             listing = f"`tt model search {family}` found no bundle"
     code = _code_note(report, base)
-    return Check("base", BLOCK, f"no installed bundle serves {base}, the model this one is based on, so stages "
-                 f"0, 2 and 4 have nothing to compare it with or serve it through.{code} {listing}."
+    lead = (weights_source.refusal_text(base, refused) if refused else
+            f"no installed bundle serves {base}, the model this one is based on, so stages "
+            "0, 2 and 4 have nothing to compare it with or serve it through.")
+    return Check("base", BLOCK, f"{lead}{code} {listing}."
                  f"{'' if code else _port_note(report)} "
                  "Pick one with --base <bundle>, or install a bundle yourself and run bringup again",
                  "nearest-model-missing", data={"base": base, "snapshot": None, "bundle": None,
-                                                "needs_fetch": False, "candidates": ordered, "report": report})
+                                                "needs_fetch": False, "candidates": ordered, "report": report,
+                                                "refused": refused_data})
 
 
 def check_gozer(text: str, kept: bool = False) -> Check:
