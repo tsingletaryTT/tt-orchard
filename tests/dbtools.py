@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from orchard import db as dbm
@@ -61,22 +62,52 @@ def blocked(directory):
 
 # --- a worker for the multi-process test: spawned children need a function they can import ------------------------------------
 
-def store_worker(directory, table, index, count, problems, tokens, cost, settle_calls=False):
+RETRY_PATIENCE_S = 120.0       # how long a worker keeps asking while the ledger says it is unavailable
+
+
+def retry_when_unavailable(operation, what, *, patience_s=RETRY_PATIENCE_S, interval_s=0.02, clock=time.monotonic, sleep=time.sleep):
+    """Run `operation()` and return its value, asking again while the ledger answers `LedgerUnavailable`.
+
+    That answer means the write lock was not free inside the busy timeout (30 s). Nothing was recorded, and that is the designed
+    refusal: a reservation that cannot be recorded cannot pass a cap. On a box at load 80 a process can wait that long for its time
+    slice, so a worker that wants an answer asks again. The wait between asks grows to half a second. After `patience_s` seconds
+    without an answer this raises AssertionError that names `what` and the last answer, so a ledger that is really stuck still fails
+    the test. Any other exception passes through."""
+    from orchard.db import LedgerUnavailable
+    deadline, tries = clock() + patience_s, 0
+    while True:
+        try:
+            return operation()
+        except LedgerUnavailable as exc:
+            tries += 1
+            if clock() >= deadline:
+                raise AssertionError(f"{what}: the ledger was unavailable for {patience_s:.0f} s ({tries} tries); last answer: {exc}") from exc
+            sleep(min(0.5, interval_s * tries))
+
+
+def store_worker(directory, table, index, count, problems, tokens, cost, settle_calls=False, busy_timeout_ms=None):
     """One process of the multi-process test: `count` reservations through the real Telegraph budget rules, optionally settled.
-    Returns [(call_id, granted)]."""
+    An open, a reservation or a settle that the ledger could not take (`LedgerUnavailable`) is asked again until it is answered
+    (`retry_when_unavailable`), so every reservation ends as granted or refused. `busy_timeout_ms` shortens the lock wait, which makes
+    that answer common on purpose. Returns [(call_id, granted)]."""
     import types
 
     import orchard.telegraph as tg
     cfg = tg.load(table, base=Path(directory))
     stub = types.SimpleNamespace(cfg=cfg)
     out = []
-    with ts.TelegraphStore.open(directory) as store:
+    kw = {} if busy_timeout_ms is None else {"busy_timeout_ms": busy_timeout_ms}
+    # Opening takes locks too (`open.lock`), and gets the same answer when they are not free in time.
+    with retry_when_unavailable(lambda: ts.TelegraphStore.open(directory, **kw), f"worker {index} opening the ledger") as store:
         for k in range(count):
             call_id, problem = f"w{index}-{k}", problems[(index + k) % len(problems)]
             worst = {"tokens": tokens, "cost": cost}
-            why = reserve(store, call_id, tokens=tokens, cost=cost, problem=problem,
-                          decide=lambda records: tg.Telegraph._over_budget(stub, "small", worst, tg.accounting(records), problem))
+            why = retry_when_unavailable(
+                lambda: reserve(store, call_id, tokens=tokens, cost=cost, problem=problem,
+                                decide=lambda records: tg.Telegraph._over_budget(stub, "small", worst, tg.accounting(records), problem)),
+                f"reservation {call_id}")
             out.append((call_id, why is None))
             if settle_calls and why is None:
-                settle(store, call_id, tokens_in=60, tokens_out=40, cost=0.0, problem=problem)
+                retry_when_unavailable(lambda: settle(store, call_id, tokens_in=60, tokens_out=40, cost=0.0, problem=problem),
+                                       f"settle of {call_id}")
     return out
