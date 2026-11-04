@@ -4153,3 +4153,8 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Wrong pass (Low/Medium): the bar pattern allowed at most 64 characters between the pipes, so a bar drawn to a wide terminal did not match and a stalled load (32/64) looked like a log with no bar. The body now has no fixed width (it cannot hold a pipe or a line break, so the cost over a line is linear). Tests use bodies of 80, 200 and 5,000 characters and four hostile lines of 2 MB inside a 2 GiB child.
 - Known limit, filed as #463: the server log is read from its start (`read_prefix`, 64 MiB), so with several boots in one log the first boot decides.
 - Mutations: 12 guards removed one at a time, each turned a test red. Four stayed green on the first pass (the digit requirement in the two patterns and the filter that leaves out a refused number) because the new reader made them redundant for the plain cases. They now have tests for the cases where they differ: a comma-leading number (`,4100`) and a Unicode-digit capture that must not replace a good earlier report.
+
+## 2026-11-04 PR 443, Copilot round 4 (issue 370)
+- Finding fixed (Medium): the 2 GiB hostile-line child called `check_engine_log`, which catches every exception and returns `not_checked`. A parser that ran out of address space still gave exit code 0 and all 26 words. The child now calls `_check_engine_log`, so a MemoryError ends the child and the test fails. A second test checks which of the two the child script calls.
+- Mutation: `_check_engine_log` made to raise MemoryError at its first line. The hostile-line test went red. The script restores the file in a trap.
+- Round 4 is past the third round. This was the only open finding. The earlier cache-comparison finding is resolved.

@@ -190,7 +190,7 @@ HOSTILE = textwrap.dedent("""
     for name, make in cases.items():
         text = make()
         t = time.time()
-        sv.check_engine_log(text, config={"num_hidden_layers": 64}, max_model_len=8192, max_num_seqs=4, block_size=64)
+        sv._check_engine_log(text, config={"num_hidden_layers": 64}, max_model_len=8192, max_num_seqs=4, block_size=64)
         took = time.time() - t
         print(name, round(took, 2), flush=True)
         del text
@@ -204,6 +204,14 @@ def test_a_hostile_fifty_megabyte_line_is_read_in_bounded_memory_and_the_child_e
                           env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"})
     assert done.returncode == 0, done.stderr[-800:] + done.stdout[-400:]
     assert len(done.stdout.split()) == 26          # thirteen cases, each printed with its time
+
+
+# ---- review of PR 443, round 4: the child calls the unwrapped parser, so running out of memory fails the child ---------------------------
+
+def test_the_hostile_child_calls_the_parser_that_does_not_catch_memory_errors():
+    """`check_engine_log` catches every exception and returns `not_checked`, so a child that called it would end with exit code 0 and print all
+    twenty-six words even when the parser ran out of address space. The child must call `_check_engine_log`, which lets the error out."""
+    assert "sv._check_engine_log(" in HOSTILE and "sv.check_engine_log(" not in HOSTILE
 
 
 # ---- review of PR 443, round 2: a progress bar belongs to the announcement it goes with ------------------------------------------------
