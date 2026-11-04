@@ -149,6 +149,11 @@ A number you cannot copy from the record is not measured: write null and say why
 
 ## Finish phase
 
+When the hardware test passed, the record is complete and `free_run_text` is readable text, the supervisor writes `result.json` itself from
+the record (it adds `derived_by: supervisor` and says how it judged `coherent`), checks it with the gate's own check, and does not start this
+phase. You get this phase when it did not: the test failed or has no record, the text did not pass its floor, or its result did not pass the
+check. Then write `result.json` as described below, and read `free_run_text` yourself.
+
 1. Read `test-result.json` first. If `returncode` is not 0 or `timed_out` is true, write `result.json` with `runs` false, a `failure` field
    that quotes the last lines of the output, and `coherent`, `n_tokens`, `top1_agreement` and `load_s` null. Then stop. Do not
    investigate and do not edit the port: repair rounds, when the failure was the port's, have already been used, so the stage ends
@@ -159,6 +164,9 @@ A number you cannot copy from the record is not measured: write null and say why
 
 ## Do not
 
+- Do not write a file longer than 6,000 lines or 400,000 bytes, and do not repeat a block of text: the supervisor refuses such a file, puts the
+  old one back and tells you. A port is a few hundred lines. If your replies keep being cut off, you are repeating yourself: stop analysing,
+  run one command or write one file, and keep the reply short.
 - Do not write or edit `port-check.json`, `hw-test-output.txt`, `test-result.json`, `port_check.py` or `port_check_config.json`. The supervisor and its check write them.
 - Do not change a model source after the test has run. The record holds each file's sha256.
 - Do not publish, push or write outside your stage directory.

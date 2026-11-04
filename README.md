@@ -525,6 +525,9 @@ cp config/tiers.example.toml config/tiers.toml
 | `model` | The model id the server lists at `/v1/models` |
 | `placement` | `chips` or `cpu` |
 | `context_tokens` | Optional. The context length, a positive integer |
+| `max_tokens` | Optional. The cap on one reply of this tier's model, 256 to 131072. Default 16384. The largest reply that ended normally in 389 measured replies was 5,463 tokens, so a coder tier with thinking off can use 8192 |
+| `temperature`, `frequency_penalty`, `repetition_penalty` | Optional numbers sent on every request of an agent step (ranges 0 to 2, -2 to 2, 0.5 to 2). Not sent when unset: the default is greedy decoding, as before |
+| `unstick_max_tokens`, `unstick_temperature`, `unstick_frequency_penalty`, `unstick_repetition_penalty` | Optional. The request that follows a reply cut off at `max_tokens` is not greedy and is capped lower, because the same request would repeat the same loop (issue 458). Defaults: temperature 0.5, cap 8192, frequency penalty 0.2, no repetition penalty. A server that refuses these parameters gets the plain request instead, and the ledger says so |
 
 **`[stages.<n>]`**, one table for each stage 0 to 8. Each names tiers by name:
 
@@ -1453,6 +1456,43 @@ After the last round (reason `spent`) or when a round passes, the stage goes on 
 count of rounds belongs to one attempt. A resume of the same attempt keeps it, an escalated attempt starts its own, and a resume of an escalated
 attempt that still has rounds goes on in its stage directory. The stage's wall time and its budget run through every round. Each round takes the
 lease again, so a board that the coder holds is parked and restored around each test, as it is for any hardware test.
+### 5.5f Runaway coder replies, and the stage 2 result the supervisor writes (issues 458 and 456)
+
+On 2026-11-03 two full-port bring-ups on a new model ended in stage 2 on replies that were cut off at `max_tokens`. Each capped reply was one
+paragraph repeated about 60 times (15 different lines in 757), in a context of 35,000 tokens and more, under greedy decoding. The retry sent the
+same context with the same sampling, so it produced the same loop. What the harness does now:
+
+- **A reply that is cut off is its own record.** The ledger notice `reply cut off at max_tokens` carries `reply_capped`, whether the text was a
+  repetition loop (`repetition`, with the measurement), `capped_in_step`, `capped_in_stage` and the retry sampling that was used. The narrator
+  says "a repetition loop" and counts the stage's capped replies. A loop is text of at least 8,000 characters that compresses (zlib) to under
+  0.06 of its size, or that has 100 or more lines of which at most 20% differ (`orchard/runaway.py`; measured on 389 replies and 750 repository files).
+- **The request after a capped reply is different.** It uses the tier's retry profile (above): not greedy, a lower cap, a small frequency penalty.
+  A loop gets a nudge that says so ("do not analyse further, run one command"). Normal requests are unchanged.
+- **After two capped replies in a row the step starts again** from the task and the list of files on disk, once per step
+  (`AGENT_RESTARTS_ON_CAPS`). The ledger decision `context restarted after capped replies` records it. A further two end the step, and the error
+  detail says how many capped replies were repetition loops and that the coder's replies are the likely cause. The fresh context also carries the
+  supervisor's own instructions to the step (gate feedback, a wrap-up request, watchdog nudges: at most four, each cut to 8,000 characters, the oldest
+  nudge dropped first), so the step is not sent back to a task it was told to change. The log row after a restart holds the replacement conversation,
+  and every row records the sampling of the request that was served (`request`).
+- **A reply cut off inside a tool call's arguments goes through the same recovery.** The call does not run and does not stay in the conversation
+  without an answer; a complete call in the same reply still runs. The cap is counted, the next request uses the retry profile, and the narrator
+  says the call was cut off and not run (it used to print `writes ? (0 characters)`).
+- **A file the agent writes is bounded.** `write_file` refuses a file over 400,000 bytes or 6,000 lines, or over 20,000 characters that compress
+  to under 0.04 (stricter than for a reply, because refusing a file costs a rewrite), and leaves the old file as it was. A shell command that makes a
+  file under `stages/<n>/port/` fail the same test has it put back to the last version the guard accepted (or removed, when it is new), and the
+  command's output says so. The guard works only through directory descriptors beneath the real port directory (`orchard/port_guard.py`): a `port`
+  that is a link is reported and nothing under it is read or changed, a link inside it is never followed, a file or directory swapped after the scan is
+  not followed or trusted, and the scan is bounded (2,000 entries, 200 files, four levels). The guard's memory is bounded across the commands of a
+  step: after a complete scan it forgets files that are gone, the backups together stay under 32 MiB (the oldest are evicted first), and the stamp
+  table holds at most 10,000 entries. A file whose backup was evicted is never put back to a wrong version and never removed: if it becomes
+  unacceptable the agent is told its previous version was not kept.
+- **Stage 2 of a full port: the supervisor writes `result.json`** when the hardware test passed and the check's record is complete
+  (`orchard/full_port_result.py`). Every field is the record's or computed from its ids exactly as the gate does (`top1_agreement` is recomputed, not
+  copied). `coherent` is the only judgement: the supervisor answers it with a stated floor that checks form (printable text, mostly words, no word holding more
+  than a quarter of the text) and the file says so. The supervisor then runs the gate's own check on what it wrote. A failed test, a missing record, text
+  below the floor, or a result the check refuses leaves the finish step to the agent, as before (the derived file is deleted first). In a rehearsal
+  run (`--full-port-rehearsal`) unreadable text is written as `coherent: false`, which the gate waives. Ledger: `result derived by the supervisor`
+  or `result not derived by the supervisor` with the reason.
 
 ### 5.6 The credentials preflight
 
