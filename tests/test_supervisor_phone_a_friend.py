@@ -153,6 +153,7 @@ def test_a_refusal_by_the_helper_is_a_ledger_decision_and_the_stage_goes_on(rig,
     assert wire.requests == []
     answered = next(d for d in telegraph_decisions(rig) if d["decision"] == paf.ANSWERED)
     assert answered["ok"] is False and answered["reason"]
+    assert [d["decision"] for d in telegraph_decisions(rig)] == [paf.ASKED, paf.ANSWERED]          # a refusal has no draft step after it
     assert all("draft-1.py" not in p for p in prepares)
     assert not (rig.run_dir / "stages" / "2" / "telegraph").exists()
     assert [d["result"] for d in rig.ends(2)][0] == "escalate"               # the stage ran on as it would have without the helper

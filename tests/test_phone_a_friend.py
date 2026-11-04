@@ -78,10 +78,11 @@ TOKEN = "hf_" + "A" * 30
 
 def test_the_task_is_scrubbed_whole_and_every_part_is_capped():
     brief = f"read /home/ttuser/orchard-runs/x and use {TOKEN} at https://user:secret@host/path"
-    task, sent = paf.build_task(brief=brief, facts="F" * (paf.FACTS_CAP + 50), excerpts="E" * (paf.EXCERPTS_CAP + 50),
+    task, sent = paf.build_task(brief=brief, facts=f"F {TOKEN} F /home/ttuser/f " + "F" * (paf.FACTS_CAP + 50),
+                                excerpts=f"E {TOKEN} E /home/ttuser/e " + "E" * (paf.EXCERPTS_CAP + 50),
                                 listing="port_model.py  2341 bytes", homes=HOMES)
     assert "/home/ttuser" not in task and TOKEN not in task and "secret" not in task
-    assert sent["facts"] == {"chars": paf.FACTS_CAP + len("\n[facts cut at 20000 characters]"), "cut": True}
+    assert sent["facts"]["cut"] is True and paf.FACTS_CAP < sent["facts"]["chars"] < paf.FACTS_CAP + 60
     assert sent["excerpts"]["cut"] is True
     assert "port_model.py  2341 bytes" in task and task.startswith(paf.REQUEST)
 
@@ -124,7 +125,8 @@ def test_the_listing_names_files_and_links_without_opening_them(tmp_path):
 # ---- what comes back ----------------------------------------------------------------------------------------------------------------------
 
 def test_the_longest_python_block_is_taken():
-    text = "Here:\n```python\nx = 1\n```\nand\n```python\ndef f():\n    return 2\n```\n```bash\nrm -rf /\n```"
+    text = ("Here:\n```python\nx = 1\n```\nand\n```python\ndef f():\n    return 2\n```\n"
+            "```bash\nrm -rf / --no-preserve-root && echo a much longer shell block than either python block\n```")
     assert paf.extract_draft(text) == "def f():\n    return 2\n"
 
 
