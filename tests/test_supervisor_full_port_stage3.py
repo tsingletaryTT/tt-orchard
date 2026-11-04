@@ -432,7 +432,9 @@ def test_the_seed_problem_text_carries_no_path_when_the_stage_directory_cannot_b
             pytest.skip("this account can write a read-only directory (running as root)")
         assert seed(sup, stage) == ["stage 2 port not copied"]
         problem = sup.ledger.rows[0][2]["problem"]
-        assert str(tmp_path) not in problem and problem.startswith("PermissionError")
+        # The destination is now written beneath the run directory's descriptor, so the refusal is safeio's `ReadFailed` with the errno name
+        # (round 4 of PR 455); it used to be the `PermissionError` of a `mkdir` by path. The property is the same: no path in the ledger.
+        assert str(tmp_path) not in problem and problem.startswith(("PermissionError", "ReadFailed")) and "EACCES" in problem
     finally:
         os.chmod(stage, 0o755)
 

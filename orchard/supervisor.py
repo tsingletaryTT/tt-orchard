@@ -116,6 +116,7 @@ from types import SimpleNamespace
 import os
 import pwd
 import shutil
+import stat
 import signal
 import subprocess
 import sys
@@ -627,8 +628,12 @@ class _SeedScan:
     no longer the one that was listed. `seen` is the number of entries read so far. The order is the operating system's: callers that need a
     stable order sort what they kept. Close the iterator (`contextlib.closing`) to release the descriptors."""
 
-    def __init__(self, root, max_entries: int = STAGE_3_SEED_ENTRIES, max_depth: int = STAGE_3_SEED_DEPTH):
+    def __init__(self, root, max_entries: int = STAGE_3_SEED_ENTRIES, max_depth: int = STAGE_3_SEED_DEPTH, *, anchor=None, parts=()):
+        """With `anchor` (a `safeio.Pin` on the run directory) and `parts` (the names from it to the port directory), the root is opened
+        beneath the anchor with no link followed at any name, so a link standing where `stages/2` should be is refused (review of PR 455,
+        round 4). Without them `root` is opened by path, and only its last name is protected."""
         self.root, self.max_entries, self.max_depth, self.seen = os.fspath(root), max_entries, max_depth, 0
+        self.anchor, self.anchor_parts = anchor, tuple(parts)
         self._pin = None
 
     def read(self, parts, identity, max_bytes: int) -> bytes:
@@ -638,7 +643,7 @@ class _SeedScan:
         return safeio.read_beneath(self._pin.fd, parts, max_bytes=max_bytes, expect_identity=identity)
 
     def __iter__(self):
-        with safeio.pinned_root(self.root) as pin:
+        with (self.anchor.child(self.anchor_parts) if self.anchor is not None else safeio.pinned_root(self.root)) as pin:
             self._pin = pin
             try:
                 stack = [((), 0)]
@@ -667,9 +672,10 @@ class _SeedScan:
                 self._pin = None
 
 
-def _holds_python(root) -> bool | None:
-    """Whether a directory holds a `.py` file within the scan bounds; None when the bounds were passed first (too large to say)."""
-    scan = _SeedScan(root)
+def _holds_python(root, *, anchor=None, parts=()) -> bool | None:
+    """Whether a directory holds a `.py` file within the scan bounds; None when the bounds were passed first (too large to say). `anchor` and
+    `parts` are those of `_SeedScan`."""
+    scan = _SeedScan(root, anchor=anchor, parts=parts)
     try:
         with contextlib.closing(iter(scan)) as entries:
             return any(kind == "file" and parts[-1].endswith(".py") for parts, kind, _identity in entries)
@@ -677,6 +683,45 @@ def _holds_python(root) -> bool | None:
         return None
     except (OSError, safeio.SafeReadError):          # a link standing where the directory should be, or one that cannot be opened: it holds no port
         return False
+
+
+def _clear_port_link(run, stage_parts, *, remove_tree: bool = False) -> None:
+    """Remove a link standing at `port` in the stage directory `stage_parts` (names beneath the pin `run` of the run directory), and with
+    `remove_tree` a real `port` directory too. The stage directory is opened with no link followed at any name and the removal goes through its
+    descriptor, so a link planted at `stages/3` makes this do nothing and nothing outside the run is touched. It never raises: a failure leaves
+    what stands there, and the writes that follow refuse it."""
+    try:
+        fd = safeio.open_beneath(run.fd, stage_parts)
+    except safeio.SafeReadError:
+        return
+    try:
+        try:
+            mode = os.lstat("port", dir_fd=fd).st_mode
+        except OSError:
+            return
+        try:
+            if stat.S_ISLNK(mode):
+                os.unlink("port", dir_fd=fd)
+            elif remove_tree and stat.S_ISDIR(mode):
+                shutil.rmtree("port", ignore_errors=True, dir_fd=fd)
+        except OSError:
+            pass
+    finally:
+        os.close(fd)
+
+
+def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
+    """Whether the stage 3 port directory already holds a port (a resumed stage) and so is kept, read beneath the run directory's descriptor:
+    a link standing at any name of the path holds nothing. Sets `_port_seed` and writes the ledger line when the answer is yes or when the
+    directory is too large to say."""
+    held = _holds_python(sup.run_dir / Path(*dst_parts), anchor=run, parts=dst_parts)
+    if held is None:                 # the coder's directory is past the scan bounds: it is left as it is, and nothing is copied over it
+        sup.ledger.append("decision", spec.number, decision="stage 3 port directory too large to scan",
+                           limits={"entries": STAGE_3_SEED_ENTRIES, "depth": STAGE_3_SEED_DEPTH})
+    if held is None or held:
+        sup._port_seed = {"copied": 0, "kept": True}
+        return True
+    return False
 
 
 class Supervisor:
@@ -3030,49 +3075,61 @@ class Supervisor:
         writes the port again from stage 2's. The directory is read lazily (`_SeedScan`), so a hostile port directory is refused after about
         `STAGE_3_SEED_FILES` or `STAGE_3_SEED_ENTRIES` reads and is never listed whole. A port already in the stage directory (a resumed stage)
         is kept. The ledger holds the sha256 of each file as copied, so a later reader can tell what the coder changed."""
-        src, dst = self.run_dir / "stages" / "2" / "port", stage_dir / "port"
-        if dst.is_dir():
-            held = _holds_python(dst)
-            if held is None:                 # the coder's directory is past the scan bounds: it is left as it is, and nothing is copied over it
-                self.ledger.append("decision", spec.number, decision="stage 3 port directory too large to scan",
-                                   limits={"entries": STAGE_3_SEED_ENTRIES, "depth": STAGE_3_SEED_DEPTH})
-                self._port_seed = {"copied": 0, "kept": True}
-                return
-            if held:
-                self._port_seed = {"copied": 0, "kept": True}
-                return
-        copied, problem = [], None
-        scan = _SeedScan(src)
         try:
-            if dst.is_symlink():                  # a link planted where the port directory goes is removed and never followed
-                dst.unlink()
-            dst.mkdir(parents=True, exist_ok=True)
-            # Every step is anchored: the source is read through the descriptors of the scan, the destination is written beneath a descriptor of
-            # its own, and a link on either side is refused, so a swap between the listing and the read cannot bring in a file from outside
-            # stage 2's port or send one out of stages/3/port/. The hash is that of the bytes read, which are the bytes written.
-            with safeio.pinned_root(dst) as out, contextlib.closing(iter(scan)) as entries:
-                for parts, kind, identity in entries:
-                    rel = Path(*parts)
-                    if rel.suffix == ".pyc":
-                        continue
-                    if kind != "file":
-                        problem = f"{rel} is not a regular file"
-                        break
-                    if len(copied) >= STAGE_3_SEED_FILES:
-                        problem = f"stages/2/port/ holds more than {STAGE_3_SEED_FILES} files (the scan stopped after reading {scan.seen} entries)"
-                        break
-                    data = scan.read(parts, identity, STAGE_3_SEED_FILE_BYTES)
-                    safeio.write_beneath(out.fd, parts, data, mode=0o644)
-                    copied.append({"path": f"stages/3/port/{rel.as_posix()}", "sha256": hashlib.sha256(data).hexdigest()})
-        except _SeedLimit as exc:
-            problem = f"stages/2/port/ {exc} (the scan stopped after reading {scan.seen} entries)"
-        except (OSError, safeio.SafeReadError) as exc:
-            # The class and the reason only: an OSError's own text carries the absolute path of the file, which does not belong in the ledger.
-            problem = f"{exc.__class__.__name__}: {getattr(exc, 'reason', None) or getattr(exc, 'strerror', None) or 'error'}"[:200]
+            stage_parts = Path(stage_dir).relative_to(self.run_dir).parts
+        except ValueError:
+            stage_parts = ()
+        if not stage_parts:
+            self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem="the stage directory is not inside the run directory")
+            self._port_seed = {"copied": 0, "kept": False}
+            return
+        src_parts, dst_parts = ("stages", "2", "port"), (*stage_parts, "port")
+        copied, problem = [], None
+        # Both sides are anchored beneath one descriptor of the run directory. The earlier version pinned only the last name of each path, so
+        # a coder that replaced `stages/2` or `stages/3` with a link made the copy read from, or write to, a directory outside the run
+        # (review of PR 455, round 4). `open_beneath` refuses a link at every name, and the destination is written and removed only
+        # through descriptors.
+        with contextlib.ExitStack() as stack:
+            try:
+                run = stack.enter_context(safeio.pinned_root(self.run_dir))
+            except (OSError, safeio.SafeReadError) as exc:
+                self.ledger.append("decision", spec.number, decision="stage 2 port not copied",
+                                   problem=f"the run directory cannot be opened: {exc.__class__.__name__}")
+                self._port_seed = {"copied": 0, "kept": False}
+                return
+            if _stage_3_port_is_held(self, run, dst_parts, spec):
+                return
+            scan = _SeedScan(self.run_dir / Path(*src_parts), anchor=run, parts=src_parts)
+            try:
+                _clear_port_link(run, stage_parts)            # a link planted where the port directory goes is removed and never followed
+                # Every step is anchored: the source is read through the descriptors of the scan, the destination is written beneath the run
+                # directory's descriptor (`write_beneath` makes each directory itself and refuses a link at any name), so a swap between the
+                # listing and the read cannot bring in a file from outside stage 2's port or send one out of stages/3/port/. The hash is that
+                # of the bytes read, which are the bytes written.
+                with contextlib.closing(iter(scan)) as entries:
+                    for parts, kind, identity in entries:
+                        rel = Path(*parts)
+                        if rel.suffix == ".pyc":
+                            continue
+                        if kind != "file":
+                            problem = f"{rel} is not a regular file"
+                            break
+                        if len(copied) >= STAGE_3_SEED_FILES:
+                            problem = f"stages/2/port/ holds more than {STAGE_3_SEED_FILES} files (the scan stopped after reading {scan.seen} entries)"
+                            break
+                        data = scan.read(parts, identity, STAGE_3_SEED_FILE_BYTES)
+                        safeio.write_beneath(run.fd, (*dst_parts, *parts), data, mode=0o644)
+                        copied.append({"path": f"stages/3/port/{rel.as_posix()}", "sha256": hashlib.sha256(data).hexdigest()})
+            except _SeedLimit as exc:
+                problem = f"stages/2/port/ {exc} (the scan stopped after reading {scan.seen} entries)"
+            except (OSError, safeio.SafeReadError) as exc:
+                # The class and the reason only: an OSError's own text carries the absolute path of the file, which does not belong in the ledger.
+                problem = f"{exc.__class__.__name__}: {getattr(exc, 'reason', None) or getattr(exc, 'strerror', None) or 'error'}"[:200]
+            if problem or not copied:
+                _clear_port_link(run, stage_parts, remove_tree=True)       # no half a port: the coder starts from stage 2's files, or from nothing
         problem = problem[:300] if problem else problem
         copied.sort(key=lambda f: f["path"])                  # the walk has no order of its own; the record has one
         if problem or not copied:
-            shutil.rmtree(dst, ignore_errors=True)            # no half a port: the coder starts from stage 2's files, or from nothing
             self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem=problem or "stages/2/port/ holds no file")
             self._port_seed = {"copied": 0, "kept": False}
             return
