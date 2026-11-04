@@ -3082,7 +3082,7 @@ class Supervisor:
 
     def _end_stage_body(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
-        if n == 2 and spec.draft == "full_port" and getattr(self, "telegraph", None) is not None and status not in ("abort", "operator-pause"):
+        if n == 2 and getattr(spec, "draft", None) == "full_port" and getattr(self, "telegraph", None) is not None and status not in ("abort", "operator-pause"):
             self._report_phone_a_friend(n, helped=(status == "pass"))
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]

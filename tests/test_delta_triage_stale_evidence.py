@@ -95,4 +95,7 @@ def test_every_evidence_name_the_template_writes_is_in_its_list_of_owned_files()
     m = re.search(r"EVIDENCE_FILES = \((.*?)\)\n", src, re.S)
     assert m, "the template has no EVIDENCE_FILES list"
     listed = set(re.findall(r'"([^"]+)"', m.group(1)))
-    assert written <= listed, sorted(written - listed)
+    # gguf-header.json is removed by its own step with its own soft failure (stage 0 then says the run has no GGUF evidence; PR 441), so it
+    # is deliberately not in the hard-failing list. The template must still show that removal.
+    self_cleared = {"gguf-header.json"} if 'stale = EVIDENCE / "gguf-header.json"' in src else set()
+    assert written <= listed | self_cleared, sorted(written - listed - self_cleared)
