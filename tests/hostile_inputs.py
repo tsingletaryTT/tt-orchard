@@ -515,17 +515,21 @@ def _skip_mask_run(payload: bytes):
     return json.loads(out.getvalue().splitlines()[-1])
 
 
+# A valid two-word tokenizer written as text, so the reader does not import `tokenizers` itself: without that package the helper answers in
+# band (ok false, ModuleNotFoundError), which still meets the contract.
+_SMALL_TOKENIZER_JSON = ('{"version": "1.0", "truncation": null, "padding": null, "added_tokens": [], "normalizer": null, "pre_tokenizer": null, '
+                         '"post_processor": null, "decoder": null, "model": {"type": "WordLevel", "vocab": {"a": 0, "b": 1}, "unk_token": "a"}}')
+
+
 def _skip_mask_run_with_file(name: str, payload: bytes):
     """The helper on a model directory where `name` holds the hostile bytes (and a small valid tokenizer stands in for any other file)."""
     import json
     import shutil
     import tempfile
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
     model_dir = Path(tempfile.mkdtemp(prefix="skipmask-"))
     try:
         if name != "tokenizer.json":
-            (model_dir / "tokenizer.json").write_text(Tokenizer(WordLevel({"a": 0, "b": 1}, unk_token="a")).to_str(), encoding="utf-8")
+            (model_dir / "tokenizer.json").write_text(_SMALL_TOKENIZER_JSON, encoding="utf-8")
         (model_dir / name).write_bytes(payload)
         return _skip_mask_run(json.dumps({"model_dir": str(model_dir), "lists": [[0, 1]]}).encode("utf-8"))
     finally:
