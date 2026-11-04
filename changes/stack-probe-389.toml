@@ -1,0 +1,4 @@
+target = "0.9.111"
+summary = "Stack freshness probe: a text-runtime run probes the interpreter stage 1 uses, and a resume is judged on the inputs the run started with."
+pr = 480
+kind = "fix"

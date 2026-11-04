@@ -4066,6 +4066,38 @@ def run_paths(args, run_dir, recorded: dict | None, *, home, environ=None) -> Ru
     return paths
 
 
+def _ledger_entries(sup) -> list:
+    """The run's ledger entries, or [] when the supervisor has no readable ledger. Setting up the stack check never refuses a run."""
+    try:
+        entries = sup.ledger.read()
+    except Exception:
+        return []
+    return entries if isinstance(entries, list) else []
+
+
+def _run_start_inputs(entries: list) -> dict | None:
+    """The inputs of the run's first `run_start` entry (the ones the agent works with), or None when there is none or they are not a mapping."""
+    for e in entries:
+        if isinstance(e, dict) and e.get("event") == "run_start":
+            found = (e.get("data") or {}).get("inputs") if isinstance(e.get("data"), dict) else None
+            return found if isinstance(found, dict) else None
+    return None
+
+
+def _stack_reference_python(sup, entries: list, inputs: dict, env) -> str | None:
+    """The interpreter the probe asks: the one stage 1 uses. A run on the text route (the `text_runtime` input names a registered runtime) uses the
+    interpreter stage 0 recorded, else `text_runtime.text_paths` (as `_text_context` does). Any other run uses the `reference_python` input, else
+    $ORCHARD_REFERENCE_PYTHON (issue 389, item 1)."""
+    name = inputs.get(text_runtime.RUNTIME_INPUT)
+    if isinstance(name, str) and name in text_runtime.REGISTRY:
+        sel = text_runtime.selection(entries)
+        recorded = (sel or {}).get("paths") if isinstance((sel or {}).get("paths"), dict) else None
+        if recorded and isinstance(recorded.get("python"), str):
+            return recorded["python"]
+        return text_runtime.text_paths(sup.paths.operator_home, env).python
+    return inputs.get("reference_python") or env.get("ORCHARD_REFERENCE_PYTHON")
+
+
 def stack_check_for(sup, args, environ=None):
     """The stack freshness comparison for a real run (orchard/stack_pins.py). Where each part lives: the tt-metal tree is $ORCHARD_TT_METAL_DIR
     or tt-metal under the operator's home (as preflight finds it); the TT vLLM plugin checkout is $ORCHARD_TT_VLLM_DIR (branch
@@ -4073,8 +4105,10 @@ def stack_check_for(sup, args, environ=None):
     the skills clones are the --skills-dir values. $ORCHARD_STACK_PINS_OFFLINE makes no network call. A part that is not named is UNKNOWN."""
     env = os.environ if environ is None else environ
     metal = env.get("ORCHARD_TT_METAL_DIR") or str(Path(sup.paths.operator_home) / "tt-metal")      # the run's operator home, as preflight reads it
+    entries = _ledger_entries(sup)
+    inputs = _run_start_inputs(entries) or sup.inputs          # a resumed run is judged on the inputs it started with (issue 389, item 2)
     sources = stack_pins_mod.Sources(
-        model_dir=sup.inputs.get("model"), ref_python=sup.inputs.get("reference_python") or env.get("ORCHARD_REFERENCE_PYTHON"), tt_metal_dir=metal,
+        model_dir=inputs.get("model"), ref_python=_stack_reference_python(sup, entries, inputs, env), tt_metal_dir=metal,
         vllm_dir=env.get("ORCHARD_TT_VLLM_DIR"), vllm_branch=env.get("ORCHARD_TT_VLLM_BRANCH") or "main",
         skills_dirs=tuple(str(d) for d in args.skills_dir), homes=(str(sup.paths.operator_home), str(sup.home)),
         exclude_paths=(str(sup.run_dir),))
