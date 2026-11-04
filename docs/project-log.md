@@ -4150,3 +4150,11 @@ Prompt (coordinator): take PR 441 through its round 3 findings under the round l
 - Tests, written first (20 of the 25 failed on the unfixed code; the other 5 cover behaviour that was already right): `tests/test_gguf_header_review4.py`, 26 tests. The reviewer's 100,000-tensor header runs in a child with a 2 GiB limit and its evidence stays small.
 - Mutations: 24 guards removed one at a time, each turned a test red on the first pass; the runner ran in a capped scope, restored the files on exit and on signals, refused to start on a dirty tree, and left the tree identical to HEAD.
 - Targeted run: 4,819 passed, 2 skipped (the GGUF, stage 0, bundle, hostile-reader, ratchet, README, version and paths files) plus 206 for the full-port, stage and narrate files. The full suite is run by the coordinator in parallel mode on the pushed head.
+
+## 2026-11-04 PR 441, Copilot round 4 (issue 440)
+- Fixed (High): `_fit_evidence` can reduce a file to its summary and drop `agreement`. `gguf_finding` read `f["agreement"]` and raised KeyError, which stopped stage 0 before delta.json was written. It now reports the counts and says the differing items are not listed.
+- Fixed (Medium, wrong label): the bundle's RISKS.md counted the missing rows and wrote "0 agree, 0 differ, 0 not comparable" for a file whose summary recorded differences. It now shows the validated summary counts and says the individual rows are not available. A summary with a bad count (boolean, negative, text) is not shown as a number.
+- Fixed (Medium, wrong label): the histogram key was the folded tensor name cut at 120 characters, so `...weight` and `...bias` with a shared 120-character start became one kind. A long name now keeps its start plus a short hash of the whole folded name, still within 120 characters.
+- Fixed (Medium): a file name that is not valid UTF-8 left a lone surrogate in the evidence and the bundle's reader refused the whole file. The names and reasons in the evidence are cleaned; `ignored_files` in delta.json keeps the original name.
+- Mutations: each of the four guards removed on its own turned a test in `tests/test_gguf_header_review5.py` red. The script restores both files in a trap.
+- Round 4 is past the third round; all four findings can crash or mislabel, so none was filed as an issue.

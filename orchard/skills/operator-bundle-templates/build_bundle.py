@@ -2209,7 +2209,16 @@ def gguf_risks(run: Run, redact: Redactor) -> list[str]:
                      + (f", GGUF file type {f['file_type']}" if isinstance(f.get("file_type"), int) and not isinstance(f.get("file_type"), bool) else "") + ".")
         rows = [r for r in (f.get("agreement") or []) if isinstance(r, dict) and isinstance(r.get("item"), str)] if isinstance(f.get("agreement"), list) else []
         count = {v: sum(1 for r in rows if r.get("verdict") == v) for v in ("agree", "differ", "not comparable")}
-        lines.append(f"- Agreement with config.json: {count['agree']} agree, {count['differ']} differ, {count['not comparable']} not comparable.")
+        summary = f.get("agreement_summary")
+        if not rows and isinstance(summary, dict) and all(isinstance(summary.get(v), int) and not isinstance(summary.get(v), bool) and summary[v] >= 0
+                                                          for v in count):
+            # Stage 0 reduces a file to its summary when the evidence reaches its size cap: the counts survive and the rows do not. The
+            # recorded counts are shown and the missing rows are said to be missing, so a recorded difference is not reported as zero.
+            count = {v: summary[v] for v in count}
+            lines.append(f"- Agreement with config.json: {count['agree']} agree, {count['differ']} differ, {count['not comparable']} not "
+                         "comparable (the individual rows are not available: stage 0 dropped them to keep the evidence file small).")
+        else:
+            lines.append(f"- Agreement with config.json: {count['agree']} agree, {count['differ']} differ, {count['not comparable']} not comparable.")
         differing = [r for r in rows if r.get("verdict") == "differ"]
         for r in differing[:GGUF_ROWS_SHOWN]:
             note = f" {cap(r['note'], 300)}." if isinstance(r.get("note"), str) and r["note"] else ""

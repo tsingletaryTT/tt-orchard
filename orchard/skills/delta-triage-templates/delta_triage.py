@@ -1547,6 +1547,17 @@ def _fold_kind(name: str) -> str:
     return re.sub(r"\.\d+\.", ".N.", name)
 
 
+def _kind_key(name: str) -> str:
+    """The histogram key of a tensor name: the folded name, or for one longer than GGUF_MAX_KIND_CHARS its start plus a short hash of the whole
+    folded name. Cutting the name alone would merge two kinds that share their first characters (`...weight` and `...bias`) and attribute the
+    precision counts and the full-precision hint of both to one entry (review of PR 441, round 4)."""
+    folded = _fold_kind(name)
+    if len(folded) <= GGUF_MAX_KIND_CHARS:
+        return folded
+    tag = hashlib.sha256(folded.encode("utf-8", errors="surrogatepass")).hexdigest()[:8]
+    return folded[:GGUF_MAX_KIND_CHARS - 9] + "~" + tag
+
+
 def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None, *, deadline: float | None = None, allowed_roots=None,
                        template_reason: str | None = None) -> dict:
     """The evidence for one GGUF file: a summary of its header and its agreement with config.json, or {"status": "unreadable", "reason"}.
@@ -1572,7 +1583,7 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None, *, d
     by_type, by_kind, other, stopped = collections.Counter(), {}, collections.Counter(), False
     for name, _dims, type_name in h["tensors"]:
         by_type[type_name] += 1
-        kind = _fold_kind(name)[:GGUF_MAX_KIND_CHARS]
+        kind = _kind_key(name)
         counts = by_kind.get(kind)
         if counts is None:
             if len(by_kind) >= GGUF_MAX_KINDS_TRACKED:      # memory and the evidence stay bounded whatever the names are
@@ -1729,6 +1740,13 @@ def gguf_evidence(model_dir: Path, ignored_files, config, template_text, mtp_ten
             continue
         files.append(gguf_file_evidence(Path(model_dir) / name, config, template_text, mtp_tensors,
                                         deadline=min(now + GGUF_FILE_TIME_S, run_deadline), allowed_roots=roots, template_reason=template_reason))
+    for f in files:
+        # A file name that is not valid UTF-8 reaches here with a lone surrogate. The evidence is written with it escaped, and the operator
+        # bundle's strict reader refuses the decoded text, which would drop every record of the file. The names are cleaned for display here;
+        # delta.json's `ignored_files` keeps the original (review of PR 441, round 4).
+        for key in ("file", "reason"):
+            if isinstance(f.get(key), str):
+                f[key] = _clean_text(f[key])
     return _fit_evidence({"schema": 1, "note": GGUF_NOTE, "files": files, "files_cut": max(len(wanted) - GGUF_MAX_FILES, 0)})
 
 
@@ -1804,9 +1822,14 @@ def gguf_finding(g: dict) -> str:
         text = f"{f['file']} ({f['role']}, {f['architecture'] or 'no architecture'}, {f['tensor_count']} tensors)"
         if s["agree"] + s["differ"] + s["not comparable"]:
             text += f": {s['agree']} rows agree with config.json, {s['differ']} differ, {s['not comparable']} not comparable"
-            differing = [r["item"] for r in f["agreement"] if r["verdict"] == "differ"]
-            if differing:
-                text += f" (differ: {short(differing, 6)})"
+            # `_fit_evidence` can reduce a file to its summary and drop the rows: the counts stay and the row names are not available.
+            rows = f.get("agreement")
+            if isinstance(rows, list):
+                differing = [r["item"] for r in rows if isinstance(r, dict) and r.get("verdict") == "differ"]
+                if differing:
+                    text += f" (differ: {short(differing, 6)})"
+            elif s["differ"]:
+                text += " (the rows were dropped to keep the evidence file small, so the differing items are not listed)"
         parts.append(text)
     return ("The repository ships GGUF files. The TT runtime does not read them, and their headers were read here without the weights as an "
             "independent description of the model. " + "; ".join(parts) + ". evidence/gguf-header.json holds the agreement table and "
