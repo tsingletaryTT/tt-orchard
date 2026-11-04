@@ -152,11 +152,12 @@ from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolut
                            recorded_paths)
 from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
+from orchard.classes import CLASS_UNKNOWN
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
 from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
-                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
+                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
@@ -192,6 +193,20 @@ EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
+# CLASS_UNKNOWN (the fixed start of the unknown-class pause reason) lives in orchard/classes.py, so status.py can read it first without this module.
+
+
+def class_unknown_reason(reasons) -> str:
+    """The pause reason for stage 0's class `unknown` (issue 437): it says so, and quotes the first reasons from delta.json."""
+    shown = "; ".join(" ".join(str(r).split())[:200] for r in list(reasons)[:3])
+    return CLASS_UNKNOWN + (f": {shown}" if shown else "") + "; a person decides whether to go on"
+
+
+def is_full_port_pause(reason) -> bool:
+    """Whether a pause reason is the full-port pause (the older text) or the unknown-class pause."""
+    return reason == FULL_PORT or (isinstance(reason, str) and reason.startswith(CLASS_UNKNOWN))
+
+
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
 FULL_PORT_STAGES_UNBUILT = ("stage 2 of the full-port route passed; stages 3 to 6 for a full-port model are not built yet "
                             "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md, slices 3 to 6), so a person reviews the "
@@ -955,7 +970,9 @@ class Supervisor:
                 self.ledger.append("decision", 1, decision="pause", reason=SCORING_NOT_ROUTED)
                 continue
             if p.next_stage == 2 and self._full_port_unacknowledged():
-                self.ledger.append("decision", 2, decision="pause", reason=FULL_PORT)
+                reason = (class_unknown_reason(delta_path_reasons(self.run_dir)) if run_class(self.ledger.read(), self.run_dir) == "unknown"
+                          else FULL_PORT)
+                self.ledger.append("decision", 2, decision="pause", reason=reason)
                 continue
             if p.next_stage == 3 and self._full_port_stages_unbuilt():
                 self.ledger.append("decision", 3, decision="pause", reason=FULL_PORT_STAGES_UNBUILT)
@@ -1006,7 +1023,7 @@ class Supervisor:
         # into the full-port stages, and no unattended retry may do that. A pause for a restricted head
         # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
-            e["event"] == "decision" and e["data"].get("reason") in (FULL_PORT, RESTRICTED_HEAD) for e in entries)
+            e["event"] == "decision" and (is_full_port_pause(e["data"].get("reason")) or e["data"].get("reason") == RESTRICTED_HEAD) for e in entries)
 
     def _full_port_stages_unbuilt(self) -> bool:
         """A run the operator allowed to port (`--full-port`) has passed stage 2, and the stages after it for a full port are not built
