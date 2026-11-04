@@ -139,7 +139,7 @@ class Env:
             echo "$@" >> {self.marker}
             n=$(wc -l < {self.marker})
             if [ -f {tmp_path}/slow-at ] && [ "$(cat {tmp_path}/slow-at)" = "$n" ]; then
-                sleep 4
+                sleep "$(cat {tmp_path}/slow-for 2>/dev/null || echo 4)"
                 echo done >> {tmp_path}/reset-finished
             fi
             if [ -f {tmp_path}/fail-at ] && [ "$(cat {tmp_path}/fail-at)" = "$n" ]; then exit 1; fi
@@ -1211,10 +1211,66 @@ def test_signal_during_the_h3_reset_lets_it_finish(env, tmp_path):
 
 
 def test_a_reset_slower_than_one_timeout_but_not_two_is_waited_for(env, tmp_path):
-    (tmp_path / "slow-at").write_text("1")      # takes 4 s
+    """Issue 405. The driver waits one timeout and then one more full timeout, both counted from the start of the process, so a reset
+    that finishes between T and 2T passes and the room for the process to get going is 2T minus the reset's own time. The old values
+    (T = 3 s, reset 4 s) left 2 s, which a box at load 80 uses up before the reset script starts. T = 5 s and a reset of 6 s leave 4 s,
+    and the reset is still slower than one timeout. The exact rule (two waits, no third, no kill) is checked without a process by
+    the three tests below, which do not depend on how fast the box is."""
+    (tmp_path / "slow-at").write_text("1")
+    (tmp_path / "slow-for").write_text("6")
     out = tmp_path / "out"
-    assert hc.main(env.argv(out, "--reset-timeout", "3"), clock=env.clock, sleep=env.sleep) == 0
+    assert hc.main(env.argv(out, "--reset-timeout", "5"), clock=env.clock, sleep=env.sleep) == 0
     assert by_check(out, "H3.reset")[0]["ok"]
+
+
+class _SlowChild:
+    """A child for `Driver.run_cmd` whose `communicate` times out `expiries` times and then finishes. It records the timeout of each call."""
+
+    def __init__(self, expiries):
+        self.expiries, self.calls, self.pid, self.returncode = expiries, [], 4_000_000_000, 0
+
+    def communicate(self, timeout=None):
+        self.calls.append(timeout)
+        if len(self.calls) <= self.expiries and timeout is not None:
+            raise subprocess.TimeoutExpired("gozer reset", timeout)
+        return "{}", ""
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _driver_with_child(monkeypatch, expiries):
+    from types import SimpleNamespace
+    d = hc.Driver(hc.parse_args(MINIMAL), None, None, None, None)
+    d.led = SimpleNamespace(append=lambda *a, **k: None)
+    child = _SlowChild(expiries)
+    monkeypatch.setattr(hc.subprocess, "Popen", lambda *a, **k: child)
+    killed = []
+    monkeypatch.setattr(hc.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    return d, child, killed
+
+
+def test_a_protected_call_that_outlives_one_timeout_gets_one_more_full_timeout_and_is_not_killed(monkeypatch):
+    d, child, killed = _driver_with_child(monkeypatch, expiries=1)
+    res = d.run_cmd(["gozer", "reset", "L1"], 3.0, protect=True)
+    assert res["exit_code"] == 0 and child.calls == [3.0, 3.0]
+    assert d.abandoned is None and killed == []
+
+
+def test_a_protected_call_that_outlives_two_timeouts_is_left_running_and_waited_for_no_third_time(monkeypatch):
+    d, child, killed = _driver_with_child(monkeypatch, expiries=2)
+    argv = ["gozer", "reset", "L1"]
+    with pytest.raises(hc.Abort):
+        d.run_cmd(argv, 3.0, protect=True)
+    assert child.calls == [3.0, 3.0]                  # two waits and no third
+    assert d.abandoned == argv and killed == []        # left running, never killed or repeated
+
+
+def test_a_call_that_is_not_protected_is_killed_at_its_first_timeout(monkeypatch):
+    d, child, killed = _driver_with_child(monkeypatch, expiries=1)
+    with pytest.raises(hc.Abort):
+        d.run_cmd(["gozer", "status"], 3.0, protect=False)
+    assert child.calls[0] == 3.0 and len(killed) == 1 and killed[0][0] == child.pid
 
 
 def test_probe_needs_exit_15_even_with_the_right_text(env, tmp_path):

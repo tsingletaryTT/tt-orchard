@@ -10,6 +10,7 @@ owner that is not alive on the lab.
 """
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from orchard import labclient, lab
+from waits import wait_until
 from orchard.adapters import Lease
 
 REPO = Path(__file__).resolve().parent.parent
@@ -117,11 +119,17 @@ def test_a_command_is_killed_on_the_lab_at_its_deadline(labroot, tmp_path):
     root, gz = labroot
     pidfile = tmp_path / "child.pid"
     with connect(root, gz, tmp_path) as lab_, open(tmp_path / "o", "wb") as f:
-        t0 = time.time()
-        code, timed_out = lab_.shell(f"sleep 30 & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=1,
+        t0 = time.monotonic()
+        # The child sleeps for 120 s, so a command that is not killed at its deadline returns after 120 s with exit code 0 (and the
+        # check below fails on that). The stopwatch only has to tell 1 s from 120 s: 60 s holds on a box where everything is 30 times slower.
+        # The helper counts the deadline from the start of the shell, so the shell has to write its child's pid inside it: 5 s leaves room
+        # for a starved process (1 s did not).
+        code, timed_out = lab_.shell(f"sleep 120 & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=5,
                                      stdout=f)
-        assert time.time() - t0 < 10
+        assert time.monotonic() - t0 < 60
     assert timed_out and code is None
+    assert pidfile.exists() and pidfile.read_text().strip().isdigit(), \
+        "the shell was killed before it wrote the pid of its child, so the group kill could not be checked: the box was too slow for the 5 s deadline"
     assert not pid_alive(int(pidfile.read_text()))           # the whole group went, not just bash
 
 
@@ -132,17 +140,21 @@ def test_the_brain_going_away_kills_running_tests_and_releases_leases(labroot, t
     adapter = labclient.LabGozerAdapter(lab_, gozer=str(gz))
     lease = adapter.acquire(2, "orchard:supervisor", "test")
     assert list(lease.chips) == ["0000:01:00.0", "0000:02:00.0"]
-    lab_.start_shell(f"sleep 60 & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=120)
-    deadline = time.time() + 5
-    while not pidfile.exists() and time.time() < deadline:
-        time.sleep(0.05)
+    # The child has to outlive the patience of `wait_until` (90 s) by a wide margin, or a helper that never kills it would pass: the
+    # child would end by itself inside the wait. The command's own deadline (120 s) is also longer than the patience.
+    lab_.start_shell(f"sleep 600 & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=120)
+    # `echo $! > file` creates the file before it writes the pid, so the file can exist and be empty: wait for the digits.
+    wait_until(lambda: pidfile.exists() and pidfile.read_text().strip().isdigit(), "the test's shell to write its child's pid")
     child = int(pidfile.read_text())
-    lab_.drop()                                             # the ssh connection breaks
-    deadline = time.time() + 10
-    while time.time() < deadline and (pid_alive(child) or "release L1" not in " ".join(gozer_log(tmp_path))):
-        time.sleep(0.1)
-    assert not pid_alive(child)
-    assert "release L1 --json" in gozer_log(tmp_path)
+    try:
+        lab_.drop()                                         # the ssh connection breaks
+        wait_until(lambda: not pid_alive(child) and "release L1 --json" in gozer_log(tmp_path),
+                   "the helper to kill the running test and release the lease after the connection broke")
+        assert not pid_alive(child)
+        assert "release L1 --json" in gozer_log(tmp_path)
+    finally:
+        if pid_alive(child):                                # a failing run leaves nothing behind
+            os.kill(child, signal.SIGKILL)
 
 
 def test_a_released_lease_is_not_released_again_when_the_brain_leaves(labroot, tmp_path):
@@ -151,8 +163,11 @@ def test_a_released_lease_is_not_released_again_when_the_brain_leaves(labroot, t
     adapter = labclient.LabGozerAdapter(lab_, gozer=str(gz))
     lease = adapter.acquire(1, "orchard:supervisor", "test")
     adapter.release(lease)
+    helper = int(lab_.hello["pid"])
     lab_.close()
-    time.sleep(0.5)
+    # Nothing can be proved about a call that never comes by waiting a fixed time: the helper may not have started its clean-up yet.
+    # Its exit is the point after which it makes no more calls.
+    wait_until(lambda: not pid_alive(helper), "the helper to exit after the connection closed")
     assert [line.split()[0] for line in gozer_log(tmp_path) if line.split()[0] != "queue"] == ["acquire", "release"]
 
 
@@ -167,9 +182,7 @@ def test_when_the_brain_leaves_the_helper_cancels_its_own_queue_tickets(labroot,
         {"ticket": "T1", "pid": mine, "who": "orchard:supervisor", "min_chips": 4},
         {"ticket": "T2", "pid": mine + 1, "who": "someone-else", "min_chips": 1}]))
     lab_.close()
-    deadline = time.time() + 10
-    while time.time() < deadline and "cancel T1" not in gozer_log(tmp_path):
-        time.sleep(0.1)
+    wait_until(lambda: "cancel T1" in gozer_log(tmp_path), "the helper to cancel the queue ticket its pid owned")
     log = gozer_log(tmp_path)
     assert "cancel T1" in log and "cancel T2" not in log
 
