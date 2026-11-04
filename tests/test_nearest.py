@@ -78,7 +78,8 @@ def test_installed_bundles_are_read_from_their_manifests(tmp_path):
     (tmp_path / "episod" / "broken" / "tt_kernel_manifest.json").write_text("not json")
     got = {i.name: i for i in nearest.read_installed(tmp_path)}
     assert set(got) == {"episod/qwen3.8-27b-dflash2-p300", "stisiTT/gemma-4-12b-it-p150"}
-    assert got["stisiTT/gemma-4-12b-it-p150"] == Installed("stisiTT/gemma-4-12b-it-p150", "google/gemma-4-12B-it", "5.1", 1)
+    assert got["stisiTT/gemma-4-12b-it-p150"] == Installed("stisiTT/gemma-4-12b-it-p150", "google/gemma-4-12B-it", "5.1", 1,
+                                                          str(tmp_path / "stisiTT" / "gemma-4-12b-it-p150"))      # the directory run.sh is read from
 
 
 def test_a_missing_models_root_is_an_empty_list(tmp_path):
