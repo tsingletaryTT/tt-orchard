@@ -179,7 +179,11 @@ def test_a_failed_stage_3_test_earns_no_repair_rounds_even_when_the_option_is_se
     assert rounds == [], "repair rounds belong to stage 2"
 
 
-def test_the_rehearsal_option_waives_coherent_in_stage_3_as_in_stage_2_and_the_ledger_says_so(rig):
+def test_the_rehearsal_option_waives_coherent_in_stage_3_as_in_stage_2_and_the_ledger_says_so(rig, monkeypatch):
+    # With PR 462 the supervisor derives `coherent` from the free-run text itself and asks no finish agent, so the scripted verdict of
+    # make3(coherent=False) is unused; the text is made unreadable instead.
+    from orchard import full_port_result
+    monkeypatch.setattr(full_port_result, "readable", lambda text: (False, "the free-run text was made unreadable by this test"))
     rig.args.full_port_rehearsal = True
     make3(rig, coherent=False)
     abort_at_pause(rig)
@@ -190,7 +194,9 @@ def test_the_rehearsal_option_waives_coherent_in_stage_3_as_in_stage_2_and_the_l
     assert "stage 3 check still applied" in next(e for e in waived if e["stage"] == 3)["data"]["note"]
 
 
-def test_without_the_rehearsal_option_an_unreadable_free_run_fails_stage_3(rig):
+def test_without_the_rehearsal_option_an_unreadable_free_run_fails_stage_3(rig, monkeypatch):
+    from orchard import full_port_result
+    monkeypatch.setattr(full_port_result, "readable", lambda text: (False, "the free-run text was made unreadable by this test"))
     make3(rig, coherent=False)
     rig.args.unattended = True
     never_wait(rig)
