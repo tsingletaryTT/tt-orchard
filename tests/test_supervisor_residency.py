@@ -322,6 +322,10 @@ def test_a_resume_after_the_hardware_test_is_not_blocked_by_the_disk_the_cache_n
         def crash_at_the_finish_step(e):          # stage 2's second agent step is the finish step, after the hardware test's evidence entry
             if e["event"] == "decision" and e["stage"] == 2 and e["data"].get("decision") == "agent step":
                 agent_steps.append(e)
+            # With PR 462 the supervisor derives result.json itself and no finish step runs: the same point in the stage is the decision that
+            # records the derived result, which comes after the hardware test's evidence entry and before the stage's end.
+            if e["event"] == "decision" and e["stage"] == 2 and e["data"].get("decision") == "result derived by the supervisor":
+                return True
             return len(agent_steps) == 2
         with pytest.raises(Crash):
             r.run(crash_if=crash_at_the_finish_step)
