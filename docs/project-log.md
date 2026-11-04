@@ -4213,6 +4213,11 @@ Prompt (operator, through the PR 444 work): the stage 7 boot check (it feeds the
 - Same pattern, found by the sweep: `head_sha256` and `code_sha256` raised `TypeError` in the gate when result.json held a list or dict (unhashable in a set lookup). They are now refused as non-strings.
 - Finding 2 (confirmed): `require_records=bound or ids_bound` refused a boot check written before `verify_bundle.py` recorded `teacher_forced`, on a run whose reference ids were pinned by PR 444 but whose verify.json was never hashed. Records are now required only when verify.json is hashed. The reference ids are still checked against their own ledger hash, and records that are present are always recomputed.
 - Tests: `tests/test_gate_numbers_445_review1.py`. 18 of its tests were red on the old code. 11 guards were removed one at a time and each turned a test red (the depth bound and the `except` in `identical` cover the same case, so both go in one mutation).
+## 2026-11-04 PR 444, Copilot round 4 (issue 433)
+- Finding fixed (High): `_token_check_reasons_in` returned no reasons for any read failure except a missing file. The suite check reads swap-check.json first and the recompute reads it again, so a file edited into unreadable JSON between the two reads let a ledger-bound run skip the recompute. On a run whose ledger holds the reference hash, any read failure is now a refusal ("could not be read"). An unbound run is judged as before.
+- Mutation: returning no reasons for a non-missing read failure turned three new tests red; the script restores the file in a trap.
+- Two older open items were already fixed on this branch: the mismatch diagnostics are bounded (`show`, `cut_text`, tests in `test_token_check_numbers.py`) and a bound run requires all 32 template positions (`tests/test_token_check_positions.py`). Both are answered in a PR comment.
+- Round 4 is past the third round; nothing was filed as an issue.
 ## 2026-11-03 Issue 370, PR 443: the log check never raises, an intent line alone is not a pass, the layer bar has no fixed width
 
 - Prompt (operator loop): an independent reader reviewed PR 443 after Copilot's round limit. Findings fixed here by class; the rest filed.
