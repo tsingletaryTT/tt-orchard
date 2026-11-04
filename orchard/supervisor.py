@@ -3565,16 +3565,27 @@ class Supervisor:
         """The hardware phase with a lab box: lease the chips there, run the test there, give the
         chips back. The coder on this box keeps serving the agents throughout."""
         n = spec.number
-        self.ledger.append("decision", n, decision="hardware phase", action="lab", where=self._where())
+        # The width this stage's test needs: stage 3 of a full port runs the port on the run's configured chip count (issue 326), which is
+        # more than the stage's own board. The lab path used to lease and run `spec.boards` boards for every stage, so stage 3 got two
+        # chips while its gate expects four and a working port failed every attempt (review of PR 455). Other stages keep their own width.
+        boards = self._phase_boards(spec, stage_dir) if spec.skill == "full-port-mesh" else spec.boards
+        chips = boards * CHIPS_PER_BOARD
+        lab_chips = getattr(self.lab, "chips", None)
+        if spec.skill == "full-port-mesh" and lab_chips and chips > lab_chips:
+            # A lease for more chips than the lab has would wait until the stage budget ran out: refuse it, as a stage 4 configuration is.
+            host = self.lab.info.get("host")
+            self._block(n, f"the port's configured chip count needs {chips} chips and the lab {host} has {lab_chips} chips",
+                        need_chips=chips, lab_chips=lab_chips)
+        self.ledger.append("decision", n, decision="hardware phase", action="lab", chips=chips, where=self._where())
         self._lab_files_up(n)
-        lease = reacquire(self.test_adapter, chips=spec.boards * CHIPS_PER_BOARD, who=WHO,
+        lease = reacquire(self.test_adapter, chips=chips, who=WHO,
                           reason=f"stage {n} hardware test", ledger=self.ledger, stage=n,
                           wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep)
         self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", test_lease=lease.record(),
                            where=self._where())
         try:
-            self._run_test(spec, stage_dir, test, lease)
+            self._run_test(spec, stage_dir, test, lease, boards=boards)
         finally:
             self._cleanup_after_test(after_test)           # before the lab lease goes back, as on this box (the sweep looks at this box's docker)
         self._audit_lab_caches(n, stage_dir, self._swap_cache(stage_dir))
