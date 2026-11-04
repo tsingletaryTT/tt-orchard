@@ -24,6 +24,11 @@ from typing import Any
 
 # A recomputed fraction and a recorded one are compared to this absolute difference: the template wrote `matches / n` as a float.
 FRACTION_TOLERANCE = 1e-9
+# The positions the weights-swap template teacher-forces: its `N_TOKENS` (orchard/skills/weights-swap-templates/serve_and_compare.py). A run the
+# supervisor bound to the ledger must carry all of them: the recompute trusts the number of records it is given, so without this count a
+# failing suffix could be deleted and the summaries rewritten to the shorter record (review of PR 444, round 3). A test pins the two numbers
+# together.
+TEMPLATE_POSITIONS = 32
 # How many positions a reason names before it says "and N more": a reason is read by a person and written to the ledger.
 LISTED_POSITIONS = 8
 
@@ -74,12 +79,15 @@ def _same_fraction(recorded: Any, expected: float) -> bool:
     return _number(recorded) and abs(float(recorded) - expected) <= FRACTION_TOLERANCE
 
 
-def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, where: str = "", *, require_records: bool = True) -> list[str]:
+def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, where: str = "", *, require_records: bool = True,
+             required_positions: int | None = None) -> list[str]:
     """Reasons the numbers of one swap-check.json (`report`) and of each result that repeats them (`results`: (label, object) pairs,
     such as ("result_draft", ...) and ("result.json", ...)) are not what the report's raw records and `reference_ids` give. Empty when
     they agree. Each reason names the field, the recorded value and the recomputed one. A report with no `teacher_forced` records is refused
     when `require_records` is set (the reference ids are bound to the ledger, so the run is one the supervisor governed from the start) and
-    judged as before otherwise (a run from before this check, whose reference ids nothing binds)."""
+    judged as before otherwise (a run from before this check, whose reference ids nothing binds). `required_positions`, when given, is the
+    number of records `teacher_forced` must hold (a bound run passes `TEMPLATE_POSITIONS`): a record of another length is refused, because a
+    deleted suffix and a shorter run give the same file."""
     if not isinstance(report, dict):
         return []
     # The template copies its numbers into the report's own result_draft; the finish step and the agent copy that again. It is judged with
@@ -96,6 +104,9 @@ def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, wh
         return [f"{where}swap-check.json: {r}" for r in why]
     out = []
     n, matches, top1 = got["n_tokens"], got["matches"], got["top1_agreement"]
+    if required_positions is not None and n != required_positions:
+        out.append(f"{where}swap-check.json teacher_forced holds {n} records, but the template records {required_positions} positions, so a deleted "
+                   "suffix cannot be told from a shorter run")
     truth = f"{matches} of {n} positions match stage 1's reference ids"
     # The skip list of PR 422 would hide positions from this count. Nothing on this branch can rebuild it, so it is refused.
     for label, obj in (("swap-check.json", report), *results):

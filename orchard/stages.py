@@ -1125,7 +1125,8 @@ def _token_check_reasons(report, results, run_dir, where: str = "") -> list[str]
     ids, reasons, bound = _reference_ids(run_dir)
     if ids is None:
         return [where + r for r in reasons]
-    return [where + r for r in reasons] + token_check.problems(report, results, ids, where, require_records=bound)
+    return [where + r for r in reasons] + token_check.problems(report, results, ids, where, require_records=bound,
+                                                                 required_positions=token_check.TEMPLATE_POSITIONS if bound else None)
 
 
 def _token_check_reasons_in(path, results, run_dir, where: str = "") -> list[str]:
