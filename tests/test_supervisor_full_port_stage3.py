@@ -380,7 +380,7 @@ def test_the_seed_refuses_a_link_and_leaves_no_half_a_port(tmp_path):
     (src / "a_first.py").write_text("import ttnn\n")
     (src / "z_link.py").symlink_to(src / "a_first.py")
     assert seed(sup, stage) == ["stage 2 port not copied"]
-    assert "is not a regular file" in sup.ledger.rows[0][2]["problem"], "the supervisor's own refusal names the link, not only the reader's"
+    assert sup.ledger.rows[0][2]["problem"] == "z_link.py is not a regular file", "the supervisor's own refusal names the link, apart from the reader's"
     assert not (stage / "port").exists(), "a copy that stopped on a problem is removed"
 
 
@@ -403,7 +403,7 @@ def test_the_seed_does_not_open_a_fifo(tmp_path):
     sup, stage, src = seeder(tmp_path)
     (src / "a.py").write_text("import ttnn\n")
     os.mkfifo(src / "b_pipe.py")
-    assert seed(sup, stage) == ["stage 2 port not copied"] and "is not a regular file" in sup.ledger.rows[0][2]["problem"]
+    assert seed(sup, stage) == ["stage 2 port not copied"] and sup.ledger.rows[0][2]["problem"] == "b_pipe.py is not a regular file"
 
 
 def test_the_seed_problem_text_carries_no_path_when_a_file_cannot_be_read(tmp_path):
@@ -420,6 +420,21 @@ def test_the_seed_problem_text_carries_no_path_when_a_file_cannot_be_read(tmp_pa
         assert str(tmp_path) not in problem and "locked_model" not in problem and problem.startswith(("SafeReadError", "ReadFailed", "PermissionError"))
     finally:
         os.chmod(secret, 0o644)
+
+
+def test_the_seed_problem_text_carries_no_path_when_the_stage_directory_cannot_be_written(tmp_path):
+    import os
+    sup, stage, src = seeder(tmp_path)
+    (src / "port_model.py").write_text("import ttnn\n")
+    os.chmod(stage, 0o555)
+    try:
+        if os.access(stage, os.W_OK):
+            pytest.skip("this account can write a read-only directory (running as root)")
+        assert seed(sup, stage) == ["stage 2 port not copied"]
+        problem = sup.ledger.rows[0][2]["problem"]
+        assert str(tmp_path) not in problem and problem.startswith("PermissionError")
+    finally:
+        os.chmod(stage, 0o755)
 
 
 def test_the_seed_keeps_a_port_already_in_the_stage_directory(tmp_path):
