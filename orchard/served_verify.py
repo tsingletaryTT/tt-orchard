@@ -378,12 +378,22 @@ def _bars_of_last_announcement(announcements: list[tuple[int, int, bool]], log_t
     """The layer progress bars (done, total) that belong to the last announcement. A bar belongs to the component whose announcement it goes
     with, and a log can hold the bars of several components (a drafter, then the target). For an `intent` line the layer loop runs after the
     line, so only bars after it count; a bar before it is an earlier component's. For a past-tense line the loop ran before the line, so the
-    bars between the previous announcement and this one count. No announcement, no bars."""
+    bars between the previous announcement and this one count, with one exception: when the previous announcement is a `Loading N layers` line
+    for a different count, the bars after it that count N are that component's loop and are left out (review of PR 443, round 3: a completion
+    statement for 64 layers must not take the finished 32-layer bar of the component announced just before it). A past-tense line for the same
+    count completes that `Loading` line and takes its bar. No announcement, no bars."""
     if not announcements:
         return []
-    pos, _count, intent = announcements[-1]
-    lo, hi = (pos, len(log_text) + 1) if intent else (announcements[-2][0] if len(announcements) > 1 else -1, pos)
-    return [(int(m.group(1)), int(m.group(2))) for m in _LAYERS_BAR.finditer(log_text) if lo < m.start() < hi]
+    pos, count, intent = announcements[-1]
+    bars = [(m.start(), int(m.group(1)), int(m.group(2))) for m in _LAYERS_BAR.finditer(log_text)]
+    if intent:
+        return [(done, total) for at, done, total in bars if at > pos]
+    prev = announcements[-2] if len(announcements) > 1 else None
+    lo = prev[0] if prev is not None else -1
+    inside = [(done, total) for at, done, total in bars if lo < at < pos]
+    if prev is not None and prev[2] and prev[1] != count:
+        inside = [(done, total) for done, total in inside if total != prev[1]]
+    return inside
 
 
 def _layers_result(seen: list[int], bars: list[tuple[int, int]], expected: int | None) -> dict:
@@ -427,11 +437,26 @@ def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=
         log_text = log_text[:MAX_ENGINE_LOG_CHARS]
     announced = _announcements(log_text)                                      # log order, with positions
     out.append(_layers_result([count for _, count, _ in announced], _bars_of_last_announcement(announced, log_text), expected))
-    tokens = [_int(m) for m in _KV_TOKENS.findall(log_text)]
-    blocks = [int(m) for m in _KV_BLOCKS.findall(log_text)]
-    conc = [(_int(a), float(b)) for a, b in _KV_CONCURRENCY.findall(log_text)]
-    overrides = [int(m) for m in _KV_OVERRIDE.findall(log_text)]
-    capacity = tokens[-1] if tokens else (blocks[-1] * block_size if blocks and _whole(block_size) and block_size > 0 else None)
+    # Each capacity report is a line with its position. The selected report is the last one, and the override and the concurrency line that
+    # describe it are the ones next to it in the log: an override printed before the report since the previous report, and the concurrency
+    # line printed after it. One that belongs to another report is not read as this one's (review of PR 443, round 3).
+    tokens = [(m.start(), _int(m.group(1))) for m in _KV_TOKENS.finditer(log_text)]
+    blocks = [(m.start(), int(m.group(1))) for m in _KV_BLOCKS.finditer(log_text)]
+    all_conc = [(m.start(), _int(m.group(1)), float(m.group(2))) for m in _KV_CONCURRENCY.finditer(log_text)]
+    all_overrides = [(m.start(), int(m.group(1))) for m in _KV_OVERRIDE.finditer(log_text)]
+    at, capacity = None, None
+    if tokens:
+        at, capacity = tokens[-1]
+    elif blocks and _whole(block_size) and block_size > 0:
+        at, capacity = blocks[-1][0], blocks[-1][1] * block_size
+    if at is None:
+        conc = [(per_request, factor) for _, per_request, factor in all_conc[-1:]]
+        overrides = []
+    else:
+        earlier = [p for p, _ in tokens + blocks if p < at]
+        previous = max(earlier) if earlier else -1
+        overrides = [n for p, n in all_overrides if previous < p < at]
+        conc = [(per_request, factor) for p, per_request, factor in all_conc if p > at][-1:]
     if capacity is None and not conc:
         out.append(_result("kv_cache", "not_checked", "the server log states no KV-cache size (no `GPU KV cache size` line, and no block count with a declared block size)"))
         return out
@@ -647,10 +672,25 @@ def check_prefix_reuse(first: dict, repeat: dict, control: dict, *, declared: bo
 
 # ---- into the boot check's evidence ---------------------------------------------------------------------------------------------
 
+# The structured facts of the two engine-log results that the boot evidence keeps beside the verdict (issue 370, review of PR 443, round 3).
+# A fixed list per result name, so the evidence holds only values this module computed (whole numbers, a float, a short text, a short list of
+# whole numbers) and its size stays bounded; any other result adds nothing.
+ENGINE_FACT_KEYS = {
+    "layers_loaded": ("layers", "layer_counts_seen", "layers_completed"),
+    "kv_cache": ("capacity_tokens", "capacity_basis", "override_blocks", "concurrency", "tokens_per_request", "full_length_sequences",
+                 "fewer_than_max_num_seqs", "blocks_per_sequence"),
+}
+
+
 def record(result: dict, check, evidence: dict) -> None:
     """`pass` and `fail` become a named check (`check(name, ok, detail)` is the boot check's own recorder). `not_checked` is listed in
-    `evidence["not_checked"]` with its reason and does not change `passed`."""
+    `evidence["not_checked"]` with its reason and does not change `passed`. The structured facts of `layers_loaded` and `kv_cache` are kept
+    in `evidence["engine_facts"][name]`, so a consumer of the saved boot result reads the numbers and not only the sentence."""
     if result["state"] == "not_checked":
         evidence.setdefault("not_checked", []).append({"name": result["name"], "why": result["detail"]})
     else:
         check(result["name"], result["state"] == "pass", result["detail"])
+    keys = ENGINE_FACT_KEYS.get(result["name"])
+    facts = {k: result[k] for k in keys if k in result} if keys else {}
+    if facts:
+        evidence.setdefault("engine_facts", {})[result["name"]] = facts
