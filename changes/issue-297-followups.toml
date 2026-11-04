@@ -1,0 +1,3 @@
+target = "0.9.112"
+summary = "Served-chat check: added-token ids, stop-id rule per backend, digests before and after the replies, deleted record reported; decode-share rows follow the served variant and passed stage 4 configurations."
+kind = "fix"

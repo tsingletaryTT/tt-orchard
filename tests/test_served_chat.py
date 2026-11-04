@@ -159,13 +159,18 @@ def reply(content="Paris, with the Eiffel Tower.", finish="stop", error=None, mo
     return {"id": "x", "mode": mode, "content": content, "reasoning": "", "tool_calls": [], "finish_reason": finish, "error": error}
 
 
-def suite(entries, mode="chat", specials=("<|im_end|>", "<|im_start|>", "<|endoftext|>"), template=TEMPLATE_A, files=None):
+def suite(entries, mode="chat", specials=("<|im_end|>", "<|im_start|>", "<|endoftext|>"), template=TEMPLATE_A, files=None, after="same"):
     """A prompt_suite record the way serve_and_compare.py writes it: the digest of the template the test saw is in it, and `files` (the digests
-    of the served tokenizer and stop-id files, or None to leave them out)."""
+    of the served tokenizer and stop-id files, or None to leave them out). `after` is the digests taken after the last reply: "same" repeats `files`,
+    None leaves them out (a swap check from before issue 297)."""
     rec = {"ran": True, "mode": mode, "max_tokens": 256, "special_tokens": list(specials), "entries": entries,
            "chat_template": {"present": mode == "chat", "sha256": sc._sha(template)}}
     if files is not None:
         rec["served_files"] = files
+        if after == "same":
+            rec["served_files_after"] = files
+        elif after is not None:
+            rec["served_files_after"] = after
     return rec
 
 
