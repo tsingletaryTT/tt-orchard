@@ -8,21 +8,36 @@
 #                 IMAGE       docker image built from the Dockerfile next to this script (default cvbench:0.1)
 #                 PROMPT      first message to the agent (default: the upstream usage text with the Qwen Code skill path)
 #
+# The run name may use letters, digits, dots, underscores and hyphens. WORK_ROOT may be relative (it is made absolute); neither it nor
+# the resolved path may contain a colon or a line break, because they become a docker mount source and destination.
+#
 # What the container gets: the task directory only (read-write, same path inside), a HOME inside it, no credentials, all capabilities
 # dropped, no new privileges, a read-only root file system, memory and process limits. It shares the host network namespace only because
 # the endpoint listens on loopback; the host's loopback services are therefore reachable from inside.
 set -euo pipefail
 NAME=${1:?run name}; BRIEF=${2:?brief file}; WALL_MIN=${3:-120}; MAX_TURNS=${4:-1500}
 : "${WORK_ROOT:?}"; : "${SKILL_SRC:?}"
+case $NAME in *[!A-Za-z0-9._-]*|"") echo "run name '$NAME' may use letters, digits, '.', '_' and '-' only"; exit 1;; esac
+nl=$'\n'
+bad_path() { case $1 in *:*|*"$nl"*) return 0;; esac; return 1; }
+bad_path "$WORK_ROOT" && { echo "WORK_ROOT may not contain a colon or a line break (it becomes a docker mount): $WORK_ROOT"; exit 1; }
+mkdir -p "$WORK_ROOT"
+WORK_ROOT=$(cd "$WORK_ROOT" && pwd -P)          # docker needs absolute paths for the mount destination and the working directory
+SKILL_SRC=$(cd "$SKILL_SRC" && pwd -P)
+bad_path "$WORK_ROOT" && { echo "WORK_ROOT resolves to a path with a colon or a line break: $WORK_ROOT"; exit 1; }
 ENDPOINT=${ENDPOINT:-http://127.0.0.1:8012}; IMAGE=${IMAGE:-cvbench:0.1}
 HERE=$(cd "$(dirname "$0")" && pwd)
-RUN=$WORK_ROOT/$NAME; TASK=$RUN/task; LOGS=$RUN/logs
+RUN=$WORK_ROOT/$NAME; TASK=$RUN/task; LOGS=$RUN/logs; CIDFILE=$LOGS/container.id
 [ ! -e "$RUN" ] || { echo "refusing to reuse $RUN"; exit 1; }
 MODEL=$(curl -sf -m 20 "$ENDPOINT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
 PROMPT=${PROMPT:-"Use the project code-video skill. Read .qwen/skills/code-video/SKILL.md and dense_prompt.md, then the relevant craft guides. This directory is the project root. Produce the complete video, run the rendering tools, and deliver out/final.mp4, SPEC.md and VERIFY.md."}
 
 mkdir -p "$TASK/.qwen/skills" "$TASK/home/.qwen" "$TASK/out" "$TASK/assets" "$LOGS"
 cp -r "$SKILL_SRC" "$TASK/.qwen/skills/code-video"
+# The trusted copy: collect.py checks the film with the checker from this directory, mounted read-only, and not with the task's copy, which
+# the model can edit. The hashes let the summary list any skill file the run changed.
+printf '%s\n' "$SKILL_SRC" > "$LOGS/skill_src"
+( cd "$SKILL_SRC" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$LOGS/skill.sha256"
 ln -s /opt/pw/node_modules "$TASK/node_modules"          # resolves inside the image: Playwright and @napi-rs/canvas
 cp "$BRIEF" "$TASK/dense_prompt.md"
 ENDPOINT="$ENDPOINT" MODEL="$MODEL" python3 - "$TASK/home/.qwen/settings.json" <<'PY'
@@ -45,14 +60,20 @@ PY
 cp "$TASK/home/.qwen/settings.json" "$LOGS/qwen-settings.json"
 
 python3 "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics.jsonl" 15 & POLL=$!
-cleanup() { kill "$POLL" 2>/dev/null || true; docker rm -f "cvbench-$NAME" >/dev/null 2>&1 || true; }
+# Remove only the container this invocation created: docker writes its id to $CIDFILE after the daemon made it. A start that failed (a
+# name already used by another run, say) leaves the file empty, and then there is nothing of ours to remove.
+cleanup() {
+  kill "$POLL" 2>/dev/null || true
+  cid=""; if [ -s "$CIDFILE" ]; then cid=$(cat "$CIDFILE"); fi
+  if [ -n "$cid" ]; then docker rm -f "$cid" >/dev/null 2>&1 || true; fi
+}
 trap cleanup EXIT
 python3 "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-start.json" once
 date -u +%FT%TZ > "$LOGS/started_at"
 
 set +e
 systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
-  timeout "$((WALL_MIN + 5))m" docker run --rm --init --name "cvbench-$NAME" \
+  timeout -k 60 "$((WALL_MIN + 5))m" docker run --rm --init --name "cvbench-$NAME" --cidfile "$CIDFILE" \
     --user "$(id -u):$(id -g)" --network host --cap-drop ALL --security-opt no-new-privileges \
     --read-only --tmpfs /tmp:rw,exec,size=2g --shm-size 2g \
     --memory 16g --memory-swap 16g --cpus 8 --pids-limit 2048 \
