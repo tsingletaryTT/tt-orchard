@@ -59,6 +59,9 @@ OTHER_TOOL_FLAGS = {
     "--duration": "make_reference.py (the audio reference script)",
     "--steps": "make_reference.py (the audio reference script)",
     "--cfg-scale": "make_reference.py (the audio reference script)",
+    "--width": "scripts/tiny_qwen4/make_checkpoint.py (the tiny Qwen4 rehearsal checkpoint; tests/test_tiny_qwen4_width.py)",
+    "--set": "scripts/tiny_qwen4/make_checkpoint.py (a width override)",
+    "--max-gb": "scripts/tiny_qwen4/make_checkpoint.py (the size limit)",
 }
 
 FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
