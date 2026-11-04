@@ -40,20 +40,40 @@ def test_a_git_error_cut_between_a_password_and_its_at_sign_leaves_no_password(t
     assert "tt-metal" in text                                       # the finding is still there, the secret is not
 
 
-def test_the_ledger_reason_of_a_failed_write_is_redacted_before_it_is_cut_and_hides_the_operator_home(rig_for_round3):
-    rig = rig_for_round3
+def _ledger_text_and_reason_of_a_failed_write(rig, message: str) -> tuple[str, str]:
+    """Run the stack-pins step with a write that fails with `OSError(message)`. Returns the whole ledger text and the reason the ledger
+    gave for `stack pins not written` (the rest of that line)."""
     from test_supervisor_stack_pins import run
     from orchard.supervisor import Control
-    prefix = f"OSError: {rig.home}/cache "
-    err = _cut_at_the_at_sign(prefix, "LEDGERPASSWORD7")
-    assert err.index("@") == 200
 
     def broken(stage_dir, new_run):
-        raise OSError(err[len("OSError: "):])
+        raise OSError(message)
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
     run(rig, broken)
     text = (rig.run_dir / "ledger.jsonl").read_text()
-    assert "stack pins not written" in text and "LEDGERPASSWORD7" not in text and str(rig.home) not in text.split("stack pins not written")[1].split("\n")[0]
+    assert "stack pins not written" in text
+    return text, text.split("stack pins not written")[1].split("\n")[0]
+
+
+def test_the_ledger_reason_of_a_failed_write_is_redacted_before_it_is_cut(rig_for_round3):
+    """Issue 426: the `@` has to be character 200 of the text the supervisor builds, so that a cut before the redaction ends between the
+    password and the `@`. That position is a property of this string. It used to be built from the run's temp directory, so a long
+    `--basetemp` made the padding negative and the `@` land beyond 200. The prefix is a fixed path of its own now."""
+    err = _cut_at_the_at_sign("OSError: /srv/pins/cache ", "LEDGERPASSWORD7")
+    assert err.index("@") == 200
+    text, _reason = _ledger_text_and_reason_of_a_failed_write(rig_for_round3, err[len("OSError: "):])
+    assert "LEDGERPASSWORD7" not in text
+
+
+def test_the_ledger_reason_of_a_failed_write_hides_the_operator_home(rig_for_round3):
+    """The message starts with the run's operator home, so the first 200 characters of an unredacted text are the home path itself
+    however long the temp directory is. The check names the start of the path and its last name, and does not depend on a cut
+    position. The part after the path has to survive: the reason is redacted, not dropped."""
+    rig = rig_for_round3
+    home = str(rig.home)
+    _text, reason = _ledger_text_and_reason_of_a_failed_write(rig, f"{home}/cache cannot be written")
+    assert home[:40] not in reason and rig.home.name not in reason
+    assert "cannot be written" in reason
 
 
 @pytest.fixture

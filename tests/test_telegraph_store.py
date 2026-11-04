@@ -312,6 +312,100 @@ def test_four_processes_making_200_reservations_each_cannot_pass_a_cap(tmp_path,
         assert db.integrity_ok()
 
 
+def test_four_processes_whose_lock_wait_is_one_millisecond_still_cannot_pass_a_cap(tmp_path):
+    """Issue 395, made deterministic: with a 1 ms lock wait the four processes meet the ledger's `LedgerUnavailable` answer all the time,
+    as processes do when a loaded box keeps the lock holder from running for 30 s. Each worker asks again, so every reservation ends
+    as granted or refused, and the cap holds exactly: not one grant too many, and none missing because a try was lost."""
+    directory = tmp_path / "state"
+    with dbm.Database(directory):
+        pass
+    ctx = multiprocessing.get_context("spawn")
+    table_ = table(max_calls=40, max_calls_per_problem=10**6, max_total_tokens=10**9)
+    with ctx.Pool(4) as pool:
+        results = pool.starmap(store_worker, [(str(directory), table_, i, 50, ["a", "b"], 1000, 0.25, False, 1) for i in range(4)])
+    assert all(len(r) == 50 for r in results)                           # every reservation got an answer
+    granted = [cid for r in results for cid, ok in r if ok]
+    assert len(granted) == 40 and len(set(granted)) == 40
+    assert tg.accounting(tg._read_ledger_strict(directory))["calls"] == 40
+    with dbm.Database(directory) as db:
+        assert db.integrity_ok()
+
+
+class _Unavailable:
+    """An operation that answers `LedgerUnavailable` `times` times and then returns 'done'."""
+
+    def __init__(self, times):
+        self.times, self.calls = times, 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.calls <= self.times:
+            raise dbm.LedgerUnavailable("database is locked")
+        return "done"
+
+
+def _fake_time():
+    now = [0.0]
+    return (lambda: now[0]), (lambda s: now.__setitem__(0, now[0] + s))
+
+
+def test_a_worker_asks_again_when_the_ledger_is_unavailable_and_returns_the_answer():
+    from dbtools import retry_when_unavailable
+    clock, sleep = _fake_time()
+    op = _Unavailable(3)
+    assert retry_when_unavailable(op, "reservation w0-1", clock=clock, sleep=sleep) == "done"
+    assert op.calls == 4
+
+
+def test_a_worker_gives_up_when_the_ledger_stays_unavailable_and_says_what_it_waited_for():
+    from dbtools import retry_when_unavailable
+    clock, sleep = _fake_time()
+    with pytest.raises(AssertionError, match=r"reservation w2-7: the ledger was unavailable for 5 s .*database is locked"):
+        retry_when_unavailable(_Unavailable(10**9), "reservation w2-7", patience_s=5.0, clock=clock, sleep=sleep)
+
+
+@pytest.mark.parametrize("seam,expected_calls", [("open", 2), ("reserve", 3), ("settle", 3)])
+def test_a_worker_asks_again_at_each_point_where_the_ledger_can_refuse_it(tmp_path, monkeypatch, seam, expected_calls):
+    """The wiring, not only the helper: a worker whose open, reservation or settle is refused once (`LedgerUnavailable`) asks again and
+    carries on. The refusal is injected at the store's own method, so no timing is involved. Two reservations, each settled, make three
+    calls of `reserve` and of `settle`, and a refused first call makes it one more at the seam."""
+    directory = tmp_path / "state"
+    with dbm.Database(directory):
+        pass
+    calls = []
+    if seam == "open":
+        real_open = ts.TelegraphStore.open.__func__
+
+        def flaky_open(cls, *a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise dbm.LedgerUnavailable("open.lock is held by another process")
+            return real_open(cls, *a, **k)
+        monkeypatch.setattr(ts.TelegraphStore, "open", classmethod(flaky_open))
+    else:
+        real = getattr(ts.TelegraphStore, seam)
+
+        def flaky(self, *a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise dbm.LedgerUnavailable("database is locked")
+            return real(self, *a, **k)
+        monkeypatch.setattr(ts.TelegraphStore, seam, flaky)
+    table_ = table(max_calls=10**6, max_calls_per_problem=10**6, max_total_tokens=10**9)
+    out = store_worker(str(directory), table_, 0, 2, ["a"], 1000, 0.25, True)
+    assert [ok for _cid, ok in out] == [True, True]
+    assert len(calls) == expected_calls
+
+
+def test_a_worker_does_not_hide_any_other_error():
+    from dbtools import retry_when_unavailable
+
+    def broken():
+        raise dbm.LedgerRefused("the database is damaged")
+    with pytest.raises(dbm.LedgerRefused):
+        retry_when_unavailable(broken, "reservation w0-0")
+
+
 def test_four_processes_that_also_settle_leave_one_settled_call_each_and_the_same_totals(tmp_path):
     directory = tmp_path / "state"
     with dbm.Database(directory):
