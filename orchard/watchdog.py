@@ -216,6 +216,7 @@ _REDIRECT = re.compile(r"\s*(?:\d?>>?|&>)\s*\S+|\s*<\s*\S+")
 _SEPARATOR = re.compile(r"\|\||&&|;|\|")
 _NUMERIC = re.compile(r"-?[\d.,:]+[a-zA-Z]?")
 _EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}$")
+_SED_RANGE = re.compile(r"\d{1,9}(?:,\d{1,9})?p")       # the print range of `sed -n 'a,bp' file`
 SHAPE_CHARS = 40
 
 
@@ -232,6 +233,11 @@ def command_shape(command: str) -> str:
     SHAPE_CHARS characters after trailing numeric arguments are removed and whitespace is
     normalised. So `grep -rn x /src | head -50` and `grep -rn y /src | head -80` share the shape
     `grep /src`, and `tail -n 200` and `tail -n 400` share `tail -n`.
+
+    The one exception is a `sed` print range. `sed -n '1,250p' f` and `sed -n '251,500p' f` read
+    different lines of one file, which is paging through it and not a loop, so the range is part
+    of the shape (`sed f 1,250p`). The same range repeated still has one shape. A third rehearsal
+    run of stage 2 was blocked as stuck for reading four ranges of one reference module.
     """
     if not isinstance(command, str) or not command.strip():
         return ""
@@ -244,6 +250,10 @@ def command_shape(command: str) -> str:
         return ""
     for t in tokens[1:]:
         if not t.startswith("-") and _path_like(t):
+            if tokens[0] == "sed":
+                rng = next((r for r in tokens[1:] if _SED_RANGE.fullmatch(r)), None)
+                if rng is not None:
+                    return f"{tokens[0]} {t} {rng}"
             return f"{tokens[0]} {t}"
     while len(tokens) > 1 and _NUMERIC.fullmatch(tokens[-1]):
         tokens.pop()
@@ -422,7 +432,10 @@ class NoFileWritten:
                        {"turns": count},
                        nudge=(f"{count} model turns have passed and no file was written. "
                               "Stop investigating: write the files the skill names now, or say "
-                              "what blocks you from writing them."))
+                              "what blocks you from writing them. For the stage 2 port, if "
+                              "`stages/2/reference_excerpts.md` exists it holds the reference "
+                              "classes your model uses: write a first `stages/2/port/port_model.py` "
+                              "from it now, even if it is incomplete, and refine it afterwards."))
 
 
 class LeaseIdle:
