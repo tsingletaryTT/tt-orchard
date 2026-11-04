@@ -1400,13 +1400,22 @@ same context with the same sampling, so it produced the same loop. What the harn
   A loop gets a nudge that says so ("do not analyse further, run one command"). Normal requests are unchanged.
 - **After two capped replies in a row the step starts again** from the task and the list of files on disk, once per step
   (`AGENT_RESTARTS_ON_CAPS`). The ledger decision `context restarted after capped replies` records it. A further two end the step, and the error
-  detail says how many capped replies were repetition loops and that the coder's replies are the likely cause.
+  detail says how many capped replies were repetition loops and that the coder's replies are the likely cause. The fresh context also carries the
+  supervisor's own instructions to the step (gate feedback, a wrap-up request, watchdog nudges: at most four, each cut to 8,000 characters, the oldest
+  nudge dropped first), so the step is not sent back to a task it was told to change. The log row after a restart holds the replacement conversation,
+  and every row records the sampling of the request that was served (`request`).
+- **A reply cut off inside a tool call's arguments goes through the same recovery.** The call does not run and does not stay in the conversation
+  without an answer; a complete call in the same reply still runs. The cap is counted, the next request uses the retry profile, and the narrator
+  says the call was cut off and not run (it used to print `writes ? (0 characters)`).
 - **A file the agent writes is bounded.** `write_file` refuses a file over 400,000 bytes or 6,000 lines, or over 20,000 characters that compress
   to under 0.04 (stricter than for a reply, because refusing a file costs a rewrite), and leaves the old file as it was. A shell command that makes a
   file under `stages/<n>/port/` fail the same test has it put back to the last version the guard accepted (or removed, when it is new), and the
   command's output says so. The guard works only through directory descriptors beneath the real port directory (`orchard/port_guard.py`): a `port`
   that is a link is reported and nothing under it is read or changed, a link inside it is never followed, a file or directory swapped after the scan is
-  not followed or trusted, and the scan is bounded (2,000 entries, 200 files, four levels).
+  not followed or trusted, and the scan is bounded (2,000 entries, 200 files, four levels). The guard's memory is bounded across the commands of a
+  step: after a complete scan it forgets files that are gone, the backups together stay under 32 MiB (the oldest are evicted first), and the stamp
+  table holds at most 10,000 entries. A file whose backup was evicted is never put back to a wrong version and never removed: if it becomes
+  unacceptable the agent is told its previous version was not kept.
 - **Stage 2 of a full port: the supervisor writes `result.json`** when the hardware test passed and the check's record is complete
   (`orchard/full_port_result.py`). Every field is the record's or computed from its ids exactly as the gate does (`top1_agreement` is recomputed, not
   copied). `coherent` is the only judgement: the supervisor answers it with a stated floor that checks form (printable text, mostly words, no word holding more
