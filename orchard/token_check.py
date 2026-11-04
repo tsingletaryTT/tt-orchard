@@ -19,6 +19,7 @@ Limits, stated so the PR and the gate do not claim more:
 """
 from __future__ import annotations
 
+import heapq
 import math
 from typing import Any
 
@@ -31,6 +32,15 @@ FRACTION_TOLERANCE = 1e-9
 TEMPLATE_POSITIONS = 32
 # How many positions a reason names before it says "and N more": a reason is read by a person and written to the ledger.
 LISTED_POSITIONS = 8
+# A reason is written to the ledger and into the continuation message the agent reads, and the ledger refuses to read a file over 16 MiB, so
+# nothing the report holds may reach a reason at its own size (review of PR 444, limit round: one 9.4 MB position string made an 18.9 MB
+# feedback entry). One report value is shown at most this many characters long; the rest is counted ("and N more characters").
+MAX_SHOWN_CHARS = 80
+# One reason is at most this long, with the count of what was cut. The field names and the recomputed values come first in every reason and
+# the shown values are short, so an ordinary reason is far below it.
+MAX_REASON_CHARS = 1000
+# The supervisor writes at most this many reasons of one gate (orchard/supervisor.py `bound_reasons`), then says how many it left out.
+MAX_REASONS_WRITTEN = 24
 
 
 def _whole(v: Any) -> bool:
@@ -39,6 +49,35 @@ def _whole(v: Any) -> bool:
 
 def _number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def show(value: Any) -> str:
+    """One value from a report, as text of bounded length. Text is cut at `MAX_SHOWN_CHARS` with the count of what was cut; a list or an object
+    is named by its size and never copied; an integer too long to print is named by its digits (its length comes from `bit_length`, so
+    nothing builds the digits). Never raises."""
+    if isinstance(value, str):
+        cut = len(value) - MAX_SHOWN_CHARS
+        return repr(value[:MAX_SHOWN_CHARS]) + (f" (and {cut} more characters)" if cut > 0 else "")
+    if value is None or isinstance(value, (bool, float)):
+        return repr(value)
+    if isinstance(value, int):
+        digits = value.bit_length() * 30103 // 100000 + 1
+        return repr(value) if digits <= 40 else f"an integer of about {digits} digits"
+    if isinstance(value, (list, tuple)):
+        return f"a list of {len(value)} items"
+    if isinstance(value, dict):
+        return f"an object with {len(value)} keys"
+    return f"a value of type {type(value).__name__}"
+
+
+def cut_text(text: str, limit: int = MAX_REASON_CHARS) -> str:
+    """`text` cut at `limit` characters, with the count of what was cut."""
+    return text if len(text) <= limit else text[:limit] + f" ... ({len(text) - limit} more characters not shown)"
+
+
+def _listed(shown: list[str], total: int) -> str:
+    """The first few of `total` items, then how many more there are."""
+    return ", ".join(shown) + (f" and {total - len(shown)} more" if total > len(shown) else "")
 
 
 def _positions(values) -> str:
@@ -81,6 +120,13 @@ def _same_fraction(recorded: Any, expected: float) -> bool:
 
 def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, where: str = "", *, require_records: bool = True,
              required_positions: int | None = None) -> list[str]:
+    """`_problems`, with each reason cut at `MAX_REASON_CHARS` (a safety net: every value a reason shows is already bounded)."""
+    return [cut_text(r) for r in _problems(report, results, reference_ids, where, require_records=require_records,
+                                           required_positions=required_positions)]
+
+
+def _problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, where: str = "", *, require_records: bool = True,
+              required_positions: int | None = None) -> list[str]:
     """Reasons the numbers of one swap-check.json (`report`) and of each result that repeats them (`results`: (label, object) pairs,
     such as ("result_draft", ...) and ("result.json", ...)) are not what the report's raw records and `reference_ids` give. Empty when
     they agree. Each reason names the field, the recorded value and the recomputed one. A report with no `teacher_forced` records is refused
@@ -114,11 +160,11 @@ def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, wh
             out.append(f"{where}{label} lists positions_skipped, and this gate has no rebuilt skip mask to check the list against, "
                        "so it cannot count fewer positions than the replies give")
     if report.get("n_tokens") != n or isinstance(report.get("n_tokens"), bool):
-        out.append(f"{where}swap-check.json n_tokens {report.get('n_tokens')!r} is not the {n} records in teacher_forced")
+        out.append(f"{where}swap-check.json n_tokens {show(report.get('n_tokens'))} is not the {n} records in teacher_forced")
     if report.get("matches") != matches or isinstance(report.get("matches"), bool):
-        out.append(f"{where}swap-check.json matches {report.get('matches')!r} is not what teacher_forced gives ({truth})")
+        out.append(f"{where}swap-check.json matches {show(report.get('matches'))} is not what teacher_forced gives ({truth})")
     if not _same_fraction(report.get("top1_agreement"), top1):
-        out.append(f"{where}swap-check.json top1_agreement {report.get('top1_agreement')!r} is not what teacher_forced gives "
+        out.append(f"{where}swap-check.json top1_agreement {show(report.get('top1_agreement'))} is not what teacher_forced gives "
                    f"({top1:.6g}: {truth})")
     listed = report.get("mismatches")
     if not isinstance(listed, list):
@@ -128,13 +174,21 @@ def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, wh
         if seen != got["mismatch_positions"]:
             # The positions are JSON values. A list or an object is unhashable and a mix of null, text and numbers cannot be sorted, so only the
             # whole numbers are put in sets or sorted; every other value is named by its repr, once, in the order it first appears.
+            # A report can hold a million of them, and each can be a huge string: only the first few are shown, each cut, and the rest are counted.
             whole = {p for p in seen if _whole(p)}
             hidden = sorted(set(got["mismatch_positions"]) - whole)
-            odd = list(dict.fromkeys(repr(p) for p in seen if not _whole(p)))
-            wrong = [repr(p) for p in sorted(whole - set(got["mismatch_positions"]))]
-            extra = odd + wrong
-            detail = (f"it leaves out positions {_positions(hidden)}" if hidden else "") + (" and " if hidden and extra else "") \
-                + (f"it lists positions that are not mismatches: {_positions(extra)}" if extra else "")
+            odd_shown, odd_total = [], 0
+            for p in seen:
+                if not _whole(p):
+                    odd_total += 1
+                    if len(odd_shown) < LISTED_POSITIONS and show(p) not in odd_shown:
+                        odd_shown.append(show(p))
+            wrong = whole - set(got["mismatch_positions"])
+            wrong_shown = [show(p) for p in heapq.nsmallest(LISTED_POSITIONS, wrong)]
+            extra_shown = (odd_shown + wrong_shown)[:LISTED_POSITIONS]
+            extra_total = odd_total + len(wrong)
+            detail = (f"it leaves out positions {_positions(hidden)}" if hidden else "") + (" and " if hidden and extra_total else "") \
+                + (f"it lists positions that are not mismatches: {_listed(extra_shown, extra_total)}" if extra_total else "")
             out.append(f"{where}swap-check.json mismatches are not the positions teacher_forced disagrees on ({detail or 'the order or a repeat differs'})")
     ids = report.get("reference_generated_ids")
     if ids != reference_ids[:n]:
@@ -143,8 +197,8 @@ def problems(report: Any, results: list[tuple[str, Any]], reference_ids: Any, wh
         if not isinstance(obj, dict):
             continue
         if obj.get("n_tokens") != n or isinstance(obj.get("n_tokens"), bool):
-            out.append(f"{where}{label} n_tokens {obj.get('n_tokens')!r} is not the {n} records in swap-check.json teacher_forced")
+            out.append(f"{where}{label} n_tokens {show(obj.get('n_tokens'))} is not the {n} records in swap-check.json teacher_forced")
         if not _same_fraction(obj.get("top1_agreement"), top1):
-            out.append(f"{where}{label} top1_agreement {obj.get('top1_agreement')!r} is not what swap-check.json teacher_forced gives "
+            out.append(f"{where}{label} top1_agreement {show(obj.get('top1_agreement'))} is not what swap-check.json teacher_forced gives "
                        f"({top1:.6g}: {truth})")
     return out

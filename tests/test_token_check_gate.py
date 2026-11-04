@@ -428,7 +428,8 @@ def test_a_mismatch_list_with_mixed_junk_positions_is_refused_and_names_each_onc
     r["mismatches"] = [{"position": None}, {"position": "x"}, {"position": []}, {"position": None}, 5, {"position": 99}]
     out = token_check.problems(r, [], REF)
     text = " ".join(mentions(out, "mismatches are not the positions"))
-    assert "None" in text and "'x'" in text and "[]" in text and "99" in text, out
+    # a list is named by its size, never copied (review of PR 444, limit round: a reason is bounded whatever the report holds)
+    assert "None" in text and "'x'" in text and "a list of 0 items" in text and "99" in text, out
     assert text.count("None") == 1, text                                     # the repeat of a value is named once
 
 

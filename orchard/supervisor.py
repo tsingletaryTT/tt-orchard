@@ -164,6 +164,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
 from orchard import full_port, model_kind, residency, scoring_check
+from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -560,6 +561,22 @@ def wrapup_text(spec, name: str, files: list[str]) -> str:
               "a field, say so in that field. When the file is written, reply with a short summary "
               "and no tool call."]
     return "\n".join(lines)
+
+
+def bound_reasons(reasons) -> list[str]:
+    """The reasons of one gate, as text that is safe to write to the ledger and into a message: each reason cut at `token_check.MAX_REASON_CHARS`
+    with the count of what was cut, a value that is not text named by its shape, and at most `token_check.MAX_REASONS_WRITTEN` reasons, then
+    one line that says how many reasons and characters were left out. A list that is already short is returned as it is. A gate quotes values
+    from files an agent or a model wrote, the ledger refuses to read a file over 16 MiB, and a refusal that makes the ledger unreadable ends
+    the run (review of PR 444, limit round)."""
+    items = list(reasons)
+    keep = items[:token_check.MAX_REASONS_WRITTEN]
+    out = [token_check.cut_text(r) if isinstance(r, str) else token_check.show(r) for r in keep]
+    if len(items) > len(keep):
+        left = items[len(keep):]
+        chars = sum(len(r) if isinstance(r, str) else 0 for r in left)
+        out.append(f"{len(left)} more reasons ({chars} characters) are not shown; the gate gave {len(items)} reasons in all")
+    return out
 
 
 def gate_feedback_text(spec, reasons) -> str:
@@ -2396,9 +2413,10 @@ class Supervisor:
         """The step ended "done" and the exit gate failed. Tell the same conversation what the gate
         found and run it once more, with its own turn cap and its own log."""
         n = spec.number
+        reasons = bound_reasons(gate.reasons)
         entry = self.ledger.append("decision", n, decision="gate feedback", phase=step.phase,
-                                   reasons=list(gate.reasons), file=f"stages/{n}/{spec.gate_file}")
-        text = gate_feedback_text(spec, gate.reasons)
+                                   reasons=reasons, file=f"stages/{n}/{spec.gate_file}")
+        text = gate_feedback_text(spec, reasons)
         log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
         return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
@@ -2586,6 +2604,7 @@ class Supervisor:
             return "pause"
         if status == "abort":
             return "abort"
+        reasons = bound_reasons(reasons)
         if spec.harness:
             # Supervisor code failed: another model cannot fix it, so it is not escalated.
             self.ledger.append("decision", n, decision="pause",
