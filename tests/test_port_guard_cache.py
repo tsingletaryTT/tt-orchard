@@ -108,13 +108,26 @@ def test_a_truncated_scan_does_not_forget_the_backups_of_files_it_did_not_list(s
 
 def test_the_stamp_table_is_bounded_when_the_scan_never_completes(stage, monkeypatch):
     monkeypatch.setattr(port_guard, "PORT_GUARD_STAMPS", 5)
-    monkeypatch.setattr(port_guard, "PORT_GUARD_ENTRIES", 3)                 # every scan is truncated: nothing is ever pruned by listing
+    monkeypatch.setattr(port_guard, "PORT_GUARD_ENTRIES", 3)                 # four files are always present: every scan stops early
     guard = PortGuard(stage)
     for i in range(40):
         put(stage, f"n{i}.py", f"d = {i}\n")
+        if i >= 4:
+            os.unlink(stage / "port" / f"n{i - 4}.py")                       # a sliding window: fresh names keep appearing in the listing
         settle(guard)
-        os.unlink(stage / "port" / f"n{i}.py")
     assert len(guard._stamp) <= 5, "the stamp table grew without limit"
+
+
+def test_a_scan_that_skipped_a_directory_below_the_depth_bound_prunes_nothing(stage):
+    guard = PortGuard(stage)
+    keep = put(stage, "keep.py", "k = 1\n")
+    settle(guard)
+    deep = stage / "port" / "a" / "b" / "c" / "d" / "e"                       # one level below PORT_GUARD_DEPTH: not looked at
+    deep.mkdir(parents=True)
+    (deep / "deep.py").write_text("z = 1\n")
+    keep.unlink()
+    settle(guard)
+    assert guard.cache_stats()[0] == 1, "the scan could not see everything, so it must not forget a file it cannot account for"
 
 
 def test_a_file_that_was_evicted_and_then_accepted_again_is_restored_again(stage, monkeypatch):
