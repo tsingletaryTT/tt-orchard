@@ -243,10 +243,17 @@ followed once, only regular files are read and headers are size-capped), and for
 convention in the reference's configuration class (found with `find_spec`, without importing `transformers`; a `_text`, `_vision` or
 `_audio` model type is also looked up under its family). It is kept under 10,500 characters so one `read_file` returns all of it, and
 it says what it left out: `tensors_left_out` (groups cut to fit; the lines are cut in one pass over their encoded lengths, so a checkpoint
-with a million groups costs one pass and not one encoding of the whole file per line), `config_left_out` and `text_config_left_out` (every
-config field dropped for size or because it is not a short scalar or list, named), `conventions_left_out` (convention notes over the
+with a million groups costs one pass and not one encoding of the whole file per line), `config_left_out` and `text_config_left_out` (config
+fields dropped for size or because they are not a short scalar or list, named; at most 100 names, and `*_left_out_more` counts the rest),
+`config_keys_not_listed` and `text_config_keys_not_listed` (keys that are not a plain identifier of at most 80 characters: they come from
+the model's own config and are counted and never copied), `conventions_left_out` (convention notes over the
 cap of 12), `layer_schedule_note` (why a `layer_types` the config holds was not summarised) and `tensors_with_long_names` (tensors whose
-names are over 200 characters; they are counted and never listed). A numeric name component of more than six digits is no layer number
+names are over 200 characters; they are counted and never listed). A convention note names the reference class it comes from, and for a
+config field the class of that section wins (the `*TextConfig` class for `text_config`, the top-level class for the top level); another class
+that states a different numbering is named in the same text. A note longer than 300 characters keeps the sentence that states the
+convention (`cut` says the description was shortened, `convention_cut` that the sentence itself was). A list of three or more 0s and 1s is
+one flag per layer and goes to `layer_flag_fields`, so it stays out of `index_fields`, which holds at most 24 fields (`index_fields_left_out` counts the
+rest). A `model_type` that is not a short identifier is not copied (`model_type_not_listed`). A numeric name component of more than six digits is no layer number
 and stays in the name pattern as it is. If building the file fails for a reason nobody listed, the ledger says `port facts not written`
 with the exception's class and no text, and the stage goes on. The skeleton's four functions raise `NotImplementedError`, so a port left as it is fails
 the check at `load`. A port already in the stage directory is kept on a resume. When the checkpoint or its config cannot be read, no
