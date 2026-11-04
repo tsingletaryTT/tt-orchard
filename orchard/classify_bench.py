@@ -111,7 +111,15 @@ def _extra_weight_files(t, files: list[str], shards: list[str], base_files: list
     """Weight files outside the backbone that the nearest model lacks: what stage 0's compare_sidecars would list."""
     skip = set(shards) | set(base_files)
     # Stage 0 scans the snapshot directory's own files (compare_sidecars uses iterdir), so a weights file in a subdirectory is not a sidecar.
-    return [f for f in files if "/" not in f and f.endswith(t.WEIGHT_SUFFIXES) and f not in skip and not t.BACKBONE_BIN.fullmatch(f)]
+    return [f for f in files if "/" not in f and f.endswith(t.WEIGHT_SUFFIXES) and f not in skip and not t.BACKBONE_BIN.fullmatch(f)
+            and not f.endswith(t.IGNORED_SUFFIXES)]
+
+
+def _ignored_files(t, files: list[str], shards: list[str], base_files: list[str], sizes: dict) -> list[dict]:
+    """The GGUF copies stage 0 lists in delta.json `ignored_files` and does not count as sidecars (issue 437)."""
+    skip = set(shards) | set(base_files)
+    return [{"file": f, "size": sizes.get(f), "reason": t.IGNORED_REASON} for f in sorted(files)
+            if "/" not in f and f.endswith(t.IGNORED_SUFFIXES) and f not in skip]
 
 
 def _sidecars(fetch, repo: str, t, extras: list[str], sizes: dict, backbone_names: set[str]) -> tuple[dict, dict]:
@@ -176,6 +184,7 @@ def collect_one(fetch, repo: str, base: dict) -> dict:
     if not data["tensors"] and any(UNREADABLE.search(e) for e in data["errors"]):
         return _skipped(repo, "the Hub will not serve this repo's files without a token: " + data["errors"][0][:120])
     sc, shapes = _sidecars(fetch, repo, t, _extra_weight_files(t, files, data["shards"], base["files"]), sizes, set(data["tensors"]))
+    sc["ignored_files"] = _ignored_files(t, files, data["shards"], base["files"], sizes)
     c = t.compare_config_dicts(cfg, base["config"], cfg_errors, "model/config.json", "base/config.json")
     tens = t.compare_tensor_maps(data["tensors"], base["tensors"], mshards=data["shards"], bshards=base["shards"], merr=data["errors"],
                                  berr=base["errors"], model_path=repo, base_path="base")
@@ -201,7 +210,7 @@ def collect_one(fetch, repo: str, base: dict) -> dict:
     gaps = (list(data["errors"]) + [u.reason for u in res.unavailable if "no safetensors" not in u.reason]
             + [e for e in cfg_errors if e.startswith("config.json:")] + [p for p in sc["problems"] if " cannot be read:" in p])    # a failed fetch, not a gguf
     tool = {"class": cls, "status": "classified", "reasons": [str(r)[:240] for r in reasons[:6]], "sidecars": [e["file"] for e in sc["sidecars"]],
-            "evidence_complete": not gaps, "incomplete_because": [g[:160] for g in gaps[:5]],
+            "ignored_files": [e["file"] for e in sc["ignored_files"]], "evidence_complete": not gaps, "incomplete_because": [g[:160] for g in gaps[:5]],
             "head": {k: head.get(k) for k in ("restricted", "rows", "base_rows", "matched_rows", "token_ids", "min_cosine", "note")},
             "downloaded_bytes": downloaded}
     packet = _packet(repo, meta, sizes, files, cfg, c, tens, data, sc, shapes, base)
@@ -226,6 +235,7 @@ def _packet(repo, meta, sizes, files, cfg, c, tens, data, sc, shapes, base) -> d
         "card_base_model": card.get("base_model"),
         "files": {"backbone_shards": len(data["shards"]), "backbone_gib": round(shard_bytes / (1 << 30), 2),
                   "other_weight_files": [{"file": e["file"], "mb": round((e["size"] or 0) / 1e6, 1)} for e in sc["sidecars"]],
+                  "ignored_files": [{"file": e["file"], "mb": round((e["size"] or 0) / 1e6, 1)} for e in sc["ignored_files"]],
                   "code_files": [f for f in files if f.endswith(".py")][:MAX_LISTED], "has_tokenizer": "tokenizer.json" in files,
                   "has_chat_template": any("chat_template" in f for f in files), "total_files": len(files)},
         "config": {"architectures": (cfg or {}).get("architectures"), "model_type": (cfg or {}).get("model_type"),
@@ -257,6 +267,8 @@ def render_packet(p: dict) -> str:
            f"- backbone: {f['backbone_shards']} safetensors shards, {f['backbone_gib']} GiB; {f['total_files']} files in all; tokenizer {f['has_tokenizer']}; chat template {f['has_chat_template']}"]
     for o in f["other_weight_files"]:
         out.append(f"- other weight file: {o['file']} ({o['mb']} MB)")
+    for o in f["ignored_files"]:
+        out.append(f"- ignored (GGUF, not read by the TT runtime, not a sidecar): {o['file']} ({o['mb']} MB)")
     if f["code_files"]:
         out.append(f"- code files (not read): {', '.join(f['code_files'])}")
     out += ["", "## Config against the nearest model", f"- architectures {c['architectures']}, model_type {c['model_type']}"]

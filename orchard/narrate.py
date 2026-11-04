@@ -722,10 +722,12 @@ UNBLOCK = {
         "`python3 -m orchard.rolefit` checks a model for the agent role. Fix the coder, then run "
         "`tt-orchard bringup <MODEL>` again."],
     "needs-new-model-code": [
-        "The model differs from the nearest supported model in a way that needs new model code (a full port). An "
-        "unattended run cannot write that.",
-        "Read stages/0/delta.json (`path_reasons`) for what differs. Choosing another nearest model or porting by "
-        "hand is a person's decision; `tt-orchard bringup <MODEL>` blocks again until stage 0 finds weights-only."],
+        "Either the model differs from the nearest supported model in a way that needs new model code (a full port), or stage 0 "
+        "could not decide the class (class `unknown`, and the reason above says so). An unattended run cannot write new code or "
+        "settle an unknown class.",
+        "Read stages/0/delta.json (`class` and `path_reasons`) for what differs or what could not be read. Choosing another "
+        "nearest model or porting by hand is a person's decision; `tt-orchard bringup <MODEL>` blocks again until stage 0 finds "
+        "weights-only. A class of `unknown` stops even with `--full-port`."],
     "full-port-stages-unbuilt": [
         "The run was started with `--full-port`, stage 0 classed the model `full-port`, and stage 2 passed: the port in stages/2/port/ ran "
         "on the leased chips and its tokens agreed with the CPU reference (stages/2/result.json and stages/2/evidence/port-check.json).",
