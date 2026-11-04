@@ -316,6 +316,89 @@ def test_the_flag_does_not_let_an_unknown_class_go_on(rig):
     assert not started(rig, 2)
 
 
+def test_the_pause_for_an_unknown_class_says_the_class_is_unknown_and_why(rig):
+    """Issue 437: the pause said "stage 0 found a full port" for a class that stage 0 could not decide, and the reason was in delta.json only."""
+    rig.args.unattended = True
+    reasons = ["sidecar head.pt cannot be read: it is not a safetensors file", "text config hidden_size differs: 2560 vs 5120"]
+    make(rig, delta={**DELTA, "path": "full-port", "class": "unknown", "path_reasons": reasons})
+    never_wait(rig)
+    assert rig.run() == EXIT_BLOCKED
+    [pause] = [d for d in rig.decisions() if d.get("decision") == "pause" and d.get("reason", "").startswith(supervisor.CLASS_UNKNOWN)]
+    assert "class unknown" in pause["reason"] and "head.pt cannot be read" in pause["reason"] and "hidden_size differs" in pause["reason"]
+    assert "found a full port" not in pause["reason"]
+    assert status.classify_pause(pause)[0] == "full_port"
+    assert [d["code"] for d in rig.decisions() if d["decision"] == "blocked"] == ["needs-new-model-code"]
+
+
+def test_an_attended_resume_goes_on_after_the_unknown_class_pause_and_does_not_pause_again(rig):
+    """The wiring behind is_full_port_pause: one resume is the acknowledgement, as it is for the full-port pause."""
+    make(rig, delta={**DELTA, "path": "full-port", "class": "unknown", "path_reasons": ["sidecar head.pt cannot be read"]})
+    waits = []
+
+    def on_sleep():
+        waits.append(1)
+        if len(waits) > 1:
+            raise Stop("paused a second time for the same unknown class")
+        Control(rig.run_dir).write("resume")
+    rig.on_sleep = on_sleep
+    try:
+        rig.run()
+    except Stop:
+        pass
+    pauses = [d for d in rig.decisions() if d.get("decision") == "pause" and d.get("reason", "").startswith(supervisor.CLASS_UNKNOWN)]
+    assert len(pauses) == 1 and started(rig, 2)
+
+
+def test_a_full_port_class_without_the_flag_still_pauses_with_the_full_port_message(tmp_path):
+    r = Rig(tmp_path)
+    with_snapshot(r, tmp_path)
+    try:
+        r.args.unattended = True
+        make(r, delta={**DELTA, "path": "full-port", "class": "full-port"})
+        never_wait(r)
+        assert r.run() == EXIT_BLOCKED
+        assert [d["reason"] for d in r.decisions() if d.get("decision") == "pause"] == [supervisor.FULL_PORT]
+    finally:
+        r.close()
+
+
+def test_an_unknown_class_pause_is_an_acknowledged_full_port_pause_on_a_resume(tmp_path):
+    entries = [{"event": "decision", "data": {"decision": "pause", "reason": supervisor.class_unknown_reason(["a reason"])}}]
+    assert supervisor.is_full_port_pause(entries[0]["data"]["reason"]) and supervisor.is_full_port_pause(supervisor.FULL_PORT)
+    assert not supervisor.is_full_port_pause("operator") and not supervisor.is_full_port_pause(supervisor.FULL_PORT_STAGES_UNBUILT)
+
+
+@pytest.mark.parametrize("quoted", [
+    "tensor model.layers.0.full-port route.pt has shape [2560]",           # the file name holds the full-port route words
+    "a file named restricted head parity.bin is not readable",              # restricted head
+    "the file scoring route.safetensors differs",                           # scoring route
+    "sidecar audio path.gguf cannot be read",                               # audio path
+    "weights failed after escalation.bin has the wrong size",               # stage failed
+    "the repository says it is not escalated: text config differs",         # stage failed, the other phrase
+    "the model needs a full port, said the card",                           # full port
+    "cap since lasted",                                                     # budget words
+])
+def test_quoted_repository_text_cannot_change_what_kind_of_pause_the_unknown_class_pause_is(quoted):
+    """Review of PR 438 (round 1): the pause reason quotes reasons from delta.json, which hold file names and text from the model's
+    repository. `classify_pause` reads substrings, so a quoted phrase used to win over the fixed prefix and give the pause another
+    code and another recovery text. The prefix is read first."""
+    pause = {"decision": "pause", "reason": supervisor.class_unknown_reason([quoted])}
+    assert status.classify_pause(pause) == ("full_port", None)
+    assert blocked.block_code(pause) == "needs-new-model-code"
+    assert supervisor.is_full_port_pause(pause["reason"])
+
+
+def test_the_unknown_class_prefix_is_one_constant_that_status_and_the_supervisor_share():
+    from orchard import classes
+    assert supervisor.CLASS_UNKNOWN is classes.CLASS_UNKNOWN or supervisor.CLASS_UNKNOWN == classes.CLASS_UNKNOWN
+
+
+def test_the_reasons_in_the_unknown_pause_are_few_and_short():
+    text = supervisor.class_unknown_reason([f"reason {i} " + "x" * 500 for i in range(10)])
+    assert "reason 0" in text and "reason 2" in text and "reason 3" not in text and len(text) < 1000
+    assert supervisor.class_unknown_reason([]).endswith("a person decides whether to go on")
+
+
 def test_a_full_port_without_the_flag_still_blocks_unattended(tmp_path):
     r = Rig(tmp_path)
     with_snapshot(r, tmp_path)

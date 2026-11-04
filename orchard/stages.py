@@ -42,7 +42,7 @@ from typing import Callable
 
 from orchard import audio_decision, audio_facts, audio_runtime, full_port, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
-from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
+from orchard.classes import CLASSES, IGNORED_WEIGHT_SUFFIXES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe, token_check
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
@@ -325,6 +325,19 @@ def _class_reasons(d: dict) -> list[str]:
             reasons.append(f"sidecars[{i}] needs a file")
         elif not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
             reasons.append(f"sidecars[{i}] ({item['file']}) needs a sha256 of 64 hex digits")
+    ignored = d.get("ignored_files", [])
+    if not isinstance(ignored, list):
+        reasons.append("delta.json ignored_files must be a list")
+        ignored = []
+    for i, item in enumerate(ignored):
+        if not isinstance(item, dict) or not _text(item.get("file")):
+            reasons.append(f"ignored_files[{i}] needs a file")
+        elif isinstance(item.get("size"), bool) or not isinstance(item.get("size"), int) or item["size"] < 0:
+            reasons.append(f"ignored_files[{i}] ({item['file']}) needs a size in bytes, a whole number of zero or more")
+        elif not _text(item.get("reason")):
+            reasons.append(f"ignored_files[{i}] ({item['file']}) needs a reason")
+        elif not str(item["file"]).endswith(IGNORED_WEIGHT_SUFFIXES):       # an agent cannot move a real sidecar out of sight
+            reasons.append(f"ignored_files[{i}] ({item['file']}) is not a converted copy: only {' and '.join(IGNORED_WEIGHT_SUFFIXES)} files may be ignored")
     if d.get("class") in SIDECAR_CLASSES and not sidecars:
         reasons.append(f"class {d['class']} needs at least one entry in sidecars")
     if "class" in d and d["class"] not in SIDECAR_CLASSES and sidecars:
@@ -1995,6 +2008,19 @@ def delta_class(run_dir) -> str | None:
     if "class" in data:
         return data["class"] if data["class"] in CLASSES else None
     return class_of_path(data.get("path"))
+
+
+def delta_path_reasons(run_dir, limit: int = 3, width: int = 200) -> list[str]:
+    """The first `limit` of `path_reasons` in stages/0/delta.json, each cut to `width` characters. [] when the file is missing, unreadable or
+    has none. The supervisor quotes these when stage 0's class is `unknown`."""
+    try:
+        data = _safe_json(Path(run_dir) / "stages" / "0" / "delta.json")
+    except safeio.SafeReadError:
+        return []
+    reasons = data.get("path_reasons") if isinstance(data, dict) else None
+    if not isinstance(reasons, list):
+        return []
+    return [" ".join(str(r).split())[:width] for r in reasons[:limit] if isinstance(r, str) and r.strip()]
 
 
 def run_class(entries: list[dict], run_dir) -> str | None:
