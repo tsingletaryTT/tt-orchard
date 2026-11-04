@@ -65,6 +65,7 @@ import time
 from pathlib import Path
 
 from orchard import orchard_view, safeio, ui
+from orchard.classes import CLASS_UNKNOWN
 from orchard.defaults import TEST_DISK_GB
 from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.stages import STAGES, ledger_ts, run_progress
@@ -183,6 +184,10 @@ def classify_pause(data: dict) -> tuple[str, str | None]:
         return "operator", None
     if reason.startswith("blocked:"):
         return "blocked", None
+    # The unknown-class pause quotes file names and text from the model's repository after its fixed prefix. The prefix is read before any
+    # substring below, so a quoted phrase cannot give the pause another kind (review of PR 438).
+    if reason.startswith(CLASS_UNKNOWN):
+        return "full_port", None
     if "failed after escalation" in reason or "is not escalated" in reason:
         return "stage_failed", None
     if "scoring route" in reason:
