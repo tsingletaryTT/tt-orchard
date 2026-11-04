@@ -633,6 +633,30 @@ def machine_facts(path) -> tuple[int | None, int | None]:
     return free, mem if isinstance(mem, int) and not isinstance(mem, bool) and mem >= 0 else None
 
 
+def _cache_sentence(fb: dict, free_disk_bytes: int) -> str:
+    """The blocking sentence for a port that writes a converted-weight cache: the first boot's disk figure against the cache disk's free space."""
+    download = fb.get("checkpoint_bytes_to_download")
+    extra = " and the download of the checkpoint" if isinstance(download, int) and not isinstance(download, bool) and download > 0 else ""
+    return (f"the first boot needs about {_gib(fb['disk_bytes'])} of free disk for the converted weights{extra}, "
+            f"and the cache disk has {_gib(free_disk_bytes)} free")
+
+
+def cache_shortfall(record, *, free_disk_bytes) -> str | None:
+    """The blocking sentence for the converted-weight cache of a port that DECLARES one (issue 451), or None. It judges the disk figure only:
+    the conversion's host RAM and the checkpoint download are judged before stage 2 by `machine_check`, so this adds nothing for a download
+    that already does not fit. A reading that is None, a damaged record and a record that was skipped are no claim."""
+    if not usable(record):
+        return None
+    fb = record["estimated"].get("first_boot")
+    whole = lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0      # noqa: E731
+    if not isinstance(fb, dict) or not whole(fb.get("disk_bytes")) or not whole(free_disk_bytes) or fb["disk_bytes"] <= free_disk_bytes:
+        return None
+    download = fb.get("checkpoint_bytes_to_download")
+    if whole(download) and download > free_disk_bytes:
+        return None
+    return _cache_sentence(fb, free_disk_bytes) + " (an estimate of the first boot against the machine's reading; the converted size was not measured)"
+
+
 def machine_check(record, *, free_disk_bytes, mem_available_bytes, cache_declared: bool = False) -> tuple[str | None, str | None]:
     """(a blocking sentence, a notice) about the record's first boot against the machine's readings; each is None when there is nothing to say.
     A reading that is None, a damaged record and a record that was skipped are no claim. The record's `first_boot` figures are estimates (the
@@ -662,9 +686,7 @@ def machine_check(record, *, free_disk_bytes, mem_available_bytes, cache_declare
         if whole(download) and download > free_disk_bytes:
             parts.append(f"the checkpoint download needs about {_gib(download)} of free disk and the cache disk has {_gib(free_disk_bytes)} free")
         elif cache_declared:
-            extra = " and the download of the checkpoint" if whole(download) and download > 0 else ""
-            parts.append(f"the first boot needs about {_gib(fb['disk_bytes'])} of free disk for the converted weights{extra}, "
-                         f"and the cache disk has {_gib(free_disk_bytes)} free")
+            parts.append(_cache_sentence(fb, free_disk_bytes))
         else:
             notice = (f"the first boot would need about {_gib(fb['disk_bytes'])} of free disk if the port writes a converted-weight cache, and the "
                       f"cache disk has {_gib(free_disk_bytes)} free. Nothing declares that this port writes a cache (a loader that converts "

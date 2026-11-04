@@ -127,7 +127,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, served_chat, stage0_scan
+from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
 from orchard import full_port_result, runaway, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
@@ -2040,6 +2040,7 @@ class Supervisor:
                     # The coder wrote the port; the check is the supervisor's. Its template, config and command are put back as shipped.
                     if problems := self._pin_full_port(spec, stage_dir, command=True):
                         return "fail", problems, None
+                    self._check_port_cache(spec, stage_dir)
                 if spec.draft == "scoring_check":
                     if problems := self._pin_scoring(spec, stage_dir, command=True):
                         return "fail", problems, None
@@ -2947,6 +2948,29 @@ class Supervisor:
             if why:
                 self._block(spec.number, why, disk_bytes_needed=fb["disk_bytes"], free_disk_bytes=free, host_ram_bytes_needed=fb["host_ram_bytes"],
                             mem_available_bytes=mem, label=rec["label"])
+
+    def _check_port_cache(self, spec, stage_dir: Path) -> None:
+        """After the coder has written the port and before its hardware test (issue 451): read what the port declares about a converted-weight
+        cache (orchard/port_cache.py) and write it to the ledger with the hash of the bytes read, so a later edit cannot change what the check
+        used. A port that declares a cache is held to the disk check for it: it blocks with both figures (block code `disk-full`) when the cache
+        disk has less free than the first boot needs. A port that declares none, or nothing at all, is not blocked on the cache; a missing or
+        unreadable declaration is a notice in the ledger. A lab run converts on the lab, so this box's disk is not read for it."""
+        decl = port_cache.read(stage_dir / "port")
+        self.ledger.append("decision", spec.number, decision="port cache declaration", state=decl["state"], why=decl["reason"],
+                           cache_dir=decl["cache_dir"], sha256=decl["sha256"], path=f"stages/{spec.number}/port/{port_cache.FILE_NAME}")
+        if decl["state"] in ("absent", "unreadable"):
+            self._note("notice", what="the port declared no converted-weight cache",
+                       detail=(decl["reason"] or f"the port has no {port_cache.FILE_NAME}") + ". The disk is not checked for a cache this port may write "
+                       "(a loader that converts straight onto the chips writes none); the estimate was not measured")
+        if decl["state"] != "writes" or self.lab is not None:
+            return
+        rec = residency.read_record(self.run_dir)
+        free, _ = residency.machine_facts(self.paths.cache_root)
+        why = residency.cache_shortfall(rec, free_disk_bytes=free)
+        if why:
+            fb = rec["estimated"]["first_boot"]
+            self._block(spec.number, why, disk_bytes_needed=fb["disk_bytes"], free_disk_bytes=free, cache_dir=decl["cache_dir"],
+                        declaration_sha256=decl["sha256"], label=rec["label"])
 
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
