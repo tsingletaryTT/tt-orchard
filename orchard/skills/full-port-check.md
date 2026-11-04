@@ -102,6 +102,12 @@ The prepare phase writes the port and `hw_test.json`, then `handoff.json`. The f
 
 ## Prepare phase
 
+0. If `stages/2/reference_excerpts.md` exists, read it first, before any other file. It holds the source of the reference classes your
+   model uses (constructor signature, `forward` method and the small helper functions `forward` calls), taken from the installed
+   `transformers` package, and its header lists what was cut. Write a first `stages/2/port/port_model.py` from it within your first
+   turns, even if it is incomplete, and only then read other files. Do not page through the reference modeling module with `sed` or
+   `read_file`: the excerpts file already holds the classes you need, and a step that reads for 20 turns without writing a file gets a
+   nudge and then a pause.
 1. Read `stages/0/delta.json` (`path_reasons`, `differences`, `hazards`, `alignment`) and the stage 1 evidence. They say what differs
    from the nearest model and what the reference produced. Read the nearest model's TT code only as an example of how a layer is written
    in ttnn. Do not edit files outside `stages/2/`.

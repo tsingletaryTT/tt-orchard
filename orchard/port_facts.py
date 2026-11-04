@@ -213,11 +213,11 @@ def reference_root(run, python) -> Path | None:
     return path if path is not None and path.is_absolute() else None
 
 
-def reference_source(root, model_type) -> str | None:
-    """The text of `models/<model_type>/configuration_<model_type>.py` under the transformers directory `root`, or None. A model type that
+def reference_source(root, model_type, kind: str = "configuration") -> str | None:
+    """The text of `models/<model_type>/<kind>_<model_type>.py` (kind `configuration` or `modeling`) under the transformers directory `root`, or None. A model type that
     ends in _text, _vision or _audio is also tried without that suffix. The model type must be lowercase letters, digits and underscores,
     so it cannot name a path outside `root`."""
-    if root is None or not isinstance(model_type, str) or not _MODEL_TYPE.fullmatch(model_type):
+    if root is None or not isinstance(model_type, str) or not _MODEL_TYPE.fullmatch(model_type) or kind not in ("configuration", "modeling"):
         return None
     names = [model_type]
     head, _, tail = model_type.rpartition("_")
@@ -225,7 +225,7 @@ def reference_source(root, model_type) -> str | None:
         names.append(head)
     for name in names:
         try:
-            data = safeio.read_bytes(Path(root) / "models" / name / f"configuration_{name}.py", max_bytes=SOURCE_MAX)
+            data = safeio.read_bytes(Path(root) / "models" / name / f"{kind}_{name}.py", max_bytes=SOURCE_MAX)
         except safeio.SafeReadError:
             continue
         return data.decode("utf-8", "replace")
@@ -342,9 +342,40 @@ def _weights(snapshot: Path, headers) -> dict:
             "bytes": headers.checkpoint_bytes, "note": note}
 
 
-def build(snapshot, *, reference_source=None, reference_lookup=None) -> dict:
+def read_config(snapshot) -> dict:
+    """The checkpoint's config.json as a dict (bounded, no links followed); PortFactsError when it is not usable."""
+    return _config(Path(snapshot))
+
+
+EXCERPT_FILE = "reference_excerpts.md"
+EXCERPT_CLASSES_LISTED = 12
+EXCERPT_LEFT_OUT_LISTED = 6
+EXCERPT_TEXT_CHARS = 100
+
+
+def _excerpts_field(summary) -> dict | None:
+    """The facts file's pointer to the excerpts file, rebuilt from the summary `port_excerpts.Excerpts.summary()` returns so that nothing in it
+    is longer than the caps here: the file name is fixed, the class names are plain identifiers, the left-out sentences are cut."""
+    if not isinstance(summary, dict):
+        return None
+    size, total = summary.get("bytes"), summary.get("classes_total")
+    classes = [c for c in summary.get("classes", []) if isinstance(c, str) and _KEY.fullmatch(c)][:EXCERPT_CLASSES_LISTED]
+    left = [x[:EXCERPT_TEXT_CHARS] for x in summary.get("left_out", []) if isinstance(x, str)][:EXCERPT_LEFT_OUT_LISTED]
+    field = {"file": EXCERPT_FILE, "bytes": size if isinstance(size, int) and not isinstance(size, bool) else None,
+             "classes": classes, "classes_total": total if isinstance(total, int) and not isinstance(total, bool) else len(classes),
+             "left_out": left,
+             "note": (f"{EXCERPT_FILE} holds the constructor signature, forward method and small helpers of these reference classes. "
+                      "Read it first and write a first port_model.py from it before you read any other file.")}
+    more = summary.get("left_out_total")
+    if isinstance(more, int) and not isinstance(more, bool):
+        field["left_out_total"] = more
+    return field
+
+
+def build(snapshot, *, reference_source=None, reference_lookup=None, excerpts=None) -> dict:
     """The facts of a checkpoint directory as a JSON-ready dict. `reference_source` is the text of the reference's configuration module;
-    `reference_lookup(model_type)` finds it when it is not given. Raises PortFactsError when the config or a header cannot be read."""
+    `reference_lookup(model_type)` finds it when it is not given. `excerpts` is the summary of the excerpts file (port_excerpts), which the
+    facts then point at. Raises PortFactsError when the config or a header cannot be read."""
     snap = Path(snapshot)
     config = _config(snap)
     try:
@@ -379,6 +410,9 @@ def build(snapshot, *, reference_source=None, reference_lookup=None) -> dict:
     if nested is not None:
         facts.update({"text_config": text, "text_config_left_out": sorted(text_left), "text_config_left_out_more": text_more,
                       "text_config_keys_not_listed": text_unlisted})
+    pointer = _excerpts_field(excerpts)
+    if pointer is not None:
+        facts["reference_excerpts"] = pointer
     facts.update({"layer_schedule": schedule, "layer_schedule_note": schedule_note, "index_fields": index_fields,
                   "index_fields_left_out": index_more, "layer_flag_fields": sorted(flag_fields),
                   "conventions": notes, "conventions_left_out": len(unlisted), "weights": _weights(snap, headers),
@@ -449,14 +483,19 @@ def copy_skeleton(stage_dir) -> bool:
     return True
 
 
-def prepare_note(*, facts: bool, skeleton: bool) -> str:
+def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
     """What the supervisor adds to the coder's prepare task for a full port. The generic prepare task names only hw_test.json and
     handoff.json; the port itself is described only in the skill, and the coder explored and wrote nothing."""
     parts = [f"This stage's check is the supervisor's: when you finish, it puts its own `stages/2/port_check.py` back and rewrites "
              f"`hw_test.json` to its fixed command (`{full_port.COMMAND}`). Your work in this step is the port module, "
              f"`stages/2/port/port_model.py`."]
+    if excerpts:
+        parts.append(f"Read `stages/2/{EXCERPT_FILE}` first, before you read any other file. It holds the source of the reference classes "
+                     "your model uses (constructor signature, `forward` and small helpers), taken from the installed transformers "
+                     "package. Write a first `port_model.py` from it within your first turns, before you open any other file or "
+                     "page through the reference module yourself.")
     if facts:
-        parts.append(f"Read `stages/2/{FACTS_NAME}` first. It holds the config fields, the layer schedule, every tensor's dtype and shape "
+        parts.append(f"Read `stages/2/{FACTS_NAME}` {'next' if excerpts else 'first'}. It holds the config fields, the layer schedule, every tensor's dtype and shape "
                      "from the checkpoint's own headers (the checkpoint may be one file with no index, or sharded), and the index "
                      "conventions the reference states for the config's id lists. You do not need to read the config, the headers or "
                      "the weights again.")
