@@ -29,6 +29,9 @@ ledger entry, and a run from before classes (a path and no class) gets the class
 from __future__ import annotations
 
 CLASSES = ("weights-only", "weights+sidecar", "restricted-head", "vocab-trim", "stock-runtime", "full-port", "unknown")
+# The fixed start of the pause reason for stage 0's class `unknown` (issue 437). The reason goes on to quote reasons from delta.json, which hold
+# file names and text from the model's repository, so every reader of a pause reason has to test this prefix before any substring of the text.
+CLASS_UNKNOWN = "stage 0 could not decide this model's class (class unknown), so the run takes the full-port path and stops"
 SIDECAR_CLASSES = ("weights+sidecar", "restricted-head")      # the classes whose delta.json may list sidecars
 IGNORED_WEIGHT_SUFFIXES = (".gguf",)     # weights files stage 0 lists in delta.json `ignored_files` and does not count as sidecars (issue 437);
 #                                        orchard/skills/delta-triage-templates/delta_triage.py keeps the same tuple as IGNORED_SUFFIXES

@@ -368,6 +368,31 @@ def test_an_unknown_class_pause_is_an_acknowledged_full_port_pause_on_a_resume(t
     assert not supervisor.is_full_port_pause("operator") and not supervisor.is_full_port_pause(supervisor.FULL_PORT_STAGES_UNBUILT)
 
 
+@pytest.mark.parametrize("quoted", [
+    "tensor model.layers.0.full-port route.pt has shape [2560]",           # the file name holds the full-port route words
+    "a file named restricted head parity.bin is not readable",              # restricted head
+    "the file scoring route.safetensors differs",                           # scoring route
+    "sidecar audio path.gguf cannot be read",                               # audio path
+    "weights failed after escalation.bin has the wrong size",               # stage failed
+    "the repository says it is not escalated: text config differs",         # stage failed, the other phrase
+    "the model needs a full port, said the card",                           # full port
+    "cap since lasted",                                                     # budget words
+])
+def test_quoted_repository_text_cannot_change_what_kind_of_pause_the_unknown_class_pause_is(quoted):
+    """Review of PR 438 (round 1): the pause reason quotes reasons from delta.json, which hold file names and text from the model's
+    repository. `classify_pause` reads substrings, so a quoted phrase used to win over the fixed prefix and give the pause another
+    code and another recovery text. The prefix is read first."""
+    pause = {"decision": "pause", "reason": supervisor.class_unknown_reason([quoted])}
+    assert status.classify_pause(pause) == ("full_port", None)
+    assert blocked.block_code(pause) == "needs-new-model-code"
+    assert supervisor.is_full_port_pause(pause["reason"])
+
+
+def test_the_unknown_class_prefix_is_one_constant_that_status_and_the_supervisor_share():
+    from orchard import classes
+    assert supervisor.CLASS_UNKNOWN is classes.CLASS_UNKNOWN or supervisor.CLASS_UNKNOWN == classes.CLASS_UNKNOWN
+
+
 def test_the_reasons_in_the_unknown_pause_are_few_and_short():
     text = supervisor.class_unknown_reason([f"reason {i} " + "x" * 500 for i in range(10)])
     assert "reason 0" in text and "reason 2" in text and "reason 3" not in text and len(text) < 1000

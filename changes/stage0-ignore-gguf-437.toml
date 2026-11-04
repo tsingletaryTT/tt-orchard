@@ -1,4 +1,4 @@
-target = "0.9.102"
+target = "0.9.106"
 pr = 438
 summary = "Stage 0 lists GGUF files as ignored_files instead of counting them as unreadable sidecars, and the unknown-class pause says why."
 kind = "fix"
