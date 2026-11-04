@@ -1556,9 +1556,8 @@ def boot_check_reasons(stage_dir, run_dir, v) -> tuple[list[str], tuple[str, ...
     doc, reasons, bound = raw_evidence.read(run_dir, stage_dir, 7, BOOT_RAW)
     if reasons:
         return reasons, ()
-    # `v` is the object the gate read through `_load`. A bound run compares the hashed file's own content, so a gate that was handed another
-    # object cannot hide a difference.
-    report = doc if bound else v
+    # `v` is the object the gate read through `_load`. On a bound run it must be the hashed file's own content.
+    report = v
     if bound and doc != v:
         # The gate read verify.json once for its own checks and this reads it again; a file that changed between the two reads is refused.
         return ["verify.json changed while the gate was reading it: the copy the gate checked is not the file the supervisor hashed"], ()
