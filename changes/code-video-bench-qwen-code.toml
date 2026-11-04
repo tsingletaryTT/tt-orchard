@@ -1,4 +1,4 @@
-target = "0.9.102"
+target = "0.9.110"
 summary = "Benchmark harness and first run log for the SenseNova code-video skill under Qwen Code in a locked-down container."
 pr = 450
 kind = "docs"
