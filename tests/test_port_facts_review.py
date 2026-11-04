@@ -109,6 +109,25 @@ def test_a_field_documented_only_in_a_class_for_another_section_says_which_class
     assert "ToyExpVisionConfig" in conv and "text_config" in conv and "Zero-indexed" in conv
 
 
+WRAPPER_TOO = TWO_CLASSES + doc({"layer_ids": "Zero-based ids of the wrapper."}, "ToyExpConfig")
+
+
+@pytest.mark.parametrize("model_type,kind_class,word", [("toy_exp_text", "ToyExpTextConfig", "One-indexed"),
+                                                        ("toy_exp_vision", "ToyExpVisionConfig", "Zero-indexed")])
+def test_a_flat_config_whose_own_model_type_is_a_section_takes_that_sections_class(tmp_path, model_type, kind_class, word):
+    """Review of PR 432, round 4: a checkpoint whose top-level config is itself the text config (`qwen4_exp_text`) has no `text_config`.
+    Its `layer_ids` belong to the text class; the wrapper's note must not win just because the field is at the top level."""
+    cfg = {"model_type": model_type, "num_hidden_layers": 2, "layer_ids": [1]}
+    field = port_facts.build(snapshot_with(tmp_path, TENSORS, cfg), reference_source=WRAPPER_TOO)["index_fields"][0]
+    assert field["in"] == "config" and field["convention"].startswith(kind_class) and word in field["convention"]
+
+
+def test_a_wrapper_config_with_no_section_suffix_still_takes_the_wrapper_class(tmp_path):
+    cfg = {"model_type": "toy_exp", "num_hidden_layers": 2, "layer_ids": [0]}
+    conv = port_facts.build(snapshot_with(tmp_path, TENSORS, cfg), reference_source=WRAPPER_TOO)["index_fields"][0]["convention"]
+    assert conv.startswith("ToyExpConfig")
+
+
 def test_the_same_field_in_two_classes_is_two_notes_each_with_its_class():
     notes = port_facts.convention_notes(TWO_CLASSES)
     assert sorted((n["class"], n["field"]) for n in notes) == [("ToyExpTextConfig", "layer_ids"), ("ToyExpVisionConfig", "layer_ids")]

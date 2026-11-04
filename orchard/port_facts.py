@@ -164,7 +164,20 @@ def _class_kind(name: str) -> str:
     return next((k for k in ("text", "vision", "audio") if k in lower), "top")
 
 
-def _pick_convention(notes: list, field: str, where: str) -> str:
+def _section_kind(where: str, model_type) -> str:
+    """The class kind that documents a config section. A nested `text_config` is text. A top-level config whose own model type ends in
+    `_text`, `_vision` or `_audio` is that section itself (a flat checkpoint config such as `qwen4_exp_text`), so a wrapper class that
+    documents the same field does not win. Any other top-level config is the wrapper (`top`)."""
+    if where == "text_config":
+        return "text"
+    if isinstance(model_type, str):
+        tail = model_type.rpartition("_")[2]
+        if tail in SUB_CONFIG_SUFFIXES and model_type.rpartition("_")[0]:
+            return tail
+    return "top"
+
+
+def _pick_convention(notes: list, field: str, where: str, model_type=None) -> str:
     """The convention text for `field` of the config section `where` ("config" for the top level, "text_config"): the note of the class that
     matches the section, with its class name first. A class of another section that states a different numbering is named too, so
     the porter sees the disagreement. When no class of the section documents the field, the classes that do are named and the note says
@@ -172,7 +185,7 @@ def _pick_convention(notes: list, field: str, where: str) -> str:
     candidates = [n for n in notes if n["field"] == field]
     if not candidates:
         return UNKNOWN_CONVENTION
-    wanted = "text" if where == "text_config" else "top"
+    wanted = _section_kind(where, model_type)
     mine = [n for n in candidates if _class_kind(n["class"]) == wanted]
     if not mine:
         listed = "; ".join(f"{n['class']}: {n['note']}" for n in candidates[:2])
@@ -348,13 +361,14 @@ def build(snapshot, *, reference_source=None, reference_lookup=None) -> dict:
     unlisted: list = []
     notes = convention_notes(reference_source, unlisted)
     index_fields, flag_fields, index_more = [], [], 0
+    section_types = {"config": config.get("model_type"), "text_config": (nested or {}).get("model_type")}
     for where, section in (("config", top), ("text_config", text)):
         for key, v in section.items():
             if INDEX_FIELD.search(key) and isinstance(v, list) and v and all(isinstance(x, int) and not isinstance(x, bool) for x in v):
                 if _is_flag_list(v):
                     flag_fields.append(key)
                 elif len(index_fields) < MAX_INDEX_FIELDS:
-                    index_fields.append({"field": key, "in": where, "values": v, "convention": _pick_convention(notes, key, where)})
+                    index_fields.append({"field": key, "in": where, "values": v, "convention": _pick_convention(notes, key, where, section_types[where])})
                 else:
                     index_more += 1
     lines, long_names = _groups(headers.tensors)
