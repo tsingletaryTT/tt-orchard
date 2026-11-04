@@ -65,9 +65,10 @@ def test_tensors_with_no_numbered_block_are_units_on_their_own_and_not_one_group
 
 
 def test_a_numbered_component_that_does_not_repeat_is_not_a_block(tmp_path):
-    t = [("alpha.7.mlp.weight", "BF16", [4096, 4096]), ("beta.mlp.weight", "BF16", [4096, 4096])]
+    t = [("alpha.7.mlp.a.weight", "BF16", [4096, 4096]), ("alpha.7.mlp.b.weight", "BF16", [4096, 4096])]      # two tensors under one number that appears once
     fb = estimate_of(tmp_path, t)["estimated"]["first_boot"]
-    assert fb["conversion_in_flight_bytes"] == 64 * MIB
+    assert fb["conversion_in_flight_bytes"] == 64 * MIB                    # one tensor at a time, not the 128 MiB of a block
+    assert fb["conversion_grouping"]["blocks"] == 0 and fb["conversion_grouping"]["tensors_alone"] == 2
 
 
 def test_vision_blocks_and_text_blocks_are_each_grouped_and_the_largest_group_counts(tmp_path):
@@ -131,6 +132,9 @@ def test_the_prefixes_remembered_for_grouping_are_bounded(monkeypatch):
 
 def test_a_name_is_read_only_to_a_fixed_depth():
     deep = ["x." * rs._MAX_PATH_PARTS + f"{i}.w" for i in (3, 4)]                        # the number sits past the depth that is read
+    assert rs._repeated_parents(deep) == frozenset()                                     # the search for repeating prefixes stops at the depth
+    parent = ".".join(["x"] * rs._MAX_PATH_PARTS)
+    assert rs._block_key(deep[0], frozenset({parent})) is None                           # and so does the block key, whatever it is given
     assert rs._block_key(deep[0], rs._repeated_parents(deep)) is None
     shallow = ["x." * (rs._MAX_PATH_PARTS - 2) + f"{i}.w" for i in (3, 4)]
     assert rs._block_key(shallow[0], rs._repeated_parents(shallow)) is not None
@@ -138,6 +142,8 @@ def test_a_name_is_read_only_to_a_fixed_depth():
 
 def test_a_numbered_part_has_at_most_six_digits():
     long_numbers = ["m.1234567.w", "m.1234568.w"]
+    assert rs._repeated_parents(long_numbers) == frozenset()                             # the search ignores a number of seven digits
+    assert rs._block_key(long_numbers[0], frozenset({"m"})) is None                      # and so does the block key, whatever it is given
     assert rs._block_key(long_numbers[0], rs._repeated_parents(long_numbers)) is None
     short_numbers = ["m.123456.w", "m.123457.w"]
     assert rs._block_key(short_numbers[0], rs._repeated_parents(short_numbers)) == "m.123456"
