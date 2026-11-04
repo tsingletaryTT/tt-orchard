@@ -135,7 +135,7 @@ class PortGuard:
         try:
             fd = safeio.open_beneath(pin.fd, f.parts, file_flags=os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
             st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (f.dev, f.ino) or st.st_size > runaway.MAX_FILE_BYTES:
+            if (st.st_dev, st.st_ino) != (f.dev, f.ino) or st.st_size > runaway.MAX_FILE_BYTES:      # the listing held a regular file: the same inode is one
                 return None
             chunks, total = [], 0
             while total <= runaway.MAX_FILE_BYTES:

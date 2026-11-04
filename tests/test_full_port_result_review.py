@@ -52,3 +52,24 @@ def test_the_commonest_word_is_found_in_one_pass_with_the_same_share():
     words = ["alpha"] * 30 + [f"w{i}" for i in range(70)]
     ok, basis = fpr.readable(" ".join(words) + " " + " ".join(f"v{i}" for i in range(400)))
     assert "commonest word" in basis
+
+
+def test_the_word_count_is_linear_in_the_sample_even_when_the_sample_holds_forty_thousand_different_words():
+    """The sample cap alone leaves a quadratic count of 40,000 words slow (seconds); a one-pass count takes milliseconds."""
+    import itertools
+    import time
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    words = ["".join(w) for w in itertools.islice(itertools.product(letters, repeat=4), 40_000)]
+    text = " ".join(words)
+    assert len(text) <= fpr.SAMPLE_CHARS
+    t = time.monotonic()
+    ok, basis = fpr.readable(text)
+    assert time.monotonic() - t < 3.0, "the commonest-word count is not linear"
+    assert "commonest word" in basis
+
+
+def test_a_long_text_is_judged_on_the_sample_alone_so_the_word_count_it_reports_is_bounded():
+    text = " ".join(f"w{i:07d}" for i in range(400_000))                      # 3.6 million characters
+    ok, basis = fpr.readable(text)
+    words_judged = int(basis.split()[0])
+    assert words_judged <= fpr.SAMPLE_CHARS // 2, f"{words_judged} words were judged: the sample cap is not applied"

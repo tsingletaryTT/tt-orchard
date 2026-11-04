@@ -284,3 +284,59 @@ def test_a_file_swapped_for_a_link_just_before_the_restore_is_replaced_and_the_t
     assert outside.read_text() == "outside\n", "the restore wrote through a link"
     assert not (sd / "port" / "port_model.py").is_symlink()
     assert (sd / "port" / "port_model.py").read_text() == "def f():\n    return 1\n"
+
+
+def test_a_pycache_directory_is_not_entered(run):
+    run_dir, _ = run
+    tools, sd = tools_for(run_dir)
+    tools.write_file("cache.py", "import os\nos.makedirs('stages/0/port/__pycache__', exist_ok=True)\n"
+                                 "open('stages/0/port/__pycache__/m.pyc', 'wb').write(b'x' * 600000)\n")
+    out = tools.shell("python3 stages/0/cache.py")
+    assert (sd / "port" / "__pycache__" / "m.pyc").stat().st_size == 600_000 and "refused" not in out
+
+
+def test_an_oversize_port_file_that_was_there_before_the_command_is_left_alone(run):
+    """A resumed stage can hold a large file from an earlier step. The command did not make it, so the guard does not touch it."""
+    run_dir, _ = run
+    tools, sd = tools_for(run_dir)
+    (sd / "port" / "old_big.py").write_text("x = 1\n" * 200_000)
+    out = tools.shell("echo hi")
+    assert "refused" not in out and (sd / "port" / "old_big.py").stat().st_size == 1_200_000
+
+
+def test_the_restart_listing_stops_at_the_entry_bound_even_when_no_entry_is_a_file(run, monkeypatch):
+    from orchard.agent import PORT_GUARD_ENTRIES
+    run_dir, led = run
+    tools, sd = tools_for(run_dir)
+    consumed = []
+
+    class Entry:
+        def __init__(self, i):
+            self.name = f"x{i}"
+            consumed.append(i)
+
+        def is_symlink(self):
+            return False
+
+        def is_dir(self, follow_symlinks=True):
+            return False
+
+        def is_file(self, follow_symlinks=True):
+            return False
+
+    class Listing:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            return (Entry(i) for i in range(10_000))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(os, "scandir", lambda d: Listing())
+    assert tools.restart_files(40) == []
+    assert len(consumed) <= 2 * (PORT_GUARD_ENTRIES + 1), f"the listing read {len(consumed)} entries"
