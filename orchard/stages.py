@@ -1149,8 +1149,11 @@ def _token_check_reasons_in(path, results, run_dir, where: str = "") -> list[str
     try:
         report = _safe_json(path)
     except safeio.SafeReadError as exc:
-        if _is_missing(exc) and _ledger_decision_sha(run_dir, REFERENCE_IDS_LEDGER_DECISION) is not None:
-            return [f"{where}swap-check.json is missing, though the supervisor recorded stage 1's reference ids in the ledger, so the "
+        if _ledger_decision_sha(run_dir, REFERENCE_IDS_LEDGER_DECISION) is not None:
+            # The suite check read this file separately, so a file that is unreadable now was changed after that read (review of PR 444,
+            # round 4). On a governed run the recompute cannot be skipped for any read failure, not only for a missing file.
+            what = "is missing" if _is_missing(exc) else "could not be read"
+            return [f"{where}swap-check.json {what}, though the supervisor recorded stage 1's reference ids in the ledger, so the "
                     "32-token check cannot be recomputed"]
         return []
     return _token_check_reasons(report, results, run_dir, where)

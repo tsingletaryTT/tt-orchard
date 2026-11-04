@@ -407,6 +407,24 @@ def test_a_bound_run_refuses_a_swap_check_that_is_not_an_object(tmp_path, gate_n
     assert mentions(got.reasons, "swap-check.json is not an object", "recomputed"), got.reasons
 
 
+@pytest.mark.parametrize("raw", ["{not json", '{"a": NaN}', "x" * 10])
+def test_a_bound_run_refuses_when_the_recompute_cannot_read_the_swap_check(tmp_path, raw):
+    """Review of PR 444, round 4: the suite check and the recompute read swap-check.json separately. A file that read fine for the suite check and
+    is unreadable for the recompute (an edit between the two reads) must not end the recompute with no reasons on a run the ledger governs."""
+    g, sd, run = stage2(tmp_path)
+    path = sd / "evidence" / "swap-check.json"
+    path.write_text(raw)
+    got = stages._token_check_reasons_in(path, [], run)
+    assert mentions(got, "swap-check.json", "could not be read", "ledger"), got
+
+
+def test_an_unbound_run_still_judges_an_unreadable_swap_check_as_before(tmp_path):
+    g, sd, run = stage2(tmp_path, record=False)
+    path = sd / "evidence" / "swap-check.json"
+    path.write_text("{not json")
+    assert stages._token_check_reasons_in(path, [], run) == []
+
+
 def test_an_unbound_run_keeps_the_old_judgement_for_a_missing_swap_check(tmp_path):
     """A run from before the check has no ledger record: a missing swap-check.json is judged as before (by the other checks), not by this one."""
     g, sd, run = stage2(tmp_path, record=False)
