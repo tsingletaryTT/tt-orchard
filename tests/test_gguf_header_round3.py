@@ -64,10 +64,11 @@ def test_brief_survives_nesting_far_deeper_than_json_can_write():
     strict(m._brief(deep))                                    # a RecursionError before the nesting bound
 
 
-def test_the_evidence_file_is_made_strict_at_the_write_site_too(tmp_path):
-    """A float that reaches the evidence by a path that does not go through `_brief` is still removed before the file is written."""
+def test_finite_replaces_non_finite_floats_in_lists_and_dicts_and_keeps_everything_else():
     m = module()
-    assert m._finite({"a": [float("inf"), {"b": float("nan")}], "c": 1.0}) == {"a": [None, {"b": None}], "c": 1.0}
+    assert m._finite({"a": [float("inf"), {"b": float("nan")}], "c": 1.0, "d": "x", "e": True, "f": None}) == \
+        {"a": [None, {"b": None}], "c": 1.0, "d": "x", "e": True, "f": None}
+    assert m._finite((1, float("inf"))) == [1, None]
 
 
 # ---- finding 2: rotary arithmetic -------------------------------------------------------------------------------------------------

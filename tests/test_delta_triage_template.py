@@ -1939,6 +1939,26 @@ def test_a_rerun_without_gguf_files_removes_the_header_evidence_of_the_earlier_r
     assert delta(stage)["ignored_files"] == []
 
 
+def test_a_config_float_that_overflows_reaches_the_evidence_as_strict_json(text_case):
+    """Round 3 of PR 441, end to end: `1e400` in config.json is read as infinity and `1e308` times a head dimension overflows. Neither may stop
+    stage 0 or put `Infinity` into evidence/gguf-header.json, which the operator bundle reads with a strict reader."""
+    stage = text_case()
+    model = add_real_gguf(stage)
+    cfg = json.loads((model / "config.json").read_text())
+    cfg.update({"rms_norm_eps": "@@INF@@", "head_dim": 128, "partial_rotary_factor": "@@HUGE@@"})
+    (model / "config.json").write_text(json.dumps(cfg).replace('"@@INF@@"', "1e400").replace('"@@HUGE@@"', "1e308"))
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    raw = (stage / "evidence" / "gguf-header.json").read_text()
+    json.loads(raw, parse_constant=lambda c: pytest.fail(f"a non-strict JSON constant, {c}, was written"))
+    assert "Infinity" not in raw and "NaN" not in raw
+    [f] = json.loads(raw)["files"]
+    rows = {x["item"]: x for x in f["agreement"]}
+    assert rows["rms norm epsilon"]["verdict"] == "not comparable" and rows["rms norm epsilon"]["config"] is None
+    assert rows["rope dimension"]["verdict"] == "not comparable"
+    assert gate_delta(stage, stage.parent.parent).ok
+
+
 def test_a_rerun_with_a_different_gguf_replaces_the_header_evidence(text_case):
     stage = text_case()
     model = add_real_gguf(stage)

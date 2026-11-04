@@ -1397,12 +1397,10 @@ def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config
         factor, note = 1.0, "partial_rotary_factor is absent from the config and is taken as 1.0"
     rot = None
     if _whole(head_dim) is not None and _number(factor) is not None:
-        try:
-            product = head_dim * factor
-        except OverflowError:                      # cannot happen for a head dimension of at most 64 bits; kept so an arithmetic fault never stops stage 0
-            product = None
+        product = head_dim * factor                # `_whole` keeps head_dim to 64 bits, so the product is a float and cannot raise
         # A product of 2**53 or more is no longer exact in a float, and an infinite one cannot be rounded (review of PR 441, round 2): not comparable.
-        if product is not None and math.isfinite(product) and abs(product) < 2 ** 53:
+        # The comparison is False for infinity and for NaN as well.
+        if abs(product) < 2 ** 53:
             rot = int(round(product)) if abs(product - round(product)) < 1e-6 else None
     add("rope dimension", g("rope.dimension_count"), rot, "int", note if rot is not None else None)
     sections, conf_sections = g("rope.dimension_sections"), _rope_value(config, "mrope_section")
@@ -4054,7 +4052,7 @@ def main() -> int:
         except OSError as exc:
             say(f"could not remove the earlier evidence/gguf-header.json ({type(exc).__name__}); this run has no GGUF evidence")
     else:
-        write_json("gguf-header.json", _finite(gh))
+        write_json("gguf-header.json", gh)
         ok = [f for f in gh["files"] if f["status"] == "ok"]
         say(f"wrote evidence/gguf-header.json ({len(ok)} of {len(gh['files'])} GGUF headers read; "
             f"{sum(f['agreement_summary']['differ'] for f in ok)} rows differ from config.json)")
