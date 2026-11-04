@@ -2747,7 +2747,7 @@ class Supervisor:
 
     def _end_stage_body(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
-        if n == 2 and spec.draft == "full_port" and self.telegraph is not None and status not in ("abort", "operator-pause"):
+        if n == 2 and spec.draft == "full_port" and getattr(self, "telegraph", None) is not None and status not in ("abort", "operator-pause"):
             self._report_phone_a_friend(n, helped=(status == "pass"))
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
@@ -2808,7 +2808,7 @@ class Supervisor:
         if spec.draft == "full_port":
             seed = getattr(self, "_port_seed", None) or {}
             note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")))
-            if spec.number == 2 and self.telegraph is not None:
+            if spec.number == 2 and getattr(self, "telegraph", None) is not None:
                 friend = self._phone_a_friend(spec, stage_dir)
                 if friend:
                     note = note + "\n\n" + friend
@@ -2885,8 +2885,12 @@ class Supervisor:
         except Exception as exc:     # the request could not be built (an unreadable skill or file): the helper is not asked, the stage goes on
             self._friend_refused(n, f"the request could not be built ({exc.__class__.__name__})")
             return None
+        from orchard import telegraph as tg
+        room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
+        # The helper cuts the middle out of a request over its `max_prompt_chars`; the entry says so, so a cap set for short advice is seen.
         self.ledger.append("decision", n, decision=phone_a_friend.ASKED, k=k, why=why, problem=phone_a_friend.PROBLEM, inputs=sent,
-                           prompt_chars=len(task) + len(failure), failed_attempts=state["failed"])
+                           prompt_chars=len(task) + len(failure), max_prompt_chars=self.telegraph.cfg.max_prompt_chars,
+                           over_cap=len(task) + len(failure) > room, failed_attempts=state["failed"])
         try:
             answer = self.telegraph.ask(phone_a_friend.PROBLEM, task, failure)
         except Exception as exc:     # `ask` returns its failures; this is for one it did not foresee

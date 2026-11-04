@@ -1,0 +1,3 @@
+target = "0.9.111"
+summary = "A full-port stage 2 whose first attempt failed asks the outside helper once for a draft port, writes the reply as an untrusted file, and records whether it helped."
+kind = "feature"

@@ -100,6 +100,21 @@ def test_the_request_holds_the_coders_brief_the_facts_and_the_failure_and_no_hom
     assert asked["k"] == 1 and asked["problem"] == paf.PROBLEM and asked["inputs"]["facts"]["chars"] > 0 and asked["failed_attempts"] == 1
 
 
+def test_a_prompt_cap_too_small_for_the_request_is_recorded_on_the_ask(rig, monkeypatch, tmp_path):
+    wire_helper(rig, monkeypatch, tmp_path, max_prompt_chars=2000)
+    coder(rig)
+    rig.run()
+    asked = next(d for d in telegraph_decisions(rig) if d["decision"] == paf.ASKED)
+    assert asked["over_cap"] is True and asked["max_prompt_chars"] == 2000
+
+
+def test_a_roomy_prompt_cap_is_not_flagged(rig, monkeypatch, tmp_path):
+    wire_helper(rig, monkeypatch, tmp_path, max_prompt_chars=400_000)
+    coder(rig)
+    rig.run()
+    assert next(d for d in telegraph_decisions(rig) if d["decision"] == paf.ASKED)["over_cap"] is False
+
+
 def test_the_ask_is_in_the_ledger_before_the_answer(rig, monkeypatch, tmp_path):
     wire_helper(rig, monkeypatch, tmp_path)
     coder(rig)
