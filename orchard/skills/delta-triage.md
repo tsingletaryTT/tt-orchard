@@ -80,7 +80,7 @@ You do not write a comparison script.
    - a tokenizer difference that matters for the model's language, for example Thai or
      Devanagari strings that encode differently (`tokenizer-encode.json` lists them by category);
    - a license change: name both licenses and what the new one restricts.
-   Keep each finding's measured numbers. Do not change `path`, `class`, `sidecars`, `code_files`, `alignment`, `values`, `head`, `model`
+   Keep each finding's measured numbers. Do not change `path`, `class`, `sidecars`, `ignored_files`, `code_files`, `alignment`, `values`, `head`, `model`
    or `nearest_model`. If the
    evidence shows that the path is wrong, add a difference with area `other` that says why and
    cites the evidence file. The operator reads it.
@@ -112,7 +112,7 @@ The script writes this shape. The gate checks it.
 
     {"model": "<org/name>@<revision>", "nearest_model": "<org/name>@<revision>",
      "path": "weights-only", "class": "weights-only", "path_reasons": [],
-     "sidecars": [], "code_files": [],
+     "sidecars": [], "ignored_files": [], "code_files": [],
      "differences": [{"area": "tokenizer", "finding": "...",
                       "evidence": ["stages/0/evidence/tokenizer-compare.json"]}],
      "hazards": [{"area": "tensor_cache", "finding": "...",
@@ -132,7 +132,10 @@ tensor names, and `code_files` lists each `.py` file in the repo with its sha256
 and hashes files. It never imports or runs a code file, and neither do you. When a model has a readable
 sidecar whose tensor names do not overlap the backbone, and the backbone is weights-only, the class is
 `weights+sidecar` and the path stays `weights-only`. An unreadable or overlapping sidecar makes the class
-`unknown` and the path `full-port`.
+`unknown` and the path `full-port`. A `.gguf` file is not a sidecar. It is llama.cpp's format, a quantized copy of the
+weights or a vision projector, and the TT runtime does not read it. The script lists each one in `ignored_files` (file,
+size, reason), does not hash it and makes no problem of it. Do not move a safetensors sidecar into `ignored_files`, and do
+not edit `class` or `path` to get around a GGUF file: the script does not count one.
 
 Names that the `model.language_model.` rule leaves over are paired by what they share: a model that calls its
 text tensors `language_model.layers.5...` against a nearest model's `model.language_model.layers.5...` still has

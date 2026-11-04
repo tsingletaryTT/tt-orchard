@@ -70,7 +70,9 @@ readable safetensors file whose tensor names do not overlap the backbone's, the 
 `weights+sidecar` and the path stays `weights-only`. An unreadable sidecar, or one that overlaps,
 makes the class `unknown` and the path `full-port`, with the reason in `path_reasons`. The class is
 also `unknown` when the backbone could not be compared at all. `sidecars` lists each file with its
-size, sha256, tensor count, dtypes and tensor names, and `code_files` lists each `.py`
+size, sha256, tensor count, dtypes and tensor names. A `.gguf` file (a quantized copy of the weights or a vision
+projector, which the TT runtime does not read) is not a sidecar and makes no problem: `ignored_files` lists
+each with its size and the reason, and the file is not hashed. `code_files` lists each `.py`
 file (down four directory levels) with its sha256. Nothing here runs a code file.
 
 Exit codes: 0 when delta.json was written (whatever the path), 2 when triage_config.json is
@@ -459,6 +461,12 @@ def safetensors_header(path: Path) -> dict:
 INDEX_NAME = "model.safetensors.index.json"
 BACKBONE_SHARD = re.compile(r"model(-\d+-of-\d+)?\.safetensors")
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".npz")
+# Files the TT runtime never reads, so they are neither the backbone nor a sidecar: a GGUF is llama.cpp's format, and a repository ships
+# one as a quantized copy of the same weights or as a vision projector. They are listed in `ignored_files` and never hashed or compared.
+# orchard/classes.py has the same tuple for the stage 0 gate; tests/test_delta_triage_template.py checks that the two agree.
+IGNORED_SUFFIXES = (".gguf",)
+IGNORED_REASON = ("a GGUF file is llama.cpp's format: a quantized copy of the weights or a vision projector. The TT runtime does not read it, "
+                  "so it is not a sidecar and the safetensors files are what stage 0 compares")
 BACKBONE_BIN = re.compile(r"pytorch_model.*\.bin")
 MAX_LISTED_NAMES = 1000
 
@@ -945,14 +953,18 @@ def file_sha256(path: Path) -> str:
 
 def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) -> dict:
     """Weights files in the new model that are not backbone shards and that the nearest model lacks.
-    `problems` says why a sidecar cannot be trusted (unreadable, or its names overlap the backbone)."""
+    `problems` says why a sidecar cannot be trusted (unreadable, or its names overlap the backbone). A GGUF file is listed in
+    `ignored_files` and makes no problem (issue 437)."""
     shards = set(backbone_shards(model_dir))
     base_files = {p.name for p in base_dir.iterdir() if p.is_file()}
     backbone = backbone_names | {normalize(n) for n in backbone_names}
-    sidecars, problems = [], []
+    sidecars, problems, ignored = [], [], []
     for p in sorted(model_dir.iterdir()):
         if (not p.is_file() or not p.name.endswith(WEIGHT_SUFFIXES) or p.name in shards
                 or p.name in base_files or BACKBONE_BIN.fullmatch(p.name)):
+            continue
+        if p.name.endswith(IGNORED_SUFFIXES):          # not read and not hashed: a quantized copy can be several GB
+            ignored.append({"file": p.name, "size": p.stat().st_size, "reason": IGNORED_REASON})
             continue
         entry = {"file": p.name, "size": p.stat().st_size, "sha256": file_sha256(p), "num_tensors": None,
                  "dtypes": [], "tensor_names": []}
@@ -973,8 +985,9 @@ def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) 
             problems.append(f"sidecar {p.name} is not a safetensors file, so its tensors cannot be read "
                             "without loading it")
         sidecars.append(entry)
-    return {"sidecars": sidecars, "problems": problems,
-            "note": "a sidecar is a weights file outside the backbone shards that the nearest model lacks"}
+    return {"sidecars": sidecars, "problems": problems, "ignored_files": ignored,
+            "note": "a sidecar is a weights file outside the backbone shards that the nearest model lacks; ignored_files lists "
+                    "converted copies (GGUF) that are neither"}
 
 
 def code_files(model_dir: Path) -> list[dict]:
@@ -3324,7 +3337,7 @@ def audio_main(cfg: dict) -> int:
     cd = (config["model_differences"], config["top_level_differences"], config["pointer_differences"], config["training_differences"])
     delta = {
         "model": model_id, "nearest_model": nearest_id, "path": path, "class": cls, "template_sha256": THIS_SHA256,
-        "path_reasons": all_reasons, "sidecars": [], "code_files": code,
+        "path_reasons": all_reasons, "sidecars": [], "ignored_files": [], "code_files": code,
         "facts": {"form": "full", "modality": "audio"},
         "values": {"summary": values["summary"], "samples": [{k: x[k] for k in ("model_tensor", "relation", "cosine")}
                                                               for x in values["samples"]]},
@@ -3445,7 +3458,7 @@ def main() -> int:
     sc = compare_sidecars(model_dir, base_dir, backbone_names)
     write_json("sidecar-compare.json", sc)
     code = code_files(model_dir)
-    say(f"wrote evidence/sidecar-compare.json ({len(sc['sidecars'])} sidecars, {len(code)} code files)")
+    say(f"wrote evidence/sidecar-compare.json ({len(sc['sidecars'])} sidecars, {len(sc['ignored_files'])} ignored files, {len(code)} code files)")
     values = sample_value_diffs(model_dir, base_dir, raw_pair_map(model_tensors, base_tensors))
     write_json("value-compare.json", values)
     say(f"wrote evidence/value-compare.json ({len(values['samples'])} tensors sampled: {fmt(values['summary'])})")
@@ -3472,7 +3485,8 @@ def main() -> int:
     ns = t["normalized_name_sets"]
     delta = {
         "model": model_id, "nearest_model": nearest_id, "path": path, "class": cls,
-        "template_sha256": THIS_SHA256, "path_reasons": reasons, "sidecars": sc["sidecars"], "code_files": code,
+        "template_sha256": THIS_SHA256, "path_reasons": reasons, "sidecars": sc["sidecars"], "ignored_files": sc["ignored_files"],
+        "code_files": code,
         "alignment": {"pairs": ns["common"], "aligned_by_prefix": ns["aligned"]["pairs"], "rules": ns["aligned"]["rules"],
                       "raw_rules": ns["aligned"]["raw_rules"], "all_pairs": ns["aligned"]["all_pairs"], "only_in_model": ns["only_in_model"][:50],
                       "only_in_base": ns["only_in_base"][:50]},
