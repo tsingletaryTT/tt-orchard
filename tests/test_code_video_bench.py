@@ -204,6 +204,28 @@ def test_a_work_root_that_cannot_be_a_docker_mount_is_refused_before_anything_st
     assert [c for c in calls(log) if c["cmd"] == "run"] == []
 
 
+@pytest.mark.parametrize("bad", ["a b", "a;b", "$(x)", "a/b", ""])
+def test_a_run_name_that_could_not_be_a_container_name_or_a_path_part_is_refused(tmp_path, stubs, bad):
+    env, log = stubs
+    skill, brief = bench_setup(tmp_path)
+    e = dict(env, WORK_ROOT=str(tmp_path / "work"), SKILL_SRC=str(skill), ENDPOINT="http://127.0.0.1:9")
+    rc, out, err = run_cmd(["bash", str(BENCH / "run_bench.sh"), bad, str(brief), "1", "10"], e, tmp_path, 60)
+    assert rc != 0 and [c for c in calls(log) if c["cmd"] == "run"] == [] and not (tmp_path / "work" / "a").exists()
+
+
+def test_the_run_records_the_trusted_skill_source_and_its_file_hashes_outside_the_task_directory(tmp_path, stubs):
+    env, log = stubs
+    rc, out, err = run_bench(tmp_path, env, tmp_path / "work")
+    assert rc == 0, err
+    logs = tmp_path / "work" / "r1" / "logs"
+    assert Path((logs / "skill_src").read_text().strip()) == (tmp_path / "skill_src").resolve()
+    import hashlib
+    want = hashlib.sha256((tmp_path / "skill_src" / "scripts" / "check_video.sh").read_bytes()).hexdigest()
+    listed = {ln.split("  ", 1)[1].removeprefix("./"): ln.split("  ", 1)[0] for ln in (logs / "skill.sha256").read_text().splitlines()}
+    assert listed["scripts/check_video.sh"] == want and "SKILL.md" in listed, listed
+    assert not (tmp_path / "work" / "r1" / "task" / "skill.sha256").exists()
+
+
 def test_the_outer_deadline_has_a_kill_after_so_a_workload_that_ignores_sigterm_cannot_hang_the_cleanup(tmp_path, stubs):
     env, log = stubs
     rc, out, err = run_bench(tmp_path, env, tmp_path / "work")
@@ -261,6 +283,14 @@ def test_a_single_series_and_the_labels_that_matter_are_kept(tmp_path):
                             'vllm:request_success_total{engine="0",finished_reason="length",model_name="m"} 2.0\n')
     assert s['vllm:request_success_total{finished_reason="stop"}'] == 7.0
     assert s['vllm:request_success_total{finished_reason="length"}'] == 2.0
+
+
+def test_a_metrics_body_over_the_read_cap_is_cut_not_read_whole(tmp_path):
+    filler = "# " + "x" * 1000 + "\n"
+    text = filler * 9500 + "vllm:num_requests_running 3.0\n"          # the gauge sits after about 9.5 MB
+    assert len(text) > 9 * 1024 * 1024
+    s = poll_once(tmp_path, text)
+    assert "vllm:num_requests_running" not in s and "error" not in s, list(s)[:5]
 
 
 # ---- collect.py ------------------------------------------------------------------------------------------------------------------
@@ -363,6 +393,19 @@ def test_files_of_the_skill_that_the_run_changed_are_listed(tmp_path, stubs):
         subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
     s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path)          # the task's copy differs from the recorded hash
     assert s["skill_files_changed_by_run"] == ["scripts/check_video.sh"], s.get("skill_files_changed_by_run")
+
+
+def test_a_fifo_left_where_a_skill_file_belongs_does_not_hang_the_collection(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    target = run / "task" / ".qwen" / "skills" / "code-video" / "scripts" / "check_video.sh"
+    target.unlink()
+    os.mkfifo(target)
+    src = trusted_skill(tmp_path)
+    (run / "logs" / "skill.sha256").write_text(
+        subprocess.run("sha256sum ./scripts/check_video.sh", shell=True, cwd=src, capture_output=True, text=True).stdout)
+    s = collect(run, dict(env, SKILL_SRC=str(src)), tmp_path, timeout=20)
+    assert s["skill_files_changed_by_run"] == ["scripts/check_video.sh"]
 
 
 def test_a_timed_out_container_is_removed_by_its_id_and_collection_goes_on(tmp_path, stubs):
