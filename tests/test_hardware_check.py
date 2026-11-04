@@ -27,8 +27,13 @@ from orchard.ledger import Ledger
 
 # The tt-gozer branch checkout these tests drive (the development machine's path by default).
 REAL_GOZER = Path(os.environ.get("ORCHARD_TEST_GOZER", "/home/ttuser/code/tt-gozer-orchard/bin/gozer"))
-pytestmark = pytest.mark.skipif(
-    not REAL_GOZER.exists(), reason=f"{REAL_GOZER} (the gozer branch with `reset`) is not present")
+
+
+def require_real_gozer():
+    """Skip the test that calls it when the gozer checkout is absent. The skip is not module-wide (review of PR 447): the tests that drive a
+    fake child through the driver's timeout rule use no gozer at all and must run on a machine without the checkout."""
+    if not REAL_GOZER.exists():
+        pytest.skip(f"{REAL_GOZER} (the gozer branch with `reset`) is not present")
 
 REPO = Path(__file__).resolve().parent.parent
 BOARD = "0000:03:00.0"          # first chip of the second board in QUIETBOX
@@ -243,6 +248,7 @@ class Env:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
+    require_real_gozer()
     return Env(tmp_path, monkeypatch)
 
 

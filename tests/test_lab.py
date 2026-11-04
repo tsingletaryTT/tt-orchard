@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from orchard import labclient, lab
-from waits import wait_until
+from waits import PATIENCE_S, wait_until
 from orchard.adapters import Lease
 
 REPO = Path(__file__).resolve().parent.parent
@@ -140,9 +140,13 @@ def test_the_brain_going_away_kills_running_tests_and_releases_leases(labroot, t
     adapter = labclient.LabGozerAdapter(lab_, gozer=str(gz))
     lease = adapter.acquire(2, "orchard:supervisor", "test")
     assert list(lease.chips) == ["0000:01:00.0", "0000:02:00.0"]
-    # The child has to outlive the patience of `wait_until` (90 s) by a wide margin, or a helper that never kills it would pass: the
-    # child would end by itself inside the wait. The command's own deadline (120 s) is also longer than the patience.
-    lab_.start_shell(f"sleep 600 & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=120)
+    # Two things must outlast both polling phases below (the wait for the pid and the wait for the cleanup, each `PATIENCE_S`). The command's
+    # own deadline: if it expired inside the second phase, the ordinary command timeout could kill the child and a helper that never kills it
+    # on a dropped connection would pass (review of PR 447). And the child itself, which must outlive the deadline so that nothing but the
+    # helper can end it inside the test.
+    command_deadline_s = 600
+    assert command_deadline_s > 2 * PATIENCE_S + 30
+    lab_.start_shell(f"sleep {command_deadline_s + 300} & echo $! > {pidfile}; wait", cwd=tmp_path, env={}, timeout=command_deadline_s)
     # `echo $! > file` creates the file before it writes the pid, so the file can exist and be empty: wait for the digits.
     wait_until(lambda: pidfile.exists() and pidfile.read_text().strip().isdigit(), "the test's shell to write its child's pid")
     child = int(pidfile.read_text())
