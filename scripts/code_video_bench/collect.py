@@ -10,8 +10,19 @@ The checker is run from a trusted copy of the skill, mounted read-only: the dire
 run_bench.sh recorded in RUN_DIR/logs/skill_src (the logs directory is never mounted into the model's container). The task's own copy of
 the skill is not used for the check, because the model can edit it; the summary lists the skill files the run changed (hashes recorded by
 run_bench.sh in RUN_DIR/logs/skill.sha256). A figure that is not measured is null, never zero.
+Isolation: the collector re-runs itself with `python3 -I` when it was not started that way, so nothing in the current directory or in a
+PYTHON* variable can be imported in its place. Inside the containers the checker runs with its working directory set to the trusted copy of
+the skill (the unchanged files, mounted read-only), the video named by its absolute path, and PYTHONSAFEPATH, PYTHONNOUSERSITE and an empty
+PYTHONPATH, so a file the model wrote into the task directory (a json.py, say) cannot be imported by the checker. Every other container call
+runs from an empty read-only scratch directory.
+Failures: a measurement that could not be taken (a container that timed out or that docker refused, ffmpeg that failed or wrote anything but
+framemd5 records, a hash count that disagrees with ffprobe's frame count) is reported as null with the reason in an `error` field, and
+`measurement_failures` lists and counts them. A failed measurement is never a figure.
 Environment: CVBENCH_DOCKER_TIMEOUT_S (default 900) bounds each container; a container that overruns is removed by its id."""
-import hashlib, json, os, re, shlex, stat, subprocess, sys, tempfile, datetime
+import os, sys
+if not sys.flags.isolated:
+    os.execv(sys.executable, [sys.executable, "-I", *sys.argv])
+import hashlib, json, re, shlex, stat, subprocess, tempfile, datetime
 
 run, W, H, FPS, DMIN, DMAX = sys.argv[1:7]
 run = os.path.abspath(run)                           # docker needs absolute mount destinations and working directories
@@ -181,25 +192,47 @@ else:
 DOCKER_TIMEOUT_S = float(os.environ.get("CVBENCH_DOCKER_TIMEOUT_S", "900"))
 
 
-def in_container(cmd, extra_mounts=()):
-    """Run `sh -c cmd` in a read-only container with no network and the task directory mounted read-only. The container id is written to a
-    --cidfile; when the call overruns, the docker client is killed by the timeout and the container is removed by that id, so the
-    timeout also bounds the container's own life. Returns the output, or a line that starts with `timed out`."""
+SCRATCH = "/scratch"                                   # an empty read-only tmpfs: the working directory of every call that needs none
+PY_SCRUB = ("PYTHONSAFEPATH=1", "PYTHONNOUSERSITE=1", "PYTHONDONTWRITEBYTECODE=1", "PYTHONPATH=")
+DOCKER_ERROR_CODES = (125, 126, 127)                    # docker's own failures: the daemon refused, the command could not be run or was not found
+OUTPUT_CAP = int(os.environ.get("CVBENCH_OUTPUT_CAP_BYTES", 64 << 20))      # the most frame-record text one ffmpeg call may write
+
+
+def in_container(cmd, extra_mounts=(), workdir=SCRATCH):
+    """Run `sh -c cmd` in a read-only container with no network, the task directory mounted read-only, an empty scratch directory and a Python
+    environment that imports nothing from the working directory. The container id is written to a --cidfile; when the call overruns, the docker
+    client is killed by the timeout and the container is removed by that id, so the timeout also bounds the container's own life.
+    Returns {"ok", "rc", "stdout", "stderr", "error", "text"}: `ok` is false when no command result exists (a timeout, a docker error, or docker
+    missing) and `error` says why; `rc` is the command's exit status when it ran, and a nonzero one is the caller's to judge."""
+    res = {"ok": False, "rc": None, "stdout": "", "stderr": "", "error": None, "text": ""}
     with tempfile.TemporaryDirectory(prefix="cvbench-collect-") as tmp:
         cidfile = os.path.join(tmp, "cid")
         argv = ["docker", "run", "--rm", "--cidfile", cidfile, "--network", "none", "--read-only", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}", "--memory", "4g",
-                "-v", f"{task}:{task}:ro", *[a for m in extra_mounts for a in ("-v", m)], "-w", task, image, "sh", "-c", cmd]
+                "--tmpfs", f"{SCRATCH}:ro,size=1m", *[a for kv in PY_SCRUB for a in ("-e", kv)],
+                "-v", f"{task}:{task}:ro", *[a for m in extra_mounts for a in ("-v", m)], "-w", workdir, image, "sh", "-c", cmd]
         try:
             r = subprocess.run(argv, capture_output=True, text=True, timeout=DOCKER_TIMEOUT_S)
-            return (r.stdout + r.stderr).strip()
         except subprocess.TimeoutExpired:
             cid = rd(cidfile)
             if cid:
                 subprocess.run(["docker", "rm", "-f", cid], capture_output=True, text=True, timeout=60)
-            return f"timed out after {DOCKER_TIMEOUT_S:g} s" + (f"; container {cid[:12]} removed" if cid else "; no container id was recorded")
+            res["error"] = f"timed out after {DOCKER_TIMEOUT_S:g} s" + (f"; container {cid[:12]} removed" if cid else "; no container id was recorded")
+            res["text"] = res["error"]
+            return res
         except OSError as exc:
-            return f"could not run docker: {type(exc).__name__}"
+            res["error"] = f"could not run docker: {type(exc).__name__}"
+            res["text"] = res["error"]
+            return res
+    res.update(rc=r.returncode, stdout=r.stdout, stderr=r.stderr, text=(r.stdout + r.stderr).strip())
+    if r.returncode in DOCKER_ERROR_CODES and r.stderr.lstrip().startswith("docker"):
+        res["error"] = f"docker error (exit {r.returncode}): " + " ".join(r.stderr.split())[:200]
+    else:
+        res["ok"] = True
+    return res
+
+
+failures = []                                           # the measurements that could not be taken, in the order they were tried
 
 final = os.path.join(task, "out", "final.mp4")
 delivered = os.path.exists(final)
@@ -216,34 +249,87 @@ for name in ("SPEC.md", "VERIFY.md", "STRUCTURE.md", "out/final.mp4"):
 out["files"] = files
 rel = os.path.relpath(final, task)
 out["measured_file"] = rel if os.path.exists(final) else None
+FRAMEMD5 = re.compile(r"^\d+,\s*-?\d+,\s*-?\d+,\s*\d+,\s*\d+,\s*([0-9a-fA-F]{32})$")      # stream, dts, pts, duration, size, md5
+
+
+def frame_hash_figures(r, probe_frames):
+    """The frame-hash measurement from one container result: the figures, or every figure null with the reason in `error`. Only framemd5
+    records count as frames; any other line, any ffmpeg error output, a nonzero exit, a container that did not run, or a record count that
+    disagrees with the frame count ffprobe reported makes the whole measurement a failure."""
+    fh = {"frames": None, "distinct": None, "identical_to_previous": None, "longest_identical_run_frames": None, "invalid_lines": 0, "error": None}
+    if not r["ok"]:
+        fh["error"] = r["error"]
+        return fh
+    if r["rc"] != 0:
+        fh["error"] = f"ffmpeg exited {r['rc']}: " + (" ".join(r["stderr"].split())[:200] or "no message")
+        return fh
+    if r["stderr"].strip():
+        fh["error"] = "ffmpeg reported errors: " + " ".join(r["stderr"].split())[:200]
+        return fh
+    if len(r["stdout"]) > OUTPUT_CAP:
+        fh["error"] = f"ffmpeg wrote more than {OUTPUT_CAP} bytes of frame records"
+        return fh
+    hashes, bad = [], []
+    for ln in r["stdout"].splitlines():
+        s_ = ln.strip()
+        if not s_ or s_.startswith("#"):
+            continue
+        m = FRAMEMD5.match(s_)
+        if m:
+            hashes.append(m.group(1).lower())
+        else:
+            bad.append(s_)
+    fh["invalid_lines"] = len(bad)
+    if bad:
+        fh["error"] = f"{len(bad)} invalid line(s) in the ffmpeg output, which are not framemd5 records (first: {bad[0][:80]!r})"
+    elif not hashes:
+        fh["error"] = "ffmpeg wrote no frame records"
+    elif probe_frames is not None and probe_frames != len(hashes):
+        fh["error"] = f"{len(hashes)} frame hashes against {probe_frames} frames counted by ffprobe"
+    else:
+        longest = cur = 0
+        for i in range(1, len(hashes)):
+            cur = cur + 1 if hashes[i] == hashes[i - 1] else 0
+            longest = max(longest, cur)
+        fh.update(frames=len(hashes), distinct=len(set(hashes)), longest_identical_run_frames=longest + 1,
+                  identical_to_previous=sum(1 for i in range(1, len(hashes)) if hashes[i] == hashes[i - 1]))
+    return fh
+
+
 if os.path.exists(final):
-    q = shlex.quote(rel)                              # one name, quoted once: a file name may hold a space or a shell metacharacter
-    probe = in_container(f"ffprobe -v error -count_frames -show_streams -show_format -of json {q}")
-    try:
-        pj = json.loads(probe)
-        v = [s for s in pj["streams"] if s["codec_type"] == "video"][0]
-        out["video"] = {"codec": v["codec_name"], "size": f"{v['width']}x{v['height']}", "pix_fmt": v.get("pix_fmt"), "avg_frame_rate": v["avg_frame_rate"],
-                        "frames": int(v["nb_read_frames"]) if str(v.get("nb_read_frames", "")).isdigit() else None, "duration_s": float(pj["format"]["duration"]),
-                        "audio_streams": sum(1 for s in pj["streams"] if s["codec_type"] == "audio"), "bytes": int(pj["format"]["size"])}
-    except Exception as exc:
-        out["video"] = {"probe_error": str(exc)[:160], "raw": probe[:300]}
+    qa = shlex.quote(final)                           # absolute, and quoted once: a file name may hold a space or a shell metacharacter
+    probe = in_container(f"ffprobe -v error -count_frames -show_streams -show_format -of json {qa}")
+    if not probe["ok"]:
+        out["video"] = {"probe_error": probe["error"], "raw": ""}
+        failures.append("video")
+    else:
+        try:
+            pj = json.loads(probe["stdout"])
+            v = [s for s in pj["streams"] if s["codec_type"] == "video"][0]
+            out["video"] = {"codec": v["codec_name"], "size": f"{v['width']}x{v['height']}", "pix_fmt": v.get("pix_fmt"), "avg_frame_rate": v["avg_frame_rate"],
+                            "frames": int(v["nb_read_frames"]) if str(v.get("nb_read_frames", "")).isdigit() else None, "duration_s": float(pj["format"]["duration"]),
+                            "audio_streams": sum(1 for s in pj["streams"] if s["codec_type"] == "audio"), "bytes": int(pj["format"]["size"])}
+        except Exception as exc:
+            out["video"] = {"probe_error": str(exc)[:160], "raw": probe["text"][:300]}
+            failures.append("video")
     trusted = trusted_skill()
     if trusted:
         out["check_video_source"] = f"trusted copy of the skill, read-only mount ({os.path.basename(trusted)})"
-        out["check_video"] = in_container("sh /trusted-skill/scripts/check_video.sh " + " ".join(shlex.quote(x) for x in (rel, W, H, FPS, DMIN, DMAX, "0")),
-                                          extra_mounts=(f"{trusted}:/trusted-skill:ro",))
+        chk = in_container("sh /trusted-skill/scripts/check_video.sh " + " ".join(shlex.quote(x) for x in (final, W, H, FPS, DMIN, DMAX, "0")),
+                           extra_mounts=(f"{trusted}:/trusted-skill:ro",), workdir="/trusted-skill")
+        if chk["ok"]:
+            out["check_video"] = chk["text"]
+        else:
+            out["check_video"] = "not measured: " + chk["error"]
+            failures.append("check_video")
     else:
         out["check_video_source"] = None
         out["check_video"] = ("not run: no trusted copy of the skill (set SKILL_SRC, or use a run made by run_bench.sh, which records "
                               "logs/skill_src); the task's own copy can be edited by the model")
-    md5 = in_container(f"ffmpeg -v error -i {q} -f framemd5 -an - 2>/dev/null | grep -v '^#'")
-    hashes = [ln.split(",")[-1].strip() for ln in md5.splitlines() if ln.strip()]
-    longest = cur = 0
-    for i in range(1, len(hashes)):
-        cur = cur + 1 if hashes[i] == hashes[i - 1] else 0
-        longest = max(longest, cur)
-    out["frame_hashes"] = {"frames": len(hashes), "distinct": len(set(hashes)),
-                           "identical_to_previous": sum(1 for i in range(1, len(hashes)) if hashes[i] == hashes[i - 1]),
-                           "longest_identical_run_frames": longest + 1 if hashes else 0}
+    md5 = in_container(f"ffmpeg -v error -i {qa} -f framemd5 -an -")
+    out["frame_hashes"] = frame_hash_figures(md5, out["video"].get("frames") if isinstance(out.get("video"), dict) else None)
+    if out["frame_hashes"]["error"]:
+        failures.append("frame_hashes")
+out["measurement_failures"] = {"count": len(failures), "names": failures}
 json.dump(out, open(f"{logs}/summary.json", "w"), indent=1)
 print(json.dumps(out, indent=1)[:6000])

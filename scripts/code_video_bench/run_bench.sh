@@ -8,6 +8,11 @@
 #                 IMAGE       docker image built from the Dockerfile next to this script (default cvbench:0.1)
 #                 PROMPT      first message to the agent (default: the upstream usage text with the Qwen Code skill path)
 #
+# The run directory is reserved with one atomic `mkdir` before anything slow starts, so two invocations with the same WORK_ROOT and run
+# name cannot both proceed: the second is refused and touches nothing of the first. The container is named cvbench-RUN_NAME-HASH, where HASH
+# comes from the reserved directory's path, so two work roots that use the same run name do not collide on the container name either.
+# Every python call here uses `python3 -I` (no current directory or PYTHON* variables on the import path).
+#
 # The run name may use letters, digits, dots, underscores and hyphens. WORK_ROOT may be relative (it is made absolute); neither it nor
 # the resolved path may contain a colon or a line break, because they become a docker mount source and destination.
 #
@@ -28,8 +33,12 @@ bad_path "$WORK_ROOT" && { echo "WORK_ROOT resolves to a path with a colon or a 
 ENDPOINT=${ENDPOINT:-http://127.0.0.1:8012}; IMAGE=${IMAGE:-cvbench:0.1}
 HERE=$(cd "$(dirname "$0")" && pwd)
 RUN=$WORK_ROOT/$NAME; TASK=$RUN/task; LOGS=$RUN/logs; CIDFILE=$LOGS/container.id
-[ ! -e "$RUN" ] || { echo "refusing to reuse $RUN"; exit 1; }
-MODEL=$(curl -sf -m 20 "$ENDPOINT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
+# Reserve the run directory. `mkdir` without -p fails if it exists, so exactly one of two racing invocations gets it. Until the run has
+# written anything, a failed start gives the name back (rmdir removes only an empty directory, which is only ever this invocation's own).
+mkdir "$RUN" 2>/dev/null || { echo "refusing to reuse $RUN: that run name is already taken under $WORK_ROOT"; exit 1; }
+trap 'rmdir "$RUN" 2>/dev/null || true' EXIT
+RUN_ID=$(printf '%s' "$RUN" | sha256sum | cut -c1-8); CNAME="cvbench-$NAME-$RUN_ID"
+MODEL=$(curl -sf -m 20 "$ENDPOINT/v1/models" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
 PROMPT=${PROMPT:-"Use the project code-video skill. Read .qwen/skills/code-video/SKILL.md and dense_prompt.md, then the relevant craft guides. This directory is the project root. Produce the complete video, run the rendering tools, and deliver out/final.mp4, SPEC.md and VERIFY.md."}
 
 mkdir -p "$TASK/.qwen/skills" "$TASK/home/.qwen" "$TASK/out" "$TASK/assets" "$LOGS"
@@ -40,7 +49,7 @@ printf '%s\n' "$SKILL_SRC" > "$LOGS/skill_src"
 ( cd "$SKILL_SRC" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$LOGS/skill.sha256"
 ln -s /opt/pw/node_modules "$TASK/node_modules"          # resolves inside the image: Playwright and @napi-rs/canvas
 cp "$BRIEF" "$TASK/dense_prompt.md"
-ENDPOINT="$ENDPOINT" MODEL="$MODEL" python3 - "$TASK/home/.qwen/settings.json" <<'PY'
+ENDPOINT="$ENDPOINT" MODEL="$MODEL" python3 -I - "$TASK/home/.qwen/settings.json" <<'PY'
 import json, os, sys
 m, base = os.environ["MODEL"], os.environ["ENDPOINT"].rstrip("/") + "/v1"
 json.dump({
@@ -59,7 +68,7 @@ json.dump({
 PY
 cp "$TASK/home/.qwen/settings.json" "$LOGS/qwen-settings.json"
 
-python3 "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics.jsonl" 15 & POLL=$!
+python3 -I "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics.jsonl" 15 & POLL=$!
 # Remove only the container this invocation created: docker writes its id to $CIDFILE after the daemon made it. A start that failed (a
 # name already used by another run, say) leaves the file empty, and then there is nothing of ours to remove.
 cleanup() {
@@ -68,12 +77,12 @@ cleanup() {
   if [ -n "$cid" ]; then docker rm -f "$cid" >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT
-python3 "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-start.json" once
+python3 -I "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-start.json" once
 date -u +%FT%TZ > "$LOGS/started_at"
 
 set +e
 systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
-  timeout -k 60 "$((WALL_MIN + 5))m" docker run --rm --init --name "cvbench-$NAME" --cidfile "$CIDFILE" \
+  timeout -k 60 "$((WALL_MIN + 5))m" docker run --rm --init --name "$CNAME" --cidfile "$CIDFILE" \
     --user "$(id -u):$(id -g)" --network host --cap-drop ALL --security-opt no-new-privileges \
     --read-only --tmpfs /tmp:rw,exec,size=2g --shm-size 2g \
     --memory 16g --memory-swap 16g --cpus 8 --pids-limit 2048 \
@@ -84,5 +93,5 @@ systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
 echo $? > "$LOGS/exit_code"
 set -e
 date -u +%FT%TZ > "$LOGS/ended_at"
-python3 "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-end.json" once
+python3 -I "$HERE/poll_metrics.py" "$ENDPOINT" "$LOGS/metrics-end.json" once
 echo "run finished, exit $(cat "$LOGS/exit_code"); task in $TASK, logs in $LOGS"

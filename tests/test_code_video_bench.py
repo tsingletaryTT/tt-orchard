@@ -36,7 +36,7 @@ if args[:1] == ["rm"]:
 if args[:1] != ["run"]:
     note({"cmd": args[:1], "args": args[1:]})
     sys.exit(0)
-vols, workdir, cidfile, name = [], None, None, None
+vols, workdir, cidfile, name, envs, tmpfs = [], None, None, None, {}, []
 i = 1
 while i < len(args):
     a = args[i]
@@ -44,13 +44,17 @@ while i < len(args):
         vols.append(args[i + 1]); i += 2
     elif a == "-w":
         workdir = args[i + 1]; i += 2
+    elif a == "-e":
+        k, _, v = args[i + 1].partition("="); envs[k] = v; i += 2
+    elif a == "--tmpfs":
+        tmpfs.append(args[i + 1]); i += 2
     elif a == "--cidfile":
         cidfile = args[i + 1]; i += 2
     elif a == "--name":
         name = args[i + 1]; i += 2
     else:
         i += 1
-note({"cmd": "run", "vols": vols, "workdir": workdir, "name": name, "cidfile": cidfile, "args": args})
+note({"cmd": "run", "vols": vols, "workdir": workdir, "name": name, "cidfile": cidfile, "env": envs, "tmpfs": tmpfs, "args": args})
 for v in vols:
     dst = v.split(":")[1]
     if not dst.startswith("/"):
@@ -76,13 +80,25 @@ if "sh" in args and args[args.index("sh") + 1:args.index("sh") + 2] == ["-c"]:
         parts = v.split(":")
         if parts[0] != parts[1]:
             cmd = cmd.replace(parts[1], parts[0])
-    r = subprocess.run(["sh", "-c", cmd], cwd=workdir or ".", capture_output=True, text=True)
+    host_cwd = workdir or "."                   # the container's working directory, as a host path: a mount destination maps to its source
+    for v in vols:
+        parts = v.split(":")
+        if workdir == parts[1]:
+            host_cwd = parts[0]
+    if not os.path.isdir(host_cwd):             # a tmpfs or an image directory: an empty directory stands in for it
+        import tempfile
+        host_cwd = tempfile.mkdtemp(prefix="stub-empty-")
+    env = {"PATH": os.environ["PATH"], "HOME": "/nonexistent", **envs}      # a container does not inherit the host's environment
+    for k, v in os.environ.items():             # except the knobs of the ffprobe and ffmpeg stand-ins, which stand for what the image holds
+        if k.startswith(("FFPROBE_", "FFMPEG_STUB_")):
+            env[k] = v
+    r = subprocess.run(["sh", "-c", cmd], cwd=host_cwd, env=env, capture_output=True, text=True)
     sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
     sys.exit(r.returncode)
 sys.exit(0)
 '''
 
-CURL_STUB = '#!/bin/sh\necho \'{"data":[{"id":"/models/under-test"}]}\'\n'
+CURL_STUB = '#!/bin/sh\n[ -n "$CURL_STUB_SLEEP" ] && sleep "$CURL_STUB_SLEEP"\n[ -n "$CURL_STUB_FAIL" ] && exit 22\necho \'{"data":[{"id":"/models/under-test"}]}\'\n'
 
 SYSTEMD_RUN_STUB = r'''#!/bin/sh
 echo "$@" >> "$STUB_LOG.systemd"
@@ -95,14 +111,21 @@ exec "$@"
 FFPROBE_STUB = r'''#!/bin/sh
 for last; do :; done
 if [ ! -f "$last" ]; then echo "ffprobe: no such file: $last" >&2; exit 1; fi
-frames=',"nb_read_frames":"240"'; [ -n "$FFPROBE_NO_FRAMES" ] && frames=
+[ -n "$FFPROBE_GARBAGE" ] && { echo "this is not json"; exit 0; }
+frames=',"nb_read_frames":"'"${FFPROBE_FRAMES:-240}"'"'; [ -n "$FFPROBE_NO_FRAMES" ] && frames=
 echo '{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,"height":720,"pix_fmt":"yuv420p","avg_frame_rate":"24/1"'"$frames"'}],"format":{"duration":"10.000","size":"123456"}}'
 '''
 
 FFMPEG_STUB = r'''#!/bin/sh
 for a; do [ "$a" = "-i" ] && want=1 && continue; if [ -n "$want" ]; then f="$a"; want=; fi; done
 if [ ! -f "$f" ]; then echo "ffmpeg: no such file: $f" >&2; exit 1; fi
-printf '#format: frame checksums\n0,0,0,1,1,0xaaaa\n0,1,1,1,1,0xaaaa\n0,2,2,1,1,0xbbbb\n'
+if [ "$FFMPEG_STUB_FAIL" = silent ]; then exit 1; fi
+if [ -n "$FFMPEG_STUB_FAIL" ]; then echo "ffmpeg: Invalid data found when processing input" >&2; exit 1; fi
+echo '#format: frame checksums'
+# real framemd5 records: stream, dts, pts, duration, size, a 32-digit md5; one new picture every 24 frames
+awk -v n="${FFMPEG_STUB_FRAMES:-240}" 'BEGIN { for (i = 0; i < n; i++) printf "0, %10d, %10d, %8d, %9d, %032x\n", i, i, 1, 2764800, int(i / 24) + 1 }'
+if [ -n "$FFMPEG_STUB_GARBAGE" ]; then echo "[warn] something odd happened"; echo "0, 999, 999, 1, 1, 0xnothex"; fi
+if [ -n "$FFMPEG_STUB_WARN" ]; then echo "Error while decoding stream #0:0: Invalid data found" >&2; fi
 '''
 
 
@@ -124,7 +147,8 @@ def stubs(tmp_path):
     log = tmp_path / "stub.log"
     log.write_text("")
     env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", STUB_LOG=str(log))
-    for k in ("DOCKER_STUB_MODE", "DOCKER_STUB_CONFLICT", "CVBENCH_DOCKER_TIMEOUT_S", "SKILL_SRC", "WORK_ROOT", "FFPROBE_NO_FRAMES"):
+    for k in ("DOCKER_STUB_MODE", "DOCKER_STUB_CONFLICT", "CVBENCH_DOCKER_TIMEOUT_S", "SKILL_SRC", "WORK_ROOT", "FFPROBE_NO_FRAMES", "FFPROBE_FRAMES",
+          "FFMPEG_STUB_FAIL", "FFMPEG_STUB_FRAMES", "FFMPEG_STUB_GARBAGE", "FFMPEG_STUB_WARN", "FFPROBE_GARBAGE", "CURL_STUB_SLEEP", "CURL_STUB_FAIL"):
         env.pop(k, None)
     return env, log
 
@@ -322,7 +346,7 @@ def trusted_skill(tmp_path):
 
 def collect(run, env, cwd, rel=False, timeout=60):
     arg = os.path.relpath(run, cwd) if rel else str(run)
-    rc, out, err = run_cmd([sys.executable, str(BENCH / "collect.py"), arg, "1280", "720", "24", "9", "11"], env, cwd, timeout)
+    rc, out, err = run_cmd([sys.executable, "-I", str(BENCH / "collect.py"), arg, "1280", "720", "24", "9", "11"], env, cwd, timeout)
     assert rc == 0, err
     return json.loads((Path(cwd) / arg / "logs" / "summary.json").read_text())
 
@@ -344,7 +368,9 @@ def test_a_render_named_with_a_space_is_probed_checked_and_hashed(tmp_path, stub
     assert s["final_mp4_delivered"] is False and s["measured_file"].endswith("render v1.mp4")
     assert s["video"].get("frames") == 240, s["video"]
     assert "trusted-check-ok" in s["check_video"], s["check_video"]
-    assert s["frame_hashes"]["frames"] == 3 and s["frame_hashes"]["distinct"] == 2, s["frame_hashes"]
+    assert s["frame_hashes"]["frames"] == 240 and s["frame_hashes"]["distinct"] == 10, s["frame_hashes"]
+    assert s["frame_hashes"]["identical_to_previous"] == 230 and s["frame_hashes"]["longest_identical_run_frames"] == 24, s["frame_hashes"]
+    assert s["frame_hashes"]["error"] is None, s["frame_hashes"]
 
 
 def test_a_frame_count_ffprobe_did_not_report_is_null_not_zero(tmp_path, stubs):
@@ -441,3 +467,214 @@ def test_the_stream_summary_says_how_many_messages_carried_usage(tmp_path, stubs
     (run / "logs" / "stream.jsonl").write_text("".join(json.dumps(m) + "\n" for m in msgs))
     st = collect(run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path))), tmp_path)["stream"]
     assert st["assistant_messages"] == 2 and st["assistant_messages_with_usage"] == 1, st
+
+
+# ---- round 2 of the Copilot review of PR 450 -------------------------------------------------------------------------------------
+# 1. a file the model wrote must not shadow a module the checker imports; 2. a run directory is reserved atomically; 3. a measurement that
+# failed is reported as failed, never as a figure.
+
+def shadowing_skill(tmp_path):
+    """A trusted skill whose checker reads its script from stdin and imports json, as the public check_video.sh does."""
+    src = tmp_path / "trusted_skill"
+    (src / "scripts").mkdir(parents=True)
+    (src / "scripts" / "check_video.sh").write_text(
+        'python3 - "$1" <<\'EOF\'\nimport json, sys\nprint("checker-imported-json-from", json.__file__)\nEOF\n')
+    return src
+
+
+def test_a_module_the_model_wrote_cannot_shadow_the_checker_imports(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    (run / "task" / "json.py").write_text('print("SHADOWED-OK")\nraise SystemExit(0)\n')
+    s = collect(run, dict(env, SKILL_SRC=str(shadowing_skill(tmp_path))), tmp_path)
+    assert "SHADOWED" not in s["check_video"], s["check_video"]
+    assert "checker-imported-json-from" in s["check_video"] and str(run / "task") not in s["check_video"], s["check_video"]
+
+
+def test_the_checker_runs_from_the_trusted_directory_with_an_absolute_video_path_and_a_scrubbed_python_environment(tmp_path, stubs):
+    import shlex
+    env, log = stubs
+    run = make_run(tmp_path)
+    collect(run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path))), tmp_path)
+    runs = [c for c in calls(log) if c["cmd"] == "run"]
+    check = [c for c in runs if any("check_video.sh" in a for a in c["args"])]
+    assert len(check) == 1, runs
+    c = check[0]
+    assert c["workdir"] == "/trusted-skill", c["workdir"]
+    words = shlex.split(c["args"][c["args"].index("-c") + 1])
+    assert words[:2] == ["sh", "/trusted-skill/scripts/check_video.sh"] and words[2].startswith("/"), words
+    assert words[2] == str(run / "task" / "out" / "final.mp4"), words
+    for k, v in {"PYTHONSAFEPATH": "1", "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": ""}.items():
+        assert c["env"].get(k) == v, (k, c["env"])
+    assert all(r["workdir"] != str(run / "task") for r in runs), "no call runs from the directory the model can write"
+    assert all(r["workdir"] == "/trusted-skill" or (r["workdir"] == "/scratch" and any(x.startswith("/scratch:") for x in r["tmpfs"])) for r in runs), runs
+
+
+def test_the_shell_script_runs_python_isolated_so_a_file_in_the_current_directory_cannot_shadow_it(tmp_path, stubs):
+    env, log = stubs
+    cwd = tmp_path / "caller"
+    cwd.mkdir()
+    (cwd / "json.py").write_text('import sys\nsys.stdout.write("SHADOWED")\nsys.exit(7)\n')
+    rc, out, err = run_bench(tmp_path, env, tmp_path / "work", cwd=cwd)
+    assert rc == 0, (out, err)
+    assert "/models/under-test" in (tmp_path / "work" / "r1" / "logs" / "qwen-settings.json").read_text()
+
+
+def test_two_runs_with_one_name_cannot_both_start(tmp_path, stubs):
+    env, log = stubs
+    skill, brief = bench_setup(tmp_path)
+    e = dict(env, WORK_ROOT=str(tmp_path / "work"), SKILL_SRC=str(skill), ENDPOINT="http://127.0.0.1:9", CURL_STUB_SLEEP="2")
+    argv = ["bash", str(BENCH / "run_bench.sh"), "r1", str(brief), "1", "10"]
+    procs = [subprocess.Popen(argv, env=e, cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+             for _ in range(2)]
+    results = []
+    try:
+        for p in procs:
+            o, er = p.communicate(timeout=90)
+            results.append((o, er, p.returncode))
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGKILL)
+    assert sorted(r[2] for r in results)[0] == 0 and sorted(r[2] for r in results)[1] != 0, results
+    refused = [r for r in results if r[2] != 0][0]
+    assert "refusing to reuse" in refused[0] + refused[1], refused
+    assert len([c for c in calls(log) if c["cmd"] == "run"]) == 1, "only the run that reserved the directory starts a container"
+    logs = tmp_path / "work" / "r1" / "logs"
+    cid = (logs / "container.id").read_text().strip()
+    assert cid.startswith("STUBID-") and (logs / "exit_code").read_text().strip() == "0"
+    removed = [a for c in calls(log) if c["cmd"] == "rm" for a in c["args"] if not a.startswith("-")]
+    assert removed == [cid], "the refused run removes nothing, the winner removes its own container"
+
+
+def test_the_container_name_comes_from_the_reserved_run_directory_so_two_roots_with_one_run_name_do_not_collide(tmp_path, stubs):
+    env, log = stubs
+    for sub in ("a", "b"):
+        base = tmp_path / sub
+        base.mkdir()
+        rc, out, err = run_bench(base, env, base / "work")
+        assert rc == 0, err
+    names = [c["name"] for c in calls(log) if c["cmd"] == "run"]
+    assert len(names) == 2 and names[0] != names[1] and all(n.startswith("cvbench-r1-") for n in names), names
+
+
+def failed(s, name):
+    assert name in s["measurement_failures"]["names"], s["measurement_failures"]
+
+
+def test_a_container_that_timed_out_during_hashing_gives_no_frame_count(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    s = collect(run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), DOCKER_STUB_MODE="sleep", CVBENCH_DOCKER_TIMEOUT_S="2"), tmp_path, timeout=90)
+    fh = s["frame_hashes"]
+    assert fh["frames"] is None and fh["distinct"] is None and fh["identical_to_previous"] is None and fh["longest_identical_run_frames"] is None, fh
+    assert "timed out" in fh["error"], fh
+    failed(s, "frame_hashes")
+    assert s["measurement_failures"]["count"] == len(s["measurement_failures"]["names"]) >= 2
+
+
+def test_a_docker_error_is_a_failed_measurement_and_not_a_frame(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    s = collect(run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), DOCKER_STUB_CONFLICT="1"), tmp_path)
+    fh = s["frame_hashes"]
+    assert fh["frames"] is None and "docker" in fh["error"].lower(), fh
+    failed(s, "frame_hashes")
+    failed(s, "video")
+    failed(s, "check_video")
+    assert s["check_video"].startswith("not measured: docker error"), s["check_video"]
+
+
+def test_an_ffmpeg_failure_is_reported_with_its_reason_and_not_as_zero_frames(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    s = collect(run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), FFMPEG_STUB_FAIL="1"), tmp_path)
+    fh = s["frame_hashes"]
+    assert fh["frames"] is None and fh["longest_identical_run_frames"] is None and "Invalid data" in fh["error"], fh
+    failed(s, "frame_hashes")
+
+
+def test_lines_that_are_not_framemd5_records_make_the_measurement_fail_and_are_counted(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    s = collect(run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), FFMPEG_STUB_GARBAGE="1"), tmp_path)
+    fh = s["frame_hashes"]
+    assert fh["frames"] is None and fh["invalid_lines"] == 2 and "invalid" in fh["error"], fh
+    failed(s, "frame_hashes")
+
+
+def test_a_hash_count_that_differs_from_the_probe_frame_count_is_a_failure(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    s = collect(run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), FFMPEG_STUB_FRAMES="200"), tmp_path)
+    fh = s["frame_hashes"]
+    assert fh["frames"] is None and "240" in fh["error"] and "200" in fh["error"], fh
+    failed(s, "frame_hashes")
+
+
+def test_a_good_run_reports_no_measurement_failures(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    s = collect(run, dict(env, SKILL_SRC=str(trusted_skill(tmp_path))), tmp_path)
+    assert s["measurement_failures"] == {"count": 0, "names": []}, s["measurement_failures"]
+    assert s["frame_hashes"]["error"] is None and s["frame_hashes"]["invalid_lines"] == 0, s["frame_hashes"]
+
+
+def test_the_collector_runs_itself_isolated_even_when_started_without_the_flag(tmp_path, stubs):
+    """Started as `python3 collect.py` with PYTHONPATH pointing at a directory that holds a shlex.py, it must still import the real module."""
+    env, log = stubs
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "shlex.py").write_text('import sys\\nsys.stderr.write("SHADOWED-shlex\\\\n")\\nsys.exit(3)\\n')
+    run = make_run(tmp_path)
+    e = dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), PYTHONPATH=str(shadow))
+    rc, out, err = run_cmd([sys.executable, str(BENCH / "collect.py"), str(run), "1280", "720", "24", "9", "11"], e, tmp_path, 60)
+    assert rc == 0 and "SHADOWED" not in err, (rc, err)
+    assert json.loads((run / "logs" / "summary.json").read_text())["video"]["frames"] == 240
+
+
+def test_a_failed_start_gives_the_run_name_back(tmp_path, stubs):
+    env, log = stubs
+    skill, brief = bench_setup(tmp_path)
+    base = dict(env, WORK_ROOT=str(tmp_path / "work"), SKILL_SRC=str(skill), ENDPOINT="http://127.0.0.1:9")
+    argv = ["bash", str(BENCH / "run_bench.sh"), "r1", str(brief), "1", "10"]
+    rc, out, err = run_cmd(argv, dict(base, CURL_STUB_FAIL="1"), tmp_path, 60)
+    assert rc != 0 and not (tmp_path / "work" / "r1").exists(), "the empty reserved directory is removed when the start fails"
+    rc, out, err = run_cmd(argv, base, tmp_path, 60)
+    assert rc == 0, err
+
+
+def test_an_ffmpeg_failure_with_no_message_is_still_a_failure_with_its_exit_status(tmp_path, stubs):
+    env, log = stubs
+    s = collect(make_run(tmp_path), dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), FFMPEG_STUB_FAIL="silent"), tmp_path)
+    assert s["frame_hashes"]["frames"] is None and "exited 1" in s["frame_hashes"]["error"], s["frame_hashes"]
+    failed(s, "frame_hashes")
+
+
+def test_ffmpeg_error_output_with_exit_status_zero_is_a_failure(tmp_path, stubs):
+    env, log = stubs
+    s = collect(make_run(tmp_path), dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), FFMPEG_STUB_WARN="1"), tmp_path)
+    assert s["frame_hashes"]["frames"] is None and "ffmpeg reported errors" in s["frame_hashes"]["error"], s["frame_hashes"]
+    failed(s, "frame_hashes")
+
+
+def test_no_frame_records_at_all_is_a_failure_and_not_zero_frames(tmp_path, stubs):
+    env, log = stubs
+    s = collect(make_run(tmp_path), dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), FFPROBE_NO_FRAMES="1", FFMPEG_STUB_FRAMES="0"), tmp_path)
+    assert s["frame_hashes"]["frames"] is None and "no frame records" in s["frame_hashes"]["error"], s["frame_hashes"]
+    failed(s, "frame_hashes")
+
+
+def test_probe_output_that_is_not_json_is_a_failed_measurement(tmp_path, stubs):
+    env, log = stubs
+    s = collect(make_run(tmp_path), dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), FFPROBE_GARBAGE="1"), tmp_path)
+    assert "probe_error" in s["video"] and "this is not json" in s["video"]["raw"], s["video"]
+    failed(s, "video")
+
+
+def test_more_frame_records_than_the_cap_allows_is_a_failure(tmp_path, stubs):
+    env, log = stubs
+    e = dict(env, SKILL_SRC=str(trusted_skill(tmp_path)), CVBENCH_OUTPUT_CAP_BYTES="1000")
+    s = collect(make_run(tmp_path), e, tmp_path)
+    assert s["frame_hashes"]["frames"] is None and "more than 1000 bytes" in s["frame_hashes"]["error"], s["frame_hashes"]
+    failed(s, "frame_hashes")
