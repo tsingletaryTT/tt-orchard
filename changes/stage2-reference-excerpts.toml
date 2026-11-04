@@ -1,3 +1,4 @@
 target = "0.9.113"
 summary = "Stage 2 gets a reference excerpts file (the layer classes the model uses, read with ast), and the watchdog no longer treats reads of different line ranges of one file as duplicates (issue 427)."
+pr = 470
 kind = "fix"

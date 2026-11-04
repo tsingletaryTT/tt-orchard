@@ -4150,7 +4150,7 @@ Prompt: "Map each of V1 to V25 (and the discover host facts) to what tt-orchard 
 - Mutations: 8 guards removed one at a time, each turned a test red. Two (the autouse marker and the fixture's call of the helper) first stayed green, because the helper also exits when its pipe closes with the process. The wiring test now checks from a second test in the same process.
 - Targeted run: 3,661 passed, 2 skipped (lab, hardware-check, telegraph store, stack pins, version, ratchet, hostile readers, readme, paths). The full suite is run by the coordinator in parallel mode on the pushed head. Main (PRs 424, 429, 434 and 438) was merged; only this log conflicted, with both sides kept.
 
-## 2026-11-04 Stage 2 reference excerpts and sed-range reads (issue 427, third rehearsal run)
+## 2026-11-04 PR 470, stage 2 reference excerpts and sed-range reads (issue 427, third rehearsal run)
 
 - Prompt (from the coordinator): fix the stage 2 first-attempt stall that the third rehearsal run still showed. Run 7 blocked the first attempt as `agent-stuck`: the coder read one reference modeling module with four `sed -n 'a,bp' <file>` calls, each with a different range and each returning new text, and the near-duplicate rule fired. The port was still the 48-line skeleton. Stacked on PR 432's branch, so the PR's base is `stage2-facts-file` and it retargets to main when 432 and 425 merge.
 - Cause: `command_shape` reduced every `sed` call to `sed <file>`, so any number of ranges of one file shared a shape. The coder needed the source of its layer classes and had no way to get it except by paging through the module.
