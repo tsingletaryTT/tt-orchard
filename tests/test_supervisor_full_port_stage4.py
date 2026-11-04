@@ -225,6 +225,25 @@ def test_a_kill_after_the_first_entry_resumes_at_the_second_and_does_not_run_the
         r.close()
 
 
+def test_a_kill_after_an_entrys_prepare_step_resumes_at_its_test_without_a_second_prepare_step(tmp_path):
+    r = Rig(tmp_path)
+    with_snapshot(r, tmp_path)
+    r.args.full_port = True
+    r.args.required_chips = (1, 3, 4)
+    try:
+        make4(r)
+        abort_at_pause(r)
+        with pytest.raises(Crash):
+            r.run(crash_if=lambda e: e["event"] == "decision" and e["stage"] == 4 and e["data"].get("decision") == "port cache declaration")
+        assert not stage_4_tests(r)
+        assert r.run(pid=200) == EXIT_ABORTED
+        prepares = [e for e in r.entries() if e["stage"] == 4 and e["data"].get("decision") == "agent step" and e["data"].get("phase") == "prepare"]
+        assert len(prepares) == 2 and [len(x["chips"]) for x in stage_4_tests(r)] == [1, 3]
+        assert [d["result"] for d in r.ends(4)] == ["pass"]
+    finally:
+        r.close()
+
+
 def test_a_marker_the_ledger_does_not_hold_is_not_a_resume_point_and_that_entrys_test_runs(tmp_path):
     # A kill between the marker and its ledger entry, or a marker the coder wrote, leaves a file the supervisor cannot vouch for.
     r = Rig(tmp_path)
