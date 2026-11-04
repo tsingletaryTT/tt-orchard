@@ -329,8 +329,8 @@ def check_mesh(log_text, *, expected_devices) -> dict:
 # finished. And on a TT server the engine's block count is set by the plugin from the size the model asked for (`Getting max_tokens_all_users=
 # 262144 for number of blocks in KV cache`), so the `GPU KV cache size` that follows is that request rounded up to whole blocks. It is not a
 # measurement of device memory, and a check of it against `max_model_len` cannot fail on such a server. The result says which it is.
-_LAYERS_LINES = (re.compile(r"\b(?:loaded|loading|built|created|initiali[sz]ed)\s+(\d{1,4})\s+(?:decoder\s+|transformer\s+)?layers\b", re.IGNORECASE),
-                 re.compile(r"\blayers\s+loaded\s*[:=]\s*(\d{1,4})\b", re.IGNORECASE))
+_LAYERS_LINES = (re.compile(r"\b(?P<verb>loaded|loading|built|created|initiali[sz]ed)\s+(?P<n>\d{1,4})\s+(?:decoder\s+|transformer\s+)?layers\b", re.IGNORECASE),
+                 re.compile(r"\blayers\s+loaded\s*[:=]\s*(?P<n>\d{1,4})\b", re.IGNORECASE))
 # The tqdm bar of a tt-metal model's layer loop. Every width is bounded, so a line of repeated bar text costs a fixed amount per repeat.
 _LAYERS_BAR = re.compile(r"Loading layers:\s{0,8}\d{1,3}%\|[^|\r\n]{0,64}\|\s{0,8}(\d{1,4})/(\d{1,4})\b")
 _KV_TOKENS = re.compile(r"\bGPU KV cache size:\s*([\d,]{1,20})\s*tokens\b", re.IGNORECASE)
@@ -360,6 +360,30 @@ def _int(text: str) -> int:
 
 def _whole(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _announcements(log_text: str) -> list[tuple[int, int, bool]]:
+    """(position, layer count, intent) of every line that states a layer count, in log order. `intent` is true for `Loading N ... layers`
+    (the present continuous that a tt-metal model prints before its layer loop), false for the past-tense and `layers loaded: N` forms that
+    are printed after the layers finish."""
+    found = []
+    for rx in _LAYERS_LINES:
+        for m in rx.finditer(log_text):
+            verb = m.groupdict().get("verb")
+            found.append((m.start(), int(m.group("n")), verb is not None and verb.lower() == "loading"))
+    return sorted(found)
+
+
+def _bars_of_last_announcement(announcements: list[tuple[int, int, bool]], log_text: str) -> list[tuple[int, int]]:
+    """The layer progress bars (done, total) that belong to the last announcement. A bar belongs to the component whose announcement it goes
+    with, and a log can hold the bars of several components (a drafter, then the target). For an `intent` line the layer loop runs after the
+    line, so only bars after it count; a bar before it is an earlier component's. For a past-tense line the loop ran before the line, so the
+    bars between the previous announcement and this one count. No announcement, no bars."""
+    if not announcements:
+        return []
+    pos, _count, intent = announcements[-1]
+    lo, hi = (pos, len(log_text) + 1) if intent else (announcements[-2][0] if len(announcements) > 1 else -1, pos)
+    return [(int(m.group(1)), int(m.group(2))) for m in _LAYERS_BAR.finditer(log_text) if lo < m.start() < hi]
 
 
 def _layers_result(seen: list[int], bars: list[tuple[int, int]], expected: int | None) -> dict:
@@ -401,9 +425,8 @@ def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=
         return [_result("layers_loaded", "not_checked", why), _result("kv_cache", "not_checked", why)]
     if len(log_text) > MAX_ENGINE_LOG_CHARS:
         log_text = log_text[:MAX_ENGINE_LOG_CHARS]
-    seen = [int(m.group(1)) for m in sorted((m for rx in _LAYERS_LINES for m in rx.finditer(log_text)), key=lambda m: m.start())]      # log order
-    bars = [(int(a), int(b)) for a, b in _LAYERS_BAR.findall(log_text)]
-    out.append(_layers_result(seen, bars, expected))
+    announced = _announcements(log_text)                                      # log order, with positions
+    out.append(_layers_result([count for _, count, _ in announced], _bars_of_last_announcement(announced, log_text), expected))
     tokens = [_int(m) for m in _KV_TOKENS.findall(log_text)]
     blocks = [int(m) for m in _KV_BLOCKS.findall(log_text)]
     conc = [(_int(a), float(b)) for a, b in _KV_CONCURRENCY.findall(log_text)]
@@ -422,16 +445,30 @@ def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=
         parts.append(f"concurrency {conc[-1][1]:g}x at {conc[-1][0]} tokens per request")
     if max_num_seqs is not None:
         parts.append(f"the can's max_num_seqs is {max_num_seqs}")
-    sequences = capacity // max_model_len if capacity is not None and _whole(max_model_len) and max_model_len > 0 else None
+    # A sequence takes whole blocks, so with a usable block size a request of `max_model_len` tokens needs ceil(max_model_len / block) of them and the
+    # cache holds floor(capacity / block) of them; without one, the unrounded division stays (issue 370, review of PR 443).
+    block = block_size if _whole(block_size) and block_size > 0 else None
+    sequences = blocks_per_sequence = None
+    if capacity is not None and _whole(max_model_len) and max_model_len > 0:
+        if block is not None:
+            blocks_per_sequence = -(-max_model_len // block)
+            sequences = (capacity // block) // blocks_per_sequence
+            if max_model_len % block:
+                parts.append(f"a sequence of {max_model_len} tokens takes {blocks_per_sequence} whole blocks of {block} tokens")
+        else:
+            sequences = capacity // max_model_len
     fewer = sequences < max_num_seqs if sequences is not None and _whole(max_num_seqs) else None
     if fewer:
         parts.append(f"only {sequences} full-length sequence{'' if sequences == 1 else 's'} {'fits' if sequences == 1 else 'fit'}, so requests that all approach "
                      f"max_model_len wait or are preempted")
     facts = {"capacity_tokens": capacity, "capacity_basis": basis, "override_blocks": overrides[-1] if overrides else None,
              "concurrency": conc[-1][1] if conc else None, "tokens_per_request": conc[-1][0] if conc else None,
-             "full_length_sequences": sequences, "fewer_than_max_num_seqs": fewer}
+             "full_length_sequences": sequences, "fewer_than_max_num_seqs": fewer, "blocks_per_sequence": blocks_per_sequence}
     if capacity is not None and _whole(max_model_len) and capacity < max_model_len:
         out.append(_result("kv_cache", "fail", f"the KV cache holds {capacity} tokens, less than one sequence of the declared max_model_len {max_model_len}", **facts))
+    elif sequences == 0 and blocks_per_sequence is not None:
+        out.append(_result("kv_cache", "fail", f"the KV cache holds {capacity // block} whole blocks of {block} tokens, fewer than the {blocks_per_sequence} whole blocks "
+                           f"one sequence of the declared max_model_len {max_model_len} needs", **facts))
     elif conc and conc[-1][1] < 1:
         out.append(_result("kv_cache", "fail", f"the engine states a concurrency of {conc[-1][1]:g}x for {conc[-1][0]} tokens per request: one full-length sequence does not fit", **facts))
     else:

@@ -203,3 +203,99 @@ def test_a_hostile_fifty_megabyte_line_is_read_in_bounded_memory_and_the_child_e
                           env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"})
     assert done.returncode == 0, done.stderr[-800:] + done.stdout[-400:]
     assert len(done.stdout.split()) == 26          # thirteen cases, each printed with its time
+
+
+# ---- review of PR 443, round 2: a progress bar belongs to the announcement it goes with ------------------------------------------------
+
+def _loading(n):
+    return f"(EngineCore pid=101) 2026-11-03 12:39:15.043 | INFO     | models.x.tt.model:__init__:174 - Loading {n} transformer layers (indices=[0])\n"
+
+
+def _bar(done, total):
+    return f"Loading layers:   0%|          | 0/{total} [00:00<?, ?it/s]\rLoading layers: 100%|██████████| {done}/{total} [04:23<00:00,  4.12s/it]\n"
+
+
+def test_an_earlier_components_completed_bar_is_not_the_bar_of_the_final_announcement():
+    # a 32-layer component loads and finishes, then a 64-layer component is announced and its bar has not appeared (or never will)
+    log = _loading(32) + _bar(32, 32) + _loading(64)
+    r = run(log)["layers_loaded"]
+    assert r["state"] == "pass" and r["layers"] == 64 and r["layers_completed"] is None and "no progress bar" in r["detail"]
+
+
+def test_an_earlier_components_short_bar_does_not_fail_a_final_announcement_whose_own_bar_completed():
+    log = _loading(32) + _bar(10, 32) + _loading(64) + _bar(64, 64)
+    r = run(log)["layers_loaded"]
+    assert r["state"] == "pass" and r["layers_completed"] == 64 and "64/64" in r["detail"]
+
+
+def test_the_final_announcements_own_short_bar_still_fails_after_an_earlier_complete_one():
+    log = _loading(32) + _bar(32, 32) + _loading(64) + _bar(40, 64)
+    r = run(log)["layers_loaded"]
+    assert r["state"] == "fail" and r["layers_completed"] == 40 and "40/64" in r["detail"]
+
+
+def test_a_bar_printed_before_the_announcement_is_not_the_announcements_bar_when_the_line_says_loading():
+    log = _bar(64, 64) + _loading(64)
+    r = run(log)["layers_loaded"]
+    assert r["state"] == "pass" and r["layers_completed"] is None
+
+
+def test_a_completion_statement_takes_the_bar_that_came_before_it_and_not_an_earlier_components():
+    # past-tense statements are printed after the layers finish, so their bar lies between the previous statement and themselves
+    log = _bar(32, 32) + "loaded 32 layers\n" + "loaded 64 layers\n"                  # the only bar goes with the 32-layer statement
+    r = run(log)["layers_loaded"]
+    assert r["state"] == "pass" and r["layers"] == 64 and r["layers_completed"] is None
+    log2 = _bar(32, 32) + "loaded 32 layers\n" + _bar(64, 64) + "loaded 64 layers\n"
+    r2 = run(log2)["layers_loaded"]
+    assert r2["state"] == "pass" and r2["layers_completed"] == 64
+    log3 = _bar(32, 32) + "loaded 32 layers\n" + _bar(30, 64) + "loaded 64 layers\n"
+    r3 = run(log3)["layers_loaded"]
+    assert r3["state"] == "fail" and r3["layers_completed"] == 30
+
+
+def test_a_bar_that_follows_a_completion_statement_belongs_to_the_next_component():
+    log = _bar(64, 64) + "loaded 64 layers\n" + _loading(32) + _bar(5, 32)
+    r = run(log)["layers_loaded"]               # the last statement is the 32-layer one: against a 64-layer config it fails on the count alone
+    assert r["state"] == "fail" and r["layers"] == 32
+
+
+# ---- review of PR 443, round 2: sequences are counted in whole blocks ---------------------------------------------------------------
+
+def _cache(tokens):
+    return f"(EngineCore pid=101) INFO 11-03 12:43:46 [kv_cache_utils.py:2177] GPU KV cache size: {tokens} tokens\n"
+
+
+def test_a_length_that_is_not_a_multiple_of_the_block_size_is_counted_in_whole_blocks():
+    # 48 tokens of cache, blocks of 16, requests of 17 tokens: each needs 2 blocks, so one fits, not two
+    r = run(_cache("48"), max_model_len=17, max_num_seqs=2, block_size=16)["kv_cache"]
+    assert r["state"] == "pass" and r["full_length_sequences"] == 1 and r["fewer_than_max_num_seqs"] is True
+    assert r["blocks_per_sequence"] == 2 and "only 1 full-length sequence fits" in r["detail"]
+
+
+def test_a_length_that_is_a_multiple_of_the_block_size_counts_as_before():
+    r = run(_cache("64"), max_model_len=16, max_num_seqs=4, block_size=16)["kv_cache"]
+    assert r["full_length_sequences"] == 4 and r["fewer_than_max_num_seqs"] is False and r["blocks_per_sequence"] == 1
+
+
+def test_a_cache_that_cannot_hold_one_sequence_in_whole_blocks_is_a_fail():
+    # 20 tokens is 1 whole block of 16; a sequence of 18 tokens needs 2 blocks, although 20 >= 18 tokens
+    r = run(_cache("20"), max_model_len=18, max_num_seqs=1, block_size=16)["kv_cache"]
+    assert r["state"] == "fail" and r["full_length_sequences"] == 0 and r["blocks_per_sequence"] == 2 and "whole blocks" in r["detail"]
+
+
+def test_a_cache_that_is_not_a_whole_number_of_blocks_counts_only_its_whole_blocks():
+    # 50 tokens is 3 whole blocks of 16; sequences of 16 tokens need 1 block each: 3 fit, not 3.1
+    r = run(_cache("50"), max_model_len=16, max_num_seqs=4, block_size=16)["kv_cache"]
+    assert r["full_length_sequences"] == 3 and r["fewer_than_max_num_seqs"] is True
+
+
+@pytest.mark.parametrize("bad", [None, 0, -16, True, 1.5, "16"])
+def test_without_a_usable_block_size_the_unrounded_count_is_used_and_no_block_figure_is_stated(bad):
+    r = run(_cache("48"), max_model_len=17, max_num_seqs=2, block_size=bad)["kv_cache"]
+    assert r["full_length_sequences"] == 2 and r["blocks_per_sequence"] is None
+
+
+def test_the_block_count_line_gives_the_same_rounding_through_the_declared_block_size():
+    log = "INFO # GPU blocks: 3\n"                       # 3 blocks of 16 = 48 tokens
+    r = run(log, max_model_len=17, max_num_seqs=2, block_size=16)["kv_cache"]
+    assert r["capacity_tokens"] == 48 and r["full_length_sequences"] == 1 and r["blocks_per_sequence"] == 2
