@@ -91,6 +91,17 @@ def test_rehearsal_waives_only_the_coherent_field_in_stage_3_as_in_stage_2(tmp_p
     assert not gate_full_port_3(bad_stage, bad_run, expected_chips=4, rehearsal=True).ok     # every other check still applies
 
 
+@pytest.mark.parametrize("bad", [0, -1, True, False, "4", 4.0, [4], 10 ** 20])
+def test_an_expected_chip_count_that_is_not_a_positive_whole_number_is_named_and_never_passes(tmp_path, bad):
+    stage_dir, run = stage3(tmp_path)
+    g = gate_full_port_3(stage_dir, run, expected_chips=bad)
+    assert not g.ok
+    if bad == 10 ** 20:
+        assert one(g, "configured for")                      # a very large count is a whole number: the chips do not match it
+    else:
+        assert one(g, "expected_chips must be a whole number of at least 1")
+
+
 def test_the_stage_2_gate_is_unchanged_by_the_new_arguments(tmp_path):
     stage_dir, run = build(tmp_path)
     assert gate_full_port(stage_dir, run).ok

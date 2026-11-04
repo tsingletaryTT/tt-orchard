@@ -1793,9 +1793,11 @@ class Supervisor:
     def _stage_3_chips(self) -> int | None:
         """The chip count stage 3 of a full port runs the port on (issue 326): the largest of the run's `--required-chips` when it is more than
         one board's chips, else None. With None, stage 2's one board is the configured chip count and stage 3 is skipped with a recorded reason
-        (`SKIP_3_FULL_PORT`). The value comes from the operator's option, which a resume keeps (`run_start`); nothing the coder writes is read."""
+        (`SKIP_3_FULL_PORT`). A count that is not a whole number of boards is rounded up, because the lease is whole boards and the gate compares
+        the chips the test ran on with this number (a configured 3 is tested on, and expected as, 4). The value comes from the operator's option,
+        which a resume keeps (`run_start`); nothing the coder writes is read."""
         top = max(self.required_chips) if self.required_chips else 0
-        return top if top > CHIPS_PER_BOARD else None
+        return -(-top // CHIPS_PER_BOARD) * CHIPS_PER_BOARD if top > CHIPS_PER_BOARD else None
 
     def _with_stack_pins(self, base):
         """Stage 0's gate plus the stack record's: the file must be the one the ledger recorded (its sha256), well formed, and hold no critical
@@ -2974,7 +2976,8 @@ class Supervisor:
                 safeio.atomic_write(dst / rel, data, mode=0o644)
                 copied.append({"path": f"stages/3/port/{rel.as_posix()}", "sha256": hashlib.sha256(data).hexdigest()})
         except (OSError, safeio.SafeReadError) as exc:
-            problem = f"{exc.__class__.__name__}: {getattr(exc, 'reason', None) or exc}"[:200]
+            # The class and the reason only: an OSError's own text carries the absolute path of the file, which does not belong in the ledger.
+            problem = f"{exc.__class__.__name__}: {getattr(exc, 'reason', None) or getattr(exc, 'strerror', None) or 'error'}"[:200]
         if problem or not copied:
             shutil.rmtree(dst, ignore_errors=True)            # no half a port: the coder starts from stage 2's files, or from nothing
             self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem=problem or "stages/2/port/ holds no file")

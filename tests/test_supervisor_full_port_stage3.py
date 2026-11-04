@@ -247,12 +247,28 @@ def test_stage_3_is_skipped_with_its_reason_when_no_count_above_one_board_is_con
         r.close()
 
 
-def test_a_configured_count_of_four_runs_stage_3_and_a_count_of_three_chips_rounds_up_to_two_boards(tmp_path):
-    spec = FULL_PORT_STAGE_3
-    sup = SimpleNamespace(required_chips=(2, 3), _stage_3_chips=lambda: Supervisor._stage_3_chips(SimpleNamespace(required_chips=(2, 3))))
-    assert sup._stage_3_chips() == 3
-    boards = Supervisor._phase_boards(SimpleNamespace(_stage_3_chips=sup._stage_3_chips), spec, tmp_path)
-    assert boards == 2
+@pytest.mark.parametrize("counts,chips,boards", [((2, 4), 4, 2), ((2, 3), 4, 2), ((3,), 4, 2), ((1, 2, 4), 4, 2), ((2, 6), 6, 3), ((1, 2), None, 1)])
+def test_the_configured_count_is_whole_boards_and_the_phase_holds_that_many(tmp_path, counts, chips, boards):
+    """The lease is whole boards, so a count of 3 is tested on, and expected as, 4: the gate compares the chips the test ran on with this number."""
+    stub = SimpleNamespace(required_chips=counts)
+    stub._stage_3_chips = lambda: Supervisor._stage_3_chips(stub)
+    assert stub._stage_3_chips() == chips
+    assert Supervisor._phase_boards(stub, FULL_PORT_STAGE_3, tmp_path) == boards
+
+
+def test_a_configured_count_of_three_is_tested_on_the_four_chips_the_lease_grants_and_the_gate_expects_four(tmp_path):
+    r = Rig(tmp_path)
+    with_snapshot(r, tmp_path)
+    r.args.full_port = True
+    r.args.required_chips = (2, 3)
+    try:
+        make3(r)
+        abort_at_pause(r)
+        r.run()
+        assert [d["result"] for d in r.ends(3)] == ["pass"]
+        assert len(stage_3_tests(r)[0]["chips"]) == 4
+    finally:
+        r.close()
 
 
 # ---- a resume between stage 2 and stage 3 -----------------------------------------------------------
@@ -379,6 +395,31 @@ def test_the_seed_refuses_too_many_files_and_a_file_over_the_cap(tmp_path, monke
     monkeypatch.setattr(supervisor, "STAGE_3_SEED_FILE_BYTES", 10)
     (src2 / "big.py").write_text("x" * 100)
     assert seed(sup2, stage2) == ["stage 2 port not copied"] and not (stage2 / "port").exists()
+
+
+@pytest.mark.timeout(30)
+def test_the_seed_does_not_open_a_fifo(tmp_path):
+    import os
+    sup, stage, src = seeder(tmp_path)
+    (src / "a.py").write_text("import ttnn\n")
+    os.mkfifo(src / "b_pipe.py")
+    assert seed(sup, stage) == ["stage 2 port not copied"] and "is not a regular file" in sup.ledger.rows[0][2]["problem"]
+
+
+def test_the_seed_problem_text_carries_no_path_when_a_file_cannot_be_read(tmp_path):
+    import os
+    sup, stage, src = seeder(tmp_path)
+    secret = src / "locked_model.py"
+    secret.write_text("import ttnn\n")
+    os.chmod(secret, 0)
+    try:
+        if os.access(secret, os.R_OK):
+            pytest.skip("this account can read a mode-0 file (running as root)")
+        assert seed(sup, stage) == ["stage 2 port not copied"]
+        problem = sup.ledger.rows[0][2]["problem"]
+        assert str(tmp_path) not in problem and "locked_model" not in problem and problem.startswith(("SafeReadError", "ReadFailed", "PermissionError"))
+    finally:
+        os.chmod(secret, 0o644)
 
 
 def test_the_seed_keeps_a_port_already_in_the_stage_directory(tmp_path):

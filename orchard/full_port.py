@@ -165,6 +165,9 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
         return [f"the full-port check runs in stages {list(STAGES)}, not stage {stage!r}"], []
     reasons: list[str] = []
     seen: list[str] = []
+    if expected_chips is not None and (type(expected_chips) is not int or expected_chips < 1):
+        reasons.append(f"expected_chips must be a whole number of at least 1 (the supervisor's configured chip count), got {expected_chips!r}")
+        expected_chips = None          # the other checks still run and name their own reasons
     result = _json(stage_dir / "result.json", "result.json", reasons)
     if result is None:
         return reasons, seen
