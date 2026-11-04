@@ -243,3 +243,25 @@ def test_the_first_declared_name_that_is_listed_is_chosen_whatever_the_listing_o
 def test_a_request_extra_name_is_used_alone_when_both_are_given():
     r = served_verify.check_listing(200, listing("a", "b"), declared_name="b", declared_names=["a"], declared_context=4096)
     assert r["state"] == "pass" and r["served"]["id"] == "b"
+
+
+# ---- review of PR 443, round 3: the structured engine-log facts reach the saved boot evidence ----------------------------------------------
+
+def test_the_saved_boot_evidence_keeps_the_structured_layer_and_cache_facts(tmp_path):
+    import json
+    ev = boot(tmp_path)
+    saved = json.loads((tmp_path / "work" / "boot-check.json").read_text())
+    assert saved["engine_facts"] == ev["engine_facts"]
+    assert saved["engine_facts"]["layers_loaded"] == {"layers": 36, "layer_counts_seen": [36], "layers_completed": None}
+    kv = saved["engine_facts"]["kv_cache"]
+    assert kv["capacity_tokens"] == 100000 and kv["capacity_basis"] == "engine" and kv["override_blocks"] is None
+    assert kv["concurrency"] == 24.41 and kv["tokens_per_request"] == 4096 and kv["full_length_sequences"] == 24
+    assert kv["fewer_than_max_num_seqs"] is None and kv["blocks_per_sequence"] is None       # the stand-in's can declares no max_num_seqs: nothing to compare
+
+
+def test_a_failing_engine_log_check_keeps_its_facts_in_the_saved_evidence(tmp_path):
+    import json
+    ev = boot(tmp_path, "small_kv")
+    saved = json.loads((tmp_path / "work" / "boot-check.json").read_text())
+    assert ev["checks"]["kv_cache"]["ok"] is False
+    assert saved["engine_facts"]["kv_cache"]["capacity_tokens"] == 1024 and saved["engine_facts"]["kv_cache"]["concurrency"] == 0.25
