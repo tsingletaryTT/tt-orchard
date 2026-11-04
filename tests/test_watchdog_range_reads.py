@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-"""Reading different line ranges of one file is progress, not a loop (issue 427, third rehearsal run).
+"""Reading different line ranges of one file is progress. It is not a loop (issue 427, third rehearsal run).
 
 In the third stage 2 rehearsal the coder paged through one reference module with `sed -n 'a,bp' <file>`: four calls, four different
 ranges, four different pieces of text. `command_shape` dropped the range, the four calls shared one shape, and the near-duplicate rule
