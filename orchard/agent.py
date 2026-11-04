@@ -524,7 +524,7 @@ class AgentStep:
         self.temperature, self.top_p, self.seed = temperature, top_p, seed
         # Issue 458. The penalties are sent on every request only when a caller sets them. `unstick` is the sampling of the request that
         # follows a reply cut off at max_tokens (orchard/runaway.py), None to send nothing different. `restart_on_caps` is how many times a
-        # step may drop its conversation and start again from the task after two capped replies in a row, instead of ending.
+        # step may drop its conversation and start again from the task after two capped replies in a row, and goes on.
         self.frequency_penalty, self.repetition_penalty = frequency_penalty, repetition_penalty
         self.unstick, self.restart_on_caps = unstick, restart_on_caps
         self._after_cap, self._caps, self._loops, self._restarts = False, 0, 0, 0
