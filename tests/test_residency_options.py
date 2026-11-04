@@ -403,7 +403,12 @@ class FakeResp:
         self.body = body
 
     def read(self, n=-1):
-        return self.body if n < 0 else self.body[:n]
+        # A stream: what is returned is not returned again, and an empty answer is the end (the chunked, deadline-bounded Hub readers read until it).
+        if n is None or n < 0:
+            out, self.body = self.body, b""
+        else:
+            out, self.body = self.body[:n], self.body[n:]
+        return out
 
     def __enter__(self):
         return self

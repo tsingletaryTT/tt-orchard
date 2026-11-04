@@ -2539,7 +2539,10 @@ class Supervisor:
         read again here, so the lab or board count at this point is the one judged. No record, a damaged or skipped one, or an unknown
         box is no claim and the stage goes on. The first boot's disk and host RAM are judged only when `hardware_pending`: a resume after the
         hardware test ended converts and downloads nothing, and the cache the test made may already fill the disk the check would demand
-        again (review of PR 435, round 1). The chip counts are judged either way."""
+        again (review of PR 435, round 1). The chip counts are judged either way.
+
+        Known limit (issue 460): MemAvailable is read here, before the hardware phase parks a large-tier coder, so the reading can be smaller than
+        the one the conversion will see by about the coder's resident size. The check can then block a little early; it never passes what does not fit."""
         rec, box = residency.read_record(self.run_dir), self._box_chips(spec)
         stage = spec.boards * CHIPS_PER_BOARD
         why = (residency.shortfall(rec, box) or residency.shortfall(rec, stage, what=f"stage {spec.number}'s lease")) if box is not None else None

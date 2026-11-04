@@ -398,6 +398,45 @@ _MLP_PARTS = frozenset({"mlp", "feed_forward", "ffn"})
 _EXPERT_PARTS = frozenset({"experts", "routed_experts", "local_experts"})
 _ROUTER_PARTS = frozenset({"gate", "router"})
 _LAYER_PREFIX = re.compile(r"^(.*?\blayers\.\d+)\.")
+_MAX_PATH_PARTS = 12               # a name is read down this many dotted parts; more is not a block layout
+_MAX_PARENTS = 200_000             # distinct parents of numbered parts remembered; a hostile header cannot make the memory grow past this
+GROUPING_RULE = ("a tensor is grouped with the other tensors of its numbered block (`layers.N`, or the first numbered path component that repeats "
+                 "across the checkpoint's tensors, such as `h.N` or `blocks.N`); a tensor with no numbered block is a unit on its own")
+
+
+def _repeated_parents(names) -> frozenset:
+    """The dotted prefixes under which a numbered part takes at least two different values across `names` (`model.layers` for `model.layers.0.`
+    and `model.layers.1.`; `transformer.h` for `transformer.h.0.` and so on). Those numbers are block indexes. Only the first _MAX_PATH_PARTS parts of a
+    name are read, a number has at most six digits, and at most _MAX_PARENTS distinct prefixes are remembered."""
+    seen: dict[str, set] = {}
+    for name in names:
+        parts = name.split(".", _MAX_PATH_PARTS)[:_MAX_PATH_PARTS]
+        for i, part in enumerate(parts):
+            if part.isdigit() and len(part) <= 6:
+                parent = ".".join(parts[:i])
+                bucket = seen.get(parent)
+                if bucket is None:
+                    if len(seen) >= _MAX_PARENTS:
+                        continue
+                    bucket = seen[parent] = set()
+                bucket.add(part)
+    return frozenset(parent for parent, numbers in seen.items() if len(numbers) >= 2)
+
+
+def _block_key(name: str, repeated) -> str | None:
+    """The key of the numbered block a tensor sits in, or None when it sits in none. A `layers.<n>` prefix is the block as before. Otherwise the
+    block is the name up to and including its first numbered part whose prefix is in `repeated`, so `transformer.h.3.mlp.experts.7.w1.weight` is in
+    block `transformer.h.3` and not in an expert of its own."""
+    m = _LAYER_PREFIX.match(name)
+    if m:
+        return m.group(1)
+    if not repeated:
+        return None
+    parts = name.split(".", _MAX_PATH_PARTS)[:_MAX_PATH_PARTS]
+    for i, part in enumerate(parts):
+        if part.isdigit() and len(part) <= 6 and ".".join(parts[:i]) in repeated:
+            return ".".join(parts[:i + 1])
+    return None
 
 
 def _is_table(parts: list, name: str) -> bool:
@@ -611,8 +650,13 @@ def machine_check(record, *, free_disk_bytes, mem_available_bytes, cache_declare
         return None, None
     parts, notice = [], None
     if whole(mem_available_bytes) and fb["host_ram_bytes"] > mem_available_bytes:
+        grouping = fb.get("conversion_grouping")
+        detail = ""
+        if isinstance(grouping, dict) and whole(grouping.get("blocks")) and whole(grouping.get("tensors_alone")) and whole(fb.get("conversion_in_flight_bytes")):
+            detail = (f" (an estimate: its in-flight part, {_gib(fb['conversion_in_flight_bytes'])}, is the largest of {grouping['blocks']} numbered blocks "
+                      f"and {grouping['tensors_alone']} single tensors; {GROUPING_RULE})")
         parts.append(f"the model does not fit this box: the first boot's conversion needs about {_gib(fb['host_ram_bytes'])} of host RAM "
-                     f"and {_gib(mem_available_bytes)} is available")
+                     f"and {_gib(mem_available_bytes)} is available{detail}")
     if whole(free_disk_bytes) and fb["disk_bytes"] > free_disk_bytes:
         download = fb.get("checkpoint_bytes_to_download")
         if whole(download) and download > free_disk_bytes:
@@ -783,6 +827,8 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
     stored = {c: 0 for c in CATEGORIES}
     uniform = {p: 0 for p in PRECISIONS}         # the chips' bytes if one precision applied to the whole model (categories on the host stay there)
     layer_groups: dict[str, int] = {}
+    repeated = _repeated_parents(t.name for t in headers.tensors)
+    alone_max, alone_count = 0, 0                 # tensors with no numbered block: each is a unit, counted without a table entry per tensor
     for t in headers.tensors:
         cat = categorize(t.name, t.shape)
         m = measured[cat]
@@ -796,9 +842,12 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
         for p in PRECISIONS:
             uniform[p] += _stored_bytes(t, p)
         if t.dtype in FLOAT_DTYPES and len(t.shape) >= 2:
-            g = _LAYER_PREFIX.match(t.name)
-            key = g.group(1) if g else cat
-            layer_groups[key] = layer_groups.get(key, 0) + t.bytes + max(t.bytes, _stored_bytes(t, pol[cat]))
+            unit = t.bytes + max(t.bytes, _stored_bytes(t, pol[cat]))
+            key = _block_key(t.name, repeated)
+            if key is None:
+                alone_max, alone_count = max(alone_max, unit), alone_count + 1
+            else:
+                layer_groups[key] = layer_groups.get(key, 0) + unit
     by_measured = {c: v for c, v in measured.items() if v["tensors"]}
     host_cats = [c for c in CATEGORIES if pol[c] == "host" and c in by_measured]
     device = sum(stored[c] for c in by_measured if pol[c] != "host")
@@ -821,10 +870,11 @@ def estimate(headers: HeaderSet, *, dram_gib=None, kv_gib=None, reserve_gib=None
             "routed_expert_host_bytes": stored["routed_experts"] if experts_on_host else 0,
             "note": MOE_NOTE_HOST if experts_on_host else MOE_NOTE} if routed else {"present": False})
 
-    flight = max(layer_groups.values(), default=0)      # the largest group: each tensor's source plus the larger of its source and converted size
+    flight = max(max(layer_groups.values(), default=0), alone_max)    # the largest block or lone tensor: each tensor's source plus the larger of its source and converted size
     to_download = 0 if headers.local else headers.checkpoint_bytes
     first_boot = {"snapshot_local": headers.local, "checkpoint_bytes_to_download": to_download, "cache_bytes": device,
-                  "disk_bytes": device + to_download, "conversion_in_flight_bytes": flight, "host_ram_bytes": host + flight}
+                  "disk_bytes": device + to_download, "conversion_in_flight_bytes": flight, "host_ram_bytes": host + flight,
+                  "conversion_grouping": {"rule": GROUPING_RULE, "blocks": len(layer_groups), "tensors_alone": alone_count}}
     record = {
         "label": "estimate", "scan": "ran", "source": headers.source, "labels": dict(LABELS),
         "measured": {"files": headers.files, "tensors": len(headers.tensors), "checkpoint_bytes": headers.checkpoint_bytes, "by_category": by_measured},

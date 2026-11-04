@@ -17,12 +17,14 @@ Two rules run through the file:
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
 import shutil
 import socket
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -34,6 +36,8 @@ from orchard.defaults import TEST_DISK_GB
 
 OK, WARN, BLOCK = "ok", "warn", "block"
 HUB_TIMEOUT_S = 20
+HUB_TOTAL_S = 60.0                   # the whole of one secondary Hub read (config, weight index): the 20 s socket timeout applies to each read, so a server that drips bytes needs this
+HUB_READ_CHUNK = 1 << 16
 GOZER_TIMEOUT_S = 10
 CPU_PROBE_TIMEOUT_S = 5
 REFERENCE_IMPORT_TIMEOUT_S = 180     # importing torch and transformers cold can take a minute
@@ -83,11 +87,27 @@ def _parameters(payload: dict) -> dict | None:
 
 
 CONFIG_FETCH_BYTES = 1 << 20         # a config.json larger than this is not read from the Hub
+
+
+def _read_capped(resp, cap: int, clock) -> bytes | None:
+    """At most `cap` bytes of `resp`, read in chunks, or None when the answer is longer than `cap` or the read takes longer than HUB_TOTAL_S in all.
+    The cap is enforced while reading (an endless answer is not held), and the deadline is checked after every chunk (a server that drips bytes cannot
+    hold the preflight for longer than one socket timeout past it)."""
+    deadline = clock() + HUB_TOTAL_S
+    chunks, held = [], 0
+    while True:
+        chunk = resp.read(min(HUB_READ_CHUNK, cap + 1 - held))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        held += len(chunk)
+        if held > cap or clock() > deadline:
+            return None
 _HUB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 _HUB_REVISION = re.compile(r"^[0-9a-f]{7,40}$")
 
 
-def read_hub_config(model_id: str, sha: str | None, *, opener=None) -> dict | None:
+def read_hub_config(model_id: str, sha: str | None, *, opener=None, clock=time.monotonic) -> dict | None:
     """The model's config.json from the Hub as an object, or None for any reason it cannot be had: an id that is not owner/name, a failed or slow
     request, an answer over CONFIG_FETCH_BYTES, text that is not JSON, JSON that is not an object. No Authorization header is sent (the harness
     never sends the operator's token). The revision is the hash the Hub's answer gave, so the file read is the one the counts describe; a value
@@ -98,11 +118,13 @@ def read_hub_config(model_id: str, sha: str | None, *, opener=None) -> dict | No
     req = urllib.request.Request(f"https://huggingface.co/{model_id}/resolve/{rev}/config.json", headers={"User-Agent": "tt-orchard"})
     try:
         with (opener or urllib.request.urlopen)(req, timeout=HUB_TIMEOUT_S) as resp:
-            raw = resp.read(CONFIG_FETCH_BYTES + 1)
-        if len(raw) > CONFIG_FETCH_BYTES:
+            raw = _read_capped(resp, CONFIG_FETCH_BYTES, clock)
+        if raw is None:
             return None
         data = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError, RecursionError):     # URLError and HTTPError are OSErrors; a timeout is too; a file nested past the parser's depth is unreadable
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError, http.client.HTTPException):
+        # URLError and HTTPError are OSErrors; a timeout is too; a truncated chunked answer is an HTTPException (IncompleteRead); a file nested past
+        # the parser's depth is unreadable
         return None
     return data if isinstance(data, dict) else None
 
@@ -111,7 +133,7 @@ INDEX_FETCH_BYTES = 16 << 20         # a weight index larger than this is not re
 MAX_INDEX_NAMES = 2_000_000
 
 
-def read_hub_weight_index(model_id: str, sha: str | None, *, opener=None) -> list[str] | None:
+def read_hub_weight_index(model_id: str, sha: str | None, *, opener=None, clock=time.monotonic) -> list[str] | None:
     """The tensor names of the model's `model.safetensors.index.json` (the keys of its `weight_map`) from the Hub, or None for any reason they
     cannot be had: an id that is not owner/name, a failed or slow request (a single-file model has no index, and a gated repository answers 401
     to a request with no token), an answer over INDEX_FETCH_BYTES, text that is not JSON, a map that is not a non-empty object, more
@@ -123,11 +145,11 @@ def read_hub_weight_index(model_id: str, sha: str | None, *, opener=None) -> lis
     req = urllib.request.Request(f"https://huggingface.co/{model_id}/resolve/{rev}/model.safetensors.index.json", headers={"User-Agent": "tt-orchard"})
     try:
         with (opener or urllib.request.urlopen)(req, timeout=HUB_TIMEOUT_S) as resp:
-            raw = resp.read(INDEX_FETCH_BYTES + 1)
-        if len(raw) > INDEX_FETCH_BYTES:
+            raw = _read_capped(resp, INDEX_FETCH_BYTES, clock)
+        if raw is None:
             return None
         data = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError, http.client.HTTPException):
         return None
     wm = data.get("weight_map") if isinstance(data, dict) else None
     if not isinstance(wm, dict) or not wm or len(wm) > MAX_INDEX_NAMES:
@@ -1491,7 +1513,7 @@ def default_signals(cfg, research_options=None) -> Signals:
                 return info, None
         except urllib.error.HTTPError as exc:
             return None, f"HTTP {exc.code}"
-        except (OSError, ValueError, RecursionError) as exc:        # an answer nested past the parser's depth is an error text, not a crash
+        except (OSError, ValueError, RecursionError, http.client.HTTPException) as exc:   # an answer nested past the parser's depth, or cut short, is an error text, not a crash
             return None, f"{type(exc).__name__}: {exc}"
 
     def local_snapshot(model_id: str):

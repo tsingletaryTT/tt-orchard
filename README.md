@@ -1635,7 +1635,7 @@ what prints the refusal numbers. A lab run skips the row, because its tests run 
 
 Before a full-port stage 2 the supervisor also compares the record's first-boot figures with this machine. Two of them block: the download of
 the checkpoint against the free disk under the cache root (block code `disk-full`), because a download needs the disk whatever the port does,
-and the host RAM available (`model-does-not-fit`). The third, the converted-weight cache, is a ledger notice (`the converted-weight cache may
+and the host RAM available (`model-does-not-fit`; the conversion's in-flight part is the largest numbered block of the checkpoint, found from the tensor names (`layers.N`, or the first numbered path component that repeats, such as `h.N` or `blocks.N`), and a tensor with no numbered block is a unit on its own: the record says which in `first_boot.conversion_grouping`, and the block text repeats it). The third, the converted-weight cache, is a ledger notice (`the converted-weight cache may
 not fit`): a port's `load(model_dir, mesh_device)` may convert straight onto the chips and write no cache (`scripts/minicpm3/chip_model.py`
 does), and the check runs before stage 2 has written the port. `residency.machine_check(..., cache_declared=True)` gives the block back for a
 caller that knows the port writes a cache. Each figure is the record's estimate against a reading of `/proc/meminfo` and the filesystem. A reading that cannot be taken is no claim (a MemAvailable of zero is a reading, and a cache root that does
