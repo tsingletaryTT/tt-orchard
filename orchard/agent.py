@@ -66,7 +66,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchard import safeio
+from orchard import runaway, safeio
 from orchard.canary import CanaryError, post_json
 from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_TIMEOUT_S,
                               AGENT_THINKING, TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
@@ -173,6 +173,15 @@ TRUNCATION_NUDGE = ("Your last reply was cut off before you ran any command. "
 EMPTY_NUDGE = ("Your last reply was empty: it had no text and no command. Say what you will do next, "
                "then call a tool, or state that the stage is finished and name the output files you "
                "wrote.")
+# The nudge after a capped reply that repeated itself (orchard/runaway.py): asking it to think briefly again invites the same loop.
+LOOP_NUDGE = ("Your last reply repeated itself until it was cut off. Do not analyse or explain further. "
+              "Run one command or write one file now, and keep the reply short.")
+RESTART_NOTE = ("The conversation was restarted because earlier replies repeated themselves until they were cut off. Everything you "
+                "did is on disk; the files are listed below. Read only what you need, do one thing at a time, and keep every reply short.")
+# The files a stage directory holds that the shell guard looks at: only the port, and no more than this many files and entries.
+PORT_GUARD_FILES = 200
+PORT_GUARD_ENTRIES = 2000
+PORT_GUARD_DEPTH = 4
 # How many replies in a row may run no command (cut off or empty) before the step ends as "error".
 BAD_REPLIES_IN_A_ROW = 2
 # The words each kind of bad reply gets in the ledger notice and in the error detail.
@@ -216,6 +225,9 @@ class Tools:
         # host tt-metal tree's models/ that those stages may change. write_file reaches it by a path that starts with its name.
         self.scratch = Path(scratch) if scratch is not None else None
         self.env, self.timeout, self.limit = env, timeout, limit
+        # What the port files held before the last shell command, so a command that makes one a runaway can be undone (issue 458).
+        self._port_stamp: dict[str, tuple[int, int]] = {}
+        self._port_backup: dict[str, bytes] = {}
 
     def call(self, name: str, arguments: str) -> str:
         try:
@@ -251,6 +263,7 @@ class Tools:
             return "error: command must be a non-empty string"
         out_path = self.stage_dir / "log" / "last-shell-output.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        self._port_remember()
         try:
             with open(out_path, "wb") as out:
                 code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out)
@@ -258,7 +271,97 @@ class Tools:
             return f"refused: {exc}"
         text = out_path.read_text(encoding="utf-8", errors="replace")
         head = f"killed after {self.timeout} s" if timed_out else f"exit {code}"
-        return f"{head}\n{clip(text, self.limit)}"
+        notes = self._port_judge()
+        return f"{head}\n{clip(text, self.limit)}" + ("\n" + "\n".join(notes) if notes else "")
+
+    def _port_files(self) -> list[tuple[str, os.stat_result]]:
+        """The regular files under <stage>/port/ (links and caches left out), at most PORT_GUARD_FILES of them, visiting at most
+        PORT_GUARD_ENTRIES entries and PORT_GUARD_DEPTH levels, so a hostile tree cannot make the guard slow."""
+        out, stack, seen = [], [(str(self.stage_dir / "port"), 0)], 0
+        while stack and len(out) < PORT_GUARD_FILES:
+            directory, depth = stack.pop()
+            try:
+                entries = os.scandir(directory)
+            except OSError:
+                continue
+            with entries:
+                for e in entries:
+                    seen += 1
+                    if seen > PORT_GUARD_ENTRIES or len(out) >= PORT_GUARD_FILES:
+                        return out
+                    try:
+                        if e.is_symlink():
+                            continue
+                        if e.is_dir(follow_symlinks=False):
+                            if depth < PORT_GUARD_DEPTH and e.name != "__pycache__":
+                                stack.append((e.path, depth + 1))
+                        elif e.is_file(follow_symlinks=False):
+                            out.append((e.path, e.stat(follow_symlinks=False)))
+                    except OSError:
+                        continue
+        return out
+
+    @staticmethod
+    def _port_read(path: str, size: int) -> bytes | None:
+        """The bytes of a port file of at most MAX_FILE_BYTES bytes, through the bounded safe reader, or None (too large, or the reader
+        refuses it: a FIFO, a link, a device)."""
+        if size > runaway.MAX_FILE_BYTES:
+            return None
+        try:
+            return safeio.read_bytes(path, max_bytes=runaway.MAX_FILE_BYTES)
+        except (safeio.SafeReadError, OSError):
+            return None
+
+    def _port_remember(self) -> None:
+        """Before a shell command: keep the bytes of each port file that changed since the last look, when the file is acceptable."""
+        for path, st in self._port_files():
+            stamp = (st.st_size, st.st_mtime_ns)
+            if self._port_stamp.get(path) == stamp:
+                continue
+            self._port_stamp[path] = stamp
+            raw = self._port_read(path, st.st_size)
+            if raw is not None and runaway.file_problem(raw.decode("utf-8", errors="replace")) is None:
+                self._port_backup[path] = raw
+            else:
+                self._port_backup.pop(path, None)
+
+    def _port_judge(self) -> list[str]:
+        """After a shell command: a port file that grew past the caps or became a loop is put back as it was (or removed, when it is new),
+        and the agent is told. The command's own output has already been read. Nothing outside <stage>/port/ is looked at."""
+        notes = []
+        for path, st in self._port_files():
+            stamp = (st.st_size, st.st_mtime_ns)
+            if self._port_stamp.get(path) == stamp:
+                continue
+            if st.st_size > runaway.MAX_FILE_BYTES:
+                problem = (f"it is {st.st_size:,} bytes; the limit for a file you write is {runaway.MAX_FILE_BYTES:,}")
+            else:
+                raw = self._port_read(path, st.st_size)
+                problem = None if raw is None else runaway.file_problem(raw.decode("utf-8", errors="replace"))
+            rel = os.path.relpath(path, self.run_dir)
+            if problem is None:
+                self._port_stamp[path] = stamp
+                continue
+            backup = self._port_backup.get(path)
+            try:
+                if backup is not None:
+                    safeio.atomic_write(path, backup, mode=0o644)
+                    what = "restored"
+                else:
+                    os.unlink(path)
+                    what = "removed"
+            except OSError as exc:
+                notes.append(f"refused: {rel} is not acceptable ({problem}) and could not be put back ({exc.__class__.__name__}); "
+                             "delete it or write a shorter file")
+                continue
+            try:
+                st2 = os.lstat(path)
+                self._port_stamp[path] = (st2.st_size, st2.st_mtime_ns)
+            except OSError:
+                self._port_stamp.pop(path, None)
+            notes.append(f"refused and {what}: {rel} {problem}. Write a shorter file: a port is tens of KB, so do not repeat blocks "
+                         "and do not generate text with a loop.")
+        return notes
 
     def target(self, path) -> Path | None:
         """The real path `path` names inside the stage directory, or None (links resolved).
@@ -348,6 +451,10 @@ class Tools:
         if p.name.startswith("ledger"):
             return "refused: the ledger is written only by the supervisor"
         rel = os.path.relpath(p, os.path.realpath(self.run_dir))
+        problem = runaway.file_problem(content)
+        if problem:
+            return (f"refused: {rel} was not written: {problem}. A file you write is a few KB to tens of KB: write a shorter file, "
+                    "do not repeat blocks, and split a long file into parts you write one at a time.")
         # A repeat of the last write is answered, not done: an agent that has finished sometimes writes
         # the same file again and again instead of ending the step (the first lab run).
         if p.is_file() and p.read_text(encoding="utf-8", errors="replace") == content:
@@ -401,7 +508,9 @@ class AgentStep:
                  clock=time.time, guard: RetryGuard | None = None, max_turns: int = AGENT_MAX_TURNS,
                  max_tokens: int = AGENT_MAX_TOKENS, timeout: float = AGENT_REQUEST_TIMEOUT_S,
                  thinking: bool = AGENT_THINKING, finished=None, temperature: float = 0,
-                 top_p: float | None = None, seed: int | None = None):
+                 top_p: float | None = None, seed: int | None = None,
+                 frequency_penalty: float | None = None, repetition_penalty: float | None = None,
+                 unstick: "runaway.Unstick | None" = None, restart_on_caps: int = 0):
         self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
         self.ledger, self.stage, self.phase = ledger, stage, phase
         self.feed, self.control, self.http, self.clock = feed, control, http, clock
@@ -413,6 +522,12 @@ class AgentStep:
         # Sampling. The default is greedy decoding (temperature 0), sent exactly as before. top_p and seed are sent
         # only when a caller sets them; whether a server honours the seed is up to the server.
         self.temperature, self.top_p, self.seed = temperature, top_p, seed
+        # Issue 458. The penalties are sent on every request only when a caller sets them. `unstick` is the sampling of the request that
+        # follows a reply cut off at max_tokens (orchard/runaway.py), None to send nothing different. `restart_on_caps` is how many times a
+        # step may drop its conversation and start again from the task after two capped replies in a row, instead of ending.
+        self.frequency_penalty, self.repetition_penalty = frequency_penalty, repetition_penalty
+        self.unstick, self.restart_on_caps = unstick, restart_on_caps
+        self._after_cap, self._caps, self._loops, self._restarts = False, 0, 0, 0
         # finished() -> bool: are this step's files written and valid (the supervisor's check)? When it
         # is true and the agent writes a file again unchanged, the step ends as done: an agent that has
         # finished sometimes repeats its last write instead of ending (the first lab run).
@@ -508,6 +623,71 @@ class AgentStep:
         return ("two replies in a row ran no command: "
                 + ", then ".join(BAD_KIND_TEXT[k] for k in kinds) + "; no action was taken")
 
+    def _send_profiled(self, request: dict, plain: dict) -> dict:
+        """Send `request`. When it carries the retry profile and the server refuses it, send `plain` instead (once) and say so in the
+        ledger: not every server takes every sampling parameter, and the step must go on."""
+        if request is plain or self.unstick is None:
+            return self._send(request)
+        try:
+            return self._send(request)
+        except AgentError as exc:
+            self.ledger.append("notice", self.stage, watchdog=True, agent=self.agent, phase=self.phase,
+                               what="retry sampling refused by the server", retry_sampling=self.unstick.record(),
+                               error=str(exc)[:300])
+            self._after_cap = False
+            return self._send(plain)
+
+    def _capped_in_stage(self) -> int:
+        """Capped replies the ledger holds for this stage, from every step so far."""
+        try:
+            return sum(1 for e in self.ledger.read() if e.get("stage") == self.stage and e.get("event") == "notice"
+                       and (e.get("data") or {}).get("reply_capped"))
+        except Exception:
+            return 0
+
+    def _note_capped(self, content: str, tokens) -> tuple[dict, str | None]:
+        """One reply was cut off at max_tokens: count it, find out whether it was a repetition loop, and arm the retry profile. Returns
+        the fields for the ledger notice and the loop reason (None when it was not a loop)."""
+        loop = runaway.loop_reason(content)
+        self._caps += 1
+        self._loops += 1 if loop else 0
+        self._after_cap = True
+        fields = {"reply_capped": True, "repetition": bool(loop), "capped_in_step": self._caps,
+                  "capped_in_stage": self._capped_in_stage() + 1}
+        if loop:
+            fields["repetition_detail"] = loop[:200]
+        if self.unstick is not None:
+            fields["retry_sampling"] = self.unstick.record()
+        return fields, loop
+
+    def _loop_detail(self) -> str:
+        """What the error detail adds when some of the capped replies were repetition loops: the coder's output is the cause."""
+        if not self._loops:
+            return ""
+        return (f"; {self._loops} of the {self._caps} capped replies in this step were repetition loops: "
+                "the coder's replies are the likely cause, so the port may be fine")
+
+    def _restart_fresh(self, turn: int) -> None:
+        """Drop the conversation and start again from the task, with the list of files on disk. Called after two capped replies in a row,
+        at most `restart_on_caps` times in a step. The loops built up in a context of 35,000 tokens and more; a short context does not
+        carry them."""
+        messages = self.messages
+        files = []
+        for root in (self.tools.stage_dir, self.tools.stage_dir / "port"):
+            try:
+                for e in sorted(os.scandir(root), key=lambda e: e.name):
+                    if e.is_file(follow_symlinks=False) and len(files) < 40:
+                        files.append(f"- {os.path.relpath(e.path, self.run_dir)} ({e.stat(follow_symlinks=False).st_size} bytes)")
+            except OSError:
+                continue
+        task = messages[1]["content"] if len(messages) > 1 and isinstance(messages[1].get("content"), str) else ""
+        text = f"{task}\n\n## From the supervisor\n{RESTART_NOTE}\n" + ("\n".join(files) if files else "(no files yet)")
+        messages[:] = [messages[0], {"role": "user", "content": text}]
+        self._restarts += 1
+        self.ledger.append("decision", self.stage, decision="context restarted after capped replies", phase=self.phase, turn=turn,
+                           capped_in_step=self._caps, repetition_loops=self._loops, restarts=self._restarts,
+                           files_listed=len(files))
+
     # ---- the loop ---------------------------------------------------------------------------
 
     def run(self, system: str, user: str) -> Outcome:
@@ -551,8 +731,15 @@ class AgentStep:
                 request["seed"] = self.seed
             if not self.thinking:
                 request["chat_template_kwargs"] = {"enable_thinking": False}
+            if self.frequency_penalty is not None:
+                request["frequency_penalty"] = self.frequency_penalty
+            if self.repetition_penalty is not None:
+                request["repetition_penalty"] = self.repetition_penalty
+            plain = request
+            if self._after_cap and self.unstick is not None:
+                request = self.unstick.apply(plain)       # the request after a capped reply: not greedy, a lower cap
             try:
-                data = self._send(request)
+                data = self._send_profiled(request, plain)
                 msg = data["choices"][0]["message"]
                 finish = data["choices"][0].get("finish_reason")
                 if not isinstance(msg, dict):
@@ -592,17 +779,26 @@ class AgentStep:
             if bad:
                 bad_run.append(bad)
                 tokens = usage.get("completion_tokens")
+                loop = None
+                capped: dict = {}
                 if bad == "truncated":
                     tokens = tokens or self.max_tokens
+                    capped, loop = self._note_capped(content, tokens)
                 self.ledger.append("notice", self.stage, watchdog=True, agent=self.agent,
                                    what="reply cut off at max_tokens" if bad == "truncated" else "empty reply",
                                    phase=self.phase, turn=turn, finish_reason=finish,
-                                   completion_tokens=tokens, in_a_row=len(bad_run))
+                                   completion_tokens=tokens, in_a_row=len(bad_run), **capped)
                 if len(bad_run) >= BAD_REPLIES_IN_A_ROW:
-                    return self._end("error", turn, detail=self._bad_detail(bad_run, tokens))
+                    if "truncated" in bad_run and self._restarts < self.restart_on_caps:
+                        self._restart_fresh(turn)
+                        logged = len(messages)
+                        bad_run = []
+                        continue
+                    return self._end("error", turn, detail=self._bad_detail(bad_run, tokens) + self._loop_detail())
                 messages.append({"role": "user",
-                                 "content": TRUNCATION_NUDGE if bad == "truncated" else EMPTY_NUDGE})
+                                 "content": (LOOP_NUDGE if loop else TRUNCATION_NUDGE) if bad == "truncated" else EMPTY_NUDGE})
                 continue
+            self._after_cap = False
             bad_run = []
             if not calls:
                 return self._end(self.control.stop_reason() or "done", turn, final_text=content)

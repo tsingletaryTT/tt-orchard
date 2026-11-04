@@ -499,6 +499,9 @@ cp config/tiers.example.toml config/tiers.toml
 | `model` | The model id the server lists at `/v1/models` |
 | `placement` | `chips` or `cpu` |
 | `context_tokens` | Optional. The context length, a positive integer |
+| `max_tokens` | Optional. The cap on one reply of this tier's model, 256 to 131072. Default 16384. The largest reply that ended normally in 389 measured replies was 5,463 tokens, so a coder tier with thinking off can use 8192 |
+| `temperature`, `frequency_penalty`, `repetition_penalty` | Optional numbers sent on every request of an agent step (ranges 0 to 2, -2 to 2, 0.5 to 2). Not sent when unset: the default is greedy decoding, as before |
+| `unstick_max_tokens`, `unstick_temperature`, `unstick_frequency_penalty`, `unstick_repetition_penalty` | Optional. The request that follows a reply cut off at `max_tokens` is not greedy and is capped lower, because the same request would repeat the same loop (issue 458). Defaults: temperature 0.5, cap 8192, frequency penalty 0.2, no repetition penalty. A server that refuses these parameters gets the plain request instead, and the ledger says so |
 
 **`[stages.<n>]`**, one table for each stage 0 to 8. Each names tiers by name:
 
@@ -1382,6 +1385,32 @@ sentences. A failed trial is not a stage failure.
 The graft trial comes first. A grafted drafter is chosen for a model that needs sampling only when its own probe shows sampling applied.
 The sampling decision then judges the configuration that is served. The decision is `stages/2/sampling-decision.json` and a
 `sampling decision` ledger entry; stage 4's configurations and stage 7's package follow it, and the stage 2 gate recomputes it from the files.
+
+### 5.5f Runaway coder replies, and the stage 2 result the supervisor writes (issues 458 and 456)
+
+On 2026-11-03 two full-port bring-ups on a new model ended in stage 2 on replies that were cut off at `max_tokens`. Each capped reply was one
+paragraph repeated about 60 times (15 different lines in 757), in a context of 35,000 tokens and more, under greedy decoding. The retry sent the
+same context with the same sampling, so it produced the same loop. What the harness does now:
+
+- **A reply that is cut off is its own record.** The ledger notice `reply cut off at max_tokens` carries `reply_capped`, whether the text was a
+  repetition loop (`repetition`, with the measurement), `capped_in_step`, `capped_in_stage` and the retry sampling that was used. The narrator
+  says "a repetition loop" and counts the stage's capped replies. A loop is text of at least 8,000 characters that compresses (zlib) to under
+  0.06 of its size, or that has 100 or more lines of which at most 20% differ (`orchard/runaway.py`; measured on 389 replies and 750 repository files).
+- **The request after a capped reply is different.** It uses the tier's retry profile (above): not greedy, a lower cap, a small frequency penalty.
+  A loop gets a nudge that says so ("do not analyse further, run one command"). Normal requests are unchanged.
+- **After two capped replies in a row the step starts again** from the task and the list of files on disk, once per step
+  (`AGENT_RESTARTS_ON_CAPS`). The ledger decision `context restarted after capped replies` records it. A further two end the step, and the error
+  detail says how many capped replies were repetition loops and that the coder's replies are the likely cause.
+- **A file the agent writes is bounded.** `write_file` refuses a file over 400,000 bytes or 6,000 lines, or over 20,000 characters that compress
+  to under 0.04 (stricter than for a reply, because refusing a file costs a rewrite), and leaves the old file as it was. A shell command that makes a
+  file under `stages/<n>/port/` fail the same test has it put back (or removed, when it is new), and the command's output says so.
+- **Stage 2 of a full port: the supervisor writes `result.json`** when the hardware test passed and the check's record is complete
+  (`orchard/full_port_result.py`). Every field is the record's or computed from its ids exactly as the gate does (`top1_agreement` is recomputed, not
+  copied). `coherent` is the only judgement: the supervisor answers it with a stated floor that checks form (printable text, mostly words, no word holding more
+  than a quarter of the text) and the file says so. The supervisor then runs the gate's own check on what it wrote. A failed test, a missing record, text
+  below the floor, or a result the check refuses leaves the finish step to the agent, as before (the derived file is deleted first). In a rehearsal
+  run (`--full-port-rehearsal`) unreadable text is written as `coherent: false`, which the gate waives. Ledger: `result derived by the supervisor`
+  or `result not derived by the supervisor` with the reason.
 
 ### 5.6 The credentials preflight
 

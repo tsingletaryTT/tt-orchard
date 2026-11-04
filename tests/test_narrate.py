@@ -555,3 +555,21 @@ def test_a_passing_hardware_test_shows_no_output_tail(run):
     out = io.StringIO()
     narrator(run, out, replay=True).poll()
     assert "all good" not in out.getvalue()
+
+
+def test_a_capped_reply_that_was_a_repetition_loop_says_so_and_counts_the_stage():
+    text = one(entry("notice", 2, what="reply cut off at max_tokens", watchdog=True, reply_capped=True, repetition=True,
+                     capped_in_step=2, capped_in_stage=3)).text
+    assert "repetition loop" in text and "3 in this stage" in text
+    plain = one(entry("notice", 2, what="reply cut off at max_tokens", watchdog=True, reply_capped=True, repetition=False, capped_in_stage=1)).text
+    assert "repetition" not in plain and "1 in this stage" in plain
+
+
+def test_a_restart_after_capped_replies_is_shown_as_a_warning():
+    line = one(entry("decision", 2, decision="context restarted after capped replies", capped_in_step=2, repetition_loops=2))
+    assert "cut off 2 times" in line.text and "2 repeated themselves" in line.text and line.bad
+
+
+def test_a_derived_result_and_a_result_left_to_the_agent_are_shown():
+    assert "written by the supervisor" in one(entry("decision", 2, decision="result derived by the supervisor", top1_agreement=0.94, n_tokens=32)).text
+    assert "stays with the agent" in one(entry("decision", 2, decision="result not derived by the supervisor", why="the hardware test did not pass")).text

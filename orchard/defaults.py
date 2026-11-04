@@ -241,6 +241,9 @@ AGENT_MAX_TOKENS = 16384        # choice: max_tokens for one model response. A r
                                 # thinking tokens count toward it. On the live Qwen3.8 run, 8,192 was
                                 # used up by reasoning in 3 of the failed replies. At about 80 tokens/s
                                 # a reply that uses all 16,384 takes about 200 s.
+AGENT_RESTARTS_ON_CAPS = 1      # choice: after two replies in a row cut off at max_tokens, a step drops its conversation and starts again
+                                # from the task once, instead of ending (issue 458). Both full-port bring-ups that reached stage 2 on
+                                # a new model ended on capped replies that were repetition loops in a context of 35,000 tokens and more.
 AGENT_REQUEST_TIMEOUT_S = 900.0 # choice: one non-streaming response; prefill alone measured 42 to 78 s
                                 # at 130K to 204K tokens (spec section 3), and contexts here stay short
 TOOL_TIMEOUT_S = 1800.0         # choice: one shell command run for an agent

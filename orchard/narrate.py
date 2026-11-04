@@ -113,6 +113,14 @@ def _decision(e: dict, d: dict) -> list[Line]:
     if what == "graft trial started":
         return [Line(o, "graft trial: serving the nearest model's mtp.* head grafted onto this model, beside the safe configuration "
                         "(this test can take 10 to 35 minutes on the chips)")]
+    if what == "context restarted after capped replies":
+        return [Line(o, f"the coder's replies were cut off {d.get('capped_in_step', '?')} times in this step "
+                        f"({d.get('repetition_loops', 0)} repeated themselves): the step starts again from a short context", True)]
+    if what == "result derived by the supervisor":
+        return [Line(o, f"result.json written by the supervisor from the check's record (top-1 agreement "
+                        f"{d.get('top1_agreement', '?')}, {d.get('n_tokens', '?')} tokens): no finish step needed")]
+    if what == "result not derived by the supervisor":
+        return [Line(o, f"the finish step stays with the agent: {_clip(d.get('why', '?'), 160)}")]
     if what in ("coder container removed", "coder container left"):
         r = d.get("result") if isinstance(d.get("result"), dict) else {}
         name = _clip(str(r.get("container", "?")), 80)
@@ -240,6 +248,8 @@ def lines_for(e: dict) -> list[Line]:
         f = (d.get("findings") or [None])[0]
         text = (f"watchdog {f.get('detector')}: {f.get('summary')}" if isinstance(f, dict)
                 else str(d.get("what") or d.get("reason") or "notice"))
+        if d.get("reply_capped"):           # issue 458: say whether the reply was a repetition loop and how many the stage has had
+            text += (" (a repetition loop)" if d.get("repetition") else "") + f"; {d.get('capped_in_stage', '?')} in this stage"
         return [Line("sheepdog" if d.get("watchdog") else "orchardist", _clip(text, 220), True)]
     if ev in ("park", "restore"):
         return [Line("orchardist", f"{ev}: {d.get('step', '?')}")]

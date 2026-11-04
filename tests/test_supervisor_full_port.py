@@ -107,6 +107,15 @@ def rig(tmp_path):
     r.close()
 
 
+@pytest.fixture
+def agent_finish(monkeypatch):
+    """The tests that use this are about what the finish AGENT writes (a forged marker, an incoherent result, a swapped file). Since issue 456
+    the supervisor writes result.json itself when the hardware test passed, so these tests switch that derivation off and the agent step runs
+    as it did. tests/test_supervisor_full_port_derived.py covers the derived path."""
+    from orchard import full_port_result
+    monkeypatch.setattr(full_port_result, "derive", lambda *a, **k: (None, "switched off by the test"))
+
+
 def test_a_full_port_with_the_flag_does_not_pause_before_stage_2_and_uses_the_full_port_skill(rig):
     make(rig)
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")      # the pause before stage 3 is where the run ends
@@ -166,6 +175,7 @@ def test_an_attended_resume_after_the_pause_goes_on_into_the_generic_stages(rig)
     assert started(rig, 3) and [d["result"] for d in rig.ends(2)] == ["pass"]
 
 
+@pytest.mark.usefixtures("agent_finish")
 def test_a_failing_gate_does_not_reach_the_pause(rig):
     make(rig, over={(2, "finish"): lambda good: {"result.json": {**good, "top1_agreement": 0.5}}})      # the record says 1.0
     rig.args.unattended = True
@@ -188,6 +198,7 @@ def test_a_result_written_during_prepare_is_set_aside_and_the_record_comes_from_
     assert rec["schema"] == "orchard-port-check/1" and rec["chip_ids"]          # the test's record replaced the forgery
 
 
+@pytest.mark.usefixtures("agent_finish")
 def test_a_marker_the_finish_step_rewrote_is_refused(rig):
     # The finish step edits test-result.json after the test; the ledger holds the sha256 of the file the supervisor wrote.
     marker = {"test-result.json": {"command": full_port.COMMAND, "returncode": 0, "timed_out": False, "chips": ["c"], "output": {}}}
@@ -496,6 +507,7 @@ def test_parse_has_a_rehearsal_flag_that_defaults_off(tmp_path):
     assert parse(a).full_port_rehearsal is False and parse(a + ["--full-port", "--full-port-rehearsal"]).full_port_rehearsal is True
 
 
+@pytest.mark.usefixtures("agent_finish")
 def test_without_the_rehearsal_flag_an_incoherent_port_fails_stage_2(rig):
     make(rig, over={(2, "finish"): incoherent})
     rig.args.unattended = True
@@ -505,6 +517,7 @@ def test_without_the_rehearsal_flag_an_incoherent_port_fails_stage_2(rig):
     assert not any(d.get("decision") == supervisor.REHEARSAL_WAIVED for d in rig.decisions())
 
 
+@pytest.mark.usefixtures("agent_finish")
 def test_with_the_rehearsal_flag_stage_2_passes_and_the_ledger_says_the_field_was_waived(rig):
     make(rig, over={(2, "finish"): incoherent})
     rig.args.full_port_rehearsal = True
@@ -517,6 +530,7 @@ def test_with_the_rehearsal_flag_stage_2_passes_and_the_ledger_says_the_field_wa
     assert start["data"]["full_port_rehearsal"] is True
 
 
+@pytest.mark.usefixtures("agent_finish")
 def test_a_result_swapped_after_the_gate_read_it_still_gets_the_waiver_decision(rig, monkeypatch):
     # A writer replaces result.json with `coherent: true` right after the gate's read. The waiver the gate applied is on its result, so the
     # decision is written from that and the file is not opened again.
@@ -536,6 +550,7 @@ def test_a_result_swapped_after_the_gate_read_it_still_gets_the_waiver_decision(
     assert len([d for d in rig.decisions() if d.get("decision") == supervisor.REHEARSAL_WAIVED]) == 1
 
 
+@pytest.mark.usefixtures("agent_finish")
 def test_the_rehearsal_flag_keeps_every_other_check(rig):
     make(rig, over={(2, "finish"): lambda good: {"result.json": {**good, "coherent": False, "top1_agreement": 0.5}}})
     rig.args.full_port_rehearsal = True
