@@ -154,7 +154,7 @@ def test_a_capped_reply_with_truncated_arguments_is_counted_and_arms_the_retry_p
         out = step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick()).run("s", "u")
     assert out.status == "done"
     notices = [e["data"] for e in ledger.read() if e["event"] == "notice" and e["data"].get("reply_capped")]
-    assert len(notices) == 1 and notices[0]["capped_in_step"] == 1
+    assert len(notices) == 1 and notices[0]["capped_in_step"] == 1 and notices[0]["incomplete_tool_calls"] == 1
     assert fm.requests[1]["temperature"] == 0.5 and fm.requests[1]["max_tokens"] == 8192, "the retry after the cap used the plain request"
     assert not (run_dir / "stages" / "0" / "port" / "port_model.py").exists(), "a call with truncated arguments must not run"
 
