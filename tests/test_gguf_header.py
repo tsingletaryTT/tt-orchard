@@ -211,17 +211,31 @@ def test_a_string_over_the_string_cap_is_refused_even_inside_the_header_cap(tmp_
 
 
 def test_the_reader_never_reads_past_the_header(tmp_path, monkeypatch):
-    """A header and a sparse 8 GiB of 'tensor data': the reader reads the header and a bounded read-ahead, never the data."""
+    """A header and a sparse 8 GiB of 'tensor data': every physical read ends inside the parsed header (review of PR 441, round 1: a
+    read-ahead of 1 MiB used to pull in tensor bytes after a small header)."""
     m = module()
     p = write(tmp_path, gguf(hybrid_kvs(), hybrid_tensors()))
-    header_end = len(p.read_bytes()) - 32 * len(hybrid_tensors())
     os.truncate(p, 8 << 30)
     seen = []
     real = os.pread
     monkeypatch.setattr(os, "pread", lambda fd, n, off: (seen.append((off, n)), real(fd, n, off))[1])
-    assert m.read_gguf_header(p)["version"] == 3
-    assert seen and max(off + n for off, n in seen) <= header_end + m.GGUF_READ_AHEAD + 4096
-    assert max(n for _, n in seen) <= m.GGUF_READ_AHEAD
+    out = m.read_gguf_header(p)
+    assert out["version"] == 3 and seen
+    assert max(off + n for off, n in seen) <= out["header_bytes"], (max(off + n for off, n in seen), out["header_bytes"])
+    assert sum(n for _, n in seen) <= out["header_bytes"]          # no byte is asked for twice
+
+
+def test_no_read_goes_past_a_small_header_cap_even_when_the_file_is_large(tmp_path, monkeypatch):
+    """The cap bounds the bytes asked of the file, not only the fields that are used (review of PR 441, round 1)."""
+    m = module()
+    p = write(tmp_path, gguf([kv("general.name", T_STR, "x" * 5000)], []))
+    os.truncate(p, 8 << 30)
+    seen = []
+    real = os.pread
+    monkeypatch.setattr(os, "pread", lambda fd, n, off: (seen.append((off, n)), real(fd, n, off))[1])
+    with pytest.raises(m.GgufError, match="larger than"):
+        m.read_gguf_header(p, max_header=2000)
+    assert seen and max(off + n for off, n in seen) <= 2000
 
 
 def test_a_hostile_length_is_refused_before_any_large_read(tmp_path, monkeypatch):
@@ -232,7 +246,7 @@ def test_a_hostile_length_is_refused_before_any_large_read(tmp_path, monkeypatch
     monkeypatch.setattr(os, "pread", lambda fd, n, off: (seen.append(n), real(fd, n, off))[1])
     with pytest.raises(m.GgufError):
         m.read_gguf_header(write(tmp_path, data))
-    assert max(seen) <= m.GGUF_READ_AHEAD
+    assert max(seen) <= 4096
 
 
 def test_a_link_to_a_regular_file_is_followed_because_a_snapshot_is_made_of_links(tmp_path):
@@ -431,6 +445,86 @@ def test_the_float32_epsilon_of_a_gguf_agrees_with_the_config_value(tmp_path):
     kvs = hybrid_kvs(**{"qwen35.attention.layer_norm_rms_epsilon": (T_F32, 1e-06)})
     rows, _ = rows_of(tmp_path, hybrid_config(rms_norm_eps=1e-06), kvs=kvs)
     assert rows["rms norm epsilon"]["verdict"] == "agree" and abs(rows["rms norm epsilon"]["gguf"] - 1e-06) < 1e-12
+
+
+@pytest.mark.parametrize("a,b,same", [
+    (1_000_000, 1_000_000, True),
+    (1_000_000, 1_000_001, False),                      # review of PR 441, round 1: the relative tolerance made this agree
+    (3_000_000_000, 3_000_000_001, False),
+    (248_320, 248_319, False),
+    (10 ** 400, 10 ** 400, True),                       # an integer too large for a float must not raise
+    (10 ** 400, 10 ** 400 + 1, False),
+    (10 ** 400, 1e300, False),                          # int against float: no OverflowError, and they differ
+    (1e300, 10 ** 400, False),
+    (10 ** 7, 1e7, True),                               # int against float keeps the tolerance (a rope base written either way)
+    (1e-6, 1.0000004e-6, True),                         # floats keep the tolerance (a float32 epsilon)
+    (1.0, 1.1, False),
+])
+def test_integers_compare_exactly_and_a_huge_integer_cannot_abort_stage_0(a, b, same):
+    m = module()
+    assert m._same(a, b) is same and m._same(b, a) is same
+    assert m._same([a, 1], [b, 1]) is same
+
+
+@pytest.mark.parametrize("key", ["rms_norm_eps", "rope_theta"])
+def test_a_float_setting_written_as_a_huge_integer_is_not_comparable_and_cannot_abort_stage_0(tmp_path, key):
+    """Same class as review round 1's finding on integer comparison: `math.isfinite` raises OverflowError on an integer too large for a float."""
+    cfg = hybrid_config(rms_norm_eps=10 ** 400) if key == "rms_norm_eps" else hybrid_config(
+        rope_parameters={"rope_theta": 10 ** 400, "partial_rotary_factor": 0.25, "mrope_section": [1, 1, 0]})
+    rows, _ = rows_of(tmp_path, cfg)
+    assert all(r["verdict"] in ("agree", "differ", "not comparable") for r in rows.values())
+    assert any(r["config"] is not None and r["verdict"] == "not comparable" for r in rows.values())
+
+
+def test_number_and_whole_refuse_what_is_not_a_finite_number_without_raising():
+    m = module()
+    assert m._number(10 ** 400) is None and m._number(-10 ** 400) is None
+    assert m._number(float("inf")) is None and m._number(True) is None and m._number("1") is None
+    assert m._number(3) == 3 and m._number(2.5) == 2.5
+
+
+def test_a_row_of_whole_counts_that_differ_by_one_differs_even_when_the_count_is_large(tmp_path):
+    kvs = hybrid_kvs(**{"qwen35.embedding_length": (T_U32, 3_000_000_000)})
+    rows, _ = rows_of(tmp_path, hybrid_config(hidden_size=3_000_000_001), kvs=kvs)
+    assert rows["hidden size"]["verdict"] == "differ"
+    rows, _ = rows_of(tmp_path, hybrid_config(hidden_size=3_000_000_000), kvs=kvs)
+    assert rows["hidden size"]["verdict"] == "agree"
+
+
+def untied_tensors():
+    return hybrid_tensors() + [("output.weight", [64, 300], Q6_K)]
+
+
+@pytest.mark.parametrize("split", [
+    {"split.no": (T_U16, 0), "split.count": (T_U16, 2)},            # a shard of a two-file model
+    {"split.tensors.count": (T_I32, 9999)},                         # the model holds more tensors than this file does
+    {"split.count": (T_STR, "two")},                                # a split count that is not a number: the inventory is unknown
+], ids=["split.count 2", "tensors.count above this file", "split.count not a number"])
+@pytest.mark.parametrize("tie", [True, False])
+def test_a_missing_output_tensor_in_one_shard_of_a_split_file_does_not_show_tying(tmp_path, split, tie):
+    """Review of PR 441, round 1: a split GGUF's tensor table lists one shard. An untied model whose output.weight is in another shard was
+    reported as tied, a false difference from config.json."""
+    kvs = hybrid_kvs(**split)
+    rows, e = rows_of(tmp_path, hybrid_config(tie_word_embeddings=tie), kvs=kvs)
+    assert e["tied_embeddings"] is None and e["tensor_inventory_complete"] is False
+    assert rows["tied embeddings"]["verdict"] == "not comparable"
+    assert "split" in rows["tied embeddings"]["note"].lower()
+
+
+def test_an_output_tensor_that_is_present_shows_untied_even_in_a_shard(tmp_path):
+    kvs = hybrid_kvs(**{"split.no": (T_U16, 1), "split.count": (T_U16, 2)})
+    rows, e = rows_of(tmp_path, hybrid_config(tie_word_embeddings=False), kvs=kvs, tensors=untied_tensors())
+    assert e["tied_embeddings"] is False and rows["tied embeddings"]["verdict"] == "agree"
+    rows, _ = rows_of(tmp_path, hybrid_config(tie_word_embeddings=True), kvs=kvs, tensors=untied_tensors())
+    assert rows["tied embeddings"]["verdict"] == "differ"
+
+
+def test_a_file_that_is_not_split_still_reads_its_missing_output_tensor_as_tied(tmp_path):
+    rows, e = rows_of(tmp_path, hybrid_config(tie_word_embeddings=True))
+    assert e["tied_embeddings"] is True and e["tensor_inventory_complete"] is True and rows["tied embeddings"]["verdict"] == "agree"
+    kvs = hybrid_kvs(**{"split.no": (T_U16, 0), "split.count": (T_U16, 1), "split.tensors.count": (T_I32, len(hybrid_tensors()))})
+    rows, e = rows_of(tmp_path, hybrid_config(tie_word_embeddings=False), kvs=kvs)
+    assert e["tied_embeddings"] is True and e["tensor_inventory_complete"] is True and rows["tied embeddings"]["verdict"] == "differ"
 
 
 def test_a_row_with_a_missing_side_is_not_comparable_and_never_agree(tmp_path):

@@ -1222,7 +1222,11 @@ hyperparameters, whether the output projection is tied, the multi-token-predicti
 quantization of each kind of tensor (the layer number folded into `N`), with the kinds left at full precision listed. It also holds an
 `agreement` table against `config.json`: each row (block count, sizes, heads, rope settings, layer pattern, the linear-attention
 dimensions, tied embeddings, the multi-token-prediction count, vocabulary size, the chat template) says agree, differ or not comparable,
-with both values. A header that cannot be read is listed as unreadable with its reason. Nothing here changes the class or the path, and a
+with both values. Every physical read of the file asks for exactly the bytes of one validated field, so no byte past the header or past the
+cap is read. Integer rows compare exactly (a tolerance is kept for floats only), and a number too large for a float makes a row not comparable
+and never stops stage 0. A file of a split GGUF lists one shard's tensors: its record says `tensor_inventory_complete: false` and tying is
+reported as unknown unless that shard holds an `output.weight`. A header that cannot be read is listed as unreadable with its reason. Nothing
+here changes the class or the path, and a
 difference is a finding for the agent and the operator to read, never a gate failure. `delta.json` gets one finding that points at the
 file, and RISKS.md gets a section, "What the GGUF files show", which says no stage records using the full-precision list. That list is
 llama.cpp's choice for that file. It is a hint about which tensors are sensitive to precision, and it was not measured on this hardware. The TT

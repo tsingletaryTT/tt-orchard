@@ -140,7 +140,8 @@ not edit `class` or `path` to get around a GGUF file: the script does not count 
 The script also reads the header of each ignored GGUF file, without the weights, into `evidence/gguf-header.json`. It holds the
 architecture's hyperparameters, whether the output projection is tied, the multi-token-prediction count, a hash of the embedded chat
 template, how each kind of tensor was quantized, and an `agreement` table against `config.json` (each row says agree, differ or not
-comparable, with both values). Read it as an independent reading of the architecture. A row that differs is a finding to explain in the
+comparable, with both values; a shard of a split file reports `tensor_inventory_complete: false` and tying as unknown). Read it as an
+independent reading of the architecture. A row that differs is a finding to explain in the
 delta (a conversion quirk, a dropped head, a different template), and it never changes the class or the path. The tensors the quantization
 left at full precision are a hint about which tensors are sensitive to precision, taken from llama.cpp's choice. They were not
 measured on this hardware. The script writes the file and the finding that points at it. Do not edit the file, and do not load or

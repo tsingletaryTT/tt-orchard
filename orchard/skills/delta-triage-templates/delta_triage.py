@@ -1029,7 +1029,6 @@ def sidecar_finding(sc: dict) -> str:
 # dequantizes a tensor, and the result never changes the class or the path.
 
 GGUF_MAX_HEADER = 64 << 20        # a header larger than this is refused (a real 248k-token vocabulary header is about 11 MB)
-GGUF_READ_AHEAD = 1 << 20         # the most one read asks of the file
 GGUF_MAX_KV = 4096                # key-value pairs
 GGUF_MAX_TENSORS = 100_000
 GGUF_MAX_KEY = 4096               # bytes in a key or a tensor name
@@ -1063,12 +1062,13 @@ class GgufError(ValueError):
 
 
 class GgufStream:
-    """Bounded sequential reads from one descriptor. `take` returns the next n bytes or raises; `skip` moves past n bytes without reading."""
+    """Bounded sequential reads from one descriptor. `take` returns the next n bytes or raises; `skip` moves past n bytes without reading.
+    A read asks the file for exactly the n bytes of the field that `_room` has just validated (inside the file and inside the cap), so no byte
+    past the header and no byte past the cap is ever asked for. There is no read-ahead: a read-ahead cannot know where the header ends."""
 
     def __init__(self, fd: int, size: int, cap: int):
         self.fd, self.size, self.cap = fd, size, cap
         self.pos = 0
-        self.buf, self.buf_at = b"", 0
         self.elements = 0
 
     def _room(self, n: int, what: str) -> None:
@@ -1079,20 +1079,14 @@ class GgufStream:
 
     def take(self, n: int, what: str) -> bytes:
         self._room(n, what)
-        if self.pos < self.buf_at or self.pos + n > self.buf_at + len(self.buf):
-            want = min(GGUF_READ_AHEAD, self.size - self.pos)
-            have = b""
-            while len(have) < max(n, 1) and len(have) < want:
-                chunk = os.pread(self.fd, want - len(have), self.pos + len(have))
-                if not chunk:
-                    break
-                have += chunk
-            self.buf, self.buf_at = have, self.pos
-            if len(have) < n:
+        have = b""
+        while len(have) < n:
+            chunk = os.pread(self.fd, n - len(have), self.pos + len(have))
+            if not chunk:
                 raise GgufError(f"the header is cut short: {what} runs past the end of the file")
-        start = self.pos - self.buf_at
+            have += chunk
         self.pos += n
-        return self.buf[start:start + n]
+        return have
 
     def skip(self, n: int, what: str) -> None:
         self._room(n, what)
@@ -1152,7 +1146,7 @@ def read_gguf_header(path, *, max_header: int = GGUF_MAX_HEADER) -> dict:
     """{"version", "kv", "tensors": [(name, dims, type name)], "header_bytes", "file_size", "alignment"} from a GGUF file's header.
 
     The file is opened once with O_NONBLOCK (a FIFO does not block) and a link is followed (a snapshot is made of links). The descriptor must be a
-    regular file, so a link to a device, a FIFO or a directory is refused. It is read with pread through GgufStream: at most GGUF_READ_AHEAD bytes per read and never past max_header. Lengths and counts in the file are
+    regular file, so a link to a device, a FIFO or a directory is refused. It is read with pread through GgufStream: each read asks for exactly the bytes of one validated field, so no byte past the header or past max_header is asked for. Lengths and counts in the file are
     checked against the file size and a cap before they are used. Refused, with one GgufError whose reason holds no content from the file:
     a file that is not GGUF, a version other than 2 and 3, counts and lengths above the caps, an array of arrays, an unknown value type, a
     key or tensor name that repeats or is not UTF-8, a tensor with no dimension or more than GGUF_MAX_DIMS, an alignment that is not a
@@ -1236,7 +1230,12 @@ def _whole(v):
 
 
 def _number(v):
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return None
+    try:
+        return v if math.isfinite(v) else None
+    except OverflowError:                          # an integer too large to convert to a float is not a usable number
+        return None
 
 
 def _config_part(config, key):
@@ -1269,7 +1268,12 @@ def _same(a, b) -> bool:
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b or (isinstance(a, bool) and isinstance(b, bool) and a == b)
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return a == b or math.isclose(a, b, rel_tol=1e-6)
+        if isinstance(a, int) and isinstance(b, int):
+            return a == b                          # counts and sizes agree exactly: a tolerance would hide 1,000,000 against 1,000,001
+        try:
+            return a == b or math.isclose(a, b, rel_tol=1e-6)         # the tolerance is for floats (a float32 epsilon, a rope base)
+        except OverflowError:                      # an integer too large to convert to a float: it differs from any float
+            return False
     return a == b
 
 
@@ -1304,7 +1308,25 @@ def _agreement_row(item, gguf, config, kind, note=None):
     return row
 
 
-def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config, template_text, mtp_tensors=None) -> list[dict]:
+def tensor_inventory_complete(kv: dict, tensor_count: int) -> bool:
+    """Whether this file's tensor table is the whole model's. A split GGUF (`split.count` above 1, or a `split.tensors.count` above this file's
+    own count) lists one shard, so a tensor that is not in it may be in another file. A split key that is not a whole number makes the
+    inventory unknown, and so does a negative count (review of PR 441, round 1)."""
+    for key in ("split.count", "split.tensors.count"):
+        if key not in kv:
+            continue
+        n = _whole(kv[key])
+        if n is None or n < 0:
+            return False
+        if key == "split.count" and n > 1:
+            return False
+        if key == "split.tensors.count" and n > tensor_count:
+            return False
+    return True
+
+
+def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config, template_text, mtp_tensors=None,
+                   inventory_complete: bool = True) -> list[dict]:
     """The agreement table of one GGUF file against config.json (and the repository's chat template). A row is listed when either side has
     a value. A difference is a finding to read and never a gate failure."""
     rows = []
@@ -1361,7 +1383,9 @@ def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config
     heads, vdim = _whole(c("linear_num_value_heads")), _whole(c("linear_value_head_dim"))
     add("linear inner size", g("ssm.inner_size"), heads * vdim if heads is not None and vdim is not None else None, "int",
         "value heads times the value head dimension")
-    add("tied embeddings", tied, c("tie_word_embeddings"), "bool", "the GGUF is tied when it has no output.weight tensor")
+    add("tied embeddings", tied, c("tie_word_embeddings"), "bool",
+        "the GGUF is tied when it has no output.weight tensor" if inventory_complete else
+        "this file is one shard of a split GGUF (or its split keys cannot be read), so a missing output.weight does not show tying")
     nextn, mtp = g("nextn_predict_layers"), c("mtp_num_hidden_layers")
     mtp_note = None
     if _whole(nextn) == 0 and _whole(mtp) and mtp > 0:
@@ -1414,7 +1438,10 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> d
     full = [{"kind": kind, "type": t, "count": n} for kind, c in sorted(by_kind.items()) for t, n in sorted(c.items())
             if t in GGUF_FULL_PRECISION]
     names = {t[0] for t in h["tensors"]}
-    tied = (("output.weight" not in names) if role == "language model" else None)
+    complete = tensor_inventory_complete(kv, len(h["tensors"]))
+    # A tensor that is present shows the model is untied even in one shard of a split file. A tensor that is missing shows tying only when
+    # this file lists every tensor of the model.
+    tied = None if role != "language model" else (False if "output.weight" in names else (True if complete else None))
     template = kv.get("tokenizer.chat_template")
     template = template if isinstance(template, str) and template else None
     array_len = lambda v: v.get("array_len") if isinstance(v, dict) else (len(v) if isinstance(v, list) else None)
@@ -1435,9 +1462,9 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> d
                          "note": ("Kinds of tensor the tool that quantized this file left at full precision, with the layer number folded "
                                   "into N. A hint about which tensors are sensitive to precision, from llama.cpp's choice for this file. "
                                   "It was not measured on Tenstorrent hardware.")},
-        "tied_embeddings": tied, "nextn_predict_layers": nextn,
+        "tied_embeddings": tied, "tensor_inventory_complete": complete, "nextn_predict_layers": nextn,
     }
-    rows = gguf_agreement(role, arch, kv, tied, tokens, template_sha, config, template_text, mtp_tensors)
+    rows = gguf_agreement(role, arch, kv, tied, tokens, template_sha, config, template_text, mtp_tensors, inventory_complete=complete)
     entry["agreement"] = rows
     entry["agreement_summary"] = {v: sum(1 for r in rows if r["verdict"] == v) for v in ("agree", "differ", "not comparable")}
     return entry
