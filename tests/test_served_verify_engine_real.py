@@ -302,3 +302,17 @@ def test_the_block_count_line_gives_the_same_rounding_through_the_declared_block
     log = "INFO # GPU blocks: 3\n"                       # 3 blocks of 16 = 48 tokens
     r = run(log, max_model_len=17, max_num_seqs=2, block_size=16)["kv_cache"]
     assert r["capacity_tokens"] == 48 and r["full_length_sequences"] == 1 and r["blocks_per_sequence"] == 2
+
+
+def test_a_bar_after_a_completion_statement_is_not_that_statements_bar():
+    # the 64-layer component finished (bar, then the statement); a later component's bar has appeared with no statement of its own yet
+    log = _bar(64, 64) + "loaded 64 layers\n" + _bar(5, 32)
+    r = run(log)["layers_loaded"]
+    assert r["state"] == "pass" and r["layers_completed"] == 64 and "64/64" in r["detail"]
+
+
+def test_announcements_in_the_two_line_forms_are_read_in_log_order_not_pattern_order():
+    # a `layers loaded: N` line comes first in the log and a `Loading N layers` line after it: the last in the log decides, whichever pattern matched it
+    log = "layers loaded: 32\n" + _loading(64) + _bar(64, 64)
+    r = run(log)["layers_loaded"]
+    assert r["state"] == "pass" and r["layers"] == 64 and r["layer_counts_seen"] == [32, 64]
