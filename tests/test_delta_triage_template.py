@@ -1990,3 +1990,22 @@ def test_the_mtp_row_carries_the_tensor_count_stage_0_found_in_the_safetensors(t
     d = delta(stage)
     assert row["verdict"] == "differ" and row["gguf"] == 0 and row["config"] == 1
     assert f"the safetensors carry {d['mtp']['new_tensors']} mtp tensors" in row["note"]
+
+
+# ---- PR 441, third Copilot review: text that cannot be encoded as UTF-8 never stops stage 0 -------------------------------------
+
+def test_a_gguf_named_with_bytes_that_are_not_utf8_does_not_stop_stage_0_and_delta_json_reads_back(text_case):
+    stage = text_case()
+    name = os.fsdecode(b"bad\xffname-Q4_K_M.gguf")                       # Python reads such a file name with a lone surrogate in it
+    add_gguf(stage, names=(name,))
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = delta(stage)
+    assert any(i["file"] == name for i in d["ignored_files"])
+
+
+def test_a_lone_surrogate_in_tokenizer_config_chat_template_does_not_stop_stage_0(text_case):
+    stage = text_case(extra_files={"tokenizer_config.json": '{"chat_template": "x\\ud800y"}'})
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert area(delta(stage), "chat_template")["finding"]

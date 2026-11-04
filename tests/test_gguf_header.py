@@ -665,8 +665,9 @@ def test_the_repository_template_is_the_jinja_file_else_the_tokenizer_config_str
     assert m.repo_chat_template(tmp_path) == "from-config"
     (tmp_path / "chat_template.jinja").write_text("from-file")
     assert m.repo_chat_template(tmp_path) == "from-file"
-    (tmp_path / "chat_template.jinja").write_text("")                     # an empty file does not win
-    assert m.repo_chat_template(tmp_path) == "from-config"
+    (tmp_path / "chat_template.jinja").write_text("")                     # an empty file still wins: transformers reads the file whenever it exists
+    assert m.repo_chat_template(tmp_path) == ""
+    (tmp_path / "chat_template.jinja").unlink()
     (tmp_path / "tokenizer_config.json").write_text(json.dumps({"chat_template": [1, 2]}))
     assert m.repo_chat_template(tmp_path) is None
 

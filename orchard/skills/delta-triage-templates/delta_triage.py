@@ -336,15 +336,33 @@ def read_json(path: Path):
         return None, f"{path.name} is not readable JSON: {exc}"
 
 
+def json_bytes(data) -> bytes:
+    """`data` as the bytes of an indented JSON file. A string from an outside file may hold a lone surrogate (`"\\ud800"` is legal JSON, and a file
+    name with bytes that are not UTF-8 is read as one), which cannot be encoded as UTF-8 and used to stop stage 0 at the write (review of PR 441,
+    round 3). Such data is written with every non-ASCII character escaped, which is still valid JSON and reads back to the same text; ordinary
+    text is written as UTF-8 as before."""
+    try:
+        return (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    except UnicodeEncodeError:
+        return (json.dumps(data, indent=2, ensure_ascii=True) + "\n").encode("ascii")
+
+
+def write_delta(delta) -> None:
+    """stage 0's delta.json, written like the evidence files (text that cannot be encoded as UTF-8 never stops the write)."""
+    (HERE_DIR / "delta.json").write_bytes(json_bytes(delta))
+
+
 def write_json(name: str, data) -> Path:
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     path = EVIDENCE / name
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_bytes(json_bytes(data))
     return path
 
 
 def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    """The sha256 of `text` as UTF-8. A lone surrogate (legal in a JSON string) is encoded as its own three bytes and not refused, so a hash
+    never stops a run, and text that differs only by a surrogate still hashes differently."""
+    return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def short(values, limit: int = 8) -> str:
@@ -1220,13 +1238,24 @@ INT_LIMIT = 1 << 64                     # the widest integer a GGUF key holds; a
 FINITE_MAX_DEPTH = 24                  # nesting a value from an outside file may have before it is replaced by a short text
 
 
+LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _clean_text(s: str) -> str:
+    """`s` with every lone surrogate replaced by U+FFFD, so it can be encoded as UTF-8 (review of PR 441, round 3)."""
+    return LONE_SURROGATE.sub("\ufffd", s)
+
+
 def _finite(v, _depth: int = 0):
     """`v` made safe to write as strict JSON (review of PR 441, round 2). Every non-finite float, at any depth, becomes None (`1e400` in a config
     is read as infinity, and `json.dumps` would write `Infinity`, which the operator bundle's reader refuses, losing the whole file). An integer
     wider than 64 bits becomes a short text (Python cannot write an integer of thousands of digits as text at all). Nesting deeper than
-    FINITE_MAX_DEPTH becomes a short text, so a hostile config cannot make this walk or the writer recurse without a bound."""
-    if v is None or isinstance(v, (bool, str)):
+    FINITE_MAX_DEPTH becomes a short text, so a hostile config cannot make this walk or the writer recurse without a bound. A lone surrogate in
+    a string or a key becomes U+FFFD, since text that cannot be encoded as UTF-8 stopped the writer."""
+    if v is None or isinstance(v, bool):
         return v
+    if isinstance(v, str):
+        return _clean_text(v)
     if isinstance(v, float):
         return v if math.isfinite(v) else None
     if isinstance(v, int):
@@ -1235,7 +1264,7 @@ def _finite(v, _depth: int = 0):
         if _depth >= FINITE_MAX_DEPTH:
             return f"<{type(v).__name__} nested deeper than {FINITE_MAX_DEPTH}>"
         if isinstance(v, dict):
-            return {str(k): _finite(x, _depth + 1) for k, x in v.items()}
+            return {_clean_text(str(k)): _finite(x, _depth + 1) for k, x in v.items()}
         return [_finite(x, _depth + 1) for x in v]
     return v
 
@@ -1244,7 +1273,7 @@ def _brief(v):
     """A value from an outside file, small enough to put in evidence, and valid in strict JSON (non-finite floats and integers wider than 64 bits
     are replaced, see `_finite`)."""
     if isinstance(v, str):
-        return v[:GGUF_MAX_VALUE_CHARS].replace("\0", " ")
+        return _clean_text(v[:GGUF_MAX_VALUE_CHARS]).replace("\0", " ")
     if isinstance(v, (list, dict)):
         v = _finite(v)
         return v if len(json.dumps(v, allow_nan=False)) <= 4000 else f"<{type(v).__name__} of {len(v)} items>"
@@ -1360,8 +1389,17 @@ def tensor_inventory_complete(kv: dict, tensor_count: int) -> bool:
     return True
 
 
+def _vocabulary_head(config):
+    """True when config.json lists an architecture that reads a vocabulary head (HEAD_ARCH), False when it lists architectures and none does (a
+    bare backbone such as an embedding model), None when it lists none that can be read."""
+    archs = config.get("architectures") if isinstance(config, dict) else None
+    if not isinstance(archs, list) or not archs or not all(isinstance(a, str) for a in archs):
+        return None
+    return any(HEAD_ARCH.search(a) for a in archs)
+
+
 def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config, template_text, mtp_tensors=None,
-                   inventory_complete: bool = True) -> list[dict]:
+                   inventory_complete: bool = True, headless: bool = False) -> list[dict]:
     """The agreement table of one GGUF file against config.json (and the repository's chat template). A row is listed when either side has
     a value. A difference is a finding to read and never a gate failure."""
     rows = []
@@ -1422,6 +1460,8 @@ def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config
     add("linear inner size", g("ssm.inner_size"), heads * vdim if heads is not None and vdim is not None else None, "int",
         "value heads times the value head dimension")
     add("tied embeddings", tied, c("tie_word_embeddings"), "bool",
+        "the model has no vocabulary head (its architectures name a bare backbone), so a missing output.weight does not show tying"
+        if headless and tied is None else
         "the GGUF is tied when it has no output.weight tensor" if inventory_complete else
         "this file is one shard of a split GGUF (or its split keys cannot be read), so a missing output.weight does not show tying")
     nextn, mtp = g("nextn_predict_layers"), c("mtp_num_hidden_layers")
@@ -1433,16 +1473,29 @@ def gguf_agreement(role: str, arch, kv: dict, tied, tokens, template_sha, config
                        "; compare with the mtp tensor count in tensor-compare.json"))
     add("multi-token prediction layers", nextn, mtp, "int", mtp_note)
     add("vocabulary size", tokens, c("vocab_size"), "int")
-    repo_sha = hashlib.sha256(template_text.rstrip().encode("utf-8")).hexdigest() if isinstance(template_text, str) and template_text else None
+    repo_sha = _template_sha(template_text) if isinstance(template_text, str) else None
+    repo_empty = isinstance(template_text, str) and not template_text.strip()
     gguf_sha = template_sha
     row = _agreement_row("chat template", gguf_sha, repo_sha, "hash", "hashes of the templates with trailing whitespace removed")
-    if gguf_sha is None and repo_sha is not None:
+    if repo_empty:
+        # An empty chat_template.jinja still takes precedence over a template in tokenizer_config.json: transformers 5.19.0 reads the file whenever it
+        # exists and assigns its text even when empty (review of PR 441, round 3). The effective template is then empty.
+        if gguf_sha is None:
+            return rows                                  # nothing on either side to compare
+        row["note"] = ("the repository's chat_template.jinja is empty and takes precedence over any template in tokenizer_config.json "
+                       "(transformers loads the file), so the effective template is empty")
+    elif gguf_sha is None and repo_sha is not None:
         row["note"] = "the GGUF has no embedded chat template"
     elif repo_sha is None and gguf_sha is not None:
         row["note"] = "the repository has no chat_template.jinja or tokenizer_config.json chat_template to compare"
     if gguf_sha is not None or repo_sha is not None:
         rows.append(row)
     return rows
+
+
+def _template_sha(text: str) -> str:
+    """The hash the chat-template row compares: the text with trailing whitespace removed (a lone surrogate is encoded, not refused)."""
+    return sha256_text(text.rstrip())
 
 
 def _fold_kind(name: str) -> str:
@@ -1479,12 +1532,13 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> d
     complete = tensor_inventory_complete(kv, len(h["tensors"]))
     # A tensor that is present shows the model is untied even in one shard of a split file. A tensor that is missing shows tying only when
     # this file lists every tensor of the model.
-    tied = None if role != "language model" else (False if "output.weight" in names else (True if complete else None))
+    headless = _vocabulary_head(config) is False             # a bare backbone has no output.weight because it never had a head, which is not tying
+    tied = None if role != "language model" else (False if "output.weight" in names else (True if complete and not headless else None))
     template = kv.get("tokenizer.chat_template")
     template = template if isinstance(template, str) and template else None
     array_len = lambda v: v.get("array_len") if isinstance(v, dict) else (len(v) if isinstance(v, list) else None)
     tokens, merges = array_len(kv.get("tokenizer.ggml.tokens")), array_len(kv.get("tokenizer.ggml.merges"))
-    template_sha = hashlib.sha256(template.rstrip().encode("utf-8")).hexdigest() if template else None
+    template_sha = _template_sha(template) if template else None
     nextn = _whole(kv.get(f"{arch}.nextn_predict_layers")) if arch and role == "language model" else None
     text = lambda key: _brief(kv[key]) if isinstance(kv.get(key), str) else None
     entry = {
@@ -1493,7 +1547,7 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> d
         "tensor_count": len(h["tensors"]), "header_bytes": h["header_bytes"],
         "hyperparameters": hyper, "hyperparameters_cut": cut,
         "tokenizer": {"model": text("tokenizer.ggml.model"), "pre": text("tokenizer.ggml.pre"), "tokens": tokens, "merges": merges,
-                      "chat_template_sha256": hashlib.sha256(template.encode("utf-8")).hexdigest() if template else None,
+                      "chat_template_sha256": sha256_text(template) if template else None,
                       "chat_template_chars": len(template) if template else None},
         "quantization": {"by_type": dict(sorted(by_type.items())), "by_kind": {k: dict(sorted(c.items())) for k, c in sorted(by_kind.items())},
                          "full_precision": full,
@@ -1502,7 +1556,8 @@ def gguf_file_evidence(path: Path, config, template_text, mtp_tensors=None) -> d
                                   "It was not measured on Tenstorrent hardware.")},
         "tied_embeddings": tied, "tensor_inventory_complete": complete, "nextn_predict_layers": nextn,
     }
-    rows = gguf_agreement(role, arch, kv, tied, tokens, template_sha, config, template_text, mtp_tensors, inventory_complete=complete)
+    rows = gguf_agreement(role, arch, kv, tied, tokens, template_sha, config, template_text, mtp_tensors, inventory_complete=complete,
+                          headless=headless and role == "language model")
     entry["agreement"] = rows
     entry["agreement_summary"] = {v: sum(1 for r in rows if r["verdict"] == v) for v in ("agree", "differ", "not comparable")}
     return entry
@@ -1566,11 +1621,20 @@ def read_small_text(path, cap: int = REPORT_MAX_BYTES):
 
 
 def repo_chat_template(model_dir: Path):
-    """The repository's own chat template: chat_template.jinja, else the `chat_template` string of tokenizer_config.json. None when neither
-    is there or readable."""
-    text = read_small_text(Path(model_dir) / "chat_template.jinja")
-    if text:
-        return text
+    """The repository's effective chat template: chat_template.jinja whenever that file exists, else the `chat_template` string of
+    tokenizer_config.json. transformers 5.19.0 reads the file when it exists and assigns its text even when the text is empty ("If independent
+    chat template file(s) exist, they take priority over template entries in the tokenizer config"), so an empty file gives "" and does not fall
+    back (review of PR 441, round 3). A file that exists but cannot be read (too large, bad bytes) gives None: the template is unknown, and the
+    inline one is not assumed. None as well when neither source is there."""
+    jinja = Path(model_dir) / "chat_template.jinja"
+    if jinja.is_file():                                   # a link is followed (a snapshot is made of links); the same test as `template_variants`
+        text = read_small_text(jinja)
+        if text:
+            return text
+        try:
+            return "" if jinja.stat().st_size == 0 else None
+        except OSError:
+            return None
     cfg, _ = read_json(Path(model_dir) / "tokenizer_config.json")
     t = cfg.get("chat_template") if isinstance(cfg, dict) else None
     return t if isinstance(t, str) and 0 < len(t) <= REPORT_MAX_BYTES else None
@@ -3992,7 +4056,7 @@ def audio_main(cfg: dict) -> int:
     research = base_research(cfg, nearest_id, cls)
     if research is not None:
         delta["base_research"] = research
-    (HERE_DIR / "delta.json").write_text(json.dumps(delta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_delta(delta)
     say(f"wrote delta.json: audio layout, path {path}, class {cls}")
     for r in all_reasons:
         say(f"  {'unknown' if r in problems else 'full-port'} because {r}")
@@ -4182,7 +4246,7 @@ def main() -> int:
     research = base_research(cfg, nearest_id, cls)
     if research is not None:
         delta["base_research"] = research
-    (HERE_DIR / "delta.json").write_text(json.dumps(delta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_delta(delta)
     say(f"wrote delta.json: path {path}, class {cls}")
     for r in reasons:
         say(f"  full-port because {r}")
