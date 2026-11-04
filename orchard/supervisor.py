@@ -159,7 +159,7 @@ from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
 from orchard.server import ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
 from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, agreement_reference_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
-                            open_stage_dir, package_format, package_options, resolve_endpoint,
+                            open_stage_dir, marker_state, package_format, package_options, resolve_endpoint, SUPERVISOR_MARKER,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, SKIP_3_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
@@ -1141,7 +1141,9 @@ class Supervisor:
                 spec = dataclasses.replace(spec, skip=SKIP_3_FULL_PORT)       # stage 2's board is the configured chip count: nothing new to show
             try:
                 if spec in (FULL_PORT_STAGE_2, SCORING_STAGE_2):
-                    self._check_residency(spec)        # a model that cannot fit the box starts no prepare step (issue 327)
+                    # a model that cannot fit the box starts no prepare step (issue 327)
+                    self._check_residency(spec, hardware_pending=self._hardware_pending(
+                        spec, resuming=p.open_stage == p.next_stage, escalated=p.next_stage in p.escalated))
                 if spec.needs_coder or self._coder_in_use():
                     self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
@@ -2900,17 +2902,51 @@ class Supervisor:
         except (OSError, ValueError) as exc:       # a full disk or a permission failure must not end a passing stage
             self.ledger.append("decision", 0, decision="residency estimate not written", reason=f"{type(exc).__name__}: {exc}"[:200])
 
-    def _check_residency(self, spec) -> None:
+    def _hardware_pending(self, spec, *, resuming: bool, escalated: bool) -> bool:
+        """Whether the attempt about to start runs the stage's hardware phase: a first attempt, a resume before the test ended, and a retry whose
+        failed test is moved aside and rerun. False for a resume after the test ended, which only reads the result (`_stage_body` skips the
+        prepare step and the test when `test-result.json` is there). The same rule as `_run_stage` uses to keep or move aside the record:
+        the marker counts only when `stages.marker_state` accepts it, because `open_stage_dir` moves aside a marker the supervisor did not
+        record (an agent can write the file, and a crash can fall between the write and its evidence entry) or the bounded reader refuses,
+        and the hardware phase then runs again, so the machine check must too (review of PR 435, round 2)."""
+        if not resuming:
+            return True
+        marker = self.run_dir / "stages" / str(spec.number) / SUPERVISOR_MARKER
+        if marker_state(self.run_dir, spec.number, SUPERVISOR_MARKER, self.ledger)[0] != "ok":
+            return True
+        return bool(escalated and spec.boards and self._test_failure(spec, marker.parent))
+
+    def _check_residency(self, spec, *, hardware_pending: bool = True) -> None:
         """Before a full-port stage 2: block with the numbers when stage 0's estimate needs more chips than the box has, or more than the
         stage's own lease gives the port check (`spec.boards` boards; the check runs on that lease, not on the whole box). The box is
         read again here, so the lab or board count at this point is the one judged. No record, a damaged or skipped one, or an unknown
-        box is no claim and the stage goes on."""
+        box is no claim and the stage goes on. The first boot's disk and host RAM are judged only when `hardware_pending`: a resume after the
+        hardware test ended converts and downloads nothing, and the cache the test made may already fill the disk the check would demand
+        again (review of PR 435, round 1). The chip counts are judged either way.
+
+        Known limit (issue 460): MemAvailable is read here, before the hardware phase parks a large-tier coder, so the reading can be smaller than
+        the one the conversion will see by about the coder's resident size. The check can then block a little early; it never passes what does not fit."""
         rec, box = residency.read_record(self.run_dir), self._box_chips(spec)
         stage = spec.boards * CHIPS_PER_BOARD
         why = (residency.shortfall(rec, box) or residency.shortfall(rec, stage, what=f"stage {spec.number}'s lease")) if box is not None else None
         if why:
             self._block(spec.number, why, need_chips=rec["estimated"]["chips_needed"], box_chips=box, stage_chips=stage,
                         device_bytes=rec["estimated"]["device_bytes"], label=rec["label"])
+        if rec is not None and self.lab is None and hardware_pending and spec.draft == "full_port":
+            # Only the full-port route converts the weights here: a scoring port (`scoring_check`, scripts/scoring_check/port_model.py) loads a
+            # tokenizer and checks a server that is already running, so it has no conversion budget to be held to (review of PR 435, round 2).
+            # The first boot converts the weights on this box (a lab run converts on the lab, which this box cannot read): the converted cache
+            # and a download need disk under the cache root, and the conversion needs host RAM. Each is the record's estimate against a reading.
+            free, mem = residency.machine_facts(self.paths.cache_root)
+            why, notice = residency.machine_check(rec, free_disk_bytes=free, mem_available_bytes=mem)
+            fb = rec["estimated"]["first_boot"] if (why or notice) else None
+            if notice and not why:
+                # The converted cache is a notice here: no port exists yet to say it writes one (review of PR 435, round 3).
+                self._note("notice", what="the converted-weight cache may not fit", detail=notice, disk_bytes_needed=fb["disk_bytes"],
+                           free_disk_bytes=free, label=rec["label"])
+            if why:
+                self._block(spec.number, why, disk_bytes_needed=fb["disk_bytes"], free_disk_bytes=free, host_ram_bytes_needed=fb["host_ram_bytes"],
+                            mem_available_bytes=mem, label=rec["label"])
 
     def _stage_0_facts(self) -> dict:
         """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).

@@ -1719,6 +1719,44 @@ per-chip reserve, the KV budget and the default policy are choices in `orchard/d
 lists each with its source (`caller` or `default (choice)`). No allocator reading backs them. The record's `not_measured` list says what
 a live reading would replace.
 
+Next to the policy it uses, the record lists the whole model at each of bf16, bfp8 and bfp4 (`estimated.precision_options`): the bytes on
+the chips and the chips that needs. A refusal names these, so it says which precision would fit ("the highest listed precision that fits is
+bfp8, which needs 3 chips") or that none does ("the model does not fit this box at any listed precision"). A model with routed experts is
+marked (`estimated.mixture_of_experts`): under the default policy every expert stays resident on the chips, so the chip count follows all the
+experts, and under `--policy routed_experts=host` the mark says `placement: host`, the experts take no chip memory and the text puts them in host
+memory. Only a few run for a token. The number of experts per token is in `config.json`, which the estimate does not read, because the headers do not hold it.
+
+For a repository too large to read header by header, `tt-orchard residency owner/name --totals-only --chips 4` makes one Hub call for the
+parameter counts by dtype and prints a lower bound for each precision. It never reads a header, a tensor name or a shape, so it counts every
+floating-point parameter at the smaller of the bytes it is stored with and the bytes the precision gives (a weight is converted to the
+precision and a vector keeps its stored bytes, so an FP8 vector stays at one byte under bf16), and every integer dtype (a packed MXFP4, NVFP4 or
+GPTQ repository) at the bytes it stores. The real total is at least the bound. The device figure is lower for a model whose default policy keeps an n-gram or
+per-layer table in host memory, and totals cannot show a table. `deep-principle/Hydrogen-1.0` (753.3 billion parameters, 1,506.7 GB in
+bf16) needs at least 49 chips at bf16, 26 at bfp8 and 14 at bfp4 under the default assumptions, so it does not fit a four-chip box at any
+listed precision, provided no host-resident table is among the counts. Preflight reads the same counts from the Hub answer it already fetches and adds a `fit` row after the gozer row. To learn whether a host-resident table is among the counts it also reads the model's
+`config.json` (at most 1 MiB) and the tensor names of its weight index `model.safetensors.index.json` (at most 16 MiB), each in one request at
+the revision the counts describe, with no token. The config is searched for keys that name such a table (`ngram_*`, `ple_*`, `per_layer`) and the
+names are checked with the rule stage 0 uses for the `ngram_ple` category. The row blocks with code `model-does-not-fit` only when placement is
+established: both files were read and name no table, even bfp4 needs more chips than the box has, and the run does not use a local snapshot of
+another revision than the counts describe. Otherwise the row is a warning that carries the same numbers, and stage 0 reads the tensor
+names of the snapshot it has and decides. That covers a table named by either file, a config or an index that could not be read (a gated
+repository answers 401 to a request with no token, and a single-file model has no index), and a local snapshot of an older revision. So the row
+for `deep-principle/Hydrogen-1.0`, a gated repository, is a warning, and `tt-orchard residency deep-principle/Hydrogen-1.0 --totals-only` is
+what prints the refusal numbers. A lab run skips the row, because its tests run on another box.
+
+Before a full-port stage 2 the supervisor also compares the record's first-boot figures with this machine. Two of them block: the download of
+the checkpoint against the free disk under the cache root (block code `disk-full`), because a download needs the disk whatever the port does,
+and the host RAM available (`model-does-not-fit`; the conversion's in-flight part is the largest numbered block of the checkpoint, found from the tensor names (`layers.N`, or the first numbered path component that repeats, such as `h.N` or `blocks.N`), and a tensor with no numbered block is a unit on its own: the record says which in `first_boot.conversion_grouping`, and the block text repeats it). The third, the converted-weight cache, is a ledger notice (`the converted-weight cache may
+not fit`): a port's `load(model_dir, mesh_device)` may convert straight onto the chips and write no cache (`scripts/minicpm3/chip_model.py`
+does), and the check runs before stage 2 has written the port. `residency.machine_check(..., cache_declared=True)` gives the block back for a
+caller that knows the port writes a cache. Each figure is the record's estimate against a reading of `/proc/meminfo` and the filesystem. A reading that cannot be taken is no claim (a MemAvailable of zero is a reading, and a cache root that does
+not exist yet is measured at its nearest existing parent), and a lab run skips the check because the first boot happens on the lab. The check
+applies to the full-port stage 2 only: a scoring port loads a tokenizer and checks a server that is already running, so it converts nothing. It
+applies to an attempt that runs the hardware test (a first attempt, a resume before the test ended, a retry that reruns a failed test). A resume
+after the test ended only reads its result, converts and downloads nothing, and is not held to it, because the converted cache may already fill
+the disk; it counts as such only when the supervisor recorded the `test-result.json` marker (`stages.marker_state`, the check `open_stage_dir`
+uses), because a marker the supervisor did not record is moved aside and the hardware phase runs again. The chip counts are checked on every attempt.
+
 When the weights per chip fit one chip with the stated reserve and KV budget (the one-chip row), the output adds a data-parallel line and the
 record gets `estimated.data_parallel`: the number of copies the configured chips can hold (one per chip), the chips that gives a copy each, and
 a note that this is replication with no collective operations. The configured chips are the box's when stage 0 knows it, else the largest
