@@ -1249,11 +1249,11 @@ The 32-token check compares one prompt with the CPU reference. The template reco
 (`teacher_forced` in `evidence/swap-check.json`). The stage 2 and stage 4 gates recompute `matches`, `top1_agreement`, `n_tokens` and the mismatch
 positions from those replies and from stage 1's `generated-ids.json`, whose sha256 the supervisor writes into the ledger before the test, and
 refuse a `swap-check.json`, `result_draft` or result that gives other numbers (issue 433). A record that lists `positions_skipped` is refused
-until the gate can rebuild the skip mask (PR 422). After the 32-token check, the swap tests send eight fixed prompts
+until the gate can rebuild the skip mask (PR 422). When the ledger holds the reference ids' hash, the gate also needs a readable swap-check.json that is a JSON object: a deleted file, `null`, a list or a number is refused, because those are what an edit would leave behind. A run with no ledger record is judged as before. After the 32-token check, the swap tests send eight fixed prompts
 (`orchard/skills/weights-swap-templates/prompt_suite.json`: a chat question, code, arithmetic, a multi-turn exchange, a
 Russian question, a tool call, a summary and a list format) and record the raw replies in `evidence/swap-check.json`.
 The prompt format follows the model's tokenizer: a chat template means the chat endpoint, none means plain
-continuation text. The supervisor writes `"prompt_suite": true` into the swap configs it drafts. When the ledger holds the reference ids' hash, the gate also needs a readable swap-check.json that is a JSON object: a deleted file, `null`, a list or a number is refused, because those are what an edit would leave behind. A run with no ledger record is judged as before.
+continuation text. The supervisor writes `"prompt_suite": true` into the swap configs it drafts.
 
 The gate reads the replies (`orchard/prompt_suite.py`); the test script only records them. It looks for the failure shapes the
 tenstorrent `qualitative-check` skill lists: a leaked control token, a loop, unreadable text, a repeated or corrupt
