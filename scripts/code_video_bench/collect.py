@@ -381,11 +381,22 @@ class Beneath:
             while stack:
                 fd, owned, prefix, depth = stack.pop()
                 try:                                          # the descriptor stays open until the subdirectories below it have been opened
+                    # At most the names the entry budget still allows, plus one to show that the directory has more: a model-made directory
+                    # may hold millions of names, and sorting a full listing would use the host's memory before the limit is checked.
+                    budget = max_entries - count + 1
+                    listing = []
                     try:
                         with os.scandir(fd) as it:
-                            listing = sorted(((e.name, e.stat(follow_symlinks=False)) for e in it), key=lambda x: x[0])
+                            for e in it:
+                                if len(listing) >= budget:
+                                    break
+                                try:
+                                    listing.append((e.name, e.stat(follow_symlinks=False)))
+                                except OSError:
+                                    continue                  # it vanished between the listing and the stat
                     except OSError:
-                        listing = []
+                        pass                                  # keep what was listed before the failure
+                    listing.sort(key=lambda x: x[0])
                     for name, st_ in listing:
                         count += 1
                         if count > max_entries:
@@ -659,6 +670,10 @@ if final:
                            extra_mounts=(f"{trusted}:/trusted-skill:ro",), workdir="/trusted-skill", out_cap=ERR_CAP)
         if chk["ok"]:
             out["check_video"] = chk["text"]
+            out["check_video_exit"] = chk["rc"]
+            if chk["rc"] != 0:                            # a checker that crashed or was killed may print nothing; its exit status is kept and counted
+                out["check_video"] = f"exited {chk['rc']}: " + (chk["text"] or "no output")
+                failures.append("check_video_exit")
         else:
             out["check_video"] = "not measured: " + chk["error"]
             failures.append("check_video")

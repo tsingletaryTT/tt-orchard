@@ -1011,3 +1011,88 @@ def test_a_skill_copy_with_more_files_than_the_limit_is_cut_and_says_so(tmp_path
     s = collect(run, e, tmp_path, timeout=60)
     assert any("more than 5000 entries" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
     assert len(s["skill_files_added_by_run"]) <= 5000, len(s["skill_files_added_by_run"])
+
+
+# ---- PR 450, Copilot round 4 -------------------------------------------------------------------------------------------------------
+
+def peak_kib_of_collect(run, env, cwd):
+    """The peak resident size (KiB) of the largest child of a fresh interpreter that runs collect.sh once. A fresh parent keeps earlier tests'
+    children out of RUSAGE_CHILDREN, whose maximum covers every child the parent ran."""
+    code = ("import resource, subprocess, sys\n"
+            "r = subprocess.run(sys.argv[1:], capture_output=True, text=True)\n"
+            "print(r.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)\n")
+    rc, out, err = run_cmd([sys.executable, "-c", code, "sh", str(BENCH / "collect.sh"), str(run), "1280", "720", "24", "9", "11"], env, cwd, 120)
+    assert rc == 0, err
+    code_, kib = out.split()
+    assert code_ == "0", out
+    return int(kib)
+
+
+HUGE_DIR_FILES = 120_000
+
+
+def test_a_skill_copy_directory_with_a_huge_number_of_names_is_not_held_whole_in_memory(tmp_path, stubs):
+    """The entry limit (5000) was checked after `sorted()` had listed and statted every name, so a model-made directory of millions of names
+    used the host's memory before the limit applied. Reading stops at the budget plus one name."""
+    env, log = stubs
+    run = make_run(tmp_path)
+    many = run / "task" / ".qwen" / "skills" / "code-video" / "many"
+    many.mkdir()
+    for i in range(HUGE_DIR_FILES):
+        with open(many / f"f{i:06d}.txt", "w"):
+            pass
+    (run / "logs" / "skill.sha256").write_text("")
+    e = dict(env, SKILL_SRC=str(trusted_skill(tmp_path)))
+    kib = peak_kib_of_collect(run, e, tmp_path)
+    s = json.loads((run / "logs" / "summary.json").read_text())
+    assert any("more than 5000 entries" in r["reason"] for r in s["refused_paths"]), s["refused_paths"]
+    assert len(s["skill_files_added_by_run"]) <= 5000
+    assert kib < 60_000, f"collect.py peaked at {kib} KiB on a directory of {HUGE_DIR_FILES} names"
+
+
+def test_a_relative_skill_src_still_names_the_trusted_skill_after_the_wrapper_changes_directory(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    trusted_skill(tmp_path)
+    cwd = tmp_path
+    rc, out, err = run_cmd(["sh", str(BENCH / "collect.sh"), os.path.relpath(run, cwd), "1280", "720", "24", "9", "11"],
+                           dict(env, SKILL_SRC="trusted_skill"), cwd, 60)
+    assert rc == 0, (rc, err)
+    s = json.loads((run / "logs" / "summary.json").read_text())
+    assert "trusted-check-ok" in s["check_video"] and s["check_video_source"], s["check_video"]
+
+
+def test_a_skill_src_that_names_no_directory_is_passed_on_and_the_checker_is_not_run(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    rc, out, err = run_cmd(["sh", str(BENCH / "collect.sh"), str(run), "1280", "720", "24", "9", "11"], dict(env, SKILL_SRC="no/such/dir"), tmp_path, 60)
+    assert rc == 0, (rc, err)
+    s = json.loads((run / "logs" / "summary.json").read_text())
+    assert s["check_video"].startswith("not run"), s["check_video"]
+
+
+def skill_with_checker(tmp_path, script):
+    src = tmp_path / "trusted_skill"
+    (src / "scripts").mkdir(parents=True)
+    (src / "scripts" / "check_video.sh").write_text(script)
+    return src
+
+
+@pytest.mark.parametrize("script,code", [("exit 3\n", 3), ("echo partial; exit 1\n", 1), ("kill -9 $$\n", 137)])
+def test_a_checker_that_exits_nonzero_is_a_recorded_failure_with_its_exit_status(tmp_path, stubs, script, code):
+    env, log = stubs
+    run = make_run(tmp_path)
+    s = collect(run, dict(env, SKILL_SRC=str(skill_with_checker(tmp_path, script))), tmp_path)
+    failed(s, "check_video_exit")
+    assert s["check_video_exit"] == code, s["check_video_exit"]
+    assert s["check_video"].startswith(f"exited {code}"), s["check_video"]
+    if "partial" in script:
+        assert "partial" in s["check_video"]                                  # what the checker printed is kept
+
+
+def test_a_checker_that_exits_zero_is_not_a_failure_and_records_its_exit_status(tmp_path, stubs):
+    env, log = stubs
+    run = make_run(tmp_path)
+    s = collect(run, dict(env, SKILL_SRC=str(skill_with_checker(tmp_path, "echo trusted-check-ok\n"))), tmp_path)
+    assert "check_video_exit" not in s["measurement_failures"]["names"], s["measurement_failures"]
+    assert s["check_video_exit"] == 0 and "trusted-check-ok" in s["check_video"] and not s["check_video"].startswith("exited"), s["check_video"]

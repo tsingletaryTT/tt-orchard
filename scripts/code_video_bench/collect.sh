@@ -13,6 +13,12 @@ HERE=$(cd "$(dirname "$0")" && pwd -P)
 [ "$#" -ge 6 ] || { echo "usage: collect.sh RUN_DIR WIDTH HEIGHT FPS MIN_DUR MAX_DUR [IMAGE]" >&2; exit 2; }
 RUN=$(cd "$1" 2>/dev/null && pwd -P) || { echo "collect.sh: no such run directory: $1" >&2; exit 2; }
 shift
+# A relative SKILL_SRC means the caller's directory, which `cd /` below would change; make it absolute first (run_bench.sh does the same).
+if [ -n "${SKILL_SRC:-}" ]; then
+    # A value that names no directory is passed on unchanged; collect.py then says "not run: no trusted copy" in the summary.
+    SKILL_SRC=$(cd "$SKILL_SRC" 2>/dev/null && pwd -P || printf '%s' "$SKILL_SRC")
+    export SKILL_SRC
+fi
 for v in $(env | sed -n 's/^\(PYTHON[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
 cd /
 exec "${CVBENCH_PYTHON:-python3}" -I -S "$HERE/collect.py" "$RUN" "$@"
