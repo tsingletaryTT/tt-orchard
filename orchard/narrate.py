@@ -215,13 +215,28 @@ def _evidence(e: dict, d: dict) -> list[Line]:
         return [Line(o, f"agent step finished: {d.get('status', '?')} after {d.get('turns', '?')} turns")]
     if what == "stack pins":
         would = d.get("would_block") or []
+        demoted = d.get("would_be_critical") or []
         text = f"stack freshness recorded ({d.get('severity', '?')}, {d.get('mode', '?')} run)"
-        reasons = {f.get("name"): f.get("reason") for f in d.get("findings") or [] if isinstance(f, dict)}
-        shown = ", ".join(f"{n}: {reasons[n]}" if reasons.get(n) else str(n) for n in (would or d.get("hazards") or [])[:4])
+        # Findings that share a name (several stale skills clones) each keep their own reason: the reasons are taken in the order the
+        # findings were recorded, one per occurrence of the name (issue 393, item 5).
+        pending: dict = {}
+        for f in d.get("findings") or []:
+            if isinstance(f, dict):
+                pending.setdefault(f.get("name"), []).append(f.get("reason"))
+
+        def shown_for(names):
+            out = []
+            for n in names[:4]:
+                queue = pending.get(n) or []
+                reason = queue.pop(0) if queue else None
+                out.append(f"{n}: {reason}" if reason else str(n))
+            return ", ".join(out)
         if would:
-            text += "; would block if ORCHARD_STACK_PINS_BLOCK=1: " + shown
+            text += "; would block if ORCHARD_STACK_PINS_BLOCK=1: " + shown_for(would)
         elif d.get("hazards"):
-            text += "; critical: " + shown
+            text += "; critical: " + shown_for(d.get("hazards") or [])
+        if demoted:
+            text += "; resume advisories that would have been critical on a new run: " + shown_for(demoted)
         return [Line(o, _clip(text, 700), bool(would or d.get("hazards")))]
     return []
 

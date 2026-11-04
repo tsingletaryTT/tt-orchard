@@ -2033,10 +2033,7 @@ class Supervisor:
         except (OSError, ValueError) as exc:        # no record: nothing may go on without one
             self.ledger.append("decision", 0, decision="stack pins not written", reason=stack_pins_mod.redact(f"{type(exc).__name__}: {exc}", self._homes())[:200])
             self._block(0, f"the stack freshness record could not be written ({type(exc).__name__}). Fix the stage 0 directory, then run the command again")
-        self.ledger.append("evidence", 0, what="stack pins", severity=rec["severity"], mode=rec["mode"],
-                           hazards=[h["name"] for h in rec["hazards"]], advisories=[a["name"] for a in rec["advisories"]],
-                           would_block=[a["name"] for a in rec["advisories"] if a.get("would_block")], blocking=bool(rec.get("blocking_requested")),
-                           findings=[{"name": f["name"], "reason": f["reason"][:300]} for f in rec["hazards"] + [a for a in rec["advisories"] if a.get("would_block")]],
+        self.ledger.append("evidence", 0, what="stack pins", **stack_pins_mod.ledger_fields(rec),
                            path=os.path.relpath(Path(stage_dir) / stack_pins_mod.FILE, self.run_dir), sha256=sha)
         if rec["hazards"]:
             why = "; ".join(f"{h['name']}: {h['reason']}" for h in rec["hazards"])

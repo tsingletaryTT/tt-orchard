@@ -234,8 +234,14 @@ def config_facts(model_dir) -> dict:
         problem = f"{bad} of the {len(archs)} architecture entries are not plain class names"
     if len(valid) > MAX_CLASSES:
         problem = (problem + "; " if problem else "") + f"{len(valid)} architectures are named and only the first {MAX_CLASSES} can be checked"
+    version = text("transformers_version", 64)
+    # A value that is present and was dropped (a number, a list, a very long string) is kept as a marker, so the check can say the declared
+    # minimum was never compared even when the KNOWN_MINIMUMS table supplies one (issue 393, item 3).
+    version_problem = None
+    if version is None and cfg.get("transformers_version") is not None:
+        version_problem = "the config's transformers_version is not a string of a usable length"
     return {"model_type": text("model_type", 100), "architectures": valid[:MAX_CLASSES], "architectures_problem": problem,
-            "transformers_version": text("transformers_version", 64)}
+            "transformers_version": version, "transformers_version_problem": version_problem}
 
 
 def required_minimum(facts: dict) -> tuple[str | None, str | None]:
@@ -292,6 +298,33 @@ def real_probe_run(argv, timeout, env=None):
         return skillsfresh._raw_run(argv, timeout, env, cwd=empty, max_bytes=PROBE_MAX_BYTES)
 
 
+def _within(path: str, directory: str) -> bool:
+    """True when `path` is `directory` or lies under it (whole path components: `/run-tools` is not under `/run`)."""
+    try:
+        return os.path.commonpath([path, directory]) == directory
+    except ValueError:
+        return False
+
+
+def _inside_excluded(python: str, exclude: tuple) -> str:
+    """The name of the excluded directory (the run directory) that the interpreter lies in; "" when it lies in none. Checked on the path as
+    given and on the path with every link resolved, because an agent can plant either a file or a link. An interpreter inside a virtualenv in
+    the run directory is inside it, so the virtualenv's startup files (which run before the probe script) are covered by the same check (issue 393)."""
+    roots = []
+    for d in exclude or ():
+        if isinstance(d, str) and d:
+            roots.append(os.path.abspath(d))
+            roots.append(os.path.realpath(d))
+    if not roots:
+        return ""
+    candidates = {os.path.abspath(python), os.path.realpath(python)}
+    for c in candidates:
+        for r in roots:
+            if _within(c, r):
+                return "the run directory" if r else ""
+    return ""
+
+
 def probe_interpreter(python, classes, run: Callable | None = None, model_type=None, env: dict | None = None, exclude: tuple = ()) -> dict:
     """Ask `python` for its transformers version and for each class in `classes`. {"state": "answered"|"unknown", "importable", "version",
     "classes": {name: bool}, "why"}. Never raises. `run` is (argv, timeout, env) -> (returncode, stdout, stderr)."""
@@ -305,6 +338,9 @@ def probe_interpreter(python, classes, run: Callable | None = None, model_type=N
             return unknown("the reference interpreter is not an executable file")
     except (ValueError, OSError):
         return unknown("the reference interpreter path cannot be checked")
+    inside = _inside_excluded(python, exclude)
+    if inside:
+        return unknown(f"the reference interpreter lies inside {inside}, which an agent can write, so the probe did not run it")
     classes = list(dict.fromkeys(c for c in classes if isinstance(c, str) and CLASS_NAME.fullmatch(c)))[:MAX_CLASSES]
     mt = model_type if isinstance(model_type, str) and MODEL_TYPE.fullmatch(model_type) else "-"
     try:
@@ -416,6 +452,8 @@ def _transformers_part(sources: Sources, run, probe_env=None) -> tuple[dict, lis
     if facts["transformers_version"] is not None and parse_version(facts["transformers_version"]) is None:
         adv.append(_entry("transformers_minimum_unreadable", f"the checkpoint's transformers_version {facts['transformers_version']!r} is not a version form "
                                                              "this check reads, so it was not used as a minimum"))
+    elif facts.get("transformers_version_problem"):
+        adv.append(_entry("transformers_minimum_unreadable", f"{facts['transformers_version_problem']}, so it was not used as a minimum"))
     part.update(model_type=facts["model_type"], architectures=facts["architectures"], checkpoint_minimum=minimum, minimum_source=source)
     probe = probe_interpreter(sources.ref_python, facts["architectures"], run, facts["model_type"], probe_env, sources.exclude_paths)
     if probe["state"] != "answered":
@@ -448,6 +486,12 @@ def _transformers_part(sources: Sources, run, probe_env=None) -> tuple[dict, lis
     if minimum is None and not facts["architectures"]:
         state = skillsfresh.UNKNOWN
         adv.append(_entry("transformers_unchecked", "the checkpoint names no minimum transformers version and no class to check"))
+    elif minimum is None:
+        adv.append(_entry("transformers_minimum_missing", "the checkpoint names no minimum transformers version (config.json has none and "
+                                                          "KNOWN_MINIMUMS has no entry for its model_type), so the installed version was not compared"))
+    # A part is current only when every check was made: each advisory above is a check that was not (issue 393, item 2).
+    if state == skillsfresh.CURRENT and adv:
+        state = skillsfresh.UNKNOWN
     part["state"] = state
     part["detail"] = (f"installed {installed}; the checkpoint needs {minimum or 'no stated minimum'}"
                       + (f"; missing classes: {', '.join(missing)}" if missing else ""))
@@ -523,6 +567,19 @@ def unchecked_record(why: str, *, new_run: bool, now: float | None = None) -> di
             "severity": "advisory", "max_behind_days": MAX_BEHIND_DAYS, "blocking_requested": False,
             "probe_limits": list(PROBE_LIMITS), "hazards": [],
             "advisories": [_entry("stack_unchecked", f"the stack was not compared with upstream: {why}")], "parts": parts}
+
+
+def ledger_fields(rec: dict) -> dict:
+    """The fields of the ledger's `stack pins` evidence entry for a record. `findings` holds the reasons of every critical hazard, of every
+    advisory that would block, and of every finding a resume demoted (`would_be_critical`): before, a resumed run's reasons were only in
+    stack-pins.json (issue 393, item 4)."""
+    adv = rec["advisories"]
+    demoted = [a for a in adv if a.get("would_be_critical")]
+    shown = rec["hazards"] + [a for a in adv if a.get("would_block")] + demoted
+    return {"severity": rec["severity"], "mode": rec["mode"], "hazards": [h["name"] for h in rec["hazards"]],
+            "advisories": [a["name"] for a in adv], "would_block": [a["name"] for a in adv if a.get("would_block")],
+            "would_be_critical": [a["name"] for a in demoted], "blocking": bool(rec.get("blocking_requested")),
+            "findings": [{"name": f["name"], "reason": f["reason"][:300]} for f in shown]}
 
 
 def write_record(stage_dir, rec: dict) -> str:
