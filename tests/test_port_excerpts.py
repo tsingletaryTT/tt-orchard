@@ -84,7 +84,7 @@ class ToyExpDecoderLayer(nn.Module):
         super().__init__()
 
     def forward(self, hidden_states, **kwargs):
-        return hidden_states
+        return rotate_half(hidden_states)
 
 
 class ToyExpForCausalLM(nn.Module):
@@ -217,6 +217,13 @@ def test_a_missing_root_or_module_gives_an_empty_result(tmp_path):
     assert port_excerpts.for_root(tree(tmp_path, source=None), CONFIG).text == ""
 
 
+def test_only_the_two_known_module_kinds_are_read(tmp_path):
+    root = tree(tmp_path)
+    (root / "models" / "toy_exp" / "evil_toy_exp.py").write_text("class ToyExpAttention:\n    pass\n")
+    assert port_facts.reference_source(root, "toy_exp", kind="evil") is None
+    assert port_facts.reference_source(root, "toy_exp", kind="modeling")
+
+
 def test_a_model_type_that_names_a_path_is_refused(tmp_path):
     root = tree(tmp_path)
     assert port_excerpts.for_root(root, {**CONFIG, "model_type": "../toy_exp"}).text == ""
@@ -245,6 +252,9 @@ def test_a_summary_with_a_hundred_classes_still_fits_the_facts_page(tmp_path):
     summary = {"file": "reference_excerpts.md", "bytes": 59_000, "classes": [f"C{i}" * 5 for i in range(100)], "left_out": ["x" * 90] * 100}
     facts = port_facts.build(snapshot_with(tmp_path, TENSORS), excerpts=summary)
     assert len(json.dumps(facts, indent=2)) + 1 <= port_facts.MAX_CHARS
+    pointer = facts["reference_excerpts"]
+    assert len(pointer["classes"]) <= port_facts.EXCERPT_CLASSES_LISTED and len(pointer["left_out"]) <= port_facts.EXCERPT_LEFT_OUT_LISTED
+    assert all(len(x) <= port_facts.EXCERPT_TEXT_CHARS for x in pointer["left_out"])
 
 
 def test_the_facts_file_without_excerpts_has_no_such_field(tmp_path):
@@ -261,7 +271,7 @@ def test_the_prepare_note_says_to_read_the_excerpts_first_and_write_a_first_port
 
 def test_the_stage_2_skill_tells_the_coder_to_read_the_excerpts_first():
     skill = (Path(port_facts.__file__).parent / "skills" / "full-port-check.md").read_text()
-    assert "stages/2/reference_excerpts.md" in skill and "first" in skill.split("reference_excerpts.md", 1)[1][:400]
+    assert "stages/2/reference_excerpts.md" in skill and "read it first, before any other file" in skill
 
 
 # ---- hostile inputs, in a child with a memory limit and a hard timeout -----------------------------------------------------
