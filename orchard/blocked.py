@@ -36,11 +36,17 @@ AUTO_RETRY = ("coder-unusable", "hardware-unhealthy", "agent-stuck")
 # A hardware-unhealthy block whose text starts a chip-off-the-bus finding (orchard/bus.py `diagnose`) is not retried: the
 # board needs a power cycle or a reboot, and a retry 60 s later runs against the same board.
 OFF_BUS_MARK = "off the PCIe bus or unreadable"
+# A coder-unusable block whose text says a container holds the chips (`tt-model serve` refused: "chip(s) 0, 1 already in use by another
+# container", issue 417) is not retried either: the container stays until someone removes it, and a retry 60 s later is refused the same way.
+CONTAINER_HOLDS_MARK = "in use by another container"
 
 
 def retryable(code: str, reason: str = "") -> bool:
-    """Whether `tt-orchard bringup` may retry this block by itself."""
-    return code in AUTO_RETRY and OFF_BUS_MARK not in (reason or "")
+    """Whether `tt-orchard bringup` may retry this block by itself. The marks are matched without regard to case (the classifier below
+    reads the lower-cased text, and a reason already in a ledger or in blocked.json may hold either), and a reason that is not text is read
+    as its string form."""
+    text = "" if reason is None else str(reason).lower()
+    return code in AUTO_RETRY and OFF_BUS_MARK.lower() not in text and CONTAINER_HOLDS_MARK.lower() not in text
 
 
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
@@ -49,6 +55,8 @@ _BLOCKED_WORDS = (
     ("model-does-not-fit", ("does not fit this box", "does not fit stage")),                     # before the hardware words: its text says `chips`
     ("package-missing", ("no installed bundle or container package",)),     # before the hardware words: its text says `chip`
     ("disk-full", ("disk", "free space", " gb free")),
+    ("hardware-unhealthy", (OFF_BUS_MARK.lower(),)),         # a chip that left the bus outranks a container refusal found in the same text
+    ("coder-unusable", (CONTAINER_HOLDS_MARK,)),     # before the hardware words: the text says `chip(s)`, and the chips are healthy
     ("hardware-unhealthy", ("lease", "chip", "board", "reset", "gozer", "hardware", "device")),
     ("coder-unusable", ("coder", "canary", "server", "model did not")),
 )
