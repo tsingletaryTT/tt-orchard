@@ -1,0 +1,4 @@
+target = "0.9.112"
+summary = "A capped coder reply is its own record with its own retry sampling and one fresh restart, agent-written files are bounded, and the supervisor writes stage 2's result.json when the hardware test passed."
+kind = "fix"
+pr = 462
