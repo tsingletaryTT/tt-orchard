@@ -175,12 +175,13 @@ def test_a_descendant_that_left_the_group_cannot_hold_run_and_run_does_not_prete
     got = limited(f"""
         import time
         br.GRACE_S = 1.0
+        br.JOIN_S = 3.0                                   # a reader that ignored the stop flag would cost the whole join
         t0 = time.time()
         res = br.run(["sh", "-c", "setsid sleep 20 & echo $! > {pid_file}; echo hi; exit 0"], "", timeout_s=10, out_max=1000, err_max=1000)
         print(json.dumps({{"elapsed": time.time() - t0, "problem": res.problem, "stdout": res.stdout.strip()}}), flush=True)
     """, deadline_s=60)
     try:
-        assert got["elapsed"] < 4.5, got                 # JOIN_S is 2 s in all
+        assert got["elapsed"] < 2.0, got                 # the readers end on the stop flag (within POLL_S), not at the end of the join
         assert (got["problem"], got["stdout"]) == (None, "hi")
     finally:
         try:
@@ -233,3 +234,18 @@ def test_a_descriptor_is_not_closed_while_a_reader_thread_may_still_use_it():
     """, deadline_s=40)
     assert got["elapsed"] < 2.5, got                       # the join was bounded by JOIN_S
     assert got["stdout_closed"] is False and got["stderr_closed"] is False
+
+
+def test_without_proc_the_wait_for_the_group_falls_back_to_the_leader_and_does_not_wait_out_the_grace_period():
+    """`/proc` unreadable (a platform without it, a restricted container): the scan reports None, and the wait must then look at the leader
+    alone, so a child that ended by itself does not cost two grace periods."""
+    got = limited("""
+        import time
+        br.GRACE_S = 3.0
+        br._live_members = lambda pgid: None
+        t0 = time.time()
+        res = br.run(["sh", "-c", "echo hi; exit 0"], "", timeout_s=10, out_max=1000, err_max=1000)
+        print(json.dumps({"elapsed": time.time() - t0, "problem": res.problem, "returncode": res.returncode, "stdout": res.stdout.strip()}), flush=True)
+    """, deadline_s=40)
+    assert got["elapsed"] < 1.5, got
+    assert (got["problem"], got["returncode"], got["stdout"]) == (None, 0, "hi")
