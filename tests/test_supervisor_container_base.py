@@ -10,6 +10,7 @@ import pytest
 
 from orchard.supervisor import EXIT_READY, parse
 from run_fakes import FILES, FakeContainers, argv, bringup
+from swap_run_sh import valid_run_sh
 from test_supervisor import Rig, Stop
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
@@ -38,7 +39,7 @@ def container_rig(tmp_path, *, bundle=False, listings=None, chips=2):
         b.mkdir(parents=True)
         (b / "tt_kernel_manifest.json").write_text(json.dumps(
             {"schema_version": "6", "device_count": 2, "weights": {"repo_id": NEAREST}}))
-        (b / "run.sh").write_text("#!/bin/bash\n")
+        (b / "run.sh").write_text(valid_run_sh(NEAREST))
     r.containers = FakeContainers(listings)
     return r
 

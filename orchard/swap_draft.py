@@ -160,6 +160,21 @@ def _container_fits(containers: list[dict], want: str, chips: int) -> list[dict]
     return [c for c in mine if larger and c["chips"] == larger[0]]
 
 
+def _eligible(tt_model_root, want: str, bundles: list, containers: list[dict]):
+    """(bundles, containers, problem): the packages from the two lists that can serve swapped weights, by the check the `base` preflight
+    row makes (orchard/weights_source.py, issue 73): a bundle whose run.sh the swap cannot rewrite and a container package recorded as
+    hard-coding its repository are left out. Without it a refused bundle would be preferred here over a usable container the preflight
+    accepted, and the stage would fail after the coder boots. A record file that cannot be read gives (nothing chosen, its own words)."""
+    from orchard import weights_source
+    try:
+        recs = weights_source.records()
+    except ValueError as exc:
+        return [], [], str(exc)
+    hard = weights_source.hard_coded_names(recs)
+    ok = [b for b in bundles if weights_source.bundle_problem(str(Path(tt_model_root) / b.name), want) is None]
+    return ok, [c for c in containers if c["name"] not in hard], None
+
+
 def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: int,
           operator_home=None) -> tuple[dict | None, list[str]]:
     """Stage 2's swap_config.json. The one v6 bundle that serves the nearest model on `chips` chips is used when there is one. When
@@ -176,6 +191,9 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
             if b.weights_repo == want and b.schema == "6" and b.chips == chips
             and (Path(tt_model_root) / b.name / "run.sh").is_file()]
     boxes = _container_fits(installed_containers(operator_home), want, chips) if operator_home is not None else []
+    fits, boxes, record_problem = _eligible(tt_model_root, want, fits, boxes)
+    if record_problem:
+        problems.append(record_problem)
     box_chips = boxes[0]["chips"] if boxes else chips
     pick = None
     if len(fits) > 1:
@@ -262,6 +280,9 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
     bundles = [b for b in read_installed(tt_model_root) if b.weights_repo == want and b.schema == "6"
                and (Path(tt_model_root) / b.name / "run.sh").is_file()]
     containers = [c for c in installed_containers(operator_home) if c["repo"] == want]
+    bundles, containers, record_problem = _eligible(tt_model_root, want, bundles, containers)
+    if record_problem:
+        return {}, None, [record_problem]
     configs, notes = {}, []
     for n in sorted(set(counts)):
         cache = lambda name: str(home / f"{n}chip-{name.lower().replace('/', '--')}" / "tt_cache")   # noqa: E731

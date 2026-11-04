@@ -483,8 +483,8 @@ def _class_note(report, repo: str) -> str:
     return ""
 
 
-def _closest(report) -> str:
-    choices = (report or {}).get("bundle_choices") or []
+def _closest(report, unoffered=()) -> str:
+    choices = [c for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in unoffered]
     if not choices:
         return ""
     return " Closest bundles found: " + ", ".join(
@@ -536,12 +536,12 @@ def _selection_basis(report) -> str:
     return "inferred from its architecture" if conf == "inferred" else conf
 
 
-def _confirm_inferred(base: str, serving, report) -> Check:
+def _confirm_inferred(base: str, serving, report, unoffered=()) -> Check:
     """An inferred base is a guess from the architecture. Using it means downloading its snapshot and basing the run
     on it, so it waits for the operator: a block that offers its bundle first, like a missing bundle does."""
     first = [{"name": b.name, "installed": True} for b in serving]
     names = {c["name"] for c in first}
-    rest = [dict(c) for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in names]
+    rest = [dict(c) for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in names and c.get("name") not in unoffered]
     return Check("base", BLOCK, f"the card names no base model; research infers {base} ({_selection_basis(report)}), "
                  f"served by the installed bundle {serving[0].name}. An inferred base is not downloaded or used "
                  f"without a confirmation: pass --base {serving[0].name} to use it, --accept-inferred-base to take "
@@ -773,9 +773,13 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     if not base:
         if (found := _stock_check(report, stock, model_id, hub, local_snapshot)) is not None:
             return found
+        try:
+            hidden = weights_source.unoffered_names(installed, weights_records if weights_records is not None else weights_source.records())
+        except ValueError:
+            hidden = set()
         return Check("base", WARN, "the model card names no base_model, so stage 0 has nothing to compare it "
                      "with. Pass --base <bundle or model id> to name the model to start from"
-                     + _closest(report) + _port_note(report) + (f" {CHECKPOINT_NOTE}" if audio else ""),
+                     + _closest(report, hidden) + _port_note(report) + (f" {CHECKPOINT_NOTE}" if audio else ""),
                      data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": [], "report": report})
     if audio:
         found = _audio_base(model_id=model_id, base=base, inferred=inferred, report=report, accept_inferred=accept_inferred, audio=audio,
@@ -786,8 +790,11 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     serving, refused = weights_source.judge([b for b in installed if b.weights_repo == base], base, recs)
     refused_names = {p.name for p, _ in refused}
     refused_data = [{"name": p.name, "reason": why} for p, why in refused]
+    # What no picker, search result or ranked choice offers: what was refused just now, and the recorded hard-coded containers that are
+    # not installed (their download would be refused by the next preflight).
+    unoffered = weights_source.unoffered_names(installed, recs, refused_names)
     if serving and inferred and report["selected"].get("confidence") != "stated" and not accept_inferred:
-        return _confirm_inferred(base, serving, report)
+        return _confirm_inferred(base, serving, report, unoffered)
     if serving:
         snap = local_snapshot(base)
         data = {"base": base, "snapshot": snap, "bundle": serving[0].name, "needs_fetch": snap is None,
@@ -812,18 +819,20 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
             found = search(family)
         except Exception:
             found = None
-    choices = (report or {}).get("bundle_choices") or []
+    # A refused package is no choice for --base. When every ranked choice is one of them, the installed and searched candidates below are
+    # listed, not an empty "ranked bundles:".
+    choices = [c for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in unoffered]
     if choices:
-        ordered = [dict(c) for c in choices if c.get("name") not in refused_names]      # a refused package is no choice for --base
+        ordered = [dict(c) for c in choices]
         listing = "ranked bundles: " + ", ".join(
             f"{c['name']} ({c.get('class') or 'no estimate'}, {c['confidence']})" for c in ordered[:5])
     else:
         cands: dict[str, dict] = {}
         for b in installed:
-            if nearest.family_query(b.weights_repo) == family and b.name != model_id and b.name not in refused_names:
+            if nearest.family_query(b.weights_repo) == family and b.name != model_id and b.name not in unoffered:
                 cands[b.name] = {"name": b.name, "installed": True}
         for c in found or []:
-            if c["name"] != model_id and c["name"] not in cands and c["name"] not in refused_names:
+            if c["name"] != model_id and c["name"] not in cands and c["name"] not in unoffered:
                 cands[c["name"]] = {"name": c["name"], "installed": c.get("installed")}
         ordered = sorted(cands.values(), key=lambda c: (not c["installed"], c["name"]))
         if found is None:

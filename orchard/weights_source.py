@@ -22,9 +22,7 @@ remains the net for what this module cannot see.
 """
 from __future__ import annotations
 
-import contextlib
 import importlib.util
-import io
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -120,16 +118,18 @@ def _template():
 
 def run_sh_problem(text: str, nearest: str) -> str | None:
     """Why stage 2's prepare_swap.py could not rewrite this bundle run.sh for a model directory, or None when it can. It runs the
-    template's own edit on the text in memory: no file is read or written, and the bundle and model paths are placeholders."""
+    template's own edit on the text in memory: no file is read or written, and the bundle and model paths are placeholders. The
+    template is asked to fail quietly for this caller (a context variable, so a preflight on another thread is not affected) and
+    the failure comes back as an exception that carries its message. The process's stderr is not touched: the web UI runs
+    preflights on request threads, and a redirect of the shared stderr lets overlapping dry runs swallow each other's messages."""
     tmpl = _template()
-    err = io.StringIO()
+    token = tmpl.QUIET.set(True)
     try:
-        with contextlib.redirect_stderr(err):
-            tmpl.edit_run_script(text, Path("/nonexistent-bundle"), nearest, Path("/nonexistent-model-dir"))
-    except SystemExit:
-        said = err.getvalue().strip().splitlines()
-        msg = said[-1] if said else "the edit failed"
-        return msg.removeprefix("prepare_swap: ")
+        tmpl.edit_run_script(text, Path("/nonexistent-bundle"), nearest, Path("/nonexistent-model-dir"))
+    except tmpl.SwapFail as exc:
+        return exc.message
+    finally:
+        tmpl.QUIET.reset(token)
     return None
 
 
@@ -143,21 +143,43 @@ def _read_run_sh(directory: str) -> str | None:
         return None
 
 
+def bundle_problem(directory: str, base: str) -> str | None:
+    """Why a v6 bundle's run.sh cannot take swapped weights, or None when it can or cannot be read (no directory, no file, a refused
+    read: the runtime check of PR 72 is the net for those)."""
+    text = _read_run_sh(directory)
+    return run_sh_problem(text, base) if text is not None else None
+
+
+def hard_coded_names(recs: dict[str, Record]) -> set[str]:
+    """The names of the container packages the record says hard-code their repository."""
+    return {name for name, rec in recs.items() if rec.status == HARD_CODED}
+
+
+def unoffered_names(installed, recs: dict[str, Record], refused_names=()) -> set[str]:
+    """The package names no picker, search result or ranked choice should offer for a bring-up: the packages judged and refused now, and
+    the recorded hard-coded containers that are not installed (a download of one would be refused by the next preflight). A name that an
+    installed v6 bundle carries is left out of the recorded part: the record is about container packages, and that bundle is judged by
+    its own run.sh when it serves the base."""
+    bundles = {pkg.name for pkg in installed if pkg.schema == "6"}
+    return set(refused_names) | (hard_coded_names(recs) - bundles)
+
+
 def judge(installed, base: str, recs: dict[str, Record]):
     """Split the installed packages that serve `base` into (usable, refused). `refused` holds (package, reason) pairs. The order of the
-    usable ones is the order given."""
+    usable ones is the order given. The record judges container packages only; a v6 bundle, even one with a recorded name (a patched
+    replacement that took the container's name), is judged by its own run.sh."""
     usable, refused = [], []
     for pkg in installed:
-        rec = record_for(pkg.name, recs)
-        if rec.status == HARD_CODED:
-            refused.append((pkg, f"{pkg.name} hard-codes its model repository, so it serves the base model whatever weights are swapped "
-                                 f"in ({rec.evidence})"))
-            continue
         if pkg.schema == "6":
-            text = _read_run_sh(getattr(pkg, "directory", ""))
-            problem = run_sh_problem(text, base) if text is not None else None
+            problem = bundle_problem(getattr(pkg, "directory", ""), base)
             if problem:
                 refused.append((pkg, f"{pkg.name}'s run.sh cannot take swapped weights: {problem}"))
+                continue
+        else:
+            rec = record_for(pkg.name, recs)
+            if rec.status == HARD_CODED:
+                refused.append((pkg, f"{pkg.name} hard-codes its model repository, so it serves the base model whatever weights are "
+                                     f"swapped in ({rec.evidence})"))
                 continue
         usable.append(pkg)
     return usable, refused
