@@ -348,6 +348,17 @@ still block at stage 4 (the container validation run did, with 23.7 GB free). Th
 on the short disk so you can see what to remove; the harness removes none of the hub models. `bringup --prune-caches` removes only the oldest
 tensor caches that no unfinished run uses, and only enough to fit (issue 27 tracks deleting a configuration's cache after its test passes).
 
+The coder container has its own cache. `tt-model serve` mounts the Hugging Face cache named by `$HF_HOME` in the environment it runs in
+(`~/.cache/huggingface` when unset), and a coder whose base model is missing there downloads it during its boot, writing nothing to its log.
+A scratch `HF_HOME` made a boot write 94 GB and fill a root disk on 2026-11-03 (issue 417). The `coder-cache` preflight row checks for the
+model, and the live narration of a coder boot adds the cache's partial downloads and the fall in its disk's free space to its once-a-minute
+line when either passes 2 GB. When the supervisor confirms that it stopped its own coder, it removes the stopped container, because a
+container that docker killed without an exit event, or that died during a boot (`Exited (1)`), stays on disk, and `tt-model serve` counts it as holding
+the chips and refuses to start (the `container` row looks for one). That includes a start whose `tt-model serve` failed after it made the container: the supervisor lists the containers under the coder's name
+before each start, records the id of one that was not there before (`coder container created`), and removes only a container with a
+recorded id, by that id. A start that failed before it created anything leaves an existing container alone, and so does a start refused
+because another process owns the container.
+
 Each chip configuration needs its own tensor cache. The supervisor checks free space only on the
 filesystem that holds the run directory. On the development machine the root disk was 99% full, so
 the run directory, the tensor caches and the model weights all lived on a second, larger disk. Put
@@ -742,6 +753,8 @@ its reason; a `warn` is information.
 | credentials | credential files are visible to agent shells and `--refuse-credentials-visible` was given. By default they are accepted, shown as a warning, and recorded in the ledger | `credentials-needed` |
 | tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
+| coder-cache | the coder's base model (the `model` of the chips tier on `coder.port`) is not in the cache the coder container mounts, and either the disk cannot hold the download plus 10 GB (`disk-full`) or `--no-fetch` forbids it (`coder-unusable`). A missing model with room is a warning that says how large the download is and where it goes. `tt-model serve` mounts `$HF_HOME` from its own environment and ignores `--hf-home`, and the row says when the two differ. The size is the hub's, or 160 GB when the hub cannot be asked. The target and base downloads the run makes onto the same disk before the coder boots are taken from the free space first (a coder model that is the target or the base adds none of its own when the coder mounts the cache the run downloads into and the disk row budgets a download of it, which it does for a target that is not local and a base that needs one; a local target that the coder's stricter snapshot check rejects, a cached base, or another cache needs a download of its own). A snapshot counts as present only when its config, every shard of each sharded weight file (`.safetensors` or PyTorch `.bin`) and that format's weight index are there (a repository with both formats passes when either is complete); the row does not compare with the hub's file list. The default cache is under this process's home, because `tt-model serve` runs in it; `operator_home` has no effect on it. It looks for the model's id and does not know the revision the package pins. Left out for a text-runtime run and for a kept coder (issue 417) | `disk-full`, `coder-unusable` |
+| container | a container already has the coder's name (`tt-model-<package>-<profile>`): `tt-model serve` refuses to start while it does. A stopped one is a leftover of an aborted run and the row names `docker rm <name>`; a running one blocks as well, and both are warnings on a resume. Left out for a bundle coder (issue 417) | `coder-unusable` |
 | cpu | the CPU tier's server (ollama) does not answer, or does not list the tier's model. Stage 4's 4-chip test parks the coder behind it, so a run without it would stop hours in | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
 | bus | a chip the configuration needs is not on the PCIe bus, is not awake (`power_state` other than D0, for example D3cold, the state both chips of one board fell into on 2026-10-22), has no readable serial (gozer refuses every lease while one cannot be read), has no driver or no `/dev/tenstorrent/N` node, finds `/dev/tenstorrent` itself missing or unlistable, or is listed by gozer but missing from the bus. The configuration needs the coder's chips plus a test board, or the whole box when the coder holds four chips (a lab run needs only the coder's chips here). Extra device nodes, a power state the kernel does not report, a gozer that lists fewer chips than the bus shows and a board listing fewer chips than another are warnings. The row reads files only (sysfs and `/dev/tenstorrent`): no lease, no device open, no reset. A board that has left the bus needs a power cycle or reboot. After the run starts, a failed test, coder boot or benchmark phase gets the same check on the chips it holds (section 5.5a) | `hardware-unhealthy` |
@@ -879,7 +892,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--required-chips` | no | The chip counts stage 4 must pass, such as `2,4`. Other counts are optional. Without it, every configuration stage 4 lists must pass. The ledger records it, and a resume with a different value is refused: move the run's directory aside and start a new run |
 | `--four-chip-package` | no | The container package stage 4 drafts its 4-chip configuration with, when several installed ones serve the nearest model (bringup.toml `four_chip_package`). Without it, the only such package is used, and with several the agent chooses |
 | `--cache-root` | no | Where the per-model tensor caches go (`{{CACHE_ROOT}}` in the skills). Default `<parent of --run-dir>/cache`. The ledger records it, and a resume with a different value is refused |
-| `--hf-home` | no | Your Hugging Face cache (`{{HF_HOME}}`). Default `$HF_HOME`, else `<operator home>/.cache/huggingface`. Recorded and kept like `--cache-root` |
+| `--hf-home` | no | Your Hugging Face cache (`{{HF_HOME}}`). Default `$HF_HOME`, else `<operator home>/.cache/huggingface`. Recorded and kept like `--cache-root`. The coder container does not use it: `tt-model serve` mounts `$HF_HOME` from the environment, and the `coder-cache` preflight row says when the two differ |
 | `--operator-home` | no | Your home directory (`{{OPERATOR_HOME}}`), where tt-model keeps its packages. Default your home from the passwd entry. Recorded and kept like `--cache-root` |
 | `--package-format` | no | `v6` makes stage 7 build a v6 thin package on the weights-only path (see [5.3](#53-what-each-stage-does)). `v5.1` is refused at start, because it needs a container image build. Without this flag stage 7 is skipped. The ledger records it, and a resume with different options is refused. A run that started without it can be given it on a resume, as long as stage 7 has not started |
 | `--package-namespace` | with `--package-format` | Your Hugging Face namespace. Stage 7 writes it into the package card and the publish commands. The run never publishes |
@@ -1305,6 +1318,13 @@ minute), then runs the same command again, which resumes from the ledger with a 
 `--auto-retries` retries (default 2, and 0 turns it off) and says each one on the screen. A block that names a missing
 model, a full disk, a credential or a rule, a failed stage after escalation, or a spent retry budget is never retried
 automatically. After the last retry the run ends blocked as before.
+
+A `coder-unusable` block that says `in use by another container` is the other exception: `tt-model serve` refused to start because a
+container, running or stopped, holds the chips it was asked to use. A coder container left as `Exited` by an earlier boot does this with
+the chips healthy (issue 417), so the block is classed as a coder problem and not a hardware one. Its text names the container and the
+command that removes it (`docker rm <name>`), or says to list containers when none has the coder's name. It is not retried by itself,
+because the container stays until someone removes it. A retry within the same run removes a stopped container of the coder's exact name
+once and starts again when the run launched a coder before; a container that was there before the run, or that runs, is never removed.
 
 A `hardware-unhealthy` block that says `a chip this run uses is off the PCIe bus or unreadable` is the exception: it is never
 retried, because the board needs a power cycle or a reboot and a retry would meet the same board. The supervisor makes that
