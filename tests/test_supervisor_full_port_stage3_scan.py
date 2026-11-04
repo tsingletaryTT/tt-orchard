@@ -57,14 +57,19 @@ class FakeEntry:
     def is_file(self, follow_symlinks=True):
         return self._kind == "file"
 
+    def stat(self, follow_symlinks=True):
+        return SimpleNamespace(st_dev=1, st_ino=hash(self.name) & 0xFFFFFF)
+
 
 class Counter:
     pulled = 0
 
 
 def fake_directory(monkeypatch, root: Path, count: int, kind: str = "file"):
-    """Make `os.scandir(root)` serve `count` entries one at a time, and count how many were asked for. Other paths (and file descriptors) are real."""
+    """Make the listing of the directory `root` serve `count` entries one at a time, and count how many were asked for. The seed lists a directory
+    through a descriptor it holds, so the fake recognises `root` by its identity (device and inode); other directories are real."""
     counter, real, root_text = Counter(), os.scandir, os.fspath(root)
+    root_stat = os.stat(root)
 
     class Scan:
         def __enter__(self):
@@ -82,8 +87,10 @@ def fake_directory(monkeypatch, root: Path, count: int, kind: str = "file"):
                 yield FakeEntry(root_text, f"f{i:07d}.py" if kind == "file" else f"d{i:07d}", kind)
 
     def scandir(path="."):
-        if isinstance(path, (str, os.PathLike)) and os.fspath(path) == root_text:
-            return Scan()
+        if isinstance(path, int):
+            st = os.fstat(path)
+            if (st.st_dev, st.st_ino) == (root_stat.st_dev, root_stat.st_ino):
+                return Scan()
         return real(path)
 
     monkeypatch.setattr(supervisor.os, "scandir", scandir)
@@ -93,7 +100,7 @@ def fake_directory(monkeypatch, root: Path, count: int, kind: str = "file"):
 @pytest.fixture
 def fake_copy(monkeypatch):
     """The first files of a faked directory are 'copied' without a disk behind them."""
-    monkeypatch.setattr(supervisor.safeio, "read_bytes", lambda path, max_bytes=None: b"x = 1\n")
+    monkeypatch.setattr(supervisor.safeio, "read_beneath", lambda root_fd, parts, *, max_bytes=None, expect_identity=None: b"x = 1\n")
 
 
 @pytest.mark.timeout(60)
@@ -176,7 +183,7 @@ def test_the_files_are_listed_in_the_ledger_in_path_order(tmp_path, monkeypatch)
         def __iter__(self):
             return iter(self.entries)
 
-    monkeypatch.setattr(supervisor.os, "scandir", lambda p=".": Reversed(p) if isinstance(p, (str, os.PathLike)) and os.fspath(p) == os.fspath(src) or os.fspath(p).startswith(os.fspath(src) + "/") else real(p))
+    monkeypatch.setattr(supervisor.os, "scandir", lambda p=".": Reversed(p) if isinstance(p, int) else real(p))
     assert seed(sup, stage) == ["stage 2 port copied"]
     paths = [f["path"] for f in sup.ledger.rows[0][2]["files"]]
     assert len(paths) == 4 and paths == sorted(paths), paths
@@ -202,9 +209,9 @@ def test_a_cache_directory_is_skipped_without_being_read_and_a_pyc_file_is_skipp
     (src / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"\0")
     opened = []
     real = os.scandir
-    monkeypatch.setattr(supervisor.os, "scandir", lambda p=".": (opened.append(os.fspath(p)) if isinstance(p, (str, os.PathLike)) else None) or real(p))
+    monkeypatch.setattr(supervisor.os, "scandir", lambda p=".": (opened.append(p) if isinstance(p, int) else None) or real(p))
     assert seed(sup, stage) == ["stage 2 port copied"]
-    assert not any(p.endswith("__pycache__") for p in opened), "a cache directory is not descended into"
+    assert len(opened) == 1, f"a cache directory is not descended into: {len(opened)} directories were listed"
     assert [f["path"] for f in sup.ledger.rows[0][2]["files"]] == ["stages/3/port/port_model.py"]
 
 

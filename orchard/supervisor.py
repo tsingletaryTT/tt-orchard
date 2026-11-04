@@ -614,37 +614,57 @@ class _SeedLimit(Exception):
 
 
 class _SeedScan:
-    """The entries of a port directory, read lazily, depth first, with every bound enforced as the entries arrive (issue 326).
+    """The entries of a port directory, read lazily, depth first, through descriptors, with every bound enforced as the entries arrive (issue 326).
 
-    Nothing is listed or sorted first: an entry is asked of the operating system only when the caller wants the next one, so a directory of
-    millions of entries is refused after about `max_entries` reads and holds one directory handle per level (at most `max_depth` + 1). A link is
-    reported and never followed; a cache directory (`__pycache__`) is reported nowhere and never entered. Yields `(parts, kind)` with `parts` the
-    names from the root and `kind` one of `file`, `link` or `other` (a device, a pipe, a socket); directories are walked, not yielded. `seen` is
-    the number of entries read so far. The order is the operating system's: callers that need a stable order sort what they kept."""
+    The root is opened once and held (`safeio.pinned_root`: a link standing where the root should be is refused), and every directory below it is
+    opened beneath that descriptor with no link followed and listed from its own descriptor. A directory renamed or replaced by a link after it
+    was classified is therefore still the one that is listed, and a link in its place is refused when the walk reaches it. Nothing is listed or
+    sorted first: an entry is asked of the operating system only when the caller wants the next one, so a directory of millions of entries is
+    refused after about `max_entries` reads and holds one descriptor per level (at most `max_depth` + 2). A link is reported and never followed;
+    a cache directory (`__pycache__`) is reported nowhere and never entered. Yields `(parts, kind, identity)` with `parts` the names from the
+    root, `kind` one of `file`, `link` or `other` (a device, a pipe, a socket) and `identity` the `(st_dev, st_ino)` of a file as listed (None
+    otherwise); directories are walked, not yielded. `read` opens a listed file beneath the same root descriptor and refuses a file that is
+    no longer the one that was listed. `seen` is the number of entries read so far. The order is the operating system's: callers that need a
+    stable order sort what they kept. Close the iterator (`contextlib.closing`) to release the descriptors."""
 
     def __init__(self, root, max_entries: int = STAGE_3_SEED_ENTRIES, max_depth: int = STAGE_3_SEED_DEPTH):
         self.root, self.max_entries, self.max_depth, self.seen = os.fspath(root), max_entries, max_depth, 0
+        self._pin = None
+
+    def read(self, parts, identity, max_bytes: int) -> bytes:
+        """The bytes of the file `parts` as it was listed (identity `(st_dev, st_ino)`), at most `max_bytes`; only while the iterator is open."""
+        if self._pin is None:
+            raise safeio.PathRefused("the port directory is not open")
+        return safeio.read_beneath(self._pin.fd, parts, max_bytes=max_bytes, expect_identity=identity)
 
     def __iter__(self):
-        stack = [(self.root, (), 0)]
-        while stack:
-            top, rel, depth = stack.pop()
-            with os.scandir(top) as listing:
-                for entry in listing:
-                    self.seen += 1
-                    if self.seen > self.max_entries:
-                        raise _SeedLimit(f"holds more than {self.max_entries} entries")
-                    parts = rel + (entry.name,)
-                    if entry.is_symlink():
-                        yield parts, "link"
-                    elif entry.is_dir(follow_symlinks=False):
-                        if entry.name == "__pycache__":
-                            continue
-                        if depth + 1 > self.max_depth:
-                            raise _SeedLimit(f"is nested deeper than {self.max_depth} levels")
-                        stack.append((entry.path, parts, depth + 1))
-                    else:
-                        yield parts, "file" if entry.is_file(follow_symlinks=False) else "other"
+        with safeio.pinned_root(self.root) as pin:
+            self._pin = pin
+            try:
+                stack = [((), 0)]
+                while stack:
+                    rel, depth = stack.pop()
+                    with safeio.list_beneath(pin.fd, rel) as listing:
+                        for entry in listing:
+                            self.seen += 1
+                            if self.seen > self.max_entries:
+                                raise _SeedLimit(f"holds more than {self.max_entries} entries")
+                            parts = rel + (entry.name,)
+                            if entry.is_symlink():
+                                yield parts, "link", None
+                            elif entry.is_dir(follow_symlinks=False):
+                                if entry.name == "__pycache__":
+                                    continue
+                                if depth + 1 > self.max_depth:
+                                    raise _SeedLimit(f"is nested deeper than {self.max_depth} levels")
+                                stack.append((parts, depth + 1))
+                            elif entry.is_file(follow_symlinks=False):
+                                st = entry.stat(follow_symlinks=False)
+                                yield parts, "file", (st.st_dev, st.st_ino)
+                            else:
+                                yield parts, "other", None
+            finally:
+                self._pin = None
 
 
 def _holds_python(root) -> bool | None:
@@ -652,10 +672,10 @@ def _holds_python(root) -> bool | None:
     scan = _SeedScan(root)
     try:
         with contextlib.closing(iter(scan)) as entries:
-            return any(kind == "file" and parts[-1].endswith(".py") for parts, kind in entries)
+            return any(kind == "file" and parts[-1].endswith(".py") for parts, kind, _identity in entries)
     except _SeedLimit:
         return None
-    except OSError:
+    except (OSError, safeio.SafeReadError):          # a link standing where the directory should be, or one that cannot be opened: it holds no port
         return False
 
 
@@ -3024,8 +3044,14 @@ class Supervisor:
         copied, problem = [], None
         scan = _SeedScan(src)
         try:
-            with contextlib.closing(iter(scan)) as entries:
-                for parts, kind in entries:
+            if dst.is_symlink():                  # a link planted where the port directory goes is removed and never followed
+                dst.unlink()
+            dst.mkdir(parents=True, exist_ok=True)
+            # Every step is anchored: the source is read through the descriptors of the scan, the destination is written beneath a descriptor of
+            # its own, and a link on either side is refused, so a swap between the listing and the read cannot bring in a file from outside
+            # stage 2's port or send one out of stages/3/port/. The hash is that of the bytes read, which are the bytes written.
+            with safeio.pinned_root(dst) as out, contextlib.closing(iter(scan)) as entries:
+                for parts, kind, identity in entries:
                     rel = Path(*parts)
                     if rel.suffix == ".pyc":
                         continue
@@ -3035,9 +3061,8 @@ class Supervisor:
                     if len(copied) >= STAGE_3_SEED_FILES:
                         problem = f"stages/2/port/ holds more than {STAGE_3_SEED_FILES} files (the scan stopped after reading {scan.seen} entries)"
                         break
-                    data = safeio.read_bytes(src / rel, max_bytes=STAGE_3_SEED_FILE_BYTES)
-                    (dst / rel).parent.mkdir(parents=True, exist_ok=True)
-                    safeio.atomic_write(dst / rel, data, mode=0o644)
+                    data = scan.read(parts, identity, STAGE_3_SEED_FILE_BYTES)
+                    safeio.write_beneath(out.fd, parts, data, mode=0o644)
                     copied.append({"path": f"stages/3/port/{rel.as_posix()}", "sha256": hashlib.sha256(data).hexdigest()})
         except _SeedLimit as exc:
             problem = f"stages/2/port/ {exc} (the scan stopped after reading {scan.seen} entries)"
