@@ -831,6 +831,16 @@ def _audio_decision_load_category_rules(base: Path):
     return audio_decision.load_category_rules(base / "input.json")
 
 
+def _weights_source_load_records(base: Path):
+    from orchard import weights_source
+    return weights_source.load_records(base / "input.json")
+
+
+def _weights_source_read_run_sh(base: Path):
+    from orchard import weights_source
+    return weights_source._read_run_sh(str(base))
+
+
 def _stack_pins_read_record(base: Path):
     from orchard import stack_pins
     return stack_pins.read_record(base)[0]
@@ -947,6 +957,8 @@ READERS: list[Reader] = [
     Reader("research.headers.read_model (hostile index)", _headers_read_model_index, feed="bytes"),
     Reader("research.headers.shard_header", _headers_shard_header, feed="bytes", documented=(_FetchError, ValueError)),
     Reader("research.http.Fetcher.json", _http_fetcher_json, feed="bytes", documented=(_FetchError,)),
+    Reader("weights_source.load_records", _weights_source_load_records, documented=(ValueError,)),
+    Reader("weights_source._read_run_sh", _weights_source_read_run_sh, rel="run.sh"),
 ]
 
 BY_NAME = {r.name: r for r in READERS}
