@@ -82,7 +82,8 @@ def test_a_completed_bar_is_named_in_the_result_and_a_missing_bar_is_said_not_as
     done = run(REAL_TT_V1)["layers_loaded"]
     assert done["layers_completed"] == 64 and "64/64" in done["detail"]
     no_bar = run("\n".join(ln for ln in REAL_TT_V1.splitlines() if "Loading layers" not in ln) + "\n")["layers_loaded"]
-    assert no_bar["state"] == "pass" and no_bar["layers_completed"] is None and "no progress bar" in no_bar["detail"]
+    # the log's only layer line is the intent printed before loading: no bar after it, so nothing says the loading finished (independent review of PR 443)
+    assert no_bar["state"] == "not_checked" and no_bar["layers_completed"] is None and "no progress bar" in no_bar["detail"]
 
 
 def test_a_bar_that_belongs_to_something_else_is_not_read_as_the_layer_bar():
@@ -159,9 +160,9 @@ def test_one_repeated_count_is_not_called_two_counts():
 
 def test_a_line_beyond_the_cap_is_not_read(monkeypatch):
     monkeypatch.setattr(sv, "MAX_ENGINE_LOG_CHARS", 400)
-    late = "x" * 500 + "\nLoading 64 transformer layers\n"
+    late = "x" * 500 + "\nloaded 64 layers\n"
     assert run(late)["layers_loaded"]["state"] == "not_checked"
-    early = "Loading 64 transformer layers\n" + "x" * 500
+    early = "loaded 64 layers\n" + "x" * 500
     assert run(early)["layers_loaded"]["state"] == "pass"
 
 
@@ -219,7 +220,8 @@ def test_an_earlier_components_completed_bar_is_not_the_bar_of_the_final_announc
     # a 32-layer component loads and finishes, then a 64-layer component is announced and its bar has not appeared (or never will)
     log = _loading(32) + _bar(32, 32) + _loading(64)
     r = run(log)["layers_loaded"]
-    assert r["state"] == "pass" and r["layers"] == 64 and r["layers_completed"] is None and "no progress bar" in r["detail"]
+    # not a pass: the 64-layer line is an intent and no bar followed it (independent review of PR 443)
+    assert r["state"] == "not_checked" and r["layers"] == 64 and r["layers_completed"] is None and "no progress bar" in r["detail"]
 
 
 def test_an_earlier_components_short_bar_does_not_fail_a_final_announcement_whose_own_bar_completed():
@@ -237,7 +239,7 @@ def test_the_final_announcements_own_short_bar_still_fails_after_an_earlier_comp
 def test_a_bar_printed_before_the_announcement_is_not_the_announcements_bar_when_the_line_says_loading():
     log = _bar(64, 64) + _loading(64)
     r = run(log)["layers_loaded"]
-    assert r["state"] == "pass" and r["layers_completed"] is None
+    assert r["state"] == "not_checked" and r["layers_completed"] is None
 
 
 def test_a_completion_statement_takes_the_bar_that_came_before_it_and_not_an_earlier_components():

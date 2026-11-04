@@ -57,7 +57,8 @@ COUNTER = "vllm:generation_tokens_total"
 _COUNTER_LINE = re.compile(r"^" + re.escape(COUNTER) + r"(?:\{[^}\n]*\})?[ \t]+(\S+)[ \t]*$", re.MULTILINE)
 _MESH_LINE = re.compile(r"(?:^|\s)multidevice with (\d{1,5}) devices and grid \(", re.MULTILINE)
 _SEQUENCE = re.compile(r"\A\s*9[\s,]+10[\s,]+11(?!\d)")
-_FIRST_INT = re.compile(r"\A\s*(-?\d+)(?!\d)")
+# at most 12 digits: a reply of thousands of digits (a repetition loop does it) is not a number, and int() of more than 4,300 digits raises
+_FIRST_INT = re.compile(r"\A\s*(-?\d{1,12})(?!\d)")
 
 
 def _result(name: str, state: str, detail: str, **more) -> dict:
@@ -331,10 +332,13 @@ def check_mesh(log_text, *, expected_devices) -> dict:
 # measurement of device memory, and a check of it against `max_model_len` cannot fail on such a server. The result says which it is.
 _LAYERS_LINES = (re.compile(r"\b(?P<verb>loaded|loading|built|created|initiali[sz]ed)\s+(?P<n>\d{1,4})\s+(?:decoder\s+|transformer\s+)?layers\b", re.IGNORECASE),
                  re.compile(r"\blayers\s+loaded\s*[:=]\s*(?P<n>\d{1,4})\b", re.IGNORECASE))
-# The tqdm bar of a tt-metal model's layer loop. Every width is bounded, so a line of repeated bar text costs a fixed amount per repeat.
-_LAYERS_BAR = re.compile(r"Loading layers:\s{0,8}\d{1,3}%\|[^|\r\n]{0,64}\|\s{0,8}(\d{1,4})/(\d{1,4})\b")
-_KV_TOKENS = re.compile(r"\bGPU KV cache size:\s*([\d,]{1,20})\s*tokens\b", re.IGNORECASE)
-_KV_CONCURRENCY = re.compile(r"\bMaximum concurrency for\s*([\d,]{1,20})\s*tokens per request:\s*(\d{1,9}(?:\.\d{1,6})?)x\b", re.IGNORECASE)
+# The tqdm bar of a tt-metal model's layer loop. The body between the pipes has no fixed width (a terminal can be any width: review of PR 443,
+# independent review); it cannot contain a pipe, a carriage return or a newline, so the match for one opener ends at the next pipe and the cost
+# over a whole line is linear in its length. The counts after the closing pipe decide.
+_LAYERS_BAR = re.compile(r"Loading layers:\s{0,8}\d{1,3}%\|[^|\r\n]*\|\s{0,8}(\d{1,4})/(\d{1,4})\b")
+# A numeric capture that allows commas must start with a digit: `[\d,]{1,20}` accepted `,` and `int("")` raised (independent review of PR 443).
+_KV_TOKENS = re.compile(r"\bGPU KV cache size:\s*(\d[\d,]{0,19})\s*tokens\b", re.IGNORECASE)
+_KV_CONCURRENCY = re.compile(r"\bMaximum concurrency for\s*(\d[\d,]{0,19})\s*tokens per request:\s*(\d{1,9}(?:\.\d{1,6})?)x\b", re.IGNORECASE)
 _KV_BLOCKS = re.compile(r"#\s*GPU blocks:\s*(\d{1,12})\b", re.IGNORECASE)
 _KV_OVERRIDE = re.compile(r"\bOverriding num_gpu_blocks=\d{1,12}\s+with\s+num_gpu_blocks_override=(\d{1,12})\b")
 MAX_ENGINE_LOG_CHARS = 64 * 1024 * 1024      # choice: the bound the boot check puts on its read of the server log (orchard/can.py MAX_LOG_BYTES)
@@ -354,8 +358,11 @@ def layers_in_config(config) -> int | None:
     return None
 
 
-def _int(text: str) -> int:
-    return int(text.replace(",", ""))
+def _int(text) -> int | None:
+    """A count captured with thousands separators, or None when it is not one (no digit, a non-ASCII digit, more than 20 digits). It never
+    raises: a line of a server log is not trusted to hold a number (independent review of PR 443)."""
+    digits = text.replace(",", "") if isinstance(text, str) else ""
+    return int(digits) if digits.isascii() and digits.isdigit() and len(digits) <= 20 else None
 
 
 def _whole(value) -> bool:
@@ -402,7 +409,7 @@ def _bars_of_last_announcement(announcements: list[tuple[int, int, bool]], log_t
     return inside
 
 
-def _layers_result(seen: list[int], bars: list[tuple[int, int]], expected: int | None) -> dict:
+def _layers_result(seen: list[int], bars: list[tuple[int, int]], expected: int | None, *, intent: bool = False) -> dict:
     """`layers_loaded` from the layer counts the log states (in log order), the last layer progress bar, and `num_hidden_layers`. The last
     stated count decides, as for the other log lines. When several different counts are stated they are listed, and a count that equals
     the config's but is not the last is named: the last line may belong to another component (a drafter, say)."""
@@ -420,11 +427,28 @@ def _layers_result(seen: list[int], bars: list[tuple[int, int]], expected: int |
         return _result("layers_loaded", "fail", f"the engine announced {last} layers but its layer progress bar ended at {bars[-1][0]}/{bars[-1][1]}", **facts)
     if bars and bars[-1][1] != last:
         return _result("layers_loaded", "fail", f"the engine announced {last} layers but its layer progress bar counts {bars[-1][1]}", **facts)
-    note = f"progress bar {bars[-1][0]}/{bars[-1][1]}" if bars else "no progress bar in the log, so the count is the engine's announcement"
+    if intent and not bars:
+        # `Loading N layers` is printed before the layers load. With no bar after it (and no completion statement) nothing in the log says
+        # they finished: the server may have stopped or restarted during the load, or this component prints no bar. Not a pass, and not a
+        # fail either, since a component can print no bar (independent review of PR 443).
+        return _result("layers_loaded", "not_checked", f"the last layer line is the intent `Loading {last} layers`, printed before the layers load, and no progress bar "
+                       f"followed it: nothing in the log says the {last} layers finished loading (the server may have stopped or restarted during the load, or this "
+                       "component prints no bar)", **facts)
+    note = f"progress bar {bars[-1][0]}/{bars[-1][1]}" if bars else "no progress bar in the log, so the count is the engine's completion statement"
     return _result("layers_loaded", "pass", f"the engine loaded {last} layers, as config.json says ({note})", **facts)
 
 
 def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=None, block_size=None) -> list[dict]:
+    """`_check_engine_log` made total: a failure inside it is a recorded `not_checked` that names the error class, and never ends the boot check
+    (independent review of PR 443: one corrupt line of a server log raised ValueError and aborted it)."""
+    try:
+        return _check_engine_log(log_text, config=config, max_model_len=max_model_len, max_num_seqs=max_num_seqs, block_size=block_size)
+    except Exception as exc:                                   # a bug or a hostile line must not stop the boot check
+        why = f"the server log could not be checked ({type(exc).__name__})"
+        return [_result("layers_loaded", "not_checked", why), _result("kv_cache", "not_checked", why)]
+
+
+def _check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=None, block_size=None) -> list[dict]:
     """Two results from the server log: `layers_loaded` (the layers the engine says it loaded, against `num_hidden_layers` of `config`, and the
     layer progress bar where the model prints one) and `kv_cache` (the cache capacity in tokens and the concurrency the engine states, against the
     can's `max_model_len`). The last matching line wins. At most `MAX_ENGINE_LOG_CHARS` characters are read.
@@ -442,13 +466,14 @@ def check_engine_log(log_text, *, config=None, max_model_len=None, max_num_seqs=
     if len(log_text) > MAX_ENGINE_LOG_CHARS:
         log_text = log_text[:MAX_ENGINE_LOG_CHARS]
     announced = _announcements(log_text)                                      # log order, with positions
-    out.append(_layers_result([count for _, count, _ in announced], _bars_of_last_announcement(announced, log_text), expected))
+    out.append(_layers_result([count for _, count, _ in announced], _bars_of_last_announcement(announced, log_text), expected,
+                              intent=bool(announced) and announced[-1][2]))
     # Each capacity report is a line with its position. The selected report is the last one, and the override and the concurrency line that
     # describe it are the ones next to it in the log: an override printed before the report since the previous report, and the concurrency
     # line printed after it. One that belongs to another report is not read as this one's (review of PR 443, round 3).
-    tokens = [(m.start(), _int(m.group(1))) for m in _KV_TOKENS.finditer(log_text)]
+    tokens = [(m.start(), n) for m in _KV_TOKENS.finditer(log_text) if (n := _int(m.group(1))) is not None]
     blocks = [(m.start(), int(m.group(1))) for m in _KV_BLOCKS.finditer(log_text)]
-    all_conc = [(m.start(), _int(m.group(1)), float(m.group(2))) for m in _KV_CONCURRENCY.finditer(log_text)]
+    all_conc = [(m.start(), n, float(m.group(2))) for m in _KV_CONCURRENCY.finditer(log_text) if (n := _int(m.group(1))) is not None]
     all_overrides = [(m.start(), int(m.group(1))) for m in _KV_OVERRIDE.finditer(log_text)]
     at, capacity = None, None
     if tokens:
