@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, model_kind, safeio, scoring_check
+from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, full_port_entries, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, IGNORED_WEIGHT_SUFFIXES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import agreement_core, prompt_suite, raw_evidence, sampling_choice, sampling_probe, sidecar_numbers, token_check
@@ -584,6 +584,16 @@ def gate_full_port_3(stage_dir, run_dir, *, rehearsal: bool = False, expected_ch
     agree with the stage 1 reference. The checks are stage 2's, on stages/3/. The supervisor gives `expected_chips` from the run's
     `--required-chips`; the gate refuses a test that ran on a different number."""
     return gate_full_port(stage_dir, run_dir, rehearsal=rehearsal, stage=3, expected_chips=expected_chips)
+
+
+def gate_full_port_4(stage_dir, run_dir, *, rehearsal: bool = False, required=None) -> GateResult:
+    """Stage 4 of a full port (issue 454): the port ran on each of the run's required chip counts, or a count was already shown by stage 2 or
+    3. `orchard/full_port_entries.py` holds the checks: each entry directory goes through the stage 2 and 3 check with the entry's count, the
+    plan lists exactly the run's counts, and result.json equals the summary rebuilt from the entries' records. `required` is the run's
+    `--required-chips` (the supervisor's own option), never a file's content. The ledger's part (the markers and the plan are the
+    supervisor's) is checked by the supervisor, because the gate has no ledger."""
+    reasons, seen, waived = full_port_entries.check_stage(stage_dir, run_dir, required=required, rehearsal=rehearsal)
+    return GateResult(not reasons, tuple(reasons), tuple(seen), tuple(waived))
 
 
 def gate_scoring_reference(stage_dir, run_dir) -> GateResult:
@@ -1977,6 +1987,15 @@ FULL_PORT_STAGE_2 = dataclasses.replace(
 FULL_PORT_STAGE_3 = dataclasses.replace(
     STAGES[3], name="full port on the configured chips and agreement with the CPU reference", skill="full-port-mesh",
     gate=gate_full_port_3, draft="full_port")
+# Stage 4 of a full port (issue 454): the port on each required chip count, one record and one marker per entry. The supervisor writes the plan
+# (tests/plan.json) from `--required-chips` and runs each entry in its own directory, stages/4/configs/<N>/ (orchard/full_port_entries.py,
+# orchard/full_port_stage4.py). The coder's step is one prepare step per entry, the skill full-port-shrink: it adapts the seeded port to the
+# smaller mesh. `boards` is the most one entry needs; the supervisor leases each entry's own boards, parking the coder for a wide one. The result
+# is the supervisor's, so there is no finish step.
+FULL_PORT_STAGE_4 = dataclasses.replace(
+    STAGES[4], name="full port on each required chip count and agreement with the CPU reference", skill="full-port-shrink",
+    refs=("tt-device-usage",), boards=2, gate=gate_full_port_4, marker="tests/plan.json", draft="full_port_entries")
+SKIP_4_FULL_PORT = ("full-port route: the run lists no chip count (`--required-chips`), so stage 4 has no entry to run")
 SKIP_3_FULL_PORT = ("full-port route: the run configures no chip count above one board (`--required-chips`), so stage 2 already ran the port on "
                     "the configured chips")
 
@@ -2342,6 +2361,8 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         return FULL_PORT_STAGE_2          # only stage 0's own `full-port` answer: `unknown` and `restricted-head` keep their pauses
     if full_port and number == 3 and path == "full-port" and cls == "full-port" and not scoring_routed(kind, path, cls, full_port):
         return FULL_PORT_STAGE_3          # a scoring model of this class keeps its own pause after stage 2
+    if full_port and number == 4 and path == "full-port" and cls == "full-port" and not scoring_routed(kind, path, cls, full_port):
+        return FULL_PORT_STAGE_4
     if path == "stock-runtime":
         stock_table = {2: STOCK_STAGE_2, 3: dataclasses.replace(STAGES[3], skip=SKIP_STOCK_3),
                        4: dataclasses.replace(STAGES[4], skip=SKIP_STOCK_4), 5: dataclasses.replace(STAGES[5], skip=SKIP_STOCK_5),

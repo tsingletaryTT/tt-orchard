@@ -72,6 +72,13 @@ class HwTest:
     def command(self, stage: int) -> str:
         return f"python3 stages/{stage}/configs/{self.chips}/{self.script}"
 
+    # Where the supervisor puts this test's marker and output. A stage 4 entry of a full port (orchard/full_port_entries.py) has its own.
+    def record_path(self, stage_dir) -> Path:
+        return hw_record_path(stage_dir, self.chips)
+
+    def output_path(self, stage_dir) -> Path:
+        return Path(stage_dir) / "tests" / str(self.chips) / "output.txt"
+
 
 def _inside(path: str, root: str) -> bool:
     root = os.path.realpath(root)
@@ -189,6 +196,13 @@ def pending(stage_dir, tests: list[HwTest]) -> list[HwTest]:
 
 def write_record(stage_dir, chips: int, record: dict) -> Path:
     path = hw_record_path(stage_dir, chips)
+    _write_json(path, record)
+    return path
+
+
+def write_test_record(stage_dir, test, record: dict) -> Path:
+    """`write_record` for a test that says where its marker goes (`test.record_path`)."""
+    path = test.record_path(stage_dir)
     _write_json(path, record)
     return path
 
