@@ -1,3 +1,4 @@
 target = "0.9.111"
 summary = "Stack freshness record: stage 0 does not run an interpreter inside the run directory, a part is current only when every check was made, a malformed transformers_version is reported, and a resumed run keeps its reasons in the ledger and narration."
 kind = "fix"
+pr = 479
