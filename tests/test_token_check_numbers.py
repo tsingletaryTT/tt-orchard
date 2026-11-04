@@ -279,6 +279,17 @@ def test_an_interrupt_in_a_gate_is_not_swallowed(tmp_path, interrupt):
         ledger.close()
 
 
+def test_a_failure_in_choosing_the_gate_is_not_turned_into_a_gate_refusal(tmp_path):
+    """The choice of gate can read the ledger (the rehearsal flag). A ledger that cannot be read is a supervisor failure and has to propagate."""
+    s, ledger = stub(tmp_path, lambda *a: None)
+    s._gate = lambda spec: (_ for _ in ()).throw(RuntimeError("the ledger cannot be read"))
+    try:
+        with pytest.raises(RuntimeError):
+            Supervisor._run_gate(s, SPEC, tmp_path)
+    finally:
+        ledger.close()
+
+
 def test_the_stage_check_turns_a_raising_gate_into_a_failed_result(tmp_path):
     s, ledger = stub(tmp_path, raising(OverflowError("x")))
     try:
