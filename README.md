@@ -1403,7 +1403,10 @@ same context with the same sampling, so it produced the same loop. What the harn
   detail says how many capped replies were repetition loops and that the coder's replies are the likely cause.
 - **A file the agent writes is bounded.** `write_file` refuses a file over 400,000 bytes or 6,000 lines, or over 20,000 characters that compress
   to under 0.04 (stricter than for a reply, because refusing a file costs a rewrite), and leaves the old file as it was. A shell command that makes a
-  file under `stages/<n>/port/` fail the same test has it put back (or removed, when it is new), and the command's output says so.
+  file under `stages/<n>/port/` fail the same test has it put back to the last version the guard accepted (or removed, when it is new), and the
+  command's output says so. The guard works only through directory descriptors beneath the real port directory (`orchard/port_guard.py`): a `port`
+  that is a link is reported and nothing under it is read or changed, a link inside it is never followed, a file or directory swapped after the scan is
+  not followed or trusted, and the scan is bounded (2,000 entries, 200 files, four levels).
 - **Stage 2 of a full port: the supervisor writes `result.json`** when the hardware test passed and the check's record is complete
   (`orchard/full_port_result.py`). Every field is the record's or computed from its ids exactly as the gate does (`top1_agreement` is recomputed, not
   copied). `coherent` is the only judgement: the supervisor answers it with a stated floor that checks form (printable text, mostly words, no word holding more
