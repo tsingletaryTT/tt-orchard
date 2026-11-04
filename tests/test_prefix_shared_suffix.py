@@ -228,6 +228,7 @@ def test_a_passing_advisory_result_is_listed_too(monkeypatch):
     ok = {"name": "prefix_shared_suffix", "state": "pass", "detail": "ok", "advisory": True, "label": "L"}
     _, checks, evidence = _live(monkeypatch, ok)
     assert "prefix_shared_suffix" not in checks and evidence["advisory"][0]["state"] == "pass"
+    assert evidence["probe_facts"]["prefix_shared_suffix"]["state"] == "pass", "the facts of the probe are kept with the other probes' facts"
 
 
 def test_a_not_checked_advisory_result_is_listed_with_the_other_not_checked_probes(monkeypatch):
