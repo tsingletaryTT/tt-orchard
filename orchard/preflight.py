@@ -91,12 +91,16 @@ CONFIG_FETCH_BYTES = 1 << 20         # a config.json larger than this is not rea
 
 def _read_capped(resp, cap: int, clock) -> bytes | None:
     """At most `cap` bytes of `resp`, read in chunks, or None when the answer is longer than `cap` or the read takes longer than HUB_TOTAL_S in all.
-    The cap is enforced while reading (an endless answer is not held), and the deadline is checked after every chunk (a server that drips bytes cannot
+    The cap is enforced while reading (an endless answer is not held), and the deadline is checked after every receive (a server that drips bytes cannot
     hold the preflight for longer than one socket timeout past it)."""
     deadline = clock() + HUB_TOTAL_S
     chunks, held = [], 0
+    # `read(n)` of an http.client response waits until n bytes have arrived, so a peer that sends a byte inside every socket timeout would hold
+    # one call for far longer than HUB_TOTAL_S (review of PR 435, round 4). `read1(n)` waits for one receive and returns what came, so the
+    # deadline is checked after every receive. A response object with no `read1` is read with `read`.
+    take = getattr(resp, "read1", None) or resp.read
     while True:
-        chunk = resp.read(min(HUB_READ_CHUNK, cap + 1 - held))
+        chunk = take(min(HUB_READ_CHUNK, cap + 1 - held))
         if not chunk:
             return b"".join(chunks)
         chunks.append(chunk)
