@@ -686,6 +686,123 @@ def test_a_sidecar_that_is_not_safetensors_is_unknown_because_its_tensors_cannot
     assert d["class"] == "unknown" and any("head.bin" in r for r in d["path_reasons"])
 
 
+# ---- converted copies of the weights (issue 437) -------------------------------------------------
+# A repository often ships quantized GGUF copies of the same weights next to the safetensors, and sometimes a vision projector as a GGUF.
+# They are not sidecars and stage 0 cannot read their tensors. Before issue 437 each one made the class `unknown`, which hid `--full-port`.
+
+GGUF_FILES = ("Model-Q4_K_M.gguf", "Model-Q8_0.gguf", "mmproj-Model-BF16.gguf")
+
+
+def add_gguf(stage: Path, names=GGUF_FILES) -> Path:
+    model = Path(json.loads((stage / "triage_config.json").read_text())["model_snapshot"])
+    for i, name in enumerate(names):
+        (model / name).write_bytes(b"GGUF" + bytes([i]) * (100 + i))
+    return model
+
+
+def test_gguf_copies_next_to_the_safetensors_are_ignored_and_listed_not_sidecars(text_case):
+    stage = text_case()
+    model = add_gguf(stage)
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = delta(stage)
+    assert d["class"] == "weights-only" and d["path"] == "weights-only", d.get("path_reasons")
+    assert d["sidecars"] == [] and d["path_reasons"] == []
+    assert [e["file"] for e in d["ignored_files"]] == sorted(GGUF_FILES)
+    for e in d["ignored_files"]:
+        assert e["size"] == (model / e["file"]).stat().st_size and "GGUF" in e["reason"] and "sha256" not in e   # never read in full
+    assert [e["file"] for e in evidence(stage, "sidecar-compare.json")["ignored_files"]] == sorted(GGUF_FILES)
+    assert evidence(stage, "sidecar-compare.json")["problems"] == []
+
+
+def test_a_model_with_gguf_copies_and_a_changed_architecture_is_full_port_not_unknown(text_case):
+    stage = text_case(config_change={"num_key_value_heads": 2})
+    add_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "full-port" and d["path"] == "full-port"
+    assert not any("gguf" in r.lower() for r in d["path_reasons"])
+
+
+def test_a_real_sidecar_next_to_gguf_copies_is_still_a_sidecar(text_case):
+    stage = text_case()
+    add_gguf(stage)
+    add_sidecar(stage)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "weights+sidecar", d.get("path_reasons")
+    assert [e["file"] for e in d["sidecars"]] == ["joint_head.safetensors"]
+    assert [e["file"] for e in d["ignored_files"]] == sorted(GGUF_FILES)
+
+
+def test_only_gguf_is_ignored_another_unreadable_weights_file_is_still_unknown(text_case):
+    stage = text_case()
+    add_gguf(stage)
+    model = Path(json.loads((stage / "triage_config.json").read_text())["model_snapshot"])
+    (model / "head.pt").write_bytes(b"pickle")
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "unknown" and any("head.pt" in r for r in d["path_reasons"])
+    assert [e["file"] for e in d["ignored_files"]] == sorted(GGUF_FILES) and not any("gguf" in r.lower() for r in d["path_reasons"])
+
+
+def test_a_gguf_file_the_nearest_model_also_has_is_not_listed(text_case):
+    stage = text_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    for snap in (cfg["model_snapshot"], cfg["nearest_snapshot"]):
+        (Path(snap) / "shared.gguf").write_bytes(b"GGUF")
+    assert run_triage(stage).returncode == 0
+    assert delta(stage)["ignored_files"] == []
+
+
+def test_the_template_and_the_gate_ignore_the_same_suffixes():
+    from orchard import classes
+    assert template_module().IGNORED_SUFFIXES == classes.IGNORED_WEIGHT_SUFFIXES == (".gguf",)
+    assert set(classes.IGNORED_WEIGHT_SUFFIXES) <= set(template_module().WEIGHT_SUFFIXES)
+
+
+def test_the_skill_tells_the_agent_not_to_edit_ignored_files():
+    text = (REPO / "orchard" / "skills" / "delta-triage.md").read_text()
+    assert "`ignored_files`" in text and "Do not move a safetensors sidecar into `ignored_files`" in text
+
+
+def test_the_draft_with_ignored_files_passes_the_stage_0_gate(text_case):
+    stage = text_case()
+    add_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    gate = gate_delta(stage, stage.parent.parent)
+    assert gate.ok, gate.reasons
+
+
+@pytest.mark.parametrize("bad, why", [
+    ("not a list", "ignored_files must be a list"),
+    ([{"size": 5, "reason": "x"}], "ignored_files[0] needs a file"),
+    ([{"file": "a.gguf", "size": -1, "reason": "x"}], "ignored_files[0] (a.gguf) needs a size"),
+    ([{"file": "a.gguf", "size": True, "reason": "x"}], "ignored_files[0] (a.gguf) needs a size"),
+    ([{"file": "a.gguf", "size": 5}], "ignored_files[0] (a.gguf) needs a reason"),
+    ("x" * 3, "ignored_files must be a list")])
+def test_the_gate_refuses_a_malformed_ignored_files_record(text_case, bad, why):
+    stage = text_case()
+    add_gguf(stage)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    d["ignored_files"] = bad
+    (stage / "delta.json").write_text(json.dumps(d))
+    gate = gate_delta(stage, stage.parent.parent)
+    assert not gate.ok and any(why in r for r in gate.reasons), gate.reasons
+
+
+def test_the_gate_refuses_ignored_files_hiding_a_real_sidecar(text_case):
+    """An agent must not move a safetensors sidecar into ignored_files to clear a problem."""
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    d["ignored_files"] = [{"file": "joint_head.safetensors", "size": 5, "reason": "GGUF copy"}]
+    (stage / "delta.json").write_text(json.dumps(d))
+    gate = gate_delta(stage, stage.parent.parent)
+    assert not gate.ok and any("ignored_files[0] (joint_head.safetensors) is not a converted copy" in r for r in gate.reasons), gate.reasons
+
+
 def test_a_plain_weights_only_model_has_no_sidecars(text_case):
     stage = text_case()
     assert run_triage(stage).returncode == 0
