@@ -204,16 +204,34 @@ SCRUB_WINDOW = 256              # characters read past a cut so a credential tha
 
 
 def _scrubbed_prefix(text: str, limit: int) -> str:
-    """The first `limit` characters of `text` with every credential in them replaced by a label, found in the text BEFORE it is cut.
+    """The first `limit` characters of `text` with every credential that starts in them replaced by a label, found in the text BEFORE it is cut.
 
     A token that starts before the cut and ends after it would leave a fragment (`hf_` and 17 payload characters at a cut of 500) that no
     pattern matches, because the patterns need 30 payload characters (issue 297, review of PR 466). The scan covers the cut plus
     SCRUB_WINDOW characters, so a token that starts inside the shown part is matched with at least SCRUB_WINDOW characters of its payload; the
-    work stays bounded however long the text is. A replacement is shorter than any match, so the cut text is never longer than `limit`."""
-    head = text[:limit + SCRUB_WINDOW]
-    for _what, pattern in scrub.TOKEN_PATTERNS:
-        head = pattern.sub("<token removed>", head)
-    return head[:limit]
+    work stays bounded however long the text is.
+
+    The matches are found in the ORIGINAL window and the result is built from original offsets: text is copied only from before `limit`, and a
+    match that starts before `limit` becomes one label however far it runs. Replacing in the window and cutting afterwards moved the cut to the
+    right (a label is shorter than its match) and pulled in the start of a later credential that the window had already cut below the pattern's
+    30-character minimum (issue 297, round 4 of PR 466). Text at or after `limit` is never copied. A label that would pass `limit` is cut, as
+    the shown text must not be longer than the limit."""
+    window = text[:limit + SCRUB_WINDOW]
+    spans = sorted(m.span() for _what, pattern in scrub.TOKEN_PATTERNS for m in pattern.finditer(window))
+    out: list[str] = []
+    at = 0                                           # the next original offset not yet copied or replaced
+    for start, end in spans:
+        if start >= limit:
+            break
+        if start < at:                               # inside a span already replaced (two patterns matched the same text)
+            at = max(at, end)
+            continue
+        out.append(window[at:start])
+        out.append("<token removed>")
+        at = end
+    if at < limit:
+        out.append(window[at:limit])
+    return "".join(out)[:limit]
 
 
 def _shown(value) -> str:
