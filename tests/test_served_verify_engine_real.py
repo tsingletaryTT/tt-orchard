@@ -270,6 +270,9 @@ def test_a_length_that_is_not_a_multiple_of_the_block_size_is_counted_in_whole_b
     r = run(_cache("48"), max_model_len=17, max_num_seqs=2, block_size=16)["kv_cache"]
     assert r["state"] == "pass" and r["full_length_sequences"] == 1 and r["fewer_than_max_num_seqs"] is True
     assert r["blocks_per_sequence"] == 2 and "only 1 full-length sequence fits" in r["detail"]
+    assert "a sequence of 17 tokens takes 2 whole blocks of 16 tokens" in r["detail"]
+    aligned = run(_cache("64"), max_model_len=16, max_num_seqs=4, block_size=16)["kv_cache"]
+    assert "whole blocks of" not in aligned["detail"]      # the sentence appears only when the length is not a multiple of the block size
 
 
 def test_a_length_that_is_a_multiple_of_the_block_size_counts_as_before():
