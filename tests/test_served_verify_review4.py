@@ -183,3 +183,23 @@ def test_the_count_reader_takes_a_plain_count_with_separators_and_nothing_else()
     assert sv._int("4,100") == 4100 and sv._int("262400") == 262400 and sv._int("1,234,567") == 1234567
     for bad in ("", ",", ",,", " ", "٣", "１２", "1e3", "-1", "1.5", "9" * 21, "9" * 5000, None, 12):
         assert sv._int(bad) is None, bad
+
+
+def test_a_capture_that_starts_with_a_comma_is_not_read_as_a_number():
+    # `,4100` is not a count: the old pattern took it as 4,100 once the comma was dropped
+    assert inner("GPU KV cache size: ,4100 tokens\n")["kv_cache"]["state"] == "not_checked"
+    r = inner("Maximum concurrency for ,8192 tokens per request: 0.50x\n")["kv_cache"]
+    assert r["state"] == "not_checked" and r.get("concurrency") is None
+
+
+def test_a_capacity_line_whose_number_the_reader_refuses_does_not_replace_a_good_earlier_one():
+    # Arabic-Indic digits match `\d` but are refused by the count reader; the line must be left out and not taken as the last report
+    log = "GPU KV cache size: 4,100 tokens\nGPU KV cache size: ٣٤ tokens\n"
+    r = inner(log, max_model_len=2000)["kv_cache"]
+    assert r["state"] == "pass" and r["capacity_tokens"] == 4100
+
+
+def test_a_concurrency_line_whose_number_the_reader_refuses_does_not_replace_a_good_earlier_one():
+    log = "GPU KV cache size: 4,100 tokens\nMaximum concurrency for 1,024 tokens per request: 2.00x\nMaximum concurrency for ٣٤ tokens per request: 0.50x\n"
+    r = inner(log, max_model_len=1024)["kv_cache"]
+    assert r["state"] == "pass" and r["concurrency"] == 2.0 and r["tokens_per_request"] == 1024
