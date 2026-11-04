@@ -3005,9 +3005,11 @@ class Supervisor:
 
     def _seed_stage_3_port(self, spec, stage_dir: Path) -> None:
         """What the coder starts stage 3 of a full port from: the port that passed stage 2, copied into stages/3/port/ (issue 326). Regular
-        files only, with a count and a size cap, and no `__pycache__`; a link, a file over the cap or too many files stop the copy, the ledger
-        says why, and the coder writes the port again from stage 2's. A port already in the stage directory (a resumed stage) is kept. The
-        ledger holds the sha256 of each file as copied, so a later reader can tell what the coder changed."""
+        files only, with a count and a size cap, and no `__pycache__`; a link (never followed), a file over the cap, too many files, too many
+        entries of any kind or too many directory levels stop the copy, the ledger says why and how many entries were read, and the coder
+        writes the port again from stage 2's. The directory is read lazily (`_SeedScan`), so a hostile port directory is refused after about
+        `STAGE_3_SEED_FILES` or `STAGE_3_SEED_ENTRIES` reads and is never listed whole. A port already in the stage directory (a resumed stage)
+        is kept. The ledger holds the sha256 of each file as copied, so a later reader can tell what the coder changed."""
         src, dst = self.run_dir / "stages" / "2" / "port", stage_dir / "port"
         if dst.is_dir():
             held = _holds_python(dst)
