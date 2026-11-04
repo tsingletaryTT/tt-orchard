@@ -494,23 +494,30 @@ def test_closing_every_lab_closes_the_helpers_and_forgets_them(labroot, tmp_path
 
 
 def test_a_test_that_fails_after_opening_a_connection_has_it_closed_by_the_module_teardown(tmp_path):
-    """The wiring, not the helper: a separate pytest run whose test opens a connection, writes the helper's pid and fails. The teardown fixture
-    of this module must have closed the connection by the time that run is over."""
+    """The wiring, not the helper: a separate pytest run with two tests. The first opens a connection, writes the helper's pid and fails. The
+    second runs after the first one's teardown, in the same process, and checks the helper is gone. (Looking after the run is over shows
+    nothing: the helper also exits when its pipe closes with the process.)"""
     inner = tmp_path / "test_inner.py"
     inner.write_text(
-        "import sys\n"
+        "import os, sys, time\n"
         f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
-        "from test_lab import _close_every_lab, labroot, connect  # noqa: F401  (the autouse fixture applies to this module too)\n"
-        "def test_opens_and_fails(labroot, tmp_path):\n"
+        "from test_lab import _close_every_lab, labroot, connect, pid_alive  # noqa: F401  (the autouse fixture applies to this module too)\n"
+        f"PIDFILE = {str(tmp_path / 'helper.pid')!r}\n"
+        "def test_a_opens_and_fails(labroot, tmp_path):\n"
         "    lab_ = connect(labroot[0], labroot[1], tmp_path)\n"
-        f"    open({str(tmp_path / 'helper.pid')!r}, 'w').write(str(lab_.proc.pid))\n"
-        "    assert False, 'this test fails on purpose'\n")
+        "    open(PIDFILE, 'w').write(str(lab_.proc.pid))\n"
+        "    assert False, 'this test fails on purpose'\n"
+        "def test_b_the_helper_is_gone_after_that_teardown():\n"
+        "    pid = int(open(PIDFILE).read())\n"
+        "    deadline = time.monotonic() + 5\n"
+        "    while pid_alive(pid) and time.monotonic() < deadline:\n"
+        "        time.sleep(0.05)\n"
+        "    assert not pid_alive(pid), 'the helper of the failed test is still running after its teardown'\n")
     done = subprocess.run([sys.executable, "-m", "pytest", str(inner), "-q", "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'inner-bt'}"],
                           capture_output=True, text=True, timeout=120, cwd=REPO)
-    assert done.returncode == 1 and "this test fails on purpose" in done.stdout, done.stdout[-400:]
-    helper = int((tmp_path / "helper.pid").read_text())
+    helper_file = tmp_path / "helper.pid"
     try:
-        wait_until(lambda: not pid_alive(helper), "the helper to be gone once the failed inner run was over", timeout=20)
+        assert "this test fails on purpose" in done.stdout and "1 failed, 1 passed" in done.stdout, done.stdout[-500:]
     finally:
-        if pid_alive(helper):
-            os.kill(helper, signal.SIGKILL)
+        if helper_file.exists() and pid_alive(int(helper_file.read_text())):
+            os.kill(int(helper_file.read_text()), signal.SIGKILL)
