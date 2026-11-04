@@ -1,16 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-"""Run a helper program with a deadline and a cap on each output stream, in a session of its own (PR 422, round 3).
+"""Run a helper program with a deadline and a cap on each output stream, in a session of its own (PR 422, rounds 3 and 4).
 
 `subprocess.run(capture_output=True)` collects everything a child writes before the caller can look at the size, and its timeout kills only
 the child it started. A wrapper (a shell script that execs Python, an interpreter shim) can leave the real worker running. This module
-reads stdout and stderr in chunks and stops reading at the cap, starts the child in a new session, and on a timeout, an over-long stream
-or an exception out of the wait it sends SIGTERM to the whole process group, then SIGKILL after a grace period, and reaps the child.
-The standard library only, because the supervisor uses nothing else.
+reads stdout and stderr in chunks and stops reading at the cap, starts the child in a new session, and on every way out (the child ended, a
+timeout, an over-long stream, an exception out of the wait) sends SIGTERM to the whole process group, then SIGKILL after a grace period, and
+reaps the child. The standard library only, because the supervisor uses nothing else.
+
+What `run` guarantees, and what it does not:
+- It returns at most `timeout_s + 3 * GRACE_S + JOIN_S` seconds (plus a few polls) after it started, however the child behaves: it ended by
+  itself, it ignores SIGTERM, a descendant keeps the output pipes open and writes nothing, or the output floods. (Review of round 3: a child
+  that ended while a descendant held the pipes used to hold `run` until the descendant ended, because the readers were blocked in a buffered
+  read and `BufferedReader.close()` waits for the lock that read holds. The readers now poll raw descriptors and look at a stop flag every
+  `POLL_S`, and nothing closes a descriptor a reader may still use.)
+- Every process of the child's group is gone when it returns, unless one ignores SIGKILL (it cannot) or sits in uninterruptible sleep, in which
+  case `run` returns after the bound and the process stays. A descendant that left the group (its own `setsid`) is not reached.
+- The group is signalled only while the leader has not been reaped: the child's end is detected with `waitid(WNOWAIT)`, so its pid, which is
+  also the group id, stays reserved until the last signal has gone. After the leader is reaped no signal is sent (a pid that was freed could
+  name another group). What remains: a group id is named by number, so a caller that signals the same group some other way after `run`
+  returns has no such protection.
+- The verdict comes from what the readers saw: a stream that crossed its cap is a problem even when the child had already ended by itself.
 """
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import threading
@@ -18,7 +33,9 @@ import time
 from dataclasses import dataclass
 
 CHUNK = 64 * 1024            # the most a stream can hold beyond its cap: the chunk that crossed it
-GRACE_S = 5.0                # between SIGTERM and SIGKILL
+GRACE_S = 5.0                # between SIGTERM and SIGKILL, and again between SIGKILL and giving up on the group
+POLL_S = 0.05                # how often a reader looks at its stop flag
+JOIN_S = 2.0                 # in all, to let the readers finish after the group has been stopped
 
 
 @dataclass
@@ -31,13 +48,20 @@ class Result:
     detail: str = ""
 
 
-def _read(stream, cap: int, sink: list, over: threading.Event) -> None:
-    """Read `stream` in chunks into `sink` until the end or the cap. Crossing the cap sets `over` and stops reading, so at most one chunk
-    beyond the cap is held. The thread ends at the end of the stream, which the group's stop brings about."""
+def _read(fd: int, cap: int, sink: list, over: threading.Event, stop: threading.Event) -> None:
+    """Read the raw descriptor `fd` in chunks into `sink` until the end, the cap, or the stop flag. Crossing the cap sets `over` and stops
+    reading, so at most one chunk beyond the cap is held. The descriptor is polled with a timeout, so the thread never blocks for good: when
+    the stop flag is set it still reads what is already in the pipe (up to the cap) and then ends."""
     held = 0
+    poller = select.poll()
     try:
+        poller.register(fd, select.POLLIN)
         while True:
-            chunk = stream.read1(CHUNK)
+            if not poller.poll(POLL_S * 1000):
+                if stop.is_set():
+                    return
+                continue
+            chunk = os.read(fd, CHUNK)
             if not chunk:
                 return
             sink.append(chunk)
@@ -62,20 +86,84 @@ def _write(stream, data: bytes) -> None:
 
 
 def _signal_group(proc, sig) -> None:
+    """Signal the child's process group. Never after the child has been reaped: its pid is then free and could name another group."""
+    if proc.returncode is not None:
+        return
     try:
         os.killpg(proc.pid, sig)
     except (ProcessLookupError, PermissionError):
         pass
 
 
-def _stop(proc) -> None:
-    """End the child's whole process group (SIGTERM, then SIGKILL after the grace period) and reap the child."""
-    _signal_group(proc, signal.SIGTERM)
+def _ended(proc) -> bool:
+    """True when the child has ended, WITHOUT reaping it: it stays a zombie, so its pid (the group id) stays reserved until `proc.wait()`."""
+    if proc.returncode is not None:
+        return True
     try:
-        proc.wait(timeout=GRACE_S)
-    except subprocess.TimeoutExpired:
-        pass
-    _signal_group(proc, signal.SIGKILL)            # also reaches a grandchild that ignored SIGTERM after its parent had gone
+        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:                      # reaped by somebody else
+        return True
+
+
+def _proc_stat(name: str) -> bytes | None:
+    """The first 4 KiB of /proc/<name>/stat, or None. The kernel's own file: its size reads as 0, so `safeio` (which compares sizes) is not used."""
+    try:
+        fd = os.open(f"/proc/{name}/stat", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        return os.read(fd, 4096)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _live_members(pgid: int) -> list[int] | None:
+    """Live (not zombie) processes of the process group `pgid`, from /proc, or None when /proc cannot be listed."""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return None
+    found = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        data = _proc_stat(name)
+        if data is None:
+            continue
+        try:
+            fields = data[data.rindex(b")") + 2:].split()
+            state, pgrp = fields[0], int(fields[2])
+        except (ValueError, IndexError):
+            continue
+        if pgrp == pgid and state not in (b"Z", b"X"):
+            found.append(int(name))
+    return found
+
+
+def _wait_group_gone(proc, seconds: float) -> bool:
+    """Wait until no live process is left in the child's group (a zombie leader does not count), at most `seconds`. Without /proc the leader
+    alone is waited for."""
+    end = time.monotonic() + seconds
+    while True:
+        members = _live_members(proc.pid)
+        if members is None:
+            members = [] if _ended(proc) else [proc.pid]
+        if not members:
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.02)
+
+
+def _stop(proc) -> None:
+    """End the child's whole process group (SIGTERM, then SIGKILL after the grace period) and reap the child. The same whether the child is
+    still running or ended by itself and left descendants. The leader is reaped last, so every signal goes out while its pid is reserved."""
+    _signal_group(proc, signal.SIGTERM)
+    _wait_group_gone(proc, GRACE_S)
+    _signal_group(proc, signal.SIGKILL)            # also reaches anything that ignored SIGTERM
+    _wait_group_gone(proc, GRACE_S)
     try:
         proc.wait(timeout=GRACE_S)
     except subprocess.TimeoutExpired:
@@ -89,7 +177,7 @@ def _wait_for_end(proc, deadline: float, over_out: threading.Event, over_err: th
             return "stdout"
         if over_err.is_set():
             return "stderr"
-        if proc.poll() is not None:
+        if _ended(proc):
             return None
         if time.monotonic() >= deadline:
             return "timeout"
@@ -98,31 +186,43 @@ def _wait_for_end(proc, deadline: float, over_out: threading.Event, over_err: th
 
 def run(argv, request: str, *, timeout_s: float, out_max: int, err_max: int, env: dict | None = None) -> Result:
     """Run `argv` with `request` on stdin. Never raises for a child that fails; an exception out of the wait (for example an interrupt)
-    stops the child's group first and then propagates."""
+    stops the child's group first and then propagates. See the module docstring for the time bound and what is guaranteed."""
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                                 start_new_session=True)
     except (OSError, ValueError) as exc:
         return Result("start", None, "", "", type(exc).__name__)
     out, err = [], []
-    over_out, over_err = threading.Event(), threading.Event()
-    threads = [threading.Thread(target=_read, args=(proc.stdout, out_max, out, over_out), daemon=True),
-               threading.Thread(target=_read, args=(proc.stderr, err_max, err, over_err), daemon=True),
+    over_out, over_err, stop = threading.Event(), threading.Event(), threading.Event()
+    threads = [threading.Thread(target=_read, args=(proc.stdout.fileno(), out_max, out, over_out, stop), daemon=True),
+               threading.Thread(target=_read, args=(proc.stderr.fileno(), err_max, err, over_err, stop), daemon=True),
                threading.Thread(target=_write, args=(proc.stdin, request.encode("utf-8")), daemon=True)]
     for t in threads:
         t.start()
+    problem = None
     try:
         problem = _wait_for_end(proc, time.monotonic() + timeout_s, over_out, over_err)
     finally:
-        # Every way out (the child ended, a deadline, a cap, an exception such as an interrupt) leaves no process of the child's group behind.
-        if proc.poll() is None:
+        # Every way out (the child ended, a deadline, a cap, an exception such as an interrupt) stops the group, also when the child had ended
+        # by itself: a descendant of it may still hold the pipes.
+        try:
             _stop(proc)
-    # The child has ended (by itself or by the stop). Let the readers drain what is already in the pipes, then close them.
+        finally:
+            stop.set()
+    # The group is gone. The readers take what is already in the pipes (up to the cap) and end within POLL_S; only then are the descriptors closed.
+    end = time.monotonic() + JOIN_S
     for t in threads[:2]:
-        t.join(timeout=2.0)
-    for stream in (proc.stdout, proc.stderr):
+        t.join(timeout=max(0.0, end - time.monotonic()))
+    for t, stream in zip(threads[:2], (proc.stdout, proc.stderr)):
+        if t.is_alive():                           # never close a descriptor a thread may still read
+            continue
         try:
             stream.close()
         except (OSError, ValueError):
             pass
+    if problem is None:                            # the verdict comes from what the readers saw, also when the child had ended first
+        if over_out.is_set():
+            problem = "stdout"
+        elif over_err.is_set():
+            problem = "stderr"
     return Result(problem, proc.returncode, b"".join(out).decode("utf-8", "replace"), b"".join(err).decode("utf-8", "replace"))
