@@ -4,6 +4,7 @@
 is configured for (`--required-chips`, here 2,4: four chips, both boards). The chip, the coder and the model are fakes; the supervisor, the stage
 machine, the gate, the park and restore path and the hardware-test runner are the real ones, and the supervisor's template runs for real on the
 CPU against a fake `ttnn` whose mesh device says how many chips it was opened with."""
+import functools
 import json
 from types import SimpleNamespace
 
@@ -293,6 +294,33 @@ def test_a_kill_after_the_stage_3_test_resumes_at_the_finish_step_without_a_seco
         r.close()
 
 
+# ---- the supervisor's own wiring --------------------------------------------------------------------
+
+def gate_stub(*, required=(2, 4), entries=()):
+    stub = SimpleNamespace(required_chips=required, ledger=SimpleNamespace(read=lambda: list(entries)))
+    stub._stage_3_chips = lambda: Supervisor._stage_3_chips(stub)
+    return stub
+
+
+def test_the_supervisor_hands_the_gate_the_configured_chip_count_from_its_own_option():
+    gate = Supervisor._gate(gate_stub(), FULL_PORT_STAGE_3)
+    assert isinstance(gate, functools.partial) and gate.keywords == {"expected_chips": 4}
+    assert Supervisor._gate(gate_stub(required=(2, 8)), FULL_PORT_STAGE_3).keywords == {"expected_chips": 8}
+
+
+def test_the_rehearsal_flag_reaches_the_stage_3_gate_from_the_ledger_only():
+    start = {"event": "run_start", "stage": None, "data": {"full_port": True, "full_port_rehearsal": True}}
+    assert Supervisor._gate(gate_stub(entries=[start]), FULL_PORT_STAGE_3).keywords == {"expected_chips": 4, "rehearsal": True}
+
+
+def test_repair_is_never_pending_in_stage_3_even_with_a_rerun_in_flight_in_its_ledger_entries(tmp_path):
+    entries = [{"event": "stage_start", "stage": 3, "data": {"escalated": False}},
+               {"event": "decision", "stage": 3, "data": {"decision": port_repair.RERUN, "round": 1, "record": {"path": "x", "sha256": "0" * 64}}}]
+    assert port_repair.rerun_inflight(entries, 3) is not None             # the question would be yes if the stage were 2
+    stub = SimpleNamespace(port_repair_rounds=2, ledger=SimpleNamespace(read=lambda: entries))
+    assert Supervisor._repair_pending(stub, FULL_PORT_STAGE_3, tmp_path) is False
+
+
 # ---- the seed ---------------------------------------------------------------------------------------
 
 class Ledger:
@@ -336,6 +364,7 @@ def test_the_seed_refuses_a_link_and_leaves_no_half_a_port(tmp_path):
     (src / "a_first.py").write_text("import ttnn\n")
     (src / "z_link.py").symlink_to(src / "a_first.py")
     assert seed(sup, stage) == ["stage 2 port not copied"]
+    assert "is not a regular file" in sup.ledger.rows[0][2]["problem"], "the supervisor's own refusal names the link, not only the reader's"
     assert not (stage / "port").exists(), "a copy that stopped on a problem is removed"
 
 

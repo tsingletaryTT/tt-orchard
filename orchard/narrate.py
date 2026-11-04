@@ -730,10 +730,13 @@ UNBLOCK = {
         "weights-only. A class of `unknown` stops even with `--full-port`."],
     "full-port-stages-unbuilt": [
         "The run was started with `--full-port`, stage 0 classed the model `full-port`, and stage 2 passed: the port in stages/2/port/ ran "
-        "on the leased chips and its tokens agreed with the CPU reference (stages/2/result.json and stages/2/evidence/port-check.json).",
-        "The stages after it for a full port (the full model, shrinking to fewer chips, the serving check, the benchmark) are not built "
-        "yet, so the run stops here on purpose. Read the stage 2 evidence and decide: replay the check command, or continue by hand. "
-        "Design and slices: docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md.",
+        "on the leased chips and its tokens agreed with the CPU reference (stages/2/result.json and stages/2/evidence/port-check.json). "
+        "Stage 3 then ran the same port on the chip count the run is configured for (the largest of `--required-chips`: "
+        "stages/3/result.json and stages/3/evidence/port-check.json), or was skipped with its reason in the ledger when no count above one "
+        "board is configured.",
+        "The stages after it for a full port (shrinking to each required chip count, the serving check, the benchmark) are not built "
+        "yet, so the run stops here on purpose. Read the stage 2 and stage 3 evidence and decide: replay the check command, or continue "
+        "by hand. Design and slices: docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md.",
         "Running `tt-orchard bringup <MODEL> --full-port` again blocks again until those stages exist."],
     "scoring-route": [
         "The model is a reranker or an embedding model (stage 0 recorded its kind in the `model_kind` of its `stage_end` ledger entry: the "
