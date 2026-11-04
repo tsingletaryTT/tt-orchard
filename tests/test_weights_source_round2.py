@@ -164,7 +164,7 @@ def test_a_hard_coded_container_is_not_a_closest_bundle_when_the_card_names_no_b
 
 
 def test_an_installed_v6_bundle_with_a_recorded_name_stays_a_candidate_to_be_judged_by_its_own_script(tmp_path):
-    other = v6(tmp_path, HARD, GOOD, repo="Qwen/Other-7B")          # a patched replacement; it does not serve this base
+    other = v6(tmp_path, HARD, GOOD.replace(BASE, "Qwen/Other-7B"), repo="Qwen/Other-7B")   # a patched replacement; it does not serve this base
     report = {"bundle_choices": [{"name": HARD, "class": "weights-only", "confidence": "stated"}]}
     c = check([other], report=report)
     assert c.status == "block" and [x["name"] for x in c.data["candidates"]] == [HARD]

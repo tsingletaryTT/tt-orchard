@@ -159,9 +159,13 @@ def unoffered_names(installed, recs: dict[str, Record], refused_names=()) -> set
     """The package names no picker, search result or ranked choice should offer for a bring-up: the packages judged and refused now, and
     the recorded hard-coded containers that are not installed (a download of one would be refused by the next preflight). A name that an
     installed v6 bundle carries is left out of the recorded part: the record is about container packages, and that bundle is judged by
-    its own run.sh when it serves the base."""
+    its own run.sh when it serves the base.
+    Every installed v6 bundle is also judged against its own `weights_repo`, so a bundle for a different base (an alternative the picker
+    could list) that cannot take swapped weights is left out too. `refused_names` only covers the packages that serve the base asked
+    for (review of PR 442, round 3). A hard-coded container of another base is already in the recorded part."""
     bundles = {pkg.name for pkg in installed if pkg.schema == "6"}
-    return set(refused_names) | (hard_coded_names(recs) - bundles)
+    own_refused = {pkg.name for pkg in installed if pkg.schema == "6" and judge([pkg], getattr(pkg, "weights_repo", ""), recs)[1]}
+    return set(refused_names) | own_refused | (hard_coded_names(recs) - bundles)
 
 
 def judge(installed, base: str, recs: dict[str, Record]):
