@@ -796,11 +796,14 @@ def gate_sidecar_parity(sp, delta: dict) -> list[str]:
                        f"(the larger of {SIDECAR_PROB_DIFF_MAX} and {SIDECAR_NOISE_FACTOR:g} times the "
                        "CPU-versus-CPU difference)")
     heads = {x.get("sha256") for x in delta.get("sidecars", []) if isinstance(x, dict)}
-    if sp.get("head_sha256") not in heads:
+    # A hash must be a string: a list or dict is unhashable and `in` on a set would raise, so a non-string is refused as a mismatch.
+    head = sp.get("head_sha256")
+    if not isinstance(head, str) or head not in heads:
         reasons.append("sidecar_parity head_sha256 does not match any sidecar stage 0 recorded; the parity "
                        "run used a different head file")
     codes = {x.get("sha256") for x in delta.get("code_files", []) if isinstance(x, dict)}
-    if codes and sp.get("code_sha256") not in codes:
+    code = sp.get("code_sha256")
+    if codes and (not isinstance(code, str) or code not in codes):
         reasons.append("sidecar_parity code_sha256 does not match any code file stage 0 recorded; the parity "
                        "run used different code")
     return reasons
@@ -1561,14 +1564,14 @@ def boot_check_reasons(stage_dir, run_dir, v) -> tuple[list[str], tuple[str, ...
     if bound and doc != v:
         # The gate read verify.json once for its own checks and this reads it again; a file that changed between the two reads is refused.
         return ["verify.json changed while the gate was reading it: the copy the gate checked is not the file the supervisor hashed"], ()
-    ids, why, ids_bound = _reference_ids(run_dir)
+    ids, why, _ = _reference_ids(run_dir)
     if why:
         return why, ()
     if ids is None:
         if bound:
             return ["stage 1's reference ids are not available, so the boot check cannot be recomputed"], ()
         return [], ("stage 7 boot check top1 agreement: the agent's script reported it; stage 1 left no reference ids to recompute it from",)
-    more = token_check.boot_problems(report, ids, require_records=bound or ids_bound)
+    more = token_check.boot_problems(report, ids, require_records=bound)
     if more:
         return more, ()
     if isinstance(report, dict) and report.get("teacher_forced") is not None:

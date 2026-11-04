@@ -25,6 +25,13 @@ from orchard.token_check import MAX_REASON_CHARS, cut_text, show
 FLOAT_FIELDS = ("hidden_pcc_min", "hidden_pcc_mean", "prob_max_abs_diff", "top1_agree_fraction")
 WHOLE_FIELDS = ("n_records", "n_questions")
 TOLERANCE = 1e-9
+# Fields the gate reads from result.json's copy of the parity object without folding them from per_record. Each one must be the evidence
+# file's own value (same type, same value), because the gate takes its bar (noise_floor) and its identities (head_sha256, code_sha256),
+# its `measured` flag and its wiring check from that copy.
+COPIED_FIELDS = ("measured", "noise_floor", "wiring_check", "head_sha256", "code_sha256")
+# Bounds for the identity comparison, so a hostile value in a copied field cannot cost a deep recursion or a long walk.
+IDENTICAL_MAX_DEPTH = 16
+IDENTICAL_MAX_NODES = 10_000
 # A record list longer than this is refused: the template measures six to eight fixed records, and a list of millions is a hostile file.
 MAX_RECORDS = 10_000
 MAX_QUESTIONS_PER_RECORD = 1_000_000
@@ -82,6 +89,36 @@ def safe_recompute(per_record: Any) -> tuple[dict | None, list[str]]:
         return None, [f"per_record could not be read ({type(exc).__name__})"]
 
 
+def identical(a: Any, b: Any) -> bool:
+    """True when `a` and `b` have the same JSON shape, the same types and the same values. Never raises.
+
+    Python's `==` treats True as 1 and 1 as 1.0, so it cannot say that a copied value is the evidence's own. Depth and node count are
+    bounded; a value past either bound is not identical (a gate's own fields are small, so nothing real is lost)."""
+    budget = [IDENTICAL_MAX_NODES]
+
+    def walk(x: Any, y: Any, depth: int) -> bool:
+        budget[0] -= 1
+        if budget[0] < 0 or depth > IDENTICAL_MAX_DEPTH or type(x) is not type(y):
+            return False
+        if isinstance(x, dict):
+            if len(x) != len(y):
+                return False
+            for k, v in x.items():
+                if type(k) is not str or k not in y or not walk(v, y[k], depth + 1):
+                    return False
+            return True
+        if isinstance(x, list):
+            return len(x) == len(y) and all(walk(i, j, depth + 1) for i, j in zip(x, y))
+        if isinstance(x, float) and x != x:
+            return False                                     # NaN is never the evidence's own number
+        return x == y
+
+    try:
+        return walk(a, b, 0)
+    except Exception:                                        # defensive: a gate must not crash on a value it cannot compare
+        return False
+
+
 def _same(recorded: Any, expected: float | int) -> bool:
     if not _finite(recorded):
         return False
@@ -122,10 +159,14 @@ def _problems(summaries, evidence, *, bound: bool) -> tuple[list[str], bool]:
                 if not _same(obj.get(field), got[field]):
                     out.append(f"{label} {field} {show(obj.get(field))} is not what per_record gives ({got[field]:.6g}, folded from "
                                f"{got['n_records']} records)")
-    # The wiring check is the template's own comparison of the script's layer loop with the model's prefill. Its result is one object in the
-    # evidence file; the copy in result.json must be that object, so the file cannot say it failed while result.json says it passed.
-    if isinstance(evidence, dict) and isinstance(evidence.get("wiring_check"), dict):
+    # Copied fields (the bar, the identities, `measured`, the wiring check): each is one value in the evidence file, and the copy in result.json
+    # must be that value, by type and value. The wiring check is the template's own comparison of the script's layer loop with the model's prefill,
+    # so the file cannot say it failed while result.json says it passed; the noise floor sets the gate's bar, so result.json cannot raise it.
+    if isinstance(evidence, dict):
         for label, obj in summaries:
-            if isinstance(obj, dict) and label != "sidecar-parity.json" and obj.get("wiring_check") != evidence["wiring_check"]:
-                out.append(f"{label} wiring_check differs from the wiring_check in sidecar-parity.json (the file the hardware test wrote)")
+            if not isinstance(obj, dict) or label == "sidecar-parity.json":
+                continue
+            for k in COPIED_FIELDS:
+                if k in obj and not identical(obj[k], evidence.get(k)):
+                    out.append(f"{label} {k} differs from the {k} in sidecar-parity.json (the file the hardware test wrote)")
     return [cut_text(r, MAX_REASON_CHARS) for r in out], True
