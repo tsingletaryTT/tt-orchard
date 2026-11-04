@@ -162,6 +162,28 @@ def config_has_host_table(config) -> bool | None:
     return False
 
 
+def index_has_host_table(names) -> bool | None:
+    """Whether the tensor names of a weight index (`model.safetensors.index.json`'s `weight_map` keys) include a table that the default policy
+    keeps on the host: the rule of `categorize`, applied to each name. None when there are no names to read. A name that is not text is
+    skipped."""
+    if not isinstance(names, (list, tuple)) or not names:
+        return None
+    return any(isinstance(n, str) and categorize(n, (2, 2)) == "ngram_ple" for n in names)
+
+
+def host_table_from(config, names) -> bool | None:
+    """Whether the Hub's parameter counts may include a table that the default policy keeps on the host, from the model's config.json and the
+    tensor names of its weight index. True when either names one. False only when placement is established: the config was read and names no
+    table, and the index's tensor names were read and none is a table. None otherwise (a single-file model has no index, a gated repository
+    gives neither file without a token, a file was too large or too deep): nothing is established, and the row that asks stays advisory."""
+    by_config, by_names = config_has_host_table(config), index_has_host_table(names)
+    if by_config is True or by_names is True:
+        return True
+    if by_config is False and by_names is False:
+        return False
+    return None
+
+
 class ResidencyError(ValueError):
     """An input is unusable: a header that is malformed or too large, a bad number, a bad policy, a target that is not a snapshot or a repo id.
     The message names the file or the option and never holds file content or a token."""
@@ -544,19 +566,29 @@ def usable(record) -> bool:
 
 
 def machine_facts(path) -> tuple[int | None, int | None]:
-    """(free disk bytes on the filesystem that holds `path`, the host's MemAvailable in bytes). Either is None when it cannot be read; a
-    reading that is not made is no claim. Never raises."""
+    """(free disk bytes on the filesystem that holds `path`, or on its nearest existing parent when `path` is not made yet, and the host's
+    MemAvailable in bytes). Either is None when it cannot be read; a reading that is not made is no claim, and a MemAvailable of zero is a
+    reading. Never raises."""
     free = None
     if isinstance(path, (str, os.PathLike)):
-        try:
-            free = int(shutil.disk_usage(path).free)
-        except (OSError, ValueError, OverflowError):
-            free = None
+        probe = Path(path)
+        for _ in range(64):                              # a cache root that does not exist yet is measured at its nearest existing parent
+            try:
+                free = int(shutil.disk_usage(probe).free)
+                break
+            except (FileNotFoundError, NotADirectoryError):
+                if probe.parent == probe:
+                    break
+                probe = probe.parent
+            except (OSError, ValueError, OverflowError):
+                break
     try:
         mem = sizing.mem_available_bytes()
     except Exception:                                    # a damaged /proc/meminfo is not a finding about the model
         mem = None
-    return free, mem if isinstance(mem, int) and not isinstance(mem, bool) and mem > 0 else None
+    # A MemAvailable of zero is a reading (no host RAM is available), and the RAM check must still run on it; only a figure that is not a
+    # whole non-negative number is no reading.
+    return free, mem if isinstance(mem, int) and not isinstance(mem, bool) and mem >= 0 else None
 
 
 def machine_shortfall(record, *, free_disk_bytes, mem_available_bytes) -> str | None:
@@ -599,8 +631,9 @@ def _validate_totals(parameters) -> dict:
 def totals_bound(parameters, *, box_chips=None, dram_gib=None, kv_gib=None, reserve_gib=None, chips=(), source="hub totals") -> dict:
     """A lower bound on the chips a model needs from the Hub's parameter counts by dtype alone (no tensor name, shape or header was read).
 
-    Every floating-point parameter is counted as if it sat in a tensor of two or more dimensions, so each listed precision gets the smallest
-    bytes the format can give; integer dtypes (a packed MXFP4, NVFP4 or GPTQ repository reports its packed bytes as U8) are counted at the
+    Every floating-point parameter is counted at the smaller of the bytes it is stored with (its dtype's width) and the bytes the precision
+    gives, so each listed precision gets the smallest bytes any shape of that parameter could take: a weight of two or more dimensions is
+    converted to the precision, and a vector keeps its stored bytes (an FP8 vector stays at one byte under bf16); integer dtypes (a packed MXFP4, NVFP4 or GPTQ repository reports its packed bytes as U8) are counted at the
     bytes they store, and no block format shrinks them. A real checkpoint holds norms and biases that no format shrinks, so the true figure is
     at least the bound. The record carries the same `shortfall` fields as an estimate, so a model that cannot fit even at the lowest listed
     precision is refused with the numbers and the precision that would fit."""
@@ -614,11 +647,16 @@ def totals_bound(parameters, *, box_chips=None, dram_gib=None, kv_gib=None, rese
     extra = _chip_list(chips, "chips")
     if box_chips is not None:
         box_chips = _chip_list([box_chips], "box_chips")[0]
-    floats = sum(n for d, n in counts.items() if d in FLOAT_DTYPES)
     fixed = sum(n * DTYPE_WIDTH[d] for d, n in counts.items() if d not in FLOAT_DTYPES)
-    by_precision = {p: fixed + int(Fraction(decode_floor.DTYPE_BYTES[p]) * floats) for p in PRECISIONS}
+    # With no shape known, a floating-point parameter sits either in a tensor of two or more dimensions, which the estimator converts to the
+    # precision (`_stored_bytes`), or in a vector that keeps the bytes it has in the checkpoint. The smaller of the two widths is a bound for
+    # both: an FP8 vector stays at one byte under bf16, and an FP32 weight is converted down.
+    by_precision = {p: fixed + int(sum(min(Fraction(DTYPE_WIDTH[d]), Fraction(decode_floor.DTYPE_BYTES[p])) * n
+                                       for d, n in counts.items() if d in FLOAT_DTYPES)) for p in PRECISIONS}
     options = _precision_options(by_precision, dram, reserve, kv)
-    options["note"] = "a lower bound for each precision: every floating-point parameter is counted as a weight of two or more dimensions"
+    options["note"] = ("a lower bound for each precision: every floating-point parameter is counted at the smaller of the bytes it is stored with "
+                       "and the bytes the precision gives, because a parameter of unknown shape may be a weight that is converted or a vector "
+                       "that is not")
     need_by = {r["precision"]: r["chips_needed"] for r in options["rows"]}
     lowest = PRECISIONS[-1]
     device = by_precision[lowest]

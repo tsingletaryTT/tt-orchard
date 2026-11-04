@@ -67,7 +67,7 @@ class HubInfo:
     pipeline_tag: str | None = None                            # the Hub's pipeline_tag when it is a non-empty string
     tags: list[str] = field(default_factory=list)              # the Hub's tags (strings only)
     parameters: dict | None = None                             # the Hub's safetensors parameter counts by dtype: whole counts under string names, else None
-    host_table: bool | None = None                             # whether config.json names a table the default policy keeps on the host (residency.config_has_host_table); None: not read
+    host_table: bool | None = None                             # whether the counts may include a table the default policy keeps on the host (residency.host_table_from, from config.json and the weight index's tensor names); False only when both were read and name none, None: not established
 
 
 def _parameters(payload: dict) -> dict | None:
@@ -102,9 +102,37 @@ def read_hub_config(model_id: str, sha: str | None, *, opener=None) -> dict | No
         if len(raw) > CONFIG_FETCH_BYTES:
             return None
         data = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):          # URLError and HTTPError are OSErrors; a timeout is too
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):     # URLError and HTTPError are OSErrors; a timeout is too; a file nested past the parser's depth is unreadable
         return None
     return data if isinstance(data, dict) else None
+
+
+INDEX_FETCH_BYTES = 16 << 20         # a weight index larger than this is not read from the Hub (a 1.4 TB checkpoint's index is a few MB)
+MAX_INDEX_NAMES = 2_000_000
+
+
+def read_hub_weight_index(model_id: str, sha: str | None, *, opener=None) -> list[str] | None:
+    """The tensor names of the model's `model.safetensors.index.json` (the keys of its `weight_map`) from the Hub, or None for any reason they
+    cannot be had: an id that is not owner/name, a failed or slow request (a single-file model has no index, and a gated repository answers 401
+    to a request with no token), an answer over INDEX_FETCH_BYTES, text that is not JSON, a map that is not a non-empty object of text names, more
+    than MAX_INDEX_NAMES names, or nesting past the parser's depth. No Authorization header is sent. The revision is the hash the Hub's answer
+    gave, as for the config."""
+    if not isinstance(model_id, str) or not _HUB_ID.match(model_id):
+        return None
+    rev = sha if isinstance(sha, str) and _HUB_REVISION.match(sha) else "main"
+    req = urllib.request.Request(f"https://huggingface.co/{model_id}/resolve/{rev}/model.safetensors.index.json", headers={"User-Agent": "tt-orchard"})
+    try:
+        with (opener or urllib.request.urlopen)(req, timeout=HUB_TIMEOUT_S) as resp:
+            raw = resp.read(INDEX_FETCH_BYTES + 1)
+        if len(raw) > INDEX_FETCH_BYTES:
+            return None
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    wm = data.get("weight_map") if isinstance(data, dict) else None
+    if not isinstance(wm, dict) or not wm or len(wm) > MAX_INDEX_NAMES or not all(isinstance(k, str) for k in wm):
+        return None
+    return list(wm)
 
 
 def _size(value) -> int:
@@ -905,10 +933,14 @@ def check_gozer(text: str, kept: bool = False) -> Check:
     return Check("gozer", OK, f"all {len(chips)} chips are free")
 
 
-def check_fit(hub: HubInfo | None, chips) -> Check | None:
+def check_fit(hub: HubInfo | None, chips, local_sha: str | None = None) -> Check | None:
     """Whether the model can fit this box at all, from the Hub's parameter counts by dtype (issue 327). None when the Hub gave no counts or the
     chip count is unknown: no claim, no row. The figure is a lower bound (orchard/residency.py `totals_bound`: no tensor name or shape was
-    read), so a block means that even the lowest listed precision needs more chips than the box has, and the run has not started a download."""
+    read), so a block means that even the lowest listed precision needs more chips than the box has, and the run has not started a download.
+
+    The counts describe the Hub's current revision (`hub.sha`). `local_sha` is the revision of the local snapshot the run will use, when there
+    is one: a run that uses an older complete snapshot downloads nothing and its headers are what stage 0 reads, so counts for another
+    revision are a finding and not a refusal."""
     if hub is None or not hub.parameters or isinstance(chips, bool) or not isinstance(chips, int) or chips < 1:
         return None
     from orchard import residency
@@ -918,12 +950,18 @@ def check_fit(hub: HubInfo | None, chips) -> Check | None:
         return Check("fit", WARN, f"the Hub's parameter counts could not be sized: {exc}")
     why = residency.shortfall(rec, chips)
     if why:
-        if hub.host_table is False:
+        same_revision = not local_sha or (bool(hub.sha) and str(local_sha).startswith(hub.sha[:8]))      # the rule `check_hub` uses for the local revision
+        if hub.host_table is False and same_revision:
             return Check("fit", BLOCK, why, "model-does-not-fit")
+        if hub.host_table is False:
+            return Check("fit", WARN, f"{why.rstrip('. ')}. This is not a block: the counts describe the Hub's current revision ({hub.sha[:12] or 'unknown'}) "
+                                      f"and this run uses the local snapshot of revision {str(local_sha)[:12]}, which may have other counts. Stage 0 reads "
+                                      "that snapshot's headers and decides")
         # The counts include a table that the default policy keeps on the host, or the config was not read to rule one out: the figure may be
         # too high for the chips, so it is a finding and not a refusal. Stage 0 reads the tensor names and decides.
-        found = ("the model's config names an n-gram or per-layer table, which the default policy keeps in host memory" if hub.host_table
-                 else "the model's config.json could not be read, so a table that the default policy keeps in host memory cannot be ruled out")
+        found = ("the model's config or its tensor names show an n-gram or per-layer table, which the default policy keeps in host memory" if hub.host_table
+                 else "the model's config.json and weight index could not both be read (a gated repository gives no file without a token, and a "
+                      "single-file model has no index), so a table that the default policy keeps in host memory cannot be ruled out")
         return Check("fit", WARN, f"{why.rstrip('. ')}. This is not a block: the counts are totals, {found}, and the chips would hold less than the "
                                   "counts say. Stage 0 reads the tensor names and decides")
     best = rec["verdict"]["best_fit"]
@@ -1337,7 +1375,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                 chips_here = len(_CHIP_LINE.findall(gozer_text()))
             except Exception:                         # the gozer row already says so
                 chips_here = 0
-            return check_fit(hub, chips_here) or Check("fit", OK, "the box's chip count could not be read from gozer, so the model's size by the "
+            return check_fit(hub, chips_here, Path(local_path).name if local_path else None) or Check("fit", OK, "the box's chip count could not be read from gozer, so the model's size by the "
                                                                "Hub's parameter counts was not compared with it")
         guarded("fit", "model-does-not-fit", fit)
     if s.bus is not None:
@@ -1448,12 +1486,12 @@ def default_signals(cfg, research_options=None) -> Signals:
                 info = parse_hub(data)
                 if info.parameters:                  # the fit row needs to know whether a host-resident table is among the counts
                     from orchard import residency
-                    info.host_table = residency.config_has_host_table(read_hub_config(model_id, info.sha))
+                    info.host_table = residency.host_table_from(read_hub_config(model_id, info.sha), read_hub_weight_index(model_id, info.sha))
                 known_hubs[model_id] = info          # local_snapshot measures its candidates against this, with no second request
                 return info, None
         except urllib.error.HTTPError as exc:
             return None, f"HTTP {exc.code}"
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:        # an answer nested past the parser's depth is an error text, not a crash
             return None, f"{type(exc).__name__}: {exc}"
 
     def local_snapshot(model_id: str):

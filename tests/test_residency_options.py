@@ -304,8 +304,9 @@ def test_an_unknown_reading_is_no_claim_and_a_damaged_record_is_no_claim():
 def test_machine_facts_reads_the_filesystem_of_the_path_and_never_raises(tmp_path):
     free, mem = REAL_MACHINE_FACTS(tmp_path)
     assert isinstance(free, int) and free > 0
-    assert mem is None or (isinstance(mem, int) and mem > 0)
-    assert REAL_MACHINE_FACTS(tmp_path / "does" / "not" / "exist")[0] is None
+    assert mem is None or (isinstance(mem, int) and mem >= 0)                        # zero is a reading (review of PR 435, round 2)
+    fresh = REAL_MACHINE_FACTS(tmp_path / "does" / "not" / "exist")[0]               # a cache root made later is measured at its nearest existing parent
+    assert isinstance(fresh, int) and fresh > 0
     assert REAL_MACHINE_FACTS(None)[0] is None
 
 
@@ -381,7 +382,7 @@ def test_a_hostile_config_is_read_to_a_bound():
     assert rs.config_has_host_table(wide) is None                                        # too many keys: unknown, so the row cannot block
 
 
-@pytest.mark.parametrize("host_table,word", [(True, "n-gram or per-layer table"), (None, "could not be read")])
+@pytest.mark.parametrize("host_table,word", [(True, "n-gram or per-layer table"), (None, "could not both be read")])
 def test_the_fit_row_is_advisory_when_a_host_table_is_named_or_the_config_was_not_read(host_table, word):
     hub = pf.parse_hub(hub_payload())
     hub.host_table = host_table
@@ -447,11 +448,13 @@ def test_hub_info_reads_the_config_only_for_a_model_with_counts_and_records_what
         urls.append(req.full_url)
         if "/api/models/" in req.full_url:
             return FakeResp(json.dumps(hub_payload()).encode())
+        if req.full_url.endswith("/model.safetensors.index.json"):          # a sharded model: the tensor names are plain
+            return FakeResp(json.dumps({"weight_map": {"model.layers.0.self_attn.q_proj.weight": "a.safetensors"}}).encode())
         return FakeResp(config_body)
     monkeypatch.setattr(pf.urllib.request, "urlopen", fake)
     info, err = pf.default_signals(_cfg(tmp_path)).hub_info("deep-principle/Hydrogen-1.0")
     assert err is None and info.host_table is expect
-    assert [u.rsplit("/", 1)[-1] for u in urls] == ["Hydrogen-1.0?blobs=true", "config.json"]
+    assert [u.rsplit("/", 1)[-1] for u in urls] == ["Hydrogen-1.0?blobs=true", "config.json", "model.safetensors.index.json"]
     urls.clear()
     nocounts = {"id": "a/b", "sha": "abc", "siblings": [], "tags": ["license:mit"]}
     monkeypatch.setattr(pf.urllib.request, "urlopen", lambda req, timeout=None: urls.append(req.full_url) or FakeResp(json.dumps(nocounts).encode()))

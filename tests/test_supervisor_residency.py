@@ -221,7 +221,7 @@ def test_a_lab_run_does_not_judge_the_first_boot_by_this_boxs_disk(tmp_path, mon
     def stub(lab):
         return SimpleNamespace(run_dir=tmp_path, lab=lab, paths=SimpleNamespace(cache_root=tmp_path / "cache"), _box_chips=lambda spec: 4,
                                _block=lambda stage, why, **ev: blocks.append(why))
-    spec = SimpleNamespace(boards=1, number=2)
+    spec = SimpleNamespace(boards=1, number=2, draft="full_port")
     Supervisor._check_residency(stub(object()), spec)
     assert blocks == [] and reads == []                                   # a lab: nothing read, nothing blocked
     Supervisor._check_residency(stub(None), spec)
@@ -234,12 +234,20 @@ def test_a_lab_run_does_not_judge_the_first_boot_by_this_boxs_disk(tmp_path, mon
 # phase (a first attempt, and a retry that must rerun a failed test), and a finish-only resume is not held to it.
 
 def hardware_stub(tmp_path, *, marker: bool, failed: bool = False):
+    """A stub supervisor. A marker the stub writes is one the supervisor recorded (its evidence entry is in the ledger), as `_run_test` leaves it;
+    an unrecorded or edited marker is in tests/test_residency_round3.py."""
     from types import SimpleNamespace
+    from orchard import stages
+    from test_residency_round3 import FakeLedger
     d = tmp_path / "stages" / "2"
     d.mkdir(parents=True)
+    ledger = FakeLedger()
     if marker:
         (d / "test-result.json").write_text("{}")
-    return SimpleNamespace(run_dir=tmp_path, _test_failure=lambda spec, stage_dir: ({"problem": "the test failed"} if failed else None))
+        rec = stages.evidence_record(tmp_path, d / "test-result.json")
+        ledger.entries.append({"event": "evidence", "stage": 2, "data": {"path": rec["path"], "sha256": rec["sha256"], "returncode": 0,
+                                                                          "timed_out": False}})
+    return SimpleNamespace(run_dir=tmp_path, ledger=ledger, _test_failure=lambda spec, stage_dir: ({"problem": "the test failed"} if failed else None))
 
 
 @pytest.mark.parametrize("resuming,marker,escalated,failed,expect", [
@@ -273,7 +281,7 @@ def test_a_check_for_a_finish_only_attempt_reads_no_machine_figure_and_blocks_no
     monkeypatch.setattr(residency, "machine_facts", lambda path: reads.append(path) or (1, 1))
     stub = SimpleNamespace(run_dir=tmp_path, lab=None, paths=SimpleNamespace(cache_root=tmp_path / "cache"), _box_chips=lambda spec: 4,
                            _block=lambda stage, why, **ev: blocks.append(why))
-    spec = SimpleNamespace(boards=1, number=2)
+    spec = SimpleNamespace(boards=1, number=2, draft="full_port")
     Supervisor._check_residency(stub, spec, hardware_pending=False)
     assert blocks == [] and reads == []
     Supervisor._check_residency(stub, spec, hardware_pending=True)
