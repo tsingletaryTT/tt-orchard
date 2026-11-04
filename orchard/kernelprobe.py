@@ -820,10 +820,33 @@ def _proc_state(proc_root: str, pid: int) -> tuple[str, int] | None:
         return None
 
 
+_UNOBSERVABLE = "unobservable"
+
+
+def _observe(proc_root: str, pid: int):
+    """What /proc says about `pid`: (state letter, start time) when it can be read, None when the process is confirmed absent (no such file
+    or directory, or the kernel's "no such process"), and _UNOBSERVABLE for any other failure (a permission error, a stat file that does not
+    parse). The two failures are different facts: an absent process is gone, an unobservable one may still run (PR 431, round 4)."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "stat"), encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
+        return None
+    except OSError:
+        return _UNOBSERVABLE
+    try:
+        rest = text[text.rfind(")") + 2:].split()
+        return rest[0], int(rest[19])
+    except (ValueError, IndexError):
+        return _UNOBSERVABLE
+
+
 def _gone(proc_root: str, pid: int, start: int | None) -> bool:
-    """True when the process no longer runs: no /proc entry, a zombie, or a different process under the same pid
-    (another start time)."""
-    st = _proc_state(proc_root, pid)
+    """True when the process is confirmed to no longer run: no /proc entry, a zombie, or a different process under the same pid (another start
+    time). A /proc entry that cannot be read or parsed is not proof of that, so it is not "gone"."""
+    st = _observe(proc_root, pid)
+    if st is _UNOBSERVABLE:
+        return False
     if st is None or st[0] == "Z":
         return True
     return start is not None and st[1] != start
@@ -986,11 +1009,14 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
     return records
 
 
-def _sweep_noting(adir, problems: list) -> list[dict]:
-    """sweep_strays over an attempt directory, with the reasons it could not vouch for the result added to `problems`."""
+def _sweep_noting(adir, problems: list, into: list) -> None:
+    """sweep_strays over an attempt directory. The records go into `into` as they are found and the reasons the sweep could not vouch for its
+    result into `problems`, also when an interrupt ends the sweep: a caller that passes the lists the saved attempt reads from keeps both."""
     status: dict = {}
     try:
-        return sweep_strays(adir, status=status)
+        got = sweep_strays(adir, status=status, into=into)
+        if got is not into:                              # a sweep that returns its records without filling `into`
+            into.extend(r for r in got if r not in into)
     finally:
         problems.extend(p for p in status.get("problems") or [] if p not in problems)
 
@@ -1113,15 +1139,15 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         ledger.close()
         # Before any verdict, and on a crash or an interrupt too: no process the agent started may keep running. The helpers that a shell
         # command's own sweep stopped (agent.spawn_checked) are no longer there to find, so the tools' records come first.
-        sweep_problems = list(tools.sweep_problems)
-        swept = list(tools.swept) + _sweep_noting(adir, sweep_problems)
+        _sweep_noting(adir, tools.sweep_problems, tools.swept)
     agent_wall_s = round(time.monotonic() - started, 2)
     try:
         check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
     finally:
         # The check imports the agent's kernel, which can start a process that outlives the check. The children carry
         # ORCHARD_RUN_DIR=<attempt directory>, so the same sweep finds them.
-        swept = swept + _sweep_noting(adir, sweep_problems)
+        _sweep_noting(adir, tools.sweep_problems, tools.swept)
+    swept, sweep_problems = list(tools.swept), list(tools.sweep_problems)
     sets = check.get("sets") if isinstance(check.get("sets"), list) else []
     measures = set_measures(sets)
     passed = check.get("passed") is True

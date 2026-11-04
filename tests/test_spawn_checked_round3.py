@@ -447,6 +447,7 @@ def stub_supervisor(ledger=None):
     s.ledger = ledger or FakeLedger()
     s.surviving_containers = []
     s.surviving_helpers = []
+    s.surviving_helper_leases = []
     s.test_adapter = FakeAdapter()
     s.test_lease = SimpleNamespace(lease_id="L1", chips=["c0"])
     s.coder_lease = None
