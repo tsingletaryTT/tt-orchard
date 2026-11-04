@@ -86,6 +86,32 @@ Chip-side facts from `docs/run-logs/2026-11-02-qwen4-ops-probe.md` that a port w
   combination the probe did not run.
 - The gated residual composed from ttnn ops matches at hidden 256 and 2560 (PCC 0.99996).
 
+### Width presets (`--width`, `--set`, `--max-gb`)
+
+The tiny widths hide problems that only a real width shows: tiling and sharding at hidden size 5120, the delta-net chunk size at 48
+value heads, the memory a 248320-row vocabulary takes on each die, and speed. `--width 27b` keeps four layers and random weights and
+takes the full-size column of the table above: hidden size 5120; 24 query and 4 KV heads of width 256; 16 key and 48 value delta-net
+heads of width 128; `hc_lowrank` 640; dense feed-forward width 14336 (the inferred figure in the table; the Qwen3.8-27B config has
+17408); vocabulary 248320; indexer budget 2048 with 4 heads of width 128 and 1 KV head; 4096 positions. For `--variant moe` and
+`mixed` it also takes 512 experts, top 10, expert and shared-expert width 640. Not scaled, because no public reading gives a width:
+the per-layer embedding (`ple_embed_dim` 64, `ple_layer_ids` [2]) and the n-gram table (base vocabulary 1000; the full-size table is
+102 GB). `max_position_embeddings` is 4096, a working length, where the model has 262144.
+
+Sizes, from the parameter count on torch's meta device (nothing allocated): the 27b dense checkpoint is 4.12 billion parameters,
+8.2 GB with its tokenizer (measured: 8,235,973,392 bytes of weights against an estimate of 8,235,973,536). The 27b MoE variants are far
+larger (512 experts of width 640 in every MoE layer): `mixed` is 37 GB and `moe` 47 GB, and the default `--max-gb 12` refuses them;
+raise it only with the disk to match. A 27b dense checkpoint with a 3-prompt, 8-token CPU reference took 58 seconds to write on a busy box. The script refuses an estimate over `--max-gb` or over the free space
+of the output filesystem minus 40 GB, before it creates the directory.
+
+`--set KEY=VALUE` (repeatable) changes one width after the preset. The keys are the width keys only (not the layer count, the layer
+schedule, the per-layer embedding or the n-gram table), only keys the variant already has (an expert key on a dense config would make
+transformers fill in 512 experts), and positive whole numbers. A scaled config (a preset other than `tiny`, or any `--set`) must
+tile on 2 and 4 dies: hidden, feed-forward, expert and vocabulary widths are multiples of 128 (whole 32-column tiles on 4 dies); head
+widths are multiples of 32; the attention, delta-net and indexer head counts divide by 4; a KV head count (the attention's and the indexer's) divides by 4 or divides 4
+(replication); the value heads are a multiple of the key heads; the vocabulary holds the 260 special and byte tokens. The tiny default
+is not held to these rules and is written exactly as before: the config, prompts, weights and tokenizer files are byte-identical to the
+output of the script before the presets existed (the manifest gained `width`, `overrides` and `size`).
+
 ## 4. How the checkpoint is made
 
 `scripts/tiny_qwen4/make_checkpoint.py` runs in the reference interpreter (`ORCHARD_REFERENCE_PYTHON`, torch and transformers
@@ -161,6 +187,22 @@ from a wrong port (the gap between the top two logits at the first differing pos
 | Reference refuses a degenerate decode | zero-scale weights |
 | Reference ids are the same on two runs | two reference runs compared |
 | Manifest hashes match the files | recomputed |
+
+`tests/test_tiny_qwen4_width.py` covers the width options. Each guard has a mutation that turns a test red:
+
+| Guard | Test |
+|---|---|
+| The default output is unchanged | `config.json`, `generation_config.json` and `prompts.json` hashes pinned from the script before the presets; the weights and tokenizer hashes too, when the torch, transformers and tokenizers versions are the pinned ones |
+| The tiny default is not held to the tile rules; a scaled config is | the rules reject the tiny config when called directly; a one-key override on the tiny base is refused |
+| `27b` has the full-size widths in four layers, no expert key on a dense config, the full-size expert widths on `moe` and `mixed` | config checks, and the stage 0 scan reports no division hazard at 2 and 4 dies |
+| Widths tile on 2 and 4 dies | 24 refused widths (not a multiple of 128 or 32, heads not dividing 4, a KV count that neither divides nor is divided by 4, value heads not a multiple of key heads, expert count above the pick count, a vocabulary under 260), each with the key named |
+| An override names a width key the variant has, as a positive whole number | refusals for a non-width key, an expert key on a dense config, a dense width on a MoE config, booleans, floats, strings, zero, negatives, nan and inf |
+| An override is bounded (1,048,576; 4,096 experts) so counting the parameters cannot hang | `10**20`, a vocabulary of 2**21, 4,097 experts are refused; the limits themselves pass |
+| `--set` parses to whole numbers | missing `=`, empty key, repeated key, non-digits |
+| The size estimate is checked before the directory exists | over `--max-gb`, over the free space minus the margin, exactly at the limit, a bad limit or estimate; the run stops before `mkdir`; the estimate is printed |
+| The estimate counts parameters without allocating them | the 27b config is counted in a child under 3 GB resident, and the estimate is within 2% of the weights file on the tiny model and a scaled one |
+| The tokenizer is sized to the config's vocabulary | a 512-wide vocabulary, round trip |
+| The manifest records width, overrides, estimated and actual sizes, and a refresh keeps them | read back after a build and after `--reference-only` |
 
 ## 7. Runbook for the pilot run (operator approval needed; not started)
 
