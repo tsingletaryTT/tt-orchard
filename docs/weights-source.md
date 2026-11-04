@@ -22,6 +22,10 @@ memory, with placeholder paths, and writes nothing. A `run.sh` the edit cannot r
 `--model` option, or (in the current form) has no line that runs `prepare_model_dir.py`. Such a bundle cannot take swapped weights, and
 the reason is the swap script's own sentence. A bundle whose directory or `run.sh` cannot be read is not refused for that.
 
+The dry run asks the script to fail quietly for this caller (the template's `QUIET` context variable) and reads the failure from the
+exception it raises, so the process's stderr is not touched. The web UI runs preflights on request threads, and a redirect of the shared
+stderr lets two overlapping dry runs swallow each other's messages.
+
 **A container package** (schema 5.1) is judged by a record, `orchard/data/weights_source.json`. Nothing in a container's manifest says
 what its generator does, so each row holds a status and the evidence for it:
 
@@ -33,6 +37,18 @@ what its generator does, so each row holds a status and the evidence for it:
 
 A package that is not in the file is `unprobed`. The file is read through `safeio` and checked row by row; a malformed file stops the
 `base` row with the reason, and `tests/test_weights_source.py` checks the shipped file.
+
+The record is about container packages only. A v6 bundle that carries a recorded name (a patched replacement that took the container's
+name) is judged by its own `run.sh`.
+
+## Where the answer is used
+
+- The `base` row drops a refused package from the packages that serve the base.
+- No picker offers a refused package, and none offers a recorded hard-coded container that is not installed (its download would be
+  refused by the next preflight): the search results, the ranked bundle choices, the installed candidates, the inferred-base
+  confirmation and the closest-bundles text all leave it out. An installed v6 bundle with that name stays, to be judged by its script.
+- Stages 2 and 4 apply the same check when they choose a package (`swap_draft.draft` and `draft_stage4`), so a refused bundle is never
+  chosen over a usable container that the preflight accepted. A record file that cannot be read gives the stage a named problem.
 
 ## Probing a package by hand
 
