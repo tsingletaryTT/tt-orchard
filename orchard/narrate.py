@@ -282,6 +282,11 @@ class TurnNarrator:
             fn = c.get("function") or {}
             name, args = fn.get("name", "?"), _args(fn.get("arguments"))
             self._pending[c.get("id", "")] = (name, "")
+            raw = fn.get("arguments")
+            if rec.get("finish_reason") == "length" and isinstance(raw, str) and not _args(raw):
+                # A reply cut off inside the arguments: the call did not run (issue 458). Saying "writes ? (0 characters)" would hide that.
+                out.append(Line(actor, f"{name} call cut off at the token limit inside its arguments; it was not run", True))
+                continue
             out.append(Line(actor, _call_text(name, args)))
         if not calls and not content:
             if rec.get("finish_reason") == "length":

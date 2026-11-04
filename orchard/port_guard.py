@@ -18,7 +18,16 @@ here happens through directory descriptors:
   with no sorting of a directory listing.
 
 What it cannot do: stop another process that owns a directory on the way from renaming things inside it (the same limit as
-`safeio.open_beneath`). The backup of each accepted file is kept in memory, at most MAX_FILE_BYTES per file and PORT_GUARD_FILES files.
+`safeio.open_beneath`). The backup of each accepted file is kept in memory, and the cache is bounded across the commands of a step:
+
+- when a scan was complete, the entries of files that are no longer there are dropped (the guard restores or removes files that exist; it
+  has nothing to put back for a file that is gone). A scan that stopped at one of its bounds proves nothing about the files it did not
+  list, so it drops nothing;
+- the backups together never exceed PORT_GUARD_BACKUP_BYTES: the oldest are evicted first. A file whose backup was evicted is never put
+  back to a wrong version and never removed: if it later becomes unacceptable it is left as the agent wrote it and the agent is told
+  that its previous version was not kept;
+- the table of stamps (which only saves a re-read) holds at most PORT_GUARD_STAMPS entries, the oldest forgotten first, and the markers
+  of evicted backups the same number.
 """
 from __future__ import annotations
 
@@ -33,6 +42,8 @@ from orchard import runaway, safeio
 PORT_GUARD_FILES = 200
 PORT_GUARD_ENTRIES = 2000
 PORT_GUARD_DEPTH = 4
+PORT_GUARD_BACKUP_BYTES = 32 * 1024 * 1024
+PORT_GUARD_STAMPS = 10_000
 _TMP_NAME = ".port-guard-tmp"
 
 
@@ -56,6 +67,8 @@ class PortGuard:
         self.run_dir = Path(run_dir) if run_dir is not None else self.stage_dir
         self._stamp: dict[tuple[str, ...], tuple[int, int, int, int]] = {}
         self._backup: dict[tuple[str, ...], bytes] = {}
+        self._evicted: dict[tuple[str, ...], None] = {}            # files whose backup was evicted for space, in eviction order
+        self._scan_complete = True
 
     # ---- anchoring ----
 
@@ -87,17 +100,20 @@ class PortGuard:
         out: list[PortFile] = []
         stack: list[tuple[tuple[str, ...], int]] = [((), 0)]
         seen = 0
+        complete = True                                            # false when a bound, an error or a skipped directory hid something
         while stack and len(out) < PORT_GUARD_FILES:
             parts, depth = stack.pop()
             try:
                 dirpin = pin.child(parts)
             except safeio.SafeReadError:
+                complete = False
                 continue                                           # a directory swapped for a link, or one that vanished
             try:
                 with os.scandir(dirpin.fd) as entries:
                     for e in entries:
                         seen += 1
                         if seen > PORT_GUARD_ENTRIES or len(out) >= PORT_GUARD_FILES:
+                            self._scan_complete = False
                             return out
                         try:
                             if e.is_symlink():
@@ -105,15 +121,20 @@ class PortGuard:
                             if e.is_dir(follow_symlinks=False):
                                 if depth < PORT_GUARD_DEPTH and e.name != "__pycache__":
                                     stack.append((parts + (e.name,), depth + 1))
+                                elif e.name != "__pycache__":
+                                    complete = False               # a directory below the depth bound is not looked at
                             elif e.is_file(follow_symlinks=False):
                                 st = e.stat(follow_symlinks=False)
                                 out.append(PortFile(parts + (e.name,), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns))
                         except OSError:
+                            complete = False
                             continue
             except OSError:
+                complete = False
                 continue
             finally:
                 dirpin.close()
+        self._scan_complete = complete and not stack
         return out
 
     def files(self) -> list[PortFile]:
@@ -212,24 +233,65 @@ class PortGuard:
         finally:
             os.close(parent)
 
+    # ---- the cache ----
+
+    def cache_stats(self) -> tuple[int, int]:
+        """(files the guard holds anything about, bytes of backups kept)."""
+        keys = set(self._stamp) | set(self._backup) | set(self._evicted)
+        return len(keys), sum(len(b) for b in self._backup.values())
+
+    def backup_evicted(self, parts: tuple[str, ...]) -> bool:
+        """Whether the backup of this file was evicted for space, so a rollback of it is not possible."""
+        return parts in self._evicted
+
+    def _set_backup(self, parts: tuple[str, ...], raw: bytes) -> None:
+        """Keep `raw` as the version a later rejection puts back, newest last, and evict the oldest backups past the byte budget."""
+        self._backup.pop(parts, None)
+        self._backup[parts] = raw
+        self._evicted.pop(parts, None)
+        total = sum(len(b) for b in self._backup.values())
+        while total > PORT_GUARD_BACKUP_BYTES and self._backup:
+            oldest = next(iter(self._backup))
+            total -= len(self._backup.pop(oldest))
+            self._evicted[oldest] = None
+        while len(self._evicted) > PORT_GUARD_STAMPS:
+            self._evicted.pop(next(iter(self._evicted)))
+
+    def _set_stamp(self, parts: tuple[str, ...], stamp) -> None:
+        self._stamp[parts] = stamp
+        while len(self._stamp) > PORT_GUARD_STAMPS:             # a stamp only saves a re-read: forgetting the oldest is safe
+            self._stamp.pop(next(iter(self._stamp)))
+
+    def _prune(self, listed: set) -> None:
+        """After a COMPLETE scan, forget the files that are no longer there. A scan that stopped at a bound listed only part of the
+        directory, so it says nothing about the files it did not reach."""
+        if not self._scan_complete:
+            return
+        for table in (self._stamp, self._backup, self._evicted):
+            for parts in [k for k in table if k not in listed]:
+                del table[parts]
+
     # ---- before and after a shell command ----
 
     def remember(self) -> None:
         """Before a shell command: keep the bytes of each port file that changed since the last look, when the file is acceptable."""
         try:
             with self._pin() as pin:
-                for f in self._scan(pin):
+                files = self._scan(pin)
+                for f in files:
                     if self._stamp.get(f.parts) == f.stamp:
                         continue
                     oversize = f.size > runaway.MAX_FILE_BYTES
                     raw = None if oversize else self._read(pin, f)
                     if raw is None and not oversize:
                         continue            # changed after the listing, or not a plain file: the stamp is not trusted, look again next time
-                    self._stamp[f.parts] = f.stamp
+                    self._set_stamp(f.parts, f.stamp)
                     if raw is not None and runaway.file_problem(raw.decode("utf-8", errors="replace")) is None:
-                        self._backup[f.parts] = raw
+                        self._set_backup(f.parts, raw)
                     else:
                         self._backup.pop(f.parts, None)
+                        self._evicted.pop(f.parts, None)        # no acceptable version exists: that is a fact, not an eviction
+                self._prune({f.parts for f in files})
         except safeio.SafeReadError:
             return
 
@@ -247,7 +309,8 @@ class PortGuard:
                              "changed. Remove the link and put the port files in a directory.")
             return notes
         try:
-            for f in self._scan(pin):
+            files = self._scan(pin)
+            for f in files:
                 if self._stamp.get(f.parts) == f.stamp:
                     continue
                 raw = None
@@ -260,10 +323,16 @@ class PortGuard:
                     problem = runaway.file_problem(raw.decode("utf-8", errors="replace"))
                 rel = self._display(f.parts)
                 if problem is None:
-                    self._stamp[f.parts] = f.stamp
-                    self._backup[f.parts] = raw                        # the accepted bytes are what a later rejection puts back
+                    self._set_stamp(f.parts, f.stamp)
+                    self._set_backup(f.parts, raw)                     # the accepted bytes are what a later rejection puts back
                     continue
                 backup = self._backup.get(f.parts)
+                if backup is None and f.parts in self._evicted:
+                    # An accepted version existed but was evicted for space: putting back a wrong version, or removing a file that held
+                    # accepted work, would lose it. Leave the file as written and say so; it is judged again after the next command.
+                    notes.append(f"refused: {rel} is not acceptable ({problem}) and its previous version was not kept (the guard's backup "
+                                 "cache is full), so it was left as it is; write a shorter file or delete it")
+                    continue
                 try:
                     if backup is not None:
                         self._restore(pin, f, backup)
@@ -277,11 +346,12 @@ class PortGuard:
                     continue
                 now = self._current(pin, f.parts)
                 if now is not None:
-                    self._stamp[f.parts] = now
+                    self._set_stamp(f.parts, now)
                 else:
                     self._stamp.pop(f.parts, None)
                 notes.append(f"refused and {what}: {rel} {problem}. Write a shorter file: a port is tens of KB, so do not repeat blocks "
                              "and do not generate text with a loop.")
+            self._prune({f.parts for f in files})
         finally:
             pin_cm.__exit__(None, None, None)
         return notes
