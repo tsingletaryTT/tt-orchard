@@ -726,6 +726,7 @@ def load_attempts(probe_dir, *, ops, probe_id) -> tuple[list[dict], int]:
 
 SWEEP_GRACE_S = 2.0          # how long the strays get after SIGTERM before the SIGKILL
 SWEEP_POLL_S = 0.05
+CLEANUP_TRIES_SWEEP = 3        # a sweep step that an interrupt cut short is run again, this many times in all
 SWEEP_FREEZE_ROUNDS = 8       # scans (each after a SIGSTOP of what is known) before the SIGKILL goes out even if new processes keep appearing
 
 
@@ -746,15 +747,20 @@ def _environ_has(proc_root: str, pid: int, entry: bytes) -> bool:
         return False
 
 
-def scan_strays(run_dir, *, proc_root: str = "/proc", uid: int | None = None, var: str = RUN_DIR_VAR) -> list[int]:
+def scan_strays(run_dir, *, proc_root: str = "/proc", uid: int | None = None, var: str = RUN_DIR_VAR,
+                errors: list | None = None) -> list[int]:
     """The pids of the processes owned by `uid` (default: ours) whose environment has ORCHARD_RUN_DIR equal to the
     resolved `run_dir`. The comparison is exact, so attempt-1 does not match attempt-10. An entry that cannot be read
-    (the process ended during the scan, or it belongs to someone else) is skipped."""
+    (the process ended during the scan, or it belongs to someone else) is skipped. A process list that cannot be read at all
+    gives an empty list, which looks like a scan that found nothing: with `errors` (a list) the reason is added to it, so the
+    caller can tell the two apart."""
     uid = os.getuid() if uid is None else uid
     entry = _run_dir_entry(run_dir, var)
     try:
         names = os.listdir(proc_root)
-    except OSError:
+    except OSError as exc:
+        if errors is not None:
+            errors.append(f"the process list {proc_root} could not be read ({type(exc).__name__})")
         return []
     found = []
     for name in names:
@@ -824,15 +830,23 @@ def _gone(proc_root: str, pid: int, start: int | None) -> bool:
 
 
 def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.killpg, grace_s: float = SWEEP_GRACE_S,
-                 clock=time.monotonic, sleep=time.sleep, var: str = RUN_DIR_VAR, identity: bool = False) -> list[dict]:
+                 clock=time.monotonic, sleep=time.sleep, var: str = RUN_DIR_VAR, identity: bool = False,
+                 into: list | None = None, status: dict | None = None) -> list[dict]:
     """Stop every process that carries this attempt's ORCHARD_RUN_DIR: SIGTERM, up to `grace_s` for them to go, then a
     second scan and SIGKILL for everything it finds, so a process a stray started during the grace is caught too.
     Returns [{"pid", "cmdline", "stopped"}]. `var` names the environment variable to look for (ORCHARD_RUN_DIR for an agent's
     strays; the supervisor uses its own for a hardware test's servers). With `identity` each record also has `boot_id` and
     `start` (field 22 of /proc/<pid>/stat), taken before the process is signalled: a pid alone can be reused. `stopped` is True only when the process is gone afterwards (no /proc
     entry, a zombie, or another process under the pid); a process that still runs, for example under a new program
-    without the variable, is recorded with `stopped` False. Never raises an Exception. An interrupt at any point after
-    the first scan (during the SIGTERM pass or the grace) still gets the SIGKILL pass before it goes on.
+    without the variable, is recorded with `stopped` False. Never raises an Exception. An interrupt at any point (during
+    the first scan, the SIGTERM pass, the grace or the freeze) still gets the SIGKILL pass over everything found so far, and
+    the records' `stopped` flags, before it goes on; the first interrupt is the one that propagates.
+
+    `into` is a list the records are added to as they are found, so a caller still has them when an interrupt ends the sweep
+    (they are also the return value). `status`, when given, is filled with `problems` (why the sweep cannot vouch that
+    nothing it was after is left: a process list that could not be read, freeze scans that never settled, an interrupt that
+    cut a scan short, an error) and `complete` (True when there are none), so a failed or unstable sweep is not mistaken for
+    an empty one.
 
     Our own pid and our ancestors are never signalled. Each signal goes to the pid itself (os.kill), except for a
     process that leads its own group, whose group is signalled so its children go too; a group is never signalled when
@@ -842,15 +856,20 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
     What it cannot see: a process whose /proc/<pid>/environ no longer holds the value (an exec with a new environment,
     or a program that overwrote that memory; clearenv() alone does not change it), and a process whose /proc entry
     cannot be read (a non-dumpable process, for example one that ran a setuid program, has a root-owned entry)."""
-    records: list[dict] = []
+    records: list[dict] = into if into is not None else []
     starts: dict[int, int | None] = {}
+    problems: list[str] = []
+    late: BaseException | None = None
     try:
         protected = _protected_pids(proc_root)
         entry = _run_dir_entry(run_dir, var)
 
         def found() -> list[int]:
-            return [pid for pid in scan_strays(run_dir, proc_root=proc_root, var=var)
+            errors: list = []
+            pids = [pid for pid in scan_strays(run_dir, proc_root=proc_root, var=var, errors=errors)
                     if isinstance(pid, int) and pid > 1 and pid not in protected]
+            problems.extend(e for e in errors if e not in problems)
+            return pids
 
         def note(pids) -> None:
             for pid in pids:
@@ -875,51 +894,122 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
             except (ProcessLookupError, PermissionError):
                 pass
 
+        def stop_all() -> None:
+            for r in list(records):
+                send(r["pid"], signal.SIGSTOP)
+
         def freeze() -> None:
             """Stop every process found so far (SIGSTOP) and scan again, until a scan finds no process that is new: a helper that keeps forking
             cannot start a child after the last scan, because it cannot run once it is stopped. A stopped process still dies of SIGKILL.
-            At most SWEEP_FREEZE_ROUNDS scans, so a source of processes that never ends cannot hold the sweep; the SIGKILLs then go out."""
+            At most SWEEP_FREEZE_ROUNDS scans, so a source of processes that never ends cannot hold the sweep. When the last scan still found
+            a new process, that one is stopped too and the sweep says it could not settle (a problem), so a caller that guards hardware can
+            block: the SIGKILLs go out either way."""
             for _ in range(SWEEP_FREEZE_ROUNDS):
                 before = len(records)
-                for r in records:
-                    send(r["pid"], signal.SIGSTOP)
+                stop_all()
                 note(found())
                 if len(records) == before:
                     return
+            stop_all()                                   # the process the last scan found has not been stopped yet
+            problems.append(f"new helpers were still appearing after {SWEEP_FREEZE_ROUNDS} scans, so the set of helpers never settled")
 
-        def kill_pass() -> None:
+        def kill_pass() -> BaseException | None:
             """Freeze, rescan until the set is stable, then the SIGKILLs. Every step has its own guard, so this never raises: an error here
-            cannot replace an interrupt that is on its way out."""
+            cannot replace an interrupt that is on its way out. An interrupt that cuts the freeze short is kept and returned after the SIGKILLs
+            went out (the processes already stopped must not stay stopped), and a SIGKILL loop that an interrupt cuts short is run again."""
+            first: BaseException | None = None
             try:
                 freeze()                                 # new processes started during the grace are scanned, and cannot start more
-            except Exception:
-                pass                                     # the processes already known still get their SIGKILL
-            for r in records:
+            except Exception as exc:
+                problems.append(f"the freeze scan failed ({type(exc).__name__}), so a helper started late may not have been found")
+            except BaseException as exc:
+                first = exc
+                problems.append("an interrupt cut the freeze scan short, so a helper started late may not have been found")
+            for _ in range(CLEANUP_TRIES_SWEEP):
                 try:
-                    send(r["pid"], signal.SIGKILL)
-                except Exception:
-                    pass
+                    for r in list(records):
+                        try:
+                            send(r["pid"], signal.SIGKILL)
+                        except Exception:
+                            pass
+                    break
+                except BaseException as exc:
+                    first = first or exc
+            return first
 
-        targets = found()
-        note(targets)
+        def kept(exc: BaseException) -> None:
+            """An error is a reason the sweep cannot vouch for its result; an interrupt (a BaseException that is not an Exception) is kept and
+            goes on after the SIGKILLs, and the first one wins."""
+            nonlocal late
+            if isinstance(exc, Exception):
+                problems.append(f"the sweep failed ({type(exc).__name__})")
+            else:
+                late = late or exc
+
+        targets: list[int] = []
+        for _ in range(CLEANUP_TRIES_SWEEP):             # an interrupt in the first scan does not skip the sweep: the scan is repeated
+            try:
+                targets = found()
+                note(targets)
+                break
+            except Exception as exc:
+                kept(exc)
+                break                                    # an error repeats; the SIGKILL pass still covers what is known
+            except BaseException as exc:
+                kept(exc)
         try:
             for pid in targets:
                 send(pid, signal.SIGTERM)
             deadline = clock() + grace_s
             while clock() < deadline and any(_environ_has(proc_root, pid, entry) for pid in targets):
                 sleep(SWEEP_POLL_S)
-        except BaseException:
-            kill_pass()                                  # never raises; an interrupt must not skip the SIGKILL
-            raise
-        kill_pass()
-        deadline = clock() + 1.0                         # a killed process leaves /proc within moments
-        while clock() < deadline and not all(_gone(proc_root, r["pid"], starts.get(r["pid"])) for r in records):
-            sleep(SWEEP_POLL_S)
+        except BaseException as exc:
+            kept(exc)
+        after = kill_pass()                              # never raises; an interrupt must not skip the SIGKILL
+        if after is not None:
+            kept(after)
+        try:
+            deadline = clock() + 1.0                     # a killed process leaves /proc within moments
+            while clock() < deadline and not all(_gone(proc_root, r["pid"], starts.get(r["pid"])) for r in records):
+                sleep(SWEEP_POLL_S)
+        except BaseException as exc:
+            kept(exc)
         for r in records:
             r["stopped"] = _gone(proc_root, r["pid"], starts.get(r["pid"]))
-    except Exception:
-        pass
+    except Exception as exc:
+        problems.append(f"the sweep failed ({type(exc).__name__})")
+    if status is not None:
+        status["problems"] = list(problems)
+        status["complete"] = not problems
+    if late is not None:
+        raise late                                       # the first interrupt, after every SIGKILL and the records are done
     return records
+
+
+def _sweep_noting(adir, problems: list) -> list[dict]:
+    """sweep_strays over an attempt directory, with the reasons it could not vouch for the result added to `problems`."""
+    status: dict = {}
+    try:
+        return sweep_strays(adir, status=status)
+    finally:
+        problems.extend(p for p in status.get("problems") or [] if p not in problems)
+
+
+def still_running(record: dict, *, proc_root: str = "/proc") -> bool:
+    """Whether the process that a sweep record names (pid, start time and boot id, taken before it was signalled) still runs. A different
+    start time under the pid, a zombie, no /proc entry, or another boot is a process that is gone. A record that cannot be judged (no pid, an
+    error while reading) counts as running: a caller that holds a lease for it must not let it go on a guess. Never raises."""
+    try:
+        pid = record.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+            return True
+        boot = record.get("boot_id")
+        if boot and _boot_id(proc_root) not in (None, boot):
+            return False
+        start = record.get("start")
+        return not _gone(proc_root, pid, start if isinstance(start, int) and not isinstance(start, bool) else None)
+    except Exception:
+        return True
 
 
 def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
@@ -935,16 +1025,22 @@ def _partial_attempt(box: dict, kw: dict, exc: BaseException) -> dict | None:
     that those calls stay on disk and in the report. None when the agent made no call. It says only what is known: the
     agent's hardware calls. The record is saved like any attempt; a failure to save it does not hide the exception."""
     hwcheck = box.get("hwcheck")
-    if hwcheck is None or not hwcheck.records:
-        return None
+    tools = box.get("tools")
+    swept = [r for r in getattr(tools, "swept", []) or [] if isinstance(r, dict)]
+    problems = [str(p) for p in getattr(tools, "sweep_problems", []) or []]
+    has_calls = hwcheck is not None and bool(hwcheck.records)
+    if not has_calls and not swept and not problems:
+        return None                                      # nothing the attempt did needs to stay on disk
     sampling = {"temperature": kw.get("temperature", 0.0), "top_p": kw.get("top_p"), "seed": kw.get("seed")}
     attempt = {
         "op": kw["op"], "attempt": kw["n"], "status": "interrupted",
-        "status_detail": f"{type(exc).__name__} before the attempt finished; the agent's hardware calls so far are kept",
+        "status_detail": f"{type(exc).__name__} before the attempt finished; what is known so far is kept (the agent's hardware calls"
+                         " and the helpers its shell commands left behind)",
         "turns": None, "agent_wall_s": None, "passed_sim": False, "category": None, "first_line": "",
         "pcc_min": None, "sets": [], "violations": [], "hw": None, "agent_check_untrusted": False,
-        "swept": list(getattr(box.get("tools"), "swept", [])),
-        "sampling": sampling, "coder_speed": kw.get("coder_speed"), "agent_hw": hwcheck.summary(),
+        "swept": swept, "sweep_problems": problems,
+        "sampling": sampling, "coder_speed": kw.get("coder_speed"),
+        "agent_hw": hwcheck.summary() if hwcheck is not None else {"enabled": False},
         "provenance": provenance(kernel_sha256=None, tt_lang=box.get("facts"), coder_model=kw.get("coder_model"),
                                  probe_id=kw.get("probe_id"), simulator_pcc_min=None, sampling=dict(sampling),
                                  skills=kw.get("skills"))}
@@ -1017,14 +1113,15 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         ledger.close()
         # Before any verdict, and on a crash or an interrupt too: no process the agent started may keep running. The helpers that a shell
         # command's own sweep stopped (agent.spawn_checked) are no longer there to find, so the tools' records come first.
-        swept = list(tools.swept) + sweep_strays(adir)
+        sweep_problems = list(tools.sweep_problems)
+        swept = list(tools.swept) + _sweep_noting(adir, sweep_problems)
     agent_wall_s = round(time.monotonic() - started, 2)
     try:
         check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
     finally:
         # The check imports the agent's kernel, which can start a process that outlives the check. The children carry
         # ORCHARD_RUN_DIR=<attempt directory>, so the same sweep finds them.
-        swept = swept + sweep_strays(adir)
+        swept = swept + _sweep_noting(adir, sweep_problems)
     sets = check.get("sets") if isinstance(check.get("sets"), list) else []
     measures = set_measures(sets)
     passed = check.get("passed") is True
@@ -1034,7 +1131,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         "category": None if passed else check.get("category"), "first_line": check.get("first_line") or "",
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         "agent_check_untrusted": agent_check_untrusted(_read_agent_check(adir / "check.json"), check, op),
-        "swept": swept, "sampling": dict(sampling), "coder_speed": coder_speed,
+        "swept": swept, "sweep_problems": sweep_problems, "sampling": dict(sampling), "coder_speed": coder_speed,
         "agent_hw": hwcheck.summary() if hwcheck is not None else {"enabled": False},
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],

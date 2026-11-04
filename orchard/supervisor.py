@@ -649,6 +649,7 @@ class Supervisor:
         # The docker label every test container of this run carries (ORCHARD_TEST_LABEL).
         self.run_label = "orchard.test=" + hashlib.sha256(str(self.run_dir).encode()).hexdigest()[:12]
         self.surviving_containers: list = []         # set by _sweep when a labelled container outlives docker stop and rm
+        self.surviving_helpers: list = []            # identities (pid, boot id, start) of hardware-test helpers a sweep could not stop
         self.control = Control(self.run_dir)
         self.actuator = RunActuator(self.control)
         self.guard = RetryGuard()
@@ -818,6 +819,12 @@ class Supervisor:
                                    lease_id=lease.lease_id, containers=list(self.surviving_containers))
                 return False
             self._cleared(None, list(self.surviving_containers))
+        alive = self._helpers_running()
+        if alive:
+            # A helper of the hardware test that the sweep could not stop may still have a chip open: the same reason as a container.
+            self.ledger.append("notice", None, what="the test lease was kept: a helper of the hardware test is still running",
+                               lease_id=lease.lease_id, helpers=alive)
+            return False
         try:
             self.test_adapter.release(lease)
         except AdapterError as exc:
@@ -835,8 +842,8 @@ class Supervisor:
         for lease, is_coder in ((self.test_lease, False), (self.coder_lease, True)):
             if lease is None:
                 continue
-            if not is_coder and self.surviving_containers:
-                ok = False             # a container still uses these chips: its lease stays, the coder's is still released
+            if not is_coder and (self.surviving_containers or any(kernelprobe.still_running(r) for r in self.surviving_helpers)):
+                ok = False             # a container or a helper still uses these chips: its lease stays, the coder's is still released
                 continue
             try:
                 if is_coder and getattr(self.coder, "owned", None) is False:
@@ -1317,6 +1324,10 @@ class Supervisor:
 
     def _ensure_coder(self) -> None:
         """The coder serves under a lease this process owns, before any stage runs."""
+        alive = self._helpers_running()
+        if alive:
+            self._block(None, "a helper of an earlier hardware test is still running (pid " + ", ".join(str(r.get("pid")) for r in alive) +
+                        "), so the coder is not restored over it; stop it and run the command again", pids=[r.get("pid") for r in alive])
         entries = self.ledger.read()
         hp = progress(entries)
         if hp.phase != "idle":
@@ -3182,13 +3193,17 @@ class Supervisor:
         identity it had (pid, boot id, start time) written to the ledger. A server that is still there afterwards blocks the run: the coder
         is not restored over it. The trial does not release the lease itself; the run's wind-down does, and gozer refuses to reset a
         chip that a server holds."""
-        records = kernelprobe.sweep_strays(trial_dir, var=GRAFT_TRIAL_ENV, identity=True)
+        status: dict = {}
+        records = kernelprobe.sweep_strays(trial_dir, var=GRAFT_TRIAL_ENV, identity=True, status=status)
         if records:
             self.ledger.append("decision", n, decision="graft trial servers stopped", when=when, servers=records)
         left = [r["pid"] for r in records if not r.get("stopped")]
         if left:
             self._block(n, "a server of the graft trial is still running (pid " + ", ".join(str(p) for p in left) + "), so the coder is "
                            "not restored over it; stop it and run the command again", pids=left)
+        if status.get("problems"):
+            self._block(n, "the sweep of the graft trial's servers could not be completed (" + "; ".join(status["problems"]) + "), so the "
+                           "coder is not restored until someone has checked that no server of the trial still runs", problems=status["problems"])
 
     def _record_graft_decision(self, stage_dir: Path, decision: dict) -> None:
         """The ledger's copy of the decision, with the decision file's sha256 so a later stage can tell the file was not changed."""
@@ -3391,13 +3406,20 @@ class Supervisor:
         t0 = self.clock()
         with _open_fresh(out_path) as out, collect_survivors() as survivors:
             try:
-                if self.lab is not None:
-                    code, timed_out = self._spawn_on_lab(n, command, env, deadline, out)
-                else:
-                    code, timed_out = spawn_checked(command, self.run_dir, env, deadline, out)
-            except Denied as exc:
-                code, timed_out = None, False
-                out.write(f"refused: {exc}\n".encode("utf-8"))
+                try:
+                    if self.lab is not None:
+                        code, timed_out = self._spawn_on_lab(n, command, env, deadline, out)
+                    else:
+                        code, timed_out = spawn_checked(command, self.run_dir, env, deadline, out)
+                except Denied as exc:
+                    code, timed_out = None, False
+                    out.write(f"refused: {exc}\n".encode("utf-8"))
+            except BaseException:
+                # An interrupt or a crash: spawn_checked swept the helpers on its way out and let the exception go on, so what the sweep
+                # stopped (and what it could not stop) is in `survivors` and nowhere else. It is written down and remembered here; the
+                # exception that is already on its way is the one that propagates.
+                self._note_test_helpers_on_exit(n, survivors)
+                raise
         self._record_test_helpers(n, survivors)
         if (timed_out or code not in (0, None)) and self.lab is None:
             # A test that ran and did not succeed is checked against the bus before anyone calls it a model failure. A refused
@@ -3413,14 +3435,72 @@ class Supervisor:
         a server that run.sh started, for example. The sweep removes them before any later scan, so this is the only record of them: one
         ledger entry with the identity each had (pid, boot id, start time) before it was signalled. A helper that is still running afterwards
         (it replaced its environment, so the sweep cannot name it again) blocks the run the way a server of the graft trial does, so the coder
-        is not restored over a process that holds a chip."""
-        if not survivors:
+        is not restored over a process that holds a chip, and its identity is remembered (`surviving_helpers`, and the ledger) so that no
+        release of the test lease and no restoration of the coder goes ahead until that exact process is gone. A sweep that could not be
+        completed (`survivors.problems`: a process list it could not read, a scan that never settled, an error) blocks as well: an empty
+        record from such a sweep is not proof that nothing is left."""
+        problems = list(getattr(survivors, "problems", []) or [])
+        if not survivors and not problems:
             return
-        self.ledger.append("decision", n, decision="hardware test helpers stopped", servers=survivors)
-        left = [r["pid"] for r in survivors if not r.get("stopped")]
+        self.ledger.append("decision", n, decision="hardware test helpers stopped", servers=list(survivors), problems=problems)
+        left = [r for r in survivors if not r.get("stopped")]
         if left:
-            self._block(n, "a helper of the hardware test is still running (pid " + ", ".join(str(p) for p in left) + "), so the coder is "
-                           "not restored over it; stop it and run the command again", pids=left)
+            self._remember_helpers(n, left, problems)
+            self._block(n, "a helper of the hardware test is still running (pid " + ", ".join(str(r["pid"]) for r in left) + "), so the coder is "
+                           "not restored over it; stop it and run the command again", pids=[r["pid"] for r in left])
+        if problems:
+            self._block(n, "the sweep of the hardware test's helpers could not be completed (" + "; ".join(problems) + "), so the coder is not "
+                           "restored until someone has checked that nothing of the test still runs; then run the command again", problems=problems)
+
+    def _note_test_helpers_on_exit(self, n: int, survivors) -> None:
+        """What `_record_test_helpers` records, for the way out of a hardware test that an interrupt or an error ended. It never raises an
+        Exception and never blocks: the exception already on its way is the one that propagates. The identities of the helpers that are
+        still running are remembered, so the lease release and the coder's restoration that follow check them."""
+        try:
+            problems = list(getattr(survivors, "problems", []) or [])
+            if not survivors and not problems:
+                return
+            left = [dict(r) for r in survivors if not r.get("stopped")]
+            self.surviving_helpers = left                 # in memory first: the ledger may be what failed
+            self.ledger.append("decision", n, decision="hardware test helpers stopped", servers=[dict(r) for r in survivors],
+                               problems=problems, interrupted=True)
+            if left:
+                self.ledger.append("decision", n, decision="hardware test helpers survived", servers=left, problems=problems,
+                                   interrupted=True)
+        except Exception:
+            pass
+
+    def _remember_helpers(self, n, left: list[dict], problems: list[str]) -> None:
+        self.surviving_helpers = [dict(r) for r in left]
+        self.ledger.append("decision", n, decision="hardware test helpers survived", servers=[dict(r) for r in left], problems=list(problems))
+
+    def _ledger_helpers(self) -> list[dict]:
+        """The helpers an earlier process of this run recorded as still running and nothing has cleared since (the last "hardware test helpers
+        survived" / "hardware test helpers cleared" decision), so a restart keeps the protection of a lease whose helper was known to run."""
+        records: list[dict] = []
+        for e in self.ledger.read():
+            if e["event"] != "decision":
+                continue
+            what = e["data"].get("decision")
+            if what == "hardware test helpers survived":
+                records = [r for r in (e["data"].get("servers") or []) if isinstance(r, dict)]
+            elif what == "hardware test helpers cleared":
+                records = []
+        return records
+
+    def _helpers_running(self) -> list[dict]:
+        """The remembered helpers (in memory, else from the ledger) that still run, judged by the identity each had before it was signalled.
+        Helpers that are gone are cleared, in memory and in the ledger."""
+        known = self.surviving_helpers or self._ledger_helpers()
+        if not known:
+            return []
+        alive = [r for r in known if kernelprobe.still_running(r)]
+        if alive:
+            self.surviving_helpers = alive
+            return alive
+        self.surviving_helpers = []
+        self._note("decision", decision="hardware test helpers cleared", servers=list(known))
+        return []
 
     def _kernel_cache(self) -> Path:
         return Path(self.paths.cache_root) / "kernels"

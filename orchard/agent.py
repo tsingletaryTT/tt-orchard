@@ -172,28 +172,49 @@ CLEANUP_TRIES = 3                                   # a step that an interrupt c
 class _HeldStopSignals:
     """While held, SIGINT and SIGTERM are recorded and not acted on. The handlers are swapped, not the signal mask: a mask covers one thread, and
     in a process with other threads the signal can reach any of them while Python still runs the handler in the main thread. A handler can be
-    swapped in the main thread only, so in another thread nothing is held and the cleanup relies on its retries. `release` puts the handlers
-    back and runs the handler of each signal that came, as the signal would have; it returns the exception that handler raised, or None."""
+    swapped in the main thread only, so in another thread nothing is held and the cleanup relies on its retries.
+
+    Both transitions can be cut short by a stop signal, because until a signal's handler is swapped the original one still runs and raises. So
+    the constructor never raises: each original handler is read before anything is swapped, an interrupt that arrives during the swapping is
+    kept in `exc` and the swapping goes on (a second try for each signal, CLEANUP_TRIES in all), and the cleanup then runs. `release` puts every
+    original handler back, repeating the whole restoration when an interrupt cuts it short (putting a handler back is idempotent), and returns
+    the first exception that came up (the one kept at the start, one raised while restoring, or one raised by the handler of a signal that
+    arrived while held, which is run as the signal would have been); None when nothing did."""
 
     def __init__(self):
         self.old: dict = {}
         self.arrived: list = []
-        if threading.current_thread() is threading.main_thread():
-            for signum in STOP_SIGNALS:
+        self.exc: BaseException | None = None
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for signum in STOP_SIGNALS:
+            for _ in range(CLEANUP_TRIES):
                 try:
-                    self.old[signum] = signal.signal(signum, self._hold)
+                    if signum not in self.old:
+                        self.old[signum] = signal.getsignal(signum)
+                    signal.signal(signum, self._hold)
+                    break
                 except (ValueError, OSError):
-                    pass
+                    self.old.pop(signum, None)
+                    break
+                except BaseException as exc:          # a stop signal arrived before this one was held: the cleanup still runs
+                    self.exc = self.exc or exc
 
     def _hold(self, signum, frame) -> None:
         self.arrived.append((signum, frame))
 
     def release(self) -> BaseException | None:
-        for signum, handler in self.old.items():
+        first = self.exc
+        for _ in range(CLEANUP_TRIES):
             try:
-                signal.signal(signum, handler)
-            except (ValueError, OSError, TypeError):
-                pass
+                for signum, handler in self.old.items():
+                    try:
+                        signal.signal(signum, handler)
+                    except (ValueError, OSError, TypeError):
+                        pass
+                break
+            except BaseException as exc:              # cut short by a signal: every handler is put back again from the start
+                first = first or exc
         for signum, frame in self.arrived:
             handler = self.old.get(signum)
             try:
@@ -202,8 +223,8 @@ class _HeldStopSignals:
                 elif handler == signal.SIG_DFL:
                     os.kill(os.getpid(), signum)          # the default action of the signal, after the cleanup
             except BaseException as exc:
-                return exc
-        return None
+                return first or exc
+        return first
 
 
 def _cleanup(proc, tag: str, stdout) -> BaseException | None:
@@ -212,8 +233,8 @@ def _cleanup(proc, tag: str, stdout) -> BaseException | None:
     The stop signals are held back while this runs (_HeldStopSignals): one that arrives meanwhile is acted on when the cleanup is done. A step
     that an exception still stops (a thread that is not the main one) is run again, up to CLEANUP_TRIES times. Returns the first exception that
     came up during the cleanup, or None; the caller decides whether it replaces anything."""
-    late = None
-    held = _HeldStopSignals()
+    held = _HeldStopSignals()                # never raises: an interrupt during its setup is in held.exc and goes on after the cleanup
+    late = held.exc
     try:
         for step in (lambda: _kill_session(proc), lambda: _sweep_helpers(tag, stdout)):
             for _ in range(CLEANUP_TRIES):
@@ -239,13 +260,24 @@ def _kill_session(proc) -> None:
 _SURVIVORS: contextvars.ContextVar = contextvars.ContextVar("orchard_spawn_survivors", default=None)
 
 
+class Survivors(list):
+    """What collect_survivors yields: the records (a list of dicts), and in `problems` what stopped a sweep from being complete (a process list
+    that could not be read, a scan that never settled, an error). An empty list with no problems is a sweep that found nothing; an empty list
+    with problems is a sweep nobody can vouch for, and a caller that guards hardware has to treat the two differently."""
+
+    def __init__(self):
+        super().__init__()
+        self.problems: list[str] = []
+
+
 @contextlib.contextmanager
 def collect_survivors():
     """Within this block, every spawn_checked call in this context adds what its sweep stopped to the list this yields: one record per process
     ({"pid", "cmdline", "stopped", "boot_id", "start"}), with the identity it had before it was signalled. The sweep removes a process before
     any later scan can see it, so the structured audit paths (the supervisor's ledger, a kernel-probe attempt's `swept` list) take the records
-    from here. `stopped` False means the process is still running."""
-    records: list[dict] = []
+    from here. `stopped` False means the process is still running. The records are added when the sweep ends, also when an interrupt cuts the
+    call short, so a caller that reads them in a `finally` sees them on every way out. `problems` lists what made a sweep incomplete."""
+    records = Survivors()
     token = _SURVIVORS.set(records)
     try:
         yield records
@@ -256,13 +288,31 @@ def collect_survivors():
 def _sweep_helpers(tag: str, stdout) -> None:
     """Stop the processes that carry `tag` (SIGTERM, a short grace, then SIGKILL) and say which in `stdout`. This runs on the way out of a kill,
     so it does not raise an Exception: an error here must not replace the result or the interrupt that is already on its way. A collector
-    (collect_survivors) also gets the records, with the identity each process had before it was signalled."""
+    (collect_survivors) also gets the records, with the identity each process had before it was signalled, and the reasons the sweep could not be
+    completed (an error, a process list that could not be read, a scan that never settled), so the caller can tell a failed sweep from an empty one.
+    The records reach the collector and `stdout` when an interrupt cuts the sweep short as well; the interrupt then goes on."""
     sink = _SURVIVORS.get()
+    records: list = []
+    status: dict = {}
     try:
-        from orchard import kernelprobe              # imported here: kernelprobe imports this module
-        records = kernelprobe.sweep_strays(tag, var=SPAWN_TAG_VAR, identity=sink is not None)
+        try:
+            from orchard import kernelprobe              # imported here: kernelprobe imports this module
+            result = kernelprobe.sweep_strays(tag, var=SPAWN_TAG_VAR, identity=sink is not None, into=records, status=status)
+            if isinstance(result, list) and result is not records:        # a sweep that returns its records and does not fill `into`
+                records.extend(r for r in result if r not in records)
+        finally:
+            _publish_sweep(sink, records, status, stdout)
+    except Exception as exc:
+        if sink is not None:
+            sink.problems.append(f"the sweep of the command's helpers failed ({type(exc).__name__})")
+
+
+def _publish_sweep(sink, records: list, status: dict, stdout) -> None:
+    """Hand a sweep's records and problems to the collector and name the helpers in `stdout`. Never raises an Exception."""
+    try:
         if sink is not None:
             sink.extend(r for r in records if isinstance(r, dict))
+            sink.problems.extend(str(p) for p in (status.get("problems") or []))
         if records:
             lines = "".join(f"orchard: a helper outlived the command and was stopped: pid {r['pid']} {r['cmdline']}"
                             f"{'' if r['stopped'] else ' (still running)'}\n" for r in records)
@@ -335,6 +385,7 @@ class Tools:
         self.env, self.timeout, self.limit = env, timeout, limit
         # What the sweeps after this tool's shell commands stopped (see collect_survivors); a kernel-probe attempt lists them under `swept`.
         self.swept: list[dict] = []
+        self.sweep_problems: list[str] = []         # what made a sweep incomplete (see Survivors); a sweep nobody can vouch for
 
     def call(self, name: str, arguments: str) -> str:
         try:
@@ -372,8 +423,11 @@ class Tools:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(out_path, "wb") as out, collect_survivors() as swept:
-                code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out)
-            self.swept.extend(swept)
+                try:
+                    code, timed_out = spawn_checked(command, self.run_dir, self.env, self.timeout, out)
+                finally:                       # an interrupt that cut the wait short still leaves what its sweep stopped
+                    self.swept.extend(swept)
+                    self.sweep_problems.extend(swept.problems)
         except Denied as exc:
             return f"refused: {exc}"
         text = out_path.read_text(encoding="utf-8", errors="replace")
