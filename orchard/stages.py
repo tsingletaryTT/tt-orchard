@@ -841,7 +841,7 @@ def sidecar_numbers_reasons_at(stage_dir, run_dir, name: str, d: dict) -> tuple[
     """(reasons, unverified) for the sidecar parity numbers (issue 445): the evidence file's `per_record` measurements are folded again
     (`orchard/sidecar_numbers.py`) and both the evidence file's own summary and result.json's `sidecar_parity` must be that fold.
     A run whose ledger holds the evidence file's hash (the supervisor's hardware test wrote it) must carry the records, and the file must be
-    the one it hashed. A run with no such record and no records is judged as before, and the numbers are marked agent-reported."""
+    that file. A run with no such record and no records is judged as before, and the numbers are marked agent-reported."""
     doc, reasons, bound = raw_evidence.read(run_dir, stage_dir, 2, name)
     if reasons:
         return reasons, ()

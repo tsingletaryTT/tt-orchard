@@ -127,5 +127,5 @@ def _problems(summaries, evidence, *, bound: bool) -> tuple[list[str], bool]:
     if isinstance(evidence, dict) and isinstance(evidence.get("wiring_check"), dict):
         for label, obj in summaries:
             if isinstance(obj, dict) and label != "sidecar-parity.json" and obj.get("wiring_check") != evidence["wiring_check"]:
-                out.append(f"{label} wiring_check is not the one in sidecar-parity.json (the file the hardware test wrote)")
+                out.append(f"{label} wiring_check differs from the wiring_check in sidecar-parity.json (the file the hardware test wrote)")
     return [cut_text(r, MAX_REASON_CHARS) for r in out], True
