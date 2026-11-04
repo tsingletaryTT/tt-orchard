@@ -28,6 +28,12 @@ four functions:
     close(model) -> None
         Release what `load` took. The check closes the device itself.
 
+If `load` writes a converted copy of the weights to disk (a cache under the cache root that the first boot fills), say so in
+`stages/2/port/converted_cache.json`: `{"writes_converted_cache": true, "cache_dir": "<where>"}`. The supervisor reads it before the hardware
+test and blocks when the cache disk has less free space than the first boot needs. If `load` converts straight onto the chips and writes no
+cache, write `{"writes_converted_cache": false}`. With no file the supervisor does not check the disk for a cache and records that nothing was
+declared. The file is your statement and it is read once: the supervisor hashes it into the ledger before the test.
+
 `prefill` must start the request afresh. The check calls it twice on the same prompt (before the teacher-forced run and before the
 free run), and the gate refuses a record where the second call returns a different first id: the serving plugin reuses a decode slot for
 a new request and expects prefill to reset that request's state
