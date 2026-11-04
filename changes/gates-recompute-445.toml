@@ -1,0 +1,3 @@
+target = "0.9.112"
+summary = "Four gates that read a number an agent typed now recompute it from raw records or say the number is agent-reported (sidecar parity, boot check, decoder PCC, full-model top1)."
+kind = "fix"
