@@ -6,7 +6,7 @@ Why. Run11 of the tiny Qwen4 rehearsal (2026-11-04) was the first run in which a
 check ran it on the chips. The helper was asked twice, both times at the start of an attempt, and the two asks were used up. After that the
 coder alone repaired the port: it fixed a shape error in prefill (round 2), then the check failed at load, and in the rounds that followed the
 coder looped on `read_file`, broke the file and ended the stage. A coder that cannot finish a port needs the helper at the point where the
-port fails, with the port in front of it, not only at the start of an attempt.
+port fails, with the port in front of it. The start of an attempt is too early and too rare.
 
 When. In a repair round of stage 2 (orchard/supervisor.py `_port_repair_rounds`), whose check has just failed on the port itself:
 - at the start of the round, in round 1 and in any round whose failure is no further along the request chain than the previous round's
