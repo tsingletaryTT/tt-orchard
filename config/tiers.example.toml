@@ -7,12 +7,20 @@ endpoint = "http://127.0.0.1:8000/v1"
 model = "CHANGE-ME"
 placement = "chips"
 context_tokens = 262144
+# Sampling for the coder (docs/coder-sampling.md). A paired test on the tiny Qwen4 rehearsal, one run per arm, wrote files with these two values
+# and none in 37 turns at temperature 0. `top_p` and `top_k` are tier keys too; a tier that sets none of them sends greedy decoding.
+temperature = 0.7
+repetition_penalty = 1.05
 
 [tiers.small]
 role = "routine steps while the large model is parked or busy"
 endpoint = "http://127.0.0.1:8001/v1"
 model = "CHANGE-ME"
 placement = "cpu"
+# Sampling for the coder (docs/coder-sampling.md). A paired test on the tiny Qwen4 rehearsal, one run per arm, wrote files with these two values
+# and none in 37 turns at temperature 0. `top_p` and `top_k` are tier keys too; a tier that sets none of them sends greedy decoding.
+temperature = 0.7
+repetition_penalty = 1.05
 
 # Stage owner. "run" is the tier that does the work. "diagnose" is the tier that takes over
 # when the run tier escalates; stages 2, 3 and 4 need one. Stage 4 also needs "plan", the tier

@@ -81,3 +81,19 @@ def test_a_step_restarts_once_after_two_capped_replies_through_the_supervisor(ri
     assert len(restarts) == 1 and restarts[0]["capped_in_step"] == 2 and restarts[0]["repetition_loops"] == 2
     after = tool_requests(rig)[2]["messages"]
     assert [m["role"] for m in after] == ["system", "user"] and "restarted" in after[1]["content"]
+
+
+def test_the_tiers_top_p_and_top_k_reach_every_request_and_the_ledger(rig):
+    text = rig.tiers.read_text().replace('model = "qwen-27b"\n', 'model = "qwen-27b"\ntemperature = 0.7\ntop_p = 0.8\ntop_k = 20\n', 1)
+    rig.tiers.write_text(text)
+    assert rig.run() == EXIT_READY
+    reqs = tool_requests(rig)
+    assert reqs and all(r["temperature"] == 0.7 and r["top_p"] == 0.8 and r["top_k"] == 20 for r in reqs)
+    first = agent_steps(rig)[0]["sampling"]
+    assert first["top_p"] == 0.8 and first["top_k"] == 20
+
+
+def test_a_tier_without_top_p_and_top_k_sends_neither_and_the_ledger_record_has_the_keys_it_had_before(rig):
+    assert rig.run() == EXIT_READY
+    assert not any("top_p" in r or "top_k" in r for r in tool_requests(rig))
+    assert set(agent_steps(rig)[0]["sampling"]) == {"max_tokens", "temperature", "retry_after_cap", "restarts_on_caps"}
