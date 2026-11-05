@@ -449,10 +449,10 @@ def test_a_write_by_stage_relative_path_ends_the_note_for_that_file_in_that_stag
         rec(1, [SYSTEM, USER], [read_of("stages/2/evidence/a.txt"), read_of("stages/1/evidence/a.txt")]),
         rec(2, [tool("AAA" * 100), tool("AAA" * 100)], [write_of("evidence/a.txt")], ),
         rec(3, [tool("wrote")], [read_of("stages/2/evidence/a.txt"), read_of("stages/1/evidence/a.txt")]),
-        rec(4, [tool("BBB" * 100), tool("AAA" * 100)], [], finish="stop"),
+        rec(4, [tool("AAA" * 100), tool("AAA" * 100)], [], finish="stop"),     # the rewrite left the same text: a write still ends the note
     ]
     out = replay.replay_run(one_step_run(tmp_path, 2, records))
-    assert out["read_calls"] == 4 and out["read_notes"] == 1               # stage 1's copy is unchanged, stage 2's was rewritten
+    assert out["read_calls"] == 4 and out["read_notes"] == 1               # stage 1's copy is unchanged (a note), stage 2's was rewritten (not)
 
 
 def test_a_path_that_exists_in_the_run_directory_is_the_run_relative_file(tmp_path):
@@ -495,3 +495,14 @@ def test_an_absolute_path_inside_the_run_directory_is_the_run_relative_file(tmp_
     ]
     out = replay.replay_run(one_step_run(tmp_path, 2, records))
     assert out["read_notes"] == 1
+
+
+def test_a_write_by_explicit_stages_path_ends_the_note_for_that_file(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [read_of("stages/2/evidence/a.txt")]),
+        rec(2, [tool("AAA" * 100)], [write_of("stages/2/evidence/a.txt")]),
+        rec(3, [tool("wrote")], [read_of("stages/2/evidence/a.txt")]),
+        rec(4, [tool("AAA" * 100)], [], finish="stop"),                    # the same text again, but the file was written in between
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 2, records))
+    assert out["read_calls"] == 2 and out["read_notes"] == 0
