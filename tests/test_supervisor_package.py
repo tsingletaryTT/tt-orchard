@@ -24,7 +24,7 @@ from package_fakes import (BASE, BASE_REV, DRAFTER, DRAFTER_REV, GENERATED, HAVE
                            NEW_REV, PROMPT_IDS, SOURCE_ENV, VOCAB, calls, fake_bin, hf_snapshot,
                            make_source, tokenizer_json)
 from run_fakes import (BOARDS, FILES, CrashingLedger, FakeContainers, Machine, MachineAdapter,
-                       MachineCoder, argv, bringup, clock, hw, plenty, write_tiers)
+                       MachineCoder, argv, bringup, clock, hw, plenty, write_tiers, FAKE_SWAP_TEST, SWAP_SCRIPTS, swap_entry, swap_prepare)
 
 if not HAVE_TOKENIZERS:
     pytest.skip("SKIPPED: the `tokenizers` package is not importable, so the stage 7 boot check "
@@ -60,7 +60,13 @@ class PackageRig:
         # (prepare_swap.py links each file to the realpath of the snapshot file).
         weights = "model-00001-of-00001.safetensors"
         md = self.run_dir / "stages/2/model-dir"
-        report = json.dumps({"new_model_id": NEW, "model_dir": str(md)})
+        # The rig's stage 1 holds the 32 reference ids, so the supervisor binds them in the ledger and the gates recompute the 32-token check from
+        # the raw replies (issue 433): the fake tests record the 32 replies the perfect fake server gives, as the template does, and the results
+        # that repeat the numbers say 32 of 32 (the shared fakes say 0.94, which no 32-record run can give).
+        forced = [{"position": k, "text": f"t{k}", "first_id": g} for k, g in enumerate(GENERATED)]
+        perfect = {"n_tokens": len(GENERATED), "matches": len(GENERATED), "top1_agreement": 1.0, "mismatches": [],
+                   "reference_generated_ids": GENERATED, "teacher_forced": forced, "result_draft": {"serves": True, "top1_agreement": 1.0, "n_tokens": len(GENERATED)}}
+        report = json.dumps({"new_model_id": NEW, "model_dir": str(md), **perfect})
         test2 = (f"ln -s {os.path.realpath(snap / weights)} {md / weights} && "
                  f"printf '%s' '{report}' > stages/2/evidence/swap-check.json && "
                  "printenv > stages/2/evidence/devices.txt")
@@ -74,7 +80,11 @@ class PackageRig:
             (2, "prepare"): {**hw(2), "swap_config.json": swap,
                              "hw_test.json": {**hw(2)["hw_test.json"], "command": test2},
                              "model-dir/config.json": '{"architectures": ["Qwen3_5ForConditionalGeneration"]}',
-                             "model-dir/preprocessor_config.json": "{}"}}
+                             "model-dir/preprocessor_config.json": "{}"},
+            (2, "finish"): {"result.json": {**FILES[(2, "finish")]["result.json"], "top1_agreement": 1.0}},
+            (4, "prepare"): {**swap_prepare(), **{f"configs/{n}/{s}": FAKE_SWAP_TEST.replace('{"result_draft": {"top1_agreement": 0.94}}', repr(perfect))
+                                                  for n, s in SWAP_SCRIPTS.items()}},
+            (4, "finish"): {"result.json": {"configs": [{**swap_entry(n), "top1_agreement": 1.0} for n in SWAP_SCRIPTS]}}}
         self.pid_file, server_cfg = tmp / "server-pid.json", tmp / "server.json"
         server_cfg.write_text(json.dumps({"mode": "perfect", "vocab": VOCAB, "prompt_ids": PROMPT_IDS,
                                           "generated_ids": GENERATED, "pid_file": str(self.pid_file)}))

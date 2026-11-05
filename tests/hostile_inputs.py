@@ -433,6 +433,12 @@ def _stages_suite_reasons_in(base: Path):
     return stages._suite_reasons_in(base / "input.json", base)
 
 
+def _stages_reference_ids(base: Path):
+    """Stage 1's generated-ids.json as the 32-token recompute reads it (issue 433): (ids, reasons, bound)."""
+    from orchard import stages
+    return stages._reference_ids(base)
+
+
 def _stages_read_checked(base: Path):
     from orchard import stages
     reasons: list = []
@@ -1008,6 +1014,7 @@ READERS: list[Reader] = [
     Reader("stages._evidence_json", _stages_evidence_json, rel="evidence/input.json"),
     Reader("stages.hw_record_problem", _stages_hw_record, rel="tests/2/test-result.json"),
     Reader("stages._suite_reasons_in", _stages_suite_reasons_in),
+    Reader("stages._reference_ids", _stages_reference_ids, rel="stages/1/evidence/reference/generated-ids.json"),
     Reader("hwtests.load_plan", _hwtests_load_plan, rel="tests/plan.json"),
     Reader("hwtests.read_plan", _hwtests_read_plan, rel="hw_tests.json"),
     Reader("stages._read_checked", _stages_read_checked),

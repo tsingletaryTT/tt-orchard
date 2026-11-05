@@ -82,6 +82,34 @@ def test_stage_2_uses_the_agreement_set_when_stage_1_wrote_its_reference_and_rec
         r.close()
 
 
+def test_stage_2_records_the_hash_of_stage_1s_reference_ids_before_any_test(tmp_path):
+    """Issue 433: the gate recomputes the 32-token check from stage 1's generated ids, which the ledger binds by hash before the test."""
+    r = container_rig(tmp_path, bundle=True)
+    ids = r.run_dir / "stages" / "1" / "evidence" / "reference" / "generated-ids.json"
+    stage_1 = {**FILES[(1, "run")], "evidence/reference/generated-ids.json": '{"generated_ids": [1, 2, 3]}'}
+    r.script = lambda request: bringup(request, overrides={(1, "run"): stage_1})
+    try:
+        try:
+            r.run()
+        except AssertionError:
+            pass                      # the rig's fake test writes no raw replies, so the gate may now refuse stage 2: the record is what this reads
+        recs = [e for e in r.entries() if e["data"].get("decision") == "stage 1 reference ids recorded"]
+        assert recs and all(e["stage"] == 2 and e["data"]["sha256"] == hashlib.sha256(ids.read_bytes()).hexdigest() for e in recs)
+        drafted_at = next(e["seq"] for e in r.entries() if e["data"].get("decision") == "swap config drafted")
+        assert min(e["seq"] for e in recs) < drafted_at
+    finally:
+        r.close()
+
+
+def test_stage_2_records_no_reference_ids_hash_when_stage_1_wrote_none(tmp_path):
+    r = container_rig(tmp_path, bundle=True)
+    try:
+        assert r.run() == EXIT_READY
+        assert not [e for e in r.entries() if e["data"].get("decision") == "stage 1 reference ids recorded"]
+    finally:
+        r.close()
+
+
 def test_stage_2_does_not_use_the_agreement_set_without_the_reference(tmp_path):
     r = container_rig(tmp_path, bundle=True)
     try:
@@ -326,3 +354,61 @@ def test_a_second_board_held_by_someone_else_is_waited_for_not_blocked(tmp_path,
         assert len(stage2_tests(r)[0]["chips"]) == 4
     finally:
         r.close()
+
+
+def test_stage_2_records_the_reference_ids_hash_even_when_the_config_could_not_be_drafted(tmp_path, monkeypatch):
+    """Review of PR 444: the pin came after a successful draft, so a run whose bundle was ambiguous (swap_draft.draft gave None) reached the
+    prepare agent and the hardware test with the reference ids unbound. The pin no longer waits for the draft."""
+    from orchard import swap_draft
+    monkeypatch.setattr(swap_draft, "draft", lambda **kw: (None, ["two bundles match"]))
+    r = container_rig(tmp_path, bundle=True)
+    ids = r.run_dir / "stages" / "1" / "evidence" / "reference" / "generated-ids.json"
+    stage_1 = {**FILES[(1, "run")], "evidence/reference/generated-ids.json": '{"generated_ids": [1, 2, 3]}'}
+    r.script = lambda request: bringup(request, overrides={(1, "run"): stage_1})
+    try:
+        try:
+            r.run()
+        except AssertionError:
+            pass
+        entries = r.entries()
+        recs = [e for e in entries if e["data"].get("decision") == "stage 1 reference ids recorded"]
+        assert recs and recs[0]["data"]["sha256"] == hashlib.sha256(ids.read_bytes()).hexdigest()
+        assert any(e["data"].get("decision") == "swap config not drafted" for e in entries)
+        first_step = next((e["seq"] for e in entries if e["data"].get("decision") == "agent step"
+                           and e["stage"] == 2), None)
+        assert first_step is None or recs[0]["seq"] < first_step
+    finally:
+        r.close()
+
+
+def test_the_reference_ids_hash_is_recorded_once_and_a_retry_keeps_the_first(tmp_path):
+    """The first record is the one the gate compares with: a retried draft must not record a changed file as the new truth."""
+    from types import SimpleNamespace
+    from orchard.ledger import Ledger
+    from orchard.supervisor import Supervisor
+    run = tmp_path / "run"
+    ids = run / "stages" / "1" / "evidence" / "reference" / "generated-ids.json"
+    ids.parent.mkdir(parents=True)
+    ids.write_text('{"generated_ids": [1, 2, 3]}')
+    led = Ledger(run / "ledger.jsonl")
+    try:
+        stub, spec = SimpleNamespace(run_dir=run, ledger=led), SimpleNamespace(number=2)
+        Supervisor._pin_reference_ids(stub, spec)
+        ids.write_text('{"generated_ids": [9, 9, 9]}')                    # the file changes after the first pin
+        Supervisor._pin_reference_ids(stub, spec)
+        recs = [e for e in led.read() if e["data"].get("decision") == "stage 1 reference ids recorded"]
+        assert len(recs) == 1 and recs[0]["data"]["sha256"] == hashlib.sha256(b'{"generated_ids": [1, 2, 3]}').hexdigest()
+    finally:
+        led.close()
+
+
+def test_pinning_with_no_reference_ids_file_records_nothing(tmp_path):
+    from types import SimpleNamespace
+    from orchard.ledger import Ledger
+    from orchard.supervisor import Supervisor
+    led = Ledger(tmp_path / "ledger.jsonl")
+    try:
+        Supervisor._pin_reference_ids(SimpleNamespace(run_dir=tmp_path, ledger=led), SimpleNamespace(number=2))
+        assert not [e for e in led.read() if e["data"].get("decision") == "stage 1 reference ids recorded"]
+    finally:
+        led.close()
