@@ -500,6 +500,16 @@ def read_only_command(command, run_dir) -> bool:
     return False
 
 
+def remember_record(table: dict, tables: tuple, key, value) -> None:
+    """Remember `value` under `key` in `table`, one of the step's `tables` (its reads and its read-only commands). A table that already holds
+    DEDUPE_MAX_RECORDS entries makes the step forget every one of its tables first, and then remembers this one. `Tools` and
+    scripts/dedupe_replay.py both call this, so the replay cannot drift from the live rule."""
+    if len(table) >= DEDUPE_MAX_RECORDS:
+        for each in tables:
+            each.clear()
+    table[key] = value
+
+
 class Tools:
     def __init__(self, run_dir, stage_dir, env: dict, *, timeout: float = TOOL_TIMEOUT_S,
                  limit: int = TOOL_OUTPUT_CHARS, scratch=None, dedupe: bool = AGENT_TOOL_DEDUPE):
@@ -543,9 +553,7 @@ class Tools:
                 "Next step: write or edit your files; do not read it again.")
 
     def _remember(self, table: dict, key, value) -> None:
-        if len(table) >= DEDUPE_MAX_RECORDS:
-            self.reset_dedupe()
-        table[key] = value
+        remember_record(table, (self._reads, self._shell_seen), key, value)
 
     def call(self, name: str, arguments: str) -> str:
         self.last_dedupe = None
@@ -1032,7 +1040,7 @@ class AgentStep:
         self._task = user if isinstance(user, str) else ""
         self._carry = []
         self._seen = self._snapshot()       # files already here (a resumed stage) are not new
-        return self._loop(self.max_turns, logged=0)
+        return self._loop(self.max_turns, logged=0, fresh=True)
 
     def continue_with(self, text: str, *, max_turns: int, log_path) -> Outcome:
         """Add one user message to this step's conversation and run the loop again.
@@ -1050,13 +1058,15 @@ class AgentStep:
         self._carry_instruction("continuation", text)
         return self._loop(max_turns, logged=logged)
 
-    def _loop(self, max_turns: int, *, logged: int) -> Outcome:
+    def _loop(self, max_turns: int, *, logged: int, fresh: bool = False) -> Outcome:
         messages = self.messages
         bad_run: list[str] = []             # kinds of the replies in a row that ran no command
         last_reply = ""                     # the visible text of the last reply that called a tool
         for turn in range(1, max_turns + 1):
             self._turn += 1
             for text in self.control.take_nudges(self.agent):
+                if fresh and turn == 1 and text.startswith(DEDUPE_HINT_PREFIX):
+                    continue        # left in the shared actuator by the step before, which held the text it speaks of; this conversation does not
                 messages.append({"role": "user", "content": text})
                 if not text.startswith(DEDUPE_HINT_PREFIX):      # that hint says a file's text is in the context: a restart drops the context (review of PR 488)
                     self._carry_instruction("nudge", text)

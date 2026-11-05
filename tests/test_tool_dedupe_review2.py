@@ -335,13 +335,36 @@ def restart_prompt(fm) -> str:
     raise AssertionError("no request carried the restart prompt")
 
 
+class LateControl:
+    """The supervisor's actuator as the agent loop sees it. `hints` are released on the call number given: the ladder queues a hint after a tool batch,
+    so a step receives it at the start of a later turn (call 1 is the first turn's)."""
+    def __init__(self, release=None):
+        self.release = release or {}            # call number -> list of nudge texts
+        self.calls, self.stop = 0, None
+
+    def nudge(self, agent, message):
+        self.release.setdefault(self.calls + 1, []).append(message)
+
+    def escalate(self, agent, stage):
+        self.stop = "escalate"
+
+    def pause(self, reason, evidence):
+        self.stop = "pause"
+
+    def take_nudges(self, agent):
+        self.calls += 1
+        return self.release.pop(self.calls, [])
+
+    def stop_reason(self):
+        return self.stop
+
+
 def run_hint_then_capped_replies(run, hint: str):
     put(run, "evidence/a.txt", "file text")
     answers = [fcall("read_file", path="evidence/a.txt"), truncated(16384, content=LOOP), truncated(16384, content=LOOP),
                fcall("read_file", path="evidence/a.txt"), ffinal("done")]
     with Ledger(run / "ledger.jsonl") as led, FakeModel(by_request(*answers)) as fm:
-        s, _, control = step(run, led, fm.endpoint, unstick=runaway.Unstick(), restart_on_caps=1)
-        control.nudges.append(hint)                       # the ladder delivered the hint before the first model turn
+        s, _, _ = step(run, led, fm.endpoint, control=LateControl({2: [hint]}), unstick=runaway.Unstick(), restart_on_caps=1)
         out = s.run("system", "task")
     return out, fm
 
@@ -359,8 +382,8 @@ def test_a_dedupe_hint_is_not_carried_into_the_restart_prompt(run):
 
 def test_the_hint_reached_the_first_conversation_before_the_restart(run):
     out, fm = run_hint_then_capped_replies(run, real_hint())
-    first = [m["content"] for m in fm.requests[0]["messages"] if m["role"] == "user"]
-    assert any(DEDUPE_HINT_PREFIX in t for t in first)           # it was sent; only the carrying across a restart is dropped
+    second = [m["content"] for m in fm.requests[1]["messages"] if m["role"] == "user"]
+    assert any(DEDUPE_HINT_PREFIX in t for t in second)          # a hint that arrives mid-step is delivered; only the carrying across a restart is dropped
 
 
 def test_other_nudges_are_still_carried_into_the_restart_prompt(run):
@@ -506,3 +529,127 @@ def test_a_write_by_explicit_stages_path_ends_the_note_for_that_file(tmp_path):
     ]
     out = replay.replay_run(one_step_run(tmp_path, 2, records))
     assert out["read_calls"] == 2 and out["read_notes"] == 0
+
+
+# ======================================================================================================================================
+# Round 3 of the review (Copilot on head 765e88b9)
+#
+# 8. A dedupe hint queued at the end of step A is taken by step B (the actuator is shared by the stage's steps), which has none of A's text.
+#    A fresh step drops marked hints on its first turn; a continuation of the same conversation keeps them.
+# 9. The replay kept both caches for ever; `Tools._remember` forgets everything before it would hold more than DEDUPE_MAX_RECORDS entries.
+# ======================================================================================================================================
+
+import orchard.agent as agent_module                                              # noqa: E402
+
+
+def run_two_steps_with_a_hint_queued(run, hint: str):
+    put(run, "evidence/a.txt", "file text")
+    with Ledger(run / "ledger.jsonl") as led, FakeModel(by_request(ffinal("done"))) as fm:
+        s, _, control = step(run, led, fm.endpoint, control=LateControl({1: [hint]}))     # queued when step B begins: it was left by step A
+        out = s.run("system", "task")
+    return out, fm
+
+
+def test_a_fresh_step_drops_a_dedupe_hint_left_by_the_step_before(run):
+    out, fm = run_two_steps_with_a_hint_queued(run, real_hint())
+    users = [m["content"] for m in fm.requests[0]["messages"] if m["role"] == "user"]
+    assert out.status == "done" and not any(DEDUPE_HINT_PREFIX in t or "already in your context" in t for t in users)
+
+
+def test_a_fresh_step_still_takes_an_ordinary_nudge_on_its_first_turn(run):
+    out, fm = run_two_steps_with_a_hint_queued(run, "You have written nothing for 20 turns. Write the port now.")
+    users = [m["content"] for m in fm.requests[0]["messages"] if m["role"] == "user"]
+    assert any("Write the port now." in t for t in users)
+
+
+def test_a_fresh_step_takes_a_dedupe_hint_that_arrives_after_its_first_turn(run):
+    put(run, "evidence/a.txt", "file text")
+    answers = [fcall("read_file", path="evidence/a.txt"), ffinal("done")]
+    with Ledger(run / "ledger.jsonl") as led, FakeModel(by_request(*answers)) as fm:
+        s, _, _ = step(run, led, fm.endpoint, control=LateControl({2: [real_hint()]}))
+        s.run("system", "task")
+    users = [m["content"] for m in fm.requests[1]["messages"] if m["role"] == "user"]
+    assert any(DEDUPE_HINT_PREFIX in t for t in users)             # the step's own conversation holds the text the hint is about
+
+
+def test_a_continuation_keeps_a_dedupe_hint_queued_for_it(run):
+    put(run, "evidence/a.txt", "file text")
+    control = LateControl({})
+    with Ledger(run / "ledger.jsonl") as led, FakeModel(by_request(ffinal("done"), ffinal("done again"))) as fm:
+        s, _, _ = step(run, led, fm.endpoint, control=control)
+        s.run("system", "task")
+        control.release[control.calls + 1] = [real_hint()]            # queued at the end of the step, before its continuation starts
+        s.continue_with("the gate found a problem", max_turns=3, log_path=run / "stages" / "0" / "log" / "cont.jsonl")
+    users = [m["content"] for m in fm.requests[-1]["messages"] if m["role"] == "user"]
+    assert any(DEDUPE_HINT_PREFIX in t for t in users)             # same conversation, same Tools: the hint still holds
+
+
+# ---- 9. the rollover ---------------------------------------------------------------------------------------------------------------------------
+
+def reads_then_repeat(names, repeat):
+    """Records of one step that read each of `names` (the answer is the same text for all) and then `repeat`, one read per record."""
+    recs, turn = [rec(1, [SYSTEM, USER], [read_a_named(names[0])])], 2
+    for nm in list(names[1:]) + [repeat]:
+        recs.append(rec(turn, [tool("TEXT")], [read_a_named(nm)]))
+        turn += 1
+    recs.append(rec(turn, [tool("TEXT")], [], finish="stop"))
+    return recs
+
+
+def read_a_named(name):
+    return call("read_file", json.dumps({"path": f"stages/0/{name}.txt"}))
+
+
+def live_note_flags(run, monkeypatch, limit, names, repeat):
+    """Run the same reads through the real Tools and return, for the final repeat, whether it was answered with a note."""
+    monkeypatch.setattr(agent_module, "DEDUPE_MAX_RECORDS", limit)
+    sd = run / "stages" / "0"
+    for n in set(names) | {repeat}:
+        put(run, f"{n}.txt", f"text of {n}")
+    t = agent_module.Tools(run, sd, agent_module.agent_env(run), dedupe=True)
+    last = None
+    for i, n in enumerate(list(names) + [repeat], 1):
+        t.begin_turn(i)
+        last = t.call("read_file", json.dumps({"path": f"{n}.txt"}))
+    return "unchanged since turn" in last
+
+
+def test_the_replay_forgets_everything_when_a_table_is_full_like_the_live_tools(tmp_path, monkeypatch, run):
+    names = ["p1", "p2", "p3", "p4"]
+    live_note = live_note_flags(run, monkeypatch, 3, names, "p1")
+    assert live_note is False                                           # p1 was forgotten when p4 found the table full
+    monkeypatch.setattr(agent_module, "DEDUPE_MAX_RECORDS", 3)
+    out = replay.replay_step(reads_then_repeat(names, "p1"), tmp_path, "0")
+    assert out["read_notes"] == 0                                       # the replay agrees
+
+
+def test_a_repeat_of_the_page_read_after_the_rollover_is_still_a_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_module, "DEDUPE_MAX_RECORDS", 3)
+    out = replay.replay_step(reads_then_repeat(["p1", "p2", "p3", "p4"], "p4"), tmp_path, "0")
+    assert out["read_notes"] == 1
+
+
+def test_below_the_limit_nothing_is_forgotten(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_module, "DEDUPE_MAX_RECORDS", 3)
+    out = replay.replay_step(reads_then_repeat(["p1", "p2", "p3"], "p1"), tmp_path, "0")
+    assert out["read_notes"] == 1
+
+
+def test_a_full_command_table_makes_the_replay_forget_the_reads_too(tmp_path, monkeypatch, run):
+    monkeypatch.setattr(agent_module, "DEDUPE_MAX_RECORDS", 2)
+    cat = lambda n: call("shell", json.dumps({"command": f"cat {n}.txt"}))
+    ok = lambda: tool("exit 0\nTEXT\n")
+    records = [
+        rec(1, [SYSTEM, USER], [read_a_named("r1")]),
+        rec(2, [tool("TEXT")], [cat("c1")]),
+        rec(3, [ok()], [cat("c2")]),
+        rec(4, [ok()], [cat("c3")]),                # the command table holds 2: c3 clears it and the reads with it
+        rec(5, [ok()], [read_a_named("r1")]),
+        rec(6, [tool("TEXT")], [], finish="stop"),
+    ]
+    out = replay.replay_step(records, tmp_path, "0")
+    assert out["read_notes"] == 0 and out["read_calls"] == 2
+
+
+def test_the_live_tools_and_the_replay_use_one_rule_for_the_rollover():
+    assert replay.remember_record is agent_module.remember_record

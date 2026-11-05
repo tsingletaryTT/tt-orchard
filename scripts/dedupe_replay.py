@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchard import safeio                      # noqa: E402
-from orchard.agent import call_complete, read_only_command    # noqa: E402
+from orchard.agent import call_complete, read_only_command, remember_record    # noqa: E402
 
 LOG_MAX_BYTES = 64 * 1024 * 1024
 NOTE_CHARS = 190                                # about the length of a note: the path, the turn numbers and one sentence
@@ -142,7 +142,7 @@ def replay_conversation(parts: list, run_dir: Path, stage: str | None = None) ->
                         out["read_notes"] += 1
                         out["saved"] += max(len(text) - NOTE_CHARS, 0)
                     elif not text.startswith(("error:", "refused:")):
-                        reads[key] = digest(text)
+                        remember_record(reads, (reads, shell), key, digest(text))
                 elif name == "shell":
                     out["shell_calls"] += 1
                     command = args.get("command")
@@ -153,7 +153,7 @@ def replay_conversation(parts: list, run_dir: Path, stage: str | None = None) ->
                             out["shell_notes"] += 1
                             out["saved"] += max(len(text) - NOTE_CHARS, 0)
                         else:
-                            shell[command] = digest(text)
+                            remember_record(shell, (reads, shell), command, digest(text))
                 elif name == "write_file":
                     shell.clear()
                     target = write_key_path(args.get("path", ""), stage, run_dir)
