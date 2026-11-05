@@ -128,7 +128,7 @@ from urllib.parse import urlparse
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, safeio, served_chat, stage0_scan
-from orchard import text_runtime
+from orchard import full_port_result, runaway, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -137,7 +137,7 @@ from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
-from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
+from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
@@ -1915,6 +1915,7 @@ class Supervisor:
             if spec in (AUDIO_STAGE_1, AUDIO_STAGE_2):
                 return self._audio_body(spec, stage_dir, resumed)
             return self._package_body(spec, stage_dir, resumed)
+        derived = False         # the supervisor wrote this stage's result itself (issue 456)
         if spec.boards == 0:
             out, step = self._step(spec, "run", stage_dir, escalated, resumed)
             out = self._wrap_up(spec, stage_dir, step, out)
@@ -1952,13 +1953,15 @@ class Supervisor:
                                      after_test=(lambda: self._sweep(spec.number)) if self._container_config(stage_dir) else None)
             if spec.draft == "scoring_check":
                 step = None          # the check's own record is the result: no agent writes a finish step for a scoring model
+            elif spec.draft == "full_port" and (derived := self._derive_full_port_result(spec, stage_dir)):
+                step = None          # the hardware test passed and the record is complete: result.json is copied from it, no agent step
             else:
                 out, step = self._step(spec, "finish", stage_dir, escalated, resumed)
                 out = self._wrap_up(spec, stage_dir, step, out)
                 if out.status != "done":
                     return out.status, [f"the finish step ended: {out.status} {out.detail}".strip()], None
         gate = self._check_gate(spec, stage_dir)
-        if not gate.ok and spec.draft == "scoring_check":
+        if not gate.ok and (spec.draft == "scoring_check" or derived):
             return "fail", list(gate.reasons), gate          # nothing an agent could add would change the record the template wrote
         if not gate.ok and spec.boards and (failed := self._test_failure(spec, stage_dir)):
             # The finish step was told to record a failed test honestly. Its result cannot pass
@@ -1989,6 +1992,41 @@ class Supervisor:
             if changed:
                 gate = self._check_gate(spec, stage_dir)       # the gate also reads the decision files
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _derive_full_port_result(self, spec, stage_dir: Path) -> bool:
+        """Stage 2 of a full port, finish phase (issue 456): when the hardware test passed and the check's record is complete, write
+        result.json from the record (orchard/full_port_result.py) so no agent step has to, and say so in the ledger. False leaves the
+        finish step to the agent: a failed or missing test or record, text the readable floor does not pass, or a derived result that
+        the gate's own check refuses (the file is deleted first, so the agent starts from a clean directory). The check that judges the
+        result is the same one the gate runs, so deriving cannot make a result pass that would not."""
+        n = spec.number
+        rehearsal = full_port_rehearsal(self.ledger.read())
+        result, why = full_port_result.derive(stage_dir, self.run_dir, rehearsal=rehearsal)
+        if result is None:
+            self.ledger.append("decision", n, decision="result not derived by the supervisor", why=why[:300])
+            return False
+        path = stage_dir / "result.json"
+        try:
+            safeio.atomic_write(path, (json.dumps(result, indent=2) + "\n").encode("utf-8"), mode=0o644)
+        except OSError as exc:
+            self.ledger.append("decision", n, decision="result not derived by the supervisor", why=f"could not write it ({exc.__class__.__name__})")
+            return False
+        # The stage's own gate judges the derived file, with the arguments that stage's gate gets (the rehearsal flag from the ledger, and for
+        # a later full-port stage the chip count it is configured for). It is the pure gate: the ledger checks and the waiver decision stay in
+        # `_check_gate`, so the decision is written once, by the stage's one gate call, whoever wrote result.json.
+        checked = self._gate(spec)(stage_dir, self.run_dir)
+        reasons = [] if checked.ok else (list(checked.reasons) or ["the stage's gate refused the derived result"])
+        if reasons:
+            path.unlink(missing_ok=True)
+            self.ledger.append("decision", n, decision="result not derived by the supervisor",
+                               why="the derived result did not pass the gate's check: " + "; ".join(reasons[:3])[:300])
+            return False
+        found = full_port.file_record(self.run_dir, path) or {}
+        self.ledger.append("evidence", n, what="result.json derived by the supervisor", **found)
+        self.ledger.append("decision", n, decision="result derived by the supervisor", file=f"stages/{n}/result.json",
+                           top1_agreement=result["top1_agreement"], n_tokens=result["n_tokens"], coherent=result["coherent"],
+                           coherent_basis=result["coherent_basis"][:300])
+        return True
 
     def _wrap_up(self, spec, stage_dir: Path, step: AgentStep, out):
         """A step that used up its turns with evidence on disk and its deliverable missing gets one
@@ -2761,9 +2799,18 @@ class Supervisor:
         except UnknownPlaceholder as exc:     # a typo in a skill: the operator fixes the skill
             self._block(n, str(exc))
         model = self.cfg.tiers[used]["model"]
+        tcfg = self.cfg.tiers[used]
+        unstick = runaway.unstick_from_tier(tcfg)
+        # What the replies of this step may use (issue 458): the cap and sampling of the tier, and the retry profile after a capped reply.
+        step_sampling = {"max_tokens": tcfg.get("max_tokens", AGENT_MAX_TOKENS), "temperature": tcfg.get("temperature", 0),
+                    **{k: tcfg[k] for k in ("frequency_penalty", "repetition_penalty") if k in tcfg},
+                    "retry_after_cap": unstick.record(), "restarts_on_caps": AGENT_RESTARTS_ON_CAPS}
         self.ledger.append("decision", n, decision="agent step", phase=phase, tier=used, model=model,
-                           escalated=escalated, skill=str(skill))
+                           escalated=escalated, skill=str(skill), sampling=step_sampling)
         step = AgentStep(agent=AGENT, endpoint=endpoint, model=model,
+                         max_tokens=step_sampling["max_tokens"], temperature=step_sampling["temperature"],
+                         frequency_penalty=tcfg.get("frequency_penalty"), repetition_penalty=tcfg.get("repetition_penalty"),
+                         unstick=unstick, restart_on_caps=AGENT_RESTARTS_ON_CAPS,
                          tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
                              **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
                              scratch=(self.run_dir / "tt-metal-scratch"

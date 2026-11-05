@@ -18,7 +18,13 @@ STAGES = range(9)                 # stages 0..8 in the spec
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}  # IPv6 loopback is ::1 only
 PLACEMENTS = {"chips", "cpu"}
 REQUIRED_TIER_KEYS = ("role", "endpoint", "model", "placement")
-TIER_KEYS = set(REQUIRED_TIER_KEYS) | {"context_tokens"}
+# Issue 458: what a tier may set about the replies of its model. `max_tokens` caps one reply; the next three are sent on every request when
+# set; the `unstick_*` keys replace the defaults of the retry after a reply was cut off (orchard/runaway.py). Each is a (type, low, high).
+SAMPLING_KEYS = {"max_tokens": (int, 256, 131072), "temperature": (float, 0.0, 2.0), "frequency_penalty": (float, -2.0, 2.0),
+                 "repetition_penalty": (float, 0.5, 2.0), "unstick_max_tokens": (int, 256, 65536),
+                 "unstick_temperature": (float, 0.0, 2.0), "unstick_frequency_penalty": (float, -2.0, 2.0),
+                 "unstick_repetition_penalty": (float, 0.5, 2.0)}
+TIER_KEYS = set(REQUIRED_TIER_KEYS) | {"context_tokens"} | set(SAMPLING_KEYS)
 STAGE_KEYS = {"run", "diagnose", "plan"}
 TOP_LEVEL_KEYS = {"tiers", "stages", "escalation"}
 SENTINEL = "CHANGE-ME"            # example config values; a run must not start on them
@@ -174,6 +180,18 @@ def load(path) -> TierConfig:
                 raise TierConfigError(f"tier {name!r}: context_tokens must be an integer (not bool), not {type(ct).__name__}")
             if ct <= 0:
                 raise TierConfigError(f"tier {name!r}: context_tokens must be positive, not {ct}")
+
+        # Sampling keys (issue 458): a whole number for the token caps, a number for the rest, each inside its range, never a bool.
+        for key, (kind, low, high) in SAMPLING_KEYS.items():
+            if key not in tier:
+                continue
+            value = tier[key]
+            numeric = isinstance(value, int) if kind is int else isinstance(value, (int, float))
+            if isinstance(value, bool) or not numeric:
+                want = "a whole number" if kind is int else "a number"
+                raise TierConfigError(f"tier {name!r}: {key} must be {want} (not bool), not {type(value).__name__}")
+            if not low <= value <= high:
+                raise TierConfigError(f"tier {name!r}: {key} must be from {low} to {high}, not {value}")
 
     # Check that a CPU tier exists (fallback during parking).
     if not any(t.get("placement") == "cpu" for t in tiers.values()):
