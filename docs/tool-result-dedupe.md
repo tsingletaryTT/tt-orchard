@@ -15,7 +15,8 @@ to mean an unchanged file. It follows the live loop: a record that opens a conve
 the step forget what it read, the incomplete calls of a capped reply have no result and are left out, tool arguments may be a JSON string or a dict, and the
 logs of a step's continuations share its memory. A path is matched the way the live tools resolve it (the run directory first, then the stage directory),
 with the stage component kept: `stages/1/evidence/a.txt` and `stages/2/evidence/a.txt` are two files, and a stage-relative path means the stage of its log.
-Its result for those five runs (unchanged by that rule):
+The replay also forgets what it remembered when a table is full, by the rule the live tools use (one function, `remember_record` in `orchard/agent.py`: a table that holds `DEDUPE_MAX_RECORDS` entries makes
+the step forget its reads and its commands before it remembers the next one). Its result for those five runs (unchanged by these rules):
 
 | | calls | would have been notes |
 |---|---:|---:|
@@ -33,7 +34,9 @@ path. Those are not exact repeats, the dedupe does not touch them, and the repea
 The hint says a file's text is already in the context. A context restart drops that conversation, so the hint is not carried into the replacement
 prompt (it starts with the marker `DEDUPE_HINT_PREFIX`, which the agent loop checks; the other watchdog nudges are still carried), the replacement prompt says
 that what the agent read before is no longer in the conversation and a file may be read again, and the tools forget every read and command they remembered, so
-the first read after a restart returns the text and never a note.
+the first read after a restart returns the text and never a note. The same holds for a new step: the supervisor's actuator is shared by the steps of a stage, so a hint
+queued at the end of one step could be taken by the next. A fresh step drops a marked hint on its first turn (it holds none of the earlier text), takes one that
+arrives later, and a continuation of the same conversation keeps a hint queued for it.
 
 ## The rules
 
