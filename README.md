@@ -2518,7 +2518,7 @@ port over 90,000 characters is not sent), the facts file, the excerpts and the f
 reply with a required function missing, with the wrong arguments, empty, raising `NotImplementedError` or using a name nothing defines is a stub
 and is not placed. A whole port replaces `port_model.py` only when the file is still the one that was sent (its sha256 is on the ask) or the
 coder's step failed, and both hashes go in the ledger (`telegraph repair asked`, `answered`, `placed`, `not placed`, `reply is a stub`). After
-the check runs again each answer gets a verdict: helped when it passed or now fails later in the request chain, not helped for a different
+the check runs again each answer gets a verdict: helped when it passed or now fails later in the request chain, and not helped for a different
 message at the same request (`telegraph repair progress`). The helper's problem id is now one per run (`full-port-stage-2:<run name>`), because
 the helper counts a problem's calls across its whole ledger and one id for every run used up the per-problem cap in three runs. `--no-repair-help`
 turns the round asks off.
