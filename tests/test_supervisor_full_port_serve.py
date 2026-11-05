@@ -16,7 +16,16 @@ from run_fakes import note
 from test_supervisor import Rig, step_skills
 from test_supervisor_full_port import FULL_PORT, PREPARE, make, started, with_snapshot
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "generic_stage_6")
+
+
+@pytest.fixture
+def generic_stage_6(monkeypatch):
+    """These tests are about stage 5 alone. Stage 6 of a full port is its own slice (tests/test_supervisor_full_port_quality.py), so here stage 6 is the
+    generic benchmark stage the scripted coder passes, as it was before stage 6 was built. The chain of all the stages is tested in
+    tests/test_full_port_chain.py."""
+    from orchard import stages
+    monkeypatch.setattr(stages, "FULL_PORT_STAGE_6", stages.STAGES[6])
 
 KEYS = [{"length": 256, "key": "48213"}, {"length": 1984, "key": "90417"}]
 

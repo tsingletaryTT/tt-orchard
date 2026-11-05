@@ -19,7 +19,16 @@ from run_fakes import where, bringup
 from test_supervisor import Rig, step_skills
 from test_supervisor_full_port import FULL_PORT, PREPARE, STAGE_1, started, with_snapshot, never_wait
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "generic_stage_5")
+
+
+@pytest.fixture
+def generic_stage_5(monkeypatch):
+    """These tests are about stage 6 alone. Stage 5 of a full port is its own slice (tests/test_supervisor_full_port_serve.py), so here stage 5 is the
+    generic serving-check stage the scripted coder passes, as it was before stage 5 was built. The chain of all the stages is tested in
+    tests/test_full_port_chain.py."""
+    from orchard import stages
+    monkeypatch.setattr(stages, "FULL_PORT_STAGE_5", stages.STAGES[5])
 
 STAGE_1_Q = STAGE_1          # test_supervisor_full_port.py's stage 1 holds the top-five file
 
