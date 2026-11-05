@@ -37,7 +37,7 @@ and with the CPU reference at the positions stage 1 recorded. It does not show t
 did not record, that a long prompt (the passkey lengths) agrees with the CPU reference (only that the server accepts it and answers the same
 ids twice), that the port is fast, or that it serves more than one request at a time (the server runs one request at a time). The chat
 template is the model's own only when `tokenizer_config.json` carries one and `jinja2` is installed; the record says which was used. The kernel-cache
-figure is a count of files in the cache directory before the boot, not the runtime's own hit counter. This module holds no state and starts nothing.
+figure is a count of files in the cache directory before the boot. The runtime's own hit counter is not read. This module holds no state and starts nothing.
 """
 from __future__ import annotations
 
