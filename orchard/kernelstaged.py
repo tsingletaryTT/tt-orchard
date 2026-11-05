@@ -223,7 +223,8 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
             control = kp.ProbeControl(wall_s=wall)
             dog = watchdog if watchdog is not None else kp.build_watchdog(control, ledger)
             dog.stage = index           # the ladder's rungs are counted per stage: a nudge used in stage 1 is not stage 2's
-            step = AgentStep(agent=kp.AGENT, endpoint=endpoint, model=model, tools=kp.attempt_tools(adir), ledger=ledger,
+            tools = kp.attempt_tools(adir)
+            step = AgentStep(agent=kp.AGENT, endpoint=endpoint, model=model, tools=tools, ledger=ledger,
                              stage=index, phase="probe", feed=dog.feed, control=control, run_dir=adir,
                              evidence_dir=adir / "evidence", log_path=adir / "log" / f"probe-{index:05d}.jsonl",
                              http=http, clock=clock, guard=RetryGuard(), max_turns=turns, temperature=temperature,
@@ -232,7 +233,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
             try:
                 outcome = step.run(system, _user_message(stage, index, len(stages), op))
             finally:
-                swept_all += kp.sweep_strays(adir)
+                swept_all += list(tools.swept) + kp.sweep_strays(adir)      # a shell command's own sweep removes helpers before this one runs
             stage_wall = round(time.monotonic() - stage_started, 2)
             vdir = None if final else kp.verdict_dir(probe_dir, op, f"{n}-s{index}")
             try:

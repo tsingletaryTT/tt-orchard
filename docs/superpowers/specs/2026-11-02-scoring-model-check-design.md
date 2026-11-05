@@ -178,8 +178,10 @@ The same limits as the full-port check. The supervisor ran a test and the record
 scores without computing them cannot be told from one that computed them. The source checks make the plain forms visible. A person who
 wants the proof replays the command on a chip.
 
-A process the port starts in a session of its own (`setsid`, a double fork) survives the supervisor's process-group kill on a timeout or
-an abort, because the template's cleanup dies in the same kill. That needs a cgroup or a PID namespace (issue 390).
+A process the port starts in a session of its own (`setsid`, a double fork) is outside the supervisor's process-group kill on a timeout or
+an abort, and the template's cleanup dies in the same kill. The supervisor stops such a helper afterwards: every spawned command carries
+ORCHARD_SPAWN_TAG, and `spawn_checked` stops and names the processes that carry it (issue 390). A helper that replaces its environment is not
+found; that case needs a cgroup or a PID namespace.
 
 Parity with Hugging Face on 32 pairs is not a quality measure. The bundles also report retrieval benchmarks (NDCG@10 on subsets of MTEB
 reranking and MIRACL) as parity rows. Slice 2 computes NDCG and Hit@1 on the shipped set only (section 5).

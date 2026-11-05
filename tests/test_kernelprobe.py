@@ -1581,7 +1581,8 @@ def test_the_sweep_kills_a_process_that_ignores_sigterm(tmp_path):
         swept = kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=0.5)
         assert [s["pid"] for s in swept] == [stubborn.pid]
         assert stubborn.wait(timeout=5) == -_signal.SIGKILL
-        assert [sig for _, _, sig in sent] == [_signal.SIGTERM, _signal.SIGKILL] and violations == []
+        # SIGTERM, then SIGSTOP (the freeze before the last scan: a process that keeps forking cannot start a child after it), then SIGKILL
+        assert [sig for _, _, sig in sent] == [_signal.SIGTERM, _signal.SIGSTOP, _signal.SIGKILL] and violations == []
     finally:
         _stop(stubborn)
 
@@ -1917,6 +1918,44 @@ def test_run_attempt_stops_agent_processes_that_outlive_the_step_before_the_verd
         assert violations == []
     finally:
         _stop(*_BackgroundingStep.started)
+
+
+class _ShellStep:
+    """Stands in for AgentStep: run() makes the agent's shell tool run a command that starts a helper in a session of its own and then outlives
+    the tool's deadline, so spawn_checked's own kill and sweep stop the helper (review of PR 431)."""
+    pidfile = None
+
+    def __init__(self, **kw):
+        self.run_dir, self.tools = Path(kw["run_dir"]), kw["tools"]
+
+    def run(self, system, user):
+        (self.run_dir / "helper.py").write_text(
+            "import subprocess, sys, time\n"
+            "h = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+            "open(sys.argv[1], 'w').write(str(h.pid))\n"
+            "time.sleep(60)\n")
+        type(self).pidfile = self.run_dir / "helper.pid"
+        self.tools.timeout = 3.0
+        self.tools.shell(f"{_sys.executable} helper.py {type(self).pidfile}")
+        return Outcome("done", 1, "done")
+
+
+def test_the_attempt_lists_the_helpers_a_shell_commands_own_sweep_stopped(tmp_path, fake_kenv, monkeypatch):
+    """The shell command's sweep removes the helper before the attempt's own sweep runs, so the attempt's `swept` list takes it from the tools."""
+    monkeypatch.setattr(kp, "AgentStep", _ShellStep)
+    try:
+        attempt = kp.run_attempt(op="add", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1",
+                                 model="m", coder_model="m", probe_id="t", run_watched=check_writer(NO_KERNEL), tt_lang=FACTS)
+        helper = int(_ShellStep.pidfile.read_text())
+        assert [s["pid"] for s in attempt["swept"]] == [helper] and attempt["swept"][0]["stopped"] is True
+        assert attempt["swept"][0]["boot_id"] and isinstance(attempt["swept"][0]["start"], int)
+        on_disk = json.loads((kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text())
+        assert on_disk["swept"] == attempt["swept"]
+    finally:
+        try:
+            os.kill(int(_ShellStep.pidfile.read_text()), _signal.SIGKILL)
+        except (OSError, ValueError, AttributeError):
+            pass
 
 
 def test_a_crashed_agent_step_still_has_its_strays_stopped(tmp_path, fake_kenv, monkeypatch):

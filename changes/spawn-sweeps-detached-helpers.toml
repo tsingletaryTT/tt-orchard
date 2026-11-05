@@ -1,0 +1,4 @@
+target = "0.9.105"
+summary = "spawn_checked stops helpers a killed command started in its own session; the cleanup survives repeated interrupts, reports an unsettled or failed sweep, keeps its records on every exit, and the supervisor holds the lease and the coder back while a helper still runs"
+kind = "fix"
+pr = 431

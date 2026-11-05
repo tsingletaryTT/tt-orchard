@@ -32,8 +32,10 @@ replays this command on a chip.
 
 A second limit (issue 390): the cleanup at the end of a run finds the processes below this one, including orphans (this process is a
 subreaper). If the supervisor kills the command's process group on a timeout or an abort, this file dies in the same kill and its cleanup
-does not run. A helper the port started in a session of its own (`setsid`, a double fork) is not in that group and keeps running. Stopping
-that needs kernel-level containment (a cgroup or a PID namespace), which this file cannot provide.
+does not run. A helper the port started in a session of its own (`setsid`, a double fork) is not in that group. The supervisor now stops it:
+every command it spawns carries ORCHARD_SPAWN_TAG in its environment, and after a kill it stops and names the processes that carry the tag
+(orchard/agent.py, `spawn_checked`). A helper that replaces its environment (`env -i`, an exec with a new one) is not found. Catching that
+needs kernel-level containment (a cgroup or a PID namespace), which this file cannot provide.
 
 Port module interface (stages/2/port/port_model.py):
 
