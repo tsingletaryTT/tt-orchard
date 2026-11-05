@@ -1,0 +1,4 @@
+target = "0.9.108"
+summary = "Stage 0 removes the evidence files it owns at the start of an attempt, so a skipped check leaves no file from an earlier attempt."
+pr = 472
+kind = "fix"
