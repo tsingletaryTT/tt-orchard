@@ -30,7 +30,7 @@ Files: `orchard/full_port_quality.py` (gate, derive), `orchard/full_port_quality
 
 ## Tests and mutations
 
-See the final report in the session; the runner refuses to start on a dirty tree and restores in a trap.
+`tests/test_full_port_quality.py` (44), `tests/test_supervisor_full_port_quality.py` (10). `scripts/mutations/full_port_stage_6.py` refuses a dirty tree, restores in a trap and checks the baseline first; all 27 mutations ran RED on 2026-11-04.
 
 ## Not tested
 
