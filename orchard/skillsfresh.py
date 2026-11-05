@@ -328,16 +328,17 @@ def _age_text(seconds: float) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
-# The scheme is limited to 32 characters (the longest in use is far shorter). With no limit, a long run of letters made the pattern read to the end of
-# the run from every start position, which is quadratic: 100,000 letters took over 5 s, and a captured check output can be 16 MiB (PR 425, round 4).
-_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]{0,31}://)[^/\s@]*@")
+# The pattern starts at `://`, with no scheme in front. An earlier form began with a scheme (`[A-Za-z][A-Za-z0-9+.-]*://`), which tried every
+# start of a long run of letters and scanned to the end of the run each time: quadratic on a long log line (review of PR 432, round 4).
+# From `://` the user-information scan stops at the next `/`, so the whole text is scanned once.
+_USERINFO = re.compile(r"://[^/\s@]*@")
 _TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{8,}")
 
 
 def scrub_secrets(text: str) -> str:
     """`text` without URL user information (`https://user:pass@host` becomes `https://host`) and without token-shaped words. Applied to a whole
     message before it is cut to a length: a cut between a password and its `@` would hide the user information from this pattern."""
-    return _TOKEN.sub("[token removed]", _USERINFO.sub(r"\1", str(text)))
+    return _TOKEN.sub("[token removed]", _USERINFO.sub("://", str(text)))
 
 
 def _err_line(err: str) -> str:

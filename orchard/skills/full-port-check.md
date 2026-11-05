@@ -14,6 +14,30 @@ runs it on one board, and compares its greedy tokens with the CPU reference from
 
 The stage has one hardware test and no retry loop of its own. If the port does not run, record that and stop (see "Finish phase").
 
+## Start here
+
+The supervisor has already put two things in the stage directory, and the prepare task tells you so:
+
+- `stages/2/port_facts.json`: the config's small fields, the layer schedule by type, every tensor's dtype and shape (read from the
+  checkpoint's own headers, whether it is one `model.safetensors` or shards), and, for config fields that hold layer ids, the index
+  convention the reference class states for them. Read it first, once. It is written from the checkpoint, so you do not need to read
+  the config, the weight headers or the weights again to learn shapes. A checkpoint with one file has no `model.safetensors.index.json`;
+  the file says which case this is. When a config id list says `one-indexed`, layer index = id - 1. When the file says the convention
+  was not found, compare the ids with the layer numbers of the tensors before you use them. The file names what it left out for size:
+  `tensors_left_out`, `config_left_out`, `text_config_left_out` (with `*_left_out_more` for names beyond the first 100),
+  `config_keys_not_listed`, `text_config_keys_not_listed`, `conventions_left_out`, `layer_schedule_note` and `tensors_with_long_names`. A
+  convention note names its reference class; use the class for the section the field is in, and read another class's different numbering as
+  a warning to check the tensors. `layer_flag_fields` hold one 0 or 1 per layer and no layer ids. A field in a `*_left_out` list may well be in the checkpoint's config; read `config.json` for that one field.
+- `stages/2/port/port_model.py`: a skeleton. Each of the four functions raises `NotImplementedError` until you replace its body, and
+  `read_tensors(model_dir)` returns every tensor by name from one file or from shards. A port left as the skeleton fails the check at
+  `load` and says so.
+
+Write a first version of `port_model.py` within 12 turns, even if it is incomplete, and refine it after. A stage that reads for twenty
+turns and writes nothing is stopped by the watchdog and costs a coder reboot. Do not page through the stage 1 reference files: the
+check reads them and your port may not. Do not search the machine for other models' code; the worked example named below is enough.
+If `port_facts.json` is not there, the supervisor could not read the checkpoint (the ledger says why); collect the same facts yourself
+from `config.json` and the weight headers, once.
+
 ## What the stage produces
 
 Under `stages/2/port/`: the port's source, and nothing else. The one file the check calls is `stages/2/port/port_model.py`. It defines

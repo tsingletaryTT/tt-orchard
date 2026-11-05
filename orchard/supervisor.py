@@ -164,7 +164,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
-from orchard import full_port, model_kind, port_repair, residency, scoring_check
+from orchard import full_port, model_kind, port_facts, port_repair, residency, scoring_check
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
@@ -2952,6 +2952,9 @@ class Supervisor:
     def _prepare_in_code(self, spec, stage_dir: Path) -> swap_prepare.PrepareOutcome:
         """Stage 2's prepare step on the weights-only path, done by the supervisor when `_draft` left a swap_config.json and the template
         (orchard/swap_prepare.py). Any other stage, and a stage with no drafted config, gets PrepareOutcome(False) and its agent step."""
+        if spec.draft == "full_port":
+            seed = getattr(self, "_port_seed", None) or {}
+            return swap_prepare.PrepareOutcome(False, note=port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton"))))
         if spec.skill != "weights-swap-check" or spec.draft != "swap_config":
             return swap_prepare.PrepareOutcome(False)
         outcome = swap_prepare.prepare(run_dir=self.run_dir, stage_dir=stage_dir, env=agent_env(self.run_dir, extra=self.extra_env),
@@ -3020,7 +3023,8 @@ class Supervisor:
         if spec.draft == "stock_config":
             return self._draft_stock(spec, stage_dir)
         if spec.draft == "full_port":
-            return self._pin_full_port(spec, stage_dir)
+            self._pin_full_port(spec, stage_dir)
+            return self._seed_full_port(spec, stage_dir)
         if spec.draft == "scoring_check":
             return self._pin_scoring(spec, stage_dir)
         if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
@@ -3063,6 +3067,39 @@ class Supervisor:
         record = reference_ids_record(self.run_dir)
         if record is not None:
             self.ledger.append("decision", spec.number, decision=REFERENCE_IDS_LEDGER_DECISION, **record)
+
+    def _seed_full_port(self, spec, stage_dir: Path) -> None:
+        """What the coder starts stage 2 of a full port from (orchard/port_facts.py): a facts file read from the checkpoint and a port
+        skeleton. Three unattended rehearsal runs showed the coder's first attempt reading for 20 turns and writing nothing. A checkpoint
+        or config that cannot be read leaves no facts file, the ledger says why, and the coder works from its skill as before. A port
+        already in the stage directory (a resumed stage) is kept."""
+        snapshot = self.inputs.get("model")
+        facts_written = False
+        if snapshot:
+            root = port_facts.reference_root(port_facts.default_run, self.inputs.get("reference_python"))
+            lookup = (lambda model_type: port_facts.reference_source(root, model_type)) if root is not None else None
+            try:
+                facts = port_facts.build(snapshot, reference_lookup=lookup)
+                record = evidence_record(self.run_dir, port_facts.write(stage_dir, facts))
+            except (port_facts.PortFactsError, OSError, safeio.SafeReadError) as exc:
+                self.ledger.append("decision", spec.number, decision="port facts not written", problem=str(exc)[:300])
+            except Exception as exc:         # advisory step: an error nobody listed (a hostile tensor name) must not stop the run; its text may quote the checkpoint
+                self.ledger.append("decision", spec.number, decision="port facts not written",
+                                   problem=f"{exc.__class__.__name__}: an unexpected error while reading the checkpoint")
+            else:
+                facts_written = True
+                self.ledger.append("decision", spec.number, decision="port facts written", facts=record,
+                                   tensor_groups=facts["tensor_groups"], tensors_left_out=facts["tensors_left_out"],
+                                   conventions=[c["field"] for c in facts["conventions"]],
+                                   reference_found=root is not None)
+        try:
+            skeleton = port_facts.copy_skeleton(stage_dir)
+        except (OSError, safeio.SafeReadError) as exc:       # a full or read-only stage directory, or no shipped skeleton: the coder writes the port from nothing, as before
+            skeleton = False
+            self.ledger.append("decision", spec.number, decision="port skeleton not copied", problem=exc.__class__.__name__)
+        if skeleton:
+            self.ledger.append("decision", spec.number, decision="port skeleton copied")
+        self._port_seed = {"facts": facts_written, "skeleton": skeleton}
 
     def _pin_full_port(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
         """Stage 2 of a full port (orchard/full_port.py): put the supervisor's template and its config in the stage directory, replacing any
