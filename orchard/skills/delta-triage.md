@@ -137,6 +137,17 @@ weights or a vision projector, and the TT runtime does not read it. The script l
 size, reason), does not hash it and makes no problem of it. Do not move a safetensors sidecar into `ignored_files`, and do
 not edit `class` or `path` to get around a GGUF file: the script does not count one.
 
+The script also reads the header of each ignored GGUF file, without the weights, into `evidence/gguf-header.json`. It holds the
+architecture's hyperparameters, whether the output projection is tied, the multi-token-prediction count, a hash of the embedded chat
+template, how each kind of tensor was quantized, and an `agreement` table against `config.json` (each row says agree, differ or not
+comparable, with both values; a shard of a split file reports `tensor_inventory_complete: false` and tying as unknown; a `detail_dropped` list means the file reached its size
+cap and names what was left out). Read it as an
+independent reading of the architecture. A row that differs is a finding to explain in the
+delta (a conversion quirk, a dropped head, a different template), and it never changes the class or the path. The tensors the quantization
+left at full precision are a hint about which tensors are sensitive to precision, taken from llama.cpp's choice. They were not
+measured on this hardware. The script writes the file and the finding that points at it. Do not edit the file, and do not load or
+dequantize a GGUF tensor: the TT runtime and vLLM load safetensors. A header that could not be read is listed with its reason and is not an error.
+
 Names that the `model.language_model.` rule leaves over are paired by what they share: a model that calls its
 text tensors `language_model.layers.5...` against a nearest model's `model.language_model.layers.5...` still has
 an analogue for every tensor. `alignment` in `delta.json` lists the pairs and the prefix rewrites, and
