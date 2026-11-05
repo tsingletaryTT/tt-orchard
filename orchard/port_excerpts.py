@@ -155,6 +155,33 @@ def _select_all(classes: dict, archs: list, kinds: list, types: list, with_other
     for a in archs:                                    # the architecture class last: its forward is the generic wrapper
         if a in classes and a not in (c for c, _ in out):
             out.append((a, "architecture named in the config"))
+    return out + _followed(classes, out, with_other_sections)
+
+
+FOLLOW_DEPTH = 2                  # a kept class builds a mixer, the mixer builds a table: both are needed to port the layer
+
+
+def _followed(classes: dict, chosen: list, with_other_sections: bool) -> list:
+    """[(class name, why)] for the same-file classes that the chosen classes build or call by name, to `FOLLOW_DEPTH` levels. The first
+    excerpt file held only the classes the rules above name, and the tiny Qwen4 model's decoder layer also builds a gated residual, a PLE
+    layer and an n-gram embedding that match no rule: the outside helper answered "source not in excerpts" (run9). A vision or audio
+    class is followed only when the config has such a section, as in `_select_all`. The walk reads each class's syntax tree once."""
+    known = {c for c, _ in chosen}
+    out: list = []
+    frontier = [c for c, _ in chosen]
+    for _ in range(FOLLOW_DEPTH):
+        nxt: list = []
+        for owner in frontier:
+            for node in ast.walk(classes[owner]):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                    continue
+                n = node.func.id
+                if (n in classes and n not in known and _NAME.fullmatch(n) and not _SKIP.search(n)
+                        and (with_other_sections or not _NON_TEXT.search(n))):
+                    known.add(n)
+                    out.append((n, f"instantiated by {owner}"))
+                    nxt.append(n)
+        frontier = nxt
     return out
 
 

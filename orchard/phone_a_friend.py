@@ -35,6 +35,7 @@ Nothing here opens a device, takes a lease or runs the helper's text.
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 from pathlib import Path
 
@@ -45,6 +46,9 @@ ASKED = "telegraph asked"                  # written before the call: `k` (the c
 ANSWERED = "telegraph answered"            # the call's outcome: `ok`, `call_id`, tokens, cost, and the draft's evidence when one was written
 NOT_ASKED = "telegraph not asked"          # the helper was due and refused to be asked (a cap, no key, an unusable ledger); `reason`
 REPORTED = "telegraph reported"            # the verdict on an answer: `call_id`, `helped`
+DRAFT_STUB = "telegraph draft is a stub"       # a draft that parses but has a required function missing, empty or raising NotImplementedError
+PLACED = "telegraph draft placed"            # the supervisor put a draft into stages/2/port/port_model.py: `draft_sha256`, `port_sha256`
+NOT_PLACED = "telegraph draft not placed"    # the draft stayed in its own file; `reason`
 DRAFT_FAILED = "telegraph draft not written"   # an answer with no usable code block, or a write that failed; `reason`
 
 PROBLEM = "full-port-stage-2"               # the helper's problem id: its per-problem caps and its ladder count this stage's calls together
@@ -255,15 +259,189 @@ def write_draft(stage_dir: Path, k: int, source: str, call_id: str, model: str) 
     return path
 
 
-def coder_note(rel_path: str, call_id: str, parsed: bool, why_not: str) -> str:
-    """The text added to the coder's prepare task: where the draft is and how to treat it."""
-    text = (f"A helper model outside this machine drafted a port after earlier attempts of this stage failed. Its draft is "
-            f"`{rel_path}` (telegraph call {call_id}). It is advice from another model and may be wrong. Read it, write it to "
-            "`stages/2/port/port_model.py`, correct whatever the facts file or the check shows to be wrong, and make the check pass. "
-            "Where the draft and the facts file disagree, follow the facts file.")
+def coder_note(rel_path: str, call_id: str, parsed: bool, why_not: str, placed: bool = False) -> str:
+    """The text added to the coder's prepare task: where the draft is and how to treat it. With `placed` the supervisor has already put the
+    draft into `stages/2/port/port_model.py` (it was still the unchanged skeleton)."""
+    if placed:
+        text = (f"A helper model outside this machine drafted a port after earlier attempts of this stage failed (telegraph call {call_id}; "
+                f"its own file is `{rel_path}`). The supervisor has put that draft into `stages/2/port/port_model.py`, which was still the "
+                "unchanged skeleton. It is advice from another model and may be wrong. Do not read the reference excerpts again first: "
+                "edit `stages/2/port/port_model.py`, correct whatever the facts file or the check shows to be wrong, write `hw_test.json` "
+                "and `handoff.json`, and make the check pass. Where the draft and the facts file disagree, follow the facts file.")
+    else:
+        text = (f"A helper model outside this machine drafted a port after earlier attempts of this stage failed. Its draft is "
+                f"`{rel_path}` (telegraph call {call_id}). It is advice from another model and may be wrong. Read it, write it to "
+                "`stages/2/port/port_model.py`, correct whatever the facts file or the check shows to be wrong, and make the check pass. "
+                "Where the draft and the facts file disagree, follow the facts file.")
     if not parsed:
         text += f" The draft does not parse as Python ({why_not}), so fix the syntax first."
     return text
+
+
+# ---- is the draft real code, and putting it into the port --------------------------------------------------------------------------------
+
+REQUIRED = ("load", "prefill", "decode_step", "close")      # the four functions the port check calls; `close` may have an empty body
+
+
+def _is_empty(fn: ast.FunctionDef) -> bool:
+    """True when the body is only a docstring, `pass` and `...`."""
+    for stmt in fn.body:
+        if isinstance(stmt, ast.Pass):
+            continue
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and (isinstance(stmt.value.value, str) or stmt.value.value is Ellipsis):
+            continue
+        return False
+    return True
+
+
+def _raises_not_implemented(fn: ast.FunctionDef) -> bool:
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            target = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            if isinstance(target, ast.Name) and target.id == "NotImplementedError":
+                return True
+    return False
+
+
+def draft_problems(source: str) -> list[str]:
+    """Why `source` is not yet a port, as short sentences: a required function is missing, empty or raises NotImplementedError. An empty
+    list means the draft has all four functions with a body. `ast.parse` reads the text and runs none of it."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return ["the draft does not parse"]
+    defs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    out: list[str] = []
+    for name in REQUIRED:
+        fn = defs.get(name)
+        if fn is None:
+            out.append(f"no {name} function")
+        elif _raises_not_implemented(fn):
+            out.append(f"{name} raises NotImplementedError")
+        elif name != "close" and _is_empty(fn):
+            out.append(f"{name} is empty")
+    return out
+
+
+def _segment(lines: list[str], node) -> str:
+    first = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+    return "\n".join(lines[first - 1:node.end_lineno])
+
+
+def merge_into_skeleton(skeleton: str, draft: str) -> tuple[str | None, str]:
+    """(the port text, "") with the draft's four functions and helpers placed in the skeleton, else (None, why). The skeleton's module
+    docstring, imports and `read_tensors` stay (the draft calls `read_tensors` and does not define it, unless it brings its own); the
+    draft's other imports and top-level code come next, then its `load`, `prefill`, `decode_step` and `close`. A draft with a problem
+    (`draft_problems`) is refused. Nothing is run: both texts are read with `ast`."""
+    problems = draft_problems(draft)
+    if problems:
+        return None, "; ".join(problems[:4])
+    try:
+        sk_tree, dr_tree = ast.parse(skeleton), ast.parse(draft)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None, "the skeleton or the draft does not parse"
+    sk_lines, dr_lines = skeleton.splitlines(), draft.splitlines()
+    first_def = next((n for n in sk_tree.body if isinstance(n, ast.FunctionDef)), None)
+    if first_def is None:
+        return None, "the skeleton has no function to keep"
+    prefix = "\n".join(sk_lines[:min([first_def.lineno] + [d.lineno for d in first_def.decorator_list]) - 1]).rstrip()
+    sk_read = next((n for n in sk_tree.body if isinstance(n, ast.FunctionDef) and n.name == "read_tensors"), None)
+    have = {ast.dump(n) for n in sk_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))}     # the same statement, whatever its comment or spacing
+    imports: list[str] = []
+    others: list[str] = []
+    mine = {n.name: n for n in dr_tree.body if isinstance(n, ast.FunctionDef)}
+    for i, node in enumerate(dr_tree.body):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str) and i == 0:
+            continue                                             # the draft's module docstring
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            text = _segment(dr_lines, node)
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                continue
+            if ast.dump(node) not in have:
+                have.add(ast.dump(node))                                  # the draft's own repeats too
+                imports.append(text)
+            continue
+        if isinstance(node, ast.FunctionDef) and (node.name in REQUIRED or node.name == "read_tensors"):
+            continue
+        others.append(_segment(dr_lines, node))
+    parts = [prefix] + imports
+    reader = mine.get("read_tensors")
+    if reader is not None:
+        parts.append(_segment(dr_lines, reader))
+    elif sk_read is not None:
+        parts.append(_segment(sk_lines, sk_read))
+    parts += others + [_segment(dr_lines, mine[name]) for name in REQUIRED]
+    text = "\n\n\n".join(p for p in parts if p.strip()) + "\n"
+    try:
+        ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None, "the merged port does not parse"
+    return text, ""
+
+
+def _newest_in(directory: Path) -> Path | None:
+    try:
+        if os.path.islink(directory) or not os.path.isdir(directory):
+            return None
+        best = None
+        for name in os.listdir(directory):
+            stem = name[len("draft-"):-len(".py")] if name.startswith("draft-") and name.endswith(".py") else ""
+            if stem.isdigit() and len(stem) < 6 and not os.path.islink(directory / name) and os.path.isfile(directory / name):
+                if best is None or int(stem) > best[0]:
+                    best = (int(stem), directory / name)
+        return best[1] if best else None
+    except OSError:
+        return None
+
+
+def standing_draft(stage_dir) -> Path | None:
+    """The newest `draft-<k>.py` (highest k) in `telegraph/` of the stage directory, else of the newest `<stage>.partial-<n>` directory that has
+    one (the supervisor moves a failed attempt's stage directory aside before the next attempt, so an earlier attempt's draft is there). Only a
+    regular file in a real directory counts. Used when a later attempt begins and the helper is not asked again: the skeleton it starts from is
+    replaced by the last draft that was real code."""
+    stage = Path(stage_dir)
+    found = _newest_in(stage / DIR)
+    if found is not None:
+        return found
+    partials = []
+    try:
+        for name in os.listdir(stage.parent):
+            tail = name[len(stage.name) + len(".partial-"):] if name.startswith(stage.name + ".partial-") else ""
+            if tail.isdigit() and len(tail) < 6 and not os.path.islink(stage.parent / name):
+                partials.append((int(tail), stage.parent / name))
+    except OSError:
+        return None
+    for _, directory in sorted(partials, reverse=True):
+        found = _newest_in(directory / DIR)
+        if found is not None:
+            return found
+    return None
+
+
+def place_draft(stage_dir, draft_path, skeleton_bytes: bytes) -> tuple[bool, str]:
+    """Put the draft into `stages/2/port/port_model.py` when that file is still byte for byte the supervisor's skeleton, so the check runs
+    against real code. (True, "") when it did; else (False, why) and nothing is changed. A file the coder wrote, a missing file and a link in its
+    place are never written through. The draft is not run."""
+    port = Path(stage_dir) / "port" / "port_model.py"
+    try:
+        if os.path.islink(port) or not os.path.isfile(port):
+            return False, "the port file is missing or is a link"
+        current = safeio.read_bytes(port, max_bytes=max(len(skeleton_bytes), 1 << 20))
+        if hashlib.sha256(current).digest() != hashlib.sha256(skeleton_bytes).digest():
+            return False, "the port file is not the unchanged skeleton"
+        draft = safeio.read_bytes(draft_path, max_bytes=DRAFT_MAX * 4).decode("utf-8", "replace")
+    except (OSError, safeio.SafeReadError) as exc:
+        return False, f"the files could not be read ({exc.__class__.__name__})"
+    merged, why = merge_into_skeleton(skeleton_bytes.decode("utf-8", "replace"), draft)
+    if merged is None:
+        return False, why
+    name = Path(draft_path).name
+    try:
+        safeio.atomic_write(port, f"# Placed by the supervisor from the helper draft {name} (an outside model's advice; it may be wrong).\n{merged}",
+                            mode=0o644, replace=True)
+    except (OSError, safeio.SafeReadError) as exc:
+        return False, f"the port file could not be written ({exc.__class__.__name__})"
+    return True, ""
 
 
 # ---- the verdict --------------------------------------------------------------------------------------------------------------------------
