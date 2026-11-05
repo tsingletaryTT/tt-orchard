@@ -109,5 +109,21 @@ def no_updates_network(monkeypatch, tmp_path):
         pytest.fail(f"this test reached the real network or runner of the updates check: {calls[:3]}", pytrace=False)
 
 
+@pytest.fixture(autouse=True)
+def hub_offline_flags_restored():
+    """make_reference.offline_environment() sets the offline flag the Hub client already holds in this process (issue 408), so a test that calls it
+    on the real environment would leave every later test offline. The flags of the modules that are imported when the test starts go back to
+    what they were."""
+    import sys
+    held = []
+    for module, attr in (("huggingface_hub.constants", "HF_HUB_OFFLINE"), ("transformers.utils.hub", "_is_offline_mode")):
+        mod = sys.modules.get(module)
+        if mod is not None and hasattr(mod, attr):
+            held.append((mod, attr, getattr(mod, attr)))
+    yield
+    for mod, attr, value in held:
+        setattr(mod, attr, value)
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_bundle: run the real stage 8 bundle builder in a supervisor test that fakes it by default")
