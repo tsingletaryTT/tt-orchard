@@ -1,7 +1,6 @@
 # A port that runs but disagrees is a failed round (run16)
 
-Draft body for the pull request (no pull request is open yet). Branch `helper-numerics-rounds`, off the local run commit `3ae2f924` (the branch
-`helper-drives-port`).
+Pull request body. Branch `stack-7-numerics`, link 7 of the stack, on `stack-6-helper-drives`. Version fragment target 0.9.122.
 
 ## What it does
 
@@ -44,7 +43,7 @@ The best port ranks by the request reached and then by agreement, and an answer 
     31 mutations, one per guard, restored in a `finally` and on SIGINT and SIGTERM with the tree clean at the start (script outside the repository:
     `~/orchard-runs/tmp/mutate_numerics.py`). The first run left two not red (a length check no test covered, and one mutation text that did not match);
     a test for a record with one id too many and a corrected mutation made both red.
-12. **Housekeeping.** Change fragment `changes/helper-numerics-rounds.toml` (target 0.9.120), a project-log entry, a README sentence on the
+12. **Housekeeping.** Change fragment `changes/helper-numerics-rounds.toml` (target 0.9.122), a project-log entry, a README sentence on the
     `--helper-drives-port` row. One older test changed (the exact dict of `unreported`). Not run: the full suite, any chip, any real helper call.
 
 ## Found while testing
