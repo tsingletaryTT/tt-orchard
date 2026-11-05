@@ -119,6 +119,7 @@ def test_the_served_port_is_byte_for_byte_the_stage_2_port(rig):
     assert a.read_bytes() == b.read_bytes()
 
 
+@pytest.mark.usefixtures("unbuilt_stages_5_6")          # the pause before stage 5 is where the port is changed under the run
 def test_a_port_that_answers_differently_behind_the_server_is_refused_and_the_run_does_not_reach_stage_6(rig):
     """Stage 2's check passes (the flag file is absent). Before stage 5 the file appears; the port, run behind the server, answers 7 at the first
     position, which differs from the corpus, so the server is refused at boot, on both attempts."""
