@@ -7,7 +7,9 @@ prompt or two budgets. They follow the same rules as served_verify:
 
   * every probe returns `{"name", "state", "detail", ...}` with `state` one of pass, fail or not_checked, and a missing capability
     (no route, no usage field, no metrics, an undeclared limit) is `not_checked`, never a pass;
-  * requests are greedy, bounded in count and in tokens, and send nothing the server could act on beyond generating text;
+  * requests are greedy, bounded in count and in tokens, and send nothing the server could act on beyond generating text. One probe,
+    `probe_prefix_shared_suffix`, also posts `/reset_prefix_cache` (it empties the server's prefix cache so a cold reference exists); it does so
+    only when the caller passes `allow_reset=True`, which the boot check does because it started that server itself;
   * the time of a probe is bounded (`timeout` per request, and a burst waits at most `timeout` in all).
 
 The code probe parses the reply with `ast` and never runs it: the endpoint can be remote and the reply is untrusted. Its result says the check is static.
@@ -36,6 +38,11 @@ PREFIX_TOKENS = 1500              # choice: long enough that a cache hit is visi
 CODE_PROMPT = ("Write a Python function named is_prime that takes an integer n and returns True when n is prime and False otherwise. "
                "Reply with only the code.")
 SECRET = "tangerine"
+CODE_NUMBER = "4417"
+SUFFIX_TOKENS = 16                # choice: a one-word or one-number answer; short, so the comparison is of a few tokens and a server that is merely not bit-exact does not fail it
+REPLY_CHARS = 80                  # choice: a reply kept in a result is cut to this many characters
+QUESTION_WORD = "What is the secret word? Answer with the word only."
+QUESTION_CODE = "What is the code number? Answer with the number only."
 _FILLER = "The quick brown fox jumps over the lazy dog. "
 
 
@@ -431,3 +438,106 @@ def probe_prefix_reuse(base: str, model: str, extra: dict | None = None, *, decl
     if first is None or control is None or repeat is None:
         return _result(name, "fail", "a prefix request did not get a 200 with a JSON reply")
     return sv.check_prefix_reuse(first, repeat, control, declared=declared)
+
+
+# ---- a shared prefix with a new suffix, warm against cold (issue 83; tenstorrent/skills PR 42) -----------------------------------
+
+def _shared_prefix(reps: int, tag: str) -> str:
+    return f"{tag}The secret word is {SECRET}. The code number is {CODE_NUMBER}. Remember both.\n" + _FILLER * reps
+
+
+def _clip(text) -> str:
+    text = text if isinstance(text, str) else ""
+    return text if len(text) <= REPLY_CHARS else text[:REPLY_CHARS - 3] + "..."
+
+
+def _count(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _reset_prefix_cache(base: str, timeout: float) -> bool:
+    """POST /reset_prefix_cache. True for a 200. A server that was not started with VLLM_SERVER_DEV_MODE=1 has no such route (a 404)."""
+    try:
+        status, _ = sv._post(base.rstrip("/") + "/reset_prefix_cache", {}, timeout)
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    return status == 200
+
+
+def _asked(base, model, extra, prompt, timeout) -> tuple[str, int | None] | None:
+    """(the reply text, usage.prompt_tokens_details.cached_tokens or None) of one greedy request, or None when the server did not answer 200 with a reply."""
+    status, doc, _ = _chat(base, {**(extra or {}), "model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0,
+                                  "max_tokens": SUFFIX_TOKENS}, timeout)
+    choices = doc.get("choices") if isinstance(doc, dict) else None
+    first = choices[0] if isinstance(choices, list) and choices else None
+    message = first.get("message") if isinstance(first, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if status != 200 or not isinstance(content, str):
+        return None
+    usage = doc.get("usage") if isinstance(doc.get("usage"), dict) else {}
+    details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+    return content, _count(details.get("cached_tokens"))
+
+
+def judge_prefix_shared_suffix(other, warm, cold, *, cached_tokens, declared: bool) -> dict:
+    """`other` is the reply to question 1 on the prefix; `warm` and `cold` are replies to question 2 on the same prefix, `warm` served after
+    the prefix was cached by the first request and `cold` after a cache reset. The control: `other` stands in for a contaminated `warm` (an
+    answer cached for a different question) and must be a different reply from `cold`; when it is not, the probe cannot tell a stale answer
+    from a right one and does not decide. `cached_tokens` is what the warm request's usage reported (None when it reports none)."""
+    name = "prefix_shared_suffix"
+    if not declared:
+        return _result(name, "not_checked", "the can does not declare prefix caching", advisory=True)
+    if not all(isinstance(t, str) and t.strip() for t in (other, warm, cold)):
+        return _result(name, "not_checked", "a reply was empty, so the replies cannot be compared", advisory=True)
+    hits = _count(cached_tokens)
+    hit = None if hits is None else hits > 0
+    control = {"stand_in": "the reply to the other question", "missed": other.strip() != cold.strip()}
+    facts = {"other_reply": _clip(other), "warm_reply": _clip(warm), "cold_reply": _clip(cold), "cached_tokens": hits, "hit_observed": hit,
+             "control": control, "advisory": True}
+    seen = ("a cache hit was observed (usage.prompt_tokens_details.cached_tokens " + str(hits) + ")" if hit else
+            "a cache hit was not observed (the server reports no cached_tokens)")
+    facts["label"] = ("Compares the text of two greedy replies of at most " + str(SUFFIX_TOKENS) + " tokens to one prompt: one served from a prefix "
+                      "another request had cached, one after /reset_prefix_cache. It does not compare logits, does not send concurrent requests, "
+                      "and says nothing about other prompts. " + seen[0].upper() + seen[1:] + ".")
+    if not control["missed"]:
+        return _result(name, "not_checked", "the control did not miss: the reply to the other question equals the cold reply, so the probe cannot "
+                       "tell a stale answer from a right one", **facts)
+    if hit is False:
+        return _result(name, "not_checked", "no cache hit was observed: the warm request reported 0 cached tokens, so it did not test a hit", **facts)
+    if warm.strip() != cold.strip():
+        return _result(name, "fail", f"the warm reply differs from the cold reply to the same prompt: {_clip(warm)!r} against {_clip(cold)!r}", **facts)
+    return _result(name, "pass", "the warm reply to a prompt on a cached prefix equals the cold reply to it; the control (the reply to the other "
+                   "question) differs, so the probe can tell a stale answer", **facts)
+
+
+def probe_prefix_shared_suffix(base: str, model: str, extra: dict | None = None, *, declared: bool = False, allow_reset: bool = False,
+                               tokens: int = PREFIX_TOKENS, max_model_len=None, timeout: float = sv.PROBE_TIMEOUT_S) -> dict:
+    """Reset the cache; request A (a fresh prefix and question 1) fills it; request B (the same prefix and question 2) hits the prefix with a
+    new suffix; reset again; request B once more is the cold reference. `judge_prefix_shared_suffix` compares them. Advisory: the result carries
+    `advisory: True`, and the boot check lists it without letting it fail the boot. Nothing is sent unless the can declares prefix caching, the caller
+    allows the reset and the server has a reset route."""
+    name = "prefix_shared_suffix"
+    if not declared:
+        return _result(name, "not_checked", "the can does not declare prefix caching", advisory=True)
+    if not allow_reset:
+        return _result(name, "not_checked", "the probe needs /reset_prefix_cache for a cold reference and the caller did not allow a reset", advisory=True)
+    if isinstance(max_model_len, int) and not isinstance(max_model_len, bool) and max_model_len < tokens + 128:
+        return _result(name, "not_checked", f"the declared max_model_len {max_model_len} is too small for a prefix of {tokens} tokens", advisory=True)
+    try:
+        if not _reset_prefix_cache(base, timeout):
+            return _result(name, "not_checked", "the server has no /reset_prefix_cache, so there is no cold reference (start vLLM with "
+                           "VLLM_SERVER_DEV_MODE=1 to enable it)", advisory=True)
+        sized = _sized_prompt(base, model, extra, tokens, timeout)
+        if isinstance(sized, str):
+            return _result(name, "not_checked", sized, advisory=True)
+        prefix = _shared_prefix(max(1, sized[0].count(_FILLER)), f"Document {uuid.uuid4()}.\n")
+        first = _asked(base, model, extra, prefix + "\n\n" + QUESTION_WORD, timeout)
+        warm = _asked(base, model, extra, prefix + "\n\n" + QUESTION_CODE, timeout)
+        if not _reset_prefix_cache(base, timeout):
+            return _result(name, "not_checked", "the second /reset_prefix_cache failed, so there is no cold reference", advisory=True)
+        cold = _asked(base, model, extra, prefix + "\n\n" + QUESTION_CODE, timeout)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return _result(name, "not_checked", f"no answer while comparing a warm and a cold reply: {type(exc).__name__}", advisory=True)
+    if first is None or warm is None or cold is None:
+        return _result(name, "not_checked", "a request did not get a 200 with a reply, so the replies cannot be compared", advisory=True)
+    return judge_prefix_shared_suffix(first[0], warm[0], cold[0], cached_tokens=warm[1], declared=declared)

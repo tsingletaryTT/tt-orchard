@@ -1,0 +1,4 @@
+target = "0.9.111"
+summary = "Boot check: an advisory warm-against-cold probe for a shared prefix with a new suffix (issue 482)"
+pr = 483
+kind = "feature"

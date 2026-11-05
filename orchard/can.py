@@ -1406,13 +1406,22 @@ def _live_probes(base: str, ck: Check, spec: Spec, extra: dict, single_rate, log
                served_probes.probe_batching(base, model, carry, single_rate=single_rate, max_num_seqs=spec.max_num_seqs, timeout=t)]
     if ck.prefix_caching:
         results.append(served_probes.probe_prefix_reuse(base, model, carry, declared=True, max_model_len=spec.max_model_len, timeout=t))
+        # Advisory (issue 83, tenstorrent/skills PR 42): a warm reply on a cached prefix against a cold one. It posts /reset_prefix_cache, which the boot
+        # check may do because it started this server itself.
+        results.append(served_probes.probe_prefix_shared_suffix(base, model, carry, declared=True, allow_reset=True,
+                                                                max_model_len=spec.max_model_len, timeout=t))
     if ck.reasoning:
         results += served_probes.probe_reasoning(base, model, carry, log_text=log_text, timeout=t)
     for result in results:
-        served_verify.record(result, check, evidence)
+        if result.get("advisory") and result["state"] != "not_checked":
+            # An advisory row is listed in the evidence and never becomes a named check, so it cannot fail the boot. A not_checked advisory row
+            # goes through `record` with the other not_checked probes.
+            evidence.setdefault("advisory", []).append({k: v for k, v in result.items() if k != "advisory"})
+        else:
+            served_verify.record(result, check, evidence)
         if result["name"] == "reasoning_field" and result.get("split"):
             evidence.setdefault("token_split", {})["reasoning_probe"] = result["split"]
-        if result["name"] in ("long_prefill", "prefix_reuse", "batching"):
+        if result["name"] in ("long_prefill", "prefix_reuse", "batching", "prefix_shared_suffix"):
             evidence.setdefault("probe_facts", {})[result["name"]] = {k: v for k, v in result.items() if k not in ("name", "detail")}
 
 
