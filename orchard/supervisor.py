@@ -3509,7 +3509,8 @@ class Supervisor:
         writes the port again from stage 2's. The directory is read lazily (`_SeedScan`), so a hostile port directory is refused after about
         `STAGE_3_SEED_FILES` or `STAGE_3_SEED_ENTRIES` reads and is never listed whole. A port already in the stage directory (a resumed stage)
         is kept. The ledger holds the sha256 of each file as copied, so a later reader can tell what the coder changed."""
-        source = full_port_quality_stage.source_stage(self) if spec.number == full_port_quality.STAGE else 2      # stage 6 measures stage 3's port, or stage 2's
+        if spec.number == full_port_quality.STAGE:
+            source = full_port_quality_stage.source_stage(self)       # stage 6 measures stage 3's port, or stage 2's; stage 4's entries pass `source`
         try:
             stage_parts = Path(stage_dir).relative_to(self.run_dir).parts
         except ValueError:
