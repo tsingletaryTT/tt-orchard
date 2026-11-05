@@ -13,7 +13,9 @@ step re-read 7 files 21 times.
 `scripts/dedupe_replay.py` replays the recorded calls through the rules below, read only. The logs hold no file identity, so it takes equal text
 to mean an unchanged file. It follows the live loop: a record that opens a conversation (a context restart logs its replacement prompt from the start) makes
 the step forget what it read, the incomplete calls of a capped reply have no result and are left out, tool arguments may be a JSON string or a dict, and the
-logs of a step's continuations share its memory. Its result for those five runs:
+logs of a step's continuations share its memory. A path is matched the way the live tools resolve it (the run directory first, then the stage directory),
+with the stage component kept: `stages/1/evidence/a.txt` and `stages/2/evidence/a.txt` are two files, and a stage-relative path means the stage of its log.
+Its result for those five runs (unchanged by that rule):
 
 | | calls | would have been notes |
 |---|---:|---:|
@@ -25,6 +27,13 @@ step would have had 14 notes (run 12, a step that read 7 files 21 times).
 
 This is a partial lever. Many loops use calls that differ a little each time: `cd <run directory>`, `sed -n` with another range, `find` with another
 path. Those are not exact repeats, the dedupe does not touch them, and the repeated-call and turn-repeat detectors stay as they were.
+
+## A restart and the hint
+
+The hint says a file's text is already in the context. A context restart drops that conversation, so the hint is not carried into the replacement
+prompt (it starts with the marker `DEDUPE_HINT_PREFIX`, which the agent loop checks; the other watchdog nudges are still carried), the replacement prompt says
+that what the agent read before is no longer in the conversation and a file may be read again, and the tools forget every read and command they remembered, so
+the first read after a restart returns the text and never a note.
 
 ## The rules
 
