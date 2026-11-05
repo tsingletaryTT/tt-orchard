@@ -166,6 +166,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, FULL_PORT_STAGE_4, SKIP_3_FULL_PORT, SKIP_4_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
 from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
+from orchard import repair_help            # the outside helper inside the port repair rounds (issue 427, run11)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
 from orchard.stages import UNVERIFIED_LEDGER_DECISION
@@ -806,6 +807,8 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
 
 
 class Supervisor:
+    REPAIR_HELP_DEFAULT = True       # the helper is asked inside the port repair rounds when it is configured (a test of the older behaviour turns it off)
+
     def __init__(self, *, run_dir, ledger, cfg, model_id: str, adapter, coder, coder_chips: int,
                  standin, skills_dirs, inputs: dict | None = None, extra_env: dict | None = None,
                  versions: dict | None = None, http=post_json, probe=probe_model, clock=time.time,
@@ -818,8 +821,10 @@ class Supervisor:
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
-                 port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None):
+                 port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, repair_help: bool | None = None):
         self.run_dir = Path(run_dir).resolve()
+        # The helper inside the repair rounds (orchard/repair_help.py): on when the helper is, unless `--no-repair-help` or the caller says no.
+        self.repair_help = self.REPAIR_HELP_DEFAULT if repair_help is None else bool(repair_help)
         # The outside helper (orchard/telegraph.py, a `Telegraph`), or None. Full-port stage 2 phones it when attempts keep failing
         # (orchard/phone_a_friend.py). None is the earlier behaviour: nothing is sent anywhere.
         self.telegraph = telegraph
@@ -2416,12 +2421,29 @@ class Supervisor:
                 # escalated a stage that was making progress (review of PR 425). A new one keeps the attempt's start time, so the stage budget
                 # stands, and reads the ladder's rungs from the ledger, so a nudge or an escalation already recorded still counts.
                 self.watchdog = self._watchdog(spec)
+                # The outside helper at the start of the round (orchard/repair_help.py): in the attempt's first round, and in a round whose failure
+                # is no further along than the last one's. Its file, when it is placed, is what the coder's step starts from.
+                asked_here, friend_note = False, ""
+                if self.repair_help and getattr(self, "telegraph", None) is not None:
+                    ask_now, ask_why = repair_help.start_trigger(self.ledger.read(), n, k, failure)
+                    if ask_now:
+                        friend_note, _placed, asked_here = self._repair_help(spec, stage_dir, k, limit, failure, raw, why=ask_why, coder_failed=False)
+                        if _placed:
+                            self._repair_baseline = port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)    # the coder's step ends on ITS edit
                 try:
-                    out, _ = self._step(spec, "repair", stage_dir, escalated, resumed, extra=self._repair_text(n, k, limit, failure, raw))
+                    out, _ = self._step(spec, "repair", stage_dir, escalated, resumed,
+                                        extra=self._repair_text(n, k, limit, failure, raw) + (("\n\n" + friend_note) if friend_note else ""))
                 finally:
                     self._repair_baseline = None
                 if out.status != "done":
-                    return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
+                    # A step that stopped in a watchdog pause or escalation, or on capped replies: the helper gets the port as the coder left it,
+                    # when it was not asked at the start of this round. A placed answer lets the round go on to its check.
+                    helped_on = False
+                    if (out.status in ("pause", "escalate", "error") and not asked_here and self.repair_help and getattr(self, "telegraph", None) is not None):
+                        _note, helped_on, _ = self._repair_help(spec, stage_dir, k, limit, failure, raw,
+                                                                why=f"the coder's repair step ended: {out.status}", coder_failed=True)
+                    if not helped_on:
+                        return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
                 touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
                 if touched:
                     self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
@@ -2443,6 +2465,7 @@ class Supervisor:
             self._hardware_phase(spec, stage_dir, test)
             self.ledger.append("decision", n, decision=port_repair.TESTED,
                                sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
+            self._repair_verdicts(n, stage_dir)
         self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="did not settle", rounds=port_repair.rounds_used(self.ledger.read(), n), of=limit)
         return "fail", [f"the port repair rounds did not settle within {2 * limit + 2} passes, which a ledger that follows the rules cannot cause; "
                         "the attempt fails, and the next attempt starts again"], None
@@ -3288,11 +3311,11 @@ class Supervisor:
         from orchard import telegraph as tg
         room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
         # The helper cuts the middle out of a request over its `max_prompt_chars`; the entry says so, so a cap set for short advice is seen.
-        self.ledger.append("decision", n, decision=phone_a_friend.ASKED, k=k, why=why, problem=phone_a_friend.PROBLEM, inputs=sent,
+        self.ledger.append("decision", n, decision=phone_a_friend.ASKED, k=k, why=why, problem=phone_a_friend.problem_id(self.run_dir), inputs=sent,
                            prompt_chars=len(task) + len(failure), max_prompt_chars=self.telegraph.cfg.max_prompt_chars,
                            over_cap=len(task) + len(failure) > room, failed_attempts=state["failed"])
         try:
-            answer = self.telegraph.ask(phone_a_friend.PROBLEM, task, failure)
+            answer = self.telegraph.ask(phone_a_friend.problem_id(self.run_dir), task, failure)
         except Exception as exc:     # `ask` returns its failures; this is for one it did not foresee
             self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, ok=False, call_id="",
                                reason=f"the helper raised {exc.__class__.__name__}")
@@ -3378,9 +3401,141 @@ class Supervisor:
         self.ledger.append("decision", n, decision=phone_a_friend.NOT_PLACED, call_id=call_id, reason=str(why)[:300])
         return False
 
+    # ---- the outside helper inside the port repair rounds (orchard/repair_help.py) -----------------------------------------------------------
+
+    def _repair_help_refused(self, n: int, k: int, reason: str) -> None:
+        self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=k, reason=reason[:300])
+
+    def _repair_help(self, spec, stage_dir: Path, k: int, limit: int, failure: dict, raw: str, *, why: str, coder_failed: bool) -> tuple[str, bool, bool]:
+        """Ask the helper for the whole corrected `port_model.py` in repair round `k` and, when the answer is a whole port and the file on disk is
+        still the one that was sent (or the coder's step failed), put it in place. Returns (the sentence for the coder, whether a file was
+        placed, whether an ask was written). Nothing here fails the stage: every refusal and every unusable answer is a ledger decision."""
+        n, stage_dir = spec.number, Path(stage_dir)
+        entries = self.ledger.read()
+        ok, reason = repair_help.due(entries, n, k)
+        if not ok:
+            self._repair_help_refused(n, k, reason)
+            return "", False, False
+        port_bytes, why_not = repair_help.read_port(stage_dir)
+        if port_bytes is None:
+            self._repair_help_refused(n, k, why_not)
+            return "", False, False
+        try:
+            facts, _ = phone_a_friend.read_input(stage_dir / port_facts.FACTS_NAME, phone_a_friend.FACTS_CAP)
+            excerpts, _ = phone_a_friend.read_input(stage_dir / "reference_excerpts.md", phone_a_friend.EXCERPTS_CAP)
+            task, sent = repair_help.build_task(facts=facts, excerpts=excerpts, port_text=port_bytes.decode("utf-8", "replace"),
+                                                listing=phone_a_friend.port_listing(stage_dir / port_repair.PORT_DIR), homes=self._homes())
+            fail = repair_help.failure(k, limit, failure.get("op"), raw, self._homes())
+        except Exception as exc:     # the request could not be built: the helper is not asked, the round goes on
+            self._repair_help_refused(n, k, f"the request could not be built ({exc.__class__.__name__})")
+            return "", False, False
+        if task is None:
+            self._repair_help_refused(n, k, f"the port is {sent['port']['chars']} characters, more than the {repair_help.PORT_CAP} the request may hold")
+            return "", False, False
+        from orchard import telegraph as tg
+        room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
+        total = repair_help.asks_in_stage(entries, n) + 1
+        sent_sha = hashlib.sha256(port_bytes).hexdigest()
+        problem = phone_a_friend.problem_id(self.run_dir)
+        self.ledger.append("decision", n, decision=repair_help.ASKED, round=k, of=limit, k=total, why=why, problem=problem, inputs=sent,
+                           prompt_chars=len(task) + len(fail), max_prompt_chars=self.telegraph.cfg.max_prompt_chars,
+                           over_cap=len(task) + len(fail) > room, port_sha256=sent_sha, failure_op=failure.get("op"), coder_failed=coder_failed)
+        try:
+            answer = self.telegraph.ask(problem, task, fail)
+        except Exception as exc:     # `ask` returns its failures; this is for one it did not foresee
+            self.ledger.append("decision", n, decision=repair_help.ANSWERED, ok=False, call_id="", reason=f"the helper raised {exc.__class__.__name__}")
+            return "", False, True
+        record = {"ok": bool(answer.ok), "call_id": answer.call_id, "model": answer.model, "tokens_in": answer.tokens_in,
+                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached)}
+        if not answer.ok:
+            self.ledger.append("decision", n, decision=repair_help.ANSWERED, reason=str(answer.reason)[:300], **record)
+            return "", False, True
+        reply = phone_a_friend.extract_draft(answer.text)
+        if reply is None:
+            self.ledger.append("decision", n, decision=repair_help.ANSWERED, **record)
+            self.ledger.append("decision", n, decision=repair_help.NOT_PLACED, call_id=answer.call_id, reason="the reply holds no Python code block")
+            return "", False, True
+        ok_py, why_py = phone_a_friend.parses(reply)
+        try:
+            path = phone_a_friend.write_draft(stage_dir, total, reply, answer.call_id, answer.model, prefix=repair_help.PREFIX)
+            evidence = evidence_record(self.run_dir, path)
+        except (OSError, safeio.SafeReadError) as exc:
+            self.ledger.append("decision", n, decision=repair_help.ANSWERED, **record)
+            self.ledger.append("decision", n, decision=repair_help.NOT_PLACED, call_id=answer.call_id,
+                               reason=f"the reply could not be written: {exc.__class__.__name__}")
+            return "", False, True
+        self.ledger.append("decision", n, decision=repair_help.ANSWERED, draft=evidence, parses=ok_py, **record)
+        if not ok_py:
+            self.ledger.append("decision", n, decision=repair_help.NOT_PLACED, call_id=answer.call_id, reason=f"the reply does not parse ({why_py})")
+            return "", False, True
+        problems = repair_help.reply_problems(reply)
+        if problems:
+            self.ledger.append("decision", n, decision=repair_help.STUB, call_id=answer.call_id, problems=[str(p)[:120] for p in problems[:6]],
+                               effect="reported as not helped; the next ask in this stage goes to the next model of the helper's list")
+            self._repair_report(n, k, answer.call_id, failure.get("op"), None, helped=False, outcome="stub")
+            return "", False, True
+        placed, why_placed, found = repair_help.place(stage_dir, reply, sent_sha, coder_failed=coder_failed, call_id=answer.call_id, model=answer.model)
+        if not placed:
+            self.ledger.append("decision", n, decision=repair_help.NOT_PLACED, call_id=answer.call_id, reason=why_placed, sent_sha256=sent_sha,
+                               found_sha256=found)
+            return "", False, True
+        port = stage_dir / port_repair.PORT_DIR / port_facts.SKELETON_NAME
+        self.ledger.append("decision", n, decision=repair_help.PLACED, call_id=answer.call_id, path=evidence_record(self.run_dir, port)["path"],
+                           port_sha256=evidence_record(self.run_dir, port)["sha256"], sent_sha256=sent_sha, found_sha256=found,
+                           why="the file was still the one that was sent" if found == sent_sha else "the coder's step failed",
+                           draft_sha256=evidence["sha256"])
+        return repair_help.coder_note(answer.call_id, True, evidence["path"]), True, True
+
+    def _repair_report(self, n: int, k, call_id: str, before_op, after_op, *, helped: bool, outcome: str) -> None:
+        """The verdict on one repair answer, to the helper's ledger and the run's. A verdict that cannot be written is noted and goes on."""
+        from orchard import telegraph as tg
+        reason = ""
+        try:
+            self.telegraph.report(call_id, helped, note=f"stage {n} repair round {k}: {outcome}")
+        except (KeyError, OSError, ValueError, *tg.LEDGER_ERRORS) as exc:
+            reason = f"the verdict could not be written ({exc.__class__.__name__})"
+        self.ledger.append("decision", n, decision=repair_help.PROGRESS, call_id=call_id, round=k, before_op=before_op, after_op=after_op,
+                           outcome=outcome, helped=helped, **({"reason": reason} if reason else {}))
+
+    def _repair_outcome(self, stage_dir) -> tuple[bool, str | None, bool]:
+        """(the check passed, the request it failed at, whether the record could be read) from the supervisor's test record."""
+        try:
+            data = safeio.read_json(Path(stage_dir) / port_repair.MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
+        except (safeio.SafeReadError, OSError, ValueError):
+            return False, None, False
+        if data.get("returncode") == 0 and data.get("timed_out") is False:
+            return True, None, True
+        failure = port_repair.read_failure(self.run_dir, stage_dir)
+        if failure is None:
+            return False, None, False
+        return False, failure.get("op"), True
+
+    def _repair_verdicts(self, n: int, stage_dir, *, final_helped: bool | None = None) -> None:
+        """Verdicts for the repair answers that have none. After a rerun of the check (`final_helped` None): helped when it passed or now fails
+        later in the request chain than where the helper was asked (`repair_help.progressed`); a different message at the same request is not
+        progress. At the end of an attempt (`final_helped` given) an answer the check never judged gets the attempt's outcome."""
+        entries = self.ledger.read()
+        pending = repair_help.unreported(entries, n)
+        if not pending:
+            return
+        passed, after_op, readable = self._repair_outcome(stage_dir) if stage_dir is not None else (False, None, False)
+        for item in pending:
+            judged = repair_help.tested_after(entries, n, item["seq"]) and readable
+            if not judged and final_helped is None:
+                continue
+            if judged and passed:
+                helped, outcome = True, "passed"
+            elif judged:
+                helped = repair_help.progressed(item["failure_op"], after_op)
+                outcome = "further" if helped else ("same request" if repair_help.rank(item["failure_op"]) == repair_help.rank(after_op) else "no progress")
+            else:
+                helped, outcome = bool(final_helped), "the attempt ended before the check judged it"
+            self._repair_report(n, item["round"], item["call_id"], item["failure_op"], after_op if judged else None, helped=helped, outcome=outcome)
+
     def _report_phone_a_friend(self, n: int, *, helped: bool) -> None:
         """Tell the helper's ledger how the attempt it helped with ended, and note it in the run's ledger. A failed report is noted and goes on."""
         from orchard import telegraph as tg
+        self._repair_verdicts(n, None, final_helped=helped)        # repair answers the check never judged get the attempt's outcome
         for call_id in phone_a_friend.unreported(self.ledger.read(), n):
             reason = ""
             try:
@@ -5002,6 +5157,9 @@ def parse(argv=None):
                    help="a TOML file with the [telegraph] table (bringup passes the config it was started with). When it enables the helper, a "
                         "full-port stage 2 whose attempts keep failing asks it once for a draft port (orchard/phone_a_friend.py); its caps apply. "
                         "Without the option, or with the helper off, nothing is sent")
+    r.add_argument("--no-repair-help", action="store_true",
+                   help="do not ask the outside helper inside the port repair rounds (orchard/repair_help.py); it is still asked at the start of an "
+                        "attempt. By default a configured helper is asked in a round whose check failed on the port and the coder has not moved it on")
     r.add_argument("--full-port", action="store_true",
                    help="let a model that stage 0 classed `full-port` go on: the local coder writes the port in stage 2 and one hardware "
                         "test compares the chip's tokens with the CPU reference (skill full-port-check). Stage 3 runs the port on the largest "
@@ -5204,6 +5362,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
             package = recorded
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
                       telegraph=_telegraph_from(getattr(args, "telegraph_config", None), environ=environ, home=home),
+                      repair_help=False if getattr(args, "no_repair_help", False) else None,
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
                       skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,

@@ -52,6 +52,14 @@ NOT_PLACED = "telegraph draft not placed"    # the draft stayed in its own file;
 DRAFT_FAILED = "telegraph draft not written"   # an answer with no usable code block, or a write that failed; `reason`
 
 PROBLEM = "full-port-stage-2"               # the helper's problem id: its per-problem caps and its ladder count this stage's calls together
+
+
+def problem_id(run_dir) -> str:
+    """The helper's problem id for this run's stage 2. The helper counts a problem's calls and cost across its whole ledger, so one id for every
+    run used up the per-problem cap (6 calls) in three runs: run11 of the tiny Qwen4 rehearsal had one call left. One id per run gives every run
+    its own calls, its own cost cap and its own ladder (the cheapest model first, a stronger one after a verdict of not helped)."""
+    name = "".join(c if c.isalnum() or c in "-_." else "-" for c in Path(run_dir).name)[:40] or "run"
+    return f"{PROBLEM}:{name}"
 PER_ATTEMPT = 1
 PER_STAGE = 2
 DIR = "telegraph"                           # under the stage directory
@@ -244,7 +252,7 @@ def draft_header(call_id: str, model: str) -> str:
             "# It is advice from another model and may be wrong. Check it against stages/2/port_facts.json before you rely on it.\n")
 
 
-def write_draft(stage_dir: Path, k: int, source: str, call_id: str, model: str) -> Path:
+def write_draft(stage_dir: Path, k: int, source: str, call_id: str, model: str, prefix: str = "draft") -> Path:
     """Write the draft to `stages/2/telegraph/draft-<k>.py` and return its path. The directory must be a real directory (a link or a file in
     its place is refused: the coder has a shell in the run and could have put one there); an existing file is never replaced."""
     directory = Path(stage_dir) / DIR
@@ -254,7 +262,7 @@ def write_draft(stage_dir: Path, k: int, source: str, call_id: str, model: str) 
         pass
     if os.path.islink(directory) or not os.path.isdir(directory):
         raise OSError(f"{directory.name} is not a plain directory ({'a link' if os.path.islink(directory) else 'not a directory'})")
-    path = directory / DRAFT_NAME.format(k=k)
+    path = directory / (DRAFT_NAME.format(k=k) if prefix == "draft" else f"{prefix}-{int(k)}.py")
     safeio.atomic_write(path, draft_header(call_id, model) + source.rstrip("\n") + "\n", mode=0o600, replace=False)
     return path
 
@@ -303,9 +311,67 @@ def _raises_not_implemented(fn: ast.FunctionDef) -> bool:
     return False
 
 
+SIGNATURES = {"load": 2, "prefill": 2, "decode_step": 3, "close": 1}     # positional parameters each function takes (the skeleton's, which the check calls)
+
+
+def _positional(fn: ast.FunctionDef) -> tuple[int, int, bool]:
+    """(the most positional arguments a call can pass, the fewest it must pass, whether *args takes the rest)."""
+    a = fn.args
+    n = len(a.posonlyargs) + len(a.args)
+    return n, n - len(a.defaults), a.vararg is not None
+
+
+def _bound_names(tree: ast.AST) -> set[str]:
+    """Every name the module binds anywhere: definitions, parameters, assignment and loop targets, imports, `as` names, comprehension and
+    walrus targets. A name used and never bound anywhere is undefined whatever the scope; a name bound in some scope may still be wrong where it is
+    used, which this does not try to decide (the check is deliberately blind to scope, so it has no false alarms on ordinary code)."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+        elif isinstance(node, ast.MatchAs) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchStar) and node.name:
+            names.add(node.name)
+    return names
+
+
+def undefined_names(source: str) -> list[str]:
+    """Names the text uses and nowhere binds or imports, in first-use order (at most eight). A star import makes every name possible, so a text
+    with one is not judged. Builtins and the module's dunder names are known."""
+    import builtins
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return []
+    if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(tree)):
+        return []
+    known = _bound_names(tree) | set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__spec__", "__package__", "__loader__"}
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in known and node.id not in out:
+            out.append(node.id)
+            if len(out) == 8:
+                break
+    return out
+
+
 def draft_problems(source: str) -> list[str]:
-    """Why `source` is not yet a port, as short sentences: a required function is missing, empty or raises NotImplementedError. An empty
-    list means the draft has all four functions with a body. `ast.parse` reads the text and runs none of it."""
+    """Why `source` is not yet a port, as short sentences: a required function is missing, takes the wrong arguments, is empty or raises
+    NotImplementedError. An empty list means the draft has all four functions with a body and the right signature. `ast.parse` reads the text
+    and runs none of it. Names the text uses and nowhere defines are judged by `undefined_names`, on the whole port (a draft calls helpers the
+    skeleton brings), so `merge_into_skeleton` and `place_whole` ask that question and this one does not."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
@@ -320,6 +386,11 @@ def draft_problems(source: str) -> list[str]:
             out.append(f"{name} raises NotImplementedError")
         elif name != "close" and _is_empty(fn):
             out.append(f"{name} is empty")
+        else:
+            most, fewest, rest = _positional(fn)
+            want = SIGNATURES[name]
+            if not rest and (most < want or fewest > want):
+                out.append(f"{name} takes {fewest}..{most} arguments, the check passes {want}")
     return out
 
 
@@ -376,6 +447,8 @@ def merge_into_skeleton(skeleton: str, draft: str) -> tuple[str | None, str]:
         ast.parse(text)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None, "the merged port does not parse"
+    if missing := undefined_names(text):
+        return None, "the merged port uses names nothing defines: " + ", ".join(missing[:5])
     return text, ""
 
 
