@@ -6,19 +6,21 @@ The code is `Tools` in `orchard/agent.py` and `DedupeStreak` in `orchard/watchdo
 
 ## What the logs show
 
-The stage logs of runs 12 to 16 of the tiny Qwen4 rehearsal (39 agent steps) hold 345 `read_file` calls that can be paired with their results.
+The stage logs of runs 12 to 16 of the tiny Qwen4 rehearsal (37 agent steps, counting a step and its gate-feedback and wrap-up continuations as one) hold 345 `read_file` calls that can be paired with their results.
 Counting a call as a repeat when the same path and arguments came earlier in the same step, 43 of 353 calls (12 percent) were repeats. The worst
 step re-read 7 files 21 times.
 
 `scripts/dedupe_replay.py` replays the recorded calls through the rules below, read only. The logs hold no file identity, so it takes equal text
-to mean an unchanged file. Its result for those five runs:
+to mean an unchanged file. It follows the live loop: a record that opens a conversation (a context restart logs its replacement prompt from the start) makes
+the step forget what it read, the incomplete calls of a capped reply have no result and are left out, tool arguments may be a JSON string or a dict, and the
+logs of a step's continuations share its memory. Its result for those five runs:
 
 | | calls | would have been notes |
 |---|---:|---:|
-| `read_file` | 345 | 30 (9 percent) |
+| `read_file` | 345 | 31 (9 percent) |
 | read-only shell commands | 321 | 2 |
 
-The notes would have kept about 291,000 of the 2,740,000 characters of tool output (10.6 percent) out of the contexts again. The largest single
+The notes would have kept about 293,000 of the 2,740,000 characters of tool output (10.7 percent) out of the contexts again. The largest single
 step would have had 14 notes (run 12, a step that read 7 files 21 times).
 
 This is a partial lever. Many loops use calls that differ a little each time: `cd <run directory>`, `sed -n` with another range, `find` with another
