@@ -173,7 +173,7 @@ def test_the_stage_end_entries_a_failed_supervisor_stage_writes_are_bounded(tmp_
     big = "m" * 20_000_000
     ledger = Ledger(tmp_path / "ledger.jsonl")
     stub = SimpleNamespace(ledger=ledger, run_dir=tmp_path)
-    spec = SimpleNamespace(number=2, name="functional decoder", harness=True)
+    spec = SimpleNamespace(number=2, name="functional decoder", harness=True, draft=None)      # a StageSpec always has `draft` (the phone-a-friend end-of-attempt report reads it)
     result = Supervisor._end_stage_body(stub, spec, tmp_path, "fail", [big] * 50, SimpleNamespace(evidence=()), False)
     assert result == "fail"
     assert (tmp_path / "ledger.jsonl").stat().st_size < 100_000
