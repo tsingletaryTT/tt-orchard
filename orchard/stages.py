@@ -43,7 +43,7 @@ from typing import Callable
 from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, IGNORED_WEIGHT_SUFFIXES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import agreement_core, prompt_suite, sampling_choice, sampling_probe, token_check
+from orchard import agreement_core, prompt_suite, raw_evidence, sampling_choice, sampling_probe, sidecar_numbers, token_check
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -67,6 +67,8 @@ class GateResult:
     reasons: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()      # run-directory-relative paths the gate relied on
     waived: tuple[str, ...] = ()        # fields an operator option waived, from the gate's own read (full-port rehearsal, issue 357)
+    unverified: tuple[str, ...] = ()    # numbers the gate accepted that nothing recomputes: the agent reported them (issue 445). Each names the
+                                        # number and says what is missing. The supervisor writes them to the ledger; the operator bundle lists them.
 
 
 @dataclass(frozen=True)
@@ -543,8 +545,16 @@ def _reference_evidence_reasons(stage_dir: Path, agent: dict) -> list[str]:
     return reasons
 
 
+# The ledger decision the supervisor writes when a passing gate accepted numbers that nothing recomputes (issue 445). The operator bundle reads it.
+UNVERIFIED_LEDGER_DECISION = "numbers accepted as the agent reported them"
+
+
 def gate_decoder(stage_dir, run_dir) -> GateResult:
-    """Stage 2: PCC at or above the functional-decoder bar, and argmax agreement."""
+    """Stage 2: PCC at or above the functional-decoder bar, and argmax agreement.
+
+    The decoder's PCC is the number the agent's own test script printed. Nothing the supervisor keeps (the two tensors, or a record of their
+    elements) lets the gate compute it again, so the result says the number is agent-reported (issue 445). What a check step would have to
+    write is in the issue that tracks it."""
     d, err = _load(stage_dir, "result.json")
     if err:
         return GateResult(False, (err,))
@@ -554,7 +564,9 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
     if d.get("argmax_match") is not True:
         reasons.append("argmax_match is not true")
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
-    return _done(reasons, seen)
+    return dataclasses.replace(_done(reasons, seen), unverified=(
+        "stage 2 decoder pcc and argmax_match: the agent reported them; no raw tensors or element records are kept, so the gate cannot "
+        "recompute them",))
 
 
 def gate_full_port(stage_dir, run_dir, *, rehearsal: bool = False, stage: int = 2, expected_chips: int | None = None) -> GateResult:
@@ -792,11 +804,14 @@ def gate_sidecar_parity(sp, delta: dict) -> list[str]:
                        f"(the larger of {SIDECAR_PROB_DIFF_MAX} and {SIDECAR_NOISE_FACTOR:g} times the "
                        "CPU-versus-CPU difference)")
     heads = {x.get("sha256") for x in delta.get("sidecars", []) if isinstance(x, dict)}
-    if sp.get("head_sha256") not in heads:
+    # A hash must be a string: a list or dict is unhashable and `in` on a set would raise, so a non-string is refused as a mismatch.
+    head = sp.get("head_sha256")
+    if not isinstance(head, str) or head not in heads:
         reasons.append("sidecar_parity head_sha256 does not match any sidecar stage 0 recorded; the parity "
                        "run used a different head file")
     codes = {x.get("sha256") for x in delta.get("code_files", []) if isinstance(x, dict)}
-    if codes and sp.get("code_sha256") not in codes:
+    code = sp.get("code_sha256")
+    if codes and (not isinstance(code, str) or code not in codes):
         reasons.append("sidecar_parity code_sha256 does not match any code file stage 0 recorded; the parity "
                        "run used different code")
     return reasons
@@ -822,7 +837,33 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
     if not isinstance(listed, list) or not any(Path(str(e)).name == "sidecar-parity.json" for e in listed):
         reasons.append("result.json evidence must list evidence/sidecar-parity.json")
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
-    return _done(reasons, seen)
+    more, unverified = sidecar_numbers_reasons(stage_dir, run_dir, d)
+    return dataclasses.replace(_done(reasons + more, seen), unverified=unverified)
+
+
+SIDECAR_RAW = "evidence/sidecar-parity.json"
+
+
+def sidecar_numbers_reasons(stage_dir, run_dir, d: dict) -> tuple[list[str], tuple[str, ...]]:
+    return sidecar_numbers_reasons_at(stage_dir, run_dir, SIDECAR_RAW, d)
+
+
+def sidecar_numbers_reasons_at(stage_dir, run_dir, name: str, d: dict) -> tuple[list[str], tuple[str, ...]]:
+    """(reasons, unverified) for the sidecar parity numbers (issue 445): the evidence file's `per_record` measurements are folded again
+    (`orchard/sidecar_numbers.py`) and both the evidence file's own summary and result.json's `sidecar_parity` must be that fold.
+    A run whose ledger holds the evidence file's hash (the supervisor's hardware test wrote it) must carry the records, and the file must be
+    that file. A run with no such record and no records is judged as before, and the numbers are marked agent-reported."""
+    doc, reasons, bound = raw_evidence.read(run_dir, stage_dir, 2, name)
+    if reasons:
+        return reasons, ()
+    more, verified = sidecar_numbers.problems([("sidecar-parity.json", doc), ("result.json sidecar_parity", d.get("sidecar_parity"))],
+                                              doc, bound=bound)
+    if more:
+        return more, ()
+    if verified:
+        return [], ()
+    return [], ("stage 2 sidecar parity: the agent reported the numbers; evidence/sidecar-parity.json holds no per_record measurements to "
+                "recompute them from",)
 
 
 def _swap_reasons(d: dict, where: str = "") -> list[str]:
@@ -864,7 +905,8 @@ def gate_full_model(stage_dir, run_dir) -> GateResult:
     if not _number(d.get("top1")) or not 0 <= d["top1"] <= 1:
         reasons.append(f"top1 must be a fraction from 0 to 1, got {d.get('top1')!r}")
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
-    return _done(reasons, seen)
+    return dataclasses.replace(_done(reasons, seen), unverified=(
+        "stage 3 top1 and parity: the agent reported them; no per-position replies are kept, so the gate cannot recompute them",))
 
 
 def gate_mesh(stage_dir, run_dir, required=None) -> GateResult:
@@ -1671,6 +1713,38 @@ def delta_model_has_mtp(delta) -> bool | None:
     return n > 0 if isinstance(n, int) and not isinstance(n, bool) else None
 
 
+BOOT_RAW = "verify/evidence/verify.json"
+
+
+def boot_check_reasons(stage_dir, run_dir, v) -> tuple[list[str], tuple[str, ...]]:
+    """(reasons, unverified) for the stage 7 boot check's numbers (issue 445). The card's boot-check row cites `top1_agreement` of verify.json, so
+    it is recomputed from the file's raw `teacher_forced` records against stage 1's reference ids (the 32-token recompute of issue 433,
+    `token_check.boot_problems`). The run is bound when the supervisor hashed verify.json when the boot check's test ended: the file must be
+    that file and must carry the records. A run with no such record is judged as before; if the records or the ids are not there the numbers
+    are marked agent-reported."""
+    doc, reasons, bound = raw_evidence.read(run_dir, stage_dir, 7, BOOT_RAW)
+    if reasons:
+        return reasons, ()
+    # `v` is the object the gate read through `_load`. On a bound run it must be the hashed file's own content.
+    report = v
+    if bound and doc != v:
+        # The gate read verify.json once for its own checks and this reads it again; a file that changed between the two reads is refused.
+        return ["verify.json changed while the gate was reading it: the copy the gate checked is not the file the supervisor hashed"], ()
+    ids, why, _ = _reference_ids(run_dir)
+    if why:
+        return why, ()
+    if ids is None:
+        if bound:
+            return ["stage 1's reference ids are not available, so the boot check cannot be recomputed"], ()
+        return [], ("stage 7 boot check top1 agreement: the agent's script reported it; stage 1 left no reference ids to recompute it from",)
+    more = token_check.boot_problems(report, ids, require_records=bound)
+    if more:
+        return more, ()
+    if isinstance(report, dict) and report.get("teacher_forced") is not None:
+        return [], ()
+    return [], ("stage 7 boot check top1 agreement: verify.json holds no teacher_forced records, so the number is the script's own report",)
+
+
 def gate_package(stage_dir, run_dir) -> GateResult:
     """Stage 7: a staged v6 package whose boot check passed.
 
@@ -1734,6 +1808,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     sidecars = [s.get("file") for s in delta.get("sidecars") or () if isinstance(s, dict)]
     profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
     boot_check, _ = _load(Path(stage_dir) / "verify" / "evidence", "verify.json")
+    unverified: tuple[str, ...] = ()
     if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
                for p in profiles):
         failed = [p.get("verify", {}).get("failed") for p in profiles if isinstance(p, dict)]
@@ -1820,12 +1895,15 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                 reasons.append(f"profile {name}: the boot check's server did not serve its own "
                                "model-dir with MODEL_WEIGHTS_DIR and HF_MODEL set to it")
             _evidence(run_dir, v.get("evidence"), f"profile {name} boot check", reasons, seen)
+            more, note = boot_check_reasons(stage_dir, run_dir, v)
+            reasons += [f"profile {name}: {r}" for r in more if r not in reasons]
+            unverified += tuple(u for u in note if u not in unverified)
     got = safeio.read_text_checked(Path(stage_dir) / PUBLISH_FILE, max_bytes=TEXT_MAX_BYTES)
     if got.ok:
         reasons += publish_problems(got.value)
     else:
         reasons.append(got.problem(PUBLISH_FILE) or f"{PUBLISH_FILE} is missing")
-    return _done(reasons, seen)
+    return dataclasses.replace(_done(reasons, seen), unverified=unverified)
 
 
 SKIP_7 = ("stage 7 builds a package only on the weights-only path of a run started with "

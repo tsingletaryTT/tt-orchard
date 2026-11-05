@@ -169,10 +169,12 @@ def main() -> int:
         tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         graft = graft_evidence(bundle, model_dir)       # the shard the server loaded, hashed while it is still served
         free_text = sac.complete(port, str(model_dir), prompt_ids, sac.N_TOKENS)
-        matches, mismatches = 0, []
+        matches, mismatches, teacher_forced = 0, [], []
         for k in range(sac.N_TOKENS):
             got = sac.complete(port, str(model_dir), prompt_ids + generated_ids[:k], 1)
             ids = tokenizer.encode(got, add_special_tokens=False).ids
+            # The raw record the supervisor's gate recomputes the count from (issue 445): the first token the server chose at position k.
+            teacher_forced.append({"position": k, "first_id": ids[0] if ids else None})
             if ids and ids[0] == generated_ids[k]:
                 matches += 1
             else:
@@ -192,7 +194,7 @@ def main() -> int:
               "model_dir_weights": marker, "server_ready_s": round(ready_s, 1),
               "n_tokens": sac.N_TOKENS, "matches": matches,
               "top1_agreement": matches / sac.N_TOKENS, **coh, "free_run_text": free_text,
-              "mismatches": mismatches, **({"graft": graft} if graft is not None else {}),
+              "mismatches": mismatches, "teacher_forced": teacher_forced, **({"graft": graft} if graft is not None else {}),
               **({"tensor_cache_at_start": cache_record} if cache_record is not None else {}),
               "evidence": [os.path.relpath(evidence / "verify.json", run_dir),
                            os.path.relpath(log_path, run_dir)]}
