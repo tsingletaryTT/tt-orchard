@@ -48,8 +48,9 @@ def go(rig, port=fk.ANSWERING, *, over=None):
     src = fk.port_source(port, rig.tmp / "snapshot")
     make(rig, over={(2, "prepare"): {**PREPARE, "port/port_model.py": src}, **(over or {})})
     sleeps = []
-    # The first pause (before stage 4) is resumed; a later one means a stage failed, and the run stops there so a failure is an assertion and not a wait.
-    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("resume" if len(sleeps) == 1 else "abort"))
+    # No pause comes before stage 5 any more (stages 3 and 4 are built), so any pause means a stage failed: the run stops there, so a failure is an
+    # assertion and not a wait.
+    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("abort"))
 
 
 def stage_5_tests(rig):
@@ -146,7 +147,7 @@ def test_a_port_that_answers_differently_behind_the_server_is_refused_and_the_ru
 def test_a_model_with_random_weights_fails_stage_5_without_the_rehearsal_option(rig):
     go(rig, fk.RANDOM_WEIGHTS)
     sleeps = []
-    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("resume" if len(sleeps) == 1 else "abort"))      # resume past the pause before stage 4, then stop at the failure
+    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("abort"))      # no pause comes before stage 5 any more: a pause is a failure, stop there
     assert rig.run() == EXIT_ABORTED
     assert [d["result"] for d in rig.ends(5)] == ["escalate", "fail"]
     assert any("coherent must be true" in r for r in rig.ends(5)[0]["reasons"])
