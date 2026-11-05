@@ -170,3 +170,23 @@ def test_served_files_never_blocks_on_a_fifo_or_reads_a_device_or_an_oversized_f
     assert got["generation_config.json"] is None                             # over the cap
     import hashlib
     assert got["chat_template.jinja"] == hashlib.sha256(b"ok").hexdigest()   # a small regular file still hashes
+
+
+def test_the_suite_record_holds_the_digests_again_after_the_last_reply(raw, tmp_path):
+    """Issue 297: a served file changed while the replies were being made is caught by comparing the digests before and after."""
+    suite = ps.load_suite()
+    srv = raw(OK)
+    (tmp_path / "generation_config.json").write_text('{"eos_token_id": 7}')
+    tpl = load_swap_template()
+    real = tpl.ask_suite_prompt
+
+    def ask_then_change(*a, **k):
+        out = real(*a, **k)
+        (tmp_path / "generation_config.json").write_text('{"eos_token_id": 8}')          # changed during the replies
+        return out
+
+    tpl.ask_suite_prompt = ask_then_change
+    record = tpl.run_suite({"new_model_id": "x/y"}, srv.server_address[1], "m", tmp_path,
+                           {"suite": suite, "suite_sha256": ps.suite_sha256(), "control": None})
+    assert record["served_files"]["generation_config.json"] != record["served_files_after"]["generation_config.json"]
+    assert set(record["served_files_after"]) == set(record["served_files"])

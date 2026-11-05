@@ -632,6 +632,7 @@ def ask_suite_prompt(port: int, model: str, prompt: dict, mode: str, max_tokens:
 def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict, tokenizer=None) -> dict:
     """Step (h): send the suite and return the record that goes under `prompt_suite` in swap-check.json."""
     template = chat_template_info(model_dir)
+    served_before = served_files(model_dir)            # taken before the first request; served_files_after is taken after the last
     mode = "chat" if template["present"] else "completion"
     max_tokens = int(cfg.get("suite_max_tokens", SUITE_MAX_TOKENS))
     entries, skipped = [], []
@@ -641,9 +642,11 @@ def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict, to
                             if template["present"] else "there is no chat template, so no tool format"})
             continue
         entries.append(ask_suite_prompt(port, model, prompt, mode, max_tokens, tokenizer))
+    served_after = served_files(model_dir)             # again after the last reply: a file changed while the replies were made is then seen
     return {"ran": True, "model_id": cfg.get("new_model_id"), "suite_sha256": setup["suite_sha256"], "mode": mode,
             "max_tokens": max_tokens,
-            "chat_template": template, "special_tokens": special_tokens(model_dir), "served_files": served_files(model_dir), "entries": entries,
+            "chat_template": template, "special_tokens": special_tokens(model_dir), "served_files": served_before, "served_files_after": served_after,
+            "entries": entries,
             "skipped": skipped, "control": setup["control"]}
 
 

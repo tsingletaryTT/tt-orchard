@@ -41,7 +41,7 @@ import os
 import re
 from pathlib import Path
 
-from orchard import safeio, served_verify
+from orchard import safeio, scrub, served_verify
 
 FILE = "served-chat.json"
 MAX_JSON_BYTES = 64 << 20            # a tokenizer.json is tens of megabytes
@@ -182,8 +182,165 @@ def _vocab(directory, incomplete: list) -> tuple[dict, dict]:
     return to_id, {i: t for t, i in to_id.items()}
 
 
-def check_files(served_dir, new_snapshot) -> dict:
-    """The template, special tokens, eos id and stop ids of `served_dir` against the new model's `new_snapshot`. Never raises."""
+def _added_tokens(directory, incomplete: list) -> dict:
+    """{content: (id, special)} for the `added_tokens` list of tokenizer.json. The first entry for a content wins, as in `_vocab`. An entry
+    whose content is not a string or whose id is not a non-negative integer is skipped. `special` is True only for a JSON true."""
+    data = _json(Path(directory) / "tokenizer.json", incomplete, f"{Path(directory).name}/tokenizer.json") or {}
+    out: dict = {}
+    for item in data.get("added_tokens") if isinstance(data.get("added_tokens"), list) else []:
+        if (isinstance(item, dict) and isinstance(item.get("content"), str)
+                and isinstance(item.get("id"), int) and not isinstance(item.get("id"), bool) and item["id"] >= 0):
+            out.setdefault(item["content"], (item["id"], item.get("special") is True))
+    return out
+
+
+SHOWN_CHARS = 80               # a token's text in a problem is cut to this many characters (the cut says how long the whole text was)
+TOKEN_TEXT_MAX = 200           # a token's text in the written record is cut to this many characters
+RECORD_TEXT_MAX = 600          # one problem detail, incomplete line or note in the written record
+RECORD_LIST_MAX = 50           # entries in each list of the written record
+
+
+SCRUB_WINDOW = 256              # characters read past a cut so a credential that starts before the cut is matched whole (the patterns need 30)
+
+
+def _scrubbed_prefix(text: str, limit: int) -> str:
+    """The first `limit` characters of `text` with every credential that starts in them replaced by a label, found in the text BEFORE it is cut.
+
+    A token that starts before the cut and ends after it would leave a fragment (`hf_` and 17 payload characters at a cut of 500) that no
+    pattern matches, because the patterns need 30 payload characters (issue 297, review of PR 466). The scan covers the cut plus
+    SCRUB_WINDOW characters, so a token that starts inside the shown part is matched with at least SCRUB_WINDOW characters of its payload; the
+    work stays bounded however long the text is.
+
+    The matches are found in the ORIGINAL window and the result is built from original offsets: text is copied only from before `limit`, and a
+    match that starts before `limit` becomes one label however far it runs. Replacing in the window and cutting afterwards moved the cut to the
+    right (a label is shorter than its match) and pulled in the start of a later credential that the window had already cut below the pattern's
+    30-character minimum (issue 297, round 4 of PR 466). Text at or after `limit` is never copied. A label that would pass `limit` is cut, as
+    the shown text must not be longer than the limit."""
+    window = text[:limit + SCRUB_WINDOW]
+    spans = sorted(m.span() for _what, pattern in scrub.TOKEN_PATTERNS for m in pattern.finditer(window))
+    out: list[str] = []
+    at = 0                                           # the next original offset not yet copied or replaced
+    for start, end in spans:
+        if start >= limit:
+            break
+        if start < at:                               # inside a span already replaced (two patterns matched the same text)
+            at = max(at, end)
+            continue
+        out.append(window[at:start])
+        out.append("<token removed>")
+        at = end
+    if at < limit:
+        out.append(window[at:limit])
+    return "".join(out)[:limit]
+
+
+def _shown(value) -> str:
+    """The repr of a token's text for a problem or an incomplete line, cut to SHOWN_CHARS characters. Token text comes from a tokenizer file
+    (up to MAX_JSON_BYTES), and the bundle refuses a record over 8 MiB as unreadable, so one huge token must not reach a detail whole (issue 297,
+    review of PR 466). A cut text says how many characters it had. Credentials are removed before the cut (`_scrubbed_prefix`)."""
+    text = value if isinstance(value, str) else str(value)
+    if len(text) <= SHOWN_CHARS:
+        return repr(_scrubbed_prefix(text, SHOWN_CHARS))
+    r = repr(_scrubbed_prefix(text, SHOWN_CHARS))
+    return f"{r[:-1]}...{r[-1]} ({len(text)} characters)"
+
+
+def _cut_text(value, limit: int):
+    """`value` itself when it is not text or fits; otherwise its first `limit` characters (credentials removed before the cut) and the full
+    length."""
+    if isinstance(value, str) and len(value) > limit:
+        return f"{_scrubbed_prefix(value, limit)}... ({len(value)} characters)"
+    return value
+
+
+def _bounded_list(items, limit: int = RECORD_LIST_MAX):
+    """At most `limit` entries, the last one saying how many were left out. Not a list: returned as it is."""
+    if not isinstance(items, list) or len(items) <= limit:
+        return items
+    left = len(items) - (limit - 1)
+    kept = list(items[:limit - 1])
+    kept.append({"name": "entries_not_listed", "detail": f"{left} more entries are not listed"} if items and isinstance(items[0], dict)
+                else f"{left} more entries are not listed")
+    return kept
+
+
+def _bounded_entries(items):
+    """A list of problems (dicts with a detail) or of lines, capped in count and in the length of each text."""
+    out = []
+    for item in _bounded_list(items) if isinstance(items, list) else []:
+        out.append({**item, "detail": _cut_text(item.get("detail"), RECORD_TEXT_MAX)} if isinstance(item, dict) else _cut_text(item, RECORD_TEXT_MAX))
+    return out
+
+
+def _bounded_files(files: dict) -> dict:
+    """`files` as written to the record: the token texts cut to TOKEN_TEXT_MAX. The checks use the whole texts and run before this."""
+    out = dict(files)
+    tokens = files.get("special_tokens")
+    if isinstance(tokens, dict):
+        out["special_tokens"] = {side: ({k: _cut_text(v, TOKEN_TEXT_MAX) for k, v in vals.items()} if isinstance(vals, dict) else vals)
+                                 for side, vals in tokens.items()}
+    if isinstance(files.get("end_tokens"), list):
+        out["end_tokens"] = [_cut_text(v, TOKEN_TEXT_MAX) for v in _bounded_list(files["end_tokens"])]
+    for key in ("problems", "incomplete"):
+        out[key] = _bounded_entries(files.get(key))
+    out["notes"] = _bounded_entries(files.get("notes"))
+    return out
+
+
+def bounded_record(rec: dict) -> dict:
+    """The record with every list capped in count and every text in length, so its size is bounded whatever the input files hold."""
+    out = dict(rec)
+    for key in ("problems", "incomplete"):
+        out[key] = _bounded_entries(rec.get(key))
+    if isinstance(rec.get("files"), dict):
+        out["files"] = _bounded_files(rec["files"])
+    replies = rec.get("replies")
+    if isinstance(replies, dict):
+        out["replies"] = {**replies, "problems": _bounded_entries(replies.get("problems")), "incomplete": _bounded_entries(replies.get("incomplete"))}
+    live = rec.get("live_probe")
+    if isinstance(live, dict) and isinstance(live.get("problems"), list):
+        out["live_probe"] = {**live, "problems": _bounded_entries(live["problems"])}
+    return out
+
+
+ADDED_TOKEN_SHOWN = 5          # a problem about added tokens names this many of them and counts the rest, so a hostile list gives a small record
+
+
+def _added_token_problems(served: dict, new: dict) -> list[dict]:
+    """One problem per kind of difference between the added tokens of the two tokenizers (issue 297: a token can keep its text and get another
+    id, or lose its `special` flag, and the named-token checks above would not see it)."""
+    kinds = {"added_token_id_differs": [], "added_token_special_differs": [], "added_token_missing_in_served": [], "added_token_extra_in_served": []}
+    for content, (nid, nspecial) in new.items():
+        if content not in served:
+            kinds["added_token_missing_in_served"].append(f"{_shown(content)} (id {nid})")
+            continue
+        sid, sspecial = served[content]
+        if sid != nid:
+            kinds["added_token_id_differs"].append(f"{_shown(content)}: served {sid}, new {nid}")
+        if sspecial != nspecial:
+            kinds["added_token_special_differs"].append(f"{_shown(content)}: served special={sspecial}, new special={nspecial}")
+    kinds["added_token_extra_in_served"] = [f"{_shown(c)} (id {i})" for c, (i, _s) in served.items() if c not in new]
+    what = {"added_token_id_differs": "added tokens with another id in the served tokenizer",
+            "added_token_special_differs": "added tokens whose special flag differs",
+            "added_token_missing_in_served": "added tokens of the new model that the served tokenizer lacks",
+            "added_token_extra_in_served": "added tokens in the served tokenizer that the new model does not have"}
+    out = []
+    for name, rows in kinds.items():
+        if rows:
+            more = f" and {len(rows) - ADDED_TOKEN_SHOWN} more" if len(rows) > ADDED_TOKEN_SHOWN else ""
+            out.append({"name": name, "detail": f"{len(rows)} {what[name]}: " + "; ".join(rows[:ADDED_TOKEN_SHOWN]) + more})
+    return out
+
+
+# The stop-id rule of each serving backend: which files the server reads for the ids that end a turn. Only the bundle's rule is known
+# (generation_config.json, then the top level of config.json). A backend that is not listed is compared on everything else and the record says the
+# stop ids could not be judged (issue 297).
+STOP_ID_RULES = {"bundle": "generation_config.json, then the top level of config.json"}
+
+
+def check_files(served_dir, new_snapshot, backend: str | None = "bundle") -> dict:
+    """The template, special tokens, eos id and stop ids of `served_dir` against the new model's `new_snapshot`. Never raises. `backend` names
+    the serving backend whose stop-id rule applies (a key of STOP_ID_RULES); with an unknown one the stop ids are listed and not judged."""
     notes: list[str] = []
     incomplete: list[str] = []
     problems: list[dict] = []
@@ -202,7 +359,7 @@ def check_files(served_dir, new_snapshot) -> dict:
     for name in TOKEN_NAMES:
         if served_tokens[name] != new_tokens[name]:
             problems.append({"name": "special_token_differs",
-                             "detail": f"{name} is {served_tokens[name]!r} in the served directory and {new_tokens[name]!r} in the new model"})
+                             "detail": f"{name} is {_shown(served_tokens[name])} in the served directory and {_shown(new_tokens[name])} in the new model"})
     s_to_id, s_to_tok = _vocab(served_dir, incomplete)
     n_to_id, n_to_tok = _vocab(new_snapshot, incomplete)
     ids = {}
@@ -210,19 +367,21 @@ def check_files(served_dir, new_snapshot) -> dict:
         tok = tokens["eos_token"]
         ids[label] = to_id.get(tok) if tok is not None else None
         if tok is not None and ids[label] is None:
-            incomplete.append(f"the id of the {label} directory's eos token {tok!r} could not be found in its tokenizer.json")
+            incomplete.append(f"the id of the {label} directory's eos token {_shown(tok)} could not be found in its tokenizer.json")
     if ids["served"] is not None and ids["new"] is not None and ids["served"] != ids["new"]:
         problems.append({"name": "eos_id_differs",
-                         "detail": f"the served tokenizer gives the eos token {new_tokens['eos_token']!r} the id {ids['served']}; the new model's gives it {ids['new']}"})
+                         "detail": f"the served tokenizer gives the eos token {_shown(new_tokens['eos_token'])} the id {ids['served']}; the new model's gives it {ids['new']}"})
     for name in TOKEN_NAMES[1:]:                       # bos, pad, unk: the named tokens must map to the same ids in both tokenizers
         tok = new_tokens[name]
         if tok is None or tok != served_tokens[name]:
             continue
         a, b = n_to_id.get(tok), s_to_id.get(tok)
         if a is None or b is None:
-            incomplete.append(f"the id of the {name} {tok!r} could not be found in the {'new' if a is None else 'served'} directory's tokenizer.json")
+            incomplete.append(f"the id of the {name} {_shown(tok)} could not be found in the {'new' if a is None else 'served'} directory's tokenizer.json")
         elif a != b:
-            problems.append({"name": "special_token_id_differs", "detail": f"{name} {tok!r} has id {b} in the served tokenizer and {a} in the new model's"})
+            problems.append({"name": "special_token_id_differs", "detail": f"{name} {_shown(tok)} has id {b} in the served tokenizer and {a} in the new model's"})
+    problems += _added_token_problems(_added_tokens(served_dir, incomplete), _added_tokens(new_snapshot, incomplete))
+    rule = STOP_ID_RULES.get(backend) if isinstance(backend, str) else None
     served_ids = stop_ids_of(served_dir, incomplete)
     ends = stop_ids_of(new_snapshot, incomplete)
     nested = (_json(Path(new_snapshot) / "config.json", incomplete, f"{Path(new_snapshot).name}/config.json") or {}).get("text_config")
@@ -233,11 +392,14 @@ def check_files(served_dir, new_snapshot) -> dict:
         ends.append(ids["new"])
     if not ends:
         incomplete.append("the new model's snapshot names no end id (no eos_token_id in its generation_config.json or config.json and no eos token the tokenizer knows)")
-    missing = [i for i in ends if i not in served_ids]
+    if rule is None:
+        incomplete.append(f"the stop id rule of the {backend if isinstance(backend, str) else 'unknown'} serving backend is not known, so the stop ids "
+                          f"{served_ids} of the served directory were not compared with the new model's ({ends})")
+    missing = [i for i in ends if i not in served_ids] if rule else []
     if missing:
         problems.append({"name": "stop_id_missing",
                          "detail": f"the new model ends a turn with id {', '.join(map(str, missing))}, which the served directory's stop ids {served_ids} lack"})
-    extra = [i for i in served_ids if ends and i not in ends]
+    extra = [i for i in served_ids if ends and i not in ends] if rule else []
     if extra:
         problems.append({"name": "unexpected_stop_id",
                          "detail": f"the served directory stops on id {', '.join(map(str, extra))}, which the new model does not end a turn with "
@@ -247,12 +409,12 @@ def check_files(served_dir, new_snapshot) -> dict:
         if want is None:
             incomplete.append(f"the token of the new model's end id {i} could not be found in its tokenizer.json")
         elif got is None:
-            incomplete.append(f"the token of end id {i} ({want!r}) could not be found in the served tokenizer.json")
+            incomplete.append(f"the token of end id {i} ({_shown(want)}) could not be found in the served tokenizer.json")
         elif want != got:
-            problems.append({"name": "end_id_token_differs", "detail": f"end id {i} is {got!r} in the served tokenizer and {want!r} in the new model's"})
+            problems.append({"name": "end_id_token_differs", "detail": f"end id {i} is {_shown(got)} in the served tokenizer and {_shown(want)} in the new model's"})
     return {"template": {"served_file": s_file, "served_sha256": s_sha, "new_file": n_file, "new_sha256": n_sha},
             "special_tokens": {"served": served_tokens, "new": new_tokens}, "eos_ids": ids,
-            "stop_ids": {"served": served_ids, "new_model_ends": ends},
+            "stop_ids": {"served": served_ids, "new_model_ends": ends}, "stop_id_rule": rule,
             "end_tokens": [n_to_tok[i] for i in ends if i in n_to_tok], "problems": problems, "incomplete": incomplete, "notes": notes}
 
 
@@ -336,11 +498,11 @@ def check_replies(record, end_tokens=(), start_tokens=()) -> dict:
         for text in texts:
             lead = text.lstrip()
             if ROLE_HEADER.match(text) or any(lead.startswith(t) for t in specials):
-                add("role_header_start", f"the reply to {e.get('id')!r} begins with a role header or a special token: {lead[:30]!r}")
+                add("role_header_start", f"the reply to {_shown(e.get('id'))} begins with a role header or a special token: {_scrubbed_prefix(lead, 30)!r}")
         for text in texts + _call_texts(e):
             for t in ends:
                 if t in text:
-                    add("stop_token_in_reply", f"the reply to {e.get('id')!r} holds the end token {t!r}, so the server did not stop on it")
+                    add("stop_token_in_reply", f"the reply to {_shown(e.get('id'))} holds the end token {_shown(t)}, so the server did not stop on it")
                     break
     if counts["checked"] >= 2 and counts["stopped"] == 0 and counts["length"] == counts["checked"]:
         add("no_reply_stopped", f"all {counts['checked']} chat replies ran to the length limit, so the server may not be stopping on the model's end token")
@@ -398,17 +560,27 @@ def check_live_probe(record, *, native_context=None) -> dict:
 
 def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
     """Both checks joined. `swap_check_path` is a swap-check.json; one that cannot be read means the replies were not checked."""
-    files = check_files(served_dir, new_snapshot)
-    incomplete = list(files["incomplete"])
     suite = None
     live_record = None
+    backend: str | None = "bundle"                       # a swap check with no `kind` was written by the bundle's serve_and_compare.py
     try:
         report = safeio.read_json(_real(swap_check_path), max_bytes=MAX_JSON_BYTES, expect=dict)
         suite = report.get("prompt_suite")
         live_record = report.get("live_probe")
+        if "kind" in report:                             # the container's script writes kind "container"; its stop-id rule is not in STOP_ID_RULES
+            backend = report["kind"] if isinstance(report["kind"], str) else None
     except safeio.SafeReadError as exc:
+        report = None
         if not _absent(exc):
-            incomplete.append(f"the swap check could not be read: {exc.reason}")
+            incomplete_early = f"the swap check could not be read: {exc.reason}"
+        else:
+            incomplete_early = None
+    else:
+        incomplete_early = None
+    files = check_files(served_dir, new_snapshot, backend=backend)
+    incomplete = list(files["incomplete"])
+    if incomplete_early:
+        incomplete.append(incomplete_early)
     served_named = files["special_tokens"].get("served") if isinstance(files.get("special_tokens"), dict) else None
     named = [v for v in served_named.values() if isinstance(v, str)] if isinstance(served_named, dict) else []
     replies = check_replies(suite, files["end_tokens"], start_tokens=named)
@@ -434,6 +606,17 @@ def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
             incomplete.append("the swap check recorded no served_files digests, so the replies cannot be tied to the tokenizer and stop files compared here")
         else:
             here = file_digests(served_dir)
+            after = suite.get("served_files_after")
+            if not isinstance(after, dict):
+                incomplete.append("the swap check recorded no served_files_after digests, so a file changed while the replies were made would not be seen")
+            else:
+                moved = sorted(n for n in INPUT_FILES if seen.get(n) != after.get(n))
+                if moved:
+                    problems.append({"name": "inputs_changed_during_replies",
+                                     "detail": "these files differ between the start and the end of the swap test's replies: " + ", ".join(moved)})
+            if seen.get("tokenizer.json") is None or (isinstance(after, dict) and after.get("tokenizer.json") is None):
+                incomplete.append("tokenizer.json could not be hashed when the swap test ran (absent, refused or unreadable), so the replies cannot be "
+                                  "tied to it")
             changed = sorted(n for n in INPUT_FILES if n != "chat_template.jinja" and n in seen and seen.get(n) != here.get(n))
             if changed:
                 problems.append({"name": "inputs_changed_since_replies",
@@ -441,8 +624,8 @@ def build_record(served_dir, new_snapshot, swap_check_path) -> dict:
             absent = [n for n in INPUT_FILES if n not in seen]
             if absent:
                 incomplete.append("the swap check's served_files lacks " + ", ".join(absent))
-    return {"label": LABEL, "not_checked": NOT_CHECKED, "ok": not problems and not incomplete and replies["checked"], "problems": problems,
-            "incomplete": incomplete, "files": files, "replies": replies, "live_probe": live}
+    return bounded_record({"label": LABEL, "not_checked": NOT_CHECKED, "ok": not problems and not incomplete and replies["checked"],
+                           "problems": problems, "incomplete": incomplete, "files": files, "replies": replies, "live_probe": live})
 
 
 def write_record(stage_dir, served_dir, new_snapshot, swap_check_path) -> dict:

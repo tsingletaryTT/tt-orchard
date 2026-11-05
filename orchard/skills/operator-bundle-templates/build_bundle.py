@@ -1210,7 +1210,7 @@ def txt(redact: Redactor, value, limit: int = 300) -> str:
     """A recorded string as one line for a table cell, shortened and redacted; a non-string is "not recorded"."""
     if not isinstance(value, str) or not value.strip():
         return NOT_RECORDED
-    line = one_line(value)
+    line = one_line(redact(value[:SERVED_CHAT_READ_MAX]))     # redact the WHOLE string first: a token that straddles the cut would leave a fragment no pattern matches (issue 297)
     if len(line) > limit:
         line = line[:limit] + "..."
     return reported_cell(redact, line)
@@ -1928,9 +1928,25 @@ def _served_chat_shape(rec) -> bool:
             and isinstance(rec.get("replies"), dict))
 
 
+SERVED_CHAT_TEXT_MAX = 500           # a line copied out of a served-chat record into RISKS.md: records are read up to 8 MiB
+
+
+SERVED_CHAT_READ_MAX = 8 << 20       # the most characters of one record string that are looked at: a record is read up to 8 MiB
+
+
+def _record_text(text, redact, *, limit: int = SERVED_CHAT_TEXT_MAX) -> str:
+    """`text` as one line for RISKS.md: the WHOLE string redacted first, then its whitespace collapsed, then cut to `limit` characters with the
+    line's length. The order matters: cutting first leaves a fragment of a credential that straddles the cut (`hf_` and 17 payload characters at
+    a cut of 500) that no pattern matches (issue 297, review of PR 466). The writer caps its own record, but an older record or one written by
+    another writer is believed once its sha256 matches the ledger, so the text is bounded here too: only the first SERVED_CHAT_READ_MAX
+    characters are read, and a record cannot hold more."""
+    line = " ".join(redact(str(text)[:SERVED_CHAT_READ_MAX]).split())
+    return line if len(line) <= limit else f"{line[:limit]}... ({len(line)} characters)"
+
+
 def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | None:
-    """What the served-chat.json records (orchard/served_chat.py, issue 17) say, as (dealt with, why), or None when stage 2 has no record and
-    the ledger names no failed write.
+    """What the served-chat.json records (orchard/served_chat.py, issue 17) say, as (dealt with, why), or None when stage 2 has no record,
+    the ledger names no record and no failed write.
 
     A record is believed only when the bytes read once from it (size capped, no link followed, regular files only) have a sha256 equal to the
     latest `served chat check` evidence entry the supervisor wrote for that path; the same bytes are parsed. The hazard is dealt with only when
@@ -1946,14 +1962,16 @@ def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | 
             failed.pop(d["path"], None)
         elif e.get("event") == "decision" and d.get("decision") == "served chat check not written":
             failed[d.get("path") if isinstance(d.get("path"), str) else SERVED_CHAT] = d.get("reason")
-    if not (run.dir / SERVED_CHAT).exists() and not failed:
+    # A record that was written and then deleted still counts: the ledger names it, so the check below reports it as missing (issue 297). That
+    # holds for every path the ledger names (stage 4 and the trials too), not only stage 2's: stage 2's record is then required as well.
+    if not (run.dir / SERVED_CHAT).exists() and not failed and not latest:
         return None
     required = {SERVED_CHAT, *latest}
     required |= {f"stages/4/configs/{c.get('chips')}/served-chat.json" for c in run.configs() if c.get("pass") is True}
     ok, why, problems = True, [], []
     for rel in sorted(failed):
         ok = False
-        why.append(f"The supervisor failed to write `{rel}` ({redact(one_line(str(failed[rel])))}).")
+        why.append(f"The supervisor failed to write `{rel}` ({_record_text(failed[rel], redact)}).")
     for rel in sorted(required):
         if rel in failed:
             continue
@@ -1964,23 +1982,24 @@ def served_chat_verdict(run: Run, redact: Redactor) -> tuple[bool, list[str]] | 
             rec = data = None
         if not _served_chat_shape(rec):
             ok = False
-            why.append(f"`{rel}` is missing or unreadable.")
+            why.append(f"`{rel}` is missing or unreadable" + (" (the ledger recorded it, so it was deleted or replaced after the check)."
+                                                                if rel in latest else "."))
             continue
         if latest.get(rel) != hashlib.sha256(data).hexdigest():
             ok = False
             why.append(f"`{rel}` does not match the sha256 the ledger recorded for it" if rel in latest else
                        f"`{rel}` has no ledger entry, so it cannot be tied to the supervisor's check.")
             continue
-        names = sorted({str(p.get("name")) for p in rec["problems"] if isinstance(p, dict)})
+        names = sorted({_record_text(p.get("name"), redact) for p in rec["problems"] if isinstance(p, dict)})
         if names:
             ok = False
-            problems.append(f"`{rel}` found: " + ", ".join(redact(n) for n in names) + ".")
+            problems.append(f"`{rel}` found: " + ", ".join(names) + ".")
         if rec["incomplete"]:
             ok = False
-            why.append(f"`{rel}` is incomplete: " + redact(one_line("; ".join(str(i) for i in rec["incomplete"][:3]))) + ".")
+            why.append(f"`{rel}` is incomplete: " + _record_text("; ".join(_record_text(i, redact, limit=SERVED_CHAT_READ_MAX) for i in rec["incomplete"][:3]), redact) + ".")
         if rec["replies"].get("checked") is not True:
             ok = False
-            why.append(f"`{rel}` checked no chat reply" + (f" ({redact(one_line(str(rec['replies'].get('why_not'))))})"
+            why.append(f"`{rel}` checked no chat reply" + (f" ({_record_text(rec['replies'].get('why_not'), redact)})"
                                                            if rec["replies"].get("why_not") else "") + ".")
         if rec.get("ok") is not True and not names and not rec["incomplete"] and rec["replies"].get("checked") is True:
             ok = False

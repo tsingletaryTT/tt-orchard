@@ -26,7 +26,7 @@ import os
 from pathlib import Path
 
 from orchard import decode_floor as df
-from orchard import defaults, model_config as mc, safeio, sampling_probe
+from orchard import defaults, model_config as mc, safeio, sampling_choice, sampling_probe
 
 TEXT_FIELDS = ("board", "dtype_policy_source", "bandwidth_source", "assumptions")      # the strings the share records and the bundle copy
 FLOOR_FILE = "decode-floor.json"
@@ -188,15 +188,32 @@ def measured(run_dir) -> list[dict]:
     """Every decode speed the run measured that has a floor to compare with: stage, source, evidence path, dies, tok/s and what the speed is."""
     run = Path(run_dir)
     out = []
-    rel = "stages/2/evidence/swap-check.json"
-    v = _probe_speed(run / rel)
+    first = "stages/2/evidence/swap-check.json"
     dies2 = _chips(run / "stages/2/swap_config.json", defaults.CHIPS_PER_BOARD)
+    # Stage 2's row comes from the swap check of the configuration the package serves (`probe_source`: the drafter-off variant when stage 2
+    # chose it). When that is another file than the first test's, the first test's speed stays as a second row with its own label, so a
+    # reader does not take it for the speed of what the package serves (issue 297).
+    chosen = "stages/2/" + sampling_choice.probe_source(run / "stages" / "2")
+    if chosen != first:
+        v = _probe_speed(run / chosen)
+        if v:
+            out.append({"stage": 2, "source": "stage 2 sampling probe, greedy request, the configuration the package serves", "evidence": chosen,
+                        "dies": _chips(run / chosen.rsplit("/evidence/", 1)[0] / "swap_config.json", dies2), "tok_s": v,
+                        "basis": _probe_basis(run / chosen)})
+    v = _probe_speed(run / first)
     if v:
-        out.append({"stage": 2, "source": "stage 2 sampling probe, greedy request", "evidence": rel, "dies": dies2, "tok_s": v,
-                    "basis": _probe_basis(run / rel)})
+        out.append({"stage": 2, "source": "stage 2 sampling probe, greedy request" if chosen == first
+                    else "stage 2 first test sampling probe, greedy request", "evidence": first, "dies": dies2, "tok_s": v,
+                    "basis": _probe_basis(run / first) + ("" if chosen == first else
+                                                           " The package serves another configuration than the one this speed was measured on.")})
+    # Stage 4 gets a row only for a configuration its result says passed: a failed configuration's swap check is not evidence of a working one.
+    result = _json(run / "stages" / "4" / "result.json")
+    cfgs = result.get("configs") if result else None
+    passed = {c["chips"] for c in cfgs if isinstance(c, dict) and c.get("pass") is True and isinstance(c.get("chips"), int)
+              and not isinstance(c.get("chips"), bool)} if isinstance(cfgs, list) else set()
     configs = run / "stages" / "4" / "configs"
     try:
-        names = sorted((p.name for p in configs.iterdir() if p.name.isdigit()), key=int) if configs.is_dir() else []
+        names = sorted((p.name for p in configs.iterdir() if p.name.isdigit() and int(p.name) in passed), key=int) if configs.is_dir() else []
     except OSError:
         names = []
     for name in names:
