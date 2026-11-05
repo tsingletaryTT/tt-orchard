@@ -75,7 +75,7 @@ from orchard import runaway, safeio
 from orchard.canary import CanaryError, post_json
 from orchard.port_guard import PORT_GUARD_DEPTH, PORT_GUARD_ENTRIES, PORT_GUARD_FILES, PortGuard  # noqa: F401  (names stay importable from here)
 from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_TIMEOUT_S,
-                              AGENT_THINKING, AGENT_TOOL_DEDUPE, DEDUPE_LISTED_CALLS, DEDUPE_MAX_RECORDS,
+                              AGENT_THINKING, AGENT_TOOL_DEDUPE, DEDUPE_HINT_PREFIX, DEDUPE_LISTED_CALLS, DEDUPE_MAX_RECORDS,
                               TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
 from orchard.runner import Denied, check_string
 from orchard.stages import evidence_record
@@ -347,7 +347,8 @@ EMPTY_NUDGE = ("Your last reply was empty: it had no text and no command. Say wh
 LOOP_NUDGE = ("Your last reply repeated itself until it was cut off. Do not analyse or explain further. "
               "Run one command or write one file now, and keep the reply short.")
 RESTART_NOTE = ("The conversation was restarted because earlier replies repeated themselves until they were cut off. Everything you "
-                "did is on disk; the files are listed below. Read only what you need, do one thing at a time, and keep every reply short.")
+                "did is on disk; the files are listed below. What you read before is no longer in this conversation, so read a file again when you "
+                "need its text. Read only what you need, do one thing at a time, and keep every reply short.")
 # What a restart carries over (review of PR 462, round 3): the supervisor's own instructions to this step (a gate's feedback, a wrap-up
 # request, a watchdog nudge) are not part of the loop that caused the restart, and dropping them would send the step back to a task it
 # had already been told to change. At most this many are carried, each cut to this many characters; the oldest nudges go first.
@@ -1056,7 +1057,8 @@ class AgentStep:
             self._turn += 1
             for text in self.control.take_nudges(self.agent):
                 messages.append({"role": "user", "content": text})
-                self._carry_instruction("nudge", text)
+                if not text.startswith(DEDUPE_HINT_PREFIX):      # that hint says a file's text is in the context: a restart drops the context (review of PR 488)
+                    self._carry_instruction("nudge", text)
             reason = self.control.stop_reason()
             if reason:
                 return self._end(reason, turn - 1)

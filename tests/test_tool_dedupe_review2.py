@@ -299,3 +299,199 @@ def test_a_restart_inside_a_continuation_clears_the_group_caches(tmp_path):
     ])
     out = replay.replay_run(run)
     assert out["read_calls"] == 3 and out["read_notes"] == 1     # the post-restart read is not a note
+
+
+# ======================================================================================================================================
+# Round 2 of the review (Copilot on head 3ac5b8dd, two findings in code that round 1 left unchanged)
+#
+# 6. A dedupe hint says "its text is already in your context, do not read it again". A context restart drops that conversation, but
+#    `_restart_fresh` carried every watchdog nudge into the replacement prompt, so the agent was told a file was present when it was not.
+# 7. scripts/dedupe_replay.py stripped every `stages/<n>/` prefix, so `stages/1/evidence/a.txt` and `stages/2/evidence/a.txt` were one file.
+# ======================================================================================================================================
+
+import pytest                                                                   # noqa: E402
+
+from orchard import runaway                                                      # noqa: E402
+from orchard.defaults import DEDUPE_HINT_PREFIX                                  # noqa: E402
+from orchard.ledger import Ledger                                                # noqa: E402
+from fake_model import FakeModel, call as fcall, final as ffinal, truncated      # noqa: E402
+from test_tool_dedupe import run, put, step                                      # noqa: E402,F401  (the fixture and the AgentStep builder)
+from test_agent_runaway_round3 import LOOP, by_request                           # noqa: E402
+
+
+def real_hint() -> str:
+    """The nudge text the detector really sends."""
+    d = DedupeStreak()
+    found = [d.feed(result(n, True)) for n in (1, 2, 3)]
+    return found[-1].nudge
+
+
+def restart_prompt(fm) -> str:
+    """The first user message of the replacement conversation: the request that follows the restart carries it."""
+    for req in fm.requests:
+        users = [m["content"] for m in req["messages"] if m["role"] == "user"]
+        if len(req["messages"]) == 2 and users and "was restarted" in users[0]:
+            return users[0]
+    raise AssertionError("no request carried the restart prompt")
+
+
+def run_hint_then_capped_replies(run, hint: str):
+    put(run, "evidence/a.txt", "file text")
+    answers = [fcall("read_file", path="evidence/a.txt"), truncated(16384, content=LOOP), truncated(16384, content=LOOP),
+               fcall("read_file", path="evidence/a.txt"), ffinal("done")]
+    with Ledger(run / "ledger.jsonl") as led, FakeModel(by_request(*answers)) as fm:
+        s, _, control = step(run, led, fm.endpoint, unstick=runaway.Unstick(), restart_on_caps=1)
+        control.nudges.append(hint)                       # the ladder delivered the hint before the first model turn
+        out = s.run("system", "task")
+    return out, fm
+
+
+def test_the_hint_the_detector_sends_starts_with_the_marker():
+    assert real_hint().startswith(DEDUPE_HINT_PREFIX) and "Do not read it again" in real_hint()
+
+
+def test_a_dedupe_hint_is_not_carried_into_the_restart_prompt(run):
+    out, fm = run_hint_then_capped_replies(run, real_hint())
+    assert out.status == "done"
+    prompt = restart_prompt(fm)
+    assert "Do not read it again" not in prompt and DEDUPE_HINT_PREFIX not in prompt and "already in your context" not in prompt
+
+
+def test_the_hint_reached_the_first_conversation_before_the_restart(run):
+    out, fm = run_hint_then_capped_replies(run, real_hint())
+    first = [m["content"] for m in fm.requests[0]["messages"] if m["role"] == "user"]
+    assert any(DEDUPE_HINT_PREFIX in t for t in first)           # it was sent; only the carrying across a restart is dropped
+
+
+def test_other_nudges_are_still_carried_into_the_restart_prompt(run):
+    out, fm = run_hint_then_capped_replies(run, "You have not written a file for 20 turns. Write the port now.")
+    assert "Write the port now." in restart_prompt(fm)
+
+
+def test_the_restart_prompt_allows_reads_again(run):
+    out, fm = run_hint_then_capped_replies(run, real_hint())
+    prompt = restart_prompt(fm).lower()
+    assert "read a file again" in prompt and "no longer in this conversation" in prompt
+
+
+def test_a_note_given_before_a_restart_is_not_given_after_it(run):
+    put(run, "evidence/a.txt", "file text")
+    answers = [fcall("read_file", path="evidence/a.txt"), fcall("read_file", path="evidence/a.txt"),
+               truncated(16384, content=LOOP), truncated(16384, content=LOOP),
+               fcall("read_file", path="evidence/a.txt"), ffinal("done")]
+    with Ledger(run / "ledger.jsonl") as led, FakeModel(by_request(*answers)) as fm:
+        s, _, _ = step(run, led, fm.endpoint, unstick=runaway.Unstick(), restart_on_caps=1)
+        out = s.run("system", "task")
+    assert out.status == "done"
+    before = [m["content"] for m in fm.requests[2]["messages"] if m["role"] == "tool"]
+    after = [m["content"] for m in fm.requests[-1]["messages"] if m["role"] == "tool"]
+    assert len(before) == 2 and "unchanged since turn" in before[1]          # a note was given in the first conversation
+    assert after == ["file text"]                                           # the new conversation holds the text itself, not a note about turn 1
+
+
+# ---- 7. the stage component of a path -------------------------------------------------------------------------------------------------
+
+def read_of(path):
+    return call("read_file", json.dumps({"path": path}))
+
+
+def write_of(path):
+    return call("write_file", json.dumps({"path": path, "content": "x"}))
+
+
+def one_step_run(tmp_path, stage, records, name="prepare-00045.jsonl", dirname=None):
+    run_dir = tmp_path / "run"
+    log = run_dir / "stages" / (dirname or str(stage)) / "log"
+    write_log(log / name, records)
+    return run_dir
+
+
+def test_the_same_file_name_in_two_stages_is_two_files(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [read_of("stages/1/evidence/a.txt"), read_of("stages/2/evidence/a.txt")]),
+        rec(2, [tool("SAME" * 100), tool("SAME" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 2, records))
+    assert out["read_calls"] == 2 and out["read_notes"] == 0
+
+
+def test_a_write_in_one_stage_does_not_end_the_note_for_the_same_name_in_another(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [read_of("stages/1/evidence/a.txt")]),
+        rec(2, [tool("AAA" * 100)], [write_of("stages/2/evidence/a.txt")]),
+        rec(3, [tool("wrote")], [read_of("stages/1/evidence/a.txt")]),
+        rec(4, [tool("AAA" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 2, records))
+    assert out["read_calls"] == 2 and out["read_notes"] == 1
+
+
+def test_a_stage_relative_path_is_the_file_of_the_steps_own_stage(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [read_of("evidence/a.txt"), read_of("stages/2/evidence/a.txt")]),
+        rec(2, [tool("SAME" * 100), tool("SAME" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 2, records))
+    assert out["read_notes"] == 1                                          # the alias and the explicit path are one file in stage 2
+
+
+def test_the_same_alias_in_a_step_of_another_stage_is_another_file(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [read_of("evidence/a.txt"), read_of("stages/2/evidence/a.txt")]),
+        rec(2, [tool("SAME" * 100), tool("SAME" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 3, records))
+    assert out["read_notes"] == 0                                          # in stage 3 `evidence/a.txt` is stages/3/evidence/a.txt
+
+
+def test_a_write_by_stage_relative_path_ends_the_note_for_that_file_in_that_stage_only(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [read_of("stages/2/evidence/a.txt"), read_of("stages/1/evidence/a.txt")]),
+        rec(2, [tool("AAA" * 100), tool("AAA" * 100)], [write_of("evidence/a.txt")], ),
+        rec(3, [tool("wrote")], [read_of("stages/2/evidence/a.txt"), read_of("stages/1/evidence/a.txt")]),
+        rec(4, [tool("BBB" * 100), tool("AAA" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 2, records))
+    assert out["read_calls"] == 4 and out["read_notes"] == 1               # stage 1's copy is unchanged, stage 2's was rewritten
+
+
+def test_a_path_that_exists_in_the_run_directory_is_the_run_relative_file(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "research").mkdir(parents=True)
+    (run_dir / "research" / "x.json").write_text("{}")
+    write_log(run_dir / "stages" / "2" / "log" / "prepare-00045.jsonl", [
+        rec(1, [SYSTEM, USER], [read_of("research/x.json"), read_of("stages/2/research/x.json")]),
+        rec(2, [tool("SAME" * 100), tool("SAME" * 100)], [], finish="stop"),
+    ])
+    out = replay.replay_run(run_dir)
+    assert out["read_notes"] == 0                                          # the live Tools read the run directory first: research/x.json is run-relative
+
+
+def test_the_stage_of_a_step_moved_aside_is_still_its_stage(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [read_of("evidence/a.txt"), read_of("stages/2/evidence/a.txt")]),
+        rec(2, [tool("SAME" * 100), tool("SAME" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 2, records, dirname="2.partial-1"))
+    assert out["read_notes"] == 1                                          # the agent saw the directory as stages/2 while it was running
+
+
+def test_offsets_still_separate_pages_of_one_file(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [call("read_file", json.dumps({"path": "evidence/a.txt", "offset": 0})),
+                                call("read_file", json.dumps({"path": "evidence/a.txt", "offset": 4000}))]),
+        rec(2, [tool("SAME" * 100), tool("SAME" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 2, records))
+    assert out["read_notes"] == 0
+
+
+def test_an_absolute_path_inside_the_run_directory_is_the_run_relative_file(tmp_path):
+    run_dir = tmp_path / "run"
+    absolute = str(run_dir / "stages" / "2" / "evidence" / "a.txt")
+    records = [
+        rec(1, [SYSTEM, USER], [read_of(absolute), read_of("stages/2/evidence/a.txt")]),
+        rec(2, [tool("SAME" * 100), tool("SAME" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_run(one_step_run(tmp_path, 2, records))
+    assert out["read_notes"] == 1

@@ -16,13 +16,15 @@ and the tool results in the next record's `sent`) and applies the same rules `or
 - a capped reply's incomplete calls did not run and have no result; and the logs of a step's gate-feedback and wrap-up continuations are replayed after the
   step's own log with the same memory, because they share its conversation and its Tools.
 
-The recorded logs hold no file identity, so equal text stands for "unchanged". A path is matched without its leading `stages/<n>/`. The count is
-therefore an estimate of what the live rule would have done. Nothing is written and no model is called. It prints one line per run and a total:
+The recorded logs hold no file identity, so equal text stands for "unchanged". A path is matched the way the live Tools resolve it: run directory first, stage directory second, with the stage
+component kept (`stages/1/evidence/a.txt` and `stages/2/evidence/a.txt` are two files) and a stage-relative path read in the stage of its log.
+The count is therefore an estimate of what the live rule would have done. Nothing is written and no model is called. It prints one line per run and a total:
 the calls, how many would have been notes, and the characters of tool output that would not have gone into the context again."""
 from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 import sys
 from pathlib import Path
@@ -36,10 +38,41 @@ LOG_MAX_BYTES = 64 * 1024 * 1024
 NOTE_CHARS = 190                                # about the length of a note: the path, the turn numbers and one sentence
 
 
-def norm(path: str) -> str:
-    path = str(path).strip().replace("\\", "/")
-    path = re.sub(r"^\./", "", path)
-    return re.sub(r"^stages/\d+/", "", path)
+STAGE_LOG_DIR = re.compile(r"^(?:.*/)?stages/(?P<n>\d+)(?:\.partial-\d+)?/log$")
+
+
+def stage_of(log: Path) -> str | None:
+    """The stage a step log belongs to: `stages/<n>/log/` or, for an attempt that was moved aside, `stages/<n>.partial-<k>/log/`. While the step
+    ran the directory was `stages/<n>`, which is how the agent saw its paths."""
+    m = STAGE_LOG_DIR.match(Path(log).parent.as_posix())
+    return m.group("n") if m else None
+
+
+def _clean(path, run_dir: Path) -> str:
+    p = posixpath.normpath(str(path).strip().replace("\\", "/")) if str(path).strip() else ""
+    root = Path(run_dir).as_posix().rstrip("/") + "/"
+    if p.startswith(root):                                  # an absolute path inside the run directory is the run-relative one
+        p = p[len(root):]
+    return p
+
+
+def read_key_path(path, stage: str | None, run_dir: Path) -> str:
+    """The file a read_file path names, as one run-relative string. `Tools.readable` tries the run directory first and the stage directory second,
+    so a path that exists under the run directory is run-relative (an explicit `stages/<n>/...` is that), and any other is the step's own stage
+    directory. The stage component is kept: `stages/1/evidence/a.txt` and `stages/2/evidence/a.txt` are two files."""
+    p = _clean(path, run_dir)
+    if p.startswith("stages/") or p.startswith("/") or (Path(run_dir) / p).exists():
+        return p
+    return f"stages/{stage if stage is not None else '?'}/{p}"
+
+
+def write_key_path(path, stage: str | None, run_dir: Path) -> str:
+    """The file a write_file path names, as the same string. `Tools.target`: relative to the stage directory, except that a path starting with
+    `stages/` is run-relative and must land in this stage."""
+    p = _clean(path, run_dir)
+    if p.startswith("stages/") or p.startswith("/"):
+        return p
+    return f"stages/{stage if stage is not None else '?'}/{p}"
 
 
 def digest(text: str) -> str:
@@ -85,7 +118,7 @@ def logged_calls(rec: dict) -> list[tuple[str, dict]]:
     return out
 
 
-def replay_conversation(parts: list, run_dir: Path) -> dict:
+def replay_conversation(parts: list, run_dir: Path, stage: str | None = None) -> dict:
     """One conversation: the logs of a step in execution order (the step's own log, then the gate-feedback and wrap-up continuations that share its
     conversation and Tools). The reads and commands it remembers carry from one log to the next and are forgotten when a record opens a new conversation."""
     reads: dict[tuple[str, int], str] = {}
@@ -104,7 +137,7 @@ def replay_conversation(parts: list, run_dir: Path) -> dict:
                 out["chars"] += len(text)
                 if name == "read_file":
                     out["read_calls"] += 1
-                    key = (norm(args.get("path", "")), args.get("offset", 0) if isinstance(args.get("offset", 0), int) else 0)
+                    key = (read_key_path(args.get("path", ""), stage, run_dir), args.get("offset", 0) if isinstance(args.get("offset", 0), int) else 0)
                     if reads.get(key) == digest(text) and not text.startswith(("error:", "refused:")):
                         out["read_notes"] += 1
                         out["saved"] += max(len(text) - NOTE_CHARS, 0)
@@ -123,16 +156,16 @@ def replay_conversation(parts: list, run_dir: Path) -> dict:
                             shell[command] = digest(text)
                 elif name == "write_file":
                     shell.clear()
-                    target = norm(args.get("path", ""))
+                    target = write_key_path(args.get("path", ""), stage, run_dir)
                     for key in [k for k in reads if k[0] == target]:
                         del reads[key]
             pending = logged_calls(rec)
     return out
 
 
-def replay_step(records: list, run_dir: Path) -> dict:
+def replay_step(records: list, run_dir: Path, stage: str | None = None) -> dict:
     """One log as one conversation (kept for callers that have a single log)."""
-    return replay_conversation([records], run_dir)
+    return replay_conversation([records], run_dir, stage)
 
 
 def grouped_logs(run_dir: Path) -> list[list[Path]]:
@@ -172,7 +205,7 @@ def replay_run(run_dir: Path) -> dict:
                 continue
         if not parts:
             continue
-        step = replay_conversation(parts, run_dir)
+        step = replay_conversation(parts, run_dir, stage_of(group[0]))
         total["steps"] += 1
         for k in ("read_calls", "read_notes", "shell_calls", "shell_notes", "chars", "saved"):
             total[k] += step[k]

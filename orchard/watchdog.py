@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from orchard.adapters import AdapterError
-from orchard.defaults import (DEDUPE_NUDGES_PER_STAGE, DEDUPE_STREAK_N, DEDUPE_STREAK_WINDOW, IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
+from orchard.defaults import (DEDUPE_HINT_PREFIX, DEDUPE_NUDGES_PER_STAGE, DEDUPE_STREAK_N, DEDUPE_STREAK_WINDOW, IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
                               RUNG_CAPS, THINKING_CAP, TURN_CYCLE_MAX_PERIOD, TURN_CYCLE_REPEATS, TURN_REPEAT_N,
                               TURN_SHAPE_N, WRITELESS_TURNS)
 
@@ -487,7 +487,7 @@ class DedupeStreak:
         what = ev.name or "a file you already read"
         return Finding(self.name, agent, ev.ts, f"{sum(recent)} of the last {len(recent)} tool results repeated an unchanged read ({what})",
                        {"count": sum(recent), "window": len(recent), "target": what}, nudge_only=True,
-                       nudge=(f"You asked again for {what}, which has not changed since you read it: its text is already in your context. "
+                       nudge=(f"{DEDUPE_HINT_PREFIX}You asked again for {what}, which has not changed since you read it: its text is already in your context. "
                               "Do not read it again. Write or edit the files this step needs now, or say what blocks you from writing them."))
 
 
