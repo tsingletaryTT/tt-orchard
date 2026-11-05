@@ -2353,6 +2353,31 @@ def recorded_by_supervisor(ledger, n: int, rec: dict, *, whats: tuple = ()) -> b
                for e in entries[start:])
 
 
+def marker_state(run_dir, n: int, marker_name: str | None, ledger) -> tuple[str, dict | None, str | None]:
+    """What `open_stage_dir` would make of the resume marker of stage `n`, with no ledger entry written: `("absent", None, None)` when there is
+    no marker file, `("unreadable", None, reason)` when the bounded reader refuses it (over the cap, a link that leaves the run directory,
+    changed during the read), `("not vouched", record, None)` when the supervisor has no evidence entry for these bytes (an agent can write
+    `test-result.json`, the plan and the stage 1 reference files), and `("ok", record, None)` when it is a resume point. The supervisor's pending
+    check asks this to learn whether a resumed stage 2 will only read results (issue 327, review of PR 435 round 2), so the two cannot disagree."""
+    if not marker_name:
+        return "absent", None, None
+    marker = Path(run_dir) / "stages" / str(n) / marker_name
+    if not marker.is_file():
+        return "absent", None, None
+    try:
+        rec = evidence_record(run_dir, marker)
+    except safeio.SafeReadError as exc:
+        return "unreadable", None, exc.reason
+    if marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, n, rec):
+        # An agent can write this file. Only the supervisor's own record of its hardware test vouches for it.
+        return "not vouched", rec, None
+    if marker_name in VOUCHED_MARKERS and not recorded_by_supervisor(ledger, n, rec, whats=VOUCHED_MARKERS[marker_name]):
+        # The plan and the stage 1 reference files are written by the supervisor too (issue 344). A file with no matching entry
+        # after the stage's latest move-aside is not a resume point; the stage directory is moved aside and the step runs again.
+        return "not vouched", rec, None
+    return "ok", rec, None
+
+
 def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple[Path, bool]:
     """The stage directory for this attempt, and whether it resumes from the stage's marker.
 
@@ -2361,26 +2386,16 @@ def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple
     """
     d = Path(run_dir) / "stages" / str(spec.number)
     if d.exists():
-        marker = d / spec.marker if spec.marker else None
-        if resuming and marker is not None and marker.is_file():
-            try:
-                rec = evidence_record(run_dir, marker)
-            except safeio.SafeReadError as exc:
-                # A marker that the bounded reader refuses (over the cap, a link that leaves the run directory, changed during the read) is not
-                # a resume point. The reason is in the ledger, and the directory is moved aside below as for any marker that cannot be used.
-                rec = None
+        if resuming and spec.marker and (d / spec.marker).is_file():
+            state, rec, reason = marker_state(run_dir, spec.number, spec.marker, ledger)
+            if state == "unreadable":
+                # A marker that the bounded reader refuses is not a resume point. The reason is in the ledger, and the directory is moved
+                # aside below as for any marker that cannot be used.
                 ledger.append("decision", spec.number, decision="marker cannot be read and is not a resume point",
-                              marker=spec.marker, reason=exc.reason)
-            if rec is None:
-                pass
-            elif marker.name == SUPERVISOR_MARKER and not recorded_by_supervisor(ledger, spec.number, rec):
-                # An agent can write this file. Only the supervisor's own record of its hardware test vouches for it.
+                              marker=spec.marker, reason=reason)
+            elif state == "not vouched":
                 ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
-            elif spec.marker in VOUCHED_MARKERS and not recorded_by_supervisor(ledger, spec.number, rec, whats=VOUCHED_MARKERS[spec.marker]):
-                # The plan and the stage 1 reference files are written by the supervisor too (issue 344). A file with no matching entry
-                # after the stage's latest move-aside is not a resume point; the stage directory is moved aside and the step runs again.
-                ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
-            else:
+            elif state == "ok":
                 ledger.append("decision", spec.number, decision="resume from marker", marker=rec)
                 return d, True
         k = 1

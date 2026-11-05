@@ -1,0 +1,3 @@
+target = "0.9.108"
+summary = "The residency estimate names the highest precision that fits, marks mixture-of-experts models, checks first-boot disk and RAM, and gives a bound from the Hub's parameter counts, so Hydrogen-1.0 is refused before a download"
+kind = "feature"
