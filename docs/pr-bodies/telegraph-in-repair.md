@@ -1,6 +1,6 @@
 # The outside helper inside the port repair rounds (issue 427, run11)
 
-Draft body for the pull request (no pull request is open yet). Branch `telegraph-in-repair`, off the local run commit `ea0a229e`.
+Pull request body. Branch `stack-5-repair-help`, link 5 of the stack, on `stack-4-chain`. Version fragment target 0.9.120.
 
 ## What it does
 
@@ -46,7 +46,7 @@ failed at prefill, the coder fixed it, the check failed at load, the coder loope
     (`scratchpad/mutate_tgrepair.py`), all red in the end. The first run had one green (a first-round clause that the previous-round lookup already
     covered); the two paths became one. The scenario tests run the real template against a fake `ttnn` and a real `Telegraph` with a recording
     transport; no clock decides a result.
-12. **Housekeeping.** Change fragment `changes/telegraph-in-repair.toml` (target 0.9.118); dated project-log entry; README flag row
+12. **Housekeeping.** Change fragment `changes/telegraph-in-repair.toml` (target 0.9.120); dated project-log entry; README flag row
     `--no-repair-help` and a README section. The per-problem cap note: the helper counts a problem across its whole ledger, so the one shared id
     had five of its six calls used by three runs; the id is now per run.
 
