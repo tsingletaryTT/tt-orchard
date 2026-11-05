@@ -1,0 +1,2 @@
+target = "0.9.115"
+summary = "Full port stage 6 (issue 329): the supervisor runs a quality and benchmark template on the port that passed, checks the numbers against the record, and the operator bundle reports them with their labels."
