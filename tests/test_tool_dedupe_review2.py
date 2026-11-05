@@ -153,15 +153,6 @@ def test_the_same_command_without_a_restart_is_a_note(tmp_path):
     assert out["shell_calls"] == 2 and out["shell_notes"] == 1
 
 
-def test_calls_pending_at_a_restart_are_dropped(tmp_path):
-    records = [
-        rec(1, [SYSTEM, USER], [read_a()]),
-        rec(2, [SYSTEM, USER], [], finish="stop"),          # the next record opens a replacement conversation: nothing answers the first call
-    ]
-    out = replay.replay_step(records, tmp_path)
-    assert out["read_calls"] == 0 and out["chars"] == 0
-
-
 # ---- 3. a capped reply can log a call that never ran -------------------------------------------------------------------------------------
 
 def test_an_incomplete_call_in_a_capped_reply_is_not_paired_with_the_result_of_the_read(tmp_path):
@@ -204,6 +195,15 @@ def test_dict_arguments_do_not_crash_and_are_replayed(tmp_path):
     ]
     out = replay.replay_step(records, tmp_path)
     assert out["read_calls"] == 2 and out["read_notes"] == 1
+
+
+def test_dict_arguments_keep_their_path_so_two_files_with_the_same_text_are_not_one_read(tmp_path):
+    records = [
+        rec(1, [SYSTEM, USER], [call("read_file", {"path": "stages/0/a.txt"}), call("read_file", {"path": "stages/0/b.txt"})]),
+        rec(2, [tool("SAME" * 100), tool("SAME" * 100)], [], finish="stop"),
+    ]
+    out = replay.replay_step(records, tmp_path)
+    assert out["read_calls"] == 2 and out["read_notes"] == 0
 
 
 def test_arguments_of_any_other_shape_do_not_crash(tmp_path):

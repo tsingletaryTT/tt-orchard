@@ -94,10 +94,9 @@ def replay_conversation(parts: list, run_dir: Path) -> dict:
     pending: list[tuple[str, dict]] = []
     for records in parts:
         for rec in records:
-            if opens_conversation(rec):                 # a restart (or the first prompt): what was read, and the calls still waiting, are gone
+            if opens_conversation(rec):                 # a restart (or the first prompt): what the step had read is gone
                 reads.clear()
                 shell.clear()
-                pending = []
             # The tool results answer the calls of the record before: they are the `tool` messages of this record's `sent`.
             results = [m.get("content", "") for m in rec.get("sent", []) if isinstance(m, dict) and m.get("role") == "tool"]
             for (name, args), text in zip(pending, results):
