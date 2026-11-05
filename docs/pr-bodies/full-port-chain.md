@@ -18,7 +18,7 @@ Branch `stack-4-chain`, link 4 of the stack, on `stack-3-stage6`. Tests only: no
 8. **Failure paths that leave state behind.** A pause anywhere fails the test, with the ledger's reason in the message.
 9. **Numbers and sizes.** None added.
 10. **Secrets, paths and host names.** None in the test or in this text.
-11. **Tests that do not test the claim.** The chain test fails when a stage's pause is put back (the `FULL_PORT_UNBUILT` switch of the previous link) and when a stage reads a ledger decision under a name the stage before it does not write. Both were seen red before the code that fixes them was in place (they are the combination fixes of the previous link).
+11. **Tests that do not test the claim.** No mutation was run for this link, which adds tests only. What the chain test relies on was seen red on the previous link: its first run, before the five combination fixes, had 13 failing tests that all came from stage 6 meeting stages 4 and 5. The chain test asserts that no run stops at a pause for an unbuilt stage, so putting that pause back would turn it red; that was not run as a mutation.
 12. **Housekeeping.** No version fragment (no code change). A dated project-log entry is not needed for tests only; the previous link carries the log entry for the combination.
 
 ## What could not be tested without hardware
