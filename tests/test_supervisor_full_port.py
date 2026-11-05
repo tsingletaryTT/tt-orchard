@@ -174,6 +174,7 @@ def test_an_unattended_retry_does_not_pass_the_pause(rig):
 
 def test_an_attended_resume_after_the_pause_goes_on_into_the_generic_stages(rig):
     make(rig)
+    rig.args.full_port_rehearsal = True          # stage 5 (issue 329) asks the passkey question, which this test's port cannot answer: random weights
     rig.on_sleep = lambda: Control(rig.run_dir).write("resume")
     assert rig.run() == EXIT_READY
     assert started(rig, 3) and [d["result"] for d in rig.ends(2)] == ["pass"]

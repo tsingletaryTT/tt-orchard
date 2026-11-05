@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, model_kind, safeio, scoring_check
+from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, full_port_serve, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, IGNORED_WEIGHT_SUFFIXES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import agreement_core, prompt_suite, raw_evidence, sampling_choice, sampling_probe, sidecar_numbers, token_check
@@ -584,6 +584,18 @@ def gate_full_port_3(stage_dir, run_dir, *, rehearsal: bool = False, expected_ch
     agree with the stage 1 reference. The checks are stage 2's, on stages/3/. The supervisor gives `expected_chips` from the run's
     `--required-chips`; the gate refuses a test that ran on a different number."""
     return gate_full_port(stage_dir, run_dir, rehearsal=rehearsal, stage=3, expected_chips=expected_chips)
+
+
+def gate_full_port_serve(stage_dir, run_dir, *, rehearsal: bool = False, expected_chips: int | None = None, source: int | None = None,
+                         corpus_sha256: str | None = None) -> GateResult:
+    """Stage 5 of a full port (issue 329): the port that passed stage 2 or 3 sits behind the chat server, replays the acceptance corpus at boot
+    and answers the passkey and canary questions. orchard/full_port_serve.py holds the checks. The supervisor gives `source` (the stage whose
+    port is served), `expected_chips` (that stage's chip count), `corpus_sha256` (the ledger's hash of the corpus it wrote) and `rehearsal`
+    (from the ledger); the gate waives `coherent` only, as stage 2's does."""
+    waived: list[str] = []
+    reasons, seen = full_port_serve.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived, expected_chips=expected_chips, source=source,
+                                          corpus_sha256=corpus_sha256)
+    return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
 
 
 def gate_scoring_reference(stage_dir, run_dir) -> GateResult:
@@ -1977,6 +1989,12 @@ FULL_PORT_STAGE_2 = dataclasses.replace(
 FULL_PORT_STAGE_3 = dataclasses.replace(
     STAGES[3], name="full port on the configured chips and agreement with the CPU reference", skill="full-port-mesh",
     gate=gate_full_port_3, draft="full_port")
+# Stage 5 of a full port (issue 329): the port that passed stage 2 or 3, behind the chat server, with the acceptance corpus replayed at boot, a passkey
+# check and a canary. No agent writes anything: the supervisor copies the port, records the corpus, runs its own template and derives result.json
+# (orchard/full_port_serve.py). Its result has the generic stage 5 `checks` shape, so the operator bundle prints it as it prints any stage 5.
+FULL_PORT_STAGE_5 = dataclasses.replace(
+    STAGES[5], name="full port behind the chat server: acceptance corpus, passkey and canary", skill=full_port_serve.SKILL,
+    gate=gate_full_port_serve, draft="full_port_serve", needs_coder=False)
 SKIP_3_FULL_PORT = ("full-port route: the run configures no chip count above one board (`--required-chips`), so stage 2 already ran the port on "
                     "the configured chips")
 
@@ -2342,6 +2360,8 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         return FULL_PORT_STAGE_2          # only stage 0's own `full-port` answer: `unknown` and `restricted-head` keep their pauses
     if full_port and number == 3 and path == "full-port" and cls == "full-port" and not scoring_routed(kind, path, cls, full_port):
         return FULL_PORT_STAGE_3          # a scoring model of this class keeps its own pause after stage 2
+    if full_port and number == 5 and path == "full-port" and cls == "full-port" and not scoring_routed(kind, path, cls, full_port):
+        return FULL_PORT_STAGE_5          # a scoring model of this class keeps the generic table after its own stage 2
     if path == "stock-runtime":
         stock_table = {2: STOCK_STAGE_2, 3: dataclasses.replace(STAGES[3], skip=SKIP_STOCK_3),
                        4: dataclasses.replace(STAGES[4], skip=SKIP_STOCK_4), 5: dataclasses.replace(STAGES[5], skip=SKIP_STOCK_5),
