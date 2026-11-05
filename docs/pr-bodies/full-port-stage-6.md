@@ -1,6 +1,6 @@
 # Full port stage 6: quality against the reference and a benchmark (issue 329, stage 6 half)
 
-Branch `full-port-stage-6`, from the local `integration` branch. No PR yet.
+Branch `stack-3-stage6`, link 3 of the stack, on `stack-2-stage5`. Version fragment target 0.9.119.
 
 ## What it does
 
@@ -35,3 +35,7 @@ Files: `orchard/full_port_quality.py` (gate, derive), `orchard/full_port_quality
 ## Not tested
 
 No chip run. A port that returns the reference ids without computing them is not detected. The pause before stage 4 still stands until the stage 4 and stage 5 forks merge.
+
+## Combination changes in this link
+
+Stage 6 was built next to stages 4 and 5, so landing it on both needed five small changes, kept as their own commits: the full-port route no longer pauses after stage 4 (a `FULL_PORT_UNBUILT` switch keeps the tests of stages 2 to 4 that stop at the old pause working), the port-copy ledger decision names its source stage (`stage 3 port copied`, which stage 6's gate reads), the seed keeps the source stage a caller passes, and the stage 5 and stage 6 supervisor tests keep the other stage generic. With those, 2,165 targeted tests pass on this link (the first run, without them, had 13 failures that all came from stage 6 meeting stages 4 and 5).
