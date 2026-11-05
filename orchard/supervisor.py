@@ -821,10 +821,15 @@ class Supervisor:
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
-                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None):
+                    port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
+                    helper_drives: bool | None = None):
         self.run_dir = Path(run_dir).resolve()
         # The helper inside the repair rounds (orchard/repair_help.py): on when the helper is, unless `--no-repair-help` or the caller says no.
         self.repair_help = self.REPAIR_HELP_DEFAULT if repair_help is None else bool(repair_help)
+        # The helper-driven stage 2 (orchard/repair_help.py `HELPER_ROUNDS`): after the first draft is placed, the repair rounds ask the helper for each
+        # corrected port and run the check, with no coder step, until the check passes, a cap is reached, or two rounds in a row fail the same way.
+        # None: on when the helper and the repair help are on and the run is a rehearsal; True and False are the operator's words.
+        self.helper_drives = helper_drives
         # The outside helper (orchard/telegraph.py, a `Telegraph`), or None. Full-port stage 2 phones it when attempts keep failing
         # (orchard/phone_a_friend.py). None is the earlier behaviour: nothing is sent anywhere.
         self.telegraph = telegraph
@@ -2374,6 +2379,8 @@ class Supervisor:
         nothing in the port ends the rounds: the same files would fail the same way. After the last round the stage goes on as it did before
         this option: the finish step records the failure, the gate fails, and the next attempt starts again."""
         n, limit = spec.number, self.port_repair_rounds
+        if limit and n == 2 and self._helper_drive_on():
+            limit = max(limit, repair_help.HELPER_ROUNDS)         # the helper drives: more rounds, each one a call within the helper's own caps
         if not limit or n != 2:         # repair rounds belong to stage 2: stage 3 starts from a port that already passed (issue 326)
             return None
         # Each round takes at most two passes (a catch-up for a rerun whose `tested` entry is missing, then the round) and the last pass reads the
@@ -2427,27 +2434,46 @@ class Supervisor:
                 self.watchdog = self._watchdog(spec)
                 # The outside helper at the start of the round (orchard/repair_help.py): in the attempt's first round, and in a round whose failure
                 # is no further along than the last one's. Its file, when it is placed, is what the coder's step starts from.
-                asked_here, friend_note = False, ""
-                if self.repair_help and getattr(self, "telegraph", None) is not None:
-                    ask_now, ask_why = repair_help.start_trigger(self.ledger.read(), n, k, failure)
-                    if ask_now:
-                        friend_note, _placed, asked_here = self._repair_help(spec, stage_dir, k, limit, failure, raw, why=ask_why, coder_failed=False)
-                        if _placed:
-                            self._repair_baseline = port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)    # the coder's step ends on ITS edit
-                try:
-                    out, _ = self._step(spec, "repair", stage_dir, escalated, resumed,
-                                        extra=self._repair_text(n, k, limit, failure, raw) + (("\n\n" + friend_note) if friend_note else ""))
-                finally:
-                    self._repair_baseline = None
-                if out.status != "done":
-                    # A step that stopped in a watchdog pause or escalation, or on capped replies: the helper gets the port as the coder left it,
-                    # when it was not asked at the start of this round. A placed answer lets the round go on to its check.
-                    helped_on = False
-                    if (out.status in ("pause", "escalate", "error") and not asked_here and self.repair_help and getattr(self, "telegraph", None) is not None):
-                        _note, helped_on, _ = self._repair_help(spec, stage_dir, k, limit, failure, raw,
-                                                                why=f"the coder's repair step ended: {out.status}", coder_failed=True)
-                    if not helped_on:
-                        return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
+                # The best port so far (orchard/repair_help.py `best_state`): the furthest this attempt's port has got along the request chain
+                # is kept in stages/2.best, so the next attempt does not start again from the skeleton.
+                self._record_best(n, stage_dir, failure)
+                asked_here, friend_note, driven_ok = False, "", False
+                handed_back = self._helper_drive_on() and repair_help.same_failure_twice(self.ledger.read(), n, k)
+                if handed_back:
+                    # Two rounds in a row failed at the same request with the same message: the helper's change moved nothing, so this round is the
+                    # coder's, and the helper is not asked again at its start.
+                    self.ledger.append("decision", n, decision="helper-driven loop handed back", round=k, op=failure["op"],
+                                       reason="two rounds in a row failed at the same request with the same message")
+                if self._helper_drive_on() and not handed_back:
+                    # The helper drives: it is given the whole port, the failure and what the last round changed, and its corrected file is the
+                    # round's repair. No coder step runs. A refusal, a stub or a cap hands the round to the coder below.
+                    _note, driven_ok, asked_here = self._repair_help(spec, stage_dir, k, limit, failure, raw,
+                                                                     why="the helper drives this stage's repairs", coder_failed=True, driven=True)
+                    if driven_ok:
+                        self._repair_baseline = None          # no coder step ends on a baseline in a round the helper drove
+                        self.ledger.append("decision", n, decision=repair_help.DRIVEN, round=k, of=limit, op=failure["op"],
+                                           port_sha256=self._port_sha(stage_dir), failure=port_repair.failed_line(raw))
+                if not driven_ok:
+                    if self.repair_help and getattr(self, "telegraph", None) is not None and not handed_back:
+                        ask_now, ask_why = repair_help.start_trigger(self.ledger.read(), n, k, failure)
+                        if ask_now:
+                            friend_note, _placed, asked_here = self._repair_help(spec, stage_dir, k, limit, failure, raw, why=ask_why, coder_failed=False)
+                            if _placed:
+                                self._repair_baseline = port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)    # the coder's step ends on ITS edit
+                    try:
+                        out, _ = self._step(spec, "repair", stage_dir, escalated, resumed,
+                                            extra=self._repair_text(n, k, limit, failure, raw) + (("\n\n" + friend_note) if friend_note else ""))
+                    finally:
+                        self._repair_baseline = None
+                    if out.status != "done":
+                        # A step that stopped in a watchdog pause or escalation, or on capped replies: the helper gets the port as the coder left it,
+                        # when it was not asked at the start of this round. A placed answer lets the round go on to its check.
+                        helped_on = False
+                        if (out.status in ("pause", "escalate", "error") and not asked_here and self.repair_help and getattr(self, "telegraph", None) is not None):
+                            _note, helped_on, _ = self._repair_help(spec, stage_dir, k, limit, failure, raw,
+                                                                    why=f"the coder's repair step ended: {out.status}", coder_failed=True)
+                        if not helped_on:
+                            return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
                 touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
                 if touched:
                     self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
@@ -3236,7 +3262,8 @@ class Supervisor:
                                                                                        copied=bool(seed.get("copied") or seed.get("kept"))))
             note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")))
             if spec.number == 2 and getattr(self, "telegraph", None) is not None:
-                friend = self._phone_a_friend(spec, stage_dir)
+                restored = self._restore_best_port(spec, stage_dir)
+                friend = restored or self._phone_a_friend(spec, stage_dir)      # a restored best port makes a fresh attempt-start draft unnecessary
                 if friend:
                     note = note + "\n\n" + friend
             return swap_prepare.PrepareOutcome(False, note=note)
@@ -3407,16 +3434,72 @@ class Supervisor:
 
     # ---- the outside helper inside the port repair rounds (orchard/repair_help.py) -----------------------------------------------------------
 
+    def _port_sha(self, stage_dir: Path) -> str | None:
+        """The sha256 of stages/2/port/port_model.py as it is on disk, or None when it cannot be read."""
+        data, _ = repair_help.read_port(stage_dir)
+        return hashlib.sha256(data).hexdigest() if data is not None else None
+
+    def _record_best(self, n: int, stage_dir: Path, failure: dict) -> None:
+        """Keep the furthest port: when the check that just failed got further along the request chain than every earlier check of this stage
+        (across attempts), save the port it ran as stages/2.best/port_model.py and write `best port recorded` with its op, rank and hash.
+        Advisory: nothing here fails the stage."""
+        if n != 2 or not self._helper_drive_on():
+            return
+        try:
+            rank_now = repair_help.best_rank(failure.get("op"))
+            best = repair_help.best_state(self.ledger.read(), n)
+            if best is not None and rank_now <= best["rank"]:
+                return
+            data, why = repair_help.read_port(stage_dir)
+            if data is None or not repair_help.save_best(stage_dir, data):
+                return
+            self.ledger.append("decision", n, decision=repair_help.BEST, op=failure.get("op"), rank=rank_now,
+                               port_sha256=hashlib.sha256(data).hexdigest(), attempt=len([e for e in self.ledger.read()
+                                                                                          if e.get("stage") == n and e.get("event") == "stage_start"]))
+        except Exception as exc:     # advisory: an error nobody listed leaves the ledger as it was
+            self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0, reason=f"best port not recorded ({exc.__class__.__name__})")
+
+    def _restore_best_port(self, spec, stage_dir: Path) -> str | None:
+        """At the start of a stage 2 attempt: when an earlier attempt left a best port and the fresh port is still the unchanged skeleton, put the
+        best port in its place (hash-checked) and return the sentence that tells the coder. None otherwise. Advisory."""
+        n = spec.number
+        if n != 2 or not self._helper_drive_on():       # a coder-driven stage 2 starts each attempt as it always did
+            return None
+        try:
+            best = repair_help.best_state(self.ledger.read(), n)
+            if best is None or best["rank"] <= 0:
+                return None
+            skeleton = safeio.read_bytes(port_facts.SKELETON, max_bytes=port_facts.SKELETON_MAX)
+            ok, why = repair_help.restore_best(stage_dir, best, skeleton)
+            if not ok:
+                self.ledger.append("decision", n, decision=phone_a_friend.NOT_PLACED, call_id="", reason=f"best port not restored: {why}"[:300])
+                return None
+            self.ledger.append("decision", n, decision=repair_help.RESTORED, op=best.get("op"), rank=best["rank"], port_sha256=best["port_sha256"],
+                               skeleton_sha256=hashlib.sha256(skeleton).hexdigest())
+            return (f"The file `stages/2/port/port_model.py` already holds the furthest version an earlier attempt reached (its check failed at the "
+                    f"{best.get('op')!r} request). Start from it: read it, correct what the check shows to be wrong and keep what works.")
+        except Exception as exc:     # advisory
+            self.ledger.append("decision", n, decision=phone_a_friend.NOT_PLACED, call_id="", reason=f"best port not restored ({exc.__class__.__name__})")
+            return None
+
+    def _helper_drive_on(self) -> bool:
+        """Whether stage 2's repair rounds are driven by the helper: the helper and the round asks are on, and the operator said so
+        (`--helper-drives-port`) or the run is a rehearsal and the operator did not refuse it (`--no-helper-drives-port`)."""
+        if getattr(self, "telegraph", None) is None or not self.repair_help or self.helper_drives is False:
+            return False
+        return bool(self.helper_drives) or bool(self.full_port_rehearsal)
+
     def _repair_help_refused(self, n: int, k: int, reason: str) -> None:
         self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=k, reason=reason[:300])
 
-    def _repair_help(self, spec, stage_dir: Path, k: int, limit: int, failure: dict, raw: str, *, why: str, coder_failed: bool) -> tuple[str, bool, bool]:
+    def _repair_help(self, spec, stage_dir: Path, k: int, limit: int, failure: dict, raw: str, *, why: str, coder_failed: bool,
+                     driven: bool = False) -> tuple[str, bool, bool]:
         """Ask the helper for the whole corrected `port_model.py` in repair round `k` and, when the answer is a whole port and the file on disk is
         still the one that was sent (or the coder's step failed), put it in place. Returns (the sentence for the coder, whether a file was
         placed, whether an ask was written). Nothing here fails the stage: every refusal and every unusable answer is a ledger decision."""
         n, stage_dir = spec.number, Path(stage_dir)
         entries = self.ledger.read()
-        ok, reason = repair_help.due(entries, n, k)
+        ok, reason = repair_help.due(entries, n, k, total=repair_help.HELPER_TOTAL if self._helper_drive_on() else repair_help.TOTAL_PER_STAGE)
         if not ok:
             self._repair_help_refused(n, k, reason)
             return "", False, False
@@ -3428,7 +3511,8 @@ class Supervisor:
             facts, _ = phone_a_friend.read_input(stage_dir / port_facts.FACTS_NAME, phone_a_friend.FACTS_CAP)
             excerpts, _ = phone_a_friend.read_input(stage_dir / "reference_excerpts.md", phone_a_friend.EXCERPTS_CAP)
             task, sent = repair_help.build_task(facts=facts, excerpts=excerpts, port_text=port_bytes.decode("utf-8", "replace"),
-                                                listing=phone_a_friend.port_listing(stage_dir / port_repair.PORT_DIR), homes=self._homes())
+                                                listing=phone_a_friend.port_listing(stage_dir / port_repair.PORT_DIR), homes=self._homes(),
+                                                previous=repair_help.previous_round_section(entries, n, k) if driven else None)
             fail = repair_help.failure(k, limit, failure.get("op"), raw, self._homes())
         except Exception as exc:     # the request could not be built: the helper is not asked, the round goes on
             self._repair_help_refused(n, k, f"the request could not be built ({exc.__class__.__name__})")
@@ -3487,7 +3571,8 @@ class Supervisor:
         self.ledger.append("decision", n, decision=repair_help.PLACED, call_id=answer.call_id, path=evidence_record(self.run_dir, port)["path"],
                            port_sha256=evidence_record(self.run_dir, port)["sha256"], sent_sha256=sent_sha, found_sha256=found,
                            why="the file was still the one that was sent" if found == sent_sha else "the coder's step failed",
-                           draft_sha256=evidence["sha256"])
+                           draft_sha256=evidence["sha256"], change=repair_help.change_summary(port_bytes.decode("utf-8", "replace"), reply),
+                           cost_usd=record["cost_usd"], driven=driven)
         return repair_help.coder_note(answer.call_id, True, evidence["path"]), True, True
 
     def _repair_report(self, n: int, k, call_id: str, before_op, after_op, *, helped: bool, outcome: str) -> None:
@@ -5168,6 +5253,13 @@ def parse(argv=None):
                    help="a TOML file with the [telegraph] table (bringup passes the config it was started with). When it enables the helper, a "
                         "full-port stage 2 whose attempts keep failing asks it once for a draft port (orchard/phone_a_friend.py); its caps apply. "
                         "Without the option, or with the helper off, nothing is sent")
+    r.add_argument("--helper-drives-port", dest="helper_drives_port", action="store_true", default=None,
+                   help="stage 2's repair rounds are driven by the outside helper: each round asks it for the whole corrected port (it is told what "
+                        "the last round changed), places the reply and runs the supervisor's check, with no coder step, until the check passes, "
+                        "a cap is reached or two rounds in a row fail the same way. By default this is on when the helper is configured and the "
+                        "run is a rehearsal (--full-port-rehearsal)")
+    r.add_argument("--no-helper-drives-port", dest="helper_drives_port", action="store_false",
+                   help="the coder repairs the port in stage 2, as before (the helper is still asked as --no-repair-help leaves it)")
     r.add_argument("--no-repair-help", action="store_true",
                    help="do not ask the outside helper inside the port repair rounds (orchard/repair_help.py); it is still asked at the start of an "
                         "attempt. By default a configured helper is asked in a round whose check failed on the port and the coder has not moved it on")
@@ -5381,6 +5473,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
                       telegraph=_telegraph_from(getattr(args, "telegraph_config", None), environ=environ, home=home),
                       repair_help=False if getattr(args, "no_repair_help", False) else None,
+                      helper_drives=getattr(args, "helper_drives_port", None),
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
                       skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,
