@@ -61,6 +61,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -74,7 +75,8 @@ from orchard import runaway, safeio
 from orchard.canary import CanaryError, post_json
 from orchard.port_guard import PORT_GUARD_DEPTH, PORT_GUARD_ENTRIES, PORT_GUARD_FILES, PortGuard  # noqa: F401  (names stay importable from here)
 from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_TIMEOUT_S,
-                              AGENT_THINKING, TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
+                              AGENT_THINKING, AGENT_TOOL_DEDUPE, DEDUPE_HINT_PREFIX, DEDUPE_LISTED_CALLS, DEDUPE_MAX_RECORDS,
+                              TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
 from orchard.runner import Denied, check_string
 from orchard.stages import evidence_record
 from orchard.watchdog import Event, RetryGuard, command_shape
@@ -345,7 +347,8 @@ EMPTY_NUDGE = ("Your last reply was empty: it had no text and no command. Say wh
 LOOP_NUDGE = ("Your last reply repeated itself until it was cut off. Do not analyse or explain further. "
               "Run one command or write one file now, and keep the reply short.")
 RESTART_NOTE = ("The conversation was restarted because earlier replies repeated themselves until they were cut off. Everything you "
-                "did is on disk; the files are listed below. Read only what you need, do one thing at a time, and keep every reply short.")
+                "did is on disk; the files are listed below. What you read before is no longer in this conversation, so read a file again when you "
+                "need its text. Read only what you need, do one thing at a time, and keep every reply short.")
 # What a restart carries over (review of PR 462, round 3): the supervisor's own instructions to this step (a gate's feedback, a wrap-up
 # request, a watchdog nudge) are not part of the loop that caused the restart, and dropping them would send the step back to a task it
 # had already been told to change. At most this many are carried, each cut to this many characters; the oldest nudges go first.
@@ -411,10 +414,115 @@ TOOL_SCHEMAS = [
 ]
 
 
+# ---- the read-only commands whose repeat answer may be a note (Tools dedupe) -------------------------------------------------------------
+
+_SHELL_META = re.compile(r"[;&|<>$`\\\n\r\t(){}~!#]")          # no separator, redirect, substitution, escape, subshell or comment, even inside quotes
+_GLOB = re.compile(r"[*?\[\]]")
+_COUNT = re.compile(r"\d{1,6}")
+_LS_FLAGS = re.compile(r"-[a-zA-Z]{1,12}")
+_WC_FLAGS = re.compile(r"-[lwcm]{1,4}")
+_GREP_FLAGS = re.compile(r"-[nilcvwFEHhsoa]{1,12}")
+_SED_RANGE_ARG = re.compile(r"\d{1,9}(?:,\d{1,9})?p")
+
+
+def read_only_command(command, run_dir) -> bool:
+    """Is `command` one of the few forms that read and never write: ls, cat, head, tail, wc, stat, `sed -n 'a,bp'`, grep without a recursive flag, and find
+    with only -name, -iname, -type and -maxdepth? Every file argument must lie inside the run directory (links resolved), the command may hold no
+    separator, redirect, substitution or unquoted wildcard, and a command that reads standard input (no file named) is out. When in doubt the answer is
+    False: a command that is not on the list is never answered with a note, and it makes the step forget the commands it remembered."""
+    if not isinstance(command, str) or not command.strip() or len(command) > 400 or _SHELL_META.search(command):
+        return False
+    try:
+        tokens = shlex.split(command)
+        raw = shlex.split(command, posix=False)
+    except ValueError:
+        return False
+    if not tokens or len(tokens) != len(raw):
+        return False
+    for tok, rtok in zip(tokens, raw):                          # a wildcard is allowed only inside quotes (find -name '*.txt', grep 'a.*b')
+        if _GLOB.search(rtok) and rtok[:1] not in ("'", '"'):
+            return False
+    root = os.path.realpath(run_dir)
+
+    def inside(arg: str) -> bool:
+        if not arg or arg.startswith("-"):
+            return False
+        p = os.path.realpath(os.path.join(root, arg))
+        try:
+            return os.path.commonpath([root, p]) == root
+        except ValueError:
+            return False
+
+    cmd, rest = tokens[0], tokens[1:]
+    if cmd == "ls":
+        flags = [a for a in rest if a.startswith("-")]
+        paths = [a for a in rest if not a.startswith("-")]
+        return all(_LS_FLAGS.fullmatch(f) for f in flags) and len(paths) <= 1 and all(inside(a) for a in paths)
+    if cmd == "cat":
+        return 1 <= len(rest) <= 4 and all(inside(a) for a in rest)
+    if cmd in ("head", "tail"):
+        if len(rest) >= 3 and rest[0] in ("-n", "-c") and _COUNT.fullmatch(rest[1]):
+            files = rest[2:]
+        elif len(rest) >= 2 and re.fullmatch(r"-\d{1,6}", rest[0]):
+            files = rest[1:]
+        else:
+            files = rest
+        return 1 <= len(files) <= 4 and all(inside(a) for a in files)
+    if cmd == "wc":
+        flags = [a for a in rest if a.startswith("-")]
+        files = [a for a in rest if not a.startswith("-")]
+        return all(_WC_FLAGS.fullmatch(f) for f in flags) and 1 <= len(files) <= 4 and all(inside(a) for a in files)
+    if cmd == "stat":
+        return 1 <= len(rest) <= 4 and all(inside(a) for a in rest)
+    if cmd == "sed":
+        return len(rest) == 3 and rest[0] == "-n" and bool(_SED_RANGE_ARG.fullmatch(rest[1])) and inside(rest[2])
+    if cmd == "grep":
+        flags = [a for a in rest if a.startswith("-") and len(a) > 1]
+        others = [a for a in rest if not (a.startswith("-") and len(a) > 1)]
+        if not all(_GREP_FLAGS.fullmatch(f) for f in flags) or len(others) < 2:
+            return False
+        return all(inside(a) for a in others[1:]) and len(others) <= 5          # others[0] is the pattern
+    if cmd == "find":
+        if not rest or not inside(rest[0]):
+            return False
+        i, expr = 1, rest[1:]
+        while i - 1 < len(expr):
+            k = expr[i - 1]
+            if k in ("-name", "-iname") and i < len(expr) and not expr[i].startswith("-"):
+                i += 2
+            elif k == "-type" and i < len(expr) and expr[i] in ("f", "d", "l"):
+                i += 2
+            elif k == "-maxdepth" and i < len(expr) and _COUNT.fullmatch(expr[i]):
+                i += 2
+            else:
+                return False
+        return True
+    return False
+
+
+def remember_record(table: dict, tables: tuple, key, value) -> None:
+    """Remember `value` under `key` in `table`, one of the step's `tables` (its reads and its read-only commands). A table that already holds
+    DEDUPE_MAX_RECORDS entries makes the step forget every one of its tables first, and then remembers this one. `Tools` and
+    scripts/dedupe_replay.py both call this, so the replay cannot drift from the live rule."""
+    if len(table) >= DEDUPE_MAX_RECORDS:
+        for each in tables:
+            each.clear()
+    table[key] = value
+
+
 class Tools:
     def __init__(self, run_dir, stage_dir, env: dict, *, timeout: float = TOOL_TIMEOUT_S,
-                 limit: int = TOOL_OUTPUT_CHARS, scratch=None):
+                 limit: int = TOOL_OUTPUT_CHARS, scratch=None, dedupe: bool = AGENT_TOOL_DEDUPE):
         self.run_dir, self.stage_dir = Path(run_dir), Path(stage_dir)
+        # Tool-result dedupe (docs/tool-result-dedupe.md). One Tools object serves one agent step (the supervisor makes a new one per step), so
+        # what it remembers is what that step's conversation holds. `begin_turn` says which model turn the next calls belong to.
+        self.dedupe = bool(dedupe)
+        self._turn = 0
+        self._reads: dict[tuple[str, int], tuple[tuple, str, int]] = {}      # (real path, offset) -> (file identity, sha256 of the answer, turn)
+        self._shell_seen: dict[str, tuple[str, int]] = {}                     # exact read-only command -> (sha256 of the answer, turn)
+        self.dedupe_count = 0
+        self.dedupe_calls: list[list] = []                                    # [tool, turn, first turn], at most DEDUPE_LISTED_CALLS of them
+        self.last_dedupe: dict | None = None                                  # set by the call that was answered with a note, else None
         # <run>/tt-metal-scratch, offered only to stages 2 to 4 of a stock-runtime run (orchard.stages.scratch_stage): a copy of the
         # host tt-metal tree's models/ that those stages may change. write_file reaches it by a path that starts with its name.
         self.scratch = Path(scratch) if scratch is not None else None
@@ -426,7 +534,29 @@ class Tools:
         # guard works only through descriptors beneath the real port directory (orchard/port_guard.py).
         self._guard = PortGuard(self.stage_dir, self.run_dir)
 
+    def begin_turn(self, turn: int) -> None:
+        """The model turn the following calls answer (a number the watchdog's events carry too)."""
+        self._turn = int(turn)
+
+    def reset_dedupe(self) -> None:
+        """Forget every read: the conversation that held them is gone (a step that started again from its task)."""
+        self._reads.clear()
+        self._shell_seen.clear()
+
+    def _note(self, tool: str, target: str, first_turn: int) -> str:
+        """The answer to a repeat of something unchanged; also counted and listed for the step's ledger record."""
+        self.dedupe_count += 1
+        if len(self.dedupe_calls) < DEDUPE_LISTED_CALLS:
+            self.dedupe_calls.append([tool, self._turn, first_turn])
+        self.last_dedupe = {"tool": tool, "turn": self._turn, "first_turn": first_turn, "target": target}
+        return (f"{target}: unchanged since turn {first_turn}; its contents are in your context above (turn {first_turn}). "
+                "Next step: write or edit your files; do not read it again.")
+
+    def _remember(self, table: dict, key, value) -> None:
+        remember_record(table, (self._reads, self._shell_seen), key, value)
+
     def call(self, name: str, arguments: str) -> str:
+        self.last_dedupe = None
         try:
             args = json.loads(arguments or "{}")
         except ValueError:
@@ -434,7 +564,8 @@ class Tools:
         if not isinstance(args, dict):
             return "error: the arguments must be a JSON object"
         if name == "shell":
-            return self.shell(args.get("command"))
+            command = args.get("command")
+            return self._deduped_shell(command, self.shell(command))
         if name == "read_file":
             unknown = self.unknown_read_args(args, ("path", "offset"),
                                              "read_file takes path and offset (offset counts characters)")
@@ -442,8 +573,35 @@ class Tools:
                 return unknown
             return self.read_file(args.get("path"), args.get("offset", 0))
         if name == "write_file":
-            return self.write_file(args.get("path"), args.get("content"))
+            result = self.write_file(args.get("path"), args.get("content"))
+            self._after_write(args.get("path"))
+            return result
         return f"error: there is no tool named {name!r}; the tools are shell, read_file and write_file"
+
+    def _after_write(self, path) -> None:
+        """A write (made or refused: when in doubt, forget) ends the notes for that file and for every shell command."""
+        self._shell_seen.clear()
+        p = self.target(path)
+        if p is not None:
+            for key in [k for k in self._reads if k[0] == str(p)]:
+                del self._reads[key]
+
+    def _deduped_shell(self, command, result: str) -> str:
+        """`result` for a shell call, or the note when the command is a read-only form, ran the same way before in this step, and printed exactly
+        what it printed then. A command off the list may write: it makes the step forget every command it remembered."""
+        if not self.dedupe:
+            return result
+        if not read_only_command(command, self.run_dir):
+            self._shell_seen.clear()
+            return result
+        if not result.startswith("exit 0\n"):
+            return result
+        digest = sha(result)
+        seen = self._shell_seen.get(command)
+        if seen is not None and seen[0] == digest:
+            return self._note("shell", command, seen[1])
+        self._remember(self._shell_seen, command, (digest, self._turn))
+        return result
 
     @staticmethod
     def unknown_read_args(args: dict, accepted: tuple, accepts: str):
@@ -564,10 +722,12 @@ class Tools:
         found, error = self.readable(path)
         if error:
             return error
+        before = self._identity(found)           # captured before the read: the record is kept only if the same file was read
         with open(found, "rb") as f:
             text = f.read().decode("utf-8", errors="replace")
+            after = self._identity(f.fileno())
         if offset == 0 and len(text) <= self.limit:
-            return text
+            return self._deduped_read(found, offset, before, after, text)
         if offset >= len(text):
             return f"error: offset {offset} is at or past the end of the file ({len(text)} characters)"
         end = min(offset + self.limit, len(text))
@@ -576,7 +736,32 @@ class Tools:
         else:
             footer = (f"[characters {offset} to {end} of {len(text)}; read on with read_file offset={end}, "
                       "or use shell (grep, jq) to find one field]")
-        return f"{text[offset:end]}\n{footer}"
+        return self._deduped_read(found, offset, before, after, f"{text[offset:end]}\n{footer}")
+
+    @staticmethod
+    def _identity(target) -> tuple | None:
+        """(device, inode, size, mtime in ns) of a path or an open descriptor, None when it cannot be read."""
+        try:
+            st = os.stat(target)
+        except (OSError, TypeError, ValueError):
+            return None
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+    def _deduped_read(self, found: str, offset: int, before, after, answer: str) -> str:
+        """`answer` for a read, or the note when this step read the same page of the same file before, the file is the same file with the same size
+        and time, and the answer is the same. A file that changed while it was read is never recorded."""
+        if not self.dedupe:
+            return answer
+        key = (found, offset)
+        if before is None or before != after:
+            self._reads.pop(key, None)
+            return answer
+        digest = sha(answer)
+        seen = self._reads.get(key)
+        if seen is not None and seen[0] == before and seen[1] == digest:
+            return self._note("read_file", os.path.relpath(found, os.path.realpath(self.run_dir)), seen[2])
+        self._remember(self._reads, key, (before, digest, self._turn))
+        return answer
 
     def write_file(self, path, content) -> str:
         if not isinstance(path, str) or not path.strip():
@@ -742,7 +927,10 @@ class AgentStep:
                 rec = evidence_record(self.run_dir, self.log_path)
             except safeio.SafeReadError as exc:
                 rec = {"unreadable": exc.reason}
-            self.ledger.append("evidence", self.stage, what="transcript", phase=self.phase, status=status, turns=turns, **rec)
+            # How many of this step's tool results were the "unchanged" note (Tools dedupe), and which calls (the first few). Left out when none.
+            count = getattr(self.tools, "dedupe_count", 0)
+            deduped = {"tool_deduped": count, "tool_deduped_calls": [list(c) for c in getattr(self.tools, "dedupe_calls", [])]} if count else {}
+            self.ledger.append("evidence", self.stage, what="transcript", phase=self.phase, status=status, turns=turns, **rec, **deduped)
         return Outcome(status, turns, final_text, detail)
 
     @staticmethod
@@ -836,6 +1024,9 @@ class AgentStep:
         carried = "".join(f"\n\n## Earlier instruction from the supervisor ({kind})\n{text}" for kind, text in self._carry)
         text = f"{task}{carried}\n\n## From the supervisor\n{RESTART_NOTE}\n" + ("\n".join(files) if files else "(no files yet)")
         messages[:] = [messages[0], {"role": "user", "content": text}]
+        reset = getattr(self.tools, "reset_dedupe", None)
+        if reset is not None:                 # the reads the dropped conversation held are no longer in the agent's context
+            reset()
         self._restarts += 1
         self.ledger.append("decision", self.stage, decision="context restarted after capped replies", phase=self.phase, turn=turn,
                            capped_in_step=self._caps, repetition_loops=self._loops, restarts=self._restarts,
@@ -849,7 +1040,7 @@ class AgentStep:
         self._task = user if isinstance(user, str) else ""
         self._carry = []
         self._seen = self._snapshot()       # files already here (a resumed stage) are not new
-        return self._loop(self.max_turns, logged=0)
+        return self._loop(self.max_turns, logged=0, fresh=True)
 
     def continue_with(self, text: str, *, max_turns: int, log_path) -> Outcome:
         """Add one user message to this step's conversation and run the loop again.
@@ -867,15 +1058,18 @@ class AgentStep:
         self._carry_instruction("continuation", text)
         return self._loop(max_turns, logged=logged)
 
-    def _loop(self, max_turns: int, *, logged: int) -> Outcome:
+    def _loop(self, max_turns: int, *, logged: int, fresh: bool = False) -> Outcome:
         messages = self.messages
         bad_run: list[str] = []             # kinds of the replies in a row that ran no command
         last_reply = ""                     # the visible text of the last reply that called a tool
         for turn in range(1, max_turns + 1):
             self._turn += 1
             for text in self.control.take_nudges(self.agent):
+                if fresh and turn == 1 and text.startswith(DEDUPE_HINT_PREFIX):
+                    continue        # left in the shared actuator by the step before, which held the text it speaks of; this conversation does not
                 messages.append({"role": "user", "content": text})
-                self._carry_instruction("nudge", text)
+                if not text.startswith(DEDUPE_HINT_PREFIX):      # that hint says a file's text is in the context: a restart drops the context (review of PR 488)
+                    self._carry_instruction("nudge", text)
             reason = self.control.stop_reason()
             if reason:
                 return self._end(reason, turn - 1)
@@ -990,11 +1184,17 @@ class AgentStep:
                 name, args = str(fn.get("name", "")), fn.get("arguments") or "{}"
                 args = args if isinstance(args, str) else json.dumps(args)
                 self._event("tool_call", tool=name, args_hash=sha(args), shape=self._shape(name, args))
+                begin = getattr(self.tools, "begin_turn", None)
+                if begin is not None:
+                    begin(self._turn)
                 result = self.tools.call(name, args)
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
+                # deduped: the answer was the "unchanged since turn N" note (Tools dedupe); the event then names what it was about.
+                note = getattr(self.tools, "last_dedupe", None)
                 # wrote: did this write_file call write its file? None for other tools.
                 self._event("tool_result", tool=name, output_hash=sha(result),
-                            wrote=result.startswith("wrote ") if name == "write_file" else None)
+                            wrote=result.startswith("wrote ") if name == "write_file" else None,
+                            **({"deduped": True, "name": str(note.get("target"))[:200]} if note else {}))
                 self._record_new_evidence()
                 repeated = repeated or (name == "write_file" and result.startswith("unchanged:"))
             # The same visible text again, with another tool call: on lab run 2 the stage 8 agent said its

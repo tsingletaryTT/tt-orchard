@@ -237,6 +237,17 @@ AGENT_THINKING = False          # choice: agent turns run with the model's think
                                 # circles in its reasoning (6,000 tokens on one point, no command) and
                                 # the step fails. Replaying one failed turn with thinking off gave a
                                 # correct command in 437 tokens. Checked on 2026-10-03 on one turn only.
+AGENT_TOOL_DEDUPE = True        # choice: within one agent step a repeat read of an unchanged file, and a repeat of a read-only shell command whose output
+                                # is unchanged, is answered with a short note that names the turn holding the text (orchard/agent.py Tools). In the stage logs
+                                # of tiny Qwen4 rehearsal runs 12 to 16, 43 of 353 read_file calls (12 percent) repeated a read of the same path in the
+                                # same step. `tt-orchard bringup --no-tool-dedupe` turns it off for a run (docs/tool-result-dedupe.md).
+DEDUPE_STREAK_N = 3             # choice: this many deduped tool results ...
+DEDUPE_STREAK_WINDOW = 6        # choice: ... among the last DEDUPE_STREAK_WINDOW tool results of a step send one nudge (watchdog DedupeStreak)
+DEDUPE_NUDGES_PER_STAGE = 3     # choice: the nudges of that detector, per agent and stage. They are not rungs of the ladder and never escalate.
+DEDUPE_HINT_PREFIX = "Unchanged-read hint: "   # choice: the nudge of that detector starts with this text, so the agent loop can tell it from the others. It says a
+                                # file's text is already in the context; a context restart drops that conversation, so a restart does not carry this hint.
+DEDUPE_LISTED_CALLS = 12        # choice: how many deduped calls a step's ledger record lists (the count is exact)
+DEDUPE_MAX_RECORDS = 400        # choice: the reads and commands one step remembers; a step that passes it forgets them all and starts again
 AGENT_MAX_TOKENS = 16384        # choice: max_tokens for one model response. A reasoning model's
                                 # thinking tokens count toward it. On the live Qwen3.8 run, 8,192 was
                                 # used up by reasoning in 3 of the failed replies. At about 80 tokens/s

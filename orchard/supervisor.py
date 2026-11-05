@@ -138,7 +138,7 @@ from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
-from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
+from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
@@ -170,7 +170,7 @@ from orchard import token_check            # bounded reasons for the ledger (bou
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
 from orchard.stages import UNVERIFIED_LEDGER_DECISION
 from orchard.tiers import TierConfigError, load
-from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
+from orchard.watchdog import (DedupeStreak, Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
                               TurnRepeat, Watchdog)
 
@@ -816,7 +816,7 @@ class Supervisor:
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
-                 port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None):
+                 port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE):
         self.run_dir = Path(run_dir).resolve()
         # The outside helper (orchard/telegraph.py, a `Telegraph`), or None. Full-port stage 2 phones it when attempts keep failing
         # (orchard/phone_a_friend.py). None is the earlier behaviour: nothing is sent anywhere.
@@ -824,6 +824,9 @@ class Supervisor:
         # `--port-repair-rounds` (issue 420): the repair rounds a full-port stage 2 attempt gives the coder after a port check that failed on the
         # port itself. Recorded in run_start; `build` hands over the recorded value on a resume. 0 is the earlier behaviour: no rounds.
         self.port_repair_rounds = port_repair.check_rounds(port_repair_rounds)
+        # `--no-tool-dedupe`: the agent's tools answer a repeat of an unchanged read with a note (orchard/agent.py Tools, docs/tool-result-dedupe.md). Recorded in
+        # run_start only when off; `build` hands over the recorded value on a resume.
+        self.tool_dedupe = bool(tool_dedupe)
         self._repair_baseline: dict | None = None      # the port directory's fingerprint when a repair step starts (the step's `finished` check)
         # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
         # supplied (the tests), and the record says nothing was compared. `_run_resumed` is set when a run starts on a ledger that has begun.
@@ -1117,6 +1120,7 @@ class Supervisor:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
+                               **({"tool_dedupe": False} if not self.tool_dedupe else {}),
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
                                paths=self.paths.record(), package=self.package,
@@ -1934,7 +1938,7 @@ class Supervisor:
 
     def _watchdog(self, spec) -> Watchdog:
         wd = Watchdog([IdenticalResponses(), ThinkingWithoutAction(), RepeatedToolCall(),
-                       NoNewEvidence(), NoFileWritten(), TurnRepeat(),
+                       NoNewEvidence(), NoFileWritten(), TurnRepeat(), DedupeStreak(),
                        StageOverBudget({spec.number: spec.budget_s})],
                       Ladder(self.actuator, self.ledger, {AGENT}))
         t0 = attempt_started_ts(self.ledger.read(), spec.number) or self.clock()
@@ -3368,7 +3372,8 @@ class Supervisor:
                          tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
                              **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
                              scratch=(self.run_dir / "tt-metal-scratch"
-                                      if scratch_stage(n, run_path(entries, self.run_dir)) else None)),
+                                      if scratch_stage(n, run_path(entries, self.run_dir)) else None),
+                             dedupe=self.tool_dedupe),
                          ledger=self.ledger, stage=n, phase=phase, feed=self.watchdog.feed,
                          control=self.actuator, run_dir=self.run_dir,
                          evidence_dir=stage_dir / "evidence",
@@ -4893,6 +4898,11 @@ def parse(argv=None):
                         f"gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the same "
                         f"check again (issue 420). 0 is the earlier behaviour, no rounds. Default {port_repair.DEFAULT_ROUNDS}, at most "
                         f"{port_repair.MAX_ROUNDS}. The ledger records the value and a resume keeps it; a resume that names another value is refused")
+    r.add_argument("--no-tool-dedupe", dest="no_tool_dedupe", action="store_true",
+                   help="send the agent every repeat read in full. By default a repeat read of a file that has not changed since the agent read it in the "
+                        "same step, and a repeat of a read-only shell command that printed the same, is answered with a short note naming the turn "
+                        "that holds the text (docs/tool-result-dedupe.md). The ledger records the choice when it is off; a resume keeps the recorded "
+                        "choice, and a resume that turns it off for a run that started with it on is refused")
     r.add_argument("--telegraph-config", metavar="FILE", default=None,
                    help="a TOML file with the [telegraph] table (bringup passes the config it was started with). When it enables the helper, a "
                         "full-port stage 2 whose attempts keep failing asks it once for a draft port (orchard/phone_a_friend.py); its caps apply. "
@@ -5048,6 +5058,13 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                              "part of what the run's stage 2 attempts did)")
         repair_rounds = recorded_rounds
     repair_rounds = port_repair.DEFAULT_ROUNDS if repair_rounds is None else port_repair.check_rounds(repair_rounds)
+    tool_dedupe = not getattr(args, "no_tool_dedupe", False)
+    if progress.started:                        # a resumed run keeps the choice it started with (a run that began before the option: on)
+        recorded_dedupe = (progress.run_start or {}).get("tool_dedupe", True) is not False
+        if not tool_dedupe and recorded_dedupe:
+            raise ValueError("this run started with the tool-result dedupe on; --no-tool-dedupe differs. Leave the option out to resume with the recorded "
+                             "value, or move this run's directory aside and start a new run (the dedupe changes what the agent was sent)")
+        tool_dedupe = recorded_dedupe
     home = operator_home() if home is None else home
     paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
                       home=home, environ=environ)
@@ -5106,7 +5123,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
-                      sampling=sampling_mode, port_repair_rounds=repair_rounds,
+                      sampling=sampling_mode, port_repair_rounds=repair_rounds, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req, stack_pins=stack_pins,
                       kind_override=getattr(args, "model_kind", None),
