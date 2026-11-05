@@ -656,7 +656,7 @@ LISTED_TEST_SETUP = '''
             raise safeio.TooLarge("the file is larger than 64 bytes")
         return {"command": "c", "returncode": 1, "timed_out": False, "seconds": 1.0, "chips": ["a"], "output": {}}
 
-    stub = SimpleNamespace(run_dir=run, _spawn=spawn, _reset_test_chips=lambda *a: None,
+    stub = SimpleNamespace(run_dir=run, _spawn=spawn, _reset_test_chips=lambda *a: None, _note_reset_order=lambda *a: None,
                            ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
     stub._moved_aside_record = lambda p: S._moved_aside_record(stub, p)
     stub._run_listed_test_body = lambda *a: S._run_listed_test_body(stub, *a)

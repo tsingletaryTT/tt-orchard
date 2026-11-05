@@ -112,6 +112,7 @@ import dataclasses
 import functools
 import hashlib
 import json
+import re
 from types import SimpleNamespace
 import os
 import pwd
@@ -589,6 +590,45 @@ def coder_tier(cfg, port: int) -> str:
     if len(names) != 1:
         raise ValueError(f"exactly one chip tier must use port {port}; found {names}")
     return names[0]
+
+
+PCI_ADDRESS = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-7])$")
+
+
+def lease_bdfs(lease) -> tuple:
+    """The PCI addresses of a lease's chips as sortable numbers, or () when the lease has none or any is not an address.
+    A lease already carries them (`chips`), so no device is opened."""
+    out = []
+    for chip in getattr(lease, "chips", ()) or ():
+        m = PCI_ADDRESS.match(str(chip))
+        if m is None:
+            return ()
+        out.append(tuple(int(g, 16) for g in m.groups()))
+    return tuple(out)
+
+
+def reset_order(leases) -> tuple[list, str]:
+    """The order in which a multi-board test's separate leases are reset, and the key it used: the lease whose chips have the
+    lowest PCI address goes last ("pci_address"). When a lease has no usable address the lowest device index decides
+    ("device_index"), and with neither the list order is kept ("list_order"). One key is used for every lease.
+
+    Issue 26, measured on 2026-11-03 on one two-board box (a 1x4 mesh open with the 1-D fabric and strict init, from a release and
+    a fresh lease each time): two leases with the lowest PCI address reset last failed 0 of 12 trials, a single lease reset once
+    failed 0 of 11, and two leases with the lowest PCI address reset first failed 6 of 12 with `Fabric Router Sync: Timeout after
+    10000 ms on Device 0`. On that box the lowest device index, the lowest PCI address and the higher serial first all give the
+    same order, so the trials do not tell them apart. The PCI address is used because it follows the physical slot. A device
+    index is a position the driver assigns in probe order. No reboot and no second box has been tried (tt-gozer issue 4, stable
+    names for boards and chips, is the longer-term fix). The list it is given is not changed."""
+    leases = list(leases)
+    bdfs = [lease_bdfs(lease) for lease in leases]
+    if all(bdfs):
+        keyed, key = [min(b) for b in bdfs], "pci_address"
+    elif all(getattr(lease, "dev_indices", ()) for lease in leases):
+        keyed, key = [min(lease.dev_indices) for lease in leases], "device_index"
+    else:
+        return leases, "list_order"
+    order = sorted(range(len(leases)), key=lambda i: keyed[i], reverse=True)
+    return [leases[i] for i in order], key
 
 
 # ---- the supervisor -----------------------------------------------------------------------------
@@ -3538,6 +3578,13 @@ class Supervisor:
             self._release_test_lease()
             raise
         try:
+            if extra is not None:
+                # The further lease was reset when it was taken, and the park has since reset the coder's lease. The lease whose
+                # chips have the lowest PCI address must be reset last (reset_order, issue 26).
+                order, key = reset_order([lease, extra])
+                if key != "list_order" and order[-1] is extra:
+                    self._note_reset_order(n, test, key)
+                    self._reset_test_chips(n, test, extra)
             self._run_listed_test(spec, stage_dir, test, [lease] + ([extra] if extra else []))
         finally:
             self._cleanup_after_test(lambda: self._sweep(n))
@@ -3602,8 +3649,10 @@ class Supervisor:
         """Reset a multi-board test's chips in place, so the test starts on chips reset after their last use.
 
         The park resets only the coder's board. On 2026-10-13 the 4-chip test failed twice with fabric router
-        timeouts on the chips the smaller tests had used, and passed once all four were reset. The cause was
-        not isolated, so this is a precaution that costs about 42 s per board, and a refused reset blocks."""
+        timeouts on the chips the smaller tests had used, and passed once all four were reset. This costs about
+        42 s per board, and a refused reset blocks. The order of two separate leases' resets matters (`reset_order`,
+        issue 26): the lease whose chips have the lowest PCI address goes last. Whether stale state on the chips also
+        plays a part is not isolated."""
         try:
             self.test_adapter.reset(lease)
         except AdapterError as exc:
@@ -3611,6 +3660,10 @@ class Supervisor:
                         lease_id=lease.lease_id, config=test.chips)
         self.ledger.append("decision", n, decision="test chips reset", config=test.chips,
                            lease_id=lease.lease_id)
+
+    def _note_reset_order(self, n: int, test, key: str) -> None:
+        """Record which key ordered the resets, so a run says whether it went by PCI address or fell back (issue 26)."""
+        self.ledger.append("decision", n, decision="test chips reset order", config=test.chips, key=key)
 
     def _give_back_test_lease(self, n: int, lease: Lease) -> None:
         try:
@@ -3659,7 +3712,9 @@ class Supervisor:
             self.ledger.append("decision", n, decision="test failed at startup; resetting the test chips and trying once more",
                                config=test.chips, returncode=result["returncode"], seconds=result["seconds"],
                                first_output=self._moved_aside_record(first))
-            for lease in leases:
+            order, key = reset_order(leases)
+            self._note_reset_order(n, test, key)
+            for lease in order:
                 self._reset_test_chips(n, test, lease)
             result = spawn()
         path = write_record(stage_dir, test.chips, {"config": test.chips, **result,
