@@ -95,4 +95,7 @@ def test_every_evidence_name_the_template_writes_is_in_its_list_of_owned_files()
     m = re.search(r"EVIDENCE_FILES = \((.*?)\)\n", src, re.S)
     assert m, "the template has no EVIDENCE_FILES list"
     listed = set(re.findall(r'"([^"]+)"', m.group(1)))
-    assert written <= listed, sorted(written - listed)
+    # gguf-header.json is removed by its own code (PR 441: a planted directory there is named and left, the attempt goes on), so it is not owned
+    # by the list above, whose removal stops the attempt on any failure. Every other name the template writes must be in the list.
+    cleans_itself = {"gguf-header.json"}
+    assert written - cleans_itself <= listed, sorted(written - cleans_itself - listed)
