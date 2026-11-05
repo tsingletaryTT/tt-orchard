@@ -317,12 +317,10 @@ def test_a_resume_after_the_hardware_test_is_not_blocked_by_the_disk_the_cache_n
         write_snapshot(tmp_path / "snapshot", SMALL, shards=1)
         make(r)
         monkeypatch.setattr(residency, "machine_facts", lambda path: (1 << 50, 1 << 50))
-        agent_steps = []
 
-        def crash_at_the_finish_step(e):          # stage 2's second agent step is the finish step, after the hardware test's evidence entry
-            if e["event"] == "decision" and e["stage"] == 2 and e["data"].get("decision") == "agent step":
-                agent_steps.append(e)
-            return len(agent_steps) == 2
+        def crash_at_the_finish_step(e):          # after the hardware test's evidence entry and before the stage's end: the supervisor derives the
+            # result itself since PR 462 (no finish agent step any more), so the crash comes when that entry is written
+            return e["event"] == "decision" and e["stage"] == 2 and e["data"].get("decision") == "result derived by the supervisor"
         with pytest.raises(Crash):
             r.run(crash_if=crash_at_the_finish_step)
         assert (r.run_dir / "stages" / "2" / "test-result.json").is_file()
