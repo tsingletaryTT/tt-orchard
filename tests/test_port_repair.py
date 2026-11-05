@@ -404,6 +404,112 @@ def test_a_link_that_points_somewhere_else_is_a_change(tmp_path):
     assert port_repair.changed(before, port_repair.fingerprint(tmp_path)) == ["a.py"]
 
 
+def _big(path, size, fill=b"x"):
+    """A file one byte over the fingerprint's read cap, written sparsely so the test stays fast."""
+    with open(path, "wb") as fh:
+        fh.write(fill * 16)
+        fh.truncate(size)
+
+
+def test_two_different_files_over_the_read_cap_do_not_fingerprint_alike(tmp_path):
+    # issue 453 item 2: every file over the cap used to become the same string, so an edit to one counted as no change
+    cap = full_port.JSON_MAX
+    _big(tmp_path / "w.bin", cap + 1)
+    before = port_repair.fingerprint(tmp_path)
+    assert not before["w.bin"].startswith("unreadable")
+    # an edit at the start, one in the last block, and a length change are each a change
+    for edit in ("head", "tail", "size"):
+        _big(tmp_path / "w.bin", cap + 1)
+        with open(tmp_path / "w.bin", "r+b") as fh:
+            if edit == "head":
+                fh.write(b"EDIT")
+            elif edit == "tail":
+                fh.seek(cap - 8)
+                fh.write(b"EDIT")
+            else:
+                fh.truncate(cap + 2)
+        after = port_repair.fingerprint(tmp_path)
+        assert port_repair.changed(before, after) == ["w.bin"], edit
+    # the same untouched file twice is the same fingerprint (a rewrite with identical bytes changes the modification time and counts as a change: the sample can
+    # notice a change and cannot prove there was none)
+    _big(tmp_path / "w.bin", cap + 1)
+    again = port_repair.fingerprint(tmp_path)
+    assert again == port_repair.fingerprint(tmp_path)
+
+
+def test_an_edit_to_a_large_file_is_seen_even_when_the_modification_time_is_put_back(tmp_path):
+    # the first and last blocks carry the check on their own: an edit that restores the size and the time is still a change
+    cap = full_port.JSON_MAX
+    _big(tmp_path / "w.bin", cap + 1)
+    st = os.stat(tmp_path / "w.bin")
+    before = port_repair.fingerprint(tmp_path)
+    for offset in (0, cap - 8):
+        with open(tmp_path / "w.bin", "r+b") as fh:
+            fh.seek(offset)
+            fh.write(b"EDIT")
+        os.utime(tmp_path / "w.bin", ns=(st.st_atime_ns, st.st_mtime_ns))
+        assert port_repair.changed(before, port_repair.fingerprint(tmp_path)) == ["w.bin"], offset
+        with open(tmp_path / "w.bin", "r+b") as fh:
+            fh.seek(offset)
+            fh.write(b"\0\0\0\0")
+        os.utime(tmp_path / "w.bin", ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def test_a_link_named_pycache_is_still_a_difference(tmp_path):
+    (tmp_path / "a.py").write_text("1")
+    before = port_repair.fingerprint(tmp_path)
+    os.symlink("/etc", tmp_path / "__pycache__")
+    assert port_repair.changed(before, port_repair.fingerprint(tmp_path)) == ["__pycache__"]
+
+
+def test_sample_blocks_refuses_a_fifo_and_a_link_and_reads_only_two_blocks(tmp_path):
+    from orchard import safeio
+    os.mkfifo(tmp_path / "pipe")
+    with pytest.raises(safeio.SafeReadError):
+        safeio.sample_blocks(tmp_path / "pipe", block=4)
+    with pytest.raises(safeio.NotRegular):  # a device reads without an error, so only the type check refuses it
+        safeio.sample_blocks("/dev/null", block=4)
+    (tmp_path / "f").write_bytes(b"0123456789")
+    os.symlink(tmp_path / "f", tmp_path / "l")
+    with pytest.raises(safeio.SafeReadError):
+        safeio.sample_blocks(tmp_path / "l", block=4)
+    size, _, head, tail = safeio.sample_blocks(tmp_path / "f", block=4)
+    assert (size, head, tail) == (10, b"0123", b"6789")
+    (tmp_path / "s").write_bytes(b"ab")
+    assert safeio.sample_blocks(tmp_path / "s", block=4)[2:] == (b"ab", b"ab")
+    (tmp_path / "e").write_bytes(b"")
+    assert safeio.sample_blocks(tmp_path / "e", block=4)[2:] == (b"", b"")
+    with pytest.raises(ValueError):
+        safeio.sample_blocks(tmp_path / "f", block=0)
+
+
+def test_a_large_file_that_is_not_regular_is_still_unreadable_not_followed(tmp_path):
+    os.mkfifo(tmp_path / "pipe")
+    fp = port_repair.fingerprint(tmp_path)
+    assert fp["pipe"].startswith("unreadable")
+
+
+def test_bytecode_directories_are_not_part_of_the_fingerprint(tmp_path):
+    # issue 453 item 3: a coder running python against the port makes __pycache__/*.pyc appear; that is not an edit
+    (tmp_path / "a.py").write_text("1")
+    before = port_repair.fingerprint(tmp_path)
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"\0\1")
+    (tmp_path / "sub" / "__pycache__").mkdir(parents=True)
+    (tmp_path / "sub" / "__pycache__" / "b.pyc").write_bytes(b"x")
+    assert port_repair.fingerprint(tmp_path) == before
+    assert port_repair.changed(before, port_repair.fingerprint(tmp_path)) == []
+
+
+def test_a_source_file_next_to_the_bytecode_directory_still_counts(tmp_path):
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "x.pyc").write_bytes(b"x")
+    (tmp_path / "a.py").write_text("1")
+    before = port_repair.fingerprint(tmp_path)
+    (tmp_path / "a.py").write_text("2")
+    assert port_repair.changed(before, port_repair.fingerprint(tmp_path)) == ["a.py"]
+
+
 # ---- the narration ---------------------------------------------------------------------------------------------------------------
 
 def narrated_lines(tmp_path, *decisions):
