@@ -3565,11 +3565,11 @@ class Supervisor:
         problem = problem[:300] if problem else problem
         copied.sort(key=lambda f: f["path"])                  # the walk has no order of its own; the record has one
         if problem or not copied:
-            self.ledger.append("decision", spec.number, decision="stage 2 port not copied", problem=problem or f"stages/{source}/port/ holds no file",
+            self.ledger.append("decision", spec.number, decision=f"stage {source} port not copied", problem=problem or f"stages/{source}/port/ holds no file",
                                **({"source_stage": source} if source != 2 else {}))
             self._port_seed = {"copied": 0, "kept": False}
             return
-        self.ledger.append("decision", spec.number, decision="stage 2 port copied", files=copied, **({"source_stage": source} if source != 2 else {}))
+        self.ledger.append("decision", spec.number, decision=f"stage {source} port copied", files=copied, **({"source_stage": source} if source != 2 else {}))
         self._port_seed = {"copied": len(copied), "kept": False}
 
     def _pin_reference_ids(self, spec) -> None:
