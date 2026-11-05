@@ -1,0 +1,3 @@
+target = "0.9.117"
+summary = "A hostile file-system fixture and reader tests for links, special files and cache layouts, a link-hazard count in the hardening ratchet, and a symlink recipe in the PR checklist."
+kind = "chore"

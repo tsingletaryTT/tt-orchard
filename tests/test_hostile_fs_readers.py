@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Readers and writers of a tree something else controls, against the hostile layouts of tests/hostile_fs.py.
+
+Each registered reader runs once in a child process with an address-space limit and a per-case alarm; the per-pair tests read that
+verdict. A reader that fails today is not weakened here: its pair is in `KNOWN_DEFECTS` with the issue that tracks it and is marked
+xfail(strict=True), so the test turns red when the reader is fixed until the entry is removed and the list cannot go stale.
+
+To add a reader: append a `PathReader` to `hostile_fs.PATH_READERS` and run this file. See docs/pr-hardening-checklist.md, the
+symlink and special-file recipe.
+"""
+from __future__ import annotations
+
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+import hostile_fs as hf
+
+# (reader name, case) -> the issue that tracks the defect and what is wrong
+KNOWN_DEFECTS: dict[tuple[str, str], tuple[int, str]] = {
+    ("ledger.Ledger lock file", "lock_link"): (493, "the lock file is opened with mode w by path: a link there truncates its target"),
+    ("residency.read_headers", "hf_blob_outside"): (494, "a snapshot link that leaves the cache root is followed and its header counted"),
+    ("delta_triage.compare_sidecars", "sidecar_link"): (464, "the sidecar scan follows a link to any target and lists the target's size"),
+}
+
+PAIRS = [(i, r.name, case) for i, r in enumerate(hf.PATH_READERS) for case in hf.EXPECT[r.family]]
+_cache: dict[int, list[dict]] = {}
+
+
+@pytest.fixture(scope="module")
+def verdicts():
+    """Every registered reader run once, in parallel, each in its own child process."""
+    with tempfile.TemporaryDirectory(prefix="hfs-", dir=None) as tmp:
+        def run(i):
+            d = Path(tmp) / f"r{i}"
+            d.mkdir()
+            return i, hf.run_reader(i, d)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for i, got in pool.map(run, range(len(hf.PATH_READERS))):
+                _cache[i] = got
+        yield _cache
+
+
+def _param(i: int, name: str, case: str):
+    defect = KNOWN_DEFECTS.get((name, case))
+    marks = [pytest.mark.xfail(strict=True, reason=f"issue {defect[0]}: {defect[1]}")] if defect else []
+    return pytest.param(i, case, id=f"{name}::{case}", marks=marks)
+
+
+@pytest.mark.parametrize("index,case", [_param(i, n, c) for i, n, c in PAIRS])
+def test_reader_survives_the_hostile_layout(verdicts, index, case):
+    reader = hf.PATH_READERS[index]
+    got = {v["case"]: v for v in verdicts[index]}[case]
+    want = hf.EXPECT[reader.family][case]
+    assert got["verdict"] in want, (
+        f"{reader.name} on {case}: {got['verdict']} (want one of {sorted(want)}). {got['detail']}. Case: {hf.CASES[case].why}")
+
+
+# ---- the harness itself: each review mistake is seen to be caught
+
+@pytest.fixture(scope="module")
+def control_verdicts():
+    with tempfile.TemporaryDirectory(prefix="hfs-ctl-") as tmp:
+        out = {}
+        for i, r in enumerate(hf.CONTROLS):
+            d = Path(tmp) / f"c{i}"
+            d.mkdir()
+            out[r.name] = {v["case"]: v["verdict"] for v in hf.run_reader(i, d, controls=True)}
+        yield out
+
+
+def test_a_plain_open_follows_a_link_and_blocks_on_a_fifo(control_verdicts):
+    got = control_verdicts["control: builtin open"]
+    assert got["plain"] == "original"
+    assert got["leaf_link"] == "leaked"                      # mistake 3 family: the link is followed
+    assert got["fifo_named_file"] == "hang"                  # the FIFO blocks the read until the alarm
+
+
+def test_o_nofollow_on_the_last_part_alone_misses_a_link_higher_up(control_verdicts):
+    got = control_verdicts["control: O_NOFOLLOW on the last part only"]
+    assert got["leaf_link"] == "refused"                     # the last part is protected
+    assert got["ancestor_link"] == "leaked"                  # mistake 1: a link on the way is followed
+
+
+def test_reading_by_pathname_after_a_pin_follows_the_swap(control_verdicts):
+    got = control_verdicts["control: pin, then read by pathname"]
+    assert got["plain"] == "original"
+    assert got["swap_after_pin"] == "leaked"                 # mistake 2: the pin did not help
+
+
+def test_the_safe_readers_are_not_caught_by_the_same_cases(verdicts):
+    names = {r.name: i for i, r in enumerate(hf.PATH_READERS)}
+    got = {v["case"]: v["verdict"] for v in verdicts[names["safeio.read_bytes(anchor=pin)"]]}
+    assert got["ancestor_link"] == "refused" and got["swap_after_pin"] == "original" and got["fifo_named_file"] == "refused"
+
+
+# ---- the registry and the cases
+
+def test_every_case_in_an_expectation_exists_and_every_family_has_one_that_must_succeed():
+    for family, cases in hf.EXPECT.items():
+        assert set(cases) <= set(hf.CASES), family
+        assert any(v & {"original", "written"} and not v & {"refused"} for v in cases.values()), f"{family} has no control case that must succeed"
+
+
+def test_readers_are_registered_once_and_use_a_known_family():
+    names = [r.name for r in hf.PATH_READERS]
+    assert len(names) == len(set(names))
+    assert all(r.family in hf.EXPECT for r in hf.PATH_READERS + hf.CONTROLS)
+
+
+def test_known_defects_name_a_registered_pair():
+    pairs = {(n, c) for _, n, c in PAIRS}
+    assert set(KNOWN_DEFECTS) <= pairs
+
+
+@pytest.mark.parametrize("case", sorted(hf.CASES))
+def test_each_case_builds_the_shape_it_says(tmp_path, case):
+    env = hf.layout(tmp_path)
+    hf.CASES[case].build(env)
+    root = env["root"]
+    if case == "leaf_link":
+        assert env["file"].is_symlink()
+    elif case == "ancestor_link":
+        assert (root / "sub").is_symlink()
+    elif case == "root_is_link":
+        assert env["root"].is_symlink()
+    elif case == "fifo_named_file":
+        import stat
+        assert stat.S_ISFIFO(env["file"].lstat().st_mode)
+    elif case == "dir_for_file":
+        assert env["file"].is_dir()
+    elif case == "sparse_huge":
+        assert env["file"].stat().st_size == hf.HUGE_SPARSE
+    elif case == "lock_link":
+        assert env["lock"].is_symlink()
+    elif case == "swap_after_pin":
+        env["between"]()
+        assert root.is_symlink() and (Path(str(root) + ".orig") / "sub" / "data.json").read_bytes() == hf.OK_BYTES
+    elif case == "deep_tree":
+        assert (root / "deep").is_dir()
+    elif case == "hf_blob_inside":
+        assert (env["snapshot"] / "model.safetensors").is_symlink()
