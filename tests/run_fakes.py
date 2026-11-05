@@ -298,6 +298,7 @@ FILES = {
                      {"name": n, "pass": True, "evidence": ev(1)}
                      for n in ("loads", "tokenizer round trip", "decodes forward", "matches the card")]}},
     (2, "prepare"): hw(2),
+    (2, "repair"): {},            # a full-port stage 2's repair round (issue 420): by default the coder changes nothing and the round ends
     # The fake run's delta says weights-only, so stage 2 runs the weights-swap-check skill.
     (2, "finish"): {"result.json": {"serves": True, "server_ready_s": 280.5, "coherent": True,
                                     "free_run_text": "The sea was calm that morning.",

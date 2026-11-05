@@ -2625,12 +2625,16 @@ def marker_state(run_dir, n: int, marker_name: str | None, ledger) -> tuple[str,
     return "ok", rec, None
 
 
-def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple[Path, bool]:
+def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger, rerun_owed: bool = False) -> tuple[Path, bool]:
     """The stage directory for this attempt, and whether it resumes from the stage's marker.
 
     A resumed stage with its marker present keeps its directory. Otherwise an existing directory
     is moved aside to `<n>.partial-<k>` (never deleted) and a fresh one is made (spec section 10).
-    """
+
+    `rerun_owed` is the supervisor's word that a port repair rerun is in flight in the ledger: its test may have replaced the supervisor's
+    marker before the entry that vouches for it was written (a kill between the two). That record is kept as the resume point so the repaired
+    port and the attempt's count stand, and it is not trusted: the supervisor runs the owed check again before anything reads it. The check
+    for a marker an agent could have written is unchanged for every other resume (review of PR 432)."""
     d = Path(run_dir) / "stages" / str(spec.number)
     if d.exists():
         if resuming and spec.marker and (d / spec.marker).is_file():
@@ -2641,6 +2645,11 @@ def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple
                 ledger.append("decision", spec.number, decision="marker cannot be read and is not a resume point",
                               marker=spec.marker, reason=reason)
             elif state == "not vouched":
+                if rerun_owed and spec.marker == SUPERVISOR_MARKER:
+                    # A port repair rerun was in flight (PR 425): the record is kept as the resume point, not trusted, and the check runs again.
+                    ledger.append("decision", spec.number, decision="resume from marker", marker=rec, unvouched=True,
+                                  reason="a port repair rerun was in flight; its record is not trusted and the check runs again")
+                    return d, True
                 ledger.append("decision", spec.number, decision="marker not written by the supervisor", marker=rec)
             elif state == "ok":
                 ledger.append("decision", spec.number, decision="resume from marker", marker=rec)

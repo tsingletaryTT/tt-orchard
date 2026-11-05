@@ -158,6 +158,15 @@ def _decision(e: dict, d: dict) -> list[Line]:
                         + _reasons(d.get("reasons"), 3), True)]
     if what.startswith("no gate feedback"):
         return [Line(o, f"not asking the agent to retry: {d.get('problem', what)}", True)]
+    if what == "port repair round":
+        where = f" at {d['op']!r}" if d.get("op") else ""
+        return [Line(o, f"port repair round {d.get('round', '?')} of {d.get('of', '?')}: the port check failed{where} ({_clip(d.get('failure', '?'), 160)}); "
+                        "the coder may edit the port, then the same check runs again", True)]
+    if what == "port repair rounds ended":
+        why = {"spent": "all the rounds were used", "unchanged": "the coder changed nothing in the port"}.get(d.get("reason"), str(d.get("reason", "?")))
+        return [Line(o, f"port repair rounds ended: {why}; the stage goes on as a failed test", True)]
+    if what == "port repair refused":
+        return [Line(o, "port repair refused: the repair step changed " + ", ".join(str(f) for f in d.get("files") or []) + ", which only the supervisor writes", True)]
     if what == "pause":
         return [Line(o, f"paused: {d.get('reason', '?')}", True)]
     if what == "blocked":

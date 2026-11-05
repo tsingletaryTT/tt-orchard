@@ -185,6 +185,15 @@ def test_a_file_the_coder_leaves_next_to_the_template_or_in_the_port_directory_i
     assert not (run / "SITECUSTOMIZE-RAN").exists()
 
 
+def test_a_ttnn_file_in_the_port_directory_cannot_stand_in_for_the_runtime(tmp_path):
+    # The runtime is imported before the port directory is on sys.path; a ttnn.py the coder leaves there is never the module the worker opens
+    # the device with (the import moved into the guarded init in review of PR 425, and must still come first).
+    run, stage, _ = make_run(tmp_path, extra_files={"port/ttnn.py": "raise RuntimeError('the coder wrote this ttnn')\n"})
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "the coder wrote this ttnn" not in done.stdout + done.stderr
+
+
 def test_a_port_that_patches_the_templates_functions_and_hooks_imports_cannot_change_the_record(tmp_path):
     # Inside the worker the port can reach this file as __main__ and install an import hook. The record is made in the parent process,
     # which none of it reaches: the stamps and the sha256 are the parent's, and the counting is the parent's over the ids it was sent.

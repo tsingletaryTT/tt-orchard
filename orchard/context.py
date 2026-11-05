@@ -62,6 +62,15 @@ PHASE_TASKS = {
                      "its output.txt into `reason`, and set every number you did not measure to "
                      "null. Do not investigate a failure and do not try to make it pass. Reply with "
                      "a short summary and no tool call."),
+    # A full-port stage 2 whose port check failed on the port itself (issue 420). The supervisor's message below this task carries the round, the
+    # limit and the end of the check's output.
+    "repair": ("The supervisor ran the port check and it failed on your port. The failure and the round number are in the supervisor's "
+               "message below, and the record and output are in your stage directory. Read the failure, find the cause in the port, and "
+               "fix it by editing only the files under stages/{n}/port/ (the port module is stages/{n}/port/port_model.py). Do not write "
+               "any other file: the check, its config, the test record and the output belong to the supervisor, and a change to the record "
+               "or the output fails the attempt. Do not run the check or any code that opens a device; the supervisor runs the same check "
+               "again after this step. If no edit to the port can fix the failure, make no change and say why. Then reply with a short "
+               "summary and no tool call."),
 }
 
 RULES = """Rules of this run:
@@ -149,6 +158,8 @@ def build_messages(*, spec: StageSpec, phase: str, run_dir, stage_dir, skill_pat
         own.append(spec.marker)
     if phase == "finish":
         own += ["hw_tests.json" if spec.tests else "hw_test.json", "test-result.json"]
+    elif phase == "repair":
+        own += ["test-result.json"]
     for name in own:
         f = stage_dir / name
         if f.is_file():

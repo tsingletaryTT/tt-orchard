@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
-    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port] [--model-kind generative|reranker|embedding]
-    tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
+    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--sampling auto|needed|not-needed] [--resume-aborted] [--full-port] [--port-repair-rounds N] [--model-kind generative|reranker|embedding]
+    tt-orchard status  [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
     tt-orchard ui       [--lan] [--host ADDR] [--port 8780] [--toplike PATH]
@@ -78,6 +78,15 @@ class NoConfig(Exception):
     """No bringup.toml was found, or the one named does not exist."""
 
 
+def _port_repair_rounds_arg(text: str) -> int:
+    """argparse type of `--port-repair-rounds`: a whole number from 0 to port_repair.MAX_ROUNDS (the supervisor checks the same range)."""
+    from orchard import port_repair
+    try:
+        return port_repair.check_rounds(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def find_config(explicit, env, checkout: Path, home: Path) -> Path:
     """The config file: --config, then $ORCHARD_BRINGUP_CONFIG, then <checkout>/config/bringup.toml, then
     ~/.config/tt-orchard/bringup.toml. A file that was named explicitly and is missing is an error; it is
@@ -142,6 +151,11 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--full-port-rehearsal", action="store_true",
                    help="with --full-port, for a rehearsal model with random weights: stage 2 waives its `coherent` field and no other check, "
                         "and the ledger says so. Given when the run starts; a resume keeps it and cannot add it")
+    b.add_argument("--port-repair-rounds", type=_port_repair_rounds_arg, default=None, metavar="N",
+                   help="a full-port stage 2 whose port check failed on the port itself (a missing weight, a bad import, an index off by one) "
+                        "gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the "
+                        "same check again (issue 420). 0 is no rounds. Default 3, at most 10. The run records the value; a resume keeps it "
+                        "and refuses another")
     b.add_argument("--prune-caches", action="store_true",
                    help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
                         "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
@@ -1333,7 +1347,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               accept_credentials=not args.refuse_credentials_visible,
                                               graft_trial=not args.no_graft_trial,
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
-                                              full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind)
+                                              full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind,
+                                              port_repair_rounds=args.port_repair_rounds)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)
