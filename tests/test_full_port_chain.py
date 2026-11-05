@@ -70,3 +70,19 @@ def test_each_stage_reads_what_the_stage_before_it_wrote(rig):
     assert six["derived_by"] == five["derived_by"] == "supervisor" and six["source_stage"] == 2
     copied = [d for d in rig.decisions() if d.get("decision") == "stage 2 port copied"]
     assert copied, "stage 6's gate reads the newest 'stage N port copied' decision of its own attempt"
+
+
+def test_the_chain_with_chips_configured_runs_stage_3_on_four_and_stage_4_covers_both_counts(rig):
+    from test_supervisor_full_port_stage3 import PREPARE_3
+    rig.args.required_chips = (2, 4)
+    src = fk.port_source(fk.ANSWERING, rig.tmp / "snapshot")
+    make(rig, over={(1, "run"): STAGE_1, (2, "prepare"): {**PREPARE, "port/port_model.py": src}, (3, "prepare"): {**PREPARE_3, "port/port_model.py": src}})
+    from orchard.supervisor import Control
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    assert rig.run() == EXIT_READY, [(d.get("decision"), d.get("reason") or d.get("code")) for d in rig.decisions() if d.get("decision") in ("pause", "blocked")]
+    res = results(rig)
+    assert res[3] == ["pass"] and res[4] == ["pass"] and res[5] == ["pass"] and res[6] == ["pass"], res
+    five = json.loads((rig.run_dir / "stages" / "5" / "result.json").read_text())
+    six = json.loads((rig.run_dir / "stages" / "6" / "result.json").read_text())
+    assert six["source_stage"] == 3 and len(json.loads((rig.run_dir / "stages" / "6" / "evidence" / "port-quality.json").read_text())["chips"]) == 4
+    assert five["derived_by"] == "supervisor"
