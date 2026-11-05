@@ -164,7 +164,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
-from orchard import full_port, model_kind, port_facts, port_repair, residency, scoring_check
+from orchard import full_port, model_kind, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
@@ -660,6 +660,25 @@ STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # int
 GRAFT_TRIAL_ENV = "ORCHARD_TRIAL_DIR"      # in the environment of the trial's test: the trial directory, so its servers can be found
 GRAFT_TRIAL_TEMPLATE = "graft_trial.py"     # copied into stages/2/graft-trial/ when the trial starts (orchard/graft_trial.py)
 SAMPLING_TRIAL_TEMPLATE = "sampling_trial.py"   # copied into stages/2/sampling-trial/ when the drafter-off trial starts (orchard/sampling_choice.py)
+
+
+def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snapshot, root) -> tuple:
+    """Write `stages/2/reference_excerpts.md` (orchard/port_excerpts.py) and say so in the ledger. Returns (written, the summary the facts file
+    points at). Advisory: a config that cannot be read, a missing or hostile reference module and a write error each leave no file, a ledger
+    decision that names the reason, and the coder works from the facts file and its skill as before."""
+    try:
+        result = port_excerpts.for_root(root, port_facts.read_config(snapshot))
+        if not result.text:
+            ledger.append("decision", spec.number, decision="reference excerpts not written", problem=result.reason[:300])
+            return False, None
+        record = evidence_record(run_dir, port_excerpts.write(stage_dir, result.text))
+    except Exception as exc:
+        ledger.append("decision", spec.number, decision="reference excerpts not written",
+                      problem=f"{exc.__class__.__name__}: an unexpected error while writing the excerpts")
+        return False, None
+    ledger.append("decision", spec.number, decision="reference excerpts written", excerpts=record, bytes=len(result.text.encode("utf-8")),
+                  classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
+    return True, result.summary()
 
 
 class Supervisor:
@@ -2954,7 +2973,7 @@ class Supervisor:
         (orchard/swap_prepare.py). Any other stage, and a stage with no drafted config, gets PrepareOutcome(False) and its agent step."""
         if spec.draft == "full_port":
             seed = getattr(self, "_port_seed", None) or {}
-            return swap_prepare.PrepareOutcome(False, note=port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton"))))
+            return swap_prepare.PrepareOutcome(False, note=port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts"))))
         if spec.skill != "weights-swap-check" or spec.draft != "swap_config":
             return swap_prepare.PrepareOutcome(False)
         outcome = swap_prepare.prepare(run_dir=self.run_dir, stage_dir=stage_dir, env=agent_env(self.run_dir, extra=self.extra_env),
@@ -3074,12 +3093,15 @@ class Supervisor:
         or config that cannot be read leaves no facts file, the ledger says why, and the coder works from its skill as before. A port
         already in the stage directory (a resumed stage) is kept."""
         snapshot = self.inputs.get("model")
-        facts_written = False
+        facts_written = excerpts_written = False
         if snapshot:
             root = port_facts.reference_root(port_facts.default_run, self.inputs.get("reference_python"))
             lookup = (lambda model_type: port_facts.reference_source(root, model_type)) if root is not None else None
+            summary = None
+            if root is not None:            # reference excerpts (issue 427): the layer classes' source, in a file of its own that the facts point at
+                excerpts_written, summary = write_reference_excerpts(self.ledger, self.run_dir, spec, stage_dir, snapshot, root)
             try:
-                facts = port_facts.build(snapshot, reference_lookup=lookup)
+                facts = port_facts.build(snapshot, reference_lookup=lookup, excerpts=summary)
                 record = evidence_record(self.run_dir, port_facts.write(stage_dir, facts))
             except (port_facts.PortFactsError, OSError, safeio.SafeReadError) as exc:
                 self.ledger.append("decision", spec.number, decision="port facts not written", problem=str(exc)[:300])
@@ -3099,7 +3121,7 @@ class Supervisor:
             self.ledger.append("decision", spec.number, decision="port skeleton not copied", problem=exc.__class__.__name__)
         if skeleton:
             self.ledger.append("decision", spec.number, decision="port skeleton copied")
-        self._port_seed = {"facts": facts_written, "skeleton": skeleton}
+        self._port_seed = {"facts": facts_written, "skeleton": skeleton, **({"excerpts": True} if excerpts_written else {})}
 
     def _pin_full_port(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
         """Stage 2 of a full port (orchard/full_port.py): put the supervisor's template and its config in the stage directory, replacing any

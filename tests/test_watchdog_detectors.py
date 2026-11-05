@@ -339,7 +339,7 @@ def test_turn_repeat_default_is_three():
     ('grep -rn "max_model_len" /opt/venv/lib/vllm/config.py | head -50',
      'grep -rn "max_model_len" /opt/venv/lib/vllm/config.py | head -80'),
     ('grep -rn "timeout" /opt/venv/lib/vllm', 'grep -rn "deadline" /opt/venv/lib/vllm'),
-    ("sed -n 100,200p stages/0/notes.txt", "sed -n 200,300p stages/0/notes.txt"),
+    ("sed -n 100,200p stages/0/notes.txt", "sed -n 100,200p stages/0/notes.txt 2>&1"),   # the same range; different ranges are in test_watchdog_range_reads.py
     ("ls -la  stages/0/evidence", "ls -la stages/0/evidence 2>/dev/null"),
     ("tail -n 200", "tail -n 400"),
     ("head -50", "head   -80"),
