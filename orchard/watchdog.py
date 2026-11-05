@@ -448,7 +448,9 @@ class DedupeStreak:
 
     Sends one hint per agent step, naming what was asked for again, and tells the agent to write. It is a `nudge_only` finding: the ladder
     delivers it without using a rung, so it can never lead to an escalation or a pause by itself (the repeated-call detectors still see every call).
-    A turn number lower than the one before it, or the first turn after a later one, starts a new step and a new count."""
+    A step starts with its first response (turn 1; a continuation keeps counting turns on from its step, so it never shows a turn 1): the count and
+    the once-per-step flag start again there (review of PR 488). A turn number lower than the one before it starts a new step as well, for a source
+    that feeds tool results without responses. Several tool results of one response (the same turn) are one step and are all counted."""
     name = "dedupe_streak"
 
     def __init__(self, n: int = DEDUPE_STREAK_N, window: int = DEDUPE_STREAK_WINDOW):
@@ -459,15 +461,23 @@ class DedupeStreak:
         self._fired: set[str] = set()
         self._turn: dict[str, int] = {}
 
+    def _new_step(self, agent: str) -> None:
+        self._recent.pop(agent, None)
+        self._fired.discard(agent)
+        self._turn.pop(agent, None)
+
     def feed(self, ev: Event) -> Finding | None:
+        agent = ev.agent
+        if ev.kind == "response":
+            if ev.turn == 1:                  # the first response of a step: nothing from an earlier step counts
+                self._new_step(agent)
+            return None
         if ev.kind != "tool_result":
             return None
-        agent = ev.agent
         if ev.turn is not None:
             last = self._turn.get(agent)
-            if last is not None and (ev.turn < last or (ev.turn == 1 and last != 1)):
-                self._recent.pop(agent, None)
-                self._fired.discard(agent)
+            if last is not None and ev.turn < last:
+                self._new_step(agent)
             self._turn[agent] = ev.turn
         recent = self._recent.setdefault(agent, deque(maxlen=self.window))
         recent.append(bool(ev.deduped))
