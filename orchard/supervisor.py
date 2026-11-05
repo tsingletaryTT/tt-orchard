@@ -1252,17 +1252,11 @@ class Supervisor:
             e["event"] == "decision" and (is_full_port_pause(e["data"].get("reason")) or e["data"].get("reason") == RESTRICTED_HEAD) for e in entries)
 
     def _full_port_stages_unbuilt(self) -> bool:
-        """A run the operator allowed to port (`--full-port`) has passed stage 2, and the stages after it for a full port are not built
-        (the design's slices 3 to 6). It pauses once, so one attended resume goes on into the generic stages. Unattended, it always blocks."""
-        entries = self.ledger.read()
-        if not full_port_enabled(entries) or run_class(entries, self.run_dir) != "full-port":
-            return False
-        if text_runtime.selected(entries) is not None:
-            return False
-        if self._scoring_route()[1]:
-            return False          # a scoring model of class full-port has its own pause after stage 2 (`_scoring_stages_unbuilt`, code scoring-route)
-        return self.unattended or not any(
-            e["event"] == "decision" and e["data"].get("reason") == FULL_PORT_STAGES_UNBUILT for e in entries)
+        """Whether a full-port run pauses after stage 4 because the stages after it are not built. Stages 3 (the port on the configured chips),
+        4 (each required chip count), 5 (the chat server with the acceptance corpus) and 6 (quality and benchmark) are all built, so no
+        full-port run pauses here any more (issues 326, 454 and 329). The constant `FULL_PORT_STAGES_UNBUILT` and the pause branch stay as the
+        place a future unbuilt stage would be named."""
+        return False
 
     def _scoring_route(self) -> tuple[str, bool]:
         """(the run's model kind, whether the scoring route takes it), read from the ledger. A generative model never takes it. A run that
@@ -4939,8 +4933,8 @@ def parse(argv=None):
     r.add_argument("--full-port", action="store_true",
                    help="let a model that stage 0 classed `full-port` go on: the local coder writes the port in stage 2 and one hardware "
                         "test compares the chip's tokens with the CPU reference (skill full-port-check). Stage 3 runs the port on the largest "
-                        "of --required-chips and stage 4 on each other count. Stages 5 and 6 for a full port are "
-                        "not built yet, so the run then pauses (unattended: ends blocked, code full-port-stages-unbuilt). The ledger records "
+                        "of --required-chips and stage 4 on each other count. Stage 5 serves the port behind the chat server and replays an acceptance "
+                        "corpus, and stage 6 measures quality and a benchmark. The ledger records "
                         "the flag and a resume keeps it. It can be added on a resume only before stage 2 has started. It changes nothing for "
                         "any other class, and `unknown` and `restricted-head` still stop")
     r.add_argument("--model-kind", choices=model_kind.KINDS, default=None,
