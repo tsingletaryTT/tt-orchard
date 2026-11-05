@@ -219,6 +219,8 @@ STAGE_3_SEED_ENTRIES = 1000               # the scan stops after this many entri
                                           # would let a directory of a million subdirectories be read to the end before anything refused it
 STAGE_3_SEED_DEPTH = 8                    # and at this many directory levels below the port directory
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
+FULL_PORT_UNBUILT = ()      # the stages of a full port that are not built yet: empty, because stages 3 to 6 all exist (issues 326, 454, 329). A non-empty
+                            # tuple makes a full-port run pause before stage 5 once (unattended: end blocked), as the first slices did; tests set it
 FULL_PORT_STAGES_UNBUILT = ("stage 4 of the full-port route passed or was skipped; stages 5 and 6 for a full-port model are not built yet "
                             "(docs/superpowers/specs/2026-11-02-full-port-supervisor-design.md: stages 5 and 6 are issue 329), so a person "
                             "reviews the result and decides whether to go on")
@@ -1254,9 +1256,19 @@ class Supervisor:
     def _full_port_stages_unbuilt(self) -> bool:
         """Whether a full-port run pauses after stage 4 because the stages after it are not built. Stages 3 (the port on the configured chips),
         4 (each required chip count), 5 (the chat server with the acceptance corpus) and 6 (quality and benchmark) are all built, so no
-        full-port run pauses here any more (issues 326, 454 and 329). The constant `FULL_PORT_STAGES_UNBUILT` and the pause branch stay as the
-        place a future unbuilt stage would be named."""
-        return False
+        full-port run pauses here any more (issues 326, 454 and 329). `FULL_PORT_UNBUILT` is empty; while it is not, a run the operator allowed to
+        port (`--full-port`) pauses once after stage 4, so one attended resume goes on, and unattended it always blocks."""
+        if not FULL_PORT_UNBUILT:
+            return False
+        entries = self.ledger.read()
+        if not full_port_enabled(entries) or run_class(entries, self.run_dir) != "full-port":
+            return False
+        if text_runtime.selected(entries) is not None:
+            return False
+        if self._scoring_route()[1]:
+            return False          # a scoring model of class full-port has its own pause after stage 2 (`_scoring_stages_unbuilt`, code scoring-route)
+        return self.unattended or not any(
+            e["event"] == "decision" and e["data"].get("reason") == FULL_PORT_STAGES_UNBUILT for e in entries)
 
     def _scoring_route(self) -> tuple[str, bool]:
         """(the run's model kind, whether the scoring route takes it), read from the ledger. A generative model never takes it. A run that

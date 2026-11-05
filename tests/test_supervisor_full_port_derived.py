@@ -11,7 +11,7 @@ from orchard.supervisor import EXIT_BLOCKED, Control
 from port_check_fakes import HONEST, WRONG
 from test_supervisor_full_port import coder_writes, failure, incoherent, make, never_wait, rig, stage_2   # noqa: F401  (rig is a fixture)
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "unbuilt_stages_5_6")
 
 
 def finish_steps(rig):
