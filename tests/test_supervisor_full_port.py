@@ -9,7 +9,7 @@ import pytest
 
 from fakes import Crash
 from orchard import blocked, narrate, status, supervisor
-from orchard.stages import full_port_enabled
+from orchard.stages import SKIP_3_FULL_PORT, full_port_enabled
 from orchard.supervisor import EXIT_ABORTED, EXIT_BLOCKED, EXIT_READY, Control, parse
 from orchard import full_port
 from port_check_fakes import HONEST, WRONG, install_fake_ttnn, python_path, tokenizer_json
@@ -137,13 +137,17 @@ def test_stage_2_passes_through_the_real_test_runner_and_the_gate(rig):
     assert any(e["path"] == "stages/2/result.json" for e in ends[0]["evidence"])
 
 
-def test_the_run_pauses_before_stage_3_and_runs_none_of_stages_3_to_6(rig):
+def test_the_run_skips_stage_3_pauses_before_stage_4_and_runs_none_of_stages_4_to_6(rig):
+    """Issue 326: stage 3 runs the port on the configured chips. This run configures no count above one board (no --required-chips), so stage 2's
+    board is that count: stage 3 is recorded as skipped with its reason, and the pause that was before stage 3 is now before stage 4."""
     make(rig)
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
     rig.run()
     reasons = [d["reason"] for d in rig.decisions() if d.get("decision") == "pause"]
     assert reasons == [supervisor.FULL_PORT_STAGES_UNBUILT]
-    for n in (3, 4, 5, 6):
+    assert [(e["data"]["result"], e["data"].get("reason")) for e in rig.entries() if e["event"] == "stage_end" and e["stage"] == 3] == \
+        [("skipped", SKIP_3_FULL_PORT)]
+    for n in (4, 5, 6):
         assert not started(rig, n), n
 
 
@@ -165,7 +169,7 @@ def test_an_unattended_retry_does_not_pass_the_pause(rig):
     assert rig.run() == EXIT_BLOCKED
     assert rig.run() == EXIT_BLOCKED
     assert [d["code"] for d in rig.decisions() if d["decision"] == "blocked"] == ["full-port-stages-unbuilt"] * 2
-    assert not started(rig, 3)
+    assert not started(rig, 4)
 
 
 def test_an_attended_resume_after_the_pause_goes_on_into_the_generic_stages(rig):

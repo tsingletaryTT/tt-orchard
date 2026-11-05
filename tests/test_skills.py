@@ -9,14 +9,14 @@ import pytest
 from orchard.stages import STAGES, resolve_skill, spec_for
 
 SKILLS = Path(__file__).resolve().parent.parent / "orchard" / "skills"
-LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "weights-swap-configs", "serving-check", "full-port-check")
+LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "weights-swap-configs", "serving-check", "full-port-check", "full-port-mesh")
 # Spec section 11: existing skills the stages use, referenced by name only.
 SPEC_EXISTING = {"model-bringup", "functional-decoder", "full-model", "multichip", "mesh-shrink",
                  "vllm-integration", "qualitative-check", "benchmark-model", "tt-device-usage",
                  "stage-review", "tti-release"}
 GATE_FILES = {"delta-triage": "delta.json", "reference-gate": "reference.json",
               "weights-swap-check": "result.json", "weights-swap-configs": "result.json",
-              "serving-check": "result.json", "full-port-check": "result.json"}
+              "serving-check": "result.json", "full-port-check": "result.json", "full-port-mesh": "result.json"}
 
 
 @pytest.mark.parametrize("name", LOCAL)

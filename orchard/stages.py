@@ -557,13 +557,21 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
-def gate_full_port(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
+def gate_full_port(stage_dir, run_dir, *, rehearsal: bool = False, stage: int = 2, expected_chips: int | None = None) -> GateResult:
     """Stage 2 of a full port (run started with --full-port): the port ran on the leased chips and its tokens agree with the stage 1
     reference. orchard/full_port.py holds the checks; each failing field has its own reason. `rehearsal` (the run's --full-port-rehearsal,
-    read from the ledger by the supervisor) waives the `coherent` field only."""
+    read from the ledger by the supervisor) waives the `coherent` field only. `stage` and `expected_chips` are for stage 3
+    (`gate_full_port_3`): the same checks on that stage's own port directory and command, and the chip count the stage is configured for."""
     waived: list[str] = []
-    reasons, seen = full_port.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived)
+    reasons, seen = full_port.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived, stage=stage, expected_chips=expected_chips)
     return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
+
+
+def gate_full_port_3(stage_dir, run_dir, *, rehearsal: bool = False, expected_chips: int | None = None) -> GateResult:
+    """Stage 3 of a full port (issue 326): the port that passed stage 2 ran on the chip count the run is configured for and its tokens still
+    agree with the stage 1 reference. The checks are stage 2's, on stages/3/. The supervisor gives `expected_chips` from the run's
+    `--required-chips`; the gate refuses a test that ran on a different number."""
+    return gate_full_port(stage_dir, run_dir, rehearsal=rehearsal, stage=3, expected_chips=expected_chips)
 
 
 def gate_scoring_reference(stage_dir, run_dir) -> GateResult:
@@ -1884,6 +1892,16 @@ FULL_PORT_STAGE_2 = dataclasses.replace(
     STAGES[2], name="full port on one board and agreement with the CPU reference", skill="full-port-check",
     gate=gate_full_port, draft="full_port")
 
+# Stage 3 of a full port (issue 326): the port that passed stage 2 on one board, on the chip count the run is configured for (the largest of
+# `--required-chips`, the large tier). The same shipped template runs it, with the same record and the same provenance checks, from stages/3/,
+# so the coder adapts the port to the mesh in stages/3/port/ (the supervisor seeds that directory with stage 2's passed port). `boards` is the
+# stage's own one; the supervisor widens the single test to the configured chips the way it does for a wider container package (issue 60).
+FULL_PORT_STAGE_3 = dataclasses.replace(
+    STAGES[3], name="full port on the configured chips and agreement with the CPU reference", skill="full-port-mesh",
+    gate=gate_full_port_3, draft="full_port")
+SKIP_3_FULL_PORT = ("full-port route: the run configures no chip count above one board (`--required-chips`), so stage 2 already ran the port on "
+                    "the configured chips")
+
 
 # A scoring model (a reranker or an embedding model, issue 378, docs/superpowers/specs/2026-11-02-scoring-model-check-design.md): stage 1 records
 # a pair set and the Hugging Face scores or vectors instead of generated ids, and stage 2 runs the supervisor's scoring check on the coder's port
@@ -2244,6 +2262,8 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
         return SCORING_STAGE_1 if number == 1 else SCORING_STAGE_2       # a scoring model has no generated tokens to compare
     if full_port and number == 2 and path == "full-port" and cls == "full-port":
         return FULL_PORT_STAGE_2          # only stage 0's own `full-port` answer: `unknown` and `restricted-head` keep their pauses
+    if full_port and number == 3 and path == "full-port" and cls == "full-port" and not scoring_routed(kind, path, cls, full_port):
+        return FULL_PORT_STAGE_3          # a scoring model of this class keeps its own pause after stage 2
     if path == "stock-runtime":
         stock_table = {2: STOCK_STAGE_2, 3: dataclasses.replace(STAGES[3], skip=SKIP_STOCK_3),
                        4: dataclasses.replace(STAGES[4], skip=SKIP_STOCK_4), 5: dataclasses.replace(STAGES[5], skip=SKIP_STOCK_5),

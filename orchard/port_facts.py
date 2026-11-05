@@ -483,6 +483,26 @@ def copy_skeleton(stage_dir) -> bool:
     return True
 
 
+def stage_3_note(*, chips: int, copied: bool) -> str:
+    """What the supervisor adds to the coder's prepare task for stage 3 of a full port (issue 326): the port passed stage 2 on one board and
+    this stage runs the same check on `chips` chips. The generic prepare task names only hw_test.json and handoff.json."""
+    parts = [f"This stage runs the port that passed stage 2 on one board again, on {chips} chips (a mesh of 1 x {chips}, which the check opens "
+             f"with the 1-D fabric on, as it does for any stage with more than one chip). The check is the supervisor's: when you finish, it "
+             f"puts its own `stages/3/port_check.py` back and rewrites `hw_test.json` to its fixed command (`{full_port.command(3)}`). Your "
+             f"work in this step is the port under `stages/3/port/`; write nothing under `stages/2/`."]
+    if copied:
+        parts.append("`stages/3/port/` already holds the files of the stage 2 port, copied by the supervisor. Change what a mesh needs: how "
+                     "each weight is placed (replicated, or sharded across the devices), where a collective is required, and how "
+                     "`load`, `prefill` and `decode_step` use the mesh device they are given. A port that runs on one chip and ignores "
+                     "the others can still pass, but it is not what this stage is for. Leave what already works.")
+    else:
+        parts.append("The supervisor could not copy the stage 2 port (the ledger says why). Copy the files of `stages/2/port/` into "
+                     "`stages/3/port/` yourself, then adapt them to the mesh.")
+    parts.append(f"When the port is ready, write `hw_test.json` as {{\"command\": \"{full_port.command(3)}\", \"deadline_s\": "
+                 f"{full_port.DEADLINE_S}}} and `handoff.json`, then reply with a short summary. Do not run the check yourself.")
+    return " ".join(parts)
+
+
 def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
     """What the supervisor adds to the coder's prepare task for a full port. The generic prepare task names only hw_test.json and
     handoff.json; the port itself is described only in the skill, and the coder explored and wrote nothing."""

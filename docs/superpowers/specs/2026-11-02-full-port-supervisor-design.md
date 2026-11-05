@@ -54,7 +54,8 @@ and a gate that checks the evidence and does not trust the agent's summary.
 | Opt-in | The operator starts the run with `--full-port` (`tt-orchard bringup MODEL --full-port`). The ledger records it in `run_start` and a resume keeps it. Without it nothing changes: a full port still blocks. |
 | Which classes | Only stage 0's class `full-port`. `unknown` and `restricted-head` keep their pauses, because for those stage 0 either could not decide or the operator ruled the harness does not serve them. |
 | Stage 2 | `full-port-check` skill and `gate_full_port` (slice 1). One board, one hardware test. |
-| Stages 3 to 6 | Not built in slice 1. After stage 2 passes, the run pauses before stage 3 with a reason that names the unbuilt stages, and an unattended run ends blocked with code `full-port-stages-unbuilt`. Slices 3 and 4 replace the pause. |
+| Stage 3 | Built (issue 326). The port that passed stage 2 runs on the chip count the run is configured for: the largest of `--required-chips`. See section 3.6. |
+| Stages 4 to 6 | Not built. After stage 3 passes (or is skipped), the run pauses before stage 4 with a reason that names the unbuilt stages, and an unattended run ends blocked with code `full-port-stages-unbuilt`. The rest of slice 3 (stage 4) and slice 6 (stages 5 and 6) replace the pause. |
 
 ### 3.2 Who writes what in stage 2
 
@@ -141,6 +142,24 @@ A failed test of the port now earns the coder up to N repair rounds in the same 
   and does not investigate), and the failure path after the last round: a failed gate, then escalation, then a fresh attempt.
 - **Cost.** Each round is one agent step and one 10-second to 1-hour test with a lease. The lease is taken again for each round and is not held between rounds: when the coder holds
   the board the test needs, the coder must be up for the repair step, so a lease held across the step would hold a board the coder is parked from.
+
+### 3.6 Stage 3: the port on the configured chips (issue 326)
+
+Stage 2 shows the port on one board. Stage 3 shows the same port on the chip count the run is configured for, which is the largest of
+`--required-chips` (the large tier; on this box, four chips and both boards). It reuses stage 2's machinery and adds no new check.
+
+| Piece | Rule |
+|---|---|
+| When it runs | Stage 0's class is `full-port`, the operator started the run with `--full-port`, and the largest `--required-chips` count is above one board's chips. With no such count, stage 3 is skipped and the `stage_end` entry carries the reason (`SKIP_3_FULL_PORT`): stage 2's board is the configured count. |
+| Who writes what | Same three parts as stage 2: a prepare step (the coder adapts the port to the mesh under `stages/3/port/`), the supervisor's one hardware test, a finish step. The supervisor copies stage 2's passed port into `stages/3/port/` before the prepare step (regular files only, capped in number and size, no caches), and the ledger holds the sha256 of each copied file. A port already there (a resumed stage) is kept. |
+| The check | The shipped `port_check.py`, copied to `stages/3/port_check.py` with its config, run as `python3 -P -s stages/3/port_check.py`. It opens a mesh of one row and N columns with the 1-D fabric when N is above one. The same record (`orchard-port-check/1`), the same provenance checks and the same bar as stage 2. |
+| What the gate adds | The record's chips and the supervisor's marker must both list exactly the configured number of chips (`expected_chips`, which the supervisor takes from the run's `--required-chips`, never from a file the coder writes), the marker's command must be stage 3's, and the port sources must be under `stages/3/port/`. The marker must be the file the supervisor recorded in the ledger. |
+| Leases | The stage's own `boards` is 1; the single test is widened to the configured chips by the same path a wider container package uses (`_wide_hardware_phase`): a further board is leased, the coder is parked and its board joins the test, and both go back afterwards. |
+| Repair rounds | None. A failed test ends the attempt, and the next attempt starts again from a fresh copy of stage 2's port. |
+| Rehearsal | `--full-port-rehearsal` waives `coherent` in stage 3 as in stage 2 and nothing else. |
+
+Not shown by stage 3: that the port is correct on every mesh shape the box can make, or that it is fast. A port that ignores the extra
+chips and runs on one passes. The skill tells the coder this is not the stage's purpose, and a person who wants the proof reads the port.
 
 ## 4. Slices
 

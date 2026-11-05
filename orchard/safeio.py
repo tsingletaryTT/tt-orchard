@@ -391,6 +391,104 @@ def read_bytes(path, *, max_bytes: int, anchor: int | None = None) -> bytes:
         os.close(fd)
 
 
+@contextmanager
+def list_beneath(root_fd: int, parts: Sequence[str] = ()) -> Iterator["os.scandir"]:
+    """The entries of the directory `parts` beneath the open directory `root_fd`, read through a descriptor and not by name.
+
+    The directory is opened with `open_beneath` (`O_DIRECTORY | O_NOFOLLOW` on every part), so a link anywhere in `parts` is refused, and the
+    listing is taken from that descriptor: a directory renamed or replaced by a link after this call is still the one that is listed. Each
+    entry's `is_symlink`, `is_dir(follow_symlinks=False)` and `stat(follow_symlinks=False)` are answered relative to the same descriptor. The
+    descriptor is closed when the `with` block ends. Raises only SafeReadError (before the first entry)."""
+    fd = open_beneath(root_fd, parts)
+    try:
+        try:
+            listing = os.scandir(fd)
+        except OSError as exc:
+            raise _os_failure(exc, "a directory") from None
+        with listing:
+            yield listing
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def read_beneath(root_fd: int, parts: Sequence[str], *, max_bytes: int, expect_identity: tuple[int, int] | None = None) -> bytes:
+    """The content of the regular file `parts` beneath the open directory `root_fd`, never more than `max_bytes` bytes.
+
+    Opened with `open_beneath` (a link in any part is refused) and read like `read_bytes`. With `expect_identity=(st_dev, st_ino)`, taken from
+    the entry when it was listed, the opened file must be that same file: a file replaced by another one after the listing is
+    `ChangedWhileReading` and nothing is read. Raises only SafeReadError."""
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+        raise ValueError("max_bytes must be a whole number, zero or more")
+    fd = open_beneath(root_fd, parts, file_flags=_FILE_FLAGS)
+    try:
+        if expect_identity is not None:
+            try:
+                st = os.fstat(fd)
+            except OSError as exc:
+                raise _os_failure(exc) from None
+            if (st.st_dev, st.st_ino) != tuple(expect_identity):
+                raise ChangedWhileReading("the file changed after the scan: it is not the one the scan saw")
+        return _read_fd(fd, max_bytes, "the file")
+    finally:
+        os.close(fd)
+
+
+def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int = 0o644) -> None:
+    """Write `data` as the regular file `parts` beneath the open directory `root_fd`, creating the directories on the way.
+
+    Every directory on the way is made with `mkdir` relative to the descriptor before it and then opened with `O_DIRECTORY | O_NOFOLLOW`, so
+    a link standing where a directory should be is refused and nothing is written through it. The bytes go to a new file with a name of its own
+    (created with `O_CREAT | O_EXCL | O_NOFOLLOW`, synced) that is then renamed over the final name inside the same directory: a reader sees the
+    old file or the whole new one, and a link already standing at the final name is replaced and not followed. Raises only SafeReadError; the
+    temporary file is removed on failure."""
+    names = _check_parts(parts)
+    if not names:
+        raise PathRefused("a file needs at least one path part")
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise ValueError("data must be bytes")
+    cur, owned, tmp = root_fd, False, None
+    try:
+        for part in names[:-1]:
+            try:
+                os.mkdir(part, 0o755, dir_fd=cur)
+            except FileExistsError:
+                pass                                            # it may be a link: the open below refuses it
+            nxt = os.open(part, _DIR_FLAGS, dir_fd=cur)
+            if owned:
+                os.close(cur)
+            cur, owned = nxt, True
+        tmp = f".{names[-1][:100]}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, mode, dir_fd=cur)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(tmp, names[-1], src_dir_fd=cur, dst_dir_fd=cur)
+        tmp = None
+    except OSError as exc:
+        raise _os_failure(exc, "a path part") from None
+    except ValueError:                      # UnicodeEncodeError: a lone surrogate cannot be passed to the operating system
+        raise PathRefused("a path part cannot be encoded for the operating system") from None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp, dir_fd=cur)
+            except OSError:
+                pass
+        if owned:
+            try:
+                os.close(cur)
+            except OSError:
+                pass
+
+
 def iter_lines(path, *, max_bytes: int, max_line_bytes: int, anchor: int | None = None, errors: str = "replace") -> Iterator[str]:
     """The lines of the regular file at `path` as text, one at a time, so a large table is never held in memory (it returns a generator: the limits are checked at once, nothing is opened until
     the first line is asked for, and the caller closes it, or lets it finish, to release the descriptor).
