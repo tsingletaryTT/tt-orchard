@@ -536,6 +536,11 @@ def summarise_records(recs: list[dict]) -> dict:
             "latency_s": sum(float(r.get("latency_s") or 0) for r in calls),
             "by_model": by_model, "by_problem": by_problem}
 
+def _reported_unhelpful(recs) -> set:
+    """The call ids that have a verdict `helped: false` in the ledger's records (a report names the call that made the answer)."""
+    return {r["report"] for r in recs if isinstance(r, dict) and "report" in r and r.get("helped") is False}
+
+
 
 class Telegraph:
     """One configured helper. `directory` is the state directory: it holds the database (the ledger and the answer cache) and
@@ -616,6 +621,10 @@ class Telegraph:
             hit = self._cached(store.cache_get(identity))
         except LEDGER_ERRORS as exc:
             return unusable(exc)
+        if hit is not None and hit.get("call_id") in _reported_unhelpful(recs):
+            # An answer the caller reported as not helpful (a stub, a port that failed) is not served again: the same question gets a new request,
+            # so the caller does not pay nothing for the same useless text twice (run12 of the tiny Qwen4 rehearsal, a cached stub at no cost).
+            hit = None
         if hit is not None:
             recorded = self._append(store, {**base, "ts": self.clock(), "outcome": "ok", "cached": True,
                                             "origin": hit.get("call_id"), "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0,

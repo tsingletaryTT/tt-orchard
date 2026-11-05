@@ -55,6 +55,13 @@ NOT_PLACED = "telegraph repair not placed"
 PROGRESS = "telegraph repair progress"     # the verdict: `call_id`, `before_op`, `after_op`, `outcome`, `helped`
 
 TOTAL_PER_STAGE = 6                        # asks in stage 2, at attempt starts and in repair rounds together
+HELPER_ROUNDS = 10                         # rounds of the helper-driven loop (no coder step) a stage 2 attempt may run
+HELPER_TOTAL = 16                          # asks in stage 2 when the helper drives (attempt starts and rounds together)
+DRIVEN = "helper-driven round"             # the ledger entry of a round the helper drove: `round`, `op`, hashes, `cost_usd`, `change`
+BEST = "best port recorded"                # the furthest a port has got along the request chain: `op`, `rank`, `port_sha256`, `attempt`
+RESTORED = "best port restored"            # the best port put back at the start of an attempt: `op`, `port_sha256`, `skeleton_sha256`
+BEST_DIR = "2.best"                        # stages/2.best/port_model.py: a copy that the move-aside of a failed attempt does not take
+PASSED_RANK = 99                           # a check that passed is further along than any failure
 PER_ROUND = 1
 PORT_CAP = 90_000                          # characters of port_model.py sent (a larger file is not sent)
 PORT_MAX = 400_000                         # bytes read at all
@@ -117,13 +124,14 @@ def asked_in_round(entries: list[dict], n: int, k: int) -> bool:
                and _data(e).get("round") == k for e in entries)
 
 
-def due(entries: list[dict], n: int, k: int) -> tuple[bool, str]:
-    """(True, "") when a repair ask for round `k` is within the limits, else (False, why)."""
+def due(entries: list[dict], n: int, k: int, total: int = TOTAL_PER_STAGE) -> tuple[bool, str]:
+    """(True, "") when a repair ask for round `k` is within the limits, else (False, why). `total` is the stage's cap on asks (`HELPER_TOTAL` when
+    the helper drives)."""
     if asked_in_round(entries, n, k):
         return False, f"the helper was already asked in round {k}"
     used = asks_in_stage(entries, n)
-    if used >= TOTAL_PER_STAGE:
-        return False, f"the helper was already asked {used} times in this stage (the limit is {TOTAL_PER_STAGE})"
+    if used >= total:
+        return False, f"the helper was already asked {used} times in this stage (the limit is {total})"
     return True, ""
 
 
@@ -190,7 +198,7 @@ def read_port(stage_dir) -> tuple[bytes | None, str]:
         return None, f"port_model.py could not be read ({exc.__class__.__name__})"
 
 
-def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listing: str, homes: tuple) -> tuple[str | None, dict]:
+def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listing: str, homes: tuple, previous: str | None = None) -> tuple[str | None, dict]:
     """(the task text, the inputs record), or (None, the record) when the port is larger than `PORT_CAP` (the helper would answer a cut file)."""
     sent: dict[str, object] = {}
     clean_port = port_repair.safe_text(port_text, homes)
@@ -206,6 +214,9 @@ def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listi
         clipped, was_cut = paf._clip(key, port_repair.safe_text(text, homes), cap)
         sections.append(f"## The {label}\n" + clipped)
         sent[key] = {"chars": len(clipped), "cut": was_cut}
+    if previous:
+        sections.append("## What the previous round did\n" + port_repair.safe_text(previous, homes)[:1500])
+        sent["previous"] = {"chars": min(len(previous), 1500)}
     sections.append("## The current stages/2/port/port_model.py (the version the check just failed on)\n```python\n" + clean_port.rstrip("\n") + "\n```")
     sent["port"] = {"chars": len(clean_port), "cut": False}
     listing_text, listing_cut = paf._clip("listing", port_repair.safe_text(listing, homes), paf.FILES_CAP)
@@ -263,3 +274,135 @@ def coder_note(call_id: str, placed: bool, rel_path: str) -> str:
                 "be wrong: read the new file, correct whatever the facts file or the check shows to be wrong, and keep what works. If the file "
                 "already looks right, change nothing that works.")
     return ""
+
+
+# ---- the helper-driven loop: what the helper is told about the round before, and when to hand back to the coder ------------------------------
+
+def change_summary(old: str, new: str) -> str:
+    """One line on what `new` changes in `old`: the count of lines added and removed and the names of the functions whose text changed (at most
+    six). Computed by the supervisor from the two files, never taken from the helper's words."""
+    import difflib
+    a, b = old.splitlines(), new.splitlines()
+    added = removed = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag in ("replace", "delete"):
+            removed += i2 - i1
+        if tag in ("replace", "insert"):
+            added += j2 - j1
+    names = _changed_functions(old, new)
+    where = ("; functions changed: " + ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")) if names else ""
+    return f"{added} lines added, {removed} removed{where}"
+
+
+def _changed_functions(old: str, new: str) -> list[str]:
+    import ast
+    def table(src: str) -> dict:
+        try:
+            tree = ast.parse(src)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            return {}
+        return {node.name: ast.dump(node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    before, after = table(old), table(new)
+    return sorted(name for name in after if before.get(name) != after[name])
+
+
+def _round_entry(entries: list[dict], n: int, k: int):
+    floor = _last_start(entries, n)
+    for e in reversed(entries):
+        if (e.get("stage") == n and e.get("event") == "decision" and _decision(e) == port_repair.DECISION and e["seq"] > floor
+                and _data(e).get("round") == k):
+            return e
+    return None
+
+
+def previous_round_section(entries: list[dict], n: int, k: int) -> str | None:
+    """The text that tells the helper what round `k - 1` of this attempt did: the failure it was asked about, the change the supervisor computed
+    between the file it sent and the file it placed, and the failure that followed (this round's). None in the first round or when the ledger
+    holds no such round."""
+    prev, cur = _round_entry(entries, n, k - 1) if k > 1 else None, _round_entry(entries, n, k)
+    if prev is None or cur is None:
+        return None
+    pd, cd = _data(prev), _data(cur)
+    change = ""
+    for e in reversed(entries):
+        if e.get("stage") == n and e.get("event") == "decision" and _decision(e) in (PLACED, DRIVEN) and e["seq"] > prev["seq"] and e["seq"] < cur["seq"]:
+            change = str(_data(e).get("change") or "")
+            if change:
+                break
+    lines = [f"Round {k - 1} failed at the {pd.get('op')!r} request: {pd.get('failure')}"]
+    if change:
+        lines.append(f"The file was then changed ({change}).")
+    lines.append(f"This round the check failed at the {cd.get('op')!r} request: {cd.get('failure')}")
+    lines.append("Do not repeat a change that did not move the failure.")
+    return "\n".join(lines)
+
+
+def same_failure_twice(entries: list[dict], n: int, k: int) -> bool:
+    """True when round `k` and round `k - 1` of this attempt failed at the same request with the same message: the helper's change did not
+    move anything, so the helper-driven loop hands the port back to the coder's repair rounds."""
+    prev, cur = (_round_entry(entries, n, k - 1) if k > 1 else None), _round_entry(entries, n, k)
+    if prev is None or cur is None:
+        return False
+    pd, cd = _data(prev), _data(cur)
+    return pd.get("op") == cd.get("op") and bool(cd.get("failure")) and pd.get("failure") == cd.get("failure")
+
+
+# ---- the best port so far, kept across attempts ----------------------------------------------------------------------------------------
+
+def best_rank(op) -> int:
+    """How far a check got: 0 for a failure before any request or an op this module does not know, 1..4 along `OPS`, `PASSED_RANK` for none."""
+    r = rank(op)
+    return r if r is not None else 0
+
+
+def best_state(entries: list[dict], n: int):
+    """The best port recorded so far in stage `n` (the `best port recorded` entry with the highest rank, the latest on a tie), or None."""
+    best = None
+    for e in entries:
+        if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == BEST:
+            d = _data(e)
+            if isinstance(d.get("rank"), int) and isinstance(d.get("port_sha256"), str) and (best is None or d["rank"] >= best["rank"]):
+                best = d
+    return best
+
+
+def best_path(stage_dir) -> Path:
+    """stages/2.best/port_model.py next to the stage directory: the move-aside of a failed attempt takes stages/2 and leaves this."""
+    return Path(stage_dir).parent / BEST_DIR / "port_model.py"
+
+
+def save_best(stage_dir, data: bytes) -> bool:
+    """Write `data` as the best port's copy. True when it was written."""
+    target = best_path(stage_dir)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        safeio.atomic_write(target, data, mode=0o644, replace=True)
+    except (OSError, safeio.SafeReadError):
+        return False
+    return True
+
+
+def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
+    """Put the best port in place of the unchanged skeleton. (placed, why). The copy's hash must equal the one the ledger recorded, the file
+    in the port directory must still be the skeleton byte for byte, and neither may be a link: a file the coder or the helper has written is
+    never replaced."""
+    port = Path(stage_dir) / "port" / "port_model.py"
+    current, why = read_port(stage_dir)
+    if current is None:
+        return False, why
+    if current.rstrip(b"\n") != skeleton.rstrip(b"\n"):
+        return False, "port_model.py is not the unchanged skeleton"
+    source = best_path(stage_dir)
+    try:
+        if os.path.islink(source) or not os.path.isfile(source):
+            return False, "the best port's copy is missing or is a link"
+        data = safeio.read_bytes(source, max_bytes=PORT_MAX)
+    except (OSError, safeio.SafeReadError) as exc:
+        return False, f"the best port's copy could not be read ({exc.__class__.__name__})"
+    if hashlib.sha256(data).hexdigest() != best.get("port_sha256"):
+        return False, "the best port's copy does not match the hash the ledger recorded"
+    try:
+        safeio.atomic_write(port, data, mode=0o644, replace=True)
+    except (OSError, safeio.SafeReadError) as exc:
+        return False, f"port_model.py could not be written ({exc.__class__.__name__})"
+    return True, ""
