@@ -355,7 +355,7 @@ RESTART_NOTE = ("The conversation was restarted because earlier replies repeated
 CARRIED_INSTRUCTIONS = 4
 CARRIED_CHARS = 8_000
 # The fields of a request that the transcript records, so a reader of the log can tell which sampling a turn used.
-LOGGED_SAMPLING = ("temperature", "max_tokens", "top_p", "seed", "frequency_penalty", "repetition_penalty")
+LOGGED_SAMPLING = ("temperature", "max_tokens", "top_p", "top_k", "seed", "frequency_penalty", "repetition_penalty")
 # The files a stage directory holds that the shell guard looks at: only the port, and no more than this many files and entries
 # (orchard/port_guard.py holds the guard and the bounds; the names stay importable from here).
 # How many replies in a row may run no command (cut off or empty) before the step ends as "error".
@@ -826,7 +826,7 @@ class AgentStep:
                  thinking: bool = AGENT_THINKING, finished=None, temperature: float = 0,
                  top_p: float | None = None, seed: int | None = None,
                  frequency_penalty: float | None = None, repetition_penalty: float | None = None,
-                 unstick: "runaway.Unstick | None" = None, restart_on_caps: int = 0):
+                 unstick: "runaway.Unstick | None" = None, restart_on_caps: int = 0, top_k: int | None = None):
         self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
         self.ledger, self.stage, self.phase = ledger, stage, phase
         self.feed, self.control, self.http, self.clock = feed, control, http, clock
@@ -838,6 +838,7 @@ class AgentStep:
         # Sampling. The default is greedy decoding (temperature 0), sent exactly as before. top_p and seed are sent
         # only when a caller sets them; whether a server honours the seed is up to the server.
         self.temperature, self.top_p, self.seed = temperature, top_p, seed
+        self.top_k = top_k     # sent only when a caller sets it (a tier's `top_k`); 0 is sent, since 0 means no limit and is a choice
         # Issue 458. The penalties are sent on every request only when a caller sets them. `unstick` is the sampling of the request that
         # follows a reply cut off at max_tokens (orchard/runaway.py), None to send nothing different. `restart_on_caps` is how many times a
         # step may drop its conversation and start again from the task after two capped replies in a row, and goes on.
@@ -1067,6 +1068,8 @@ class AgentStep:
                        "max_tokens": self.max_tokens, "stream": False}
             if self.top_p is not None:
                 request["top_p"] = self.top_p
+            if self.top_k is not None:
+                request["top_k"] = self.top_k
             if self.seed is not None:
                 request["seed"] = self.seed
             if not self.thinking:

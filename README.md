@@ -526,7 +526,7 @@ cp config/tiers.example.toml config/tiers.toml
 | `placement` | `chips` or `cpu` |
 | `context_tokens` | Optional. The context length, a positive integer |
 | `max_tokens` | Optional. The cap on one reply of this tier's model, 256 to 131072. Default 16384. The largest reply that ended normally in 389 measured replies was 5,463 tokens, so a coder tier with thinking off can use 8192 |
-| `temperature`, `frequency_penalty`, `repetition_penalty` | Optional numbers sent on every request of an agent step (ranges 0 to 2, -2 to 2, 0.5 to 2). Not sent when unset: the default is greedy decoding, as before |
+| `temperature`, `frequency_penalty`, `repetition_penalty`, `top_p`, `top_k` | Optional values sent on every request of an agent step (ranges 0 to 2, -2 to 2, 0.5 to 2, 0 to 1, and a whole number 0 to 200). Not sent when unset: a tier that sets none of them sends greedy decoding, as before. The shipped Coder-Next examples set `temperature = 0.7` and `repetition_penalty = 1.05`, because one paired run wrote files with them and none under greedy decoding ([docs/coder-sampling.md](docs/coder-sampling.md)) |
 | `unstick_max_tokens`, `unstick_temperature`, `unstick_frequency_penalty`, `unstick_repetition_penalty` | Optional. The request that follows a reply cut off at `max_tokens` is not greedy and is capped lower, because the same request would repeat the same loop (issue 458). Defaults: temperature 0.5, cap 8192, frequency penalty 0.2, no repetition penalty. A server that refuses these parameters gets the plain request instead, and the ledger says so |
 
 **`[stages.<n>]`**, one table for each stage 0 to 8. Each names tiers by name:

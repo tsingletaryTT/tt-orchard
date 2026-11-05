@@ -1,0 +1,3 @@
+target = "0.9.115"
+summary = "The shipped Coder-Next tiers examples ask for temperature 0.7 and repetition_penalty 1.05 on the coder tiers, and a tier may set top_p and top_k; docs/coder-sampling.md records the paired test behind the choice."
+kind = "feature"

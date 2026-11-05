@@ -18,10 +18,11 @@ STAGES = range(9)                 # stages 0..8 in the spec
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}  # IPv6 loopback is ::1 only
 PLACEMENTS = {"chips", "cpu"}
 REQUIRED_TIER_KEYS = ("role", "endpoint", "model", "placement")
-# Issue 458: what a tier may set about the replies of its model. `max_tokens` caps one reply; the next three are sent on every request when
+# Issue 458: what a tier may set about the replies of its model (`top_p` and `top_k` came with the coder's sampling default, docs/coder-sampling.md). `max_tokens` caps one reply; the next three are sent on every request when
 # set; the `unstick_*` keys replace the defaults of the retry after a reply was cut off (orchard/runaway.py). Each is a (type, low, high).
 SAMPLING_KEYS = {"max_tokens": (int, 256, 131072), "temperature": (float, 0.0, 2.0), "frequency_penalty": (float, -2.0, 2.0),
-                 "repetition_penalty": (float, 0.5, 2.0), "unstick_max_tokens": (int, 256, 65536),
+                 "repetition_penalty": (float, 0.5, 2.0), "top_p": (float, 0.0, 1.0), "top_k": (int, 0, 200),
+                 "unstick_max_tokens": (int, 256, 65536),
                  "unstick_temperature": (float, 0.0, 2.0), "unstick_frequency_penalty": (float, -2.0, 2.0),
                  "unstick_repetition_penalty": (float, 0.5, 2.0)}
 TIER_KEYS = set(REQUIRED_TIER_KEYS) | {"context_tokens"} | set(SAMPLING_KEYS)

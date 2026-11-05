@@ -75,3 +75,29 @@ def test_a_float_zero_temperature_is_sent_as_the_same_bytes_as_before(run):
     run_dir, ledger = run
     (body,) = _bodies(run_dir, ledger, temperature=0.0)
     assert '"temperature": 0,' in body and '"temperature": 0.0' not in body
+
+
+def test_top_k_is_sent_only_when_it_is_set_and_a_step_built_the_old_way_sends_none(run):
+    run_dir, ledger = run
+    (old,) = _bodies(run_dir, ledger)
+    assert "top_k" not in json.loads(old) and "top_p" not in json.loads(old)
+
+
+def test_top_p_and_top_k_are_sent_together_when_both_are_set(run):
+    run_dir, ledger = run
+    (body,) = _bodies(run_dir, ledger, temperature=0.7, top_p=0.8, top_k=20)
+    parsed = json.loads(body)
+    assert (parsed["temperature"], parsed["top_p"], parsed["top_k"]) == (0.7, 0.8, 20)
+
+
+def test_a_top_k_of_zero_is_sent_because_zero_means_no_limit_and_is_a_choice(run):
+    run_dir, ledger = run
+    (body,) = _bodies(run_dir, ledger, top_k=0)
+    assert json.loads(body)["top_k"] == 0
+
+
+def test_the_transcript_line_records_top_k_with_the_other_sampling_keys(run):
+    run_dir, ledger = run
+    _bodies(run_dir, ledger, temperature=0.7, top_p=0.8, top_k=20)
+    line = json.loads((run_dir / "stages" / "0" / "log" / "r.jsonl").read_text().splitlines()[0])
+    assert line["request"]["top_k"] == 20 and line["request"]["top_p"] == 0.8

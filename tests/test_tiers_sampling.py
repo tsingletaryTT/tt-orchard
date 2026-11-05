@@ -55,3 +55,24 @@ def test_a_tier_without_the_keys_loads_as_before(tmp_path):
     p.write_text(GOOD)
     cfg = load(p)
     assert not any(k in cfg.tiers["large"] for k in ("max_tokens", "temperature", "unstick_temperature"))
+
+
+# ---- the coder's sampling by default: top_p and top_k are tier keys too (a paired test showed greedy decoding wrote no port) ----
+
+@pytest.mark.parametrize("line,key,expected", [("top_p = 0.8", "top_p", 0.8), ("top_p = 1", "top_p", 1.0), ("top_p = 0", "top_p", 0.0),
+                                               ("top_k = 20", "top_k", 20), ("top_k = 0", "top_k", 0), ("top_k = 200", "top_k", 200)])
+def test_top_p_and_top_k_are_accepted_and_kept(tmp_path, line, key, expected):
+    value = tiers_with(tmp_path, line).tiers["large"][key]
+    assert value == expected and (isinstance(value, int) if key == "top_k" else isinstance(value, (int, float)))
+
+
+REFUSED_TOP = [("top_p = 1.5", "top_p"), ("top_p = -0.1", "top_p"), ("top_p = true", "top_p"), ('top_p = "high"', "top_p"),
+               ("top_k = 201", "top_k"), ("top_k = -1", "top_k"), ("top_k = 20.5", "top_k"), ("top_k = true", "top_k")]
+
+
+@pytest.mark.parametrize("line,key", REFUSED_TOP)
+def test_a_bad_top_p_or_top_k_is_refused_and_the_message_names_the_key(tmp_path, line, key):
+    with pytest.raises(TierConfigError) as exc:
+        tiers_with(tmp_path, line)
+    message = str(exc.value)
+    assert key in message and "'large'" in message and "must be" in message
