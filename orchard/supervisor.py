@@ -165,7 +165,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, SKIP_3_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
-from orchard import full_port, model_kind, port_excerpts, port_facts, port_repair, residency, scoring_check
+from orchard import full_port, model_kind, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
@@ -814,8 +814,11 @@ class Supervisor:
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
-                 port_repair_rounds: int = port_repair.DEFAULT_ROUNDS):
+                 port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None):
         self.run_dir = Path(run_dir).resolve()
+        # The outside helper (orchard/telegraph.py, a `Telegraph`), or None. Full-port stage 2 phones it when attempts keep failing
+        # (orchard/phone_a_friend.py). None is the earlier behaviour: nothing is sent anywhere.
+        self.telegraph = telegraph
         # `--port-repair-rounds` (issue 420): the repair rounds a full-port stage 2 attempt gives the coder after a port check that failed on the
         # port itself. Recorded in run_start; `build` hands over the recorded value on a resume. 0 is the earlier behaviour: no rounds.
         self.port_repair_rounds = port_repair.check_rounds(port_repair_rounds)
@@ -3052,6 +3055,8 @@ class Supervisor:
 
     def _end_stage_body(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
+        if n == 2 and spec.draft == "full_port" and getattr(self, "telegraph", None) is not None and status not in ("abort", "operator-pause"):
+            self._report_phone_a_friend(n, helped=(status == "pass"))
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
             ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
@@ -3114,7 +3119,12 @@ class Supervisor:
             if spec.number == 3:
                 return swap_prepare.PrepareOutcome(False, note=port_facts.stage_3_note(chips=self._stage_3_chips() or 0,
                                                                                        copied=bool(seed.get("copied") or seed.get("kept"))))
-            return swap_prepare.PrepareOutcome(False, note=port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts"))))
+            note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")))
+            if spec.number == 2 and getattr(self, "telegraph", None) is not None:
+                friend = self._phone_a_friend(spec, stage_dir)
+                if friend:
+                    note = note + "\n\n" + friend
+            return swap_prepare.PrepareOutcome(False, note=note)
         if spec.skill != "weights-swap-check" or spec.draft != "swap_config":
             return swap_prepare.PrepareOutcome(False)
         outcome = swap_prepare.prepare(run_dir=self.run_dir, stage_dir=stage_dir, env=agent_env(self.run_dir, extra=self.extra_env),
@@ -3123,6 +3133,116 @@ class Supervisor:
             self.ledger.append("decision", spec.number, decision="prepare run by the supervisor", returncode=outcome.returncode,
                                done=outcome.done, **evidence_record(self.run_dir, stage_dir / outcome.output))
         return outcome
+
+    # ---- phone a friend: the outside helper drafts a port when stage 2 keeps failing (orchard/phone_a_friend.py) -------------------
+
+    def _friend_brief(self, spec, stage_dir: Path, entries: list[dict]) -> str:
+        """The messages the coder's own prepare step gets (the skill and the task), as one text for the helper."""
+        skill = resolve_skill(spec.skill, self.skills_dirs)
+        if skill is None:
+            raise ValueError("the skill is not in the skills directories")
+        refs = {r: resolve_skill(r, self.skills_dirs) for r in spec.refs}
+        system, user = build_messages(spec=spec, phase="prepare", run_dir=self.run_dir, stage_dir=stage_dir, skill_path=skill, refs=refs,
+                                      facts=facts_from(run_progress(entries).run_start, self.run_dir), entries=entries, resumed=False,
+                                      paths=self.paths)
+        return f"{system}\n\n{user}"
+
+    def _friend_failure(self, n: int, stage_dir: Path, entries: list[dict]) -> str:
+        """Why the earlier attempts failed, for the helper: the reasons the latest failed attempt ended with, the watchdog's findings since the
+        previous end, and the end of the port check's output when this attempt's directory holds one."""
+        reasons: list = []
+        watchdog: list = []
+        for e in entries:
+            if e.get("stage") != n:
+                continue
+            data = e.get("data") if isinstance(e.get("data"), dict) else {}
+            if e["event"] == "stage_end" and data.get("result") not in ("pass", "skipped"):
+                reasons = list(data.get("reasons") or [])[:8]
+        for e in entries:
+            data = e.get("data") if isinstance(e.get("data"), dict) else {}
+            if e.get("stage") == n and e["event"] in ("retry", "escalate"):
+                for f in (data.get("findings") or [])[:4]:
+                    if isinstance(f, dict) and isinstance(f.get("summary"), str):
+                        watchdog.append(f["summary"][:300])
+        output = ""
+        try:
+            output = safeio.read_bytes(Path(stage_dir) / port_repair.OUTPUT, max_bytes=phone_a_friend.READ_MAX).decode("utf-8", "replace")
+        except (safeio.SafeReadError, OSError):
+            pass
+        return phone_a_friend.failure_text(reasons, watchdog[-6:], output, self._homes())
+
+    def _friend_refused(self, n: int, reason: str) -> None:
+        """The helper was due and was not asked. The ledger says why; the stage carries on as before."""
+        self.ledger.append("decision", n, decision=phone_a_friend.NOT_ASKED, reason=reason[:300])
+
+    def _phone_a_friend(self, spec, stage_dir: Path) -> str | None:
+        """For a full-port stage 2 attempt: when the ledger says the helper is due, ask it once for a draft `port_model.py`, write the draft
+        to `stages/2/telegraph/draft-<k>.py` and return the sentence that tells the coder where it is. None in every other case. Nothing here
+        fails the stage: a refusal, an unusable reply and a failed write each leave a ledger decision and None."""
+        n = spec.number
+        entries = self.ledger.read()
+        state = phone_a_friend.attempt_state(entries, n)
+        is_due, why = phone_a_friend.due(state)
+        if not is_due:
+            return None
+        k = state["asked_in_stage"] + 1
+        stage_dir = Path(stage_dir)
+        try:
+            brief = self._friend_brief(spec, stage_dir, entries)
+            facts, _ = phone_a_friend.read_input(stage_dir / port_facts.FACTS_NAME, phone_a_friend.FACTS_CAP)
+            excerpts, _ = phone_a_friend.read_input(stage_dir / "reference_excerpts.md", phone_a_friend.EXCERPTS_CAP)
+            task, sent = phone_a_friend.build_task(brief=brief, facts=facts, excerpts=excerpts,
+                                                   listing=phone_a_friend.port_listing(stage_dir / port_repair.PORT_DIR), homes=self._homes())
+            failure = self._friend_failure(n, stage_dir, entries)
+        except Exception as exc:     # the request could not be built (an unreadable skill or file): the helper is not asked, the stage goes on
+            self._friend_refused(n, f"the request could not be built ({exc.__class__.__name__})")
+            return None
+        from orchard import telegraph as tg
+        room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
+        # The helper cuts the middle out of a request over its `max_prompt_chars`; the entry says so, so a cap set for short advice is seen.
+        self.ledger.append("decision", n, decision=phone_a_friend.ASKED, k=k, why=why, problem=phone_a_friend.PROBLEM, inputs=sent,
+                           prompt_chars=len(task) + len(failure), max_prompt_chars=self.telegraph.cfg.max_prompt_chars,
+                           over_cap=len(task) + len(failure) > room, failed_attempts=state["failed"])
+        try:
+            answer = self.telegraph.ask(phone_a_friend.PROBLEM, task, failure)
+        except Exception as exc:     # `ask` returns its failures; this is for one it did not foresee
+            self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, ok=False, call_id="",
+                               reason=f"the helper raised {exc.__class__.__name__}")
+            return None
+        record = {"ok": bool(answer.ok), "call_id": answer.call_id, "model": answer.model, "tokens_in": answer.tokens_in,
+                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached)}
+        if not answer.ok:
+            self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, reason=str(answer.reason)[:300], **record)
+            return None
+        draft = phone_a_friend.extract_draft(answer.text)
+        if draft is None:
+            self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, **record)
+            self.ledger.append("decision", n, decision=phone_a_friend.DRAFT_FAILED, call_id=answer.call_id,
+                               reason="the reply holds no Python code block")
+            return None
+        ok_py, why_not = phone_a_friend.parses(draft)
+        try:
+            path = phone_a_friend.write_draft(stage_dir, k, draft, answer.call_id, answer.model)
+            evidence = evidence_record(self.run_dir, path)
+        except (OSError, safeio.SafeReadError) as exc:
+            self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, **record)
+            self.ledger.append("decision", n, decision=phone_a_friend.DRAFT_FAILED, call_id=answer.call_id,
+                               reason=f"the draft could not be written: {exc.__class__.__name__}")
+            return None
+        self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, draft=evidence, parses=ok_py, **record)
+        return phone_a_friend.coder_note(evidence["path"], answer.call_id, ok_py, why_not)
+
+    def _report_phone_a_friend(self, n: int, *, helped: bool) -> None:
+        """Tell the helper's ledger how the attempt it helped with ended, and note it in the run's ledger. A failed report is noted and goes on."""
+        from orchard import telegraph as tg
+        for call_id in phone_a_friend.unreported(self.ledger.read(), n):
+            reason = ""
+            try:
+                self.telegraph.report(call_id, helped, note=f"stage {n}: the attempt {'passed' if helped else 'did not pass'} after the draft")
+            except (KeyError, OSError, ValueError, *tg.LEDGER_ERRORS) as exc:
+                reason = f"the verdict could not be written ({exc.__class__.__name__})"
+            self.ledger.append("decision", n, decision=phone_a_friend.REPORTED, call_id=call_id, helped=helped,
+                               **({"reason": reason} if reason else {}))
 
     def _step(self, spec, phase: str, stage_dir: Path, escalated: bool, resumed: bool, extra: str | None = None):
         """One agent step. `extra`, when given, is added to the task message (stage 2's prepare gets the script's message)."""
@@ -4676,6 +4796,10 @@ def parse(argv=None):
                         f"gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the same "
                         f"check again (issue 420). 0 is the earlier behaviour, no rounds. Default {port_repair.DEFAULT_ROUNDS}, at most "
                         f"{port_repair.MAX_ROUNDS}. The ledger records the value and a resume keeps it; a resume that names another value is refused")
+    r.add_argument("--telegraph-config", metavar="FILE", default=None,
+                   help="a TOML file with the [telegraph] table (bringup passes the config it was started with). When it enables the helper, a "
+                        "full-port stage 2 whose attempts keep failing asks it once for a draft port (orchard/phone_a_friend.py); its caps apply. "
+                        "Without the option, or with the helper off, nothing is sent")
     r.add_argument("--full-port", action="store_true",
                    help="let a model that stage 0 classed `full-port` go on: the local coder writes the port in stage 2 and one hardware "
                         "test compares the chip's tokens with the CPU reference (skill full-port-check). Stages 3 to 6 for a full port are "
@@ -4876,6 +5000,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
         else:
             package = recorded
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
+                      telegraph=_telegraph_from(getattr(args, "telegraph_config", None), environ=environ, home=home),
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
                       skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,
@@ -4895,6 +5020,23 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                                       "port": args.coder_port, "profile": args.coder_profile,
                                       "image_id": args.coder_image_id, "model": cfg.tiers[tier]["model"],
                                       "chips": args.coder_chips})
+
+
+def _telegraph_from(path, *, environ=None, home=None):
+    """The `Telegraph` the run's `--telegraph-config` names, or None when there is no option or the table leaves the helper off. A file that cannot
+    be read, a table that is wrong, or a state directory that cannot be chosen refuses the start with the reason (the operator passed the option)."""
+    if not path:
+        return None
+    from orchard import telegraph as tg
+    from orchard import telegraph_cmd
+    try:
+        tcfg = telegraph_cmd.load_config(path)
+        if not tcfg.enabled:
+            return None
+        directory = telegraph_cmd.resolve_directory(None, tcfg, os.environ if environ is None else environ, home or Path.home())
+    except (tg.ConfigError, OSError, ValueError) as exc:
+        raise ValueError(f"--telegraph-config {path}: {exc}") from exc
+    return tg.Telegraph(tcfg, directory, environ=environ)
 
 
 PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home",

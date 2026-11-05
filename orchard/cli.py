@@ -1349,7 +1349,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               graft_trial=not args.no_graft_trial,
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
                                               full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind,
-                                              port_repair_rounds=args.port_repair_rounds)
+                                              port_repair_rounds=args.port_repair_rounds, telegraph_config=cfg_path)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)
