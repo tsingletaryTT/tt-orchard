@@ -26,7 +26,12 @@ Steps:
 (d) Free run: 32 greedy tokens from the stage 1 prompt ids.
 (e) Teacher forced, k = 0..31: prompt_ids + generated_ids[:k], one greedy token. The returned
     text is re-tokenized with model-dir/tokenizer.json and its FIRST id is compared with
-    generated_ids[k]. top1_agreement = matches / 32.
+    generated_ids[k]. top1_agreement = matches / the positions compared. A position whose reference token
+    cannot be read back from the server's text is `skipped` and left out of both (issue 406, see
+    `unrecoverable_ids`): half of a character, a token that does not re-encode to itself, and a stop token
+    (a special added token, or an id in generation_config.json's eos_token_id) that the server leaves out
+    of the response. `positions_skipped` lists them and `n_tokens` counts the rest. The gate's floor on
+    n_tokens refuses a record that skipped too many.
 (f) coherent: the free-run text is non-empty, at least 80 percent of its characters are letters,
     digits, whitespace or common punctuation, and no 6-word phrase appears more than 3 times.
 (g) Write evidence/swap-check.json (every number, the texts, ids, mismatches, a `serving` record of the
@@ -58,7 +63,7 @@ Steps:
     `stages/1/evidence/reference/agreement-reference.json` holds, for each prompt of `agreement_prompts.json` (copied next to this file),
     the prompt ids and the CPU reference's greedy ids, and the sha256 of the prompt set it was made from. After the 32-token check the
     script teacher-forces each prompt the same way (one request per position) and records the first id the chip returned at every
-    position under `agreement_set`, beside the reference ids. It judges nothing: the stage gate recomputes every number from the ids
+    position under `agreement_set`, beside the reference ids and a `skipped` list of the positions (step e) that are left out. It judges nothing: the stage gate recomputes every number from the ids
     with orchard/agreement_core.py (this directory's agreement_core.py is a byte-identical copy of it, so the script and the gate
     score the same way). `agreement_control` in the config names the swap-check.json of an earlier run of the same set on the nearest
     model; its record is embedded after a check that it used the same reference ids. A missing file, a set whose sha256 differs from the
@@ -434,7 +439,7 @@ def load_agreement_control(cfg: dict, run_dir: Path, entries: list, set_sha: str
         mine = {e["id"]: [int(i) for i in e["generated_ids"][:len(ctl.get(e["id"], []))]] for e in entries}
         same = record["prompt_set_sha256"] == set_sha and ctl == mine
         embedded = [{"id": e["id"], "kind": e.get("kind"), "reference_ids": e["reference_ids"], "chip_ids": e["chip_ids"],
-                     "error": e.get("error")} for e in record["entries"]]
+                     "skipped": e.get("skipped") or [], "error": e.get("error")} for e in record["entries"]]
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         print(f"serve_and_compare: cannot use the agreement control {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -456,6 +461,8 @@ def run_agreement_set(cfg: dict, port: int, model: str, tokenizer, setup: dict) 
     for e in setup["entries"]:
         ref_ids = [int(i) for i in e["generated_ids"][:n_tokens]]
         chip_ids, error = [], None
+        bad = unrecoverable_ids(tokenizer, Path(model), ref_ids)
+        skipped = [k for k, r in enumerate(ref_ids) if r in bad]
         for k in range(len(ref_ids)):
             try:
                 text = complete(port, model, [int(i) for i in e["prompt_ids"]] + ref_ids[:k], 1)
@@ -469,7 +476,7 @@ def run_agreement_set(cfg: dict, port: int, model: str, tokenizer, setup: dict) 
             chip_ids.append(ids[0] if ids else None)
         chip_ids += [None] * (len(ref_ids) - len(chip_ids))        # a stopped prompt counts its missing positions as mismatches
         out.append({"id": e["id"], "kind": e.get("kind"), "prompt_tokens": len(e["prompt_ids"]), "reference_ids": ref_ids,
-                    "chip_ids": chip_ids, "error": error})
+                    "chip_ids": chip_ids, "skipped": skipped, "error": error})
     return {"ran": True, "model_id": cfg.get("new_model_id"), "prompt_set_sha256": setup["prompt_set_sha256"],
             "reference_sha256": setup["reference_sha256"], "n_tokens": n_tokens, "entries": out, "control": setup["control"],
             "control_expected": bool(cfg.get("agreement_control"))}
@@ -582,6 +589,45 @@ def special_tokens(model_dir: Path) -> list[str]:
         return []
     return [t["content"] for t in added if isinstance(t, dict) and t.get("special") is True
             and isinstance(t.get("content"), str)]
+
+
+def stop_token_ids(tokenizer, model_dir: Path) -> set[int]:
+    """The ids the server leaves out of the text it returns: the tokenizer's special added tokens and the top-level eos_token_id (an int or a
+    list) of generation_config.json and of config.json, which the served bundle also reads. An unreadable or odd file gives no ids from it."""
+    ids: set[int] = set()
+    try:
+        for i, tok in tokenizer.get_added_tokens_decoder().items():
+            if getattr(tok, "special", False) is True:
+                ids.add(int(i))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    for name in ("generation_config.json", "config.json"):
+        try:
+            eos = json.loads(read_small_file(Path(os.path.realpath(Path(model_dir) / name))).decode("utf-8")).get("eos_token_id")
+        except (OSError, ValueError, AttributeError):
+            eos = None
+        for v in eos if isinstance(eos, list) else [eos]:
+            if isinstance(v, int) and not isinstance(v, bool):
+                ids.add(v)
+    return ids
+
+
+def unrecoverable_ids(tokenizer, model_dir: Path, ids) -> set[int]:
+    """Which of `ids` the comparison cannot read back from the server's text (issue 406). The comparison re-encodes the text of one
+    generated token and takes the first id, so a token is unrecoverable when its text is empty or holds a replacement character (half of
+    a character), when its text re-encodes to other ids, or when it is a stop token the server leaves out of the response. The test
+    reads only the REFERENCE token, so what the chip answered cannot move a position in or out of the score."""
+    stops = stop_token_ids(tokenizer, model_dir)
+    out: set[int] = set()
+    for i in set(ids):
+        if i in stops:
+            out.add(i)
+            continue
+        text = tokenizer.decode([i])         # every special token is in `stops` already, so the default skipping of special tokens changes nothing here
+        back = tokenizer.encode(text, add_special_tokens=False).ids if text else []
+        if not text or "\ufffd" in text or back[:1] != [i]:
+            out.add(i)
+    return out
 
 
 def token_count(tokenizer, text: str) -> int | None:
@@ -816,11 +862,15 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
         raise RuntimeError("test_raise_after_ready is set: raising after the server became healthy")
     free_text = complete(port, model, prompt_ids, N_TOKENS)
     matches, mismatches, forced = 0, [], []
+    bad = unrecoverable_ids(tokenizer, STAGE_DIR / "model-dir", generated_ids[:N_TOKENS])
+    skipped = [k for k in range(N_TOKENS) if generated_ids[k] in bad]
     for k in range(N_TOKENS):
         got_text = complete(port, model, prompt_ids + generated_ids[:k], 1)
         ids = tokenizer.encode(got_text, add_special_tokens=False).ids
         got_id = ids[0] if ids else None
-        forced.append({"position": k, "text": got_text, "first_id": got_id})
+        forced.append({"position": k, "text": got_text, "first_id": got_id, **({"skipped": True} if k in skipped else {})})
+        if k in skipped:
+            continue
         if got_id == generated_ids[k]:
             matches += 1
         else:
@@ -828,7 +878,7 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
                                "expected_text": tokenizer.decode([generated_ids[k]])[:300],
                                "got_text": got_text[:300]})
     out = {"server_ready_s": round(ready_s, 1), "free_run_text": free_text,
-           "matches": matches, "forced": forced, "mismatches": mismatches}
+           "matches": matches, "forced": forced, "mismatches": mismatches, "positions_skipped": skipped}
     if suite_setup is not None:
         out["prompt_suite"] = run_suite(cfg, port, model, STAGE_DIR / "model-dir", suite_setup, tokenizer)
     if cfg.get("_agreement") is not None:
@@ -885,7 +935,8 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
     server started; it is required, so a caller cannot forget it (issue 319). `extra` adds keys to the report;
     serve_and_compare_container.py records its docker command there."""
     prompt_ids, generated_ids, generated_text = reference
-    top1 = m["matches"] / N_TOKENS
+    n_compared = N_TOKENS - len(m.get("positions_skipped", []))
+    top1 = m["matches"] / n_compared if n_compared else 0.0
     coh = coherence(m["free_run_text"])
     swap_json = log_path.parent / "swap-check.json"
     draft = {"serves": True,
@@ -893,14 +944,14 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
              "coherent": coh["coherent"],
              "free_run_text": m["free_run_text"][:200],
              "top1_agreement": top1,
-             "n_tokens": N_TOKENS,
+             "n_tokens": n_compared,
              "cache_dir": str(cache),
              "evidence": [os.path.relpath(swap_json, run_dir), os.path.relpath(log_path, run_dir)]}
     report = {"label": "measured", "new_model_id": cfg["new_model_id"],
               "model_dir": weights_env["MODEL_WEIGHTS_DIR"], "port": cfg["port"],
               "weights_dir_env": weights_env, "hf_model_env": weights_env["HF_MODEL"],
-              "server_ready_s": m["server_ready_s"], "tensor_cache_at_start": cache_at_start, "n_tokens": N_TOKENS,
-              "matches": m["matches"], "top1_agreement": top1, **coh,
+              "server_ready_s": m["server_ready_s"], "tensor_cache_at_start": cache_at_start, "n_tokens": n_compared,
+              "positions_skipped": m.get("positions_skipped", []), "matches": m["matches"], "top1_agreement": top1, **coh,
               "prompt_ids": prompt_ids, "reference_generated_ids": generated_ids[:N_TOKENS],
               "reference_generated_text": generated_text, "free_run_text": m["free_run_text"],
               "free_run_ids": tokenizer.encode(m["free_run_text"], add_special_tokens=False).ids,
@@ -911,7 +962,7 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
     if "agreement_set" in m:
         # The 32-token result stays beside the set's record (issue 15): the old bar is a recorded baseline, and the gate reads both.
         report["agreement_set"] = {**m["agreement_set"], "baseline": {"check": "32-token teacher-forced, one prompt", "top1_agreement": top1,
-                                                                    "n_tokens": N_TOKENS}}
+                                                                    "n_tokens": n_compared}}
     if "sampling_probe" in m:
         report["sampling_probe"] = m["sampling_probe"]
     if "live_probe" in m:

@@ -43,6 +43,7 @@ DAMAGE_EVERY = 4               # the damage control replaces every fourth token,
 LONG_PROMPT_TOKENS = 2000      # choice: the long prompt of the set, about this many tokens: a CPU reference at this length takes minutes
 CPU_REFERENCE_MAX_TOKENS = 4096  # choice: above this input length a CPU reference is too slow; compare against the base on the chip
 
+MAX_SKIP_FRACTION = 0.25       # choice: a prompt may leave out at most this share of its positions as not recoverable from the server's text
 MAX_ENTRIES = 64               # a record with more entries than this is refused
 MAX_IDS = 100_000              # and so is one with more ids than this in one list
 
@@ -102,10 +103,73 @@ def prompt_set_problems(data) -> list[str]:
 
 # ---- scoring ---------------------------------------------------------------------------------------------------------------------------
 
-def score_prompt(reference_ids, chip_ids) -> dict:
+def skipped_positions(skipped, n: int) -> list[int]:
+    """The positions a record leaves out of the score (issue 406), checked: a list of distinct whole numbers inside the prompt, at most
+    MAX_SKIP_FRACTION of its positions. The template skips a position only when the reference token cannot be read back from the text the
+    server returns (half of a character, a token that does not re-encode to itself, a stop token). A record that skips more than a quarter
+    of a prompt is refused, so a list of skipped positions cannot hide mismatches."""
+    if skipped is None:
+        return []
+    if not isinstance(skipped, list) or not all(_is_int(k) for k in skipped):
+        raise ValueError("skipped must be a list of whole-number positions")
+    if len(set(skipped)) != len(skipped) or any(k < 0 or k >= n for k in skipped):
+        raise ValueError(f"skipped must hold distinct positions from 0 to {n - 1}")
+    if len(skipped) > n * MAX_SKIP_FRACTION:
+        raise ValueError(f"{len(skipped)} of {n} positions are not recoverable from the server's text, more than the {MAX_SKIP_FRACTION:.0%} "
+                         "a prompt may leave out; the check is not comparable for this prompt")
+    return sorted(skipped)
+
+
+def stop_ids_from(*docs) -> set[int]:
+    """The whole-number `eos_token_id` values (a number or a list) of the top level of each JSON document given (generation_config.json and
+    config.json of the served directory). Anything else in the field is ignored; a bool is not an id."""
+    out: set[int] = set()
+    for doc in docs:
+        value = doc.get("eos_token_id") if isinstance(doc, dict) else None
+        for v in value if isinstance(value, list) else [value]:
+            if _is_int(v):
+                out.add(v)
+    return out
+
+
+def special_ids(tokenizer) -> set[int]:
+    """The ids of the tokenizer's special added tokens; empty when the tokenizer cannot list them."""
+    try:
+        return {int(i) for i, tok in tokenizer.get_added_tokens_decoder().items() if getattr(tok, "special", False) is True}
+    except (AttributeError, TypeError, ValueError):
+        return set()
+
+
+def unrecoverable_ids(tokenizer, stops, ids) -> set[int]:
+    """Which of `ids` cannot be read back from the text a server returns for one generated token (issue 406): a stop id (`stops` plus the
+    tokenizer's special tokens), a token whose text is empty or holds a replacement character, and a token whose text re-encodes to other
+    ids. It reads the REFERENCE ids, so what the chip answered cannot move a position in or out of the score. The serve-and-compare template
+    has the same rule in its own file (it cannot import this one), and a test keeps the two equal."""
+    stopped = set(stops) | special_ids(tokenizer)
+    out: set[int] = set()
+    for i in set(ids):
+        if i in stopped:
+            out.add(i)
+            continue
+        text = tokenizer.decode([i])
+        back = tokenizer.encode(text, add_special_tokens=False).ids if text else []
+        if not text or "\ufffd" in text or back[:1] != [i]:
+            out.add(i)
+    return out
+
+
+def expected_skipped(tokenizer, stops, reference_ids) -> list[int]:
+    """The positions of `reference_ids` a correct run leaves out of the score: what the template's mask must be, and what the gate compares
+    a record's `skipped` list with."""
+    bad = unrecoverable_ids(tokenizer, stops, reference_ids)
+    return [k for k, r in enumerate(reference_ids) if r in bad]
+
+
+def score_prompt(reference_ids, chip_ids, skipped=None) -> dict:
     """Teacher-forced agreement of one prompt: `chip_ids[k]` is the first id the chip returned at position k when it was given the
     reference's first k tokens, and `reference_ids[k]` is the reference's token. A missing or None chip id is a mismatch. The two lists
-    must have the same length; a shorter chip list is a reason, not a silent shorter score."""
+    must have the same length; a shorter chip list is a reason, not a silent shorter score. `skipped` lists positions left out of both the
+    matches and the count (see skipped_positions); `n` is the number of positions compared and `skipped` the number left out."""
     if (not isinstance(reference_ids, list) or not isinstance(chip_ids, list) or not reference_ids
             or len(reference_ids) > MAX_IDS or len(chip_ids) > MAX_IDS):
         raise ValueError("reference_ids and chip_ids must be non-empty lists of at most %d ids" % MAX_IDS)
@@ -113,9 +177,11 @@ def score_prompt(reference_ids, chip_ids) -> dict:
         raise ValueError(f"the chip list has {len(chip_ids)} ids and the reference has {len(reference_ids)}")
     if not all(_is_int(x) for x in reference_ids) or not all(x is None or _is_int(x) for x in chip_ids):
         raise ValueError("ids must be whole numbers (a chip id may be None)")
-    matches = sum(1 for r, c in zip(reference_ids, chip_ids) if r == c)
-    first = next((k for k, (r, c) in enumerate(zip(reference_ids, chip_ids)) if r != c), None)
-    return {"n": len(reference_ids), "matches": matches, "top1": matches / len(reference_ids), "first_mismatch": first}
+    left_out = set(skipped_positions(skipped, len(reference_ids)))
+    pairs = [(k, r, c) for k, (r, c) in enumerate(zip(reference_ids, chip_ids)) if k not in left_out]
+    matches = sum(1 for _, r, c in pairs if r == c)
+    first = next((k for k, r, c in pairs if r != c), None)
+    return {"n": len(pairs), "matches": matches, "top1": matches / len(pairs), "first_mismatch": first, "skipped": len(left_out)}
 
 
 def damaged_copy(reference_ids, vocab_size: int | None = None, every: int = DAMAGE_EVERY) -> list[int]:
@@ -142,12 +208,12 @@ def summarise(entries, *, pooled_min: float = POOLED_TOP1_MIN, prompt_min: float
             continue
         pid = e.get("id")
         try:
-            s = score_prompt(e.get("reference_ids"), e.get("chip_ids"))
+            s = score_prompt(e.get("reference_ids"), e.get("chip_ids"), e.get("skipped"))
         except ValueError as exc:
             reasons.append(f"prompt {pid!r}: {exc}")
             continue
         per.append({"id": pid, "kind": e.get("kind"), **s})
-        if s["n"] < min_tokens:
+        if s["n"] + s["skipped"] < min_tokens:          # the run must cover min_tokens positions; skipped ones are capped by MAX_SKIP_FRACTION
             reasons.append(f"prompt {pid!r} compared {s['n']} tokens and at least {min_tokens} are needed")
     if len(per) < min_prompts:
         reasons.append(f"{len(per)} prompts were scored and at least {min_prompts} are needed")
@@ -173,9 +239,14 @@ def calibrate(entries, *, vocab_size: int | None = None, **bars) -> dict:
     for e in entries if isinstance(entries, list) else []:
         try:
             ref = e["reference_ids"]
-            score_prompt(ref, ref)                    # the same shape rules as a real entry
-            damaged_entries.append({"id": e.get("id"), "kind": e.get("kind"), "reference_ids": ref,
-                                    "chip_ids": damaged_copy(ref, vocab_size)})
+            score_prompt(ref, ref, e.get("skipped"))  # the same shape rules as a real entry
+            left_out = set(skipped_positions(e.get("skipped"), len(ref)))
+            measured = [k for k in range(len(ref)) if k not in left_out]
+            chips = list(ref)                         # the damage goes on the compared positions, so a skipped position cannot hide it
+            for k, v in zip(measured, damaged_copy([ref[k] for k in measured], vocab_size)):
+                chips[k] = v
+            damaged_entries.append({"id": e.get("id"), "kind": e.get("kind"), "reference_ids": ref, "chip_ids": chips,
+                                    "skipped": e.get("skipped")})
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
     damaged = summarise(damaged_entries, **bars)
@@ -230,6 +301,7 @@ def control_problems(control_entries, entries) -> list[str]:
     if not isinstance(control_entries, list) or not isinstance(entries, list):
         return ["the control has no entries list"]
     mine = {e.get("id"): e.get("reference_ids") for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
+    mine_skipped = {e.get("id"): e.get("skipped") or [] for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
     out, seen = [], set()
     for c in control_entries:
         if not isinstance(c, dict) or not isinstance(c.get("id"), str):
@@ -244,10 +316,17 @@ def control_problems(control_entries, entries) -> list[str]:
             continue
         if c.get("reference_ids") != mine[cid]:
             out.append(f"control prompt {cid!r} has other reference ids than the run")
+        if (c.get("skipped") or []) != mine_skipped[cid]:
+            out.append(f"control prompt {cid!r} skipped other positions than the run, so the two scores count other tokens")
         chip = c.get("chip_ids")
         if c.get("error") not in (None, ""):
             out.append(f"control prompt {cid!r} had a failed request: {str(c['error'])[:120]}")
-        if not isinstance(chip, list) or any(x is None for x in chip):
+        try:
+            left_out = set(skipped_positions(c.get("skipped"), len(c["reference_ids"])))
+        except (ValueError, KeyError, TypeError):
+            out.append(f"control prompt {cid!r} has a malformed skipped list")
+            left_out = set()
+        if not isinstance(chip, list) or any(x is None for k, x in enumerate(chip) if k not in left_out):
             out.append(f"control prompt {cid!r} has missing chip ids")
     for cid in sorted(set(mine) - seen):
         out.append(f"control prompt {cid!r} is missing")
