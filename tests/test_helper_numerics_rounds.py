@@ -80,7 +80,7 @@ def test_the_agreement_is_recomputed_from_the_ids_and_not_taken_from_the_record(
     assert port_repair.read_numerics(run, stage)["agreement"] == pytest.approx(17 / 32)
 
 
-@pytest.mark.parametrize("mutate", ["port_changed_after", "reference_ids_changed", "chip_ids_short", "schema", "exit_code_2", "timed_out", "no_record"])
+@pytest.mark.parametrize("mutate", ["port_changed_after", "reference_ids_changed", "chip_ids_short", "chip_ids_long", "schema", "exit_code_2", "timed_out", "no_record"])
 def test_a_record_that_cannot_be_trusted_earns_no_round_and_no_pass(tmp_path, mutate):
     run, stage = checked(tmp_path, LOW)
     rec = json.loads(record_path(stage).read_text())
@@ -91,6 +91,8 @@ def test_a_record_that_cannot_be_trusted_earns_no_round_and_no_pass(tmp_path, mu
         rec["reference_ids"] = [i + 1 for i in rec["reference_ids"]]
     elif mutate == "chip_ids_short":
         rec["chip_ids"] = rec["chip_ids"][:-1]
+    elif mutate == "chip_ids_long":
+        rec["chip_ids"] = rec["chip_ids"] + [rec["chip_ids"][0]]          # one more id than the reference has
     elif mutate == "schema":
         rec["schema"] = "other/1"
     elif mutate == "exit_code_2":
