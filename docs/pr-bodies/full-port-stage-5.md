@@ -1,6 +1,6 @@
 # Full port stage 5: the port behind a chat server, with an acceptance corpus replayed at boot (issue 329, stage 5 half)
 
-Branch `full-port-stage-5`, off the local `integration` branch. Not a pull request yet. No publish, no push to Hugging Face, no hardware, no real telegraph call.
+Branch `stack-2-stage5`, link 2 of the stack, on `stack-1-stage4`. No publish, no push to Hugging Face, no hardware, no real telegraph call.
 
 ## What it does
 
@@ -26,7 +26,7 @@ After stage 4, a full-port run (`--full-port`, class `full-port`) reaches stage 
 9. **Numbers and sizes.** The port copy has caps (200 files, 2 MiB each, 1000 entries, depth 8). The passkey lengths are bounded (at most 8192 tokens, never above the context minus 64) and a context too small for two lengths is refused at prepare. `max_tokens` is 1 to 4096 and the request body at most 8 MiB. Tests use 0, -1, too large and a prompt longer than the context.
 10. **Secrets, paths and host names.** The record holds the cache directory with `$HOME` shortened to `~`. The ledger entries hold hashes, counts and port file names only. The skill and README name no machine path. The repo test for `/home/` and `/mnt/` in `orchard/skills` passes.
 11. **Tests that do not test the claim.** 39 mutations, each removing one guard, each turned a test red (list in the project log). One mutation (teacher forcing dropped) was first green because the fake port's own greedy run equalled the reference; a test with a port that is wrong at one position was added and turned it red. The template runs as a real subprocess against a fake `ttnn`. Hostile-input registry entries for the new gate were not added: it reuses `full_port._json`, which stage 2 covers.
-12. **Housekeeping.** `changes/full-port-stage-5.toml` (target 0.9.117, chosen to avoid the default 0.9.115 that two parallel forks will also take), a dated project-log entry, a README note (no new flag), `python3 scripts/version.py check` passes.
+12. **Housekeeping.** `changes/full-port-stage-5.toml` (target 0.9.118, the next free one in the stack), a dated project-log entry, a README note (no new flag), `python3 scripts/version.py check` passes.
 
 ## What a pass shows, and what it does not
 
