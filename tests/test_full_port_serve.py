@@ -252,6 +252,20 @@ def test_stage_3_is_the_source_when_it_passed_and_the_gate_expects_its_chips(tmp
     refused(b, "differs", source=2)                       # stage 2's record is not the one this corpus was built from, and the config names stage 3
 
 
+def test_the_teacher_forced_replay_feeds_the_reference_ids_so_a_port_that_is_wrong_at_one_position_still_replays(tmp_path):
+    """The port answers 999 where it should answer 106 (stage 2's check allows it: 31 of 32). Its free run then goes its own way. The replay must
+    feed the reference ids in the teacher-forced entry, or the two entries could not both match what stage 2 recorded."""
+    wrong = fk.ANSWERING.replace("def decode_step(model, token_id, position):\n", "def decode_step(model, token_id, position):\n    if token_id == 105:\n        return _peak(999)\n")
+    b = fk.build(tmp_path, wrong)
+    corpus = json.loads((b["stage"] / "corpus.json").read_text())
+    tf, free = corpus["entries"]
+    assert tf["expected_ids"][6] == 999 and tf["expected_ids"][7] == REF_IDS[7] and free["expected_ids"][6] == 999 and free["expected_ids"][7] != REF_IDS[7]
+    assert fk.run_serve(b).returncode == 0
+    fk.derive(b)
+    reasons, _, _ = fk.gate(b)
+    assert reasons == [], reasons
+
+
 # ---- the model with random weights ---------------------------------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
