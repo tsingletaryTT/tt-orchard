@@ -1,0 +1,4 @@
+target = "0.9.109"
+summary = "A stage 2 port declares whether it writes a converted-weight cache, and the supervisor blocks on the disk for one that does."
+pr = 473
+kind = "feature"
