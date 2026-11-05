@@ -3230,7 +3230,65 @@ class Supervisor:
                                reason=f"the draft could not be written: {exc.__class__.__name__}")
             return None
         self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, draft=evidence, parses=ok_py, **record)
-        return phone_a_friend.coder_note(evidence["path"], answer.call_id, ok_py, why_not)
+        placed = False
+        if ok_py:
+            problems = phone_a_friend.draft_problems(draft)
+            if problems:
+                self._friend_stub(n, answer.call_id, problems)
+            else:
+                placed = self._place_friend_draft(n, stage_dir, path, answer.call_id)
+        return phone_a_friend.coder_note(evidence["path"], answer.call_id, ok_py, why_not, placed=placed)
+
+    def _place_standing_draft(self, spec, stage_dir: Path) -> None:
+        """A later attempt of stage 2 starts from a fresh skeleton. When the helper is not due this attempt (its calls are used up, or no attempt
+        has failed) and an earlier attempt left a draft that is real code, put that draft in the fresh skeleton's place, so the attempt starts
+        from code the check can run. A due helper is asked instead, and its new draft is placed (`_phone_a_friend`). Advisory: nothing here fails
+        the stage, and a port the coder has written is never replaced."""
+        n = spec.number
+        if n != 2 or getattr(self, "telegraph", None) is None:
+            return
+        try:
+            if phone_a_friend.due(phone_a_friend.attempt_state(self.ledger.read(), n))[0]:
+                return
+            draft = phone_a_friend.standing_draft(stage_dir)
+            if draft is None:
+                return
+            self._place_friend_draft(n, Path(stage_dir), draft, "")
+        except Exception as exc:     # advisory: an error nobody listed leaves the skeleton as it was
+            self.ledger.append("decision", n, decision=phone_a_friend.NOT_PLACED, call_id="", reason=f"{exc.__class__.__name__}: an unexpected error")
+
+    def _friend_stub(self, n: int, call_id: str, problems: list[str]) -> None:
+        """A draft that parses but is a stub (a required function missing, empty or raising NotImplementedError) helped nobody: say so now, so the
+        helper's ladder takes the next question to the next model of its list (`Telegraph._choose_model` moves up one step on a not-helped
+        verdict), and the ledger records why. Run9 of the tiny Qwen4 rehearsal: the cheapest model's stub, then eight reads of the excerpts."""
+        from orchard import telegraph as tg
+        self.ledger.append("decision", n, decision=phone_a_friend.DRAFT_STUB, call_id=call_id, problems=[str(p)[:120] for p in problems[:6]],
+                           effect="reported as not helped; the next ask in this stage goes to the next model of the helper's list")
+        reason = "stub draft: " + "; ".join(str(p)[:80] for p in problems[:3])
+        try:
+            self.telegraph.report(call_id, False, note=f"stage {n}: {reason}")
+        except (KeyError, OSError, ValueError, *tg.LEDGER_ERRORS) as exc:
+            reason += f" (the verdict could not be written: {exc.__class__.__name__})"
+        self.ledger.append("decision", n, decision=phone_a_friend.REPORTED, call_id=call_id, helped=False, reason=reason[:300])
+
+    def _place_friend_draft(self, n: int, stage_dir: Path, draft_path, call_id: str) -> bool:
+        """Put a draft that parses and is not a stub into `stages/2/port/port_model.py` when that file is still the unchanged skeleton, so the
+        supervisor's check runs against real code and its failures become the coder's next input. The ledger holds the draft's hash and the new
+        port's hash, or why nothing was placed. A file the coder has written is never replaced."""
+        try:
+            skeleton = safeio.read_bytes(port_facts.SKELETON, max_bytes=port_facts.SKELETON_MAX)
+            ok, why = phone_a_friend.place_draft(stage_dir, draft_path, skeleton)
+            if ok:
+                port = Path(stage_dir) / "port" / port_facts.SKELETON_NAME
+                record = evidence_record(self.run_dir, port)
+                self.ledger.append("decision", n, decision=phone_a_friend.PLACED, call_id=call_id, path=record["path"], port_sha256=record["sha256"],
+                                   draft_sha256=evidence_record(self.run_dir, Path(draft_path))["sha256"],
+                                   skeleton_sha256=hashlib.sha256(skeleton).hexdigest())
+                return True
+        except (OSError, safeio.SafeReadError) as exc:
+            ok, why = False, f"the files could not be read ({exc.__class__.__name__})"
+        self.ledger.append("decision", n, decision=phone_a_friend.NOT_PLACED, call_id=call_id, reason=str(why)[:300])
+        return False
 
     def _report_phone_a_friend(self, n: int, *, helped: bool) -> None:
         """Tell the helper's ledger how the attempt it helped with ended, and note it in the run's ledger. A failed report is noted and goes on."""
@@ -3304,7 +3362,8 @@ class Supervisor:
             return self._draft_stock(spec, stage_dir)
         if spec.draft == "full_port":
             self._pin_full_port(spec, stage_dir)
-            return self._seed_full_port(spec, stage_dir)
+            self._seed_full_port(spec, stage_dir)
+            return self._place_standing_draft(spec, stage_dir)
         if spec.draft == "scoring_check":
             return self._pin_scoring(spec, stage_dir)
         if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
