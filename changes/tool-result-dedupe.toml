@@ -1,0 +1,4 @@
+target = "0.9.115"
+summary = "A repeat read of an unchanged file, or of a read-only shell command with the same output, is answered with a note in one agent step; the watchdog nudges after three notes; --no-tool-dedupe turns it off."
+pr = 488
+kind = "feature"
