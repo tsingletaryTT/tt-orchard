@@ -206,7 +206,7 @@ def test_with_the_opt_in_a_full_port_class_gets_the_full_port_stage_2():
 
 
 def test_the_opt_in_changes_no_other_stage_and_no_other_class():
-    for n in (0, 1, 4, 5, 6, 7, 8):      # stage 3 changes too since issue 326: tests/test_full_port_stage3.py
+    for n in (0, 1, 4, 5, 7, 8):      # stage 3 changes too since issue 326 (tests/test_full_port_stage3.py), stage 6 since issue 329 (tests/test_supervisor_full_port_quality.py)
         assert spec_for(n, "full-port", None, "full-port", full_port=True) == spec_for(n, "full-port", None, "full-port")
     assert spec_for(2, "full-port", None, "unknown", full_port=True).skill == "functional-decoder"
     assert spec_for(2, "weights-only", None, "weights-only", full_port=True).skill == "weights-swap-check"

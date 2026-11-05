@@ -4640,3 +4640,11 @@ Prompt (operator): take all the help available from the new tenstorrent/skills P
 - The reset is the only request in `served_probes.py` that is not generation; the module docstring now says so and the probe sends it only when the caller allows it.
 - Tests: `tests/test_prefix_shared_suffix.py` (25) against a server that models a prefix cache with one switch per fault. 18 mutations, all red after two got tests (probe facts kept; the judge's own declared check).
 - Not done: the load version for issue 83, the counters, the burst probe with a serial reference, the skills-freshness plugin-version note, and no real-server run.
+
+## 2026-11-04 Full port stage 6 (issue 329, stage 6 half, branch `full-port-stage-6`)
+- Prompt: build stage 6 of the full-port route so the tiny random-weight rehearsal model can go through stages 0 to 8: free-run quality against the reference, teacher-forced perplexity, a benchmark with warm-up and at least 3 repeats with the share of the decode floor, every number labelled measured or TODO, and the operator bundle reporting them.
+- Built: `orchard/skills/full-port-templates/port_quality.py` (supervisor-owned template; worker in a second process as in `port_check.py`; the parent times each request), `orchard/full_port_quality.py` (gate, derive), `orchard/full_port_quality_stage.py` (supervisor hooks as functions), `orchard/full_port_bundle.py` (bundle section and risks), skill `full-port-quality`. Stage 6 has no agent step. The port is copied from stage 3 (else stage 2) and the ledger holds the hash of each copied file; the gate also compares them with the source stage's own record.
+- Decision: stage 1 records only 32 greedy ids and the reference's top-5 logits per step, not full log probabilities. The comparison with the reference is therefore the mean difference of top-5 logit gaps (bar 0.5, a choice), with perplexity reported next to it and no bar of its own.
+- Decision: the rehearsal option waives `coherent` and nothing else, as in stages 2 and 3. The text floor (20 characters, 4 different words) still applies.
+- Shared files touched: `supervisor.py` (hooks, `_seed_stage_3_port` takes a source stage), `stages.py` (gate, spec), `tests/test_skills.py` (list), README, `build_bundle.py` (two calls).
+- Not done: the pause before stage 4 is unchanged (stages 4 and 5 are other forks); no run on a chip.

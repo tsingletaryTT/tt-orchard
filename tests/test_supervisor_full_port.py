@@ -13,6 +13,7 @@ from orchard.stages import SKIP_3_FULL_PORT, full_port_enabled
 from orchard.supervisor import EXIT_ABORTED, EXIT_BLOCKED, EXIT_READY, Control, parse
 from orchard import full_port
 from port_check_fakes import HONEST, WRONG, install_fake_ttnn, python_path, tokenizer_json
+from quality_fakes import TINY_CONFIG, top5_file
 from run_fakes import DELTA, FILES, argv, bringup, note
 from test_supervisor import Rig, Stop, step_skills
 
@@ -21,7 +22,9 @@ pytestmark = pytest.mark.usefixtures("stub_tools")
 REF_IDS = list(range(100, 132))
 
 # What the coder's stage 1 would leave: the reference ids the stage 2 comparison reads.
+# The top-five file is what stage 6 compares the port's logit gaps with (issue 329).
 STAGE_1 = {**FILES[(1, "run")], "evidence/reference/generated-ids.json": {"generated_ids": REF_IDS, "generated_text": "x"},
+           "evidence/reference/top5-logits.json": top5_file(),
            "evidence/reference/prompt-ids.json": {"prompt_ids": [1, 2, 3], "prompt_text": "p"}}
 
 # The port the coder writes (the check is the supervisor's template, which these tests run for real on the CPU with a fake `ttnn`).
@@ -172,7 +175,8 @@ def test_an_unattended_retry_does_not_pass_the_pause(rig):
     assert not started(rig, 4)
 
 
-def test_an_attended_resume_after_the_pause_goes_on_into_the_generic_stages(rig):
+def test_an_attended_resume_after_the_pause_goes_on_into_the_generic_stages(rig, tmp_path):
+    (tmp_path / "snapshot" / "config.json").write_text(json.dumps(TINY_CONFIG))        # stage 6 (issue 329) reads the model's config for the decode floor
     make(rig)
     rig.on_sleep = lambda: Control(rig.run_dir).write("resume")
     assert rig.run() == EXIT_READY
