@@ -165,7 +165,7 @@ chips and runs on one passes. The skill tells the coder this is not the stage's 
 ### 3.7 Stage 4: the port on each required chip count (issue 454)
 
 Stage 2 shows the port on one board and stage 3 on the largest of `--required-chips`. Stage 4 shows it on every other count the operator
-listed, the way the weights-only stage 4 runs one test per count (`orchard/hwtests.py`). The check is the one of stages 2 and 3, with an
+listed, the way the weights-only stage 4 runs one test per count (`orchard/hwtests.py`). The check is the same as in stages 2 and 3, applied to an
 entry's directory in place of a stage's directory. The files and the checks are described in `orchard/full_port_entries.py` and the
 supervisor's side in `orchard/full_port_stage4.py`.
 
