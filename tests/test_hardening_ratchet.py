@@ -183,3 +183,18 @@ def test_update_writes_both_baselines_and_refuses_growth_in_either(tmp_path, mon
     assert json.loads(haz.read_text()) == {"a.py": 1}
     assert hb.main(["--accept-growth"]) == 0
     assert json.loads(haz.read_text()) == {"a.py": 2}
+
+
+def test_update_writes_neither_baseline_when_one_count_fell_and_the_other_grew(tmp_path, monkeypatch):
+    raw, haz = tmp_path / "raw.json", tmp_path / "haz.json"
+    raw.write_text('{"a.py": 3}'), haz.write_text('{"a.py": 1}')
+    monkeypatch.setattr(hb, "ROOT", tmp_path)
+    monkeypatch.setattr(hb, "BASELINE", raw)
+    monkeypatch.setattr(hb, "HAZARD_BASELINE", haz)
+    monkeypatch.setattr(hb, "count_all", lambda root=hb.ROOT: {"a.py": 1})              # fell
+    monkeypatch.setattr(hb, "count_hazards_all", lambda root=hb.ROOT: {"a.py": 2})      # grew
+    assert hb.main(["--update"]) == 1
+    assert json.loads(raw.read_text()) == {"a.py": 3}                                    # the lowered count was not written either
+    assert json.loads(haz.read_text()) == {"a.py": 1}
+    assert hb.main(["--accept-growth"]) == 0
+    assert json.loads(raw.read_text()) == {"a.py": 1} and json.loads(haz.read_text()) == {"a.py": 2}

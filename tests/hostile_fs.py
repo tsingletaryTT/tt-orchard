@@ -47,6 +47,7 @@ ADDRESS_SPACE = 2 << 30
 OK_BYTES = b'{"ok": 1}'
 DECOY_BYTES = b'{"ok": 0, "decoy": true}'
 VICTIM_BYTES = b"precious\n"
+REVISION = "0123456789abcdef0123456789abcdef01234567"      # a snapshot directory is named by a commit hash
 HUGE_SPARSE = 1 << 30                       # a sparse file of 1 GiB: it costs no disk and is far over every cap used here
 
 # Class names of the repository's own refusals. A reader's own named error counts as a refusal; a bare KeyError or TypeError does not.
@@ -57,6 +58,12 @@ REFUSAL_NAMES = frozenset({
 
 
 # ------------------------------------------------------------------------------------------------------------------- layout
+
+def _cache_lock_path(root: Path) -> Path:
+    sys.path.insert(0, str(REPO))
+    from orchard import cache_lock
+    return cache_lock.lock_path(root, "ledger.jsonl")
+
 
 def layout(base: Path) -> dict:
     """The plain layout under `base`: `root/` holds `sub/data.json` (OK_BYTES) and a small tree; `outside/` holds a decoy of the same name
@@ -70,7 +77,7 @@ def layout(base: Path) -> dict:
     (outside / "sub" / "DECOY_MARK").write_bytes(b"x")
     (outside / "victim.txt").write_bytes(VICTIM_BYTES)
     return {"base": base, "root": root, "outside": outside, "rel": "sub/data.json", "parts": ("sub", "data.json"),
-            "file": root / "sub" / "data.json", "lock": root / "ledger.jsonl.lock", "victim": outside / "victim.txt",
+            "file": root / "sub" / "data.json", "lock": root / "ledger.jsonl.lock", "cache_lock": _cache_lock_path(root), "victim": outside / "victim.txt",
             "between": lambda: None}
 
 
@@ -119,7 +126,10 @@ def _sparse_huge(env):
 
 
 def _lock_link(env):
+    """Links at the exact lock names the readers open: the ledger's `<name>.lock` and cache_lock's `.<name>.lock` (taken from its own
+    `lock_path`, so a change of naming there cannot leave this case opening a fresh file)."""
     env["lock"].symlink_to(env["victim"])
+    env["cache_lock"].symlink_to(env["victim"])
 
 
 def _deep_tree(env):
@@ -148,22 +158,23 @@ def _tiny_safetensors(path: Path) -> None:
 
 
 def _hf_inside(env):
-    """A Hugging Face cache snapshot: `snapshot/model.safetensors` is a link into `blobs/` inside the same cache root."""
+    """A Hugging Face cache snapshot: `snapshots/<revision>/model.safetensors` is a link into `blobs/` inside the same cache root."""
     cache = env["root"] / "models--x"
+    snap = cache / "snapshots" / REVISION
     (cache / "blobs").mkdir(parents=True)
-    (cache / "snapshot").mkdir()
+    snap.mkdir(parents=True)
     _tiny_safetensors(cache / "blobs" / "abc123")
-    (cache / "snapshot" / "model.safetensors").symlink_to("../blobs/abc123")
-    env["snapshot"] = cache / "snapshot"
+    (snap / "model.safetensors").symlink_to("../../blobs/abc123")           # the layout huggingface_hub writes
+    env["snapshot"] = snap
 
 
 def _hf_outside(env):
     """The same snapshot, but the link points outside the cache root."""
-    cache = env["root"] / "models--x"
-    (cache / "snapshot").mkdir(parents=True)
+    snap = env["root"] / "models--x" / "snapshots" / REVISION
+    snap.mkdir(parents=True)
     _tiny_safetensors(env["outside"] / "elsewhere.safetensors")
-    (cache / "snapshot" / "model.safetensors").symlink_to(env["outside"] / "elsewhere.safetensors")
-    env["snapshot"] = cache / "snapshot"
+    (snap / "model.safetensors").symlink_to(env["outside"] / "elsewhere.safetensors")
+    env["snapshot"] = snap
 
 
 def _sidecar_link(env):
@@ -267,9 +278,11 @@ def _r_list_beneath(pin, env):
 
 def _r_scan_beneath(pin, env):
     from orchard import safeio
-    seen: list[str] = []
-    safeio.scan_beneath(pin, lambda entry: seen.append(str(getattr(entry, "name", entry))))
-    return "decoy" if "DECOY_MARK" in seen else "original"
+    seen: list[tuple[str, ...]] = []
+    safeio.scan_beneath(pin, lambda entry: seen.append(tuple(entry.parts)))       # ScanEntry has `parts` and `kind`
+    if any(parts[-1] == "DECOY_MARK" for parts in seen):
+        return "decoy"
+    return "original" if ("sub", "data.json") in seen else "other"            # the real tree must be listed, or the scan proved nothing
 
 
 def _r_write_beneath(pin, env):
@@ -297,21 +310,29 @@ def _r_atomic_write_path(env):
 def _r_ledger_lock(env):
     from orchard import ledger
     led = ledger.Ledger(env["root"] / "ledger.jsonl")
-    led.close()
-    return "original"
+    try:
+        # The lock file the reader opened must be the one the case prepared; if the name drifted the case proves nothing.
+        return "original" if env["lock"].exists() else "other"
+    finally:
+        led.close()
 
 
 def _r_cache_lock(env):
     from orchard import cache_lock
-    with cache_lock.entry_lock(env["root"], "ledger.jsonl", exclusive=True):
-        pass
-    return "original"
+    with cache_lock.entry_lock(env["root"], "ledger.jsonl", exclusive=True) as held:
+        return "original" if held and env["cache_lock"].exists() else ("refused" if not held else "other")
 
 
 def _r_residency_headers(env):
     from orchard import residency
     got = residency.read_headers(env["snapshot"])
     return "original" if [t.name for t in got.tensors] == ["w"] else "other"
+
+
+def sidecar_leaked(entries: list[dict]) -> bool:
+    """True when a listed `extra.gguf` carries the size or hash of the file the link points at. Listing the link by name, with a reason
+    and no target size, is the correct answer (issue 464) and is not a leak."""
+    return any(e["file"] == "extra.gguf" and (e.get("size") == len(VICTIM_BYTES) or bool(e.get("sha256"))) for e in entries)
 
 
 def _r_compare_sidecars(env):
@@ -323,8 +344,8 @@ def _r_compare_sidecars(env):
     empty = env["base"] / "empty_base"
     empty.mkdir()
     got = mod.compare_sidecars(env["root"], empty, set())
-    listed = [e["file"] for e in got["sidecars"]] + [e["file"] for e in got["ignored_files"]]
-    return "decoy" if "extra.gguf" in listed else "original"
+    # A refused link may stay listed (issue 464: with a reason and no target size). It leaks when an entry carries the target's size or hash.
+    return "decoy" if sidecar_leaked(got["sidecars"] + got["ignored_files"]) else "original"
 
 
 PATH_READERS: list[PathReader] = [
@@ -367,7 +388,16 @@ def _c_path_after_pin(env):
             return _label(fh.read())
 
 
+def _c_scan_by_name(env):
+    from orchard import safeio
+    with safeio.pinned_root(env["root"]):
+        env["between"]()
+        seen = [Path(d) / n for d, _, names in os.walk(env["root"]) for n in names]       # mistake 2 for a tree: walk by name after the pin
+    return "decoy" if any(p.name == "DECOY_MARK" for p in seen) else "original"
+
+
 CONTROLS: list[PathReader] = [
+    PathReader("control: pin, then walk by pathname", "scan", _c_scan_by_name),
     PathReader("control: builtin open", "path_read", _c_naive_open, claims_pin=False),
     PathReader("control: O_NOFOLLOW on the last part only", "pinned_read", _c_nofollow_last_only),
     PathReader("control: pin, then read by pathname", "pinned_read", _c_path_after_pin),

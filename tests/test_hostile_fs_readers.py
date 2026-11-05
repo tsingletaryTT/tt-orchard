@@ -11,6 +11,7 @@ symlink and special-file recipe.
 """
 from __future__ import annotations
 
+import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -91,6 +92,18 @@ def test_reading_by_pathname_after_a_pin_follows_the_swap(control_verdicts):
     assert got["swap_after_pin"] == "leaked"                 # mistake 2: the pin did not help
 
 
+def test_walking_by_pathname_after_a_pin_follows_the_swap(control_verdicts):
+    got = control_verdicts["control: pin, then walk by pathname"]
+    assert got["plain"] == "original"
+    assert got["swap_after_pin"] == "leaked"                 # the scan check can see a decoy: DECOY_MARK is matched on the right field
+
+
+def test_the_cache_lock_name_is_the_one_the_lock_case_prepares(tmp_path):
+    from orchard import cache_lock
+    env = hf.layout(tmp_path)
+    assert env["cache_lock"] == cache_lock.lock_path(env["root"], "ledger.jsonl")
+
+
 def test_the_safe_readers_are_not_caught_by_the_same_cases(verdicts):
     names = {r.name: i for i, r in enumerate(hf.PATH_READERS)}
     got = {v["case"]: v["verdict"] for v in verdicts[names["safeio.read_bytes(anchor=pin)"]]}
@@ -135,7 +148,8 @@ def test_each_case_builds_the_shape_it_says(tmp_path, case):
     elif case == "sparse_huge":
         assert env["file"].stat().st_size == hf.HUGE_SPARSE
     elif case == "lock_link":
-        assert env["lock"].is_symlink()
+        assert env["lock"].is_symlink() and env["cache_lock"].is_symlink()
+        assert env["cache_lock"].name == ".ledger.jsonl.lock"
     elif case == "swap_after_pin":
         env["between"]()
         assert root.is_symlink() and (Path(str(root) + ".orig") / "sub" / "data.json").read_bytes() == hf.OK_BYTES
@@ -143,3 +157,13 @@ def test_each_case_builds_the_shape_it_says(tmp_path, case):
         assert (root / "deep").is_dir()
     elif case == "hf_blob_inside":
         assert (env["snapshot"] / "model.safetensors").is_symlink()
+        assert env["snapshot"].parent.name == "snapshots" and os.readlink(env["snapshot"] / "model.safetensors") == "../../blobs/abc123"
+
+
+def test_a_refused_link_that_stays_listed_without_the_target_size_is_not_a_leak():
+    ok = [{"file": "extra.gguf", "size": 17, "reason": "a link: not read"}]           # 17 is the length of the link's own text, not the target's size
+    assert hf.sidecar_leaked(ok) is False
+    assert hf.sidecar_leaked([{"file": "extra.gguf", "size": len(hf.VICTIM_BYTES), "reason": "x"}]) is True
+    assert hf.sidecar_leaked([{"file": "extra.gguf", "size": 3, "sha256": "ab"}]) is True
+    assert hf.sidecar_leaked([{"file": "other.gguf", "size": len(hf.VICTIM_BYTES)}]) is False
+    assert hf.sidecar_leaked([]) is False

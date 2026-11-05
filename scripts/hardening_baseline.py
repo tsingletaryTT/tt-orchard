@@ -142,14 +142,23 @@ def count_all(root: Path = ROOT) -> dict[str, int]:
     return out
 
 
+def growth(counts: dict[str, int], path: Path = BASELINE) -> list[str]:
+    """What is above the recorded baseline in `path` (a count that rose, or a file that is new), as `file was -> now`. Writes nothing."""
+    old = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    return [f"{rel} {old.get(rel, 0)} -> {n}" for rel, n in sorted(counts.items()) if n > old.get(rel, 0)]
+
+
+def write_baseline(counts: dict[str, int], path: Path) -> None:
+    path.write_text(json.dumps(counts, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def update_baseline(counts: dict[str, int], path: Path = BASELINE, accept_growth: bool = False) -> list[str]:
     """Write `counts` as the baseline. When any count is above the recorded one (or a file is new), write nothing and return what grew,
     unless `accept_growth` is true. An empty list means the baseline was written."""
-    old = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    grew = [f"{rel} {old.get(rel, 0)} -> {n}" for rel, n in sorted(counts.items()) if n > old.get(rel, 0)]
+    grew = growth(counts, path)
     if grew and not accept_growth:
         return grew
-    path.write_text(json.dumps(counts, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    write_baseline(counts, path)
     return []
 
 
@@ -158,14 +167,17 @@ def main(argv=None) -> int:
     counts = count_all()
     hazards = count_hazards_all()
     if "--update" in argv or "--accept-growth" in argv:
-        grew = update_baseline(counts, BASELINE, accept_growth="--accept-growth" in argv)
-        grew += update_baseline(hazards, HAZARD_BASELINE, accept_growth="--accept-growth" in argv)
-        if grew:
-            print("refused: raw file access grew (was -> now): " + ", ".join(grew) + ". Use orchard/safeio.py, mark a line that is right "
+        # Both counts are checked before either file is written, so a refusal leaves both baselines as they were.
+        grew = growth(counts, BASELINE) + growth(hazards, HAZARD_BASELINE)
+        if grew and "--accept-growth" not in argv:
+            print("refused: raw file access or link hazards grew (was -> now): " + ", ".join(grew) + ". Use orchard/safeio.py, mark a line that is right "
                   "to keep with `# hardening: ok <reason>`, or, when another merged change raised the counts, run with --accept-growth "
                   "and say why in the project log.", file=sys.stderr)
             return 1
-        print(f"wrote {BASELINE.relative_to(ROOT)}: {sum(counts.values())} raw accesses in {len(counts)} files")
+        write_baseline(counts, BASELINE)
+        write_baseline(hazards, HAZARD_BASELINE)
+        print(f"wrote {BASELINE.relative_to(ROOT)}: {sum(counts.values())} raw accesses in {len(counts)} files; "
+              f"{HAZARD_BASELINE.relative_to(ROOT)}: {sum(hazards.values())} link hazards in {len(hazards)} files")
         return 0
     for rel, n in sorted(counts.items(), key=lambda kv: -kv[1])[:15]:
         print(f"{n:5d}  {rel}")
