@@ -1,0 +1,3 @@
+target = "0.9.119"
+summary = "A rehearsal's stage 2 repairs are driven by the outside helper without the coder, the furthest port is kept across attempts, and a reported stub is not answered from the helper's cache."
+kind = "feature"
