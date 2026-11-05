@@ -116,7 +116,7 @@ def test_a_secret_cut_by_the_limit_in_a_setup_error_never_leaves_the_worker_eith
     assert "S3CRET" not in done.stdout + done.stderr
 
 
-def test_the_workers_clip_takes_secrets_out_before_the_cut_and_stays_fast_on_hostile_text():
+def test_the_workers_clip_takes_secrets_out_before_the_cut_and_stays_fast_on_hostile_text(tmp_path):
     # Loaded by path in a child process with a hard timeout: a pattern that went quadratic would hang here, not in a worker the supervisor waits for.
     code = r"""
 import importlib.util, sys, time
@@ -129,7 +129,11 @@ for text in ("a" * 300000, "ab://" * 60000, "https://" + "u" * 300000, "a+." * 1
     assert "hf_A" not in out and "SECRET" not in out, out[-60:]
 print("ok", round(worst, 3))
 """
-    done = subprocess.run([sys.executable, "-I", "-c", code, str(full_port.TEMPLATE)], capture_output=True, text=True, timeout=60)
+    # The template finds its run directory as the nearest `stages` above its own directory (stage 4 of a full port, issue 454), so the copy that is loaded sits under one.
+    copy = tmp_path / "stages" / "2" / "port_check.py"
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(full_port.TEMPLATE.read_bytes())
+    done = subprocess.run([sys.executable, "-I", "-c", code, str(copy)], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0 and done.stdout.startswith("ok"), done.stdout + done.stderr
     assert float(done.stdout.split()[1]) < 5.0
 
