@@ -210,7 +210,7 @@ def test_a_covered_entry_for_a_count_the_covering_stage_did_not_run_is_refused(t
     make_covered(run, 4, stage=2)            # stage 2's marker is not there in this run
     assert one(gate(stage_dir, run), "stages/2/test-result.json")
     make_covered(run, 4, stage=3, chips=3)
-    assert one(gate(stage_dir, run), "is for 3 chips, not 4")
+    assert one(gate(stage_dir, run), "is for 3 chips and this entry is for 4")
 
 
 def test_a_covered_entry_that_names_a_stage_that_cannot_cover_is_refused(tmp_path):

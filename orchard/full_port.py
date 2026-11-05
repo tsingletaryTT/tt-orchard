@@ -175,7 +175,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
     if entry is not None:
         if stage != ENTRY_STAGE or type(entry) is not int or entry < 1:
-            return [f"an entry of the full-port check is a chip count of at least 1 in stage {ENTRY_STAGE}, not entry {entry!r} of stage {stage!r}"], []
+            return [f"an entry of the full-port check is a chip count of at least 1 in stage {ENTRY_STAGE}; got entry {entry!r} of stage {stage!r}"], []
         if expected_chips is not None and expected_chips != entry:
             return [f"the entry for {entry} chips cannot be checked against an expected count of {expected_chips!r}"], []
         expected_chips = entry          # the entry's own count: a record that lists another number of chips is not this entry's

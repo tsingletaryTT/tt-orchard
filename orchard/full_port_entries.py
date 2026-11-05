@@ -18,7 +18,7 @@ Files, under the stage directory `stages/4/`:
         evidence/port-check.json  the record the template wrote
         evidence/hw-test-output.txt  the command's output
         result.json               written by the supervisor from the record (`orchard/full_port_result.py`)
-    configs/<N>/covered.json      instead of a test: the entry's count is a count that stage 2 or stage 3 already showed. It names the
+    configs/<N>/covered.json      written when the entry's count is one that stage 2 or stage 3 already showed. It names the
                                   stage and the path and sha256 of that stage's marker and record. No test runs for such an entry.
     result.json                   the stage's summary, written by the supervisor. The gate rebuilds it from the entries' records
                                   (`summarize`) and refuses a file that differs.
@@ -200,7 +200,7 @@ def _covered_reasons(edir: Path, run_dir: Path, chips: int, covered: dict) -> tu
     seen: list[str] = []
     stage = covered.get("covered_by")
     if covered.get("chips") != chips or type(covered.get("chips")) is not int:
-        reasons.append(f"{COVERED_FILE} is for {covered.get('chips')!r} chips, not {chips}")
+        reasons.append(f"{COVERED_FILE} is for {covered.get('chips')!r} chips and this entry is for {chips}")
     if stage not in COVERED_BY or type(stage) is not int:
         reasons.append(f"{COVERED_FILE} names stage {stage!r}; only stages {list(COVERED_BY)} cover an entry")
         return reasons, seen
@@ -282,7 +282,7 @@ def summarize(stage_dir, run_dir, required) -> dict:
 def check_stage(stage_dir, run_dir, *, required, rehearsal: bool = False) -> tuple[list[str], list[str], list[str]]:
     """(reasons, evidence paths, waived fields) for stage 4 of a full port. `required` is the run's `--required-chips`, the supervisor's
     own option; the gate takes the list of entries from it and never from a file. The plan must list exactly those counts, each entry
-    must pass, and the stage's result.json must be the one `summarize` builds from the entries' records."""
+    must pass, and the stage's result.json must equal what `summarize` builds from the entries' records."""
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
     reasons: list[str] = []
     seen: list[str] = []
