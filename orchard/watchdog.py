@@ -18,12 +18,12 @@ import hashlib
 import json
 import re
 import shlex
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from orchard.adapters import AdapterError
-from orchard.defaults import (IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
+from orchard.defaults import (DEDUPE_NUDGES_PER_STAGE, DEDUPE_STREAK_N, DEDUPE_STREAK_WINDOW, IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
                               RUNG_CAPS, THINKING_CAP, TURN_CYCLE_MAX_PERIOD, TURN_CYCLE_REPEATS, TURN_REPEAT_N,
                               TURN_SHAPE_N, WRITELESS_TURNS)
 
@@ -57,6 +57,9 @@ class Event:
     # On a tool_call: the call's shape (command_shape of a shell command), so TurnRepeat can match
     # commands that differ only in a trailing argument. None for other tools and for transcripts.
     shape: str | None = None
+    # On a tool_result: True when the tool's answer was the short "unchanged since turn N" note (orchard/agent.py Tools), and `name` then
+    # holds what the note is about (the file's path, or the command). False for every other event.
+    deduped: bool = False
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -73,6 +76,8 @@ class Finding:
     pause: bool = False               # a budget cap: go straight to pause (spec section 10)
     notice_only: bool = False         # a supervisor matter (an idle lease): a notice, no rung
     nudge: str | None = None          # the text the nudge rung sends; None uses the repeat text
+    nudge_only: bool = False          # a hint, never a rung: the ladder sends the nudge, at most DEDUPE_NUDGES_PER_STAGE times per agent and stage,
+                                      # and never escalates or pauses on it (DedupeStreak)
 
     def record(self) -> dict:
         return {"detector": self.detector, "agent": self.agent, "ts": self.ts,
@@ -438,6 +443,44 @@ class NoFileWritten:
                               "from it now, even if it is incomplete, and refine it afterwards."))
 
 
+class DedupeStreak:
+    """The agent keeps asking for text it already has: `n` of its last `window` tool results were the "unchanged" note (Tools dedupe).
+
+    Sends one hint per agent step, naming what was asked for again, and tells the agent to write. It is a `nudge_only` finding: the ladder
+    delivers it without using a rung, so it can never lead to an escalation or a pause by itself (the repeated-call detectors still see every call).
+    A turn number lower than the one before it, or the first turn after a later one, starts a new step and a new count."""
+    name = "dedupe_streak"
+
+    def __init__(self, n: int = DEDUPE_STREAK_N, window: int = DEDUPE_STREAK_WINDOW):
+        if n < 1 or window < n:
+            raise ValueError("n must be at least 1 and window at least n")
+        self.n, self.window = n, window
+        self._recent: dict[str, deque] = {}
+        self._fired: set[str] = set()
+        self._turn: dict[str, int] = {}
+
+    def feed(self, ev: Event) -> Finding | None:
+        if ev.kind != "tool_result":
+            return None
+        agent = ev.agent
+        if ev.turn is not None:
+            last = self._turn.get(agent)
+            if last is not None and (ev.turn < last or (ev.turn == 1 and last != 1)):
+                self._recent.pop(agent, None)
+                self._fired.discard(agent)
+            self._turn[agent] = ev.turn
+        recent = self._recent.setdefault(agent, deque(maxlen=self.window))
+        recent.append(bool(ev.deduped))
+        if not ev.deduped or agent in self._fired or sum(recent) < self.n:
+            return None
+        self._fired.add(agent)
+        what = ev.name or "a file you already read"
+        return Finding(self.name, agent, ev.ts, f"{sum(recent)} of the last {len(recent)} tool results repeated an unchanged read ({what})",
+                       {"count": sum(recent), "window": len(recent), "target": what}, nudge_only=True,
+                       nudge=(f"You asked again for {what}, which has not changed since you read it: its text is already in your context. "
+                              "Do not read it again. Write or edit the files this step needs now, or say what blocks you from writing them."))
+
+
 class LeaseIdle:
     """A lease held while its chips have no device open, for longer than idle_s.
 
@@ -527,6 +570,7 @@ def replay(events, detectors) -> list[Finding]:
 
 
 RUNGS = ("nudge", "escalate", "pause")
+SOFT_RUNG = "hint"        # the ledger name of a nudge_only finding's nudge; not one of RUNGS, so it uses none of their caps
 
 
 class Actuator(Protocol):
@@ -572,14 +616,18 @@ class Ladder:
         if missing:
             raise ValueError(f"caps must name every rung; missing {sorted(missing)}")
         self._taken: Counter = Counter()
+        self._hints: Counter = Counter()        # the nudge_only hints sent, per (agent, stage): they are not rungs (see SOFT_RUNG)
         for e in ledger.read():
             d = e["data"]
             if e["event"] == "decision" and d.get("decision") == "resume":
                 # A resume (the operator's, or an unattended retry) is a fresh start for the ladder;
                 # only a restart without one must not repeat a rung.
                 self._taken.clear()
+                self._hints.clear()
             elif d.get("watchdog") and d.get("rung") in RUNGS:
                 self._taken[(d.get("agent"), e["stage"], d["rung"])] += 1
+            elif d.get("watchdog") and d.get("rung") == SOFT_RUNG:
+                self._hints[(d.get("agent"), e["stage"])] += 1
 
     def _left(self, agent: str, stage, rung: str) -> bool:
         return self._taken[(agent, stage, rung)] < self.caps[rung]
@@ -597,6 +645,18 @@ class Ladder:
         self.actuator.pause(reason, {"agent": agent, "findings": records})
         return "pause"
 
+    def _hint(self, agent: str, findings: list[Finding], stage, records: list) -> str:
+        """A finding that is only a hint: one nudge, outside the three rungs and their caps, at most DEDUPE_NUDGES_PER_STAGE per agent and
+        stage; past that, or for an agent the supervisor did not launch, a notice. It never escalates and never pauses."""
+        if agent not in self.launched or self._hints[(agent, stage)] >= DEDUPE_NUDGES_PER_STAGE:
+            self.ledger.append("notice", stage, watchdog=True, agent=agent, findings=records, **({"report_only": True} if agent not in self.launched else {}))
+            return "notice"
+        message = nudge_message(findings)
+        self.ledger.append("retry", stage, watchdog=True, rung=SOFT_RUNG, agent=agent, findings=records, message=message)
+        self._hints[(agent, stage)] += 1
+        self.actuator.nudge(agent, message)
+        return "nudge"
+
     def respond(self, agent: str, findings: list[Finding], stage) -> str:
         quiet = [f for f in findings if f.notice_only]
         if quiet:
@@ -606,6 +666,10 @@ class Ladder:
         findings = [f for f in findings if not f.notice_only]
         if not findings:
             return "notice"
+        records = [f.record() for f in findings]
+        if all(f.nudge_only for f in findings):
+            return self._hint(agent, findings, stage, records)
+        findings = [f for f in findings if not f.nudge_only] or findings
         records = [f.record() for f in findings]
         if any(f.pause for f in findings):
             return self._pause(agent, stage, records) if self._left(agent, stage, "pause") else "none"

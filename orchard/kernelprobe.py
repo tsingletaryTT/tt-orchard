@@ -352,7 +352,7 @@ def attempt_tools(adir: Path, hardware=None) -> Tools:
     run as long as one simulator check plus a margin. `hardware` (make_hardware_check) adds the `hardware_check` tool,
     the one way an attempt reaches a chip."""
     adir = Path(adir)
-    tools = ProbeTools(adir, adir, agent_env(adir), timeout=AGENT_TOOL_TIMEOUT_S)
+    tools = ProbeTools(adir, adir, agent_env(adir), timeout=AGENT_TOOL_TIMEOUT_S, dedupe=False)     # the kernel probe keeps its own reads (docs/tool-result-dedupe.md)
     tools.hardware = hardware
     return tools
 

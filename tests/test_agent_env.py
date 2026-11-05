@@ -153,7 +153,7 @@ def test_a_long_file_is_read_in_pages_that_say_where_the_next_one_starts(run):
     again until the watchdog stopped it (three attempts in a row)."""
     text = "".join(f"line {i:05d}\n" for i in range(2000))          # 22,000 characters
     (run / "stages" / "0" / "big.json").write_text(text)
-    t = tools(run, limit=1000)
+    t = tools(run, limit=1000, dedupe=False)               # the loop below reads page 0 again; the paging is what this test is about, not the note
     first = t.read_file("big.json")
     assert first.startswith(text[:1000])
     assert f"characters 0 to 1000 of {len(text)}" in first and "offset=1000" in first

@@ -308,7 +308,7 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
                     graft_trial: bool = True, resume_aborted: bool = False,
                     sampling: str | None = None, full_port: bool = False, full_port_rehearsal: bool = False,
                     model_kind: str | None = None, port_repair_rounds: int | None = None,
-                    telegraph_config: Path | None = None) -> list[str]:
+                    telegraph_config: Path | None = None, tool_dedupe: bool = True) -> list[str]:
     """The arguments after `python3 -m orchard.supervisor`. Optional flags appear only when the config
     sets them, so the supervisor's own defaults stay the defaults. `--accept-credentials-visible` is added
     only when the caller says the operator asked for it on the command line; the config cannot add it."""
@@ -366,6 +366,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         argv += ["--model-kind", model_kind]       # only when named: stage 0 otherwise reads the card and the architecture, and a resume keeps the ledger's answer
     if resume_aborted:
         argv.append("--resume-aborted")      # only when the operator asked: an abort is terminal otherwise
+    if not tool_dedupe:
+        argv.append("--no-tool-dedupe")       # only when the operator asked: the supervisor's default is on, and a resume keeps the recorded choice
     if accept_credentials:
         argv.append("--accept-credentials-visible")
     return argv

@@ -157,6 +157,10 @@ def _parser() -> argparse.ArgumentParser:
                         "gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the "
                         "same check again (issue 420). 0 is no rounds. Default 3, at most 10. The run records the value; a resume keeps it "
                         "and refuses another")
+    b.add_argument("--no-tool-dedupe", action="store_true",
+                   help="send the agent every repeat read in full (by default a repeat read of an unchanged file in the same step is answered with a "
+                        "short note naming the turn that holds the text; docs/tool-result-dedupe.md). The run records the choice when it is off; a "
+                        "resume keeps it and refuses to turn it off for a run that started with it on")
     b.add_argument("--prune-caches", action="store_true",
                    help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
                         "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
@@ -1349,7 +1353,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               graft_trial=not args.no_graft_trial,
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
                                               full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind,
-                                              port_repair_rounds=args.port_repair_rounds, telegraph_config=cfg_path)
+                                              port_repair_rounds=args.port_repair_rounds, telegraph_config=cfg_path,
+                                              tool_dedupe=not args.no_tool_dedupe)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)
