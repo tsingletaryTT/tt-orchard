@@ -1,6 +1,6 @@
 # Stage 4 for a full port: the port on each required chip count (issue 454)
 
-Draft body for the pull request (no pull request is open yet). Branch `full-port-stage-4`, off the local `integration` branch.
+Pull request body. Branch `stack-1-stage4`, off `main`. This is the first link of a stack (stage 4, stage 5, stage 6, the stage 0 to 8 chain test, the helper inside repair rounds, the coder-free helper loop, the numeric mismatch report); each link is a separate pull request on the one before it.
 
 ## What it does
 
@@ -54,8 +54,7 @@ Not in this change: stages 5 and 6 (issue 329), any run on chips, and the `stage
 11. **Tests that do not test the claim.** 26 mutations, one per guard, each restored in a `finally` block, each turning a test red (table below).
     One mutation (the prepare step on resume) first showed no red test, and a test for it was added. The scenario tests run the real supervisor,
     the real template and the real park path against a fake `ttnn`; no clock decides a result.
-12. **Housekeeping.** Change fragment `changes/full-port-stage-4.toml` (target 0.9.115, the default next patch; another branch may claim the
-    same target and one of the two needs another). Dated project-log entry at the end of `docs/project-log.md`. No new command-line flag, so no
+12. **Housekeeping.** Change fragment `changes/full-port-stage-4.toml` (target 0.9.117, the next free one after the tiers sampling default and the tool-result dedupe). Dated project-log entry at the end of `docs/project-log.md`. No new command-line flag, so no
     README flag row; the `full-port` class row and the `--full-port` help now describe stage 4. `scripts/version.py check` is green.
 
 ## Tests
