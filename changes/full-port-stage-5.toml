@@ -1,3 +1,4 @@
 target = "0.9.118"
 summary = "Stage 5 of a full port: the port that passed stage 2 or 3 runs behind a chat server, replays an acceptance corpus recorded from the stage 1 reference at boot, and answers a passkey check and a canary; a server whose replay differs is refused."
+pr = 490
 kind = "feature"
