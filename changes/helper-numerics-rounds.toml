@@ -1,3 +1,4 @@
 target = "0.9.122"
 summary = "A port that runs on the chips but disagrees with the CPU reference is a failed round for the helper-driven loop: the helper gets the agreement and the first mismatching positions, and the best port ranks by agreement."
+pr = 498
 kind = "feature"
