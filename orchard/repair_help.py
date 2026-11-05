@@ -142,12 +142,11 @@ def start_trigger(entries: list[dict], n: int, k: int, failure: dict) -> tuple[b
     """Whether to ask at the start of round `k`: in round 1 (the port as it came out of the attempt's first step failed), and in a later round when
     the failure is no further along than in the round before (the coder did not move it). A round that moved the failure on lets the coder go
     on first; the helper is asked after its step if the step fails (`coder_failed`)."""
-    if k <= 1:
-        return True, "the first repair round of the attempt: the port failed its first test"
-    found, before = previous_op(entries, n, k)
+    found, before = previous_op(entries, n, k) if k > 1 else (False, None)
     after = failure.get("op")
     if not found:
-        return True, "the previous round is not in the ledger"
+        return True, ("the first repair round of the attempt: the port failed its first test" if k <= 1
+                      else "the previous round is not in the ledger")
     if progressed(before, after):
         return False, "the failure moved further along since the previous round"
     return True, f"the failure did not move on since the previous round (it is at {after!r})"
