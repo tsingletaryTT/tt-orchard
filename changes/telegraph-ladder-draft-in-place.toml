@@ -1,0 +1,3 @@
+target = "0.9.114"
+summary = "Phone a friend, round 2: a stub draft counts as not helped so the next ask goes to the next model, the reference excerpts follow the classes a kept class builds, and a real draft is put in the port when it is still the skeleton."
+kind = "fix"
