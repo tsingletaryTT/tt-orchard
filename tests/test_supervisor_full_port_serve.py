@@ -38,7 +38,9 @@ def go(rig, port=fk.ANSWERING, *, over=None):
     """Script the coder's stage 2 prepare with `port` (a template of fakes) and resume past the pause before stage 4."""
     src = fk.port_source(port, rig.tmp / "snapshot")
     make(rig, over={(2, "prepare"): {**PREPARE, "port/port_model.py": src}, **(over or {})})
-    rig.on_sleep = lambda: Control(rig.run_dir).write("resume")
+    sleeps = []
+    # The first pause (before stage 4) is resumed; a later one means a stage failed, and the run stops there so a failure is an assertion and not a wait.
+    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("resume" if len(sleeps) == 1 else "abort"))
 
 
 def stage_5_tests(rig):
