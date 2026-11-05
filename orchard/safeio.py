@@ -489,6 +489,64 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
                 pass
 
 
+def mkdir_beneath(root_fd: int, parts: Sequence[str]) -> None:
+    """Make the directory `parts` beneath the open directory `root_fd`, and every directory on the way that is missing.
+
+    Each directory is made with `mkdir` relative to the descriptor before it and then opened with `O_DIRECTORY | O_NOFOLLOW`, so a link standing
+    where a directory should be is refused and nothing is made through it. A directory that exists is kept. Raises only SafeReadError."""
+    names = _check_parts(parts)
+    cur, owned = root_fd, False
+    try:
+        for part in names:
+            try:
+                os.mkdir(part, 0o755, dir_fd=cur)
+            except FileExistsError:
+                pass                                            # it may be a link: the open below refuses it
+            nxt = os.open(part, _DIR_FLAGS, dir_fd=cur)
+            if owned:
+                os.close(cur)
+            cur, owned = nxt, True
+    except OSError as exc:
+        raise _os_failure(exc, "a path part") from None
+    except ValueError:                      # UnicodeEncodeError: a lone surrogate cannot be passed to the operating system
+        raise PathRefused("a path part cannot be encoded for the operating system") from None
+    finally:
+        if owned:
+            try:
+                os.close(cur)
+            except OSError:
+                pass
+
+
+def unlink_beneath(root_fd: int, parts: Sequence[str]) -> bool:
+    """Remove the file or link named by `parts` beneath the open directory `root_fd`. True when something was removed, False when nothing
+    stood there or the directory that should hold it does not exist.
+
+    The directory on the way is opened with `open_beneath`, so a link in any directory part is refused and the removal happens inside the
+    directory reached, never inside a link's target. A link standing at the last name is removed itself and its target is left alone. A
+    directory at the last name is not removed (`ReadFailed`). Raises only SafeReadError."""
+    names = _check_parts(parts)
+    if not names:
+        raise PathRefused("a file needs at least one path part")
+    try:
+        parent = open_beneath(root_fd, names[:-1])
+    except ReadFailed as exc:
+        if "(ENOENT)" in exc.reason:
+            return False
+        raise
+    try:
+        os.unlink(names[-1], dir_fd=parent)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise _os_failure(exc, "the file") from None
+    except ValueError:                      # UnicodeEncodeError
+        raise PathRefused("a path part cannot be encoded for the operating system") from None
+    finally:
+        os.close(parent)
+
+
 def iter_lines(path, *, max_bytes: int, max_line_bytes: int, anchor: int | None = None, errors: str = "replace") -> Iterator[str]:
     """The lines of the regular file at `path` as text, one at a time, so a large table is never held in memory (it returns a generator: the limits are checked at once, nothing is opened until
     the first line is asked for, and the caller closes it, or lets it finish, to release the descriptor).
