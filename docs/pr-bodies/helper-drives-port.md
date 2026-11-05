@@ -1,6 +1,6 @@
 # The helper drives stage 2 of a rehearsal (run12)
 
-Draft body for the pull request (no pull request is open yet). Branch `helper-drives-port`, off the local run commit `21d30539`.
+Pull request body. Branch `stack-6-helper-drives`, link 6 of the stack, on `stack-5-repair-help`. Version fragment target 0.9.121.
 
 ## What it does
 
@@ -39,7 +39,7 @@ with the same message (the coder then repairs that round). `--no-helper-drives-p
    change summary holds counts and function names only.
 11. **Tests that do not test the claim.** 27 tests; 25 mutations, one per guard, each red on the first run, restored in a `finally` and on SIGINT and
    SIGTERM, tree clean at the start (`scratchpad/mutate_hdrive.py`).
-12. **Housekeeping.** Change fragment `changes/helper-drives-port.toml` (target 0.9.119), a project-log entry, README rows for the two switches. Not run:
+12. **Housekeeping.** Change fragment `changes/helper-drives-port.toml` (target 0.9.121), a project-log entry, README rows for the two switches. Not run:
    the full suite, any chip, any real helper call.
 
 ## Not done
