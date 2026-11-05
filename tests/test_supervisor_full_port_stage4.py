@@ -23,7 +23,7 @@ from test_supervisor import Rig, step_skills
 from test_supervisor_full_port import FULL_PORT, never_wait, started, with_snapshot
 from test_supervisor_full_port_stage3 import PREPARE_3
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "unbuilt_stages_5_6")
 
 # A port that works on a mesh and refuses a single device (the fake runtime opens a single chip as {"device": 0}).
 NO_SINGLE_CHIP = HONEST.replace("def load(model_dir, mesh_device):\n",

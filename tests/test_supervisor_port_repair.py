@@ -16,7 +16,7 @@ from run_fakes import argv, bringup, call, turn, where
 from test_supervisor import Rig
 from test_supervisor_full_port import PREPARE, STAGE_1, make, never_wait, stage_2, started, with_snapshot
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "unbuilt_stages_5_6")
 
 # The port the tiny Qwen4 rehearsal's coder wrote: it reads a weight the checkpoint does not have, so `load` fails.
 BROKEN = HONEST.replace('return {"dir": model_dir, "device": mesh_device}', "raise KeyError('model.layers.2.ple.conv1d.weight')")

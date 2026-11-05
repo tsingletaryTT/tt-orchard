@@ -16,7 +16,7 @@ from port_check_fakes import install_fake_ttnn, python_path, tokenizer_json
 from test_supervisor_full_port_stage3 import abort_at_pause, make3
 from test_supervisor_lab import FakeLab, LabRig, lab_args
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "unbuilt_stages_5_6")
 
 
 class Stage3LabRig(LabRig):

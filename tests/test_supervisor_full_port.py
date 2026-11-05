@@ -17,7 +17,7 @@ from quality_fakes import TINY_CONFIG, top5_file
 from run_fakes import DELTA, FILES, argv, bringup, note
 from test_supervisor import Rig, Stop, step_skills
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "unbuilt_stages_5_6")
 
 REF_IDS = list(range(100, 132))
 

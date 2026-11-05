@@ -136,3 +136,11 @@ def hub_offline_flags_restored():
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_bundle: run the real stage 8 bundle builder in a supervisor test that fakes it by default")
+
+
+@pytest.fixture
+def unbuilt_stages_5_6(monkeypatch):
+    """The first full-port slices ended every run at a pause before stage 5 (stages 5 and 6 were not built). Tests of stages 2 to 4 that stop a run
+    there use this fixture, which makes the pause mechanism (`supervisor.FULL_PORT_UNBUILT`) apply again; the real chain has no such pause."""
+    from orchard import supervisor
+    monkeypatch.setattr(supervisor, "FULL_PORT_UNBUILT", (5, 6))
