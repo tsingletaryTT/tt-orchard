@@ -167,6 +167,25 @@ def test_the_hazard_counter_counts_what_it_says(tmp_path):
     assert _hazards(tmp_path, src) == 7
 
 
+def test_qualified_write_opens_are_hazards_like_the_bare_builtin(tmp_path):
+    # Review of PR 495, round 3: builtins.open, io.open and codecs.open open for writing exactly like the builtin, and the raw count already
+    # recognises them through OPEN_MODULES, so turning a qualified read into a write must not leave both counts unchanged.
+    src = "\n".join([
+        "builtins.open(p, 'w')",                    # 1
+        "io.open(p, 'a')",                          # 1
+        "codecs.open(p, 'w')",                      # 1
+        "codecs.open(p, mode='r+', encoding='u')",  # 1 (mode by keyword)
+        "io.open(p, 'rb')",                         # a read
+        "builtins.open(p)",                         # a read
+        "codecs.open(p, mode_variable)",            # not a literal: not counted
+        "webbrowser.open(u, 'w')",                  # a module that is not a plain file open
+        "tarfile.open(p, 'w')",                     # likewise
+        "obj.open(p, 'w')",                         # a method on any object is too broad to count
+        "io.open(p, 'w')  # hardening: ok our own scratch file",   # marked
+    ]) + "\n"
+    assert _hazards(tmp_path, src) == 4
+
+
 def test_a_hazard_marker_in_a_string_does_not_count(tmp_path):
     assert _hazards(tmp_path, "open(p, 'w'); s = 'hardening: ok'\n") == 1
 

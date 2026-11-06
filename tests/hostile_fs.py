@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -285,9 +286,29 @@ def _r_scan_beneath(pin, env):
     return "original" if ("sub", "data.json") in seen else "other"            # the real tree must be listed, or the scan proved nothing
 
 
+def published_regular(path: Path, data: bytes) -> bool:
+    """True when `path` is a regular file (not a link) holding exactly `data`. A write that says it succeeded must pass this."""
+    try:
+        st = os.lstat(path)
+        return stat.S_ISREG(st.st_mode) and path.read_bytes() == data
+    except OSError:
+        return False
+
+
+def published_beneath(root_fd: int, parts, data: bytes) -> bool:
+    """True when the regular file `parts` beneath the pinned directory holds exactly `data`, read through the descriptor."""
+    from orchard import safeio
+    try:
+        return safeio.read_beneath(root_fd, parts, max_bytes=1 << 20) == data
+    except Exception:
+        return False
+
+
 def _r_write_beneath(pin, env):
     from orchard import safeio
     safeio.write_beneath(pin.fd, ("sub", "written.txt"), b"w")
+    ok = published_beneath(pin.fd, ("sub", "written.txt"), b"w")                            # checked now, while the pin is still open
+    env["publishes"] = lambda: ok
     return "written"
 
 
@@ -304,6 +325,7 @@ def _r_read_json_path(env):
 def _r_atomic_write_path(env):
     from orchard import safeio
     safeio.atomic_write(env["root"] / "sub" / "data.json", b"new")
+    env["publishes"] = lambda: published_regular(env["root"] / "sub" / "data.json", b"new")
     return "written"
 
 
@@ -396,7 +418,46 @@ def _c_scan_by_name(env):
     return "decoy" if any(p.name == "DECOY_MARK" for p in seen) else "original"
 
 
+def _c_deletes_victim(env):
+    env["victim"].unlink()                                    # mistake: removes a file outside the root, then says nothing happened
+    return "original"
+
+
+def _c_deletes_outside_dir(env):
+    import shutil
+    shutil.rmtree(env["outside"] / "sub")                     # mistake: removes a directory outside the root
+    return "original"
+
+
+def _c_replaces_with_link(env):
+    data = env["outside"] / "sub" / "data.json"
+    copy = env["outside"] / "copy.json"
+    copy.write_bytes(data.read_bytes())
+    data.unlink()
+    data.symlink_to(copy)                                     # mistake: the bytes read back are the same, but the file is now a link
+    return "refused"
+
+
+def _c_replaces_dir_with_link(env):
+    import shutil
+    sub = env["outside"] / "sub"
+    shutil.copytree(sub, env["outside"] / "sub_copy")
+    shutil.rmtree(sub)
+    sub.symlink_to(env["outside"] / "sub_copy")               # mistake: same names and bytes, but the directory is now a link
+    return "refused"
+
+
+def _c_writes_nothing(env):
+    env["publishes"] = lambda: published_regular(env["root"] / "sub" / "never.txt", b"w")
+    return "written"                                          # mistake: claims success, publishes nothing
+
+
 CONTROLS: list[PathReader] = [
+    PathReader("control: deletes the file outside the root", "effects", _c_deletes_victim),
+    PathReader("control: deletes the directory outside the root", "effects", _c_deletes_outside_dir),
+    PathReader("control: replaces the file outside the root with a link", "effects", _c_replaces_with_link),
+    PathReader("control: replaces the directory outside the root with a link", "effects", _c_replaces_dir_with_link),
+    PathReader("control: write that publishes nothing", "effects", _c_writes_nothing),
     PathReader("control: pin, then walk by pathname", "scan", _c_scan_by_name),
     PathReader("control: builtin open", "path_read", _c_naive_open, claims_pin=False),
     PathReader("control: O_NOFOLLOW on the last part only", "pinned_read", _c_nofollow_last_only),
@@ -406,6 +467,7 @@ CONTROLS: list[PathReader] = [
 # family -> case -> the verdicts that are right. Anything else is a failure of the reader.
 READ_BAD = {"leaked", "hang", "crash"}
 EXPECT: dict[str, dict[str, set[str]]] = {
+    "effects": {"plain": {"original", "written"}, "ancestor_link": {"original", "refused", "written"}},      # only the controls use this family
     "pinned_read": {"plain": {"original"}, "leaf_link": {"refused"}, "ancestor_link": {"refused"}, "root_is_link": {"refused"},
                     "swap_after_pin": {"original", "refused"}, "fifo_named_file": {"refused"}, "dir_for_file": {"refused"},
                     "sparse_huge": {"refused"}},
@@ -432,8 +494,12 @@ def _verdict(reader: PathReader, case_name: str, base: Path) -> dict:
     env = layout(base)
     env["case"] = case_name
     CASES[case_name].build(env)
+    outside_sub = env["outside"] / "sub"
+    outside_data = outside_sub / "data.json"
     victim_before = env["victim"].read_bytes() if env["victim"].exists() else None
-    outside_files_before = sorted(p.name for p in (env["outside"] / "sub").iterdir()) if (env["outside"] / "sub").is_dir() else []
+    outside_files_before = sorted(p.name for p in outside_sub.iterdir()) if outside_sub.is_dir() else None
+    data_before = outside_data.read_bytes() if outside_data.is_file() and not outside_data.is_symlink() else None
+    data_was_plain = data_before is not None
 
     def on_alarm(signum, frame):
         raise _Alarm()
@@ -452,15 +518,19 @@ def _verdict(reader: PathReader, case_name: str, base: Path) -> dict:
         detail = f"{name}: {str(exc)[:120]}"
     finally:
         signal.alarm(0)
-    # Effects outside the root count as a leak whatever the reader returned.
-    if env["victim"].exists() and env["victim"].read_bytes() != victim_before:
-        got, detail = "leaked", "the file outside the root changed"
-    elif (env["outside"] / "sub").is_dir() and sorted(p.name for p in (env["outside"] / "sub").iterdir()) != outside_files_before:
-        got, detail = "leaked", "a file appeared outside the root"
-    elif (env["outside"] / "sub" / "data.json").exists() and (env["outside"] / "sub" / "data.json").read_bytes() != DECOY_BYTES:
-        got, detail = "leaked", "data.json outside the root changed"
+    # Effects outside the root count as a leak whatever the reader returned. An object that existed before must still exist, as the same
+    # kind of object holding the same bytes: a reader that deletes or replaces it must not pass because there is nothing left to compare.
+    publishes = env.get("publishes")
+    if victim_before is not None and not published_regular(env["victim"], victim_before):
+        got, detail = "leaked", "the file outside the root changed, was replaced or was deleted"
+    elif outside_files_before is not None and (outside_sub.is_symlink() or not outside_sub.is_dir() or sorted(p.name for p in outside_sub.iterdir()) != outside_files_before):
+        got, detail = "leaked", "the directory outside the root was removed or its entries changed"
+    elif data_was_plain and not published_regular(outside_data, data_before):
+        got, detail = "leaked", "data.json outside the root changed, was replaced or was deleted"
     elif got == "decoy":
         got, detail = "leaked", "the reader returned content from outside the root"
+    elif got == "written" and publishes is not None and not publishes():
+        got, detail = "unpublished", "the writer reported success but the destination does not hold the bytes it wrote"
     return {"case": case_name, "verdict": got, "detail": detail}
 
 

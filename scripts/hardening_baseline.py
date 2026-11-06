@@ -50,11 +50,16 @@ def _is_safeio(node: ast.expr) -> bool:
     return (isinstance(node, ast.Name) and node.id == "safeio") or (isinstance(node, ast.Attribute) and node.attr == "safeio")
 
 
-def _is_raw_call(node: ast.Call) -> bool:
-    f = node.func
+def _is_file_open(f: ast.expr) -> bool:
+    """True for the callee of the builtin `open` and of `builtins.open`, `io.open` and `codecs.open` (OPEN_MODULES): the plain file open."""
     if isinstance(f, ast.Name):
         return f.id == "open"
-    if isinstance(f, ast.Attribute) and f.attr == "open" and isinstance(f.value, ast.Name) and f.value.id in OPEN_MODULES:
+    return isinstance(f, ast.Attribute) and f.attr == "open" and isinstance(f.value, ast.Name) and f.value.id in OPEN_MODULES
+
+
+def _is_raw_call(node: ast.Call) -> bool:
+    f = node.func
+    if _is_file_open(f):
         return True
     return isinstance(f, ast.Attribute) and f.attr in RAW_METHODS and not _is_safeio(f.value)
 
@@ -94,7 +99,7 @@ def _is_hazard_call(node: ast.Call) -> bool:
         # A descriptor-relative open (`dir_fd`) still follows a link in the last part, so it needs O_NOFOLLOW too.
         flags = node.args[1:2] + [kw.value for kw in node.keywords if kw.arg == "flags"]
         return not any(_mentions_nofollow(a) for a in flags)
-    if isinstance(f, ast.Name) and f.id == "open":
+    if _is_file_open(f):          # the builtin and its qualified forms (builtins.open, io.open, codecs.open), as the raw count sees them
         mode = node.args[1] if len(node.args) > 1 else next((kw.value for kw in node.keywords if kw.arg == "mode"), None)
         return isinstance(mode, ast.Constant) and isinstance(mode.value, str) and any(c in mode.value for c in "wax+")
     return False

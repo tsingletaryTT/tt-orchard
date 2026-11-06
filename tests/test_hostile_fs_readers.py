@@ -98,6 +98,48 @@ def test_walking_by_pathname_after_a_pin_follows_the_swap(control_verdicts):
     assert got["swap_after_pin"] == "leaked"                 # the scan check can see a decoy: DECOY_MARK is matched on the right field
 
 
+def test_deleting_a_file_or_a_directory_outside_the_root_is_a_leak(control_verdicts):
+    # Review of PR 495, round 3: a reader that deletes the prepared outside objects must not pass as 'original' or 'refused' because the byte
+    # comparison is skipped when the object is gone.
+    for name in ("control: deletes the file outside the root", "control: deletes the directory outside the root",
+                 "control: replaces the directory outside the root with a link"):
+        got = control_verdicts[name]
+        assert got and set(got.values()) == {"leaked"}, (name, got)
+
+
+def test_replacing_the_file_outside_the_root_with_a_link_is_a_leak(control_verdicts):
+    got = control_verdicts["control: replaces the file outside the root with a link"]
+    assert got and set(got.values()) == {"leaked"}, got
+
+
+def test_a_writer_that_publishes_nothing_is_not_reported_as_written(control_verdicts):
+    got = control_verdicts["control: write that publishes nothing"]
+    assert got and set(got.values()) == {"unpublished"}, got
+
+
+def test_published_regular_wants_a_regular_file_holding_the_bytes(tmp_path):
+    good = tmp_path / "good"
+    good.write_bytes(b"new")
+    assert hf.published_regular(good, b"new")
+    assert not hf.published_regular(good, b"old")                           # wrong bytes
+    assert not hf.published_regular(tmp_path / "missing", b"new")           # nothing there
+    (tmp_path / "link").symlink_to(good)
+    assert not hf.published_regular(tmp_path / "link", b"new")              # a link with the right bytes behind it is not a regular replacement
+    (tmp_path / "dir").mkdir()
+    assert not hf.published_regular(tmp_path / "dir", b"new")
+
+
+def test_published_beneath_reads_through_the_pinned_descriptor(tmp_path):
+    from orchard import safeio
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    with safeio.pinned_root(root) as pin:
+        assert not hf.published_beneath(pin.fd, ("sub", "w.txt"), b"w")       # nothing written yet
+        safeio.write_beneath(pin.fd, ("sub", "w.txt"), b"w")
+        assert hf.published_beneath(pin.fd, ("sub", "w.txt"), b"w")
+        assert not hf.published_beneath(pin.fd, ("sub", "w.txt"), b"other")
+
+
 def test_the_cache_lock_name_is_the_one_the_lock_case_prepares(tmp_path):
     from orchard import cache_lock
     env = hf.layout(tmp_path)
