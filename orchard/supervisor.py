@@ -145,7 +145,7 @@ from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (PLAN, failed_tests, load_plan, move_aside, plan_refusal, pending, read_plan, suspect_caches,
-                             unrecorded, write_plan, write_record, write_summary, write_test_record)
+                             unrecorded, write_plan, write_record, write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.package import PackageError, stage_all
 from orchard.package import finish as package_finish
@@ -4697,10 +4697,33 @@ class Supervisor:
         except safeio.SafeReadError as exc:
             n = spec.number
             reason = f"not completed: a run file was refused: {exc.reason}"
-            path = write_test_record(stage_dir, test, {"config": test.chips, "command": test.command(n), "returncode": None,
-                                                       "timed_out": False, "seconds": 0, "chips": [], "not_run": reason})
+            try:
+                path = self._write_test_record_beneath(stage_dir, test, {"config": test.chips, "command": test.command(n), "returncode": None,
+                                                                         "timed_out": False, "seconds": 0, "chips": [], "not_run": reason})
+            except safeio.SafeReadError as again:
+                # The record's own directory is a link too. Nothing is written; the exception must not leave here, because the callers still owe
+                # the lease release and the restore of the coder. The gate finds no marker and the stage fails (review of PR 489).
+                self.ledger.append("decision", n, decision="the hardware test record was not written", config=test.chips, reason=again.reason)
+                return
             self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache, returncode=None,
                                timed_out=False, not_run=reason, **self._moved_aside_record(path))
+
+    def _run_parts(self, path) -> tuple[str, ...]:
+        """The run-relative parts of `path`, for the operations that go through the pinned run directory."""
+        return Path(os.path.relpath(path, self.run_dir)).parts
+
+    def _mkdir_beneath_run(self, directory) -> None:
+        """Make `directory` through a descriptor of the run directory: a link standing in any directory on the way is refused (SafeReadError)."""
+        with safeio.pinned_root(self.run_dir) as pin:
+            safeio.mkdir_beneath(pin.fd, self._run_parts(directory))
+
+    def _write_test_record_beneath(self, stage_dir, test, record: dict) -> Path:
+        """`write_test_record` through the run directory. The test ran the coder's port, which could have put a link where a directory of the
+        entry stood; a path-based write would have put the marker in the link's target, outside the run (review of PR 489)."""
+        path = test.record_path(stage_dir)
+        with safeio.pinned_root(self.run_dir) as pin:
+            safeio.write_beneath(pin.fd, self._run_parts(path), json.dumps(record, indent=2).encode("utf-8"), mode=0o644)
+        return path
 
     def _run_listed_test_body(self, spec, stage_dir: Path, test, leases: list[Lease]) -> None:
         """Run one configuration's test on the first `test.chips` chips of `leases`, in device
@@ -4709,8 +4732,10 @@ class Supervisor:
         held = sorted((i, c) for lease in leases for c, i in zip(lease.chips, lease.dev_indices))
         chosen = held[:test.chips]
         out_path = test.output_path(stage_dir)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
         def spawn() -> dict:
+            # The test runs the coder's port, which can replace a directory of the entry with a link while it runs. Each directory on the way to
+            # the output is checked again, through the run directory, before the output is opened (review of PR 489).
+            self._mkdir_beneath_run(out_path.parent)
             return self._spawn(n, test.command(n), [c for _, c in chosen], [i for i, _ in chosen],
                                min(test.deadline_s, spec.budget_s), out_path,
                                config=test.chips, cache=test.cache,
@@ -4723,7 +4748,8 @@ class Supervisor:
             # isolated, so reset every chip the test holds and run it once more. Its record is the second try's.
             # The second try writes output.txt again. The first try's text says why it failed, so it is kept beside it.
             first = out_path.with_name("output-first-try.txt")
-            os.replace(out_path, first)
+            with safeio.pinned_root(self.run_dir) as pin:
+                safeio.replace_beneath(pin.fd, self._run_parts(out_path), self._run_parts(first))
             self.ledger.append("decision", n, decision="test failed at startup; resetting the test chips and trying once more",
                                config=test.chips, returncode=result["returncode"], seconds=result["seconds"],
                                first_output=self._moved_aside_record(first))
@@ -4732,8 +4758,7 @@ class Supervisor:
             for lease in order:
                 self._reset_test_chips(n, test, lease)
             result = spawn()
-        path = write_test_record(stage_dir, test, {"config": test.chips, **result,
-                                                   "device_ids": [i for i, _ in chosen]})
+        path = self._write_test_record_beneath(stage_dir, test, {"config": test.chips, **result, "device_ids": [i for i, _ in chosen]})
         self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache,
                            returncode=result["returncode"], timed_out=result["timed_out"],
                            **evidence_record(self.run_dir, path))

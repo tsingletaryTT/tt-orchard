@@ -65,6 +65,13 @@ def _write_json_beneath(sup, pin, path: Path, data) -> Path:
     return path
 
 
+def _write_json_pinned(sup, path: Path, data) -> Path:
+    """`_write_json_beneath` with a descriptor of the run directory opened for this one write. A link standing in `stages/4/tests/` (the coder
+    can make one) is refused with SafeReadError, never followed (review of PR 489)."""
+    with safeio.pinned_root(sup.run_dir) as pin:
+        return _write_json_beneath(sup, pin, path, data)
+
+
 # ---- what the ledger says ----------------------------------------------------------------------------------------------
 
 def _latest_end(entries: list[dict], stage: int) -> str | None:
@@ -239,7 +246,7 @@ def run(sup, spec, stage_dir, escalated: bool, resumed: bool):
         entries, problems = full_port_entries.plan_entries(sup.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD, budget_s=spec.budget_s)
         if problems:
             return "fail", problems, None
-        plan = full_port_entries.write_plan(stage_dir, entries)
+        plan = _write_json_pinned(sup, Path(stage_dir) / full_port_entries.PLAN, full_port_entries.plan_data(entries))
         sup.ledger.append("evidence", n, what=PLAN_WHAT, configs=[e.chips for e in entries], **evidence_record(sup.run_dir, plan))
     # A test lease left from a block (a container that would not stop) goes back first, as in the weights-only stage 4.
     if not sup._release_test_lease():
@@ -267,7 +274,7 @@ def run(sup, spec, stage_dir, escalated: bool, resumed: bool):
     except safeio.SafeReadError as exc:
         return _fail(sup, spec, stage_dir, entries, [f"the run directory could not be opened for the stage's entries: {exc.reason}"])
     summary = full_port_entries.summarize(stage_dir, sup.run_dir, [e.chips for e in entries])
-    path = full_port_entries.write_json(stage_dir / full_port_entries.RESULT_FILE, summary)
+    path = _write_json_pinned(sup, stage_dir / full_port_entries.RESULT_FILE, summary)
     sup.ledger.append("evidence", n, what=STAGE_RESULT_WHAT, **evidence_record(sup.run_dir, path))
     _write_stage_marker(sup, stage_dir, entries)
     gate = sup._check_gate(spec, stage_dir)
