@@ -206,3 +206,26 @@ def test_the_bundle_reports_stage_5_numbers_with_their_labels(rig):
     stage5_text = text.split("## Stage 5:")[1].split("\n## ")[0]
     assert "| boot to ready | 41.5 s | measured |" in stage5_text and "| replay of the acceptance corpus | TODO | TODO | - |" in stage5_text
     assert "stage 5 replay of the acceptance corpus: TODO" in bundle(rig, "RISKS.md")
+
+
+def test_a_top_five_file_replaced_after_stage_1_passed_stops_stage_6(rig):
+    """Review of PR 491: the replacement changes the reference gaps, and the record's own hash would match it. The ledger's hash from stage 1's pass
+    is the one that counts, before the test runs and again at the gate."""
+    make_q(rig)
+    inner = rig.script
+    top5 = rig.run_dir / "stages" / "1" / "evidence" / "reference" / "top5-logits.json"
+    tampered = []
+
+    def tamper(request):
+        if "tools" in request and where(request)[0] == 2 and top5.is_file() and not tampered:       # the coder's first step after stage 1 passed
+            data = json.loads(top5.read_text())
+            data["steps"][0]["top5"][0]["logit"] += 6.0
+            top5.write_text(json.dumps(data))
+            tampered.append(1)
+        return inner(request)
+    rig.script = tamper
+    assert rig.run() != EXIT_READY
+    assert tampered
+    ends = rig.ends(6)
+    assert ends and ends[-1]["result"] != "pass"
+    assert "not the file stage 1's gate accepted" in " ".join(ends[-1].get("reasons", []))
