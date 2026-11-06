@@ -132,6 +132,20 @@ SHOWN = ("max_position_embeddings", "intermediate_size", "rope_theta", "rms_norm
 # Keys that record how a file was written and say nothing about the model.
 BOOKKEEPING = ("architectures", "transformers_version", "_name_or_path")
 ABSENT = "<absent>"
+# Keys that a newer transformers release writes into a config and an older one leaves out, where the value follows from other fields
+# (issue 537). This is a small list on purpose, not a blanket ignore: each key is set aside only when its own condition holds on both
+# configs, and every other difference stays a difference. `derivable_default_ignored` applies the conditions and `derivable_keys_ignored`
+# in the config record says what was set aside and why, so a person can check it.
+#   layer_types  transformers 5 writes one entry per layer. For Qwen3 the default is "full_attention" everywhere unless a sliding window is in
+#                use. Set aside when one side has no layer_types, the other lists only "full_attention", one entry per layer, both configs
+#                have the same model_type and layer count, neither has a sliding window in use, and neither has a linear-attention or
+#                layer-pattern key.
+#   dtype        transformers 5 renamed torch_dtype to dtype. Set aside when one side has dtype, the other has no dtype but a torch_dtype,
+#                and the two values are equal.
+DERIVABLE_DEFAULTS = ("layer_types", "dtype")
+LAYER_PATTERN_KEYS = ("full_attention_interval", "linear_num_key_heads", "linear_num_value_heads", "linear_key_head_dim",
+                      "linear_value_head_dim", "linear_conv_kernel_dim", "layer_pattern", "attn_layer_indices", "layers_block_type",
+                      "mlp_only_layers", "no_rope_layers")
 
 # The vision-language layout puts the text model under this prefix.
 LM_PREFIX = "model.language_model."
@@ -423,6 +437,41 @@ def effective(cfg: dict, key: str):
     return value
 
 
+def _sliding_window_in_use(cfg: dict) -> bool:
+    """True when the text config turns a sliding window on, or does not say it is off while naming a window."""
+    t = text_part(cfg)
+    if t.get("use_sliding_window") is True:
+        return True
+    sw = t.get("sliding_window")
+    return sw not in (None, ABSENT, False) and t.get("use_sliding_window") is not False
+
+
+def derivable_default_ignored(mcfg: dict, bcfg: dict) -> list[dict]:
+    """The keys in DERIVABLE_DEFAULTS that differ only because a newer transformers wrote them, each with the condition that made it
+    derivable. A key whose condition fails is not listed and stays a difference."""
+    out = []
+    # layer_types: the side that lists it must list "full_attention" for every layer, and nothing may make a layer different.
+    for side, other, who in ((mcfg, bcfg, "new model"), (bcfg, mcfg, "nearest model")):
+        st, ot = text_part(side), text_part(other)
+        lt, layers = st.get("layer_types"), st.get("num_hidden_layers")
+        if ("layer_types" in st and "layer_types" not in ot and isinstance(lt, list) and isinstance(layers, int)
+                and not isinstance(layers, bool) and layers > 0 and len(lt) == layers and all(x == "full_attention" for x in lt)
+                and layers == ot.get("num_hidden_layers") and st.get("model_type") is not None and st.get("model_type") == ot.get("model_type")
+                and not _sliding_window_in_use(side) and not _sliding_window_in_use(other)
+                and not any(k in st or k in ot for k in LAYER_PATTERN_KEYS)):
+            out.append({"key": "layer_types", "side": who,
+                        "why": f"the {who} lists full_attention for all {layers} layers and the other config has no layer_types; "
+                               "both have the same model_type and no sliding window or layer pattern, so that list is the default"})
+    # dtype: transformers 5 writes `dtype` where 4 wrote `torch_dtype`.
+    for side, other, who in ((mcfg, bcfg, "new model"), (bcfg, mcfg, "nearest model")):
+        st, ot = text_part(side), text_part(other)
+        v = st.get("dtype", ABSENT)
+        if isinstance(v, str) and "dtype" not in ot and ot.get("torch_dtype") == v:
+            out.append({"key": "dtype", "side": who, "value": v,
+                        "why": f"the {who} writes dtype and the other writes torch_dtype with the same value ({v}); a newer transformers renamed the key"})
+    return out
+
+
 def compare_configs(model_dir: Path, base_dir: Path) -> dict:
     mcfg, merr = read_json(model_dir / "config.json")
     bcfg, berr = read_json(base_dir / "config.json")
@@ -468,6 +517,12 @@ def compare_config_dicts(mcfg, bcfg, errors: list, model_path: str, base_path: s
             continue
         values[key] = {"model": a, "base": b, "equal": a == b}
     out["text_key_values"] = values
+    ignored = derivable_default_ignored(mcfg, bcfg)
+    out["derivable_keys_ignored"] = ignored
+    for x in ignored:
+        if x["key"] in values:          # the decisive comparison treats it as equal; the raw values stay in text_key_values and text_config_diffs
+            values[x["key"]]["equal"] = True
+            values[x["key"]]["derivable_default"] = True
     out["decisive_keys"] = list(DECISIVE)
     out["decisive_keys_equal"] = all(values[k]["equal"] for k in DECISIVE)
     out["decisive_keys_differing"] = [k for k in DECISIVE if not values[k]["equal"]]
@@ -2746,6 +2801,9 @@ def config_finding(c: dict) -> str:
               + (f" and {len(rest) - 6} more" if len(rest) > 6 else "") + ".")
     if not other and c["decisive_keys_equal"]:
         s += " No other text config key differs."
+    if c.get("derivable_keys_ignored"):
+        s += (" Set aside as derivable (a newer transformers wrote them; the raw values stay in text_config_diffs): "
+              + "; ".join(f"{x['key']} ({x['why']})" for x in c["derivable_keys_ignored"]) + ".")
     nest = {True: "nests its text config under text_config", False: "has a flat config"}
     s += f" The new model {nest[c['model_config_nested']]}; the nearest model {nest[c['base_config_nested']]}."
     return s
