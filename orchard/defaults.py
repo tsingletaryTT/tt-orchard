@@ -96,6 +96,11 @@ WRITELESS_TURNS = 20            # choice: model turns in a row in which no file 
                                 # write tools), so 20 stays quiet there. The live stage 2 run that
                                 # grepped vLLM source for 60 turns would have been nudged at turn 20.
 
+FIRST_WRITE_TURNS = 12          # choice (issue 427): model turns of a stage 2 prepare step in a row with no file written before the supervisor sends one
+                                # hint that names the file to write and what goes in it. The task text already asks for a first version within this many
+                                # turns (orchard/port_facts.py), so the hint arrives when the agent has passed its own deadline. It is a hint, not a rung:
+                                # NoFileWritten still nudges at WRITELESS_TURNS. Evidence: three rehearsal runs read 20 turns (44 seconds) and wrote nothing.
+
 # ---- plan 4: stages, agent steps and the run ---------------------------------------------------
 # Per-stage wall-clock budgets (spec section 10). Choices; none is measured. Stage 5 holds one 2-chip
 # cold boot (COLD_BOOT_S, about 30 min) plus its checks; stage 4 boots two configurations. Stage 7
