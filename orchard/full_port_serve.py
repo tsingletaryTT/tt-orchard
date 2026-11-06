@@ -163,6 +163,15 @@ def build_corpus(run_dir, stage: int, *, accepted: str | None = None) -> tuple[d
         return None, problems
     if accepted is not None and rec_sha != accepted:
         return None, [f"{rec_rel} is not the file stage {stage}'s gate accepted (the ledger's sha256 differs): it changed after the stage passed"]
+    # The record names the stage 1 files its ids came from and their sha256 (stage 2's gate checked that when it passed). A stage 1 file that
+    # changed since would be paired with the record's old outputs, and rebuilding the corpus would repeat the pairing (review of PR 490).
+    for key, rel, sha in (("reference", full_port.REFERENCE_FILE, ref_sha), ("prompt", full_port.PROMPT_FILE, prm_sha)):
+        named = rec.get(key)
+        if not isinstance(named, dict) or named.get("path") != rel or named.get("sha256") != sha:
+            problems.append(f"the accepted record's {key} is not {rel} as it is on disk now (the path or the sha256 differs): "
+                            "it changed after the stage passed")
+    if problems:
+        return None, problems
     ref = ref_doc.get("generated_ids")
     prompt = prm_doc.get("prompt_ids")
     chip, free, rref = rec.get("chip_ids"), rec.get("free_run_ids"), rec.get("reference_ids")
@@ -222,7 +231,9 @@ def plan_passkeys(corpus_sha: str, max_len: int) -> list[dict]:
 def max_len_of(snapshot) -> int:
     """The server's context limit: `max_position_embeddings` from the snapshot's config.json (or its text_config), else DEFAULT_MAX_LEN."""
     try:
-        cfg = safeio.read_json(Path(snapshot) / "config.json", max_bytes=1 << 20, expect=dict)
+        # A Hugging Face cache snapshot holds config.json as a link into blobs/, which the bounded reader refuses by itself: the link is resolved
+        # first, as the port facts do (review of PR 490).
+        cfg = safeio.read_json(safeio.resolved(Path(snapshot) / "config.json"), max_bytes=1 << 20, expect=dict)
     except (safeio.SafeReadError, OSError):
         return DEFAULT_MAX_LEN
     for part in (cfg, cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else {}):
@@ -512,6 +523,12 @@ def _passkey_reasons(record, corpus_sha256, stage_dir, reasons) -> tuple[list[bo
         answered.append(bool(r["key"]) and r["key"] in r["answer_text"])
     if len(set(lengths)) < PASSKEY_LENGTHS_MIN:
         reasons.append(f"passkey.runs must cover at least {PASSKEY_LENGTHS_MIN} different lengths")
+    # Two planned lengths are two lengths only when the server measured two different prompts. With a small context the filler comes out the
+    # same size for both, and the plan's lengths alone would pass (review of PR 490).
+    measured = {r["prompt_tokens"] for r in runs if isinstance(r, dict) and _int(r.get("prompt_tokens"), 1)}
+    if len(measured) < PASSKEY_LENGTHS_MIN:
+        reasons.append(f"passkey.runs: the server measured the same prompt length for different planned lengths ({sorted(measured)}); "
+                       f"at least {PASSKEY_LENGTHS_MIN} different measured prompt lengths are needed")
     if planned is not None and sorted(lengths) != sorted(p["length"] for p in planned):
         reasons.append("passkey.runs do not cover the planned lengths")
     return answered, same_twice
@@ -620,16 +637,19 @@ def derive(stage_dir, run_dir, *, rehearsal: bool = False) -> tuple[dict | None,
         free = next(e for e in expected.values() if e["kind"] == "free-run")["expected_ids"]
         canary_ok = canary["first_ids"] == canary["second_ids"] and canary["first_ids"] == free[:len(canary["first_ids"])] and bool(canary["first_ids"])
         cache = boot["kernel_cache"]
-    except (KeyError, TypeError, StopIteration, safeio.SafeReadError):
+        if not isinstance(cache, dict) or not all(isinstance(r, dict) for r in runs):
+            raise TypeError("kernel_cache or a passkey run is not an object")
+        lengths = [r["length"] for r in runs]
+    except (KeyError, TypeError, AttributeError, ValueError, StopIteration, safeio.SafeReadError):
         return None, "the record or the corpus does not have the shape the template writes"
     base = [os.path.relpath(stage_dir / RECORD_FILE, run_dir), os.path.relpath(stage_dir / OUTPUT_FILE, run_dir), os.path.relpath(stage_dir / CORPUS_NAME, run_dir)]
     all_answered = bool(answered) and all(answered)
     return ({"serves": True, "coherent": all_answered, "load_s": boot.get("load_s"), "ready_s": boot.get("ready_s"), "ready_line": boot.get("ready_line"),
              "kernel_cache_warm": cache.get("warm"), "corpus_positions": total, "corpus_matched": matched, "corpus_reference_agreement": agreement,
-             "passkey_lengths": [r["length"] for r in runs], "passkey_answered": answered,
+             "passkey_lengths": lengths, "passkey_answered": answered,
              "checks": {"boots": {"pass": True, "seconds": boot.get("ready_s"), "evidence": base},
                         "corpus": {"pass": matched == total, "positions": total, "matched": matched, "evidence": base},
-                        "passkey": {"pass": bool(answered) and (all_answered or rehearsal) and deterministic, "lengths": [r["length"] for r in runs],
+                        "passkey": {"pass": bool(answered) and (all_answered or rehearsal) and deterministic, "lengths": lengths,
                                     "answered": answered, "evidence": base},
                         "canary": {"pass": canary_ok, "evidence": base}},
              "evidence": base, "derived_by": "supervisor", "limits": LIMITS,
