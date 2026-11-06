@@ -608,15 +608,16 @@ def gate_full_port_serve(stage_dir, run_dir, *, rehearsal: bool = False, expecte
 
 
 def gate_full_port_6(stage_dir, run_dir, *, rehearsal: bool = False, expected_chips: int | None = None, seeded: list | None = None,
-                     source_stage: int = 2) -> GateResult:
+                     source_stage: int = 2, accepted_record_sha: str | None = None) -> GateResult:
     """Stage 6 of a full port (issue 329): the port that passed the earlier stage was run by the supervisor's quality template, and the numbers in
     result.json (free-run leading match, teacher-forced perplexity, top-5 logit gap difference from the reference, the benchmark and its share of the
-    decode floor) are recomputed from the record. orchard/full_port_quality.py holds the checks. The four keywords come from the supervisor and
+    decode floor) are recomputed from the record. orchard/full_port_quality.py holds the checks. The five keywords come from the supervisor and
     the ledger: the rehearsal flag waives `coherent` only, `expected_chips` is the chip count the test must have run on, `seeded` is the ledger's
-    list of copied port files, and `source_stage` is the stage the port came from."""
+    list of copied port files, `source_stage` is the stage the port came from, and `accepted_record_sha` is the hash the ledger holds for that
+    stage's accepted port-check record."""
     waived: list[str] = []
     reasons, seen = full_port_quality.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived, expected_chips=expected_chips, seeded=seeded,
-                                            source_stage=source_stage)
+                                            source_stage=source_stage, accepted_record_sha=accepted_record_sha)
     return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
 
 

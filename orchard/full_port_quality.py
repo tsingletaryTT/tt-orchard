@@ -138,6 +138,10 @@ def record_problems(record: dict) -> list[str]:
     if not isinstance(runs, list) or not runs:
         out.append("bench.runs must be a non-empty list")
         return out
+    if not any(isinstance(r, dict) and r.get("warmup") is False for r in runs):
+        # `summarise` takes its steps from the first measured run, so a record of warm-up runs only has to be refused here (review of PR 491).
+        out.append("bench.runs holds no measured run: every run is a warm-up")
+        return out
     for i, r in enumerate(runs):
         if not (isinstance(r, dict) and type(r.get("warmup")) is bool and _finite(r.get("prefill_s")) and r["prefill_s"] > 0
                 and _finite(r.get("decode_s")) and r["decode_s"] > 0 and type(r.get("steps")) is int and r["steps"] >= MIN_BENCH_STEPS
@@ -185,7 +189,7 @@ def summarise(record: dict, model_cfg: dict, source_stage: int) -> dict:
     free = record["free_run_ids"]
     lead = leading_match(ref, free)
     warm, measured = _bench_runs(record)
-    timings = [{k: r[k] for k in ("prefill_s", "decode_s", "decode_tok_s")} for r in measured]
+    timings = [{k: r[k] for k in ("prefill_s", "decode_s", "decode_tok_s", "host_loadavg_1m") if k in r} for r in measured]   # the load average is not a part: resident lists it per run
     summary = resident.summarise_runs(timings, warmup=len(warm))
     chips = len(record["chips"])
     floor = df.floor_for_board(model_cfg, record["dtype_policy"], BOARD, dies=chips)
@@ -299,12 +303,13 @@ def derive(stage_dir, run_dir, *, source_stage: int, rehearsal: bool = False) ->
 # ---- the gate -----------------------------------------------------------------------------------------------------------------
 
 def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = None, expected_chips: int | None = None,
-          seeded: list | None = None, source_stage: int = 2) -> tuple[list[str], list[str]]:
+          seeded: list | None = None, source_stage: int = 2, accepted_record_sha: str | None = None) -> tuple[list[str], list[str]]:
     """(reasons, evidence paths) for a stage 6 directory of a full port. No reasons means the result passes.
 
     `expected_chips` is the chip count the test must have run on (the supervisor's, from the run's `--required-chips` when stage 3 ran, else
     one board); `seeded` is the list of {path, sha256} the ledger holds for the files the supervisor copied into `stages/6/port/`; `source_stage`
-    is the stage the port came from. All three are keywords the caller sets; nothing in the stage directory sets them. `rehearsal` waives the
+    is the stage the port came from; `accepted_record_sha` is the sha256 the ledger holds for that stage's port-check record among the evidence its
+    gate accepted (a missing value is a refusal). All four are keywords the caller sets; nothing in the stage directory sets them. `rehearsal` waives the
     `coherent` field and nothing else; `waived` receives its name when it did."""
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
     reasons: list[str] = []
@@ -370,7 +375,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
         _output_reasons(stage_dir, run_dir, marker, reasons)
     _template_reasons(record, stage_dir, reasons)
     full_port._source_reasons(record, stage_dir, run_dir, reasons, STAGE)
-    _seed_reasons(record, run_dir, seeded, source_stage, reasons)
+    _seed_reasons(record, run_dir, seeded, source_stage, accepted_record_sha, reasons)
 
     # ---- result.json against the numbers the record gives ----
     if arrays or not isinstance(record.get("free_run_text"), str):
@@ -481,7 +486,7 @@ def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list)
         reasons.append(f"{OUTPUT_FILE} does not carry a {OUTPUT_MARK} line that matches {RECORD_FILE}, so the record was not written by the test the supervisor ran")
 
 
-def _seed_reasons(record: dict, run_dir: Path, seeded: list | None, source_stage: int, reasons: list) -> None:
+def _seed_reasons(record: dict, run_dir: Path, seeded: list | None, source_stage: int, accepted_record_sha: str | None, reasons: list) -> None:
     """The port that ran is the port that passed the earlier stage. The files the record names must be exactly the files the supervisor copied
     in (the ledger's hashes), and those must be the files the source stage's own record named (its hashes, read from its evidence)."""
     sources = record.get("port_sources")
@@ -494,7 +499,18 @@ def _seed_reasons(record: dict, run_dir: Path, seeded: list | None, source_stage
     if mine != {k: v for k, v in copied.items() if k.endswith(".py")}:
         reasons.append(f"the port files the record names are not the .py files the supervisor copied from stage {source_stage} (the ledger's hashes): "
                        "the port that was measured is not the port that passed")
-    src_record = full_port._json(run_dir / "stages" / str(source_stage) / full_port.RECORD_FILE, f"stage {source_stage} {full_port.RECORD_FILE}", [])
+    # The source record is trusted only when it is the file the source stage's gate accepted: its hash is in the ledger. Without this, a
+    # record and a port replaced together after the source stage passed would be accepted as the port that passed (review of PR 491).
+    src_path = run_dir / "stages" / str(source_stage) / full_port.RECORD_FILE
+    if not isinstance(accepted_record_sha, str) or not accepted_record_sha:
+        reasons.append(f"the ledger holds no sha256 for stage {source_stage}'s {full_port.RECORD_FILE} among the evidence its gate accepted, "
+                       "so that record cannot be trusted to name the port that passed")
+        return
+    if full_port._sha(src_path) != accepted_record_sha:
+        reasons.append(f"stage {source_stage}'s {full_port.RECORD_FILE} is not the file its gate accepted (the sha256 differs from the ledger's): "
+                       "the record that names the port that passed has been replaced")
+        return
+    src_record = full_port._json(src_path, f"stage {source_stage} {full_port.RECORD_FILE}", [])
     src_prefix = full_port.port_dir(source_stage)
     theirs = {s["path"][len(src_prefix):]: s.get("sha256") for s in (src_record or {}).get("port_sources", [])
               if isinstance(s, dict) and isinstance(s.get("path"), str) and s["path"].startswith(src_prefix)}
