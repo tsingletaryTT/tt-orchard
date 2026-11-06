@@ -275,6 +275,9 @@ RUN_PARK_BOOT_CAP = 12          # choice: cold park restores since the last resu
                                 # each), so the normal run needs 2 to 4; this bounds a loop of parks.
 COLD_START_S = 600.0            # choice: a coder start slower than this counts as a cold boot; it sits
                                 # between the 2-3 min warm restart and the ~30 min cold boot (spec section 3)
+WIDE_FABRIC_RETRIES = 2         # choice: how many times the wide phase (a single test on more boards than its stage's) is run again after
+                                # it failed with the fabric handshake timeout. Issue 487: a retry with the chips reset in the issue 26
+                                # order has passed where the first try failed; two retries bound the cost (about 1 to 3 minutes each).
 RUN_WALL_CLOCK_S = 259200.0     # choice: 72 h from run start or the last resume, then the run pauses
 CONTROL_POLL_S = 10.0           # choice: how often a paused supervisor reads the control file
 RUN_CANARY_PROMPT = "What is 17 + 25? Answer with one number."   # choice: short, one greedy answer
