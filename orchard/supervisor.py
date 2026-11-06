@@ -165,7 +165,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, FULL_PORT_STAGE_4, SKIP_3_FULL_PORT, SKIP_4_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
-from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, op_cheats, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
+from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, op_cheats, phone_a_friend, port_construction, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import repair_help            # the outside helper inside the port repair rounds (issue 427, run11)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
@@ -706,6 +706,27 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
     ledger.append("decision", spec.number, decision="reference excerpts written", excerpts=record, bytes=len(result.text.encode("utf-8")),
                   classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
     return True, result.summary()
+
+
+def write_effective_construction(ledger, run_dir: Path, spec, stage_dir: Path, snapshot, python, *, runner=None) -> tuple:
+    """Write `stages/2/effective_construction.txt` (orchard/port_construction.py, issue 541) and record it in the ledger with its path and
+    sha256, the way the facts file is recorded. Returns (written, the summary the facts file carries). Advisory: no reference interpreter,
+    a script that fails and a write error each leave no file and a ledger decision that names the reason. `runner` is for the tests."""
+    if not python:
+        return False, None
+    try:
+        text, flags, summary, why = port_construction.for_snapshot(python, snapshot, **({"runner": runner} if runner else {}))
+        if not text:
+            ledger.append("decision", spec.number, decision="effective construction not written", problem=why[:300])
+            return False, None
+        record = evidence_record(run_dir, port_construction.write(stage_dir, text))
+    except Exception as exc:
+        ledger.append("decision", spec.number, decision="effective construction not written",
+                      problem=f"{exc.__class__.__name__}: an unexpected error while building the file")
+        return False, None
+    ledger.append("decision", spec.number, decision="effective construction written", construction=record,
+                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"])
+    return True, summary
 
 
 class _SeedLimit(Exception):
@@ -3364,7 +3385,7 @@ class Supervisor:
                 return swap_prepare.PrepareOutcome(False, note=port_facts.stage_3_note(chips=self._stage_3_chips() or 0,
                                                                                        copied=bool(seed.get("copied") or seed.get("kept"))))
             note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")),
-                                           cheat=(stage_dir / full_port.CHEAT_MD_NAME).is_file())
+                                           cheat=(stage_dir / full_port.CHEAT_MD_NAME).is_file(), construction=bool(seed.get("construction")))
             if spec.number == 2 and getattr(self, "telegraph", None) is not None:
                 done_dir, done = getattr(self, "_best_restore", (None, None))
                 restored = done if done_dir == str(stage_dir) else self._restore_best_port(spec, stage_dir)      # `_draft` already tried it
@@ -4097,15 +4118,16 @@ class Supervisor:
         if spec.number in (3, full_port_quality.STAGE):
             return self._seed_stage_3_port(spec, stage_dir)
         snapshot = self.inputs.get("model")
-        facts_written = excerpts_written = False
+        facts_written = excerpts_written = construction_written = False
         if snapshot:
             root = port_facts.reference_root(port_facts.default_run, self.inputs.get("reference_python"))
             lookup = (lambda model_type: port_facts.reference_source(root, model_type)) if root is not None else None
             summary = None
             if root is not None:            # reference excerpts (issue 427): the layer classes' source, in a file of its own that the facts point at
                 excerpts_written, summary = write_reference_excerpts(self.ledger, self.run_dir, spec, stage_dir, snapshot, root)
+            construction_written, construction = write_effective_construction(self.ledger, self.run_dir, spec, stage_dir, snapshot, self.inputs.get("reference_python"))
             try:
-                facts = port_facts.build(snapshot, reference_lookup=lookup, excerpts=summary)
+                facts = port_facts.build(snapshot, reference_lookup=lookup, excerpts=summary, construction=construction)
                 record = evidence_record(self.run_dir, port_facts.write(stage_dir, facts))
             except (port_facts.PortFactsError, OSError, safeio.SafeReadError) as exc:
                 self.ledger.append("decision", spec.number, decision="port facts not written", problem=str(exc)[:300])
@@ -4125,7 +4147,8 @@ class Supervisor:
             self.ledger.append("decision", spec.number, decision="port skeleton not copied", problem=exc.__class__.__name__)
         if skeleton:
             self.ledger.append("decision", spec.number, decision="port skeleton copied")
-        self._port_seed = {"facts": facts_written, "skeleton": skeleton, **({"excerpts": True} if excerpts_written else {})}
+        self._port_seed = {"facts": facts_written, "skeleton": skeleton, **({"excerpts": True} if excerpts_written else {}),
+                           **({"construction": True} if facts_written and construction_written else {})}
 
     def _seed_stage_3_port(self, spec, stage_dir: Path, *, source: int = 2) -> None:
         """What the coder starts stage 3 of a full port from: the port that passed stage 2, copied into stages/3/port/ (issue 326). Stage 4's

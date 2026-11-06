@@ -22,7 +22,10 @@ ANSWERING = '''
 import ttnn
 VOCAB = 1000
 PASS, KEY, IS = {pass_id}, {key_id}, {is_id}
+LAYERS = 64                           # a stand-in decoder stack (deeper than any fake config): one ttnn.linear per layer per pass
 def _peak(i):
+    for _ in range(LAYERS):
+        ttnn.linear(None, None)
     v = [0.0] * VOCAB
     v[i % VOCAB] = 1.0
     return v

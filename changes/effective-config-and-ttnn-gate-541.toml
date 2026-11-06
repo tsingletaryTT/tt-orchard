@@ -1,0 +1,3 @@
+target = "0.9.125"
+summary = "Stage 2 of a full port: the facts gain an effective-construction file (resolved constructor settings against class defaults), and the port check fails a port that makes too few ttnn calls or leaves its weights on the host."
+kind = "feature"

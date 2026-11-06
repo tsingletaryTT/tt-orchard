@@ -24,8 +24,20 @@ installing an import hook) reaches the parent's code, its record or its output:
 - the last line the parent prints is `PORT_CHECK_SHA256 <sha256 of the record's bytes>`.
 
 What this does not prove: the worker is the coder's code on the chip, and a port that returns the reference's ids without computing
-them cannot be told from one that computed them. The gate's source checks (a port file must mention ttnn and must not read the stage 1
-reference) make the plain forms visible. A person who wants the proof replays this command on a chip.
+them cannot be told from one that computed them. The gate's source checks (a port file must make a reachable ttnn matmul-family call and
+must not read the stage 1 reference) make the plain forms visible. A person who wants the proof replays this command on a chip.
+
+Device-op gate (issue 541). In run 18 of the tiny Qwen4 rehearsal all 22 versions of the port made zero `ttnn.<op>(` calls: `import ttnn  # noqa`
+and host torch. The "chip run" computed on the CPU. This file now counts, and fails the run with a message that says what to do, when
+  * no source file under the port directory has a reachable matmul-family ttnn call (the static early reject, before the device is touched);
+  * the first prefill makes fewer matmul-family ttnn calls than the floor, one per decoder layer of the checkpoint's config (counted at run
+    time: the worker puts a counting proxy in `sys.modules["ttnn"]` before it imports the port module, so a mention, a comment, an unused
+    import or a function nobody calls adds nothing);
+  * no decode step makes that many (a step that replays a captured ttnn trace counts as the captured pass);
+  * after `load`, the port's model holds more weight elements as host torch or numpy tensors than as ttnn tensors.
+The counts go into the record as `device_ops` and the gate (orchard/full_port.py) checks them again. Limits: the count is of calls made, so a
+port that calls ttnn.linear on a dummy tensor and computes elsewhere passes the count; the weight scan sees only what `load` returned and the
+module's globals; and the proxy sees attribute access on `ttnn` and `from ttnn import name`, and misses `from ttnn.sub import name`.
 
 Port module interface (stages/2/port/port_model.py), all four functions required:
 
@@ -52,8 +64,10 @@ Optional hook, for localising a numerics failure (issue 505):
 
 Output: evidence/port-check.json (orchard-port-check/1, see orchard/skills/full-port-check.md) and the last line of stdout.
 """
+import collections
 import hashlib
 import importlib
+import inspect
 import json
 import os
 import re
@@ -62,6 +76,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 SCHEMA = "orchard-port-check/1"
@@ -84,6 +99,14 @@ EXIT_GRACE_S = 60.0              # how long a worker that was asked to close may
 REPLY_TIMEOUT_S = 3000.0         # the supervisor's own deadline is the limit that matters; this ends a worker that stopped answering
 MIN_LOAD_S = 1e-6                # a load the clock cannot resolve is reported as this, not as 0
 PREFIX = "port| "
+COUNTS = collections.Counter()   # the worker's tally of ttnn calls since the last request began (see CountingModule)
+OPS_KEY = "ops"                  # the worker's reply field that carries the tally
+DEVICE_OPS_FAILURE = "device-ops"          # the `op` of a failure of the device-op gate (orchard/port_repair.py reads it from the failure line)
+MAX_OP_NAMES = 60                # names kept per request's tally
+SCAN_NODES = 200_000             # objects visited by the weight scan
+HOST_SHARE_MAX = 0.5             # more than this share of the weight elements on the host fails the run
+CONFIG_MAX = 1 << 20             # the snapshot's config.json is a few kilobytes
+SOURCE_MAX = 1 << 21             # a port source file is read to this size for the static count
 MARK = "PORT_CHECK"              # the start of the line the parent prints last; a port that prints it fails the run
 FORGED = threading.Event()       # set when a line from the worker mentions MARK
 
@@ -94,6 +117,162 @@ def sha_bytes(data: bytes) -> str:
 
 def sha_file(path) -> str:
     return sha_bytes(Path(path).read_bytes())
+
+
+# The static count and the layer floor. This block is orchard/ttnn_calls.py between its `shared` markers, byte for byte
+# (tests/test_ttnn_calls.py compares them), because this file runs from the stage directory and cannot import `orchard`.
+# --- begin shared: ttnn_calls
+import ast
+import re
+
+MATMUL_FAMILY = re.compile(r"matmul|linear|sdpa|scaled_dot_product|conv[123]d|conv_transpose|einsum")
+# ttnn names that manage the device or build a shape. A call to one is not a computation on the device.
+NOT_COMPUTE = frozenset({"open_device", "close_device", "open_mesh_device", "close_mesh_device", "set_fabric_config", "MeshShape",
+                         "synchronize_device", "get_device_ids", "get_num_devices", "manage_device", "begin_trace_capture",
+                         "end_trace_capture", "release_trace", "deallocate", "to_torch", "from_torch", "as_tensor", "to_device",
+                         "from_device", "load_tensor", "dump_tensor", "to_dtype", "to_layout", "reshape", "typecast", "get_arch_name"})
+LAYER_COUNT_KEYS = ("num_hidden_layers", "n_layer", "num_layers", "n_layers")
+LAYER_COUNT_MAX = 10_000
+_ZERO_NAMES = frozenset({"TYPE_CHECKING"})
+
+
+def is_matmul(name: str) -> bool:
+    """True when the dotted ttnn name (`ttnn.linear`, `ttnn.experimental.minimal_matmul`) is a matmul-family op."""
+    return bool(MATMUL_FAMILY.search(name.lower()))
+
+
+def is_compute(name: str) -> bool:
+    """True when the call is an op that computes, and not device management, a shape or a copy between host and device."""
+    return name.rsplit(".", 1)[-1] not in NOT_COMPUTE
+
+
+def _chain(node):
+    """The dotted name of a Name or Attribute chain (`a.b.c`), or None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _constant_test(test):
+    """True or False when an `if` test is a constant a plain reading can decide, else None."""
+    if isinstance(test, ast.Constant):
+        return bool(test.value)
+    if isinstance(test, ast.Name) and test.id in _ZERO_NAMES:
+        return False
+    if isinstance(test, ast.Attribute) and test.attr in _ZERO_NAMES:
+        return False
+    return None
+
+
+def static_calls(source: str) -> dict:
+    """{"calls": {dotted name: count}, "error": None} for the reachable `ttnn.<op>(` calls of `source`; with a syntax error, {"calls": {}, "error": reason}.
+
+    A name counts as ttnn when it is bound by `import ttnn`, `import ttnn as t`, `from ttnn import linear` or `x = ttnn.linear`, and the call is
+    `ttnn.linear(...)`, `t.linear(...)`, `linear(...)` or `x(...)`. Calls that only manage the device (NOT_COMPUTE) are listed in `calls` too; use
+    `is_compute` to leave them out."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        return {"calls": {}, "error": f"{type(exc).__name__}: the file does not parse"}
+    roots: dict[str, str] = {}          # local name -> the dotted ttnn name it stands for
+
+    def bind(stmt):
+        if isinstance(stmt, ast.Import):
+            for a in stmt.names:
+                if a.name == "ttnn" or a.name.startswith("ttnn."):
+                    roots[a.asname or "ttnn"] = a.name if a.asname else "ttnn"
+        elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and (stmt.module == "ttnn" or (stmt.module or "").startswith("ttnn.")):
+            for a in stmt.names:
+                roots[a.asname or a.name] = f"{stmt.module}.{a.name}"
+        elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            dotted = _chain(stmt.value)
+            if dotted and dotted.split(".", 1)[0] in roots:
+                head, _, rest = dotted.partition(".")
+                roots[stmt.targets[0].id] = roots[head] + ("." + rest if rest else "")
+
+    calls: dict[str, int] = {}
+
+    def look(node):
+        """The calls in an expression or in the parts of a statement that are not blocks of statements."""
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                dotted = _chain(sub.func)
+                if dotted and dotted.split(".", 1)[0] in roots:
+                    head, _, rest = dotted.partition(".")
+                    name = roots[head] + ("." + rest if rest else "")
+                    if name != "ttnn":
+                        calls[name] = calls.get(name, 0) + 1
+
+    def block(stmts):
+        for stmt in stmts:
+            bind(stmt)
+            if isinstance(stmt, ast.If):
+                look(stmt.test)
+                decided = _constant_test(stmt.test)
+                if decided is not False:
+                    block(stmt.body)
+                if decided is not True:
+                    block(stmt.orelse)
+            elif isinstance(stmt, ast.While) and _constant_test(stmt.test) is False:
+                block(stmt.orelse)
+            elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for d in stmt.decorator_list:
+                    look(d)
+                if isinstance(stmt, ast.ClassDef):
+                    for b in stmt.bases:
+                        look(b)
+                else:
+                    for d in [*stmt.args.defaults, *[k for k in stmt.args.kw_defaults if k is not None]]:
+                        look(d)
+                block(stmt.body)
+            elif hasattr(stmt, "body") or hasattr(stmt, "handlers"):          # for, while, with, try, match: the header, then each block
+                for field, value in ast.iter_fields(stmt):
+                    if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                        block(value)
+                    elif field == "handlers":
+                        for h in value:
+                            block(h.body)
+                    elif field == "cases":
+                        for c in value:
+                            block(c.body)
+                    elif isinstance(value, ast.AST):
+                        look(value)
+                    elif isinstance(value, list):
+                        for v in value:
+                            if isinstance(v, ast.AST) and not isinstance(v, (ast.stmt, ast.excepthandler, ast.match_case)):
+                                look(v)
+                            elif isinstance(v, ast.withitem):
+                                look(v)
+            else:
+                look(stmt)
+            if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+                return                       # what follows in this block cannot run
+
+    block(tree.body)
+    return {"calls": dict(sorted(calls.items())), "error": None}
+
+
+def layer_floor(config) -> tuple[int, int | None]:
+    """(floor, layers): the number of matmul-family device calls one forward pass must make at least, and the layer count it came from (None
+    when the config does not give one). Every decoder layer projects its input at least once, so a pass that touches the device for every layer
+    makes at least one matmul or linear per layer. Without a layer count the floor is 1."""
+    section = config.get("text_config") if isinstance(config, dict) and isinstance(config.get("text_config"), dict) else config
+    if not isinstance(section, dict):
+        return 1, None
+    for key in LAYER_COUNT_KEYS:
+        n = section.get(key)
+        if type(n) is int and 0 < n <= LAYER_COUNT_MAX:
+            return n, n
+    kinds = section.get("layer_types")
+    if isinstance(kinds, list) and 0 < len(kinds) <= LAYER_COUNT_MAX:
+        return len(kinds), len(kinds)
+    return 1, None
+# --- end shared: ttnn_calls
 
 
 # ---- the worker: the port module's side of the pipes ------------------------------------------------------------------------
@@ -179,6 +358,109 @@ def save_layers(mod, model, ids) -> dict:
     return {"ok": True, "layers": len(arrays) - 1}
 
 
+# ---- the device-op count: a proxy for `ttnn` in the worker, and the scan of what `load` returned -------------------------------------------
+
+class Counted:
+    """A ttnn op that adds one to COUNTS[name] each time it is called, then calls the real one."""
+
+    def __init__(self, fn, name):
+        self.__dict__.update(_fn=fn, _name=name)
+
+    def __call__(self, *args, **kwargs):
+        COUNTS[self._name] += 1
+        return self._fn(*args, **kwargs)
+
+    def __getattr__(self, attr):                 # `ttnn.matmul.golden_function` and the like
+        if attr in ("_fn", "_name"):
+            raise AttributeError(attr)
+        return getattr(self._fn, attr)
+
+
+class CountingModule(types.ModuleType):
+    """The real `ttnn` (or one of its submodules), with each op reached through it counted. Classes, constants and non-callables come back
+    unchanged, so `isinstance(x, ttnn.Tensor)`, `ttnn.bfloat16` and `ttnn.TILE_LAYOUT` behave as they do on the real module."""
+
+    def __init__(self, real, name):
+        super().__init__(name)
+        self.__dict__.update(_real=real, _cname=name)
+        if hasattr(real, "__path__"):
+            self.__path__ = real.__path__
+
+    def __getattr__(self, attr):
+        if attr in ("_real", "_cname"):
+            raise AttributeError(attr)
+        value = getattr(self._real, attr)
+        full = f"{self._cname}.{attr}"
+        if isinstance(value, types.ModuleType):
+            return CountingModule(value, full)
+        if inspect.isclass(value) or not callable(value):
+            return value
+        return Counted(value, full)
+
+    def __dir__(self):
+        return dir(self._real)
+
+
+def take_counts() -> dict:
+    """The tally since the last call, as {name: count} for the MAX_OP_NAMES most called names, and the counter cleared."""
+    out = dict(COUNTS.most_common(MAX_OP_NAMES))
+    COUNTS.clear()
+    return out
+
+
+def weight_kind(x):
+    """("host" or "device", element count) for a tensor-like object, else None. Torch and numpy tensors are host. A ttnn tensor is device unless
+    it reports a storage type that is not on the device. Read from the type's module and attributes only: no import of torch or numpy."""
+    t = type(x)
+    root = (t.__module__ or "").split(".")[0]
+    try:
+        if root == "torch" and hasattr(x, "numel") and hasattr(x, "dtype"):
+            return "host", int(x.numel())
+        if root == "numpy" and t.__name__ == "ndarray":
+            return "host", int(x.size)
+        if root == "ttnn" and hasattr(x, "shape") and not inspect.isclass(x) and not callable(x):
+            numel = 1
+            for d in tuple(x.shape):
+                numel *= int(d)
+            where = "device"
+            if hasattr(x, "storage_type"):
+                where = "device" if "DEVICE" in str(x.storage_type()).upper() else "host"
+            return where, numel
+    except Exception:
+        return None
+    return None
+
+
+def scan_weights(*roots) -> dict:
+    """Walk what the port holds (dicts, lists, tuples, sets and object attributes, no modules, classes or functions) and total the weight
+    elements by where they live. Bounded to SCAN_NODES objects; `truncated` says it stopped early. Properties are never called."""
+    seen, stack, host, dev, n_host, n_dev, visited = set(), list(roots), 0, 0, 0, 0, 0
+    while stack and visited < SCAN_NODES:
+        x = stack.pop()
+        if id(x) in seen or x is None or isinstance(x, (str, bytes, int, float, bool, types.ModuleType, types.FunctionType, type)):
+            continue
+        seen.add(id(x))
+        visited += 1
+        kind = weight_kind(x)
+        if kind is not None:
+            if kind[0] == "host":
+                host, n_host = host + kind[1], n_host + 1
+            else:
+                dev, n_dev = dev + kind[1], n_dev + 1
+            continue
+        if isinstance(x, dict):
+            stack.extend(x.values())
+        elif isinstance(x, (list, tuple, set, frozenset)):
+            stack.extend(x)
+        else:
+            try:
+                stack.extend(vars(x).values())
+            except TypeError:
+                pass
+    return {"host_elements": host, "device_elements": dev, "host_tensors": n_host, "device_tensors": n_dev, "visited": visited,
+            "truncated": bool(stack)}
+
+
 def worker(read_fd: int, write_fd: int) -> int:
     """Answer requests until `close`. Every reply is one JSON line: {"ok": true, ...} or {"ok": false, "error": text}."""
     rd, wr = os.fdopen(read_fd, "r", encoding="utf-8"), os.fdopen(write_fd, "w", encoding="utf-8")
@@ -202,16 +484,22 @@ def worker(read_fd: int, write_fd: int) -> int:
                 except (Exception, SystemExit) as exc:
                     reply({"ok": False, "kind": "setup", "error": clip(f"{type(exc).__name__}: {exc}")})
                     continue
+                sys.modules["ttnn"] = CountingModule(ttnn, "ttnn")       # the port imports this one: every op it calls is counted
                 sys.path.insert(0, str(PORT_DIR))
                 mod = importlib.import_module(PORT_MODULE)
                 reply({"ok": True})
             elif op == "load":           # timed: only the port's own load
+                COUNTS.clear()
                 model = mod.load(req["model_dir"], device)
-                reply({"ok": True})
+                reply({"ok": True, OPS_KEY: take_counts()})
+            elif op == "scan":           # untimed, right after `load`: where the port's weights live
+                reply({"ok": True, "weights": scan_weights(model, vars(mod))})
             elif op == "prefill":
-                reply({"ok": True, "id": argmax(mod.prefill(model, [int(i) for i in req["ids"]]))})
+                COUNTS.clear()
+                reply({"ok": True, "id": argmax(mod.prefill(model, [int(i) for i in req["ids"]])), OPS_KEY: take_counts()})
             elif op == "decode":
-                reply({"ok": True, "id": argmax(mod.decode_step(model, int(req["token"]), int(req["position"])))})
+                COUNTS.clear()
+                reply({"ok": True, "id": argmax(mod.decode_step(model, int(req["token"]), int(req["position"]))), OPS_KEY: take_counts()})
             elif op == "layers":         # optional, untimed, after the comparison: per-layer hidden states for `layer-diff`
                 reply(save_layers(mod, model, [int(i) for i in req["ids"]]))
             elif op == "close":
@@ -332,6 +620,127 @@ class Worker:
             t.join(10)
 
 
+class DeviceOps:
+    """The parent's tally of the ttnn calls the worker reported, and the checks on it (issue 541). Each check raises PortFailed with a message
+    that says what to do. The worker's numbers are taken as given: the parent cannot see inside the worker, so a port that falsifies them is
+    not caught here, which the module's docstring states."""
+
+    def __init__(self, floor: int, layers):
+        self.floor, self.layers = floor, layers
+        self.prefill_matmul = None
+        self.decode_matmul_max = 0
+        self.decode_trace_replays = 0
+        self.total = collections.Counter()
+        self.weights = None
+        self.static_matmul = None
+
+    @staticmethod
+    def _clean(ops) -> dict:
+        """The worker's tally with each entry type-checked: a name of at most 120 characters and a count from 0 to 10**9."""
+        if not isinstance(ops, dict):
+            return {}
+        return {k: v for k, v in list(ops.items())[:MAX_OP_NAMES] if isinstance(k, str) and len(k) <= 120 and type(v) is int and 0 <= v <= 10 ** 9}
+
+    @staticmethod
+    def matmuls(ops: dict) -> int:
+        return sum(v for k, v in ops.items() if is_matmul(k))
+
+    @staticmethod
+    def replays(ops: dict) -> int:
+        return sum(v for k, v in ops.items() if k.rsplit(".", 1)[-1] == "execute_trace")
+
+    def seen(self, ops: dict) -> str:
+        top = sorted(ops.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+        return ", ".join(f"{k} x{v}" for k, v in top) if top else "none"
+
+    def what_to_do(self) -> str:
+        return ("Move the computation onto the device: in load(), upload each weight with ttnn.from_torch(w, dtype=ttnn.bfloat16, "
+                "layout=ttnn.TILE_LAYOUT, device=mesh_device) (or ttnn.as_tensor) and keep the ttnn tensor; in prefill and decode_step, run each "
+                "projection with ttnn.linear or ttnn.matmul on those tensors. stages/2/cheat_sheet.md lists the call forms. A host torch port with "
+                "`import ttnn` computes on the CPU, so the run does not show the chip works, and it does not count. An import, a comment, a "
+                "string and code that is not reached make no calls.")
+
+    def check_static(self) -> None:
+        """Before the device is touched: some file under the port directory must have a reachable matmul-family ttnn call."""
+        names, errors = collections.Counter(), 0
+        for f in sorted(PORT_DIR.rglob("*.py")):
+            if not f.is_file() or f.is_symlink():
+                continue
+            with open(f, "rb") as fh:             # hardening: ok regular file under the port directory (links are refused first), bounded read
+                text = fh.read(SOURCE_MAX + 1).decode("utf-8", "replace")
+            found = static_calls(text)
+            errors += found["error"] is not None
+            names.update(found["calls"])
+        self.static_matmul = sum(v for k, v in names.items() if is_matmul(k) and is_compute(k))
+        if self.static_matmul or errors:          # a file that does not parse is reported by the worker's import, which names the line
+            return
+        listed = ", ".join(f"{k} x{v}" for k, v in sorted(names.items())[:8]) or "none"
+        raise PortFailed(f"{DEVICE_OPS_FAILURE}: no source file under stages/2/port/ makes a reachable ttnn matmul-family call (ttnn.matmul, "
+                         f"ttnn.linear and the like). ttnn calls found: {listed}. " + self.what_to_do(), op=DEVICE_OPS_FAILURE)
+
+    def check_weights(self, scan) -> None:
+        """After load: the weights the port holds must be mostly ttnn tensors. A scan that finds no tensor at all is recorded as such and the
+        matmul counts decide."""
+        if not isinstance(scan, dict):
+            return
+        host, dev = scan.get("host_elements"), scan.get("device_elements")
+        if type(host) is not int or type(dev) is not int or host < 0 or dev < 0:
+            return
+        self.weights = {k: scan.get(k) for k in ("host_elements", "device_elements", "host_tensors", "device_tensors", "visited", "truncated")}
+        if host + dev and host / (host + dev) > HOST_SHARE_MAX:
+            raise PortFailed(f"{DEVICE_OPS_FAILURE}: after load() the port holds {host} weight elements as host torch or numpy tensors and "
+                             f"{dev} as ttnn tensors; at most {int(HOST_SHARE_MAX * 100)}% may stay on the host. " + self.what_to_do(), op="load")
+
+    def add_load(self, ops) -> None:
+        self.total.update(self._clean(ops))
+
+    def add_prefill(self, ops) -> None:
+        ops = self._clean(ops)
+        self.total.update(ops)
+        self.prefill_matmul = self.matmuls(ops)
+        self.prefill_seen = self.seen(ops)
+
+    def check_prefill(self) -> None:
+        if self.prefill_matmul < self.floor:
+            of = f"the {self.layers} layers of the config" if self.layers else "the model"
+            raise PortFailed(f"{DEVICE_OPS_FAILURE}: the first prefill made {self.prefill_matmul} matmul-family ttnn calls; a forward pass over {of} "
+                             f"makes at least {self.floor} (one ttnn.matmul or ttnn.linear per layer). ttnn calls seen in that prefill: "
+                             f"{self.prefill_seen}. " + self.what_to_do(), op="prefill")
+
+    def add_decode(self, ops) -> None:
+        ops = self._clean(ops)
+        self.total.update(ops)
+        self.decode_matmul_max = max(self.decode_matmul_max, self.matmuls(ops))
+        self.decode_trace_replays += self.replays(ops)
+
+    def check_decode(self) -> None:
+        """Some decode step must make the floor's worth of matmul calls. A step that replays a captured trace makes none itself: the captured
+        pass (counted wherever it ran) must have made the floor's worth, which the total over the whole run shows."""
+        if self.decode_matmul_max >= self.floor:
+            return
+        if self.decode_trace_replays and self.matmuls(self.total) >= 2 * self.floor:
+            return
+        raise PortFailed(f"{DEVICE_OPS_FAILURE}: no decode step made as many as {self.floor} matmul-family ttnn calls (the most in one step was "
+                         f"{self.decode_matmul_max}; trace replays: {self.decode_trace_replays}). Decoding a token runs every layer, so a step makes "
+                         f"at least one ttnn.matmul or ttnn.linear per layer. " + self.what_to_do(), op="decode")
+
+    def record(self) -> dict:
+        top = sorted(self.total.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
+        return {"floor": self.floor, "layers": self.layers, "prefill_matmul_calls": self.prefill_matmul, "decode_matmul_calls_max": self.decode_matmul_max,
+                "decode_trace_replays": self.decode_trace_replays, "matmul_calls_total": self.matmuls(self.total),
+                "static_matmul_calls": self.static_matmul, "weights": self.weights, "top_calls": dict(top)}
+
+
+def read_config(model_dir: str) -> dict:
+    """The snapshot's config.json as a dict, or {} when it cannot be read (the floor is then 1)."""
+    try:
+        with open(Path(model_dir) / "config.json", "rb") as fh:      # hardening: ok the supervisor's own snapshot path; a bounded read in a try
+            data = json.loads(fh.read(CONFIG_MAX + 1)[:CONFIG_MAX])
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def read_ids(rel: str, key: str) -> list[int]:
     data = json.loads((RUN_DIR / rel).read_text(encoding="utf-8"))
     ids = data.get(key) if isinstance(data, dict) else None
@@ -379,17 +788,28 @@ def main() -> int:
         if stale.exists() or stale.is_symlink():
             stale.unlink()
 
+    floor, layers = layer_floor(read_config(model_dir))
+    device_ops = DeviceOps(floor, layers)
+    device_ops.check_static()          # the early reject: no reachable ttnn matmul-family call anywhere in the port, so nothing to run on the device
+
     w = Worker()
     try:
         w.ask(op="init", n_chips=len(chips))
         t0 = time.monotonic()
         w.ask(op="load", model_dir=model_dir)
+        device_ops.add_load(w.last.get(OPS_KEY))       # a warm-up pass that captures the decode trace runs here
         load_s = max(time.monotonic() - t0, MIN_LOAD_S)     # full precision; a rounded value could be 0.0, which the gate refuses
         print(f"loaded in {load_s}s", flush=True)
+        w.ask(op="scan")                 # untimed: where the weights the port holds live
+        device_ops.check_weights(w.last.get("weights"))
         # Teacher forced: at position i the port's argmax is taken, then the reference id i is fed in, never the port's own.
         chip = [w.ask(op="prefill", ids=prompt)]
+        device_ops.add_prefill(w.last.get(OPS_KEY))
+        device_ops.check_prefill()       # the first forward pass is the cheapest place to learn it never touched the device
         for i in range(1, n):
             chip.append(w.ask(op="decode", token=ref[i - 1], position=len(prompt) + i - 1))
+            device_ops.add_decode(w.last.get(OPS_KEY))
+        device_ops.check_decode()
         # Free run: a fresh prefill, then the port's own greedy ids.
         free = [w.ask(op="prefill", ids=prompt)]
         for k in range(1, FREE_RUN_TOKENS):
@@ -423,6 +843,7 @@ def main() -> int:
               "reference_ids": ref, "chip_ids": chip,
               "top1_agreement": agreement,
               "chips": chips, "load_s": load_s, "free_run_ids": free, "free_run_text": free_run_text(model_dir, free),
+              "device_ops": device_ops.record(),
               "port_sources": port_sources(), "template_sha256": sha_file(__file__),
               "config": {"path": str(CONFIG_FILE.relative_to(RUN_DIR)), "sha256": sha_file(CONFIG_FILE)}}
     data = (json.dumps(record, indent=2) + "\n").encode("utf-8")
