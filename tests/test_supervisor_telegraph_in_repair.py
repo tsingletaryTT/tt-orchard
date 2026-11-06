@@ -298,3 +298,31 @@ def test_the_helper_text_is_never_run_by_the_supervisor(rig, monkeypatch, tmp_pa
     import ast
     ast.parse((rig.run_dir / "stages" / "2" / "telegraph" / "repair-1.py").read_text())          # the saved reply is text
     assert not decs(rig, rh.STUB)                                                               # and the supervisor judged it by reading it
+
+
+# ---- review of PR 496 ------------------------------------------------------------------------------------------------------------------------------
+
+def test_after_a_helper_rescued_a_paused_repair_step_the_next_round_still_asks_the_coder(rig, monkeypatch, tmp_path):
+    """Finding: the handled watchdog stop stayed set, so the next repair step ended before it sent a request, and the pause entry stayed unresumed."""
+    tel, wire = wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN, PREFILL_BROKEN + "# helper\n", HONEST])
+    seen = start(rig, BROKEN, [PREFILL_BROKEN + "# a\n", PREFILL_BROKEN + "# b\n", HONEST])
+    looping_coder(rig)
+    assert rig.run() == EXIT_ABORTED
+    assert any("round 3 of" in text for text in seen), "the coder was never asked in round 3"
+    entries = rig.entries()
+    seqs = [(e["seq"], e["data"].get("decision")) for e in entries if e["stage"] in (2, None) and e["event"] == "decision"]
+    pauses = [s for s, d in seqs if d == "pause"]
+    end2 = next(e["seq"] for e in entries if e["stage"] == 2 and e["event"] == "stage_end")
+    # every pause the watchdog wrote inside stage 2 is answered by a resume before the stage ended
+    for p in [p for p in pauses if p < end2]:
+        assert any(s > p and s < end2 and d == "resume" for s, d in seqs), f"the pause at {p} was never resumed"
+
+
+def test_a_repair_request_over_the_helpers_prompt_cap_is_not_sent(rig, monkeypatch, tmp_path):
+    """Finding: the helper cuts the middle out of a request over max_prompt_chars, and the answer then replaced the whole file."""
+    tel, wire = wire_helper(monkeypatch, tmp_path, [HONEST], max_prompt_chars=tg.MIN_PROMPT_CHARS)
+    start(rig, BROKEN, [HONEST + "# c\n"])
+    rig.run()
+    refused = decs(rig, rh.NOT_ASKED)
+    assert refused and any("prompt" in d["reason"] for d in refused), refused
+    assert not decs(rig, rh.ASKED) and not wire.requests

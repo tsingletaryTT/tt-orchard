@@ -163,7 +163,7 @@ def test_the_merge_into_the_skeleton_refuses_a_draft_that_uses_a_name_nothing_de
 
 
 def test_each_problem_id_is_one_run_so_the_per_problem_caps_do_not_carry_over():
-    assert paf.problem_id("/x/orchard-runs/tiny-qwen4-run12") == "full-port-stage-2:tiny-qwen4-run12"
+    assert paf.problem_id("/x/orchard-runs/tiny-qwen4-run12").startswith("full-port-stage-2:tiny-qwen4-run12-")      # the run's name, then a digest of its path
     assert paf.problem_id("/x/a") != paf.problem_id("/x/b")
     assert "/" not in paf.problem_id("/x/we ird/na me") and len(paf.problem_id("/x/" + "n" * 300)) < 80
 

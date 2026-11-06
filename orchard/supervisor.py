@@ -2474,6 +2474,8 @@ class Supervisor:
                                                                     why=f"the coder's repair step ended: {out.status}", coder_failed=True)
                         if not helped_on:
                             return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
+                        if out.status in ("pause", "escalate"):
+                            self._consume_handled_stop(n, out.status)
                 touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
                 if touched:
                     self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
@@ -3327,6 +3329,11 @@ class Supervisor:
         is_due, why = phone_a_friend.due(state)
         if not is_due:
             return None
+        spent = repair_help.asks_in_stage(entries, n)
+        if spent >= repair_help.TOTAL_PER_STAGE:
+            # The stage's limit counts the repair-round asks too (review of PR 496): an attempt that follows six repair asks sends no seventh call.
+            self._friend_refused(n, f"the helper was already asked {spent} times in this stage, repair rounds included (the limit is {repair_help.TOTAL_PER_STAGE})")
+            return None
         k = state["asked_in_stage"] + 1
         stage_dir = Path(stage_dir)
         try:
@@ -3492,6 +3499,16 @@ class Supervisor:
     def _repair_help_refused(self, n: int, k: int, reason: str) -> None:
         self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=k, reason=reason[:300])
 
+    def _consume_handled_stop(self, n: int, status: str) -> None:
+        """The helper's port took over from a repair step the watchdog stopped, so the stop is handled: the actuator forgets it (the next repair
+        step would otherwise end before it sent a request) and a recorded watchdog pause is answered by a resume entry (the run would otherwise wait
+        for the operator at the stage's end). An operator abort or pause is never consumed here: only these two statuses reach this method
+        (review of PR 496)."""
+        self.actuator.clear()
+        if status == "pause":
+            self.ledger.append("decision", n, decision="resume", by="helper rescue",
+                                note="a helper-supplied port took over from the repair step the watchdog paused")
+
     def _repair_help(self, spec, stage_dir: Path, k: int, limit: int, failure: dict, raw: str, *, why: str, coder_failed: bool,
                      driven: bool = False) -> tuple[str, bool, bool]:
         """Ask the helper for the whole corrected `port_model.py` in repair round `k` and, when the answer is a whole port and the file on disk is
@@ -3522,6 +3539,11 @@ class Supervisor:
             return "", False, False
         from orchard import telegraph as tg
         room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
+        if len(task) + len(fail) > room:
+            # The helper cuts the middle out of a request over its prompt cap, and its answer would then replace the whole file from a partial
+            # reading of it: the request is not sent (review of PR 496).
+            self._repair_help_refused(n, k, f"the request is {len(task) + len(fail)} characters, more than the {room} the helper's prompt cap leaves room for")
+            return "", False, False
         total = repair_help.asks_in_stage(entries, n) + 1
         sent_sha = hashlib.sha256(port_bytes).hexdigest()
         problem = phone_a_friend.problem_id(self.run_dir)
@@ -4455,12 +4477,14 @@ class Supervisor:
             what = "the port's configured chip count" if spec.skill in ("full-port-mesh", full_port_serve.SKILL, "full-port-quality") else "the container package"
             self._block(n, f"{what} needs {boards * CHIPS_PER_BOARD} chips and this box has {have * CHIPS_PER_BOARD}",
                         need_chips=boards * CHIPS_PER_BOARD)
-        d = decide_park(self.coder_lease.units, chips, boards)
+        # After an abort the coder's lease is released, and `--resume-aborted` can reach a stage that needs no coder (stage 5 of a full port) with
+        # none: there is nothing to park, so every board comes from a lease of its own, which waits while the boards are busy (review of PR 490).
+        d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action, chips=boards * CHIPS_PER_BOARD,
                            free_boards=list(d.free_boards), server_boards=list(d.server_boards))
         shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
         first_chip = {c.board: c.bdf for c in reversed(chips)}
-        if d.action == "use_free":
+        if d.action == "use_free" or self.coder_lease is None:
             lease = self._take_test_lease(spec, shape, boards, None)
             try:
                 self._run_test(spec, stage_dir, test, lease, boards=boards, **record)

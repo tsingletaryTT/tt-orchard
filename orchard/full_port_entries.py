@@ -193,6 +193,21 @@ def failed(stage_dir, required) -> dict | None:
     return {"configs": [c for c, _ in bad], "problem": "; ".join(f"the {c}-chip entry: {w}" for c, w in bad)}
 
 
+def chain_problems(run_dir, stage: int) -> list[str]:
+    """Why the stage's marker, output and record do not hang together, or []. The marker names the supervisor's output file and its sha256;
+    the output holds the one line the template printed, which carries the record's sha256. A covering rests on all three, so the record
+    that covers an entry must be the one the test printed (review of PR 489: the hashes of the marker and of the record alone let a
+    rewritten record cover an entry)."""
+    run_dir = Path(run_dir)
+    stage_dir = run_dir / "stages" / str(stage)
+    marker = _read(stage_dir / MARKER_FILE)
+    if marker is None:
+        return [f"stage {stage}'s marker is not readable JSON"]
+    reasons: list[str] = []
+    full_port._output_reasons(stage_dir, run_dir, marker, reasons)
+    return [f"stage {stage}: {r}" for r in reasons]
+
+
 def _covered_reasons(edir: Path, run_dir: Path, chips: int, covered: dict) -> tuple[list[str], list[str]]:
     """The file-level checks of a covered entry. The ledger's part (the covering stage passed, its marker is the supervisor's) is in
     `orchard/full_port_stage4.py`."""
@@ -219,6 +234,7 @@ def _covered_reasons(edir: Path, run_dir: Path, chips: int, covered: dict) -> tu
         reasons.append(f"stage {stage}'s marker does not show a passing test, so it covers nothing")
     elif not isinstance(marker.get("chips"), list) or len(marker["chips"]) != chips:
         reasons.append(f"stage {stage}'s test ran on {marker.get('chips')!r}, which is not {chips} chips, so it does not cover this entry")
+    reasons.extend(chain_problems(run_dir, stage))
     if (edir / MARKER_FILE).exists() or (edir / MARKER_FILE).is_symlink():
         reasons.append(f"the entry holds {COVERED_FILE} and a test marker; an entry is either covered or tested")
     return reasons, seen

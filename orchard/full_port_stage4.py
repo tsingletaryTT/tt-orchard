@@ -25,6 +25,8 @@ change a record the template wrote. A resumed stage goes on at the first entry t
 """
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 from pathlib import Path
 
@@ -37,6 +39,29 @@ ENTRY_RESULT_WHAT = "entry result derived by the supervisor"
 STAGE_RESULT_WHAT = "stage result derived by the supervisor"
 PLAN_WHAT = "hardware test list"                         # the same entry the weights-only stage 4 writes for tests/plan.json
 PREPARED = "prepared.json"                               # written by the supervisor when an entry's prepare step is done (a resume skips it)
+
+
+class _Ended(Exception):
+    """A step ended with a status that is not a failure of the entry: `abort`, `operator-pause`, `pause` or `escalate`. The stage ends with that
+    status and the reasons, as the generic stage body does for its own steps (review of PR 489: every status had become a failed stage)."""
+
+    def __init__(self, status: str, reasons: list[str]):
+        super().__init__(status)
+        self.status, self.reasons = status, reasons
+
+
+ENDING_STATUSES = ("abort", "operator-pause", "pause", "escalate")      # the statuses a step can end with that the stage must pass on as they are
+
+
+def _parts(sup, path) -> tuple[str, ...]:
+    """The run-relative parts of `path`, for the operations that go through the pinned run directory."""
+    return Path(os.path.relpath(path, sup.run_dir)).parts
+
+
+def _write_json_beneath(sup, pin, path: Path, data) -> Path:
+    """`full_port_entries.write_json` through the pinned run directory: a link standing in the entry's path is refused, never followed."""
+    safeio.write_beneath(pin.fd, _parts(sup, path), (json.dumps(data, indent=2) + "\n").encode("utf-8"), mode=0o644)
+    return path
 
 
 # ---- what the ledger says ----------------------------------------------------------------------------------------------
@@ -70,7 +95,7 @@ def covering_stage(ledger, run_dir, chips: int) -> dict | None:
         record = full_port.file_record(run_dir, run_dir / "stages" / str(k) / full_port.RECORD_FILE)
         if marker is None or record is None or not recorded_by_supervisor(ledger, k, marker):
             continue
-        if full_port_entries.marker_problem(run_dir / "stages" / str(k), chips) is None:
+        if full_port_entries.marker_problem(run_dir / "stages" / str(k), chips) is None and not full_port_entries.chain_problems(run_dir, k):
             return {"covered_by": k, "evidence": marker, "record": record}
     return None
 
@@ -196,10 +221,22 @@ def run(sup, spec, stage_dir, escalated: bool, resumed: bool):
             sup._block(n, f"the {entry.chips}-chip entry needs {entry.boards * CHIPS_PER_BOARD} chips and this box has {have * CHIPS_PER_BOARD}",
                        need_chips=entry.boards * CHIPS_PER_BOARD)
     rehearsal = full_port_rehearsal(sup.ledger.read())
-    for entry in entries:
-        reasons = _one_entry(sup, spec, stage_dir, entry, escalated, resumed, rehearsal)
-        if reasons:
-            return _fail(sup, spec, stage_dir, entries, reasons)
+    try:
+        # Every removal and write the stage makes in an entry goes through this descriptor of the run directory, so a link standing in
+        # `configs/`, in an entry's directory or in its `evidence/` is refused and the operation never leaves the run (review of PR 489).
+        with safeio.pinned_root(sup.run_dir) as pin:
+            for entry in entries:
+                try:
+                    reasons = _one_entry(sup, spec, stage_dir, entry, escalated, resumed, rehearsal, pin)
+                except safeio.SafeReadError as exc:
+                    reasons = [f"the {entry.chips}-chip entry: a path in it was refused ({exc.reason}); the supervisor does not follow a link there"]
+                if reasons:
+                    return _fail(sup, spec, stage_dir, entries, reasons)
+    except _Ended as ended:
+        _write_stage_marker(sup, stage_dir, entries)
+        return ended.status, ended.reasons, None
+    except safeio.SafeReadError as exc:
+        return _fail(sup, spec, stage_dir, entries, [f"the run directory could not be opened for the stage's entries: {exc.reason}"])
     summary = full_port_entries.summarize(stage_dir, sup.run_dir, [e.chips for e in entries])
     path = full_port_entries.write_json(stage_dir / full_port_entries.RESULT_FILE, summary)
     sup.ledger.append("evidence", n, what=STAGE_RESULT_WHAT, **evidence_record(sup.run_dir, path))
@@ -208,7 +245,7 @@ def run(sup, spec, stage_dir, escalated: bool, resumed: bool):
     return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
 
-def _one_entry(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool, rehearsal: bool) -> list[str]:
+def _one_entry(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool, rehearsal: bool, pin) -> list[str]:
     """Run one entry to the point where it passes (no reasons returned) or fails (the reasons)."""
     n, c = spec.number, entry.chips
     edir = entry.directory(stage_dir)
@@ -217,32 +254,35 @@ def _one_entry(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool
     ledger, run_dir = sup.ledger, sup.run_dir
     marker = entry.record_path(stage_dir)
     covered_path = edir / full_port_entries.COVERED_FILE
+    safeio.mkdir_beneath(pin.fd, _parts(sup, edir))        # refuses a link in `configs/` or in the entry's directory before anything is read or removed
     # ---- a covering already written and vouched for: nothing to run ----
     if covered_path.is_file() and (rec := full_port.file_record(run_dir, covered_path)) and recorded_by_supervisor(ledger, n, rec, whats=(COVERED_WHAT,)):
         return []
-    if covered_path.exists() or covered_path.is_symlink():
-        covered_path.unlink()          # a covered.json the ledger does not hold was not written by the supervisor
+    if safeio.unlink_beneath(pin.fd, _parts(sup, covered_path)):
+        pass                           # a covered.json the ledger does not hold was not written by the supervisor
     # ---- the test: done and vouched for, or to be run ----
     tested = False
     if marker.is_file() and (rec := full_port.file_record(run_dir, marker)) and recorded_by_supervisor(ledger, n, rec):
         tested = True
     else:
         for stale in (marker, edir / full_port.RECORD_FILE, edir / full_port.OUTPUT_FILE, edir / full_port_entries.RESULT_FILE):
-            if stale.exists() or stale.is_symlink():
-                stale.unlink()         # a marker the ledger does not hold (a kill between the file and its entry, or a file the coder wrote)
+            if safeio.unlink_beneath(pin.fd, _parts(sup, stale)):
+                pass                   # a marker the ledger does not hold (a kill between the file and its entry, or a file the coder wrote)
     if not tested:
         cover = covering_stage(ledger, run_dir, c)
         if cover is not None:
-            edir.mkdir(parents=True, exist_ok=True)
-            path = full_port_entries.write_json(covered_path, {"chips": c, **cover})
+            path = _write_json_beneath(sup, pin, covered_path, {"chips": c, **cover})
             ledger.append("evidence", n, what=COVERED_WHAT, **evidence_record(run_dir, path))
             ledger.append("decision", n, decision="entry covered by an earlier stage", config=c, covered_by=cover["covered_by"],
                           evidence=cover["evidence"], record=cover["record"])
             return []
-        problems = _prepare(sup, spec, stage_dir, entry, escalated, resumed)
+        problems, deadline = _prepare(sup, spec, stage_dir, entry, escalated, resumed, pin)
         if problems:
             return [f"{where}: {p}" for p in problems]
-        sup._run_listed(spec, stage_dir, entry)
+        # The deadline the supervisor's check pinned into hw_test.json (the coder's own, when it is shorter than the default) bounds the test; the
+        # plan's deadline stays the longest it can be (review of PR 489).
+        runnable = dataclasses.replace(entry, deadline_s=min(entry.deadline_s, float(deadline))) if deadline else entry
+        sup._run_listed(spec, stage_dir, runnable)
     # ---- the entry's result, from the record ----
     why = full_port_entries.marker_problem(edir, c)
     if why:
@@ -251,10 +291,10 @@ def _one_entry(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool
     result, because = full_port_result.derive(edir, run_dir, rehearsal=rehearsal)
     if result is None:
         return [f"{where}: no result could be derived from the check's record: {because}"]
-    full_port_entries.write_json(path, result)
+    _write_json_beneath(sup, pin, path, result)
     reasons, _ = full_port.check(edir, run_dir, rehearsal=rehearsal, stage=full_port.ENTRY_STAGE, entry=c)
     if reasons:
-        path.unlink(missing_ok=True)
+        safeio.unlink_beneath(pin.fd, _parts(sup, path))
         ledger.append("decision", n, decision="entry result refused by the check", config=c, why="; ".join(reasons[:3])[:300])
         return [f"{where}: {r}" for r in reasons]
     ledger.append("evidence", n, what=ENTRY_RESULT_WHAT, **evidence_record(run_dir, path))
@@ -263,14 +303,15 @@ def _one_entry(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool
     return []
 
 
-def _prepare(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool) -> list[str]:
-    """The entry's prepare phase and the supervisor's own steps around it. Returns the problems that stop the entry."""
+def _prepare(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool, pin) -> tuple[list[str], float | None]:
+    """The entry's prepare phase and the supervisor's own steps around it. Returns (the problems that stop the entry, the deadline of the
+    entry's hw_test.json when it was read). A step that ends `abort`, `operator-pause`, `pause` or `escalate` raises `_Ended`."""
     n = spec.number
     edir = entry.directory(stage_dir)
     rel = os.path.relpath(edir, sup.run_dir)
-    (edir / "evidence").mkdir(parents=True, exist_ok=True)
+    safeio.mkdir_beneath(pin.fd, _parts(sup, edir / "evidence"))
     if problems := sup._pin_full_port(spec, edir, entry=entry.chips):
-        return problems
+        return problems, None
     seed = seed_stage(sup.ledger.read())
     sup._seed_stage_3_port(spec, edir, source=seed)
     prepared = edir / PREPARED
@@ -280,18 +321,22 @@ def _prepare(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool) 
         out, step = sup._step(spec, "prepare", edir, escalated, resumed, extra=note)
         out = sup._wrap_up(spec, edir, step, out)
         if out.status != "done":
-            return [f"the prepare step ended: {out.status} {out.detail}".strip()]
-        full_port_entries.write_json(prepared, {"chips": entry.chips, "seed_stage": seed})
+            why = [f"the prepare step ended: {out.status} {out.detail}".strip()]
+            if out.status in ENDING_STATUSES:
+                raise _Ended(out.status, [f"the {entry.chips}-chip entry: {why[0]}"])
+            return why, None
+        _write_json_beneath(sup, pin, prepared, {"chips": entry.chips, "seed_stage": seed})
     # Nothing in the entry may claim a result before the test has run; the template and the fixed command go back as shipped.
     if moved := swap_prepare.set_aside_results(edir):
         sup.ledger.append("decision", n, decision="results written before the test were set aside", config=entry.chips, files=moved)
     if problems := sup._pin_full_port(spec, edir, command=True, entry=entry.chips):
-        return problems
+        return problems, None
     sup._check_port_cache(spec, edir)
-    _, problems = sup._read_test(edir)
+    test, problems = sup._read_test(edir)
     if not problems:
         # The park reads the coder's note from stages/<n>/handoff.json (`Supervisor._handoff`). The entry's note, which `_read_test` has just
         # checked, is copied there by the supervisor, so a wide entry can park the coder and the stand-in is told what the coder was doing.
         data = safeio.read_bytes(edir / "handoff.json", max_bytes=full_port_entries.JSON_MAX)
         safeio.atomic_write(Path(stage_dir) / "handoff.json", data, mode=0o644)
-    return problems
+    deadline = test.get("deadline_s") if isinstance(test, dict) and not problems else None
+    return problems, deadline
