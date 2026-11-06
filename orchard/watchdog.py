@@ -447,8 +447,8 @@ class FirstWriteDeadline:
     """A step that has made `turns` model turns in a row without writing any file gets one hint that says what to write (issue 427).
 
     The stage 2 prepare step's first attempt read the reference files for 20 turns and wrote no port. NoFileWritten nudges at 20 turns and
-    counts the nudge as a rung, so a second stall escalates the coder. This detector acts earlier and more gently: at the step's own deadline
-    (the task asks for a first version within that many turns) it sends one `nudge_only` hint, which uses no rung, whose text comes from
+    counts the nudge as a rung, so a second stall escalates the coder. This detector acts earlier and more gently: one response after the step's own deadline
+    (the task asks for a first version within that many turns; the hint waits for that turn's tools, so a first write on the deadline turn gets none) it sends one `nudge_only` hint, which uses no rung, whose text comes from
     `message(count)`. The supervisor builds that text from the port file as it stands, so it names the file and what to put in it.
 
     A step starts with its first response (turn 1; a continuation keeps counting from its step). The count and the once-per-step flag start
@@ -464,14 +464,16 @@ class FirstWriteDeadline:
         self.message, self.turns = message, turns
         self._count: dict[str, int] = {}
         self._fired: set[str] = set()
+        self._due: set[str] = set()      # the deadline passed on a response whose tools have not all run yet (review of PR 501)
 
     def _new_step(self, agent: str) -> None:
         self._count.pop(agent, None)
         self._fired.discard(agent)
+        self._due.discard(agent)
 
     def feed(self, ev: Event) -> Finding | None:
         if NoFileWritten._is_write(ev):
-            self._new_step(ev.agent)
+            self._new_step(ev.agent)       # a write on the deadline turn cancels the hint that turn would have queued
             return None
         if ev.kind != "response":
             return None
@@ -479,13 +481,20 @@ class FirstWriteDeadline:
             self._new_step(ev.agent)
         if ev.agent in self._fired:
             return None
+        # The hint for a deadline passed on the previous response is sent now: that response's tools have run, and none of them wrote a file
+        # (a write would have cleared `_due`). Sending it at the deadline response itself would queue the text before the turn's tools run,
+        # and a first write on that turn would still be told the port is the skeleton.
+        if ev.agent in self._due:
+            self._due.discard(ev.agent)
+            self._fired.add(ev.agent)
+            count = self._count[ev.agent]
+            return Finding(self.name, ev.agent, ev.ts, f"{count} model turns in a row and no file written; the write deadline passed",
+                           {"turns": count}, nudge_only=True, nudge=str(self.message(count)))
         count = self._count.get(ev.agent, 0) + 1
         self._count[ev.agent] = count
-        if count < self.turns:
-            return None
-        self._fired.add(ev.agent)
-        return Finding(self.name, ev.agent, ev.ts, f"{count} model turns in a row and no file written; the write deadline passed",
-                       {"turns": count}, nudge_only=True, nudge=str(self.message(count)))
+        if count >= self.turns:
+            self._due.add(ev.agent)
+        return None
 
 
 class DedupeStreak:

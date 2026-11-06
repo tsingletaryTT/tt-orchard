@@ -1947,7 +1947,7 @@ class Supervisor:
         except (safeio.SafeReadError, OSError):
             unchanged = False        # no port file, or one that cannot be read safely: the generic hint, which claims nothing about it
         try:
-            safeio.read_prefix(stage_dir / port_facts.EXCERPT_FILE, max_bytes=1)
+            safeio.read_prefix(stage_dir / port_facts.EXCERPT_FILE, max_bytes=phone_a_friend.EXCERPTS_CAP)      # the whole-file cap, as the helper reads it (review of PR 501)
             excerpts = True
         except (safeio.SafeReadError, OSError):
             excerpts = False
