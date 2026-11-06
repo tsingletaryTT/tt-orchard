@@ -30,6 +30,7 @@ What this does not show: a port that returns the reference's ids without computi
 gate's source checks (a port file must mention ttnn and must not read the stage 1 reference) make the plain forms visible. Timing and
 quality are measured on one prompt. The benchmark is batch size one.
 """
+import errno
 import hashlib
 import importlib
 import json
@@ -203,6 +204,72 @@ class QualityFailed(Exception):
         self.kind, self.op = kind, op
 
 
+def proc_stat(pid: int):
+    """(parent pid, start time in clock ticks) of a process from /proc/<pid>/stat, or None when it is gone or unreadable. The start time with the
+    pid names one process for the life of the machine's boot."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:  # hardening: ok reads /proc/<pid>/stat, a kernel file
+            rest = f.read().rsplit(b")", 1)[1].split()
+        return int(rest[1]), int(rest[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _pidfd_open(pid: int) -> int:
+    """A pidfd for `pid`. Some Python builds lack os.pidfd_open, so the system call (434 on x86-64 and arm64) is the fallback; OSError when the
+    kernel has no pidfds or the process is gone."""
+    if hasattr(os, "pidfd_open"):
+        return os.pidfd_open(pid)
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.syscall(434, pid, 0)
+    if fd < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    return fd
+
+
+def _pidfd_kill(fd: int) -> None:
+    """SIGKILL the process a pidfd names (pidfd_send_signal, call 424, when the signal module lacks it)."""
+    if hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(fd, signal.SIGKILL)
+        return
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.syscall(424, fd, int(signal.SIGKILL), None, 0) < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+
+def kill_if_same(pid: int, started: int) -> bool:
+    """SIGKILL `pid` only if it is still the process that started at `started`. A pidfd is opened first and the start time is read after that, so
+    the signal goes to the process the descriptor names even if the number is reused a moment later. On a kernel without pidfds the start time
+    is checked just before os.kill, which leaves a window of a few instructions."""
+    try:
+        fd = _pidfd_open(pid)
+    except OSError as exc:
+        if exc.errno in (errno.ENOSYS, errno.EPERM):  # no pidfds here: the start-time check alone
+            now = proc_stat(pid)
+            if now is None or now[1] != started:
+                return False
+            try:
+                os.kill(pid, signal.SIGKILL)
+                return True
+            except OSError:
+                return False
+        return False
+    try:
+        now = proc_stat(pid)
+        if now is None or now[1] != started:
+            return False
+        _pidfd_kill(fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 class Worker:
     """The worker process and its pipes. `ask` sends one request and returns the reply (a dict)."""
 
@@ -274,25 +341,22 @@ class Worker:
         return answer_
 
     def kill_descendants(self) -> None:
-        """SIGKILL every process below the worker (children the port started), found through /proc (the same method as port_check.py)."""
+        """SIGKILL every process below the worker (children the port started), found through /proc (the same method as port_check.py). The scan
+        keeps each child's start time with its pid, and a child is signalled only if a pidfd taken afterwards still shows that start time, so a pid
+        that was freed and reused between the scan and the signal is left alone (review of PR 491)."""
         parents = {}
         for entry in os.listdir("/proc"):
             if entry.isdigit():
-                try:
-                    with open(f"/proc/{entry}/stat", "rb") as f:  # hardening: ok reads /proc/<pid>/stat, a kernel file
-                        parents[int(entry)] = int(f.read().rsplit(b")", 1)[1].split()[1])
-                except (OSError, ValueError, IndexError):
-                    continue
+                stat = proc_stat(int(entry))
+                if stat is not None:
+                    parents[int(entry)] = stat
         found, frontier = [], [self.proc.pid]
         while frontier:
-            kids = [p for p, pp in parents.items() if pp in frontier and p not in found]
+            kids = [p for p, (pp, _) in parents.items() if pp in frontier and p not in found]
             found.extend(kids)
             frontier = kids
         for pid in reversed(found):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+            kill_if_same(pid, parents[pid][1])
 
     def stop(self) -> None:
         self.kill_descendants()
@@ -397,6 +461,9 @@ def main() -> int:
     RECORD.parent.mkdir(parents=True, exist_ok=True)
     if RECORD.exists() or RECORD.is_symlink():
         RECORD.unlink()
+    # The model's config.json is hashed before the port runs. The floor and the share are worked out from that file, so a port that rewrites it
+    # during load() or close() must not be able to choose the file the gate later hashes (review of PR 491).
+    config_sha = sha_file(Path(model_dir) / "config.json")
 
     w = Worker()
     try:
@@ -424,6 +491,8 @@ def main() -> int:
     finally:
         w.stop()
     refuse_links()
+    if sha_file(Path(model_dir) / "config.json") != config_sha:
+        raise QualityFailed("the model's config.json changed while the port ran: the floor and the share would describe another configuration")
     if FORGED.is_set():
         raise QualityFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
 
@@ -437,7 +506,7 @@ def main() -> int:
                         "timed_by": "this process's monotonic clock around each request round trip (pipe and argmax included)"},
               "dtype_policy": policy if policy else {"default": "bf16"},
               "dtype_policy_source": "declared by the port (DTYPE_POLICY)" if policy else "assumed: the port declares no DTYPE_POLICY, so every weight is taken as bf16",
-              "model_config": {"path": "config.json", "sha256": sha_file(Path(model_dir) / "config.json")},
+              "model_config": {"path": "config.json", "sha256": config_sha},
               "port_sources": port_sources(), "template_sha256": sha_file(__file__),
               "config": {"path": str(CONFIG_FILE.relative_to(RUN_DIR)), "sha256": sha_file(CONFIG_FILE)}}
     data = (json.dumps(record, indent=2) + "\n").encode("utf-8")
