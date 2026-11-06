@@ -280,6 +280,18 @@ def stop_ids(snapshot: Path) -> list:
     return sorted(set(out))
 
 
+def vocab_bound(snapshot: Path, tokenizer_count: int) -> int:
+    """The token-id bound for requests: the larger of the tokenizer's entry count and the snapshot's `vocab_size` (top level or `text_config`).
+    A padded embedding table has valid ids above the tokenizer's count (review of PR 490, round 6); ids at or above the bound are still a 400."""
+    config = read_json(snapshot / "config.json")
+    sizes = [tokenizer_count]
+    for doc in (config, config.get("text_config") if isinstance(config.get("text_config"), dict) else {}):
+        value = doc.get("vocab_size")
+        if type(value) is int and 0 < value <= 10_000_000:
+            sizes.append(value)
+    return max(sizes)
+
+
 def kernel_cache() -> tuple[str, int]:
     """(directory, files in it): TT_METAL_CACHE, else ~/.cache/tt-metal-cache. A directory that does not exist has 0 entries."""
     home = os.path.expanduser("~")
@@ -378,7 +390,7 @@ def main() -> int:
         w.ask(op="load", model_dir=str(snapshot))
         load_s = max(time.monotonic() - t0, 1e-6)
         print(f"loaded in {load_s}s", flush=True)
-        engine = Engine(w, int(config["max_len"]), tok, stop_ids(snapshot), render, vocab_size=tok.get_vocab_size(with_added_tokens=True))
+        engine = Engine(w, int(config["max_len"]), tok, stop_ids(snapshot), render, vocab_size=vocab_bound(snapshot, tok.get_vocab_size(with_added_tokens=True)))
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(engine))
         port = server.server_address[1]
         if port in FORBIDDEN_PORTS or 8100 <= port <= 8103:
