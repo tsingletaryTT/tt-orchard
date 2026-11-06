@@ -1954,3 +1954,21 @@ def test_write_beneath_if_syncs_the_directory_after_the_file_is_published(tmp_pa
     finally:
         os.close(fd)
     assert events.index("publish") < len(events) - 1 and events[events.index("publish") + 1:] == ["dir-sync"], events
+
+
+def test_write_beneath_syncs_each_new_directory_and_the_rename(tmp_path, monkeypatch):
+    """Review of PR 497: the file's bytes were synced, but not the directory entries that make it findable after a crash. Every directory the call
+    makes is synced through its parent, and the file's own directory is synced after the rename."""
+    import os
+    synced = []
+    real = os.fsync
+
+    def spy(fd):
+        if os.path.isdir(f"/proc/self/fd/{fd}"):
+            synced.append(os.path.realpath(f"/proc/self/fd/{fd}"))
+        return real(fd)
+    monkeypatch.setattr(os, "fsync", spy)
+    with safeio.pinned_root(tmp_path) as pin:
+        safeio.write_beneath(pin.fd, ("a", "b", "f.txt"), b"x")
+    root, a, b = (str(tmp_path.resolve()), str((tmp_path / "a").resolve()), str((tmp_path / "a" / "b").resolve()))
+    assert synced == [root, a, b], synced           # the entry for a (in root), the entry for b (in a), then the rename (in b)
