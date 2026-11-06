@@ -217,7 +217,7 @@ def test_the_start_trigger_lets_the_coder_go_on_only_when_the_agreement_rose():
 def test_an_answer_is_listed_with_the_agreement_its_ask_was_made_at():
     entries = [{"seq": 1, "stage": 2, "event": "decision", "data": {"decision": rh.ASKED, "round": 1, "failure_op": "numerics", "failure_agreement": 0.5}},
                {"seq": 2, "stage": 2, "event": "decision", "data": {"decision": rh.ANSWERED, "ok": True, "call_id": "c1"}}]
-    assert rh.unreported(entries, 2) == [{"call_id": "c1", "round": 1, "failure_op": "numerics", "failure_agreement": 0.5, "seq": 2, "placed": False}]
+    assert rh.unreported(entries, 2) == [{"call_id": "c1", "round": 1, "failure_op": "numerics", "failure_agreement": 0.5, "seq": 2, "placed": False, "discarded": False}]
 
 
 # ---- the loop ----------------------------------------------------------------------------------------------------------------------------
