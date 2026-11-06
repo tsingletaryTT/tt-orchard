@@ -343,3 +343,132 @@ def test_an_evidence_directory_replaced_by_a_link_is_refused_and_nothing_is_writ
         f"(os.rename(os.path.join(here, 'evidence'), os.path.join(here, 'evidence.moved')), os.symlink({str(out)!r}, os.path.join(here, 'evidence')))")
     assert done.returncode == 2 and "link" in done.stdout, done.stdout + done.stderr
     assert [p.name for p in out.iterdir() if p.name.startswith("port-serve")] == []  # (hw-test-output.txt is the test runner's own)
+
+
+# ---- round 4 (second Copilot round of PR 490) -----------------------------------------------------------------------------------------
+
+def _template(tmp_path):
+    """The shipped template as a module, with its run directory moved under `tmp_path` (it opens no device on import)."""
+    import importlib.util
+    from pathlib import Path
+    src = Path(full_port_serve.__file__).parent / "skills" / "full-port-templates" / "port_serve.py"
+    spec = importlib.util.spec_from_file_location("port_serve_under_test", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    run_dir = tmp_path / "run"
+    (run_dir / "stages" / "5" / "evidence").mkdir(parents=True)
+    mod.HERE, mod.RUN_DIR = run_dir / "stages" / "5", run_dir
+    mod.RECORD = mod.HERE / "evidence" / "port-serve.json"
+    return mod
+
+
+def test_a_stage_directory_swapped_for_a_link_between_the_check_and_the_write_is_not_written_through(tmp_path, monkeypatch):
+    """Finding: the realpath comparison and the open were two steps; swapping `stages/5` for a link in between sent the record outside the run.
+    The swap happens at each point the check or the descent passes: the old code's realpath and islink calls, and the new code's descent."""
+    mod = _template(tmp_path)
+    outside = tmp_path / "outside"
+    (outside / "evidence").mkdir(parents=True)
+    swapped = []
+
+    def swap():
+        if not swapped:
+            swapped.append(1)
+            os.rename(mod.HERE, mod.HERE.with_name("5.moved"))
+            os.symlink(outside, mod.HERE)
+    real_realpath, real_islink, real_open = os.path.realpath, os.path.islink, os.open
+    monkeypatch.setattr(os.path, "realpath", lambda p, *a, **k: (lambda r: (swap(), r)[1])(real_realpath(p, *a, **k)))
+    monkeypatch.setattr(os.path, "islink", lambda p: (lambda r: (swap(), r)[1])(real_islink(p)))
+    monkeypatch.setattr(os, "open", lambda p, *a, **k: (swap() if p == "5" else None, real_open(p, *a, **k))[1])
+    with pytest.raises(mod.ServeFailed):
+        mod.write_record(b"{}")
+    assert list((outside / "evidence").iterdir()) == []
+
+
+class _Worker:
+    def __init__(self):
+        self.calls = []
+
+    def ask(self, **kw):
+        self.calls.append(kw)
+        return 5
+
+
+class _Tok:
+    def encode(self, text, add_special_tokens=False):
+        return type("E", (), {"ids": [1, 2, 3]})()
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "x"
+
+
+def _served(tmp_path):
+    import threading
+    from http.server import ThreadingHTTPServer
+    mod = _template(tmp_path)
+    worker = _Worker()
+    engine = mod.Engine(worker, 100, _Tok(), [], lambda m: "t")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), mod.make_handler(engine))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return mod, engine, worker, server
+
+
+def _post(mod, server, body, headers=None):
+    import http.client
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+    conn.request("POST", "/v1/completions", json.dumps(body), {"Content-Type": "application/json", **(headers or {})})
+    resp = conn.getresponse()
+    return resp.status, resp.read()
+
+
+def test_an_ordinary_request_is_refused_until_the_replay_has_matched_and_the_port_is_not_run(tmp_path):
+    """Finding: the listener took ordinary requests during the corpus replay."""
+    mod, engine, worker, server = _served(tmp_path)
+    try:
+        body = {"prompt": [1, 2], "max_tokens": 1}
+        status, _ = _post(mod, server, body)
+        assert status == 503 and worker.calls == []
+        status, _ = _post(mod, server, body, {"X-Orchard-Replay": engine.replay_token})
+        assert status == 200 and worker.calls
+        engine.open = True
+        status, _ = _post(mod, server, body)
+        assert status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("body", [{"prompt": [-1], "max_tokens": 1}, {"prompt": [1], "max_tokens": 2, "forced_tokens": [-1]}])
+def test_a_negative_token_id_is_a_400_and_the_port_is_not_run(tmp_path, body):
+    """Finding: `prompt: [-1]` and `forced_tokens: [-1]` reached the worker."""
+    mod, engine, worker, server = _served(tmp_path)
+    engine.open = True
+    try:
+        status, _ = _post(mod, server, body)
+        assert status == 400 and worker.calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_result_that_lists_other_files_with_the_right_names_is_refused(run):
+    """Finding: the gate checked only the base names of result.evidence, so copies elsewhere in the run passed as the stage's evidence."""
+    import shutil
+    other = run["run"] / "elsewhere"
+    other.mkdir()
+    r = json.loads((run["stage"] / "result.json").read_text())
+    listed = []
+    for rel in r["evidence"]:
+        name = os.path.basename(rel)
+        shutil.copy(run["run"] / rel, other / name)
+        listed.append(f"elsewhere/{name}")
+    edit = {"evidence": listed, "checks": {k: {**v, "evidence": listed} for k, v in r["checks"].items()}}
+    (run["stage"] / "result.json").write_text(json.dumps({**r, **edit}))
+    refused(run, "evidence must be exactly")
+
+
+@pytest.mark.parametrize("value", [[1, 2], None])
+def test_a_changed_top_level_passkey_lengths_is_refused(run, value):
+    """Finding: result.json passkey_lengths was never compared with the record."""
+    p = run["stage"] / "result.json"
+    p.write_text(json.dumps({**json.loads(p.read_text()), "passkey_lengths": value}))
+    refused(run, "passkey_lengths")

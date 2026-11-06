@@ -191,6 +191,9 @@ def safe_text(raw: str, homes: tuple = ()) -> str:
     return scrub_secrets(redact(raw, homes))
 
 
+PORT_AT_TEST = "port files at test start"     # the supervisor's decision, written before a hardware test starts: the port directory's fingerprint
+
+
 def digest(sources: dict) -> str:
     """One sha256 for a `fingerprint` of the port directory."""
     return hashlib.sha256(json.dumps(sources, sort_keys=True).encode("utf-8")).hexdigest()

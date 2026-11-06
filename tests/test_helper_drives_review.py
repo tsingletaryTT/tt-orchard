@@ -210,6 +210,8 @@ def _passed_check_stub(tmp_path, *, vouched):
     led.append("stage_start", 2, escalated=False, resumed=False)
     if vouched:
         marker = (stage / port_repair.MARKER).read_bytes()
+        # What `_run_test` writes before the test starts: the whole port directory, every regular file (review of PR 497, round 4).
+        led.append("decision", 2, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage / "port"))
         led.append("evidence", 2, path="stages/2/" + port_repair.MARKER, sha256=hashlib.sha256(marker).hexdigest(), returncode=0, timed_out=False)
     s = object.__new__(Supervisor)
     s.run_dir, s.ledger, s.repair_help, s.helper_drives, s.telegraph = run, led, True, True, object()

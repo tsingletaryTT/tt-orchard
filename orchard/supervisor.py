@@ -326,7 +326,9 @@ class RunActuator:
         self._stop = "pause"
         # A pause the stage's wall-clock budget caused is kept apart: no helper rescue lifts it (review of PR 496, round 3).
         findings = evidence.get("findings") if isinstance(evidence, dict) else None
-        self.deadline_pause = any(isinstance(f, dict) and f.get("detector") == "stage_over_budget" for f in findings or [])
+        # Sticky: a later pause from the coder ladder must not lower the flag a budget pause raised, because the agent step goes on feeding events
+        # until it next asks whether to stop. Only `clear()` lowers it (review of PR 496, round 4).
+        self.deadline_pause = self.deadline_pause or any(isinstance(f, dict) and f.get("detector") == "stage_over_budget" for f in findings or [])
 
     def take_nudges(self, agent: str) -> list[str]:
         return self._nudges.pop(agent, [])
@@ -1138,6 +1140,7 @@ class Supervisor:
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
+                               **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
                                **({"helper_drives": self.helper_drives} if self.helper_drives is not None else {}),
@@ -2519,7 +2522,8 @@ class Supervisor:
                         # when it was not asked at the start of this round. A placed answer lets the round go on to its check.
                         helped_on = False
                         # A pause the stage's wall-clock budget caused stays in effect: a rescue would run another hardware check past the deadline.
-                        deadline = out.status == "pause" and getattr(self.actuator, "deadline_pause", False)
+                        # The flag is read whatever status the step returned: a step can raise it on a pause and then end `error` on a capped reply.
+                        deadline = bool(getattr(self.actuator, "deadline_pause", False))
                         if (out.status in ("pause", "escalate", "error") and not deadline and not asked_here and self.repair_help
                                 and getattr(self, "telegraph", None) is not None):
                             _note, helped_on, _ = self._repair_help(spec, stage_dir, k, limit, failure, raw,
@@ -2528,6 +2532,12 @@ class Supervisor:
                             return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
                         if out.status in ("pause", "escalate"):
                             self._consume_handled_stop(n, out.status)
+                        # The operator may have written abort or pause while the helper's reply was awaited. The rescue does not override it, and no
+                        # hardware check starts on its strength (review of PR 496, round 4).
+                        if (command := self.actuator.stop_reason()) in ("abort", "operator-pause"):
+                            self.ledger.append("decision", n, decision="helper rescue stopped", round=k, command=command,
+                                               reason="the operator's command arrived while the helper's reply was awaited")
+                            return command, [f"the repair step ended: {command} (the operator's command arrived while the helper's reply was awaited)"], None
                 touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
                 if touched:
                     self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
@@ -3504,6 +3514,19 @@ class Supervisor:
         data, _ = repair_help.read_port(stage_dir)
         return hashlib.sha256(data).hexdigest() if data is not None else None
 
+    def _saved_is_tested(self, n: int, saved: dict) -> bool:
+        """Whether the snapshot `saved` holds exactly the files the latest hardware test of stage `n` started with: the newest
+        `port files at test start` decision before that test's evidence entry, compared file by file (every regular file, not only the sources the
+        check's record lists). False when no such decision exists."""
+        entries = self.ledger.read()
+        tests = [e for e in entries if e.get("stage") == n and e.get("event") == "evidence" and "returncode" in e["data"] and "timed_out" in e["data"]]
+        if not tests:
+            return False
+        before = [e for e in entries if e.get("stage") == n and e.get("event") == "decision"
+                  and e["data"].get("decision") == port_repair.PORT_AT_TEST and e["seq"] < tests[-1]["seq"]]
+        manifest = before[-1]["data"].get("sources") if before else None
+        return isinstance(manifest, dict) and manifest == {item["path"]: item["sha256"] for item in saved["files"]}
+
     def _record_best(self, n: int, stage_dir: Path, failure: dict) -> None:
         """Keep the furthest port: when the check that just failed got further along the request chain than every earlier check of this stage
         (across attempts), save the port directory it ran as a snapshot under stages/2.best/ and write `best port recorded` with its op, rank, file list and hashes.
@@ -3518,6 +3541,11 @@ class Supervisor:
                 return
             saved = repair_help.save_best(stage_dir)
             if saved is None:
+                return
+            if not self._saved_is_tested(n, saved):
+                # A resume after an edit made while the supervisor was stopped would otherwise save the untested files at the old failure's rank.
+                self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0,
+                                   reason="best port not recorded: the port directory is not the one the failed check ran on")
                 return
             # The snapshot is on disk under its own name before the entry that names it: a stop between the two leaves an unreferenced directory
             # and the earlier best port still restorable (review of PR 497).
@@ -3575,8 +3603,11 @@ class Supervisor:
             # marker alone. The record the test wrote names the sources it ran, and its hash is printed in the output the marker vouches for; the
             # snapshot is kept at the passing rank only when it holds exactly those files (review of PR 497, round 3). Otherwise the earlier
             # best port stays.
+            # The record lists the Python sources it ran; every other regular file of the snapshot (a converted cache the skill asks for) is
+            # authenticated by the supervisor's own manifest from before the test (`_saved_is_tested`), so a port with such a file can still pass.
             tested = self._tested_sources(stage_dir)
-            if tested is None or tested != {f"stages/{n}/port/{item['path']}": item["sha256"] for item in saved["files"]}:
+            if (tested is None or not self._saved_is_tested(n, saved)
+                    or tested != {f"stages/{n}/port/{item['path']}": item["sha256"] for item in saved["files"] if item["path"].endswith(".py")}):
                 self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0,
                                    reason="best port not recorded: the port directory is not the one the passing check ran on")
                 return
@@ -3777,6 +3808,12 @@ class Supervisor:
         except (safeio.SafeReadError, OSError, ValueError):
             return False, None, False, None
         if not recorded_by_supervisor(self.ledger, n, found):
+            return False, None, False, None
+        # The record must be the newest hardware test's: an earlier test's marker and output restored over a later rerun's would match its own
+        # old evidence entry and judge the wrong test (review of PR 496, round 4).
+        tests = [e["data"] for e in self.ledger.read() if e.get("event") == "evidence" and e.get("stage") == n
+                 and "returncode" in e["data"] and "timed_out" in e["data"]]
+        if not tests or (tests[-1].get("path"), tests[-1].get("sha256")) != (found["path"], found["sha256"]):
             return False, None, False, None
         if data.get("returncode") == 0 and data.get("timed_out") is False:
             state, numbers = port_repair.numerics_state(self.run_dir, stage_dir, marker=data)
@@ -4812,6 +4849,11 @@ class Supervisor:
                   output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,
                   extra: Lease | None = None, boards: int | None = None) -> dict:
         n = spec.number
+        if n == 2 and record == "test-result.json" and self._helper_drive_on():
+            # The port directory as the test is about to run it, written by the supervisor before anything runs: a best-port snapshot is kept
+            # only when it holds exactly these files, so an edit made while the supervisor was stopped, or after the test, is never recorded as
+            # the port a check ran on (review of PR 497, round 4).
+            self.ledger.append("decision", n, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage_dir / port_repair.PORT_DIR))
         k = (boards or spec.boards) * CHIPS_PER_BOARD       # a wider test (issue 60) holds more chips than the stage's own
         deadline = min(float(test["deadline_s"]), spec.budget_s)
         out_path = stage_dir / output
@@ -5671,6 +5713,11 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
             raise ValueError("this run started with the tool-result dedupe on; --no-tool-dedupe differs. Leave the option out to resume with the recorded "
                              "value, or move this run's directory aside and start a new run (the dedupe changes what the agent was sent)")
         tool_dedupe = recorded_dedupe
+    # `--no-repair-help` is recorded in run_start only when off. A resumed run keeps it off: the opt-out says the port files are not sent to the
+    # outside helper, and a resume that forgot it would send them (review of PR 496, round 4).
+    repair_help_off = bool(getattr(args, "no_repair_help", False))
+    if progress.started and (progress.run_start or {}).get("repair_help") is False:
+        repair_help_off = True
     home = operator_home() if home is None else home
     paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
                       home=home, environ=environ)
@@ -5721,7 +5768,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
             package = recorded
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
                       telegraph=_telegraph_from(getattr(args, "telegraph_config", None), environ=environ, home=home),
-                      repair_help=False if getattr(args, "no_repair_help", False) else None,
+                      repair_help=False if repair_help_off else None,
                       helper_drives=helper_drives,
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
