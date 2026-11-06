@@ -231,6 +231,29 @@ def test_a_covering_stage_that_ran_on_other_chips_than_the_count_covers_nothing(
     assert one(gate(stage_dir, run), "does not cover this entry")
 
 
+def test_a_covering_record_that_the_output_does_not_vouch_for_covers_nothing(tmp_path):
+    # Review of PR 489: the covering was accepted on the hashes of the marker and the record alone. The record must also be the one whose hash
+    # the test's own output printed, or a rewritten record (with its new hash put in covered.json) would cover an entry.
+    stage_dir, run = stage4_run(tmp_path)
+    rewrite(run / "stages/3/evidence/port-check.json", top1_agreement=1.0)
+    make_covered(run, 4)                      # covered.json now holds the rewritten record's hash
+    assert one(gate(stage_dir, run), "does not carry a PORT_CHECK_SHA256 line that matches")
+
+
+def test_a_covering_output_that_is_not_the_one_the_marker_recorded_covers_nothing(tmp_path):
+    stage_dir, run = stage4_run(tmp_path)
+    out = run / "stages/3/evidence/hw-test-output.txt"
+    out.write_text(out.read_text() + "a line added after the test\n")
+    assert one(gate(stage_dir, run), "is not the output file the supervisor recorded")
+
+
+def test_covering_stage_skips_a_stage_whose_record_the_output_does_not_vouch_for(tmp_path):
+    stage_dir, run = stage4_run(tmp_path)
+    rewrite(run / "stages/3/evidence/port-check.json", top1_agreement=1.0)
+    ledger = vouched_ledger(tmp_path, stage_dir, run)
+    assert full_port_stage4.covering_stage(ledger, run, 4) is None
+
+
 # ---- the ledger's half --------------------------------------------------------------------------------------------
 
 class Sup:

@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,59 +41,96 @@ class Prepared:
     pinned: dict = field(default_factory=dict)            # {"template", "worker", "config", "corpus"}: the sha256 of each file written
 
 
-def _scan(root: Path):
-    """Yield (relative parts, bytes) for each regular file under `root`, in sorted order, or raise ValueError naming why the directory is refused."""
-    seen = 0
-    stack = [(root, ())]
-    files = 0
-    while stack:
-        directory, parts = stack.pop()
-        if len(parts) >= MAX_DEPTH:
-            raise ValueError(f"more than {MAX_DEPTH} directory levels")
-        for entry in sorted(os.scandir(directory), key=lambda e: e.name):
-            seen += 1
-            if seen > MAX_ENTRIES:
-                raise ValueError(f"more than {MAX_ENTRIES} entries")
-            rel = (*parts, entry.name)
-            if entry.name == "__pycache__" or entry.name.endswith(".pyc"):
-                continue
-            if entry.is_symlink():
-                raise ValueError(f"{'/'.join(rel)} is a link")
-            if entry.is_dir(follow_symlinks=False):
-                stack.append((Path(entry.path), rel))
-                continue
-            if not entry.is_file(follow_symlinks=False):
-                raise ValueError(f"{'/'.join(rel)} is not a regular file")
-            files += 1
-            if files > MAX_FILES:
-                raise ValueError(f"more than {MAX_FILES} files")
-            yield rel, safeio.read_bytes(entry.path, max_bytes=MAX_FILE_BYTES)
+def _list_port(src) -> list[tuple[str, ...]]:
+    """The regular files under the pinned source directory `src`, as sorted name tuples, or ValueError naming why the directory is refused.
+
+    The walk is `safeio.scan_beneath`: it streams each directory one entry at a time (a directory with a million names is never held whole),
+    spends one budget of MAX_ENTRIES on every entry of every directory, opens each subdirectory beneath its parent with no link followed, and
+    refuses at MAX_DEPTH directory levels. `__pycache__` and `.pyc` files are skipped."""
+    found: list[tuple[str, ...]] = []
+
+    def visit(entry) -> None:
+        parts = entry.parts
+        if "__pycache__" in parts or parts[-1].endswith(".pyc"):
+            return
+        rel = "/".join(parts)
+        if entry.kind == "link":
+            raise ValueError(f"{rel} is a link")
+        if entry.kind == "dir":
+            return
+        if entry.kind != "file":
+            raise ValueError(f"{rel} is not a regular file")
+        if len(found) >= MAX_FILES:
+            raise ValueError(f"more than {MAX_FILES} files")
+        found.append(parts)
+
+    result = safeio.scan_beneath(src, visit, max_entries=MAX_ENTRIES, max_depth=MAX_DEPTH)
+    if result.entries_cut:
+        raise ValueError(f"more than {MAX_ENTRIES} entries")
+    if result.depth_cut:
+        raise ValueError(f"more than {MAX_DEPTH} directory levels")
+    if result.unreadable:
+        raise ValueError(f"a directory in it could not be read ({result.unreadable[0][1]})")
+    return sorted(found)
+
+
+def _clear_port(run, stage_parts: tuple[str, ...]) -> None:
+    """Remove what stands at `port` in the stage directory `stage_parts` (beneath the pin `run`): a real directory with its tree, or a link or a
+    file by itself. The stage directory is opened with no link followed at any name and the removal goes through its descriptor, so a link
+    planted at `stages/5` is refused (SafeReadError) and a link planted at `port` is removed and never followed."""
+    fd = safeio.open_beneath(run.fd, stage_parts)
+    try:
+        try:
+            mode = os.lstat("port", dir_fd=fd).st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(mode):
+            shutil.rmtree("port", dir_fd=fd)         # a port left by an earlier, unfinished attempt of this stage directory
+        else:
+            os.unlink("port", dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def copy_port(run_dir: Path, source: int, stage_dir: Path) -> tuple[list[dict], str | None]:
-    """Copy `stages/<source>/port/` to `<stage_dir>/port/`, replacing a port already there. Returns ([{"path", "sha256"}], None) or ([], why)."""
-    src, dst = Path(run_dir) / "stages" / str(source) / "port", Path(stage_dir) / "port"
-    if src.is_symlink() or not src.is_dir():
-        return [], f"stages/{source}/port/ is not a directory"
+    """Copy `stages/<source>/port/` to `<stage_dir>/port/`, replacing a port already there. Returns ([{"path", "sha256"}], None) or ([], why).
+
+    Both ends are anchored beneath one descriptor of the run directory (review of PR 490): the source is opened with no link followed at any
+    name, so a link planted at `stages/2` is refused, and the destination is removed and written only through descriptors, so a link planted
+    at `stages/5` cannot send the removal or a write outside the run."""
+    run_dir, stage_dir = Path(run_dir), Path(stage_dir)
+    src_parts = ("stages", str(source), "port")
     try:
-        found = sorted(_scan(src))
-    except ValueError as exc:
-        return [], f"stages/{source}/port/ cannot be copied: {exc}"[:300]
+        stage_parts = stage_dir.relative_to(run_dir).parts
+    except ValueError:
+        return [], "the stage directory is not inside the run directory"
+    if not stage_parts:
+        return [], "the stage directory is not inside the run directory"
+    dst_parts = (*stage_parts, "port")
+    not_dir = f"stages/{source}/port/ is not a directory"
+    try:
+        with safeio.pinned_root(run_dir) as run:
+            try:
+                src = run.child(src_parts)
+            except safeio.SafeReadError:
+                return [], not_dir
+            with src:
+                try:
+                    found = _list_port(src)
+                except ValueError as exc:
+                    return [], f"stages/{source}/port/ cannot be copied: {exc}"[:300]
+                if not found:
+                    return [], f"stages/{source}/port/ holds no file"
+                safeio.mkdir_beneath(run.fd, stage_parts)
+                _clear_port(run, stage_parts)
+                out = []
+                for parts in found:
+                    data = safeio.read_beneath(run.fd, (*src_parts, *parts), max_bytes=MAX_FILE_BYTES)
+                    safeio.write_beneath(run.fd, (*dst_parts, *parts), data, mode=0o644)
+                    out.append({"path": f"stages/{full_port_serve.STAGE}/port/{'/'.join(parts)}", "sha256": hashlib.sha256(data).hexdigest()})
+                return out, None
     except (OSError, safeio.SafeReadError) as exc:
         return [], f"stages/{source}/port/ cannot be copied: {getattr(exc, 'reason', None) or exc.__class__.__name__}"[:300]
-    if not found:
-        return [], f"stages/{source}/port/ holds no file"
-    if dst.is_symlink() or dst.is_file():
-        dst.unlink()
-    elif dst.is_dir():
-        shutil.rmtree(dst)                       # a port left by an earlier, unfinished attempt of this stage directory
-    out = []
-    for parts, data in found:
-        target = dst.joinpath(*parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        safeio.atomic_write(target, data, mode=0o644)
-        out.append({"path": f"stages/{full_port_serve.STAGE}/port/{'/'.join(parts)}", "sha256": hashlib.sha256(data).hexdigest()})
-    return out, None
 
 
 def _put(path: Path, data: bytes, mode: int = 0o644) -> str:
