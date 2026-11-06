@@ -369,6 +369,30 @@ def test_a_shape_is_the_first_word_and_the_first_path_like_argument():
     assert command_shape("") == ""
 
 
+# Run 18 of the tiny Qwen4 rehearsal was stopped for "near-duplicate tool calls (cd /run/dir)" although the
+# four commands ran different programs. Every command began with `cd <run dir> &&`, and the shape took
+# "cd" and the run dir as the first word and path. A leading `cd X &&` is a setting, so it is skipped.
+
+@pytest.mark.parametrize("a,b", [
+    ("cd /run/dir && cat port_model.py | head -200", "cd /run/dir && grep -E 'ple|PLE' port_facts.json | head -50"),
+    ("cd /run/dir && cat port_model.py", "cd /run/dir && python3 -c 'print(1)'"),
+    ("cd /run/dir && cat a.json", "cd /run/dir && cat b.json"),
+    ("cd /run/dir; cat a.json", "cd /run/dir; cat b.json"),
+])
+def test_a_shared_cd_prefix_does_not_make_commands_look_alike(a, b):
+    from orchard.watchdog import command_shape
+    assert command_shape(a) != command_shape(b), (command_shape(a), command_shape(b))
+
+
+def test_a_cd_prefix_is_skipped_and_a_repeated_command_after_it_still_matches():
+    from orchard.watchdog import command_shape
+    assert command_shape("cd /run/dir && cat port_model.py | head -200") == "cat port_model.py"
+    assert command_shape("cd /run/dir && cat port_model.py | tail -200") == command_shape("cd /run/dir && cat port_model.py | head -50")
+    assert command_shape("cd /run/dir && cd sub && ls -la x/y") == "ls x/y"
+    assert command_shape('cd "/run dir" && cat a.json') == "cat a.json"
+    assert command_shape("cd /run/dir") == "cd /run/dir"        # a bare cd has nothing after it to describe
+
+
 def scall(ts, turn, args, shape):
     return Event(ts=ts, agent="a", kind="tool_call", tool="shell", args_hash=args, turn=turn, shape=shape)
 
