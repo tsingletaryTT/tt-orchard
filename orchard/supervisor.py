@@ -170,7 +170,7 @@ from orchard import token_check            # bounded reasons for the ledger (bou
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
 from orchard.stages import UNVERIFIED_LEDGER_DECISION
 from orchard.tiers import TierConfigError, load
-from orchard.watchdog import (DedupeStreak, Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
+from orchard.watchdog import (DedupeStreak, FirstWriteDeadline, Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
                               TurnRepeat, Watchdog)
 
@@ -1936,11 +1936,30 @@ class Supervisor:
 
     # ---- one stage ----------------------------------------------------------------------------
 
+    def _write_deadline_hint(self, turns: int) -> str:
+        """The text of the write-deadline hint (watchdog FirstWriteDeadline), made when it is sent from the port file as it stands: the hint
+        that names the skeleton's functions is right only while `port_model.py` is still byte for byte the supervisor's skeleton."""
+        stage_dir = self.run_dir / "stages" / "2"
+        try:
+            skeleton = safeio.read_bytes(port_facts.SKELETON, max_bytes=port_facts.SKELETON_MAX)
+            current = safeio.read_bytes(stage_dir / "port" / port_facts.SKELETON_NAME, max_bytes=port_facts.SKELETON_MAX)
+            unchanged = current == skeleton
+        except (safeio.SafeReadError, OSError):
+            unchanged = False        # no port file, or one that cannot be read safely: the generic hint, which claims nothing about it
+        try:
+            safeio.read_prefix(stage_dir / port_facts.EXCERPT_FILE, max_bytes=1)
+            excerpts = True
+        except (safeio.SafeReadError, OSError):
+            excerpts = False
+        return port_facts.write_deadline_hint(turns, port_is_skeleton=unchanged, excerpts=excerpts)
+
     def _watchdog(self, spec) -> Watchdog:
-        wd = Watchdog([IdenticalResponses(), ThinkingWithoutAction(), RepeatedToolCall(),
-                       NoNewEvidence(), NoFileWritten(), TurnRepeat(), DedupeStreak(),
-                       StageOverBudget({spec.number: spec.budget_s})],
-                      Ladder(self.actuator, self.ledger, {AGENT}))
+        detectors = [IdenticalResponses(), ThinkingWithoutAction(), RepeatedToolCall(),
+                     NoNewEvidence(), NoFileWritten(), TurnRepeat(), DedupeStreak(),
+                     StageOverBudget({spec.number: spec.budget_s})]
+        if spec.draft == "full_port" and spec.number == 2:
+            detectors.append(FirstWriteDeadline(self._write_deadline_hint))      # issue 427: a first attempt that only reads is told what to write
+        wd = Watchdog(detectors, Ladder(self.actuator, self.ledger, {AGENT}))
         t0 = attempt_started_ts(self.ledger.read(), spec.number) or self.clock()
         wd.feed(Event(ts=t0, agent="supervisor", kind="ledger", name="stage_start", stage=spec.number))
         return wd

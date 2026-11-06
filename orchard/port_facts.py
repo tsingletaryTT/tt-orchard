@@ -33,12 +33,13 @@ from pathlib import Path
 
 from orchard import full_port, residency, safeio
 from orchard.commands import run_command
+from orchard.defaults import FIRST_WRITE_TURNS
 
 SCHEMA = "orchard-port-facts/1"
 FACTS_NAME = "port_facts.json"
 SKELETON = Path(__file__).resolve().parent / "skills" / "full-port-templates" / "port_model_skeleton.py"
 SKELETON_NAME = "port_model.py"
-FIRST_VERSION_TURNS = 12          # choice: the watchdog nudges at 20 turns with no file written; a first version by 12 leaves room to refine
+FIRST_VERSION_TURNS = FIRST_WRITE_TURNS   # choice (defaults.py): the watchdog nudges at 20 turns with no file written; a first version by 12 leaves room to refine, and at 12 the write-deadline hint arrives
 MAX_CHARS = 10_500                # choice: under the agent's 12,000-character tool page, so one read_file returns the whole file
 CONFIG_MAX = 1 << 20              # config.json is a few kilobytes; this bound only stops a hostile file
 SOURCE_MAX = 1 << 20              # a transformers configuration module is tens of kilobytes
@@ -529,3 +530,18 @@ def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
     parts.append(f"When the port is written, write `hw_test.json` as {{\"command\": \"{full_port.COMMAND}\", \"deadline_s\": "
                  f"{full_port.DEADLINE_S}}} and `handoff.json`, then reply with a short summary and no tool call.")
     return "\n\n".join(parts)
+
+
+def write_deadline_hint(turns: int, *, port_is_skeleton: bool, excerpts: bool) -> str:
+    """The text of the one hint a stage 2 step gets when it has read for `turns` turns and written nothing (watchdog FirstWriteDeadline).
+    While the port is still the supervisor's skeleton it names the file and the four functions to fill in, and where the source to copy
+    from is. Once the port has been edited, the step is a repair or a finish step, and the hint says only to write what the step asks for."""
+    if not port_is_skeleton:
+        return (f"{turns} model turns have passed and you have written no file. Stop reading. Make the edit this step asks for now, "
+                "or say what blocks you.")
+    source = (f"`stages/2/{EXCERPT_FILE}` holds the source of the reference classes, and `stages/2/{FACTS_NAME}` holds the shapes"
+              if excerpts else f"`stages/2/{FACTS_NAME}` holds the shapes")
+    return (f"{turns} model turns have passed and `stages/2/port/port_model.py` is still the skeleton. Write it now with the write_file tool: "
+            "replace the NotImplementedError bodies of `load`, `prefill`, `decode_step` and `close`, keep `read_tensors`, and put the layer "
+            f"code in helper functions above them. {source}; you have everything you need in your context. An incomplete first version is "
+            "what this step needs. Do not open another reference file before you have written it.")

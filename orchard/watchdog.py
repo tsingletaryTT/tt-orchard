@@ -25,7 +25,7 @@ from typing import Protocol
 from orchard.adapters import AdapterError
 from orchard.defaults import (DEDUPE_HINT_PREFIX, DEDUPE_NUDGES_PER_STAGE, DEDUPE_STREAK_N, DEDUPE_STREAK_WINDOW, IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
                               RUNG_CAPS, THINKING_CAP, TURN_CYCLE_MAX_PERIOD, TURN_CYCLE_REPEATS, TURN_REPEAT_N,
-                              TURN_SHAPE_N, WRITELESS_TURNS)
+                              TURN_SHAPE_N, WRITELESS_TURNS, FIRST_WRITE_TURNS)
 
 KINDS = frozenset({"response", "tool_call", "tool_result", "evidence", "ledger"})
 
@@ -441,6 +441,51 @@ class NoFileWritten:
                               "`stages/2/reference_excerpts.md` exists it holds the reference "
                               "classes your model uses: write a first `stages/2/port/port_model.py` "
                               "from it now, even if it is incomplete, and refine it afterwards."))
+
+
+class FirstWriteDeadline:
+    """A step that has made `turns` model turns in a row without writing any file gets one hint that says what to write (issue 427).
+
+    The stage 2 prepare step's first attempt read the reference files for 20 turns and wrote no port. NoFileWritten nudges at 20 turns and
+    counts the nudge as a rung, so a second stall escalates the coder. This detector acts earlier and more gently: at the step's own deadline
+    (the task asks for a first version within that many turns) it sends one `nudge_only` hint, which uses no rung, whose text comes from
+    `message(count)`. The supervisor builds that text from the port file as it stands, so it names the file and what to put in it.
+
+    A step starts with its first response (turn 1; a continuation keeps counting from its step). The count and the once-per-step flag start
+    again there, and on any write, using the same definition of a write as NoFileWritten. The ledger shows each hint as a `hint` entry with
+    this detector's name, which is how the hints are counted."""
+    name = "first_write_deadline"
+
+    def __init__(self, message, turns: int = FIRST_WRITE_TURNS):
+        if turns < 1:
+            raise ValueError("turns must be at least 1")
+        if not callable(message):
+            raise TypeError("message must be a function from the turn count to the hint text")
+        self.message, self.turns = message, turns
+        self._count: dict[str, int] = {}
+        self._fired: set[str] = set()
+
+    def _new_step(self, agent: str) -> None:
+        self._count.pop(agent, None)
+        self._fired.discard(agent)
+
+    def feed(self, ev: Event) -> Finding | None:
+        if NoFileWritten._is_write(ev):
+            self._new_step(ev.agent)
+            return None
+        if ev.kind != "response":
+            return None
+        if ev.turn == 1:
+            self._new_step(ev.agent)
+        if ev.agent in self._fired:
+            return None
+        count = self._count.get(ev.agent, 0) + 1
+        self._count[ev.agent] = count
+        if count < self.turns:
+            return None
+        self._fired.add(ev.agent)
+        return Finding(self.name, ev.agent, ev.ts, f"{count} model turns in a row and no file written; the write deadline passed",
+                       {"turns": count}, nudge_only=True, nudge=str(self.message(count)))
 
 
 class DedupeStreak:
