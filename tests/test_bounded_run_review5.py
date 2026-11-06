@@ -60,6 +60,7 @@ def test_reap_tagged_kills_only_the_processes_that_carry_the_tag():
 def _listed_test_run(tmp_path, spawn, boards=1):
     """One configuration's test through `Supervisor._run_listed_test` (the stage 4 path), with `spawn` standing in for the hardware run.
     Returns the mask-input ledger entries the run wrote."""
+    from pathlib import Path
     from types import SimpleNamespace
     from orchard import stages
     from orchard.ledger import Ledger, read_entries
@@ -75,7 +76,8 @@ def _listed_test_run(tmp_path, spawn, boards=1):
     sup._moved_aside_record = lambda p: {}
     sup._run_listed_test_body = lambda *a: Supervisor._run_listed_test_body(sup, *a)
     sup._reset_test_chips = lambda *a: None
-    test = SimpleNamespace(chips=2, boards=boards, command=lambda n: "cmd", deadline_s=10.0, cache="/c")
+    test = SimpleNamespace(chips=2, boards=boards, command=lambda n: "cmd", deadline_s=10.0, cache="/c",
+                           output_path=lambda sd: Path(sd) / "tests" / "2" / "output.txt", record_path=lambda sd: Path(sd) / "tests" / "2" / "test-result.json")
     lease = SimpleNamespace(chips=["a", "b"], dev_indices=[0, 1], lease_id="L")
     try:
         sup._run_listed_test(SimpleNamespace(number=4, budget_s=100.0), run / "stages" / "4", test, [lease])
