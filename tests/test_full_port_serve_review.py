@@ -536,3 +536,47 @@ def test_a_request_that_is_waiting_when_the_server_closes_never_reaches_the_work
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ---- an empty teacher-forced reference is a reason, not a ZeroDivisionError (PR 490, round 6) -------------------------------------------
+
+def test_an_empty_teacher_forced_reference_with_an_empty_replay_is_a_reason_and_not_a_crash(good, tmp_path):
+    b = fk.clone(good, tmp_path)
+    corpus = b["stage"] / full_port_serve.CORPUS_NAME
+
+    def empty_reference(doc):
+        for e in doc["entries"]:
+            if e["kind"] == "teacher-forced":
+                e["reference_ids"] = []
+
+    edit_json(corpus, empty_reference)
+
+    def empty_replay(rec):
+        for e in rec["replay"]["entries"]:
+            if e["kind"] == "teacher-forced":
+                e["got_ids"] = []
+
+    rewrite(b, empty_replay)
+    result, why = full_port_serve.derive(b["stage"], b["run"])
+    assert result is None and why
+
+
+# ---- a padded embedding table has valid ids above the tokenizer's count (PR 490, round 6) -----------------------------------------------
+
+def _vocab_template():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("port_serve_vocab_bound", full_port_serve.TEMPLATE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("config, expected", [
+    ({"vocab_size": 160}, 160),                                  # padded table: the config is larger than the tokenizer
+    ({"text_config": {"vocab_size": 170}}, 170),
+    ({"vocab_size": 50}, 100),                                   # a smaller config never lowers the bound
+    ({"vocab_size": True}, 100), ({"vocab_size": "9"}, 100), ({"vocab_size": 10**12}, 100), ({}, 100),
+])
+def test_the_serving_bound_is_the_larger_of_the_tokenizer_count_and_the_configs_vocab_size(tmp_path, config, expected):
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    assert _vocab_template().vocab_bound(tmp_path, 100) == expected

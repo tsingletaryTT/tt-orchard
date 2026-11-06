@@ -673,6 +673,8 @@ def derive(stage_dir, run_dir, *, rehearsal: bool = False) -> tuple[dict | None,
         total = sum(len(e["expected_ids"]) for e in expected.values())
         matched = sum(sum(1 for a, b in zip(entries[i], e["expected_ids"]) if a == b) for i, e in expected.items() if len(entries[i]) == len(e["expected_ids"]))
         tf = next(e for e in expected.values() if e["kind"] == "teacher-forced")
+        if not (isinstance(tf["reference_ids"], list) and tf["reference_ids"]):
+            raise ValueError("the teacher-forced reference is empty")  # agreement() divides by its length (review of PR 490, round 6)
         agreement = full_port.agreement(tf["reference_ids"], entries[tf["id"]]) if len(entries[tf["id"]]) == len(tf["reference_ids"]) else 0.0
         runs = passkey["runs"]
         answered = [isinstance(r["key"], str) and bool(r["key"]) and r["key"] in r["answer_text"] for r in runs]
