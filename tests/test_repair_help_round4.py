@@ -61,10 +61,10 @@ def test_a_ladder_pause_after_a_budget_pause_does_not_lower_the_deadline_flag(tm
 def test_an_earlier_tests_marker_restored_over_a_later_rerun_judges_nothing(tmp_path):
     """Finding: the first test's marker and output, put back after a later rerun failed, matched the first test's own evidence entry."""
     s, stage, _ = _answered_then_tested(tmp_path, tested=True)
-    assert s._repair_outcome(2, stage) == (False, "prefill", True)          # the control: this is the newest test's record
+    assert s._repair_outcome(2, stage) == (False, "prefill", True, None)          # the control: this is the newest test's record
     s.ledger.append("evidence", 2, what="hardware test", config=[], cache=None, returncode=2, timed_out=False,
                     path="stages/2/test-result.json", sha256="0" * 64)            # a later rerun wrote other bytes at the same path
-    assert s._repair_outcome(2, stage) == (False, None, False)
+    assert s._repair_outcome(2, stage) == (False, None, False, None)
 
 
 # ---- --no-repair-help survives a resume -------------------------------------------------------------------------------------------
