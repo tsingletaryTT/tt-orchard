@@ -662,6 +662,10 @@ LISTED_TEST_SETUP = '''
     stub._moved_aside_record = lambda p: S._moved_aside_record(stub, p)
     stub._run_listed_test_body = lambda *a: S._run_listed_test_body(stub, *a)
     stub._record_mask_inputs = lambda *a: S._record_mask_inputs(stub, *a)
+    # The real methods that write through the pinned run directory; the production code calls them on self.
+    stub._run_parts = lambda *a: S._run_parts(stub, *a)
+    stub._mkdir_beneath_run = lambda *a: S._mkdir_beneath_run(stub, *a)
+    stub._write_test_record_beneath = lambda *a: S._write_test_record_beneath(stub, *a)
     test = SimpleNamespace(chips=4, boards=2, command=lambda n: "cmd", deadline_s=10.0, cache="/c",
                            output_path=lambda sd: Path(sd) / "tests" / "4" / "output.txt", record_path=lambda sd: Path(sd) / "tests" / "4" / "test-result.json")
     lease = SimpleNamespace(chips=["a", "b", "c", "d"], dev_indices=[0, 1, 2, 3], lease_id="L")

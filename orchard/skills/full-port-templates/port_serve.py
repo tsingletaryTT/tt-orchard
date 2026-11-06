@@ -30,6 +30,7 @@ import hashlib
 import http.client
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -87,6 +88,11 @@ class Engine:
     def __init__(self, worker, max_len: int, tokenizer, stop_ids, render):
         self.w, self.max_len, self.tok, self.stop_ids, self.render = worker, max_len, tokenizer, set(stop_ids), render
         self.lock = threading.Lock()
+        # Until the corpus replay has matched, the server answers only the replay's own requests, which carry this per-run secret in a header.
+        # An ordinary loopback client gets 503, so it cannot get a completion from a port that is still on trial, and cannot change the worker's
+        # state in the middle of the replay (review of PR 490, round 4).
+        self.open = False
+        self.replay_token = secrets.token_hex(16)
 
     def run(self, prompt, max_tokens, *, forced=None, ignore_eos=False):
         """(ids, finish): at most `max_tokens` ids. With `forced` (a list of max_tokens - 1 ids) each step after the first is fed the forced id in
@@ -97,6 +103,9 @@ class Engine:
             raise ValueError(f"the prompt is {len(prompt)} tokens and {max_tokens} more were asked; the server's context is {self.max_len}")
         if forced is not None and len(forced) != max_tokens - 1:
             raise ValueError("forced_tokens must hold max_tokens - 1 ids")
+        # A negative id would index from the end of an embedding table, or fail inside the port. It is refused here, before the port runs.
+        if any(i < 0 for i in prompt) or (forced is not None and any(i < 0 for i in forced)):
+            raise ValueError("token ids must not be negative")
         with self.lock:
             out, finish = [], "length"
             nxt = self.w.ask(op="prefill", ids=prompt)
@@ -131,6 +140,8 @@ def make_handler(engine: Engine):
             path = self.path.rstrip("/")
             if path not in ("/v1/completions", "/v1/chat/completions"):
                 return self._json(404, {"error": {"message": "not found"}})
+            if not engine.open and self.headers.get("X-Orchard-Replay") != engine.replay_token:
+                return self._json(503, {"error": {"message": "the server is replaying its acceptance corpus and takes no other request yet"}})
             try:
                 n = int(self.headers.get("Content-Length", "0"))
                 if not 0 < n <= MAX_BODY:
@@ -177,10 +188,13 @@ def make_handler(engine: Engine):
     return Handler
 
 
-def post(port: int, path: str, body: dict) -> dict:
+def post(port: int, path: str, body: dict, token: str | None = None) -> dict:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=CLIENT_TIMEOUT_S)
     try:
-        conn.request("POST", path, json.dumps(body), {"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["X-Orchard-Replay"] = token
+        conn.request("POST", path, json.dumps(body), headers)
         resp = conn.getresponse()
         data = json.loads(resp.read())
     finally:
@@ -276,10 +290,19 @@ def write_record(data: bytes) -> None:
     The directory must be a real directory at its own place beneath the run, the temporary name is removed first (removing a link removes the
     link), and the new file is created exclusively with no following of links."""
     evidence = RECORD.parent
-    expected = os.path.join(os.path.realpath(RUN_DIR), *evidence.relative_to(RUN_DIR).parts)
-    if os.path.realpath(evidence) != expected or os.path.islink(evidence):
-        raise ServeFailed(f"{evidence.relative_to(RUN_DIR)} is a link or has a linked parent: the record is not written through it")
-    dfd = os.open(evidence, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    # Descend from the run directory one name at a time, each open relative to the one before and with no following of links. A directory
+    # swapped for a link at any moment after this point cannot redirect the write, because every descriptor already names the real directory
+    # (a realpath comparison followed by a path open leaves a gap between the check and the use; review of PR 490, round 4).
+    try:
+        dfd = os.open(RUN_DIR, os.O_RDONLY | os.O_DIRECTORY)
+        for part in evidence.relative_to(RUN_DIR).parts:
+            try:
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            finally:
+                os.close(dfd)
+            dfd = nxt
+    except OSError as exc:
+        raise ServeFailed(f"{evidence.relative_to(RUN_DIR)} is a link or has a linked parent: the record is not written through it ({exc.strerror})")
     try:
         tmp = RECORD.name + ".tmp"
         try:
@@ -348,7 +371,7 @@ def main() -> int:
             body = {"prompt": e["prompt_ids"], "max_tokens": len(e["expected_ids"]), "ignore_eos": True}
             if e["kind"] == "teacher-forced":
                 body["forced_tokens"] = e["forced_ids"]
-            got = post(port, "/v1/completions", body)["choices"][0]["token_ids"]
+            got = post(port, "/v1/completions", body, engine.replay_token)["choices"][0]["token_ids"]
             replay.append({"id": e["id"], "kind": e["kind"], "got_ids": got})
             total += len(e["expected_ids"])
             same = sum(1 for a, b in zip(got, e["expected_ids"]) if a == b) if len(got) == len(e["expected_ids"]) else 0
@@ -358,6 +381,7 @@ def main() -> int:
                 first_bad = f"entry {e['id']!r} differs at position {at} ({same} of {len(e['expected_ids'])} equal)"
         if matched != total:
             raise ServeFailed(f"the corpus replay matched {matched} of {total} positions: {first_bad}. The server is refused")
+        engine.open = True                                   # every position matched: ordinary requests are served from here
         models = [m.get("id") for m in get(port, "/v1/models").get("data", []) if isinstance(m, dict)]
         ready_line = f"READY {MODEL_ID} on 127.0.0.1:{port} pid {os.getpid()} corpus {matched}/{total} positions"
         print(ready_line, flush=True)
