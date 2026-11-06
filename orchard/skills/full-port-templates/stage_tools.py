@@ -51,11 +51,39 @@ PROMPT_REL = "stages/1/evidence/reference/prompt-ids.json"
 ADVICE_NOTE = "advice from files in this directory; the gate's verdict is the supervisor's"
 
 
-def read_file(path: Path, cap: int):
+def open_dir_beneath(root, parts) -> int:
+    """An open directory descriptor for root/parts[0]/parts[1]/..., each directory opened from the one before with O_NOFOLLOW, so a component that
+    is a link (or was swapped for one after an earlier check) is refused with OSError (review of PR 506: O_NOFOLLOW on the leaf alone does not
+    cover the directories above it). The caller closes the descriptor."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))  # hardening: ok the run directory itself is the trusted anchor the supervisor named
+    try:
+        for part in parts:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_beneath(root, parts, cap: int):
+    """(bytes, None) or (None, reason) for the regular file root/parts, with no link followed at any level."""
+    try:
+        dfd = open_dir_beneath(root, parts[:-1])
+    except OSError as exc:
+        return None, f"cannot be opened ({exc.__class__.__name__}: a link or an unreadable directory)"
+    try:
+        return read_file(Path(parts[-1]), cap, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
+def read_file(path: Path, cap: int, dir_fd=None):
     """(bytes, None) or (None, reason). A regular file only: a link, a FIFO or a device is refused without being opened for blocking, and a file
     over `cap` is refused. The size is checked on the open descriptor, so a file swapped after a check is still bounded."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
     except FileNotFoundError:
         return None, "missing"
     except OSError as exc:
@@ -220,10 +248,10 @@ def numerics(stage: Path) -> list[str]:
 # The outer part (standard library only) checks that the port's layer file is the one the supervisor's captured output names, finds the reference
 # interpreter and runs the inner part under it. The inner part needs numpy, and torch with transformers when the reference is not cached.
 
-def file_sha256(path: Path, cap: int):
+def file_sha256(path: Path, cap: int, dir_fd=None):
     """(hex digest, None) or (None, reason) of a regular file, read in blocks from the open descriptor (no link followed, no FIFO opened)."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
     except FileNotFoundError:
         return None, "missing"
     except OSError as exc:
@@ -506,6 +534,31 @@ def cached_reference(stage: Path, key: dict):
     return layers
 
 
+def store_reference_cache(stage: Path, key: dict, ref: list, np) -> None:
+    """Write the reference cache (npz, then the sidecar that binds it to `key`). Every create, rename and removal goes through a descriptor for the
+    evidence directory that was opened from the run with O_NOFOLLOW at each level, so a linked `evidence` or `stages` directory cannot send a
+    write or a removal outside the run (review of PR 506). Raises OSError when the directory is not reachable that way."""
+    run = run_dir_of(stage)
+    dfd = open_dir_beneath(str(run), Path(stage).relative_to(run).parts + (os.path.dirname(LAYER_REF_REL),))
+    try:
+        def write(name: str, produce):
+            tmp = name + ".tmp"
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except FileNotFoundError:
+                pass
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o644, dir_fd=dfd)
+            with os.fdopen(fd, "wb") as f:  # hardening: ok the descriptor comes from os.open with O_EXCL and O_NOFOLLOW, beneath a directory descriptor
+                produce(f)
+            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        npz, side = os.path.basename(LAYER_REF_REL), os.path.basename(LAYER_REF_META_REL)
+        write(npz, lambda f: np.savez(f, **{f"layer_{k:03d}": a for k, a in enumerate(ref)}))
+        digest, _ = file_sha256(Path(npz), LAYER_FILE_MAX, dir_fd=dfd)
+        write(side, lambda f: f.write(json.dumps({**key, "npz_sha256": digest, "layers": len(ref)}).encode()))
+    finally:
+        os.close(dfd)
+
+
 def inner(argv: list) -> int:
     import numpy as np
     threshold, dtype, digest, count = float(argv[0]), argv[1], argv[2], int(argv[3])
@@ -542,14 +595,7 @@ def inner(argv: list) -> int:
             return 2
         source = f"computed now on the CPU ({dtype})"
         try:                                  # the cache: a temporary file, a rename, and a sidecar that binds it to the prompt, the snapshot and the dtype
-            tmp = stage / (LAYER_REF_REL + ".tmp")
-            with new_file(tmp) as f:
-                np.savez(f, **{f"layer_{k:03d}": a for k, a in enumerate(ref)})
-            os.replace(tmp, stage / LAYER_REF_REL)
-            side = stage / (LAYER_REF_META_REL + ".tmp")
-            with new_file(side) as f:
-                f.write(json.dumps({**key, "npz_sha256": file_sha256(stage / LAYER_REF_REL, LAYER_FILE_MAX)[0], "layers": len(ref)}).encode())
-            os.replace(side, stage / LAYER_REF_META_REL)
+            store_reference_cache(stage, key, ref, np)
         except OSError:
             pass                              # the cache is a convenience
     result = compare_layers(ref, port, threshold)
@@ -660,7 +706,7 @@ def show_cmd(stage: Path, argv: list):
             break
     if target is None:
         return 2, [f"{clean(args.file, 100)} missing (looked in the stage directory and the run directory)."]
-    data, why = read_file(Path(target), SHOW_FILE_MAX)
+    data, why = read_beneath(run, Path(os.path.relpath(target, run)).parts, SHOW_FILE_MAX)   # each directory opened from the run with O_NOFOLLOW
     if data is None:
         return 2, [f"{clean(args.file, 100)} {why}."]
     if b"\0" in data[:8192]:

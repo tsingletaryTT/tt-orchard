@@ -197,3 +197,52 @@ def test_the_usage_line_names_every_tool(tmp_path):
 def test_find_refuses_an_empty_or_an_overlong_text(tmp_path, needle):
     done = cli(stage_with(tmp_path), "facts", "--find", needle)
     assert done.returncode == 2 and "1 to 100 characters" in done.stdout
+
+
+# ---- ancestor links (PR 506 review): a check on the path is not a guard for the open that follows it -------------------------------
+
+def test_a_file_read_beneath_the_run_refuses_a_directory_replaced_by_a_link(tmp_path):
+    """Finding: `show` checked containment on the resolved path and then opened that path by name, so a directory swapped for a link in between
+    let the read leave the run. The open now walks each directory from the run with O_NOFOLLOW."""
+    tool = load_tool()
+    stage = stage_with(tmp_path)
+    run = stage.parent.parent
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("hunter2\n")
+    (stage / "port" / "ok.txt").write_text("fine\n")
+    assert tool.read_beneath(run, ("stages", "2", "port", "ok.txt"), 1000) == (b"fine\n", None)
+    # the swap: `port` becomes a link to a directory outside the run
+    import shutil
+    shutil.rmtree(stage / "port")
+    (stage / "port").symlink_to(outside)
+    data, why = tool.read_beneath(run, ("stages", "2", "port", "secret.txt"), 1000)
+    assert data is None and "hunter2" not in str(why) and why
+
+
+def test_the_reference_cache_is_not_written_through_a_linked_evidence_directory(tmp_path):
+    """Finding: the cache wrote, renamed and removed files by path, so a linked `evidence` directory sent them outside the run."""
+    import numpy as np
+    tool = load_tool()
+    stage = stage_with(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "layer-reference.npz").write_text("precious")
+    (stage / "evidence").symlink_to(outside)
+    with pytest.raises(OSError):
+        tool.store_reference_cache(stage, {"prompt_sha256": "x"}, [np.zeros((2, 2), dtype=np.float32)], np)
+    assert sorted(p.name for p in outside.iterdir()) == ["layer-reference.npz"]
+    assert (outside / "layer-reference.npz").read_text() == "precious"
+
+
+def test_the_reference_cache_is_written_and_read_back_in_a_plain_evidence_directory(tmp_path):
+    import numpy as np
+    tool = load_tool()
+    stage = stage_with(tmp_path)
+    (stage / "evidence").mkdir()
+    tool.store_reference_cache(stage, {"prompt_sha256": "x"}, [np.ones((2, 2), dtype=np.float32)], np)
+    meta, _ = tool.read_json(stage / "evidence" / "layer-reference.json")
+    assert meta["prompt_sha256"] == "x" and meta["layers"] == 1
+    digest, _ = tool.file_sha256(stage / "evidence" / "layer-reference.npz", 10 ** 6)
+    assert meta["npz_sha256"] == digest
+    assert not list((stage / "evidence").glob("*.tmp"))
