@@ -105,9 +105,11 @@ def _decision(entry: dict) -> str | None:
 
 
 def _last_start(entries: list[dict], n: int) -> int:
+    """The sequence number of the latest FRESH start of stage `n`. A resumed start (`resumed` true) is the same attempt going on after a restart,
+    so the rounds written before it still belong to the attempt (review of PR 497)."""
     last = 0
     for e in entries:
-        if e.get("stage") == n and e.get("event") == "stage_start":
+        if e.get("stage") == n and e.get("event") == "stage_start" and _data(e).get("resumed") is not True:
             last = e["seq"]
     return last
 
