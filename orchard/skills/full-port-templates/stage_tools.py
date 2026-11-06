@@ -91,7 +91,7 @@ def read_json(path: Path, expect=dict):
     except (ValueError, RecursionError):
         return None, "is not JSON"
     if not isinstance(value, expect):
-        return None, f"holds {type(value).__name__}, not {expect.__name__}"
+        return None, f"holds {type(value).__name__}; expected {expect.__name__}"
     return value, None
 
 
@@ -178,7 +178,7 @@ def last_check(stage: Path) -> list[str]:
             kind, op = kind_op["kind"], kind_op["op"]
             lines.append(f"result: FAILED, kind {kind}" + (f", at the '{op}' request" if op else ", before any request reached the port"))
             if kind == "setup":
-                lines.append("  the run around the port was wrong (chips, stage 1 files, runtime), not the port: an edit to the port cannot fix it.")
+                lines.append("  the run around the port was wrong (chips, stage 1 files, runtime). An edit to the port cannot fix it.")
         else:
             lines.append("result: FAILED, with no structured failure line (a crash or a timeout before the check could say what failed).")
         lines.append("message: " + clean(message if message is not None else "(none printed)"))
@@ -554,7 +554,7 @@ def inner(argv: list) -> int:
             pass                              # the cache is a convenience
     result = compare_layers(ref, port, threshold)
     notes = [f"layer-diff: the port's {count} layer outputs against the CPU reference on the {len(ids)}-token stage 1 prompt; threshold {threshold}.",
-             f"reference: {len(ref)} layers, {source}. port file {LAYER_PORT_REL}, sha256 {digest[:12]}, the one the check's output names.",
+             f"reference: {len(ref)} layers, {source}. port file {LAYER_PORT_REL}, sha256 {digest[:12]}, the file the check's output names.",
              f"({ADVICE_NOTE})"]
     print("\n".join(render(result, threshold, notes)))
     return 0 if result["first"] is None else 1

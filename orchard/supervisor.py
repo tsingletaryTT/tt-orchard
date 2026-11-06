@@ -2385,12 +2385,17 @@ class Supervisor:
         if failure.get("kind") == "numerics":
             return "\n".join([f"Port repair round {k} of {limit} for this attempt. The port ran to the end on the chips but disagrees with the CPU reference.",
                                repair_help.numeric_report(failure), "The supervisor runs the same check again after this step, on the same chips and "
-                               f"with the same reference. Only your edits under stages/{n}/port/ reach it."])
+                               f"with the same reference. Only your edits under stages/{n}/port/ reach it.",
+                               f"Tools: `python3 stages/{n}/stage_tools.py last-check` repeats these numbers. `python3 stages/{n}/stage_tools.py layer-diff` names the first "
+                               "layer that differs from the CPU reference, when port_model.py defines `layer_outputs(model, ids)` (the stage task says what it returns). "
+                               f"`python3 stages/{n}/stage_tools.py facts KEY` and `... show FILE --lines A:B` read the facts and your files."])
         where = f"at the {failure['op']!r} request" if failure.get("op") else "before any request reached the port"
         return "\n".join([f"Port repair round {k} of {limit} for this attempt. The port check failed {where}.",
                           f"The end of the check's output (stages/{n}/{port_repair.OUTPUT}):", "```", port_repair.tail(raw).rstrip(), "```",
                           "The supervisor runs the same check again after this step, on the same chips and with the same reference. "
-                          f"Only your edits under stages/{n}/port/ reach it."])
+                          f"Only your edits under stages/{n}/port/ reach it.",
+                          f"Tools: `python3 stages/{n}/stage_tools.py last-check` summarises this failure. `python3 stages/{n}/stage_tools.py facts KEY` and "
+                          "`... show FILE --lines A:B` read the facts and your files."])
 
     def _port_repair_rounds(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         """Up to `--port-repair-rounds` repair rounds for a full-port stage 2 whose port check failed on the port itself. Returns

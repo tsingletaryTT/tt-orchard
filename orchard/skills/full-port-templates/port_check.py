@@ -150,7 +150,7 @@ def layer_arrays(outputs, ids):
         if hasattr(x, "detach"):                       # a torch tensor
             x = x.detach().float().cpu().numpy()
         elif not isinstance(x, np.ndarray):
-            raise ValueError(f"layer {k} is a {type(x).__name__}, not a torch tensor or a numpy array")
+            raise ValueError(f"layer {k} is a {type(x).__name__}; expected a torch tensor or a numpy array")
         if x.dtype.kind not in "fiub":
             raise ValueError(f"layer {k} has dtype {x.dtype}, which is not numeric")
         total += int(x.size)

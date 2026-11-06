@@ -86,7 +86,7 @@ def test_the_summary_is_under_forty_lines_even_for_a_long_failure(tmp_path):
 def test_a_setup_failure_says_the_port_is_not_to_blame(tmp_path):
     out_text = 'FAILED: TT_VISIBLE_DEVICES names no chip\nPORT_CHECK_FAILURE {"kind": "setup", "op": null}\n'
     out = text(load_tool(), make_stage(tmp_path, output=out_text, returncode=2))
-    assert "kind setup" in out and "not the port" in out
+    assert "kind setup" in out and "An edit to the port cannot fix it" in out
 
 
 def test_a_passing_agreement_is_reported_as_a_pass_with_its_number(tmp_path):
