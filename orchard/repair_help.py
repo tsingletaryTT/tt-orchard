@@ -166,12 +166,17 @@ def start_trigger(entries: list[dict], n: int, k: int, failure: dict) -> tuple[b
 def unreported(entries: list[dict], n: int) -> list[dict]:
     """The repair answers of stage `n` (ok, with a call id) that have no `telegraph repair progress` entry yet, oldest first, each with the ask's
     `round`, `failure_op`, the sequence number of the answer and `placed`: whether a `telegraph repair placed` entry for it followed. An answer
-    without one never became the port, so whatever a later check found says nothing about it (review of PR 496, round 5)."""
+    without one never became the port, so whatever a later check found says nothing about it (review of PR 496, round 5). `discarded` is True
+    when a new attempt of the stage began after the answer (a restart after a watchdog escalation moves the port aside): a later attempt's check
+    says nothing about that answer either, so the supervisor settles it without one (review of PR 496, round 7)."""
     placed_ids = {_data(e).get("call_id") for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == PLACED}
     done = {_data(e).get("call_id") for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == PROGRESS}
     asks: dict[int, dict] = {}
     out = []
     for e in entries:
+        if e.get("stage") == n and e.get("event") == "stage_start" and _data(e).get("resumed") is not True:
+            for item in out:
+                item["discarded"] = True          # an attempt boundary: every answer seen so far belongs to an attempt that is over
         if e.get("stage") != n or e.get("event") != "decision":
             continue
         d = _data(e)
@@ -182,7 +187,7 @@ def unreported(entries: list[dict], n: int) -> list[dict]:
               and not d.get("cached")):
             out.append({"call_id": d["call_id"], "round": last_ask.get("round") if asks else None,
                         "failure_op": last_ask.get("failure_op") if asks else None, "seq": e["seq"],
-                        "placed": d["call_id"] in placed_ids})
+                        "placed": d["call_id"] in placed_ids, "discarded": False})
     return out
 
 
