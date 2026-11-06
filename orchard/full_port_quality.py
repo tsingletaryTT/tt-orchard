@@ -178,13 +178,25 @@ def top5_gap_diff(top5: list, probes: list) -> float:
     return sum(diffs) / len(diffs)
 
 
+COPIED_FILE_MAX = 8 << 30      # the largest copied file whose hash is rechecked
+
+
+def perplexity_of(nll: float):
+    """exp(nll), or None when the result is too large for a float (the bundle then prints TODO). The value is not capped: exp(701) is a number
+    a float holds, and a capped figure would be reported as measured (review of PR 491)."""
+    try:
+        return math.exp(nll)
+    except OverflowError:
+        return None
+
+
 def summarise(record: dict, model_cfg: dict, source_stage: int) -> dict:
     """The numbers of a record that passed `record_problems`: a dict of the result's computed fields. Raises df.FloorInputError for a policy or
     config the floor cannot count."""
     ref, chip, lps = record["reference_ids"], record["chip_ids"], record["logprobs"]
     n = len(chip)
     nll = -sum(lps) / n
-    ppl = math.exp(min(nll, 700.0))
+    ppl = perplexity_of(nll)
     gap = top5_gap_diff(record["reference_top5"], record["probe_logits"])
     free = record["free_run_ids"]
     lead = leading_match(ref, free)
@@ -496,6 +508,17 @@ def _seed_reasons(record: dict, run_dir: Path, seeded: list | None, source_stage
         reasons.append("the ledger holds no record of the files copied into stages/6/port/, so the port cannot be tied to the stage that passed it")
         return
     copied = {s["path"][len(PORT_DIR):]: s.get("sha256") for s in seeded if isinstance(s, dict) and isinstance(s.get("path"), str) and s["path"].startswith(PORT_DIR)}
+    # Every copied file as it is now, not only the sources: a port that rewrote a copied JSON file or a native library during the test must not
+    # leave the runtime dependencies different from the supervisor's copy (review of PR 491).
+    for s in seeded:
+        if isinstance(s, dict) and isinstance(s.get("path"), str) and s["path"].startswith(PORT_DIR) and not s["path"].endswith(".py"):
+            try:
+                now = safeio.sha256_file(run_dir / s["path"], max_bytes=COPIED_FILE_MAX)     # streamed; a native library is larger than a JSON file
+            except safeio.SafeReadError:
+                now = None
+            if now != s.get("sha256"):
+                reasons.append(f"{s['path']} is not the file the supervisor copied (its sha256 differs from the ledger's, or it is gone): "
+                               "the runtime files the port used are not the ones that passed")
     if mine != {k: v for k, v in copied.items() if k.endswith(".py")}:
         reasons.append(f"the port files the record names are not the .py files the supervisor copied from stage {source_stage} (the ledger's hashes): "
                        "the port that was measured is not the port that passed")

@@ -37,8 +37,15 @@ def _datasheet(x, digits: int = 4) -> str:
     return f"{x:.{digits}g} (datasheet value)" if _num(x) else "TODO"
 
 
+TEXT_READ_MAX = 20_000        # a record is believed once its hash matches the ledger, so how much of one text is read is bounded here too
+
+
 def _text(redact, x, limit: int = 400) -> str:
-    return redact(" ".join(str(x).split())[:limit]) if isinstance(x, str) and x.strip() else "not recorded"
+    """`x` as one line: the text is redacted whole first, then its whitespace is collapsed, then it is cut to `limit`. Cutting first can leave a
+    credential prefix that no pattern matches (review of PR 491; build_bundle.py's `_record_text` has the same order)."""
+    if not (isinstance(x, str) and x.strip()):
+        return "not recorded"
+    return " ".join(redact(x[:TEXT_READ_MAX]).split())[:limit]
 
 
 def is_full_port_result(res) -> bool:
