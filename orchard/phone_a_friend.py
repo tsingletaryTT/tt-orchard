@@ -362,7 +362,7 @@ def undefined_names(source: str) -> list[str]:
         return []
     if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(tree)):
         return []
-    known = _bound_names(tree) | set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__spec__", "__package__", "__loader__"}
+    known = _bound_names(tree) | set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__spec__", "__package__", "__loader__", "__class__"}
     out: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in known and node.id not in out:

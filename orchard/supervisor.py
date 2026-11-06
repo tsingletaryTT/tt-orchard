@@ -314,6 +314,7 @@ class RunActuator:
         self.control = control
         self._nudges: dict[str, list[str]] = {}
         self._stop: str | None = None
+        self.deadline_pause = False
 
     def nudge(self, agent: str, message: str) -> None:
         self._nudges.setdefault(agent, []).append(message)
@@ -323,6 +324,9 @@ class RunActuator:
 
     def pause(self, reason: str, evidence: dict) -> None:
         self._stop = "pause"
+        # A pause the stage's wall-clock budget caused is kept apart: no helper rescue lifts it (review of PR 496, round 3).
+        findings = evidence.get("findings") if isinstance(evidence, dict) else None
+        self.deadline_pause = any(isinstance(f, dict) and f.get("detector") == "stage_over_budget" for f in findings or [])
 
     def take_nudges(self, agent: str) -> list[str]:
         return self._nudges.pop(agent, [])
@@ -337,6 +341,7 @@ class RunActuator:
 
     def clear(self) -> None:
         self._stop = None
+        self.deadline_pause = False
         self._nudges.clear()
 
 
@@ -2496,7 +2501,10 @@ class Supervisor:
                         # A step that stopped in a watchdog pause or escalation, or on capped replies: the helper gets the port as the coder left it,
                         # when it was not asked at the start of this round. A placed answer lets the round go on to its check.
                         helped_on = False
-                        if (out.status in ("pause", "escalate", "error") and not asked_here and self.repair_help and getattr(self, "telegraph", None) is not None):
+                        # A pause the stage's wall-clock budget caused stays in effect: a rescue would run another hardware check past the deadline.
+                        deadline = out.status == "pause" and getattr(self.actuator, "deadline_pause", False)
+                        if (out.status in ("pause", "escalate", "error") and not deadline and not asked_here and self.repair_help
+                                and getattr(self, "telegraph", None) is not None):
                             _note, helped_on, _ = self._repair_help(spec, stage_dir, k, limit, failure, raw,
                                                                     why=f"the coder's repair step ended: {out.status}", coder_failed=True)
                         if not helped_on:
@@ -3635,6 +3643,7 @@ class Supervisor:
         if reply is None:
             self.ledger.append("decision", n, decision=repair_help.ANSWERED, **record)
             self.ledger.append("decision", n, decision=repair_help.NOT_PLACED, call_id=answer.call_id, reason="the reply holds no Python code block")
+            self._repair_unusable(n, k, answer.call_id, failure, "no Python code block")
             return "", False, True
         ok_py, why_py = phone_a_friend.parses(reply)
         try:
@@ -3644,10 +3653,12 @@ class Supervisor:
             self.ledger.append("decision", n, decision=repair_help.ANSWERED, **record)
             self.ledger.append("decision", n, decision=repair_help.NOT_PLACED, call_id=answer.call_id,
                                reason=f"the reply could not be written: {exc.__class__.__name__}")
+            self._repair_unusable(n, k, answer.call_id, failure, "the reply could not be written")
             return "", False, True
         self.ledger.append("decision", n, decision=repair_help.ANSWERED, draft=evidence, parses=ok_py, **record)
         if not ok_py:
             self.ledger.append("decision", n, decision=repair_help.NOT_PLACED, call_id=answer.call_id, reason=f"the reply does not parse ({why_py})")
+            self._repair_unusable(n, k, answer.call_id, failure, "the reply does not parse")
             return "", False, True
         problems = repair_help.reply_problems(reply)
         if problems:
@@ -3659,6 +3670,7 @@ class Supervisor:
         if not placed:
             self.ledger.append("decision", n, decision=repair_help.NOT_PLACED, call_id=answer.call_id, reason=why_placed, sent_sha256=sent_sha,
                                found_sha256=found)
+            self._repair_unusable(n, k, answer.call_id, failure, "the reply was not placed")
             return "", False, True
         port = stage_dir / port_repair.PORT_DIR / port_facts.SKELETON_NAME
         self.ledger.append("decision", n, decision=repair_help.PLACED, call_id=answer.call_id, path=evidence_record(self.run_dir, port)["path"],
@@ -3667,6 +3679,11 @@ class Supervisor:
                            draft_sha256=evidence["sha256"], change=repair_help.change_summary(port_bytes.decode("utf-8", "replace"), reply),
                            cost_usd=record["cost_usd"], driven=driven)
         return repair_help.coder_note(answer.call_id, True, evidence["path"]), True, True
+
+    def _repair_unusable(self, n: int, k, call_id: str, failure: dict, why: str) -> None:
+        """A reply none of whose content reached the coder or the port is reported as not helped at once. Left pending, a later check that the
+        coder's own edit passed would be credited to it and keep its model on the helper's ladder (review of PR 496, round 3)."""
+        self._repair_report(n, k, call_id, failure.get("op"), None, helped=False, outcome=f"unusable reply: {why}")
 
     def _repair_report(self, n: int, k, call_id: str, before_op, after_op, *, helped: bool, outcome: str) -> None:
         """The verdict on one repair answer, to the helper's ledger and the run's. A verdict that cannot be written is noted and goes on."""
@@ -3679,15 +3696,22 @@ class Supervisor:
         self.ledger.append("decision", n, decision=repair_help.PROGRESS, call_id=call_id, round=k, before_op=before_op, after_op=after_op,
                            outcome=outcome, helped=helped, **({"reason": reason} if reason else {}))
 
-    def _repair_outcome(self, stage_dir) -> tuple[bool, str | None, bool]:
-        """(the check passed, the request it failed at, whether the record could be read) from the supervisor's test record."""
+    def _repair_outcome(self, n: int, stage_dir) -> tuple[bool, str | None, bool]:
+        """(the check passed, the request it failed at, whether the record could be read) from the supervisor's test record. The record sits in
+        a directory the coder can write, so it is read once, its path and sha256 are matched to the evidence entry the supervisor wrote when the
+        test ended, and both the pass and the failure are taken from those bytes (review of PR 496, round 3)."""
+        path = Path(stage_dir) / port_repair.MARKER
         try:
-            data = safeio.read_json(Path(stage_dir) / port_repair.MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
+            raw = safeio.read_bytes(path, max_bytes=full_port.JSON_MAX)
+            data = safeio.parse_json_bytes(raw, max_bytes=full_port.JSON_MAX, expect=dict)
+            found = {"path": os.path.relpath(os.path.realpath(path), os.path.realpath(self.run_dir)), "sha256": hashlib.sha256(raw).hexdigest()}
         except (safeio.SafeReadError, OSError, ValueError):
+            return False, None, False
+        if not recorded_by_supervisor(self.ledger, n, found):
             return False, None, False
         if data.get("returncode") == 0 and data.get("timed_out") is False:
             return True, None, True
-        failure = port_repair.read_failure(self.run_dir, stage_dir)
+        failure = port_repair.read_failure(self.run_dir, stage_dir, marker=data)
         if failure is None:
             return False, None, False
         return False, failure.get("op"), True
@@ -3700,7 +3724,7 @@ class Supervisor:
         pending = repair_help.unreported(entries, n)
         if not pending:
             return
-        passed, after_op, readable = self._repair_outcome(stage_dir) if stage_dir is not None else (False, None, False)
+        passed, after_op, readable = self._repair_outcome(n, stage_dir) if stage_dir is not None else (False, None, False)
         for item in pending:
             judged = repair_help.tested_after(entries, n, item["seq"]) and readable
             if not judged and final_helped is None:

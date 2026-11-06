@@ -76,7 +76,10 @@ def test_the_chain_with_chips_configured_runs_stage_3_on_four_and_stage_4_covers
     from test_supervisor_full_port_stage3 import PREPARE_3
     rig.args.required_chips = (2, 4)
     src = fk.port_source(fk.ANSWERING, rig.tmp / "snapshot")
-    make(rig, over={(1, "run"): STAGE_1, (2, "prepare"): {**PREPARE, "port/port_model.py": src}, (3, "prepare"): {**PREPARE_3, "port/port_model.py": src}})
+    # Stage 3's port differs from stage 2's by a harmless module-level marker, so copying the wrong stage's port into stage 5 or 6 changes bytes
+    # the provenance gates hash (review of PR 492).
+    src3 = src + "\nSTAGE_3_MARKER = 3\n"
+    make(rig, over={(1, "run"): STAGE_1, (2, "prepare"): {**PREPARE, "port/port_model.py": src}, (3, "prepare"): {**PREPARE_3, "port/port_model.py": src3}})
     from orchard.supervisor import Control
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
     assert rig.run() == EXIT_READY, [(d.get("decision"), d.get("reason") or d.get("code")) for d in rig.decisions() if d.get("decision") in ("pause", "blocked")]
@@ -84,5 +87,9 @@ def test_the_chain_with_chips_configured_runs_stage_3_on_four_and_stage_4_covers
     assert res[3] == ["pass"] and res[4] == ["pass"] and res[5] == ["pass"] and res[6] == ["pass"], res
     five = json.loads((rig.run_dir / "stages" / "5" / "result.json").read_text())
     six = json.loads((rig.run_dir / "stages" / "6" / "result.json").read_text())
+    stages = rig.run_dir / "stages"
+    port = lambda n: (stages / str(n) / "port" / "port_model.py").read_bytes()  # noqa: E731
+    assert port(3) != port(2) and b"STAGE_3_MARKER" in port(3) and b"STAGE_3_MARKER" not in port(2)
+    assert port(5) == port(3) and port(6) == port(3), "stages 5 and 6 serve and measure the port stage 3 passed"
     assert six["source_stage"] == 3 and len(json.loads((rig.run_dir / "stages" / "6" / "evidence" / "port-quality.json").read_text())["chips"]) == 4
     assert five["derived_by"] == "supervisor"
