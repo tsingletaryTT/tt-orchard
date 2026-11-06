@@ -148,11 +148,24 @@ def shape_problems(sheet) -> list[str]:
             problems.append(f"mistake {i}: checks must be a list")
             continue
         for c in checks:
-            if (not isinstance(c, dict) or c.get("root") not in roots or not isinstance(c.get("name"), str)
-                    or not all(isinstance(a, str) for a in c.get("absent_args", []) + c.get("present_args", []))
-                    or not (c.get("absent_args") or c.get("present_args") or c.get("absent"))):
+            if not isinstance(c, dict) or not _check_is_well_typed(c, roots):
                 problems.append(f"mistake {i}: each check names a root, a name and absent_args, present_args or absent")
     return problems
+
+
+def _check_is_well_typed(c: dict, roots) -> bool:
+    """True when a mistake check has a string root named in `roots`, a string name, list-valued argument lists of strings and at least one claim.
+    Every type is tested before it is used, so a null or list value is reported as a problem and never raises."""
+    root, name = c.get("root"), c.get("name")
+    if not isinstance(root, str) or root not in roots or not isinstance(name, str):
+        return False
+    lists = []
+    for key in ("absent_args", "present_args"):
+        value = c.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(a, str) for a in value):
+            return False
+        lists.append(value)
+    return bool(lists[0] or lists[1] or c.get("absent"))
 
 
 def entries(sheet: dict):

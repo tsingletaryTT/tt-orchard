@@ -192,3 +192,12 @@ def test_the_staged_kernel_task_names_the_sheet_when_the_directory_has_it(tmp_pa
     assert kernelprobe.CHEAT_NAME not in kernelstaged._user_message(stage, 1, 3, "row_sum", adir)
     assert kernelprobe.write_cheat_sheet(adir)
     assert kernelprobe.CHEAT_NAME in kernelstaged._user_message(stage, 2, 3, "row_sum", adir)
+
+
+@pytest.mark.parametrize("broken", [{"sections": None}, {"sections": [{"entries": None}]}, {"sections": "x"}])
+def test_cheat_reports_a_sheet_with_null_containers_as_exit_2_and_not_a_traceback(tmp_path, broken):
+    stage = stage_dir(tmp_path)
+    (stage / "cheat_sheet.json").write_text(json.dumps(broken))
+    for args in (("cheat",), ("cheat", "linear")):
+        done = cli(stage, *args)
+        assert done.returncode == 2 and "malformed" in done.stdout and "Traceback" not in done.stderr

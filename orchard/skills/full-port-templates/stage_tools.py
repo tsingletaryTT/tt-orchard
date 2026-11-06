@@ -738,7 +738,11 @@ def cheat_cmd(stage: Path, argv: list):
     sheet, why = read_json(stage / CHEAT_FILES[args.sheet])
     if sheet is None:
         return 2, [f"{CHEAT_FILES[args.sheet]} {why}."]
-    found = [e for sec in sheet.get("sections", []) if isinstance(sec, dict) for e in sec.get("entries", []) if isinstance(e, dict)]
+    # The installed sheet is coder-writable: test each container type before iterating (a null `sections` or `entries` is a diagnostic, not a traceback).
+    sections = sheet.get("sections", [])
+    if not isinstance(sections, list) or any(isinstance(sec, dict) and not isinstance(sec.get("entries", []), list) for sec in sections):
+        return 2, [f"{CHEAT_FILES[args.sheet]} is malformed: `sections` and each section's `entries` must be lists."]
+    found = [e for sec in sections if isinstance(sec, dict) for e in sec.get("entries", []) if isinstance(e, dict)]
     if args.name is None:
         return 0, [f"{len(found)} entries in the {args.sheet} sheet; `cheat NAME` prints one:"] + [clean(", ".join(str(e.get("name")) for e in found[i:i + 6]), CHEAT_LINE)
                                                                                                  for i in range(0, len(found), 6)]

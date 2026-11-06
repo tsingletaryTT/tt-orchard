@@ -369,3 +369,11 @@ def test_mutation_a_fake_op_added_to_the_shipped_ttnn_sheet_is_found_on_the_real
     sheet["sections"][0]["entries"].append(entry("ttnn.fake_op", "ttnn.fake_op(x)", "y = ttnn.fake_op(x)"))
     problems = oc.verify(sheet, {"tt_metal": oc.build_index(tree)})
     assert problems and all("fake_op" in p for p in problems)
+
+
+@pytest.mark.parametrize("bad", [{"absent_args": None}, {"present_args": None}, {"absent_args": "gamma"}, {"root": ["tt_metal"]}, {"root": None}])
+def test_a_mistake_check_with_a_null_or_list_valued_field_is_a_problem_and_never_a_traceback(bad):
+    check = {"root": "tt_metal", "name": "ttnn.foo", "absent_args": ["gamma"]}
+    check.update(bad)
+    mistake = {"symptom": "s", "fix": "f", "seen_in": "x", "checks": [check]}
+    assert any("mistake 0" in p for p in oc.shape_problems(sheet_of(GOOD, mistakes=[mistake])))
