@@ -4370,12 +4370,14 @@ class Supervisor:
             what = "the port's configured chip count" if spec.skill in ("full-port-mesh", full_port_serve.SKILL, "full-port-quality") else "the container package"
             self._block(n, f"{what} needs {boards * CHIPS_PER_BOARD} chips and this box has {have * CHIPS_PER_BOARD}",
                         need_chips=boards * CHIPS_PER_BOARD)
-        d = decide_park(self.coder_lease.units, chips, boards)
+        # After an abort the coder's lease is released, and `--resume-aborted` can reach a stage that needs no coder (stage 5 of a full port) with
+        # none: there is nothing to park, so every board comes from a lease of its own, which waits while the boards are busy (review of PR 490).
+        d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action, chips=boards * CHIPS_PER_BOARD,
                            free_boards=list(d.free_boards), server_boards=list(d.server_boards))
         shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
         first_chip = {c.board: c.bdf for c in reversed(chips)}
-        if d.action == "use_free":
+        if d.action == "use_free" or self.coder_lease is None:
             lease = self._take_test_lease(spec, shape, boards, None)
             try:
                 self._run_test(spec, stage_dir, test, lease, boards=boards, **record)
