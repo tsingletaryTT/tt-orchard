@@ -121,9 +121,13 @@ def write_json(path, data) -> Path:
     return path
 
 
+def plan_data(entries: list[PortEntry]) -> dict:
+    """The content of tests/plan.json for `entries`."""
+    return {"tests": [{"chips": e.chips, "script": e.script, "deadline_s": e.deadline_s, "cache": e.cache} for e in entries]}
+
+
 def write_plan(stage_dir, entries: list[PortEntry]) -> Path:
-    return write_json(Path(stage_dir) / PLAN, {"tests": [{"chips": e.chips, "script": e.script, "deadline_s": e.deadline_s, "cache": e.cache}
-                                                          for e in entries]})
+    return write_json(Path(stage_dir) / PLAN, plan_data(entries))
 
 
 def load_plan(stage_dir) -> tuple[list[PortEntry] | None, str | None]:
