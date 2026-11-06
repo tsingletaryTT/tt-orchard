@@ -98,9 +98,11 @@ def _decision(entry: dict) -> str | None:
 
 
 def _last_start(entries: list[dict], n: int) -> int:
+    """The seq of the stage's latest attempt start. A resumed start belongs to the attempt it resumes, so it is not a boundary (the same rule as
+    `port_repair.rounds_used`): after a restart in round 1 the helper's earlier progress is still in the history (review of PR 496)."""
     last = 0
     for e in entries:
-        if e.get("stage") == n and e.get("event") == "stage_start":
+        if e.get("stage") == n and e.get("event") == "stage_start" and _data(e).get("resumed") is not True:
             last = e["seq"]
     return last
 
