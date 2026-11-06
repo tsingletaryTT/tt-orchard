@@ -287,7 +287,7 @@ def _failed_test_on_disk(run, stage, op):
                                                           "output": {"path": str(out.relative_to(run)), "sha256": hashlib.sha256(raw).hexdigest()}}))
 
 
-def _answered_then_tested(tmp_path, *, tested, after="prefill"):
+def _answered_then_tested(tmp_path, *, tested, after="prefill", vouch=True):
     """A run whose helper answered in round 1 (the check failed at `load`) and whose supervisor stopped after the check's rerun finished."""
     run = tmp_path / "run"
     stage = run / "stages" / "2"
@@ -302,6 +302,11 @@ def _answered_then_tested(tmp_path, *, tested, after="prefill"):
     if tested:
         led.append("decision", 2, decision=port_repair.TESTED, sources=port_repair.digest(port_repair.fingerprint(stage / "port")))
     _failed_test_on_disk(run, stage, after)            # by default the test after the answer failed later in the chain: progress
+    if vouch:
+        # What Supervisor._run_test appends right after it writes the marker: the path and hash the verdict is tied to (review of PR 496, round 3).
+        raw = (stage / port_repair.MARKER).read_bytes()
+        led.append("evidence", 2, what="hardware test", config=[], cache=None, returncode=2, timed_out=False,
+                   path=str((stage / port_repair.MARKER).relative_to(run)), sha256=hashlib.sha256(raw).hexdigest())
     s = object.__new__(Supervisor)
     s.run_dir, s.ledger, s.repair_help = run, led, True
     reported = []
@@ -349,3 +354,87 @@ def test_a_restart_judges_the_finished_test_before_it_asks_again(tmp_path):
     with pytest.raises(Stop):
         s._port_repair_rounds(type("S", (), {"number": 2})(), stage, False, False)
     assert seen == [1], "the helper was asked before the finished test was judged"
+
+
+def test_a_failure_marker_the_ledger_never_vouched_for_judges_nothing(tmp_path):
+    """Finding (round 3): the failure path trusted a marker and an output hash the coder can rewrite. Without the supervisor's evidence entry the
+    answer is not judged by it; it gets the attempt's outcome."""
+    s, stage, _ = _answered_then_tested(tmp_path, tested=True, vouch=False)
+    s._report_phone_a_friend(2, helped=False, stage_dir=stage)
+    (p,) = _progress(s)
+    assert p["outcome"] == "the attempt ended before the check judged it" and p["helped"] is False
+
+
+def test_a_rewritten_passing_marker_does_not_make_the_answer_helped(tmp_path):
+    """Finding (round 3): with a pending answer and a later `tested` entry, a marker rewritten to exit code 0 produced a helped verdict."""
+    s, stage, _ = _answered_then_tested(tmp_path, tested=True)
+    marker = stage / port_repair.MARKER
+    marker.write_text(_json.dumps({"returncode": 0, "timed_out": False}))           # the coder's rewrite: the ledger's hash no longer matches
+    s._report_phone_a_friend(2, helped=False, stage_dir=stage)
+    (p,) = _progress(s)
+    assert p["helped"] is False and p["outcome"] == "the attempt ended before the check judged it"
+
+
+def test_the_vouched_marker_still_judges_the_answer(tmp_path):
+    s, stage, _ = _answered_then_tested(tmp_path, tested=True)
+    passed, op, readable = s._repair_outcome(2, stage)
+    assert (passed, op, readable) == (False, "prefill", True)
+
+
+def test_the_implicit_class_cell_is_a_known_name():
+    """Finding (round 3): a method that refers to `__class__` binds it implicitly, and the scope-blind check reported it as undefined, which made
+    repair placement and skeleton merging refuse a valid port."""
+    from orchard import phone_a_friend as paf
+    src = "class A:\n    def cls(self):\n        return __class__\n"
+    assert paf.undefined_names(src) == []
+    assert paf.undefined_names("x = missing_name\n") == ["missing_name"]          # the control: a real undefined name is still reported
+
+
+# ---- round 3: the placement is about one port directory and keeps a late edit -----------------------------------------------------------
+
+def _port_run(tmp_path, text="x = 1\n"):
+    stage = tmp_path / "run" / "stages" / "2"
+    (stage / "port").mkdir(parents=True)
+    (stage / "port" / "port_model.py").write_text(text)
+    return stage
+
+
+def test_a_port_directory_swapped_in_after_the_read_is_not_written(tmp_path, monkeypatch):
+    """Finding: the pinned descriptor named the stage directory only. A `port` replaced by another real directory between the read and the write
+    had its coder file overwritten."""
+    stage = _port_run(tmp_path)
+    sent = hashlib.sha256(b"x = 1\n").hexdigest()
+    real = rh.safeio.read_beneath
+    calls = []
+
+    def swapping(fd, parts, **kw):
+        out = real(fd, parts, **kw)
+        if not calls:
+            calls.append(1)
+            os.rename(stage / "port", stage / "port.old")
+            (stage / "port").mkdir()
+            (stage / "port" / "port_model.py").write_text("coder_file = 2\n")
+        return out
+    monkeypatch.setattr(rh.safeio, "read_beneath", swapping)
+    rh.place(stage, "y = 2\n", sent, coder_failed=False, call_id="c1", model="m")
+    assert (stage / "port" / "port_model.py").read_text() == "coder_file = 2\n"
+
+
+def test_an_edit_made_after_the_comparison_is_kept_and_the_placement_is_refused(tmp_path, monkeypatch):
+    """Finding: the replacement was unconditional, so an edit between the comparison and the write was lost."""
+    stage = _port_run(tmp_path)
+    sent = hashlib.sha256(b"x = 1\n").hexdigest()
+    real = rh.safeio.read_beneath
+    calls = []
+
+    def editing(fd, parts, **kw):
+        out = real(fd, parts, **kw)
+        if not calls:
+            calls.append(1)
+            (stage / "port" / "port_model.py").write_text("late_edit = 3\n")
+        return out
+    monkeypatch.setattr(rh.safeio, "read_beneath", editing)
+    placed, why, _ = rh.place(stage, "y = 2\n", sent, coder_failed=False, call_id="c1", model="m")
+    assert placed is False and "changed" in why
+    assert (stage / "port" / "port_model.py").read_text() == "late_edit = 3\n"
+    assert [p.name for p in (stage / "port").iterdir()] == ["port_model.py"], "a temporary file was left behind"
