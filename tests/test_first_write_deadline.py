@@ -284,3 +284,23 @@ def test_a_hint_still_queued_when_the_write_arrives_is_withdrawn_and_the_ledger_
     wd.feed(wrote(FIRST_WRITE_TURNS + 1))
     assert act.queued == []
     assert [e for e in led.read() if e["data"].get("hint_withdrawn")]
+
+
+def _hint_finding():
+    from orchard.watchdog import Finding
+    return Finding("first_write_deadline", "a", 0.0, "no write", nudge="HINT", nudge_only=True)
+
+
+def test_withdrawing_hints_refunds_the_budget_also_after_a_restart(tmp_path):
+    """Review of PR 501: a withdrawn hint was never delivered, so it must not use up the stage's hint budget.
+    Three send-and-withdraw rounds, then a restart (ledger replay): the next hint is still sent, not turned into a notice."""
+    from orchard.defaults import DEDUPE_NUDGES_PER_STAGE
+    led = Ledger(tmp_path / "ledger.jsonl")
+    act = _Actuator()
+    lad = Ladder(act, led, {"a"})
+    for _ in range(DEDUPE_NUDGES_PER_STAGE):
+        assert lad.respond("a", [_hint_finding()], 2) == "nudge"
+        assert lad.withdraw("a", "HINT", 2)
+    assert lad.respond("a", [_hint_finding()], 2) == "nudge"          # live ladder: budget refunded
+    act.take_nudges("a")
+    assert Ladder(act, led, {"a"}).respond("a", [_hint_finding()], 2) == "nudge"   # replayed ladder: one delivered, budget left

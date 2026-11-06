@@ -707,6 +707,10 @@ class Ladder:
                 self._taken[(d.get("agent"), e["stage"], d["rung"])] += 1
             elif d.get("watchdog") and d.get("rung") == SOFT_RUNG:
                 self._hints[(d.get("agent"), e["stage"])] += 1
+            elif d.get("watchdog") and d.get("hint_withdrawn"):
+                # A withdrawn hint was never delivered: give its budget back (see `withdraw`).
+                key = (d.get("agent"), e["stage"])
+                self._hints[key] = max(0, self._hints[key] - 1)
 
     def _left(self, agent: str, stage, rung: str) -> bool:
         return self._taken[(agent, stage, rung)] < self.caps[rung]
@@ -744,6 +748,8 @@ class Ladder:
             return False
         self.ledger.append("notice", stage, watchdog=True, agent=agent, hint_withdrawn=True,
                            note="a write arrived before the hint was sent, so the hint was dropped")
+        # The hint was never delivered, so it does not use up the stage's hint budget. Replay does the same (see __init__).
+        self._hints[(agent, stage)] = max(0, self._hints[(agent, stage)] - 1)
         return True
 
     def respond(self, agent: str, findings: list[Finding], stage) -> str:
