@@ -324,6 +324,14 @@ class RunActuator:
     def take_nudges(self, agent: str) -> list[str]:
         return self._nudges.pop(agent, [])
 
+    def retract_nudge(self, agent: str, message: str) -> bool:
+        """Drop one queued nudge by its text; False when it is not queued (already sent). See `Ladder.withdraw`."""
+        queued = self._nudges.get(agent, [])
+        if message in queued:
+            queued.remove(message)
+            return True
+        return False
+
     def stop_reason(self) -> str | None:
         cmd = self.control.take()
         if cmd == "abort":

@@ -465,15 +465,28 @@ class FirstWriteDeadline:
         self._count: dict[str, int] = {}
         self._fired: set[str] = set()
         self._due: set[str] = set()      # the deadline passed on a response whose tools have not all run yet (review of PR 501)
+        self._sent: dict[str, str] = {}  # the hint text sent in this step, until a write shows it may be stale
+        self._withdrawn: list[tuple[str, str]] = []
 
     def _new_step(self, agent: str) -> None:
         self._count.pop(agent, None)
         self._fired.discard(agent)
         self._due.discard(agent)
+        self._sent.pop(agent, None)
+
+    def take_withdrawn(self) -> list[tuple[str, str]]:
+        """(agent, hint text) for each hint a write has made stale since the last call. The watchdog asks the actuator to drop each one if it is
+        still queued (review of PR 501, round 6)."""
+        out, self._withdrawn = self._withdrawn, []
+        return out
 
     def feed(self, ev: Event) -> Finding | None:
         if NoFileWritten._is_write(ev):
-            self._new_step(ev.agent)       # a write on the deadline turn cancels the hint that turn would have queued
+            # A write cancels a hint that was queued on the response before it: that response's tools run before the next request, so the
+            # text (which says the port is the skeleton) would reach a coder that has just written its port.
+            if ev.agent in self._sent:
+                self._withdrawn.append((ev.agent, self._sent[ev.agent]))
+            self._new_step(ev.agent)
             return None
         if ev.kind != "response":
             return None
@@ -488,8 +501,10 @@ class FirstWriteDeadline:
             self._due.discard(ev.agent)
             self._fired.add(ev.agent)
             count = self._count[ev.agent]
+            text = str(self.message(count))
+            self._sent[ev.agent] = text
             return Finding(self.name, ev.agent, ev.ts, f"{count} model turns in a row and no file written; the write deadline passed",
-                           {"turns": count}, nudge_only=True, nudge=str(self.message(count)))
+                           {"turns": count}, nudge_only=True, nudge=text)
         count = self._count.get(ev.agent, 0) + 1
         self._count[ev.agent] = count
         if count >= self.turns:
@@ -721,6 +736,16 @@ class Ladder:
         self.actuator.nudge(agent, message)
         return "nudge"
 
+    def withdraw(self, agent: str, message: str, stage) -> bool:
+        """Drop a hint that is still queued for `agent`, when the actuator can (`retract_nudge`). A hint the agent has already been sent is left alone.
+        The ledger records a withdrawal."""
+        retract = getattr(self.actuator, "retract_nudge", None)
+        if retract is None or not retract(agent, message):
+            return False
+        self.ledger.append("notice", stage, watchdog=True, agent=agent, hint_withdrawn=True,
+                           note="a write arrived before the hint was sent, so the hint was dropped")
+        return True
+
     def respond(self, agent: str, findings: list[Finding], stage) -> str:
         quiet = [f for f in findings if f.notice_only]
         if quiet:
@@ -792,6 +817,10 @@ class Watchdog:
         if ev.kind == "ledger" and ev.name == "stage_start":
             self.stage = ev.stage
         findings = replay([ev], self.detectors)
+        for d in self.detectors:
+            take = getattr(d, "take_withdrawn", None)
+            for agent, text in (take() if take is not None else []):
+                self.ladder.withdraw(agent, text, self.stage)
         by_agent: dict[str, list[Finding]] = {}
         for f in findings:
             by_agent.setdefault(f.agent, []).append(f)

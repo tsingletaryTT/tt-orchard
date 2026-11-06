@@ -185,6 +185,12 @@ class _Actuator(Act):
     def nudge(self, agent, message):
         self.queued.append(message)
 
+    def retract_nudge(self, agent, message):
+        if message in self.queued:
+            self.queued.remove(message)
+            return True
+        return False
+
     def take_nudges(self, agent):
         out, self.queued = self.queued, []
         return out
@@ -226,6 +232,17 @@ def test_step_level_a_first_write_on_the_deadline_turn_is_sent_no_hint(tmp_path)
     assert not any("HINT after" in m for requests in sent for m in requests)
 
 
+def test_step_level_a_first_write_on_the_turn_after_the_deadline_is_sent_no_hint(tmp_path):
+    """Review of PR 501, round 6: 12 read-only turns and the first write on turn 13. The hint was queued at response 13, before that turn's
+    write ran, so request 14 told the coder its edited port was still the skeleton."""
+    from fake_model import call, final
+    n = FIRST_WRITE_TURNS
+    script = [call("read_file", path="a.txt") for _ in range(n)] + [call("write_file", path="evidence/port.py", content="x = 1\n"),
+                                                                    call("read_file", path="a.txt"), final("done")]
+    sent = _run_step(tmp_path, script)
+    assert not any("HINT after" in m for requests in sent for m in requests)
+
+
 def test_step_level_a_step_that_only_reads_is_sent_the_hint_once(tmp_path):
     from fake_model import call, final
     n = FIRST_WRITE_TURNS
@@ -243,3 +260,27 @@ def test_the_supervisors_hint_names_an_existing_multi_byte_excerpt_file(tmp_path
     assert "reference_excerpts.md" not in sup._write_deadline_hint(12)            # no file: not named
     (stage / port_facts.EXCERPT_FILE).write_text("class Block:\n    def forward(self, x): ...\n" * 200)
     assert "reference_excerpts.md" in sup._write_deadline_hint(12)
+
+
+def test_a_retraction_is_ledgered_and_a_hint_already_delivered_is_left_alone(tmp_path):
+    led = Ledger(tmp_path / "ledger.jsonl")
+    act = _Actuator()
+    wd = Watchdog([det()], Ladder(act, led, {"a"}))
+    for e in stream(FIRST_WRITE_TURNS + 1):
+        wd.feed(e)
+    assert act.queued == [f"HINT after {FIRST_WRITE_TURNS}"]
+    act.take_nudges("a")                                         # the next request took it
+    wd.feed(wrote(FIRST_WRITE_TURNS + 1))
+    assert not [e for e in led.read() if e["data"].get("hint_withdrawn")]
+
+
+def test_a_hint_still_queued_when_the_write_arrives_is_withdrawn_and_the_ledger_says_so(tmp_path):
+    led = Ledger(tmp_path / "ledger.jsonl")
+    act = _Actuator()
+    wd = Watchdog([det()], Ladder(act, led, {"a"}))
+    for e in stream(FIRST_WRITE_TURNS) + [resp(FIRST_WRITE_TURNS + 1)]:
+        wd.feed(e)
+    assert act.queued == [f"HINT after {FIRST_WRITE_TURNS}"]
+    wd.feed(wrote(FIRST_WRITE_TURNS + 1))
+    assert act.queued == []
+    assert [e for e in led.read() if e["data"].get("hint_withdrawn")]
