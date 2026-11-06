@@ -143,3 +143,62 @@ def test_write_beneath_refuses_data_that_is_not_bytes(tmp_path):
     (tmp_path / "root").mkdir()
     with pin(tmp_path / "root") as root, pytest.raises(ValueError):
         safeio.write_beneath(root.fd, ("x.py",), "text")
+
+
+# ---- mkdir_beneath and unlink_beneath (review of PR 489) ----------------------------------------------------------------------
+
+def test_mkdir_beneath_makes_the_missing_directories_and_keeps_those_that_exist(tmp_path):
+    (tmp_path / "root" / "a").mkdir(parents=True)
+    (tmp_path / "root" / "a" / "keep.txt").write_text("k")
+    with pin(tmp_path / "root") as root:
+        safeio.mkdir_beneath(root.fd, ("a", "b", "c"))
+        safeio.mkdir_beneath(root.fd, ("a", "b", "c"))            # again: no error
+    assert (tmp_path / "root" / "a" / "b" / "c").is_dir() and (tmp_path / "root" / "a" / "keep.txt").read_text() == "k"
+
+
+def test_mkdir_beneath_refuses_a_link_in_the_path_and_makes_nothing_through_it(tmp_path):
+    (tmp_path / "root").mkdir()
+    out = tmp_path / "outside"
+    out.mkdir()
+    (tmp_path / "root" / "a").symlink_to(out)
+    with pin(tmp_path / "root") as root, pytest.raises(safeio.SafeReadError):
+        safeio.mkdir_beneath(root.fd, ("a", "b"))
+    assert list(out.iterdir()) == []
+
+
+def test_unlink_beneath_removes_a_file_and_says_whether_it_did(tmp_path):
+    (tmp_path / "root" / "d").mkdir(parents=True)
+    (tmp_path / "root" / "d" / "x").write_text("x")
+    with pin(tmp_path / "root") as root:
+        assert safeio.unlink_beneath(root.fd, ("d", "x")) is True
+        assert safeio.unlink_beneath(root.fd, ("d", "x")) is False         # already gone
+        assert safeio.unlink_beneath(root.fd, ("missing", "x")) is False   # the directory is not there either
+    assert not (tmp_path / "root" / "d" / "x").exists()
+
+
+def test_unlink_beneath_removes_a_link_at_the_final_name_and_leaves_its_target(tmp_path):
+    (tmp_path / "root").mkdir()
+    target = tmp_path / "target.txt"
+    target.write_text("keep me\n")
+    (tmp_path / "root" / "x").symlink_to(target)
+    with pin(tmp_path / "root") as root:
+        assert safeio.unlink_beneath(root.fd, ("x",)) is True
+    assert not (tmp_path / "root" / "x").is_symlink() and target.read_text() == "keep me\n"
+
+
+def test_unlink_beneath_refuses_a_link_in_a_directory_part_and_removes_nothing_in_its_target(tmp_path):
+    (tmp_path / "root").mkdir()
+    out = tmp_path / "outside"
+    out.mkdir()
+    (out / "x").write_text("keep me\n")
+    (tmp_path / "root" / "d").symlink_to(out)
+    with pin(tmp_path / "root") as root, pytest.raises(safeio.PathRefused):
+        safeio.unlink_beneath(root.fd, ("d", "x"))
+    assert (out / "x").read_text() == "keep me\n"
+
+
+def test_unlink_beneath_does_not_remove_a_directory(tmp_path):
+    (tmp_path / "root" / "d").mkdir(parents=True)
+    with pin(tmp_path / "root") as root, pytest.raises(safeio.ReadFailed):
+        safeio.unlink_beneath(root.fd, ("d",))
+    assert (tmp_path / "root" / "d").is_dir()

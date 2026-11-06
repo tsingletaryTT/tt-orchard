@@ -2338,16 +2338,26 @@ class Supervisor:
         if spec.draft != "full_port" or spec.number != 2 or not self.port_repair_rounds:
             return False
         n, entries = spec.number, self.ledger.read()
+        limit = self._repair_limit(n)
         if port_repair.stopped_noted(entries, n):
             return False
         if port_repair.rerun_inflight(entries, n) is not None:
             return True
         if port_repair.read_failure(self.run_dir, stage_dir) is None:
             return False
-        if port_repair.rounds_used(entries, n) < self.port_repair_rounds:
+        if port_repair.rounds_used(entries, n) < limit:
             return True
         tested = port_repair.tested_digest(entries, n)
         return tested is not None and port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)) != tested
+
+    def _repair_limit(self, n: int) -> int:
+        """The repair rounds an attempt of stage `n` has: `--port-repair-rounds`, or more when the helper drives (each round is a call within the
+        helper's own caps). The loop and `_repair_pending` both use it, so an attempt resumed after its third failed rerun is not called spent
+        while helper rounds remain (review of PR 497)."""
+        limit = self.port_repair_rounds
+        if limit and n == 2 and self._helper_drive_on():
+            limit = max(limit, repair_help.HELPER_ROUNDS)
+        return limit
 
     def _seal(self, stage_dir: Path, rel: str) -> dict | None:
         """The path and sha256 of a file of the stage directory through the bounded reader, or None (missing, a link, over the cap)."""
@@ -2382,9 +2392,8 @@ class Supervisor:
         aside, and the same check runs again under a lease like any test, so the supervisor writes the new record. A round that changed
         nothing in the port ends the rounds: the same files would fail the same way. After the last round the stage goes on as it did before
         this option: the finish step records the failure, the gate fails, and the next attempt starts again."""
-        n, limit = spec.number, self.port_repair_rounds
-        if limit and n == 2 and self._helper_drive_on():
-            limit = max(limit, repair_help.HELPER_ROUNDS)         # the helper drives: more rounds, each one a call within the helper's own caps
+        n = spec.number
+        limit = self._repair_limit(n)
         if not limit or n != 2:         # repair rounds belong to stage 2: stage 3 starts from a port that already passed (issue 326)
             return None
         # Each round takes at most two passes (a catch-up for a rerun whose `tested` entry is missing, then the round) and the last pass reads the
@@ -2426,6 +2435,9 @@ class Supervisor:
                 k = owed["round"] if owed is not None and type(owed.get("round")) is int else used
             else:
                 if used >= limit:
+                    # The last round's check has just failed: its port may be the furthest the attempt reached, so it is recorded before the
+                    # rounds end (review of PR 497).
+                    self._record_best(n, stage_dir, failure)
                     self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="spent", rounds=used, of=limit, op=failure["op"])
                     return None
                 k = used + 1
@@ -2459,8 +2471,15 @@ class Supervisor:
                 if self._helper_drive_on() and not handed_back:
                     # The helper drives: it is given the whole port, the failure and what the last round changed, and its corrected file is the
                     # round's repair. No coder step runs. A refusal, a stub or a cap hands the round to the coder below.
+                    # The operator's controls are read before the paid request and again before the chip check, as a coder step reads them
+                    # between turns (review of PR 497).
+                    if stop := self.actuator.stop_reason():
+                        return stop, [f"the helper-driven repair round {k} ended: {stop}"], None
+                    # coder_failed is False: no coder step ran, so a file that changed while the helper answered is somebody's edit and is kept.
                     _note, driven_ok, asked_here = self._repair_help(spec, stage_dir, k, limit, failure, raw,
-                                                                     why="the helper drives this stage's repairs", coder_failed=True, driven=True)
+                                                                     why="the helper drives this stage's repairs", coder_failed=False, driven=True)
+                    if stop := self.actuator.stop_reason():
+                        return stop, [f"the helper-driven repair round {k} ended: {stop}"], None
                     if driven_ok:
                         self._repair_baseline = None          # no coder step ends on a baseline in a round the helper drove
                         self.ledger.append("decision", n, decision=repair_help.DRIVEN, round=k, of=limit, op=failure["op"],
@@ -2486,6 +2505,8 @@ class Supervisor:
                                                                     why=f"the coder's repair step ended: {out.status}", coder_failed=True)
                         if not helped_on:
                             return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
+                        if out.status in ("pause", "escalate"):
+                            self._consume_handled_stop(n, out.status)
                 touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
                 if touched:
                     self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
@@ -3339,6 +3360,11 @@ class Supervisor:
         is_due, why = phone_a_friend.due(state)
         if not is_due:
             return None
+        spent = repair_help.asks_in_stage(entries, n)
+        if spent >= repair_help.TOTAL_PER_STAGE:
+            # The stage's limit counts the repair-round asks too (review of PR 496): an attempt that follows six repair asks sends no seventh call.
+            self._friend_refused(n, f"the helper was already asked {spent} times in this stage, repair rounds included (the limit is {repair_help.TOTAL_PER_STAGE})")
+            return None
         k = state["asked_in_stage"] + 1
         stage_dir = Path(stage_dir)
         try:
@@ -3504,10 +3530,21 @@ class Supervisor:
         (`--helper-drives-port`) or the run is a rehearsal and the operator did not refuse it (`--no-helper-drives-port`)."""
         if getattr(self, "telegraph", None) is None or not self.repair_help or self.helper_drives is False:
             return False
-        return bool(self.helper_drives) or bool(self.full_port_rehearsal)
+        # A resume builds the supervisor without the flag; the run's own start entry says whether it was a rehearsal (review of PR 497).
+        return bool(self.helper_drives) or bool(self.full_port_rehearsal) or full_port_rehearsal(self.ledger.read())
 
     def _repair_help_refused(self, n: int, k: int, reason: str) -> None:
         self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=k, reason=reason[:300])
+
+    def _consume_handled_stop(self, n: int, status: str) -> None:
+        """The helper's port took over from a repair step the watchdog stopped, so the stop is handled: the actuator forgets it (the next repair
+        step would otherwise end before it sent a request) and a recorded watchdog pause is answered by a resume entry (the run would otherwise wait
+        for the operator at the stage's end). An operator abort or pause is never consumed here: only these two statuses reach this method
+        (review of PR 496)."""
+        self.actuator.clear()
+        if status == "pause":
+            self.ledger.append("decision", n, decision="resume", by="helper rescue",
+                                note="a helper-supplied port took over from the repair step the watchdog paused")
 
     def _repair_help(self, spec, stage_dir: Path, k: int, limit: int, failure: dict, raw: str, *, why: str, coder_failed: bool,
                      driven: bool = False) -> tuple[str, bool, bool]:
@@ -3546,6 +3583,11 @@ class Supervisor:
             return "", False, False
         from orchard import telegraph as tg
         room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
+        if len(task) + len(fail) > room:
+            # The helper cuts the middle out of a request over its prompt cap, and its answer would then replace the whole file from a partial
+            # reading of it: the request is not sent (review of PR 496).
+            self._repair_help_refused(n, k, f"the request is {len(task) + len(fail)} characters, more than the {room} the helper's prompt cap leaves room for")
+            return "", False, False
         total = repair_help.asks_in_stage(entries, n) + 1
         sent_sha = hashlib.sha256(port_bytes).hexdigest()
         problem = phone_a_friend.problem_id(self.run_dir)
@@ -4496,12 +4538,14 @@ class Supervisor:
             what = "the port's configured chip count" if spec.skill in ("full-port-mesh", full_port_serve.SKILL, "full-port-quality") else "the container package"
             self._block(n, f"{what} needs {boards * CHIPS_PER_BOARD} chips and this box has {have * CHIPS_PER_BOARD}",
                         need_chips=boards * CHIPS_PER_BOARD)
-        d = decide_park(self.coder_lease.units, chips, boards)
+        # After an abort the coder's lease is released, and `--resume-aborted` can reach a stage that needs no coder (stage 5 of a full port) with
+        # none: there is nothing to park, so every board comes from a lease of its own, which waits while the boards are busy (review of PR 490).
+        d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action, chips=boards * CHIPS_PER_BOARD,
                            free_boards=list(d.free_boards), server_boards=list(d.server_boards))
         shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
         first_chip = {c.board: c.bdf for c in reversed(chips)}
-        if d.action == "use_free":
+        if d.action == "use_free" or self.coder_lease is None:
             lease = self._take_test_lease(spec, shape, boards, None)
             try:
                 self._run_test(spec, stage_dir, test, lease, boards=boards, **record)

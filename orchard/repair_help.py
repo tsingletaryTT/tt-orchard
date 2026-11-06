@@ -65,6 +65,7 @@ PASSED_RANK = 99                           # a check that passed is further alon
 PER_ROUND = 1
 NUMERIC_REPORT_CAP = 4_000                  # characters of the numbers report sent
 PORT_CAP = 90_000                          # characters of port_model.py sent (a larger file is not sent)
+PORT_PARTS = ("port", "port_model.py")         # the port file beneath the stage directory
 PORT_MAX = 400_000                         # bytes read at all
 OPS = ("init", "load", "prefill", "decode", port_repair.NUMERICS_OP)   # the order the check asks the port; a failure later in it is progress; the last is a port that ran to the end
 PREFIX = "repair"                          # the reply's file: stages/2/telegraph/repair-<k>.py
@@ -125,9 +126,11 @@ def _decision(entry: dict) -> str | None:
 
 
 def _last_start(entries: list[dict], n: int) -> int:
+    """The sequence number of the latest FRESH start of stage `n`. A resumed start (`resumed` true) is the same attempt going on after a restart,
+    so the rounds written before it still belong to the attempt (review of PR 497)."""
     last = 0
     for e in entries:
-        if e.get("stage") == n and e.get("event") == "stage_start":
+        if e.get("stage") == n and e.get("event") == "stage_start" and _data(e).get("resumed") is not True:
             last = e["seq"]
     return last
 
@@ -216,13 +219,16 @@ def tested_after(entries: list[dict], n: int, seq: int) -> bool:
 
 def read_port(stage_dir) -> tuple[bytes | None, str]:
     """(the bytes of stages/2/port/port_model.py, "") or (None, why). A link, a missing file and one over `PORT_MAX` are refused."""
-    port = Path(stage_dir) / "port" / "port_model.py"
     try:
-        if os.path.islink(port) or not os.path.isfile(port):
-            return None, "port_model.py is missing or is a link"
-        return safeio.read_bytes(port, max_bytes=PORT_MAX), ""
-    except (OSError, safeio.SafeReadError) as exc:
-        return None, f"port_model.py could not be read ({exc.__class__.__name__})"
+        with safeio.pinned_root(stage_dir) as pin:
+            return _read_in(pin), ""
+    except safeio.SafeReadError as exc:
+        return None, f"port_model.py is missing, is a link, or could not be read ({exc.reason})"
+
+
+def _read_in(pin) -> bytes:
+    """The port file beneath the pinned stage directory: a link at `port` or at `port_model.py` is refused, whoever planted it (review of PR 496)."""
+    return safeio.read_beneath(pin.fd, PORT_PARTS, max_bytes=PORT_MAX)
 
 
 def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listing: str, homes: tuple, previous: str | None = None,
@@ -307,19 +313,21 @@ def place(stage_dir, source: str, sent_sha: str, *, coder_failed: bool, call_id:
     """(placed, why, found_sha256). Writes `source` as `stages/2/port/port_model.py` when that file is still the one that was sent (`sent_sha`, a
     sha256 hex digest) or the coder's step failed; a file the coder changed while the helper answered is left alone. A reply that equals the port
     as it is changes nothing. `source` is not run. The caller has already refused a stub."""
-    port = Path(stage_dir) / "port" / "port_model.py"
-    current, why = read_port(stage_dir)
-    if current is None:
-        return False, why, ""
-    found = hashlib.sha256(current).hexdigest()
-    if found != sent_sha and not coder_failed:
-        return False, "the coder changed port_model.py while the helper answered", found
-    if hashlib.sha256(source.rstrip("\n").encode("utf-8")).digest() == hashlib.sha256(current.rstrip(b"\n")).digest():
-        return False, "the reply is the port as it already is", found
+    # The read and the write go through one descriptor of the stage directory, so a link planted at `port` between them is refused too.
     try:
-        safeio.atomic_write(port, header(call_id, model) + source.rstrip("\n") + "\n", mode=0o644, replace=True)
-    except (OSError, safeio.SafeReadError) as exc:
-        return False, f"port_model.py could not be written ({exc.__class__.__name__})", found
+        with safeio.pinned_root(stage_dir) as pin:
+            try:
+                current = _read_in(pin)
+            except safeio.SafeReadError as exc:
+                return False, f"port_model.py is missing, is a link, or could not be read ({exc.reason})", ""
+            found = hashlib.sha256(current).hexdigest()
+            if found != sent_sha and not coder_failed:
+                return False, "the coder changed port_model.py while the helper answered", found
+            if hashlib.sha256(source.rstrip("\n").encode("utf-8")).digest() == hashlib.sha256(current.rstrip(b"\n")).digest():
+                return False, "the reply is the port as it already is", found
+            safeio.write_beneath(pin.fd, PORT_PARTS, (header(call_id, model) + source.rstrip("\n") + "\n").encode("utf-8"), mode=0o644)
+    except safeio.SafeReadError as exc:
+        return False, f"port_model.py could not be written ({exc.reason})", locals().get("found", "")
     return True, "", found
 
 
