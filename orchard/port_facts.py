@@ -515,6 +515,10 @@ def tools_text(stage: int = 2, *, facts: bool = True, cheat: bool = True) -> str
         f"- `{base} facts KEY`: one value of {FACTS_NAME} by dotted path, for example `facts config.hc_count`; `facts --find TEXT` searches keys and text.",
         f"- `{base} show FILE --lines A:B`: a range of a file in the run directory, with line numbers.",
         f"- `{base} cheat NAME`: one entry of the verified TTNN call sheet, for example `cheat ttnn.linear`; `cheat` alone lists the names.",
+
+        f"- `{base} edit stages/{stage}/port/port_model.py --old TEXT --new TEXT`: after your first write, change a port file with this. Do not write the whole file again.",
+        "`edit` needs TEXT to occur once (add the lines around it if it does not). For several lines, write the old and the new text with write_file, a new "
+        "file name for each edit, and pass `--old-file` and `--new-file`.",
         "Optional hook for `layer-diff`: define `layer_outputs(model, ids)` in `port_model.py`. It runs the prompt `ids` once and returns the hidden state "
         "after each decoder layer, in order, as a list of torch tensors or numpy arrays. The check calls it only when the agreement is below "
         f"{full_port.TOP1_MIN}, after the comparison, in the same run; its result cannot change the verdict, and an error in it is printed and ignored."]

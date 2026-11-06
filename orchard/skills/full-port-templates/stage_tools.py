@@ -9,7 +9,9 @@ port_check.py) and the task text names it. Run it from anywhere:
     python3 stages/2/stage_tools.py show FILE --lines A:B a range of a file in the run directory, with line numbers
     python3 stages/2/stage_tools.py cheat [NAME]          one entry of the verified TTNN call sheet (issue 523); --sheet ttlang for the kernel sheet
 
-It reads only files in its own stage directory, and writes nothing there except what a tool says it writes. It is standard library only: it must
+    python3 stages/2/stage_tools.py edit FILE --old TEXT --new TEXT   change the one place where TEXT occurs in a file of stages/<N>/port (issue 524)
+
+It reads only files in its own stage directory, and writes nothing there except what a tool says it writes (`edit` writes only below port/). It is standard library only: it must
 run in the coder's shell, where the supervisor's own package is not importable. Everything it prints is advice built from files the coder could
 also have edited; the supervisor's verdict is the gate's, taken from its own ledger. Each tool says what it read.
 
@@ -753,12 +755,243 @@ def cheat_cmd(stage: Path, argv: list):
                 "    " + clean(e.get("notes"), CHEAT_LINE), "    " + clean(f"seen: {e.get('seen_in')}", CHEAT_LINE)]
     return 0, out + ([f"({len(hits) - 3} more entries match; give the full name)"] if len(hits) > 3 else [])
 
+# ---- edit -------------------------------------------------------------------------------------------------------------------------
+
+EDIT_MAX_BYTES = 400_000           # the most a port file may hold after an edit: the agent's own write bound (orchard/runaway.py MAX_FILE_BYTES; a test keeps the two equal)
+EDIT_MAX_LINES = 6_000             # and its line bound (runaway.MAX_FILE_LINES)
+EDIT_TEXT_MAX = 200_000            # bytes read from an --old-file or --new-file
+EDIT_SHOWN = 3                     # closest lines shown when the old text is not found
+EDIT_PLACES = 9                    # matches listed when the old text occurs more than once
+PORT_DIR = "port"                  # the directory of the stage that `edit` may change
+RECORD_MARK = "EDIT_RECORD "       # starts the one JSON line a successful call prints; the transcript keeps it
+
+
+class _EditArgs(Exception):
+    pass
+
+
+def _edit_parser():
+    import argparse
+
+    class Parser(argparse.ArgumentParser):
+        def error(self, message):
+            raise _EditArgs(message)
+    parser = Parser(prog="stage_tools.py edit", add_help=False)
+    parser.add_argument("file")
+    parser.add_argument("--old", default=None)
+    parser.add_argument("--new", default=None)
+    parser.add_argument("--old-file", default=None)
+    parser.add_argument("--new-file", default=None)
+    return parser
+
+
+def _inside(base, candidate: str) -> bool:
+    return candidate.startswith(str(base).rstrip(os.sep) + os.sep)
+
+
+def port_target(stage: Path, name: str):
+    """(parts below the stage directory, None) for the port file `name` names, or (None, reason). The name is taken from the run directory, from the stage
+    directory or from the port directory, as `show` takes names. The path is cleaned of `.` and `..` first and must then lie below <stage>/port; the file is
+    opened later, one directory at a time with O_NOFOLLOW, so a link anywhere on the way is refused."""
+    if not name or "\0" in name or len(name) > 500:
+        return None, "the file name is empty, too long or has a NUL."
+    port_dir = os.path.join(stage, PORT_DIR)
+    run = run_dir_of(stage)
+    candidates = [os.path.normpath(os.path.join(run, name)), os.path.normpath(os.path.join(stage, name)), os.path.normpath(os.path.join(port_dir, name))]
+    for i, cand in enumerate(candidates):
+        if _inside(port_dir, cand) and (i < 2 or os.path.lexists(cand)):
+            return Path(os.path.relpath(cand, stage)).parts, None
+    return None, (f"{clean(name, 100)} is not in the port directory ({rel(Path(port_dir))}): `edit` changes only files there. "
+                  "Other files in your stage directory are written with write_file.")
+
+
+def _read_text_beneath(root: Path, parts, cap: int, what: str):
+    try:
+        dfd = open_dir_beneath(root, parts[:-1])
+    except OSError as exc:
+        return None, f"{what} cannot be opened ({exc.__class__.__name__}: a link or an unreadable directory)."
+    try:
+        data, why = read_file(Path(parts[-1]), cap, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    if data is None:
+        return None, f"{what} {why}."
+    try:
+        return data.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return None, f"{what} is not UTF-8 text."
+
+
+def _text_arg(stage: Path, text, name, flag: str):
+    """(text, None) from `--old TEXT` or `--old-file FILE` (the file lies in the run directory, with no link on the way), or (None, reason)."""
+    if text is not None and name is not None:
+        return None, f"give {flag} or {flag}-file, not both."
+    if name is None:
+        return text, None
+    run = run_dir_of(stage)
+    if not name or "\0" in name or len(name) > 500:
+        return None, f"{flag}-file: the file name is empty, too long or has a NUL."
+    for base in (run, stage):
+        cand = os.path.normpath(os.path.join(base, name))
+        if _inside(run, cand):
+            parts = Path(os.path.relpath(cand, run)).parts
+            got, why = _read_text_beneath(run, parts, EDIT_TEXT_MAX, f"{flag}-file {clean(name, 100)}")
+            if got is not None or "missing" not in str(why):
+                return got, why
+    return None, f"{flag}-file {clean(name, 100)} is missing or outside the run directory."
+
+
+def _positions(text: str, old: str, limit: int) -> list:
+    """Offsets of `old` in `text`, overlapping ones included, at most `limit` of them."""
+    found, at = [], text.find(old)
+    while at != -1 and len(found) < limit:
+        found.append(at)
+        at = text.find(old, at + 1)
+    return found
+
+
+def _closest_lines(text: str, old: str) -> list:
+    """(line number, text) of the lines of `text` most like the first non-blank line of `old`, best first."""
+    import difflib
+    probe = next((l.strip() for l in old.splitlines() if l.strip()), "")[:200]
+    if not probe:
+        return []
+    matcher = difflib.SequenceMatcher(None, autojunk=False)
+    matcher.set_seq2(probe)
+    scored, seen = [], set()
+    for n, line in enumerate(text.splitlines(), start=1):
+        body = line.strip()
+        if not body or body in seen:
+            continue
+        matcher.set_seq1(body)
+        if matcher.real_quick_ratio() < 0.5 or matcher.quick_ratio() < 0.5:
+            continue
+        ratio = matcher.ratio()
+        if ratio >= 0.5:
+            seen.add(body)
+            scored.append((-ratio, n, body))
+    scored.sort()
+    return [(n, body) for _, n, body in scored[:EDIT_SHOWN]]
+
+
+def _lines_changed(old: str, new: str) -> int:
+    """The lines an edit changes: the larger of the old and new text's lines once the lines they share at the start and the end are set aside."""
+    a, b = old.split("\n"), new.split("\n")
+    while a and b and a[0] == b[0]:
+        a, b = a[1:], b[1:]
+    while a and b and a[-1] == b[-1]:
+        a, b = a[:-1], b[:-1]
+    return max(len(a), len(b))
+
+
+def _stat_key(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def edit_cmd(stage: Path, argv: list):
+    """(exit code, lines) for `edit FILE --old TEXT --new TEXT` (or --old-file / --new-file): replace the one place where the old text occurs in a file
+    of <stage>/port. Refused, with the file untouched: a file outside the port directory or reached through a link, an old text that occurs in no place or in
+    several, a result that is empty or over the write bound, a file that changed after it was read. The new file is written to a temporary file in the
+    same directory, flushed, and renamed over the old one, so a reader sees the old bytes or the new ones. Exit 0 changed, 1 no unique match, 2 refused."""
+    try:
+        args = _edit_parser().parse_args(argv)
+    except _EditArgs as exc:
+        return 2, [f"edit: {exc}. Usage: edit FILE --old TEXT --new TEXT (or --old-file / --new-file for text over several lines)."]
+    old, why = _text_arg(stage, args.old, args.old_file, "--old")
+    if old is None:
+        return 2, [f"edit: {why if why else '--old (or --old-file) is needed.'}"]
+    new, why = _text_arg(stage, args.new, args.new_file, "--new")
+    if new is None:
+        return 2, [f"edit: {why if why else '--new (or --new-file) is needed; an empty --new \"\" deletes the old text.'}"]
+    if old == "":
+        return 2, ["edit: the old text is empty, and it would match everywhere. Give the text to replace."]
+    if old == new:
+        return 2, ["edit: the old and the new text are the same, so nothing would change."]
+    parts, why = port_target(stage, args.file)
+    if parts is None:
+        return 2, [f"edit: {why}"]
+    shown = "/".join(rel(stage).split("/") + list(parts)) if rel(stage) != str(stage) else "/".join(parts)
+    try:
+        dfd = open_dir_beneath(stage, parts[:-1])
+    except OSError as exc:
+        return 2, [f"edit: {shown} cannot be reached ({exc.__class__.__name__}: a link on the way, or a directory that is not there). Nothing was changed."]
+    tmp = None
+    try:
+        leaf = parts[-1]
+        try:
+            before = os.stat(leaf, dir_fd=dfd, follow_symlinks=False)
+        except OSError as exc:
+            return 2, [f"edit: {shown} cannot be read ({exc.__class__.__name__}). Nothing was changed."]
+        if not stat.S_ISREG(before.st_mode):
+            return 2, [f"edit: {shown} is not a regular file (a link, a directory, a pipe or a device). Nothing was changed."]
+        if before.st_size > EDIT_MAX_BYTES:
+            return 2, [f"edit: {shown} is {before.st_size:,} bytes, over the limit of {EDIT_MAX_BYTES:,} for a port file. Nothing was changed; write a shorter file."]
+        data, why = read_file(Path(leaf), EDIT_MAX_BYTES, dir_fd=dfd)
+        if data is None:
+            return 2, [f"edit: {shown} {why}. Nothing was changed."]
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return 2, [f"edit: {shown} is not UTF-8 text. Nothing was changed."]
+        at = _positions(text, old, EDIT_PLACES)
+        if not at:
+            near = _closest_lines(text, old)
+            hint = ("The closest lines are " + "; ".join(f"line {n}: {clean(b, 100)!r}" for n, b in near) + ". ") if near else ""
+            return 1, [f"edit: --old does not occur in {shown}. {hint}Copy the text exactly (indentation and line breaks included) from "
+                       f"`show {shown} --lines A:B`, then run `edit` again. Nothing was changed."]
+        if len(at) > 1:
+            where = ", ".join(str(text.count("\n", 0, i) + 1) for i in at)
+            count = f"{len(at)} places" if len(at) < EDIT_PLACES else f"at least {EDIT_PLACES} places"
+            return 1, [f"edit: --old occurs in {count} of {shown} (lines {where}). Add more of the surrounding text to --old so that it matches one place only. "
+                       "Nothing was changed."]
+        result = text[:at[0]] + new + text[at[0] + len(old):]
+        out = result.encode("utf-8")
+        lines_after = result.count("\n") + 1
+        if not result.strip():
+            return 2, [f"edit: the result would be empty. Nothing was changed."]
+        if len(out) > EDIT_MAX_BYTES or lines_after > EDIT_MAX_LINES:
+            return 2, [f"edit: the result would be {len(out):,} bytes and {lines_after:,} lines; the limit for a port file is {EDIT_MAX_BYTES:,} bytes and "
+                       f"{EDIT_MAX_LINES:,} lines. Nothing was changed; make the new text shorter."]
+        try:
+            tmp = f".edit-{os.getpid()}-{os.urandom(4).hex()}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=dfd)
+            try:
+                os.fchmod(fd, stat.S_IMODE(before.st_mode))
+                view = memoryview(out)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if _stat_key(os.stat(leaf, dir_fd=dfd, follow_symlinks=False)) != _stat_key(before):
+                raise OSError("the file changed after it was read")
+            os.rename(tmp, leaf, src_dir_fd=dfd, dst_dir_fd=dfd)
+            tmp = None
+        except OSError as exc:
+            return 2, [f"edit: {shown} was not changed: {clean(str(exc), 150)}. The file is unchanged; read it again with `show` and repeat the edit."]
+        try:
+            os.fsync(dfd)
+        except OSError:
+            pass
+        record = {"tool": "edit", "file": shown, "bytes_before": len(data), "bytes_after": len(out), "lines_changed": _lines_changed(old, new),
+                  "chars_old": len(old), "chars_new": len(new)}
+        return 0, [f"edit: changed {record['lines_changed']} line(s) of {shown} ({len(data):,} to {len(out):,} bytes).", RECORD_MARK + json.dumps(record, sort_keys=True)]
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+        os.close(dfd)
+
+
 
 COMMANDS = {"last-check": "which check failed, where, the numbers and the evidence file",
             "layer-diff": "the port against the CPU reference layer by layer: the first layer whose relative error is over --threshold",
             "facts": "one value of port_facts.json by dotted path, or --find TEXT",
             "show": "a range of a file in the run directory with line numbers: show FILE --lines A:B",
-            "cheat": "one entry of the verified TTNN call sheet (--sheet ttlang for the kernel sheet): cheat NAME"}
+            "cheat": "one entry of the verified TTNN call sheet (--sheet ttlang for the kernel sheet): cheat NAME",
+            "edit": "change one exact piece of a port file: edit FILE --old TEXT --new TEXT (or --old-file / --new-file)"}
 
 
 def main(argv=None) -> int:
@@ -773,7 +1006,7 @@ def main(argv=None) -> int:
         return 0
     if argv[0] == "layer-diff":
         return layer_diff(HERE, argv[1:])
-    code, lines = {"facts": facts_cmd, "show": show_cmd, "cheat": cheat_cmd}[argv[0]](HERE, argv[1:])
+    code, lines = {"facts": facts_cmd, "show": show_cmd, "cheat": cheat_cmd, "edit": edit_cmd}[argv[0]](HERE, argv[1:])
     print("\n".join(lines))
     return code
 
