@@ -123,3 +123,102 @@ def test_the_baseline_has_no_entry_for_a_missing_file():
     baseline = json.loads(hb.BASELINE.read_text(encoding="utf-8"))
     missing = [rel for rel in baseline if not (REPO / rel).is_file()]
     assert not missing, f"remove from tests/hardening_baseline.json (python3 scripts/hardening_baseline.py --update): {missing}"
+
+
+# ---- the second count: link hazards (docs/pr-hardening-checklist.md, the symlink and special-file recipe)
+
+HAZARD_BASELINE = hb.HAZARD_BASELINE
+
+
+def _hazards(tmp_path, source: str) -> int:
+    return hb.count_hazards_source(source)
+
+
+def test_no_file_gained_a_link_hazard():
+    baseline = json.loads(HAZARD_BASELINE.read_text(encoding="utf-8"))
+    now = hb.count_hazards_all(REPO)
+    grew = {rel: (baseline.get(rel, 0), n) for rel, n in now.items() if n > baseline.get(rel, 0)}
+    assert not grew, (
+        "link hazards grew (was, now): " + ", ".join(f"{rel} {a} -> {b}" for rel, (a, b) in sorted(grew.items()))
+        + ". Open with os.open and O_NOFOLLOW (or safeio, or a dir_fd from a pinned root); never open a path for writing with mode w, a or x. "
+          "Mark a line that is right to keep with `# hardening: ok <reason>`. See the symlink recipe in docs/pr-hardening-checklist.md.")
+
+
+def test_the_hazard_counter_counts_what_it_says(tmp_path):
+    src = "\n".join([
+        "os.open(p, os.O_RDONLY)",                                       # 1: no O_NOFOLLOW
+        "os.open(p, os.O_RDONLY | os.O_NOFOLLOW)",                       # safe
+        "os.open(p, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))",        # safe (named through getattr)
+        "os.open(name, os.O_RDONLY, dir_fd=fd)",                         # 1: a descriptor anchors the lookup, a last-part link is still followed
+        "os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)",         # safe
+        "os.open(name, flags=os.O_RDONLY, dir_fd=fd)",                   # 1: flags given by keyword
+        "os.open(name, flags=os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)",   # safe
+        "open(p, 'w')",                                                  # 1
+        "open(p, mode='a')",                                             # 1
+        "open(p, 'r+')",                                                 # 1
+        "open(p)",                                                       # a read: the raw count's business
+        "open(p, 'rb')",                                                 # a read
+        "open(p, mode_variable)",                                        # not a literal: not counted
+        "webbrowser.open(u, 'w')",                                       # not the builtin
+        "os.open(name, os.O_RDONLY | NOFOLLOW, dir_fd=fd)",              # safe: a module constant named NOFOLLOW
+        "os.open(name, flags, dir_fd=fd)",                               # 1: flags in a variable are not seen through
+        "open(p, 'w')  # hardening: ok our own scratch file",           # marked
+    ]) + "\n"
+    assert _hazards(tmp_path, src) == 7
+
+
+def test_qualified_write_opens_are_hazards_like_the_bare_builtin(tmp_path):
+    # Review of PR 495, round 3: builtins.open, io.open and codecs.open open for writing exactly like the builtin, and the raw count already
+    # recognises them through OPEN_MODULES, so turning a qualified read into a write must not leave both counts unchanged.
+    src = "\n".join([
+        "builtins.open(p, 'w')",                    # 1
+        "io.open(p, 'a')",                          # 1
+        "codecs.open(p, 'w')",                      # 1
+        "codecs.open(p, mode='r+', encoding='u')",  # 1 (mode by keyword)
+        "io.open(p, 'rb')",                         # a read
+        "builtins.open(p)",                         # a read
+        "codecs.open(p, mode_variable)",            # not a literal: not counted
+        "webbrowser.open(u, 'w')",                  # a module that is not a plain file open
+        "tarfile.open(p, 'w')",                     # likewise
+        "obj.open(p, 'w')",                         # a method on any object is too broad to count
+        "io.open(p, 'w')  # hardening: ok our own scratch file",   # marked
+    ]) + "\n"
+    assert _hazards(tmp_path, src) == 4
+
+
+def test_a_hazard_marker_in_a_string_does_not_count(tmp_path):
+    assert _hazards(tmp_path, "open(p, 'w'); s = 'hardening: ok'\n") == 1
+
+
+def test_the_hazard_baseline_has_no_entry_for_a_missing_file():
+    baseline = json.loads(HAZARD_BASELINE.read_text(encoding="utf-8"))
+    assert not [rel for rel in baseline if not (REPO / rel).is_file()]
+
+
+def test_update_writes_both_baselines_and_refuses_growth_in_either(tmp_path, monkeypatch):
+    raw, haz = tmp_path / "raw.json", tmp_path / "haz.json"
+    raw.write_text("{}"), haz.write_text('{"a.py": 1}')
+    monkeypatch.setattr(hb, "ROOT", tmp_path)               # the success message prints a path relative to the root
+    monkeypatch.setattr(hb, "BASELINE", raw)
+    monkeypatch.setattr(hb, "HAZARD_BASELINE", haz)
+    monkeypatch.setattr(hb, "count_all", lambda root=hb.ROOT: {})
+    monkeypatch.setattr(hb, "count_hazards_all", lambda root=hb.ROOT: {"a.py": 2})
+    assert hb.main(["--update"]) == 1                      # the hazard count grew: refused
+    assert json.loads(haz.read_text()) == {"a.py": 1}
+    assert hb.main(["--accept-growth"]) == 0
+    assert json.loads(haz.read_text()) == {"a.py": 2}
+
+
+def test_update_writes_neither_baseline_when_one_count_fell_and_the_other_grew(tmp_path, monkeypatch):
+    raw, haz = tmp_path / "raw.json", tmp_path / "haz.json"
+    raw.write_text('{"a.py": 3}'), haz.write_text('{"a.py": 1}')
+    monkeypatch.setattr(hb, "ROOT", tmp_path)
+    monkeypatch.setattr(hb, "BASELINE", raw)
+    monkeypatch.setattr(hb, "HAZARD_BASELINE", haz)
+    monkeypatch.setattr(hb, "count_all", lambda root=hb.ROOT: {"a.py": 1})              # fell
+    monkeypatch.setattr(hb, "count_hazards_all", lambda root=hb.ROOT: {"a.py": 2})      # grew
+    assert hb.main(["--update"]) == 1
+    assert json.loads(raw.read_text()) == {"a.py": 3}                                    # the lowered count was not written either
+    assert json.loads(haz.read_text()) == {"a.py": 1}
+    assert hb.main(["--accept-growth"]) == 0
+    assert json.loads(raw.read_text()) == {"a.py": 1} and json.loads(haz.read_text()) == {"a.py": 2}
