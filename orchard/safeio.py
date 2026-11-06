@@ -447,8 +447,9 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
     Every directory on the way is made with `mkdir` relative to the descriptor before it and then opened with `O_DIRECTORY | O_NOFOLLOW`, so
     a link standing where a directory should be is refused and nothing is written through it. The bytes go to a new file with a name of its own
     (created with `O_CREAT | O_EXCL | O_NOFOLLOW`, synced) that is then renamed over the final name inside the same directory: a reader sees the
-    old file or the whole new one, and a link already standing at the final name is replaced and not followed. Raises only SafeReadError; the
-    temporary file is removed on failure."""
+    old file or the whole new one, and a link already standing at the final name is replaced and not followed. Each directory it creates and the
+    rename are synced through their parent descriptors before it returns, so a crash cannot leave a later ledger entry durable while the file is
+    not. Raises only SafeReadError; the temporary file is removed on failure."""
     names = _check_parts(parts)
     if not names:
         raise PathRefused("a file needs at least one path part")
@@ -459,6 +460,7 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
         for part in names[:-1]:
             try:
                 os.mkdir(part, 0o755, dir_fd=cur)
+                os.fsync(cur)                                   # the new directory's entry is durable once its parent is synced (review of PR 497)
             except FileExistsError:
                 pass                                            # it may be a link: the open below refuses it
             nxt = os.open(part, _DIR_FLAGS, dir_fd=cur)
@@ -477,6 +479,7 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
             os.close(fd)
         os.rename(tmp, names[-1], src_dir_fd=cur, dst_dir_fd=cur)
         tmp = None
+        os.fsync(cur)                       # the rename is durable only once its directory is synced (review of PR 497)
     except OSError as exc:
         raise _os_failure(exc, "a path part") from None
     except ValueError:                      # UnicodeEncodeError: a lone surrogate cannot be passed to the operating system

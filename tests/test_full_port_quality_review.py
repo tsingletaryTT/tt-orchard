@@ -337,3 +337,13 @@ def test_a_boolean_or_an_integer_is_not_accepted_for_a_float_result_field(record
 def test_the_same_values_of_the_same_types_still_compare_equal():
     from orchard import full_port_quality as fq
     assert fq._same({"a": [1.0, 2, None, "x"], "b": 0.5}, {"b": 0.5, "a": [1.0, 2, None, "x"]}) is True
+
+
+def test_a_top_five_file_replaced_after_stage_1_passed_is_refused_and_a_missing_ledger_hash_is_a_refusal(tmp_path):
+    """Review of PR 491: the record's own top5.sha256 only ties the record to the file on disk, so the ledger's hash from stage 1's pass must match."""
+    run, stage, seeded = good(tmp_path)
+    derive_and_write(run, stage)
+    accepted = full_port._sha(run / full_port_quality.TOP5_REL)
+    assert quality_check(run, stage, seeded, top5_accepted_sha=accepted)[0] == []
+    assert _has(quality_check(run, stage, seeded, top5_accepted_sha="0" * 64)[0], "is not the file stage 1's gate accepted")
+    assert _has(quality_check(run, stage, seeded, top5_accepted_sha=None)[0], "holds no sha256 for stages/1/evidence/reference/top5-logits.json")

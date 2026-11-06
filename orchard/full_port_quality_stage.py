@@ -50,11 +50,17 @@ def seeded(sup) -> list:
     return files
 
 
+def top5_accepted(sup) -> str | None:
+    """The sha256 the ledger holds for stage 1's top-five file among the evidence stage 1's gate accepted, or None."""
+    return full_port_serve.accepted_sha(sup.ledger.read(), 1, full_port_quality.TOP5_REL)
+
+
 def gate(sup, spec):
     """The stage's gate with the arguments that come from the supervisor and the ledger, never from a file the stage directory holds."""
     source = source_stage(sup)
     accepted = full_port_serve.accepted_sha(sup.ledger.read(), source, f"stages/{source}/{full_port.RECORD_FILE}")
-    kwargs = {"expected_chips": expected_chips(sup), "seeded": seeded(sup), "source_stage": source, "accepted_record_sha": accepted}
+    kwargs = {"expected_chips": expected_chips(sup), "seeded": seeded(sup), "source_stage": source, "accepted_record_sha": accepted,
+              "top5_accepted_sha": top5_accepted(sup)}
     if full_port_rehearsal(sup.ledger.read()):
         kwargs["rehearsal"] = True
     return functools.partial(spec.gate, **kwargs)
@@ -66,6 +72,13 @@ def pin(sup, spec, stage_dir: Path) -> list[str]:
     snapshot = sup.inputs.get("model")
     if not snapshot:
         return ["the run has no model snapshot (inputs `model=`), so the quality check has nothing to load"]
+    # Before the test runs: the top-five file on disk is the one stage 1's gate accepted (the gate checks again after the test).
+    top5 = full_port._inside(sup.run_dir, full_port_quality.TOP5_REL)
+    want = top5_accepted(sup)
+    if not want:
+        return [f"the ledger holds no sha256 for {full_port_quality.TOP5_REL} among stage 1's accepted evidence, so the gap bar has no reference"]
+    if top5 is None or full_port._sha(top5) != want:
+        return [f"{full_port_quality.TOP5_REL} is not the file stage 1's gate accepted"]
     shipped = Path(sup.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port_quality.TEMPLATE_NAME
     template = safeio.read_bytes(shipped, max_bytes=RUN_JSON_MAX)
     config = (json.dumps({"model_snapshot": str(Path(snapshot).absolute())}, indent=2) + "\n").encode("utf-8")
