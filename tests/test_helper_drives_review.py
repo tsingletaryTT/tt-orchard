@@ -116,3 +116,29 @@ def test_the_failure_of_the_last_allowed_round_is_recorded_as_the_best_port(rig,
     first_attempt = [e for e in entries if e["seq"] < first_end]
     best = rh.best_state(first_attempt, 2)
     assert best is not None and best["op"] == "prefill", best      # the first attempt alone, not what a later attempt records
+
+
+def test_an_abort_that_arrived_during_the_chip_check_stops_the_run_before_the_first_paid_request(rig, monkeypatch, tmp_path):
+    original = Supervisor._hardware_phase
+
+    def phase(self, *a, **k):
+        original(self, *a, **k)
+        Control(self.run_dir).write("abort")                 # the operator's command arrives while the first check ran
+    monkeypatch.setattr(Supervisor, "_hardware_phase", phase)
+    tel, wire = wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN, HONEST])
+    start(rig, BROKEN, ["# c\n"])
+    assert rig.run() == EXIT_ABORTED
+    assert not wire.requests, "a paid request went out after the abort"
+
+
+def test_a_helper_driven_attempt_runs_more_rounds_than_port_repair_rounds(rig, monkeypatch, tmp_path):
+    """The loop's limit is the helper's when the helper drives, whatever --port-repair-rounds says."""
+    monkeypatch.setattr(rh, "HELPER_ROUNDS", 3)
+    rig.args.port_repair_rounds = 1
+    wire_helper(monkeypatch, tmp_path, [STILL_LOAD, PREFILL_BROKEN, PREFILL_BROKEN + "# x\n", HONEST])
+    start(rig, BROKEN, ["# c\n"])
+    rig.run()
+    entries = rig.entries()
+    first_end = next(e["seq"] for e in entries if e["stage"] == 2 and e["event"] == "stage_end")
+    rounds = [e for e in entries if e["seq"] < first_end and e["data"].get("decision") == port_repair.DECISION]
+    assert len(rounds) >= 2, len(rounds)
