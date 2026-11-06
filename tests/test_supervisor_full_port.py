@@ -26,6 +26,10 @@ REF_IDS = list(range(100, 132))
 STAGE_1 = {**FILES[(1, "run")], "evidence/reference/generated-ids.json": {"generated_ids": REF_IDS, "generated_text": "x"},
            "evidence/reference/top5-logits.json": top5_file(),
            "evidence/reference/prompt-ids.json": {"prompt_ids": [1, 2, 3], "prompt_text": "p"}}
+# The real reference template lists the top-five file as evidence of its decode check, so stage 1's pass records its hash (review of PR 491).
+STAGE_1["reference.json"] = {"verdict": "pass", "checks": [
+    {"name": n, "pass": True, "evidence": [*FILES[(1, "run")]["reference.json"]["checks"][0]["evidence"], "stages/1/evidence/reference/top5-logits.json"]}
+    for n in ("loads", "tokenizer round trip", "decodes forward", "matches the card")]}
 
 # The port the coder writes (the check is the supervisor's template, which these tests run for real on the CPU with a fake `ttnn`).
 PREPARE = {"port/port_model.py": HONEST,
