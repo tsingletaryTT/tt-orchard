@@ -4171,6 +4171,9 @@ class Supervisor:
         safeio.atomic_write(stage_dir / full_port.TEMPLATE_NAME, safeio.read_bytes(shipped, max_bytes=RUN_JSON_MAX), mode=os.stat(shipped).st_mode & 0o777)   # replaces what stands there
         config = stage_dir / full_port.CONFIG_NAME
         _put(config, json.dumps({"model_snapshot": str(Path(snapshot).absolute())}, indent=2) + "\n")
+        # The coder's fixed-name tools (issue 505): the supervisor's file, put back each time, so an edit made during prepare is undone.
+        tools = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TOOLS_NAME
+        safeio.atomic_write(stage_dir / full_port.TOOLS_NAME, safeio.read_bytes(tools, max_bytes=RUN_JSON_MAX), mode=os.stat(tools).st_mode & 0o777)
         if command:
             deadline = full_port.DEADLINE_S
             given = self._run_json(stage_dir / "hw_test.json", "hw_test.json", spec.number).value
@@ -4179,7 +4182,8 @@ class Supervisor:
                 deadline = given
             _put(stage_dir / "hw_test.json", json.dumps({"command": full_port.command(spec.number, entry), "deadline_s": deadline}) + "\n")
         else:
-            self.ledger.append("decision", spec.number, decision="port check template copied", copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME])
+            self.ledger.append("decision", spec.number, decision="port check template copied",
+                               copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, full_port.TOOLS_NAME])
         return []
 
     def _pin_scoring(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:

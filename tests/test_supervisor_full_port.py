@@ -751,3 +751,14 @@ def test_an_unexpected_error_in_the_facts_step_leaves_a_ledger_decision_and_does
     assert stub._port_seed["facts"] is False and not (sd / "port_facts.json").exists() and stub._port_seed["skeleton"] is True
     problem = next(k for _, k in entries if k.get("decision") == "port facts not written")["problem"]
     assert "ValueError" in problem and "99999" not in problem
+
+
+def test_the_stage_gets_the_shipped_stage_tools_and_an_edit_of_them_is_undone(rig):
+    """Issue 505: the coder's fixed-name tools are the supervisor's file. A copy the coder edited during prepare is put back."""
+    shipped = full_port.TEMPLATE.parent / "stage_tools.py"
+    coder_writes(rig, {"stage_tools.py": "print('forged')\n"}, unattended=False)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert (stage_2(rig) / "stage_tools.py").read_bytes() == shipped.read_bytes()
+    copied = [d for d in rig.decisions() if d.get("decision") == "port check template copied"]
+    assert copied and "stage_tools.py" in copied[0]["copied"]

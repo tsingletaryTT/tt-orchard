@@ -50,6 +50,8 @@ OUTPUT_MARK = "PORT_CHECK_SHA256"
 MODEL_ROLE = "model"                  # every file under stages/2/port/ is model code; the check is the template's
 TEMPLATE = Path(__file__).resolve().parent / "skills" / "full-port-templates" / "port_check.py"      # the shipped template
 TEMPLATE_NAME = "port_check.py"       # its name in stages/2/
+TOOLS = TEMPLATE.parent / "stage_tools.py"      # the coder's fixed-name tools (issue 505): last-check, layer-diff, facts, show
+TOOLS_NAME = "stage_tools.py"         # its name in the stage directory, next to the template
 CONFIG_NAME = "port_check_config.json"
 # The only command the supervisor runs for this stage. -P and -s keep files the coder leaves in stages/2/ off the template's sys.path.
 COMMAND = "python3 -P -s stages/2/port_check.py"
