@@ -56,3 +56,34 @@ def test_a_restart_after_a_numerics_repair_edit_and_before_its_rerun_runs_the_ch
     rig.run(pid=200)
     assert decs(rig, port_repair.RERUN), "the repaired port was never tested again"
     assert stage_ends(rig) == ["pass"]
+
+
+# ---- round 3: every source the check ran is compared, not only port_model.py --------------------------------------------------------------
+
+def _checked_with_helper(tmp_path):
+    from port_check_fakes import make_run, run_template
+    run, stage, *_ = make_run(tmp_path, PASSES, extra_files={"port/helper.py": "H = 1\n", "port/sub/deep.py": "D = 2\n"})
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 0, done.stdout + done.stderr
+    return run, stage
+
+
+def test_untouched_sources_leave_the_check_readable_as_a_pass(tmp_path):
+    run, stage = _checked_with_helper(tmp_path)
+    assert port_repair.numerics_state(run, stage)[0] == "passed"
+
+
+def test_a_supporting_file_changed_added_or_removed_after_the_check_makes_the_record_unreadable(tmp_path):
+    """Finding: only port_model.py was compared, so the old agreement stayed valid for a port nobody had tested."""
+    for action in ("changed", "added", "removed", "nested-changed"):
+        run, stage = _checked_with_helper(tmp_path / action)
+        port = stage / "port"
+        if action == "changed":
+            (port / "helper.py").write_text("H = 2\n")
+        elif action == "added":
+            (port / "extra.py").write_text("E = 3\n")
+        elif action == "removed":
+            (port / "helper.py").unlink()
+        else:
+            (port / "sub" / "deep.py").write_text("D = 9\n")
+        assert port_repair.numerics_state(run, stage) == ("unreadable", None), action

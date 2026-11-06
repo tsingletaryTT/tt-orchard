@@ -76,7 +76,8 @@ def test_a_port_that_runs_below_the_bar_is_a_numerics_failure_with_the_numbers(t
 
 def test_a_port_at_the_bar_or_above_is_a_pass_not_a_failure(tmp_path):
     run, stage = checked(tmp_path, PASSES)
-    assert port_repair.numerics_state(run, stage) == ("passed", None) and port_repair.read_numerics(run, stage) is None
+    state, numbers = port_repair.numerics_state(run, stage)
+    assert state == "passed" and numbers["agreement"] >= full_port.TOP1_MIN and port_repair.read_numerics(run, stage) is None
 
 
 def test_the_rows_are_the_first_sixteen_mismatches_only(tmp_path):

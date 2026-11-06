@@ -3564,9 +3564,10 @@ class Supervisor:
         if n != 2 or not self._helper_drive_on():
             return
         try:
-            passed, _op, readable, _numbers = self._repair_outcome(n, stage_dir)        # also matches the marker to the ledger's evidence entry
+            passed, _op, readable, numbers = self._repair_outcome(n, stage_dir)        # also matches the marker to the ledger's evidence entry
             if not (passed and readable):
                 return                  # a record that is not the check's own, or one below the agreement bar, is not a port that passed
+            agreement = numbers.get("agreement") if isinstance(numbers, dict) else None
             saved = repair_help.save_best(stage_dir)
             if saved is None:
                 return
@@ -3579,10 +3580,13 @@ class Supervisor:
                 self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0,
                                    reason="best port not recorded: the port directory is not the one the passing check ran on")
                 return
+            # Among passing ports the higher agreement is the better one: a later port with a lower agreement does not replace it, so a starting
+            # point of 1.0 survives a later attempt that reached only 0.875 (review of PR 498, round 3). An equal key keeps the earlier entry.
             best = repair_help.best_state(self.ledger.read(), n)
-            if best is not None and best["rank"] >= repair_help.PASSED_RANK and best.get("snapshot") == saved["snapshot"]:
-                return                  # this very port is already the best one
+            if best is not None and repair_help.best_key(repair_help.PASSED_RANK, agreement) <= repair_help.best_key(best["rank"], best.get("agreement")):
+                return
             self.ledger.append("decision", n, decision=repair_help.BEST, op=None, rank=repair_help.PASSED_RANK, **saved, passed=True,
+                               **({"agreement": agreement} if agreement is not None else {}),
                                attempt=len([e for e in self.ledger.read() if e.get("stage") == n and e.get("event") == "stage_start"]))
         except Exception as exc:     # advisory: an error nobody listed leaves the ledger as it was
             self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0, reason=f"best port not recorded ({exc.__class__.__name__})")
@@ -3778,7 +3782,7 @@ class Supervisor:
             state, numbers = port_repair.numerics_state(self.run_dir, stage_dir, marker=data)
             if state == "below":
                 return False, port_repair.NUMERICS_OP, True, numbers
-            return (state == "passed"), None, state != "unreadable", None
+            return (state == "passed"), None, state != "unreadable", (numbers if state == "passed" else None)
         failure = port_repair.read_failure(self.run_dir, stage_dir, marker=data)
         if failure is None:
             return False, None, False, None

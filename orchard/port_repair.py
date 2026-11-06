@@ -295,8 +295,29 @@ NUMERICS_OP = "numerics"                    # the `op` of a failure that is not 
 NUMERIC_ROWS = 16                           # mismatching positions listed in the report (the first ones)
 
 
+def current_sources(stage_dir) -> dict | None:
+    """{run-relative path: sha256} of every `.py` file under the stage's port directory as it is now, the set the check's template records in
+    `port_sources` (`rglob("*.py")`, `__pycache__` holds no `.py`). None when a file cannot be read or a link or special file stands in the tree."""
+    stage_dir = Path(stage_dir)
+    root = stage_dir / PORT_DIR
+    out: dict[str, str] = {}
+    try:
+        for here, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__" or os.path.islink(os.path.join(here, d)))
+            for name in sorted(files + [d for d in dirs if os.path.islink(os.path.join(here, d))]):
+                path = Path(here) / name
+                if path.is_symlink():
+                    return None
+                if name.endswith(".py"):
+                    rel = f"stages/{stage_dir.name}/{PORT_DIR}/{path.relative_to(root).as_posix()}"
+                    out[rel] = hashlib.sha256(safeio.read_bytes(path, max_bytes=full_port.SOURCE_MAX)).hexdigest()
+    except (safeio.SafeReadError, OSError, ValueError):
+        return None
+    return out
+
+
 def numerics_state(run_dir, stage_dir, *, marker: dict | None = None) -> tuple[str, dict | None]:
-    """("below", the numbers), ("passed", None) or ("unreadable", None) for a hardware test that exited 0.
+    """("below", the numbers), ("passed", {"agreement", "n"}) or ("unreadable", None) for a hardware test that exited 0.
 
     "below": the test record shows exit code 0 without a timeout, the check's record (evidence/port-check.json) has the shipped schema, names the
     stage 1 reference files with their current sha256, holds reference ids that are the first ids of the stage 1 reference, holds chip ids of the
@@ -336,9 +357,14 @@ def numerics_state(run_dir, stage_dir, *, marker: dict | None = None) -> tuple[s
     if not isinstance(sources, list) or not any(isinstance(s, dict) and s.get("path") == f"stages/2/{PORT_DIR}/port_model.py"
                                                 and s.get("sha256") == port_sha for s in sources):
         return "unreadable", None            # the record is about another version of the port
+    # Every source the check ran, and no other, must be on disk now with the same hash: a supporting file changed, added or removed after the
+    # check would leave `port_model.py` matching while the port is another one (review of PR 498, round 3).
+    listed = {s.get("path"): s.get("sha256") for s in sources if isinstance(s, dict)}
+    if len(listed) != len(sources) or listed != current_sources(stage_dir):
+        return "unreadable", None
     agreement = full_port.agreement(ref, chip)
     if agreement >= full_port.TOP1_MIN:
-        return "passed", None
+        return "passed", {"agreement": round(agreement, 6), "n": len(chip)}      # kept: the better of two passing ports has the higher agreement
     rows = [(i, a, b) for i, (a, b) in enumerate(zip(ref, chip)) if a != b]
     return "below", {"kind": "numerics", "op": NUMERICS_OP, "returncode": 0, "agreement": round(agreement, 6), "n": len(chip),
                      "mismatches": len(rows), "first_mismatch": rows[0][0], "rows": rows[:NUMERIC_ROWS], "port_sha256": port_sha}

@@ -310,3 +310,30 @@ def test_without_a_best_port_the_standing_draft_is_still_considered(tmp_path):
     s, stage, spec, calls = _draft_stub(tmp_path, with_best=False)
     s._draft(spec, stage)
     assert calls == ["standing"]
+
+
+# ---- review of PR 498, round 3 -----------------------------------------------------------------------------------------------------------
+
+def _earlier_best(s, agreement):
+    """An earlier attempt's best passing port, as `_record_best_passed` writes it, with the given agreement."""
+    s.ledger.append("decision", 2, decision=rh.BEST, op=None, rank=rh.PASSED_RANK, passed=True, agreement=agreement, port_sha256="a" * 64,
+                    snapshot="b" * 64, files=[{"path": "port_model.py", "sha256": "a" * 64, "bytes": 1}], attempt=1)
+
+
+def test_a_later_passing_port_with_a_lower_agreement_does_not_replace_the_best_one(tmp_path):
+    """Finding: every passing snapshot had rank 99 and the passing agreement was dropped, so a 0.875 port replaced a 1.0 port."""
+    s, stage = _passed_check_stub(tmp_path, vouched=True)               # the check in this stub passes with an agreement of 0.875
+    _earlier_best(s, 1.0)
+    s._record_best_passed(2, stage)
+    bests = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+    assert len(bests) == 1 and bests[0]["agreement"] == 1.0
+    assert rh.best_state(s.ledger.read(), 2)["agreement"] == 1.0
+
+
+def test_a_later_passing_port_with_a_higher_agreement_is_recorded_with_its_agreement(tmp_path):
+    s, stage = _passed_check_stub(tmp_path, vouched=True)
+    _earlier_best(s, 0.5)
+    s._record_best_passed(2, stage)
+    bests = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+    assert len(bests) == 2 and bests[-1]["agreement"] == 0.875 and bests[-1]["passed"] is True
+    assert rh.best_state(s.ledger.read(), 2)["agreement"] == 0.875
