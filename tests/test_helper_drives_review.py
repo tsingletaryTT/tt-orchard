@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The helper drives stage 2: the findings of the Copilot review of PR 497. Each test names the finding."""
+from pathlib import Path
+
 import pytest
 
 from orchard import port_repair, repair_help as rh
@@ -202,7 +204,18 @@ def _passed_check_stub(tmp_path, *, vouched):
     (stage / "port").mkdir(parents=True)
     (stage / "port" / "port_model.py").write_text("x = 1\n")
     (stage / "port" / "helper.py").write_text("y = 2\n")
-    marker = json.dumps({"returncode": 0, "timed_out": False}).encode()
+    # The chain the supervisor's test leaves: a record that lists the sources it ran, an output file that prints the record's hash once, and a
+    # marker that names the output by hash (review of PR 497, round 3).
+    from orchard import full_port
+    (stage / "evidence").mkdir()
+    record = json.dumps({"port_sources": [
+        {"path": f"stages/2/port/{name}", "sha256": hashlib.sha256((stage / "port" / name).read_bytes()).hexdigest(), "role": "model"}
+        for name in ("helper.py", "port_model.py")]}).encode()
+    (stage / full_port.RECORD_FILE).write_bytes(record)
+    out = f"loaded\n{full_port.OUTPUT_MARK} {hashlib.sha256(record).hexdigest()}\n".encode()
+    (stage / full_port.OUTPUT_FILE).write_bytes(out)
+    marker = json.dumps({"returncode": 0, "timed_out": False,
+                         "output": {"path": f"stages/2/{full_port.OUTPUT_FILE}", "sha256": hashlib.sha256(out).hexdigest()}}).encode()
     (stage / port_repair.MARKER).write_bytes(marker)
     led = Ledger(run / "ledger.jsonl")
     led.append("run_start", None, model="m")
@@ -229,3 +242,81 @@ def test_a_test_record_the_supervisor_did_not_write_is_not_a_passed_check(tmp_pa
     s, stage = _passed_check_stub(tmp_path, vouched=False)
     s._record_best_passed(2, stage)
     assert not [e for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+
+
+def test_a_port_edited_after_the_passing_check_does_not_displace_the_best_port(tmp_path):
+    """Finding (round 3): on a resume after a successful check, an edited port kept the authenticated success marker and was saved at the passing
+    rank without being tested."""
+    s, stage = _passed_check_stub(tmp_path, vouched=True)
+    s._record_best_passed(2, stage)
+    (first,) = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+    (stage / "port" / "port_model.py").write_text("x = 1\n# edited after the check\n")
+    s._record_best_passed(2, stage)
+    bests = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+    assert bests == [first], "an untested snapshot was recorded as the best port"
+    assert any("not the one the passing check ran on" in e["data"].get("reason", "") for e in s.ledger.read())
+
+
+def test_a_file_added_to_the_port_after_the_passing_check_is_also_refused(tmp_path):
+    s, stage = _passed_check_stub(tmp_path, vouched=True)
+    (stage / "port" / "extra.py").write_text("z = 3\n")
+    s._record_best_passed(2, stage)
+    assert not [e for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+
+
+def test_a_record_rewritten_to_list_the_edited_port_is_refused_because_the_output_mark_no_longer_matches(tmp_path):
+    import hashlib
+    import json
+    from orchard import full_port
+    s, stage = _passed_check_stub(tmp_path, vouched=True)
+    (stage / "port" / "port_model.py").write_text("x = 1\n# edited\n")
+    rec = json.loads((stage / full_port.RECORD_FILE).read_text())
+    for item in rec["port_sources"]:
+        item["sha256"] = hashlib.sha256((stage / item["path"].replace("stages/2/", "")).read_bytes()).hexdigest()
+    (stage / full_port.RECORD_FILE).write_text(json.dumps(rec))          # the coder's rewrite: the output's printed hash is the old record's
+    s._record_best_passed(2, stage)
+    assert not [e for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+
+
+def _draft_stub(tmp_path, *, with_best):
+    """A supervisor at the start of an attempt: the port directory holds the real skeleton, and the ledger holds (or not) a best port that an
+    earlier attempt saved. `_place_standing_draft` is replaced by a recorder."""
+    from types import SimpleNamespace
+    from orchard import port_facts
+    run = tmp_path / "run"
+    stage = run / "stages" / "2"
+    skeleton = Path(port_facts.SKELETON).read_bytes()
+    (stage / "port").mkdir(parents=True)
+    (stage / "port" / "port_model.py").write_bytes(b"best_port = 1\n")
+    led = Ledger(run / "ledger.jsonl")
+    led.append("run_start", None, model="m")
+    led.append("stage_start", 2, escalated=False, resumed=False)
+    if with_best:
+        saved = rh.save_best(stage)
+        led.append("decision", 2, decision=rh.BEST, op="prefill", rank=3, **saved, attempt=1)
+    (stage / "port" / "port_model.py").write_bytes(skeleton)              # the next attempt's fresh skeleton
+    s = object.__new__(Supervisor)
+    s.run_dir, s.ledger, s.repair_help, s.helper_drives, s.telegraph = run, led, True, True, object()
+    calls = []
+    s._pin_full_port = lambda spec, d, **k: None
+    s._seed_full_port = lambda spec, d: None
+    s._place_standing_draft = lambda spec, d: calls.append("standing") or None
+    return s, stage, SimpleNamespace(number=2, draft="full_port"), calls
+
+
+def test_the_best_port_is_restored_before_the_standing_draft_and_the_draft_is_then_not_placed(tmp_path):
+    """Finding (round 3): `_draft` placed the standing draft first, `restore_best` then refused the changed file, and the attempt started from an
+    older draft although a further-tested snapshot existed."""
+    s, stage, spec, calls = _draft_stub(tmp_path, with_best=True)
+    s._draft(spec, stage)
+    assert (stage / "port" / "port_model.py").read_bytes() == b"best_port = 1\n"
+    assert calls == [], "the standing draft was considered after the best port was restored"
+    assert s._best_restore == (str(stage), "The files under `stages/2/port/` already hold the furthest version an earlier attempt reached "
+                                           "(its check failed at the 'prefill' request). Start from it: read it, correct what the check shows "
+                                           "to be wrong and keep what works.")
+
+
+def test_without_a_best_port_the_standing_draft_is_still_considered(tmp_path):
+    s, stage, spec, calls = _draft_stub(tmp_path, with_best=False)
+    s._draft(spec, stage)
+    assert calls == ["standing"]

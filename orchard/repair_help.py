@@ -514,8 +514,24 @@ def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
             for rel, _ in blobs:
                 if rel != "port_model.py" and _exists(pin, ("port", *rel.split("/"))):
                     return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
-            for rel, data in sorted(blobs, key=lambda item: item[0] == "port_model.py"):
-                safeio.write_beneath(pin.fd, ("port", *rel.split("/")), data, mode=0o644)
+            # The writes go through one descriptor of the port directory. The skeleton is read again through it, and port_model.py is replaced only
+            # if it still holds those bytes; a supporting file is created only where nothing exists. An edit made after the checks above, or a
+            # file created in the meantime, is kept and the restore stops (review of PR 497, round 3).
+            port_fd = safeio.open_beneath(pin.fd, ("port",))
+            try:
+                skeleton_now = safeio.read_beneath(port_fd, ("port_model.py",), max_bytes=PORT_MAX)
+                if skeleton_now.rstrip(b"\n") != skeleton.rstrip(b"\n"):
+                    return False, "port_model.py is not the unchanged skeleton"
+                for rel, data in sorted(blobs, key=lambda item: item[0] == "port_model.py"):
+                    try:
+                        safeio.write_beneath_if(port_fd, tuple(rel.split("/")), data, mode=0o644,
+                                                expect_sha256=hashlib.sha256(skeleton_now).hexdigest() if rel == "port_model.py" else None)
+                    except safeio.AlreadyExists:
+                        return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
+                    except safeio.ChangedWhileReading:
+                        return False, "port_model.py changed while the best port was being restored, and the edit is kept"
+            finally:
+                os.close(port_fd)
     except safeio.SafeReadError as exc:
         return False, f"the port could not be written ({exc.reason})"
     return True, ""

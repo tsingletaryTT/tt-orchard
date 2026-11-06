@@ -3299,7 +3299,9 @@ class Supervisor:
                                                                                        copied=bool(seed.get("copied") or seed.get("kept"))))
             note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")))
             if spec.number == 2 and getattr(self, "telegraph", None) is not None:
-                restored = self._restore_best_port(spec, stage_dir)
+                done_dir, done = getattr(self, "_best_restore", (None, None))
+                restored = done if done_dir == str(stage_dir) else self._restore_best_port(spec, stage_dir)      # `_draft` already tried it
+                self._best_restore = (None, None)
                 friend = restored or self._phone_a_friend(spec, stage_dir)      # a restored best port makes a fresh attempt-start draft unnecessary
                 if friend:
                     note = note + "\n\n" + friend
@@ -3513,6 +3515,29 @@ class Supervisor:
         self.watchdog.feed(Event(ts=self.clock(), agent="supervisor", kind="ledger", name="helper-driven round", stage=spec.number))
         return self.actuator.stop_reason()
 
+    def _tested_sources(self, stage_dir) -> dict | None:
+        """{run-relative path: sha256} of the port files the last hardware test ran on, or None when that cannot be shown. The chain: the marker
+        matches the supervisor's evidence entry (`_repair_outcome` did that), the marker names the output file by hash, the output carries the
+        record's hash on the template's one mark line (`full_port._output_reasons`), and the record lists the sources it ran."""
+        stage_dir = Path(stage_dir)
+        try:
+            marker = safeio.read_json(stage_dir / port_repair.MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
+            found = full_port.file_record(self.run_dir, stage_dir / port_repair.MARKER)
+            if found is None or not recorded_by_supervisor(self.ledger, 2, found):
+                return None
+            reasons: list[str] = []
+            full_port._output_reasons(stage_dir, self.run_dir, marker, reasons)
+            if reasons:
+                return None
+            record = safeio.read_json(stage_dir / full_port.RECORD_FILE, max_bytes=full_port.JSON_MAX, expect=dict)
+            sources = record.get("port_sources")
+            if not isinstance(sources, list) or not all(isinstance(x, dict) and isinstance(x.get("path"), str) and isinstance(x.get("sha256"), str)
+                                                        for x in sources):
+                return None
+            return {x["path"]: x["sha256"] for x in sources}
+        except (safeio.SafeReadError, OSError, ValueError):
+            return None
+
     def _record_best_passed(self, n: int, stage_dir: Path) -> None:
         """Keep a port whose check ran to the end, which ranks above every failure. The stage's gate may still refuse it (the check's agreement
         with the reference can be below the gate's minimum), and the next attempt should start from this port and not from an earlier failure
@@ -3520,14 +3545,20 @@ class Supervisor:
         if n != 2 or not self._helper_drive_on():
             return
         try:
-            found = full_port.file_record(self.run_dir, Path(stage_dir) / port_repair.MARKER)
-            if found is None or not recorded_by_supervisor(self.ledger, n, found):
-                return
-            passed, _op, readable = self._repair_outcome(stage_dir)
+            passed, _op, readable = self._repair_outcome(n, stage_dir)        # also matches the marker to the ledger's evidence entry
             if not (passed and readable):
                 return
             saved = repair_help.save_best(stage_dir)
             if saved is None:
+                return
+            # The marker says a check passed, not that it passed on these files: after a resume the coder may have edited the port and left the
+            # marker alone. The record the test wrote names the sources it ran, and its hash is printed in the output the marker vouches for; the
+            # snapshot is kept at the passing rank only when it holds exactly those files (review of PR 497, round 3). Otherwise the earlier
+            # best port stays.
+            tested = self._tested_sources(stage_dir)
+            if tested is None or tested != {f"stages/{n}/port/{item['path']}": item["sha256"] for item in saved["files"]}:
+                self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0,
+                                   reason="best port not recorded: the port directory is not the one the passing check ran on")
                 return
             best = repair_help.best_state(self.ledger.read(), n)
             if best is not None and best["rank"] >= repair_help.PASSED_RANK and best.get("snapshot") == saved["snapshot"]:
@@ -3816,6 +3847,15 @@ class Supervisor:
         if spec.draft == "full_port":
             self._pin_full_port(spec, stage_dir)
             self._seed_full_port(spec, stage_dir)
+            # The best port of an earlier attempt goes in first, while the port is still the fresh skeleton (`restore_best` refuses anything
+            # else). The standing draft is used only when no best port was restored: placed first, it would turn the skeleton into an older
+            # draft and the restoration would then be refused (review of PR 497, round 3). `_prepare_in_code` reads the answer from here.
+            self._best_restore = (str(stage_dir), None)
+            if spec.number == 2 and getattr(self, "telegraph", None) is not None:
+                restored = self._restore_best_port(spec, stage_dir)
+                self._best_restore = (str(stage_dir), restored)
+                if restored:
+                    return None
             return self._place_standing_draft(spec, stage_dir)
         if spec.draft == "scoring_check":
             return self._pin_scoring(spec, stage_dir)
