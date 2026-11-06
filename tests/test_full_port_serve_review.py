@@ -100,6 +100,15 @@ def test_the_copy_reads_no_more_of_a_huge_directory_than_the_entry_cap_allows(ru
     assert len(taken) <= 7, f"the scan took {len(taken)} entries of a directory that holds 301"
 
 
+def test_a_port_nested_deeper_than_the_depth_cap_is_refused_and_not_half_copied(run, monkeypatch):
+    monkeypatch.setattr(full_port_serve_stage, "MAX_DEPTH", 2)
+    deep = run["run"] / "stages" / "2" / "port" / "a" / "b"
+    deep.mkdir(parents=True)
+    (deep / "x.py").write_text("pass\n")
+    files, why = full_port_serve_stage.copy_port(run["run"], 2, run["stage"])
+    assert files == [] and "more than 2 directory levels" in why
+
+
 # ---- the corpus builder compares the record's hashes with the files it reads ------------------------------------------------------
 
 def edit_json(path, fn):
@@ -119,6 +128,14 @@ def test_a_stage_1_prompt_changed_after_the_stage_passed_is_not_paired_with_the_
 def test_a_stage_1_reference_changed_after_the_stage_passed_is_refused(run):
     ref = run["run"] / full_port.REFERENCE_FILE
     edit_json(ref, lambda d: d.update(generated_ids=list(d["generated_ids"])[:-1] + [199]))
+    corpus, problems = full_port_serve.build_corpus(run["run"], 2)
+    assert corpus is None and any("reference" in p and "record" in p for p in problems), problems
+
+
+def test_a_stage_1_reference_extended_after_the_stage_passed_is_refused(run):
+    """Extra ids at the end keep the record's reference_ids a prefix of the file, so only the hash tells the file changed."""
+    ref = run["run"] / full_port.REFERENCE_FILE
+    edit_json(ref, lambda d: d.update(generated_ids=list(d["generated_ids"]) + [5, 5, 5]))
     corpus, problems = full_port_serve.build_corpus(run["run"], 2)
     assert corpus is None and any("reference" in p and "record" in p for p in problems), problems
 
