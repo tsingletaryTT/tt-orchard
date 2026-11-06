@@ -25,7 +25,7 @@ from typing import Protocol
 from orchard.adapters import AdapterError
 from orchard.defaults import (DEDUPE_HINT_PREFIX, DEDUPE_NUDGES_PER_STAGE, DEDUPE_STREAK_N, DEDUPE_STREAK_WINDOW, IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
                               RUNG_CAPS, THINKING_CAP, TURN_CYCLE_MAX_PERIOD, TURN_CYCLE_REPEATS, TURN_REPEAT_N,
-                              TURN_SHAPE_N, WRITELESS_TURNS)
+                              TURN_SHAPE_N, WRITELESS_TURNS, FIRST_WRITE_TURNS)
 
 KINDS = frozenset({"response", "tool_call", "tool_result", "evidence", "ledger"})
 
@@ -443,6 +443,75 @@ class NoFileWritten:
                               "from it now, even if it is incomplete, and refine it afterwards."))
 
 
+class FirstWriteDeadline:
+    """A step that has made `turns` model turns in a row without writing any file gets one hint that says what to write (issue 427).
+
+    The stage 2 prepare step's first attempt read the reference files for 20 turns and wrote no port. NoFileWritten nudges at 20 turns and
+    counts the nudge as a rung, so a second stall escalates the coder. This detector acts earlier and more gently: one response after the step's own deadline
+    (the task asks for a first version within that many turns; the hint waits for that turn's tools, so a first write on the deadline turn gets none) it sends one `nudge_only` hint, which uses no rung, whose text comes from
+    `message(count)`. The supervisor builds that text from the port file as it stands, so it names the file and what to put in it.
+
+    A step starts with its first response (turn 1; a continuation keeps counting from its step). The count and the once-per-step flag start
+    again there, and on any write, using the same definition of a write as NoFileWritten. The ledger shows each hint as a `hint` entry with
+    this detector's name, which is how the hints are counted."""
+    name = "first_write_deadline"
+
+    def __init__(self, message, turns: int = FIRST_WRITE_TURNS):
+        if turns < 1:
+            raise ValueError("turns must be at least 1")
+        if not callable(message):
+            raise TypeError("message must be a function from the turn count to the hint text")
+        self.message, self.turns = message, turns
+        self._count: dict[str, int] = {}
+        self._fired: set[str] = set()
+        self._due: set[str] = set()      # the deadline passed on a response whose tools have not all run yet (review of PR 501)
+        self._sent: dict[str, str] = {}  # the hint text sent in this step, until a write shows it may be stale
+        self._withdrawn: list[tuple[str, str]] = []
+
+    def _new_step(self, agent: str) -> None:
+        self._count.pop(agent, None)
+        self._fired.discard(agent)
+        self._due.discard(agent)
+        self._sent.pop(agent, None)
+
+    def take_withdrawn(self) -> list[tuple[str, str]]:
+        """(agent, hint text) for each hint a write has made stale since the last call. The watchdog asks the actuator to drop each one if it is
+        still queued (review of PR 501, round 6)."""
+        out, self._withdrawn = self._withdrawn, []
+        return out
+
+    def feed(self, ev: Event) -> Finding | None:
+        if NoFileWritten._is_write(ev):
+            # A write cancels a hint that was queued on the response before it: that response's tools run before the next request, so the
+            # text (which says the port is the skeleton) would reach a coder that has just written its port.
+            if ev.agent in self._sent:
+                self._withdrawn.append((ev.agent, self._sent[ev.agent]))
+            self._new_step(ev.agent)
+            return None
+        if ev.kind != "response":
+            return None
+        if ev.turn == 1:
+            self._new_step(ev.agent)
+        if ev.agent in self._fired:
+            return None
+        # The hint for a deadline passed on the previous response is sent now: that response's tools have run, and none of them wrote a file
+        # (a write would have cleared `_due`). Sending it at the deadline response itself would queue the text before the turn's tools run,
+        # and a first write on that turn would still be told the port is the skeleton.
+        if ev.agent in self._due:
+            self._due.discard(ev.agent)
+            self._fired.add(ev.agent)
+            count = self._count[ev.agent]
+            text = str(self.message(count))
+            self._sent[ev.agent] = text
+            return Finding(self.name, ev.agent, ev.ts, f"{count} model turns in a row and no file written; the write deadline passed",
+                           {"turns": count}, nudge_only=True, nudge=text)
+        count = self._count.get(ev.agent, 0) + 1
+        self._count[ev.agent] = count
+        if count >= self.turns:
+            self._due.add(ev.agent)
+        return None
+
+
 class DedupeStreak:
     """The agent keeps asking for text it already has: `n` of its last `window` tool results were the "unchanged" note (Tools dedupe).
 
@@ -638,6 +707,10 @@ class Ladder:
                 self._taken[(d.get("agent"), e["stage"], d["rung"])] += 1
             elif d.get("watchdog") and d.get("rung") == SOFT_RUNG:
                 self._hints[(d.get("agent"), e["stage"])] += 1
+            elif d.get("watchdog") and d.get("hint_withdrawn"):
+                # A withdrawn hint was never delivered: give its budget back (see `withdraw`).
+                key = (d.get("agent"), e["stage"])
+                self._hints[key] = max(0, self._hints[key] - 1)
 
     def _left(self, agent: str, stage, rung: str) -> bool:
         return self._taken[(agent, stage, rung)] < self.caps[rung]
@@ -666,6 +739,18 @@ class Ladder:
         self._hints[(agent, stage)] += 1
         self.actuator.nudge(agent, message)
         return "nudge"
+
+    def withdraw(self, agent: str, message: str, stage) -> bool:
+        """Drop a hint that is still queued for `agent`, when the actuator can (`retract_nudge`). A hint the agent has already been sent is left alone.
+        The ledger records a withdrawal."""
+        retract = getattr(self.actuator, "retract_nudge", None)
+        if retract is None or not retract(agent, message):
+            return False
+        self.ledger.append("notice", stage, watchdog=True, agent=agent, hint_withdrawn=True,
+                           note="a write arrived before the hint was sent, so the hint was dropped")
+        # The hint was never delivered, so it does not use up the stage's hint budget. Replay does the same (see __init__).
+        self._hints[(agent, stage)] = max(0, self._hints[(agent, stage)] - 1)
+        return True
 
     def respond(self, agent: str, findings: list[Finding], stage) -> str:
         quiet = [f for f in findings if f.notice_only]
@@ -738,6 +823,10 @@ class Watchdog:
         if ev.kind == "ledger" and ev.name == "stage_start":
             self.stage = ev.stage
         findings = replay([ev], self.detectors)
+        for d in self.detectors:
+            take = getattr(d, "take_withdrawn", None)
+            for agent, text in (take() if take is not None else []):
+                self.ladder.withdraw(agent, text, self.stage)
         by_agent: dict[str, list[Finding]] = {}
         for f in findings:
             by_agent.setdefault(f.agent, []).append(f)
