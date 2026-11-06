@@ -223,6 +223,9 @@ _NUMERIC = re.compile(r"-?[\d.,:]+[a-zA-Z]?")
 _EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}$")
 _SED_RANGE = re.compile(r"\d{1,9}(?:,\d{1,9})?p")       # the print range of `sed -n 'a,bp' file`
 SHAPE_CHARS = 40
+# One leading `cd <dir> &&` (or `;`). Agents start every shell call this way, so it says where the command
+# runs and nothing about what it does.
+_CD_PREFIX = re.compile(r"""^\s*cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*""")
 
 
 def _path_like(token: str) -> bool:
@@ -234,9 +237,10 @@ def command_shape(command: str) -> str:
 
     Only the part before the first pipe or separator counts, and redirect suffixes are dropped.
     The shape is the first word plus the first path-like argument (one with a slash, a leading
-    `~` or `.`, or a file extension). A command with no path-like argument is cut to its first
-    SHAPE_CHARS characters after trailing numeric arguments are removed and whitespace is
-    normalised. So `grep -rn x /src | head -50` and `grep -rn y /src | head -80` share the shape
+    `~` or `.`, or a file extension). Leading `cd <dir> &&` (or `;`) prefixes are skipped first, so
+    `cd /run && cat a.json` and `cd /run && grep x b.json` do not share the shape `cd /run`.
+    A command with no path-like argument is cut to its first SHAPE_CHARS characters after
+    trailing numeric arguments are removed and whitespace is normalised. So `grep -rn x /src | head -50` and `grep -rn y /src | head -80` share the shape
     `grep /src`, and `tail -n 200` and `tail -n 400` share `tail -n`.
 
     The one exception is a `sed` print range. `sed -n '1,250p' f` and `sed -n '251,500p' f` read
@@ -246,6 +250,8 @@ def command_shape(command: str) -> str:
     """
     if not isinstance(command, str) or not command.strip():
         return ""
+    while (rest := _CD_PREFIX.sub("", command, count=1)).strip() and rest != command:
+        command = rest                    # `cd X && cd Y && cmd`: skip each leading cd; a bare `cd X` stays
     head = _REDIRECT.sub("", _SEPARATOR.split(command, 1)[0])
     try:
         tokens = shlex.split(head)

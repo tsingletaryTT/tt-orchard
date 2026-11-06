@@ -4709,3 +4709,8 @@ Prompt (operator): "lots of repeat issues from copilot around symlinks. can we g
 - Docs: the symlink and special-file recipe in `docs/pr-hardening-checklist.md`, a mention in the PR template (item 2) and the README development notes.
 - Tests first. Mutations (all red, restored): five in the hazard counter (dir_fd exemption, NOFOLLOW check, write modes, marker, second baseline write) and three in `safeio` (directory flags lose `O_NOFOLLOW`: 13 tests fail; file flags lose `O_NONBLOCK`: 7; file flags lose `O_NOFOLLOW`: 2). 84 tests pass and 3 xfail in `tests/test_hostile_fs_readers.py`; 17 in the ratchet file. The full suite was not run.
 - Not covered: readers that are not registered (the fixture tests what is listed, and 33 files still carry a link hazard in the baseline); Windows and macOS link behaviour; the fixture does not exercise a file that grows during a read (that stays in `tests/hostile_inputs.py`).
+
+## 2026-11-06 watchdog shape ignores a leading cd
+- Run 18 of the tiny Qwen4 rehearsal was stopped as "near-duplicate tool calls with the same shape (cd <run dir>)" in 4 turns. The four commands ran different programs (cat, grep, python3) on different files. Every one began with `cd <run dir> &&`, and `command_shape` took `cd` as the first word and the run dir as the first path, so all four shapes were `cd <run dir>`.
+- Fix: `command_shape` skips leading `cd <dir> &&` or `;` prefixes (quoted directories too, and chains of them) before it takes the first word and path. A bare `cd X` keeps its shape. A command repeated after the same prefix still has one shape.
+- Test first: 5 new cases in `tests/test_watchdog_detectors.py` were red on the old code. Mutation: restoring the old `watchdog.py` turns the same 5 red; restored.
