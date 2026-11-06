@@ -156,3 +156,72 @@ def test_the_assumed_bf16_floor_warning_says_the_share_is_overstated():
     res = {"schema": full_port_quality.RESULT_SCHEMA, "coherent": True, "benchmark": {"dtype_policy_source": "assumed bf16: the port declares none"}}
     text = "\n".join(full_port_bundle.risks(res, lambda s: s))
     assert "overstated" in text and "understated" not in text
+
+
+# ---- round 3 -------------------------------------------------------------------------------------------------------------------------
+
+def test_the_mutation_script_finds_the_text_of_every_row_it_mutates():
+    """Finding: the `seeded-hashes` row searched for an old call, matched nothing, and the default run always ended with status 1."""
+    import importlib.util
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("mut6", root / "scripts" / "mutations" / "full_port_stage_6.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    missing = []
+    for name, row in mod.MUTATIONS.items() if hasattr(mod, "MUTATIONS") else []:
+        path, old = row[0], row[1]
+        if (root / path).read_text(encoding="utf-8").count(old) != 1:
+            missing.append(name)
+    assert hasattr(mod, "MUTATIONS") and not missing, missing
+
+
+def _child():
+    import subprocess
+    import sys
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def test_a_descendant_whose_start_time_differs_is_not_signalled():
+    """Finding: only pids were kept, so a pid freed and reused between the scan and the kill could take SIGKILL. The start time recorded in the
+    scan is checked against the live process first."""
+    mod = load_template()
+    child = _child()
+    try:
+        started = mod.proc_stat(child.pid)[1]
+        assert mod.kill_if_same(child.pid, started + 1) is False
+        assert child.poll() is None, "a process with another start time was killed"
+        assert mod.kill_if_same(child.pid, started) is True
+        child.wait(timeout=10)
+        assert child.returncode == -9
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def test_kill_descendants_reads_each_childs_start_time_in_the_scan(monkeypatch):
+    mod = load_template()
+    child = _child()
+    seen = []
+    try:
+        w = mod.Worker.__new__(mod.Worker)
+        w.proc = type("P", (), {"pid": os.getpid()})()
+        monkeypatch.setattr(mod, "kill_if_same", lambda pid, started: seen.append((pid, started)))
+        w.kill_descendants()
+        assert (child.pid, mod.proc_stat(child.pid)[1]) in seen
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_port_that_rewrites_the_model_config_while_it_runs_fails_the_test(tmp_path):
+    """Finding: the config hash was first taken after the worker finished, so a changed config.json was accepted as the model's."""
+    from port_check_fakes import HONEST
+    from quality_fakes import make_run, run_template
+    port = HONEST.replace("def load(model_dir, mesh_device):\n",
+                          "def load(model_dir, mesh_device):\n    import pathlib\n"
+                          "    c = pathlib.Path(model_dir) / 'config.json'\n    c.write_text(c.read_text().replace('64', '65'))\n", 1)
+    run, stage, snap, seeded = make_run(tmp_path, port)
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "config.json changed while the port ran" in done.stdout, done.stdout + done.stderr
+    assert not (stage / "evidence" / "port-quality.json").exists()

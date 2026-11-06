@@ -270,6 +270,35 @@ def passkey_prompt(tok, length: int, key: str) -> str:
 
 # ---- the run -------------------------------------------------------------------------------------------------------------------
 
+def write_record(data: bytes) -> None:
+    """Write the record through the evidence directory's descriptor. The port ran in this directory tree and could have left a link at the
+    temporary name, or replaced `evidence` itself with a link, so a plain write would truncate a file outside the run (review of PR 490, round 3).
+    The directory must be a real directory at its own place beneath the run, the temporary name is removed first (removing a link removes the
+    link), and the new file is created exclusively with no following of links."""
+    evidence = RECORD.parent
+    expected = os.path.join(os.path.realpath(RUN_DIR), *evidence.relative_to(RUN_DIR).parts)
+    if os.path.realpath(evidence) != expected or os.path.islink(evidence):
+        raise ServeFailed(f"{evidence.relative_to(RUN_DIR)} is a link or has a linked parent: the record is not written through it")
+    dfd = os.open(evidence, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        tmp = RECORD.name + ".tmp"
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, RECORD.name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
 def main() -> int:
     t_start = time.monotonic()
     config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))  # hardening: ok the supervisor wrote this file before the test; no agent works in stage 5, and the gate compares its hash
@@ -378,9 +407,7 @@ def main() -> int:
                          "second_ids": c_second},
               "port_sources": [{"path": str(f.relative_to(RUN_DIR)), "sha256": sha_file(f), "role": "model"} for f in sorted(PORT_DIR.rglob("*.py"))]}
     data = (json.dumps(record, indent=2) + "\n").encode("utf-8")
-    tmp = RECORD.with_name(RECORD.name + ".tmp")
-    tmp.write_bytes(data)  # hardening: ok the supervisor wrote this file before the test; no agent works in stage 5, and the gate compares its hash
-    os.replace(tmp, RECORD)
+    write_record(data)
     print(f"corpus {matched}/{total}; passkey lengths {[r['length'] for r in runs]}; canary {'same' if c_first == c_second else 'DIFFERENT'}", flush=True)
     print("PORT_CHECK_SHA256", sha_bytes(data), flush=True)
     return 0

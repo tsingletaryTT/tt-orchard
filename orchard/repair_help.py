@@ -321,19 +321,30 @@ def place(stage_dir, source: str, sent_sha: str, *, coder_failed: bool, call_id:
     """(placed, why, found_sha256). Writes `source` as `stages/2/port/port_model.py` when that file is still the one that was sent (`sent_sha`, a
     sha256 hex digest) or the coder's step failed; a file the coder changed while the helper answered is left alone. A reply that equals the port
     as it is changes nothing. `source` is not run. The caller has already refused a stub."""
-    # The read and the write go through one descriptor of the stage directory, so a link planted at `port` between them is refused too.
+    # The port directory is opened once, beneath the pinned stage directory, and the read and the write both go through that descriptor. A
+    # directory swapped in for `port` after the open is not read or written, so the comparison and the placement are about one directory (review
+    # of PR 496, round 3). The replacement is conditional on the hash of the bytes that were read: a coder file written after the comparison is
+    # kept and the placement is refused.
     try:
         with safeio.pinned_root(stage_dir) as pin:
+            port_fd = safeio.open_beneath(pin.fd, PORT_PARTS[:-1])
             try:
-                current = _read_in(pin)
-            except safeio.SafeReadError as exc:
-                return False, f"port_model.py is missing, is a link, or could not be read ({exc.reason})", ""
-            found = hashlib.sha256(current).hexdigest()
-            if found != sent_sha and not coder_failed:
-                return False, "the coder changed port_model.py while the helper answered", found
-            if hashlib.sha256(source.rstrip("\n").encode("utf-8")).digest() == hashlib.sha256(current.rstrip(b"\n")).digest():
-                return False, "the reply is the port as it already is", found
-            safeio.write_beneath(pin.fd, PORT_PARTS, (header(call_id, model) + source.rstrip("\n") + "\n").encode("utf-8"), mode=0o644)
+                try:
+                    current = safeio.read_beneath(port_fd, PORT_PARTS[-1:], max_bytes=PORT_MAX)
+                except safeio.SafeReadError as exc:
+                    return False, f"port_model.py is missing, is a link, or could not be read ({exc.reason})", ""
+                found = hashlib.sha256(current).hexdigest()
+                if found != sent_sha and not coder_failed:
+                    return False, "the coder changed port_model.py while the helper answered", found
+                if hashlib.sha256(source.rstrip("\n").encode("utf-8")).digest() == hashlib.sha256(current.rstrip(b"\n")).digest():
+                    return False, "the reply is the port as it already is", found
+                try:
+                    safeio.write_beneath_if(port_fd, PORT_PARTS[-1:], (header(call_id, model) + source.rstrip("\n") + "\n").encode("utf-8"),
+                                            expect_sha256=found, mode=0o644)
+                except safeio.ChangedWhileReading:
+                    return False, "the coder changed port_model.py while the reply was being placed", found
+            finally:
+                os.close(port_fd)
     except safeio.SafeReadError as exc:
         return False, f"port_model.py could not be written ({exc.reason})", locals().get("found", "")
     return True, "", found
@@ -578,8 +589,24 @@ def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
             for rel, _ in blobs:
                 if rel != "port_model.py" and _exists(pin, ("port", *rel.split("/"))):
                     return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
-            for rel, data in sorted(blobs, key=lambda item: item[0] == "port_model.py"):
-                safeio.write_beneath(pin.fd, ("port", *rel.split("/")), data, mode=0o644)
+            # The writes go through one descriptor of the port directory. The skeleton is read again through it, and port_model.py is replaced only
+            # if it still holds those bytes; a supporting file is created only where nothing exists. An edit made after the checks above, or a
+            # file created in the meantime, is kept and the restore stops (review of PR 497, round 3).
+            port_fd = safeio.open_beneath(pin.fd, ("port",))
+            try:
+                skeleton_now = safeio.read_beneath(port_fd, ("port_model.py",), max_bytes=PORT_MAX)
+                if skeleton_now.rstrip(b"\n") != skeleton.rstrip(b"\n"):
+                    return False, "port_model.py is not the unchanged skeleton"
+                for rel, data in sorted(blobs, key=lambda item: item[0] == "port_model.py"):
+                    try:
+                        safeio.write_beneath_if(port_fd, tuple(rel.split("/")), data, mode=0o644,
+                                                expect_sha256=hashlib.sha256(skeleton_now).hexdigest() if rel == "port_model.py" else None)
+                    except safeio.AlreadyExists:
+                        return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
+                    except safeio.ChangedWhileReading:
+                        return False, "port_model.py changed while the best port was being restored, and the edit is kept"
+            finally:
+                os.close(port_fd)
     except safeio.SafeReadError as exc:
         return False, f"the port could not be written ({exc.reason})"
     return True, ""

@@ -298,6 +298,7 @@ def test_the_helper_text_is_never_run_by_the_supervisor(rig, monkeypatch, tmp_pa
     import ast
     ast.parse((rig.run_dir / "stages" / "2" / "telegraph" / "repair-1.py").read_text())          # the saved reply is text
     assert not decs(rig, rh.STUB)                                                               # and the supervisor judged it by reading it
+    assert not marker.exists(), "the helper's text ran: the supervisor must only read it"          # (finding, PR 496 round 3: the marker was never checked)
 
 
 # ---- review of PR 496 ------------------------------------------------------------------------------------------------------------------------------
@@ -326,3 +327,37 @@ def test_a_repair_request_over_the_helpers_prompt_cap_is_not_sent(rig, monkeypat
     refused = decs(rig, rh.NOT_ASKED)
     assert refused and any("prompt" in d["reason"] for d in refused), refused
     assert not decs(rig, rh.ASKED) and not wire.requests
+
+
+def test_a_pause_the_stage_budget_caused_is_not_lifted_by_a_helper_rescue(rig, monkeypatch, tmp_path):
+    """Finding (round 3): a round that skipped its start ask could rescue a deadline-expired stage and run another hardware check. A pause the
+    stage_over_budget detector caused stays; a pause from the ladder (the test above) is still rescued."""
+    tel, wire = wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN, HONEST])
+    start(rig, BROKEN, [PREFILL_BROKEN + "# a\n"])
+    looping_coder(rig)
+    # The looping coder reaches the escalate rung; here the same stop arrives as the budget detector's pause.
+    def as_deadline(self, agent, stage):
+        self.pause("watchdog: stage over budget", {"agent": agent, "findings": [{"detector": "stage_over_budget"}]})
+    monkeypatch.setattr(sv.RunActuator, "escalate", as_deadline)
+    orig_pause = sv.RunActuator.pause
+    monkeypatch.setattr(sv.RunActuator, "pause", lambda self, reason, evidence: orig_pause(
+        self, reason, {**evidence, "findings": [{**f, "detector": "stage_over_budget"} for f in evidence["findings"]]}))
+    rig.run()
+    asked = decs(rig, rh.ASKED)
+    assert asked and not [a for a in asked if a["coder_failed"]], ("the helper was asked to rescue a deadline pause", [a["why"] for a in asked])
+    assert stage_ends(rig) != ["pass"]
+
+
+@pytest.mark.parametrize("text,why", [
+    ("I do not think I can help with this one.", "no Python code block"),
+    ("Here:\n```python\ndef prefill(:\n```\n", "does not parse"),
+])
+def test_a_reply_with_no_usable_code_is_reported_as_not_helped_even_when_the_coder_then_passes(rig, monkeypatch, tmp_path, text, why):
+    """Finding (round 3): an ok reply with no Python block stayed eligible for a progress verdict, so the coder's own passing check counted it
+    as helped and kept its model on the helper's ladder."""
+    tel, wire = wire_helper(monkeypatch, tmp_path, [lambda body: openai_reply(text, 300, 40)])
+    start(rig, BROKEN, [HONEST + "# the coder fixed it\n"])
+    rig.run()
+    assert stage_ends(rig) == ["pass"]
+    verdicts = decs(rig, rh.PROGRESS)
+    assert verdicts and all(v["helped"] is False and v["outcome"].startswith("unusable reply") and why in v["outcome"] for v in verdicts), verdicts

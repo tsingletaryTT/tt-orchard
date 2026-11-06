@@ -309,7 +309,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     replay = _replay_reasons(record, corpus, reasons) if corpus is not None else None
     passkey = _passkey_reasons(record, corpus_sha256, stage_dir, reasons)
     _canary_reasons(record, corpus, reasons)
-    _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons)
+    _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons, record)
     return reasons, seen
 
 
@@ -556,7 +556,7 @@ def _canary_reasons(record, corpus, reasons) -> None:
                        "(or it could not show state leaked from one request to the next)")
 
 
-def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons) -> None:
+def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons, record=None) -> None:
     """result.json is the supervisor's copy of the record: each field is recomputed here."""
     if result.get("serves") is not True:
         reasons.append(f"serves must be true (the server reached its readiness line after the corpus replay), got {result.get('serves')!r}")
@@ -594,6 +594,7 @@ def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons) -
         c = checks.get(name) if isinstance(checks, dict) else None
         if not isinstance(c, dict) or not isinstance(c.get("pass"), bool) or not isinstance(c.get("evidence"), list) or not c["evidence"]:
             reasons.append(f"result.json checks.{name} needs pass (true or false) and evidence")
+    _check_summary_reasons(result, checks, boot, replay, passkey, record, reasons)
     # A passing serving check records a boot and a canary that passed: the gate refuses a result that says otherwise, so the operator bundle
     # never reports failed checks from a stage that passed (review of PR 490).
     for name in ("boots", "canary"):
@@ -608,6 +609,34 @@ def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons) -
             reasons.append("result.json checks.passkey.pass differs from the answers (true when every key was answered, or under the rehearsal option)")
     if result.get("derived_by") != "supervisor":
         reasons.append("result.json is not the supervisor's derived file (derived_by)")
+
+
+def _check_summary_reasons(result, checks, boot, replay, passkey, record, reasons) -> None:
+    """Each entry of result.checks is compared with the entry `derive` would write from the record: the same evidence list as the result's own
+    (so `[null]` and a short list are refused), and the same counts, lengths, answers and seconds. A summary with a changed number would
+    otherwise reach the operator bundle next to a passing flag (review of PR 490, round 3)."""
+    if not isinstance(checks, dict):
+        return
+    evidence = result.get("evidence")
+    for name in ("boots", "corpus", "passkey", "canary"):
+        c = checks.get(name)
+        if isinstance(c, dict) and isinstance(c.get("evidence"), list) and c["evidence"] and c["evidence"] != evidence:
+            reasons.append(f"result.json checks.{name}.evidence must be the same list of files as the result's own evidence")
+    def differs(name, key, want):
+        c = checks.get(name)
+        if isinstance(c, dict) and c.get(key) != want:
+            reasons.append(f"result.json checks.{name}.{key} {c.get(key)!r} differs from the {want!r} the gate recomputed from the record")
+    if isinstance(boot, dict):
+        differs("boots", "seconds", boot.get("ready_s"))
+    if isinstance(replay, dict):
+        differs("corpus", "positions", replay["positions"])
+        differs("corpus", "matched", replay["matched"])
+    if passkey is not None:
+        differs("passkey", "answered", passkey[0])
+        section = record.get("passkey") if isinstance(record, dict) else None
+        runs = section.get("runs") if isinstance(section, dict) else None
+        if isinstance(runs, list):
+            differs("passkey", "lengths", [r.get("length") for r in runs if isinstance(r, dict)])
 
 
 # ---- the result ------------------------------------------------------------------------------------------------------------------

@@ -336,13 +336,13 @@ def test_a_restore_that_fails_part_way_leaves_the_skeleton_as_the_entry_module(t
     (stage / "port" / "zz" / "mod.py").write_bytes(b"Z = 1\n")
     entry = rh.save_best(stage)
     _next_attempt(stage, skeleton)
-    real = rh.safeio.write_beneath
+    real = rh.safeio.write_beneath_if
 
     def failing(fd, parts, data, **kw):
-        if tuple(parts) == ("port", "zz", "mod.py"):
+        if tuple(parts) == ("zz", "mod.py"):
             raise rh.safeio.PathRefused("the disk refused this file")
         return real(fd, parts, data, **kw)
-    monkeypatch.setattr(rh.safeio, "write_beneath", failing)
+    monkeypatch.setattr(rh.safeio, "write_beneath_if", failing)
     placed, why = rh.restore_best(stage, entry, skeleton)
     assert placed is False and "disk refused" in why
     assert (stage / "port" / "port_model.py").read_bytes() == skeleton
@@ -464,3 +464,45 @@ def test_an_unhelpful_report_against_a_cache_hit_blocks_the_origin_as_well(tmp_p
     assert hit.cached is True
     tel.report(hit.call_id, False, note="a stub")                       # a report on a cache hit is recorded against the call that made the answer
     assert tel.ask("p", "the question", "").cached is False and len(wire.requests) == 2
+
+
+# ---- review of PR 497, round 3: the restore keeps what a writer put there after the checks --------------------------------------------------
+
+def test_an_edit_to_port_model_made_while_the_snapshot_is_read_is_kept(tmp_path, monkeypatch):
+    """Finding: the skeleton check came first and `write_beneath` then replaced the file unconditionally, so a late edit was lost."""
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, PREFILL_BROKEN.encode())
+    entry = rh.save_best(stage)
+    _next_attempt(stage, skeleton)
+    real = rh.safeio.read_beneath
+    seen = []
+
+    def editing(fd, parts, **kw):
+        out = real(fd, parts, **kw)
+        if tuple(parts) == ("port_model.py",) and not seen:
+            seen.append(1)
+            (stage / "port" / "port_model.py").write_bytes(b"# an edit that arrived late\n")
+        return out
+    monkeypatch.setattr(rh.safeio, "read_beneath", editing)
+    placed, why = rh.restore_best(stage, entry, skeleton)
+    assert placed is False and "edit is kept" in why
+    assert (stage / "port" / "port_model.py").read_bytes() == b"# an edit that arrived late\n"
+
+
+def test_a_supporting_file_created_after_its_existence_check_is_not_overwritten(tmp_path, monkeypatch):
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"import helper\n", **{"helper.py": b"H = 1\n"})
+    entry = rh.save_best(stage)
+    _next_attempt(stage, skeleton)
+    real = rh._exists
+
+    def late(pin, parts):
+        out = real(pin, parts)
+        if tuple(parts) == ("port", "helper.py"):
+            (stage / "port" / "helper.py").write_bytes(b"# written by someone else\n")
+        return out
+    monkeypatch.setattr(rh, "_exists", late)
+    placed, why = rh.restore_best(stage, entry, skeleton)
+    assert placed is False and "already exists" in why
+    assert (stage / "port" / "helper.py").read_bytes() == b"# written by someone else\n"
+    assert (stage / "port" / "port_model.py").read_bytes() == skeleton

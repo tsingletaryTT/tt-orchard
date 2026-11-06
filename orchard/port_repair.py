@@ -76,18 +76,22 @@ def parse_failure(text) -> dict | None:
     return found
 
 
-def read_failure(run_dir, stage_dir) -> dict | None:
+def read_failure(run_dir, stage_dir, *, marker: dict | None = None) -> dict | None:
     """{"kind": "port", "op", "returncode": 2} when the supervisor's record of stage 2's test shows a failure of the port, else None.
 
     Needs all of: a test record that is a JSON object; an exit code of exactly 2 (a bool or a float is not one) with `timed_out` false (the
     check exits 2 only for a failure it named); an `output` entry in the record that names the stage's output file; that file read through the
     bounded reader with the sha256 the record holds; and a failure line of kind `port` in it. Anything else is None, so a record or an output
-    file the coder rewrote earns no round."""
+    file the coder rewrote earns no round. `marker`, when given, is the parsed record the caller already read and authenticated against the
+    ledger (from the same bytes), so the record is not read a second time."""
     stage_dir = Path(stage_dir)
-    try:
-        data = safeio.read_json(stage_dir / MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
-    except (safeio.SafeReadError, OSError, ValueError):
-        return None
+    if marker is not None:
+        data = marker
+    else:
+        try:
+            data = safeio.read_json(stage_dir / MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
+        except (safeio.SafeReadError, OSError, ValueError):
+            return None
     code = data.get("returncode")
     if type(code) is not int or code != 2 or data.get("timed_out") is not False:
         return None

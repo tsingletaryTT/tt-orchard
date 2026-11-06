@@ -39,7 +39,7 @@ MUTATIONS = {
     "output-mark": (Q, "    if not marks or marks[-1] != full_port._sha(stage_dir / RECORD_FILE):", "    if False:", UNIT),
     "command-fixed": (Q, "        if marker.get(\"command\") != command():", "        if False:", UNIT),
     "chip-count": (Q, "        elif expected_chips is not None and (len(rc) != expected_chips or len(mcs) != expected_chips):", "        elif False:", UNIT),
-    "seeded-hashes": (Q, "    _seed_reasons(record, run_dir, seeded, source_stage, reasons)", "    pass", UNIT),
+    "seeded-hashes": (Q, "    _seed_reasons(record, run_dir, seeded, source_stage, accepted_record_sha, reasons)", "    pass", UNIT),
     "source-record": (Q, "    if not theirs or theirs != mine:", "    if False:", UNIT),
     "prefill-resets": (Q, "    elif free[0] != chip[0]:", "    elif False:", UNIT),
     "test-passed": (Q, "        if not (type(code) is int and code == 0 and timed_out is False):", "        if False:", UNIT),
