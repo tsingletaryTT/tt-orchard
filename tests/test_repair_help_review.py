@@ -304,6 +304,7 @@ def _answered_then_tested(tmp_path, *, tested, after="prefill"):
     _failed_test_on_disk(run, stage, after)            # by default the test after the answer failed later in the chain: progress
     s = object.__new__(Supervisor)
     s.run_dir, s.ledger, s.repair_help = run, led, True
+    s.helper_drives = False                  # PR 497 adds the flag; the coder drives the rounds in this test
     reported = []
     s.telegraph = type("T", (), {"report": lambda self, call_id, helped, note="": reported.append((call_id, helped, note))})()
     return s, stage, reported
