@@ -242,7 +242,7 @@ def raising(exc):
     return gate
 
 
-SPEC = SimpleNamespace(number=2, tests=False, skill="decoder-check", gate_file="result.json")
+SPEC = SimpleNamespace(number=2, tests=False, skill="decoder-check", gate_file="result.json", draft=None)
 
 
 def test_a_gate_that_raises_is_a_failed_gate_that_names_the_class_and_not_the_message(tmp_path):
