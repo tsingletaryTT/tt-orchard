@@ -112,6 +112,28 @@ def test_replacing_the_file_outside_the_root_with_a_link_is_a_leak(control_verdi
     assert got and set(got.values()) == {"leaked"}, got
 
 
+def test_an_empty_listing_or_scan_is_not_a_pass(control_verdicts):
+    # Review of PR 495: a reader that lists nothing used to be reported as `original` because nothing in the listing was a decoy.
+    for name in ("control: lists nothing", "control: scans nothing"):
+        got = control_verdicts[name]
+        assert got["plain"] == "empty", (name, got)
+    assert hf.classify_listing([]) == "empty" and hf.classify_listing(["data.json"]) == "original" and hf.classify_listing(["DECOY_MARK"]) == "decoy"
+    assert hf.classify_scan([]) == "empty" and hf.classify_scan([("sub", "data.json")]) == "original"
+    assert hf.classify_sidecars([], expect_listed="extra.gguf") == "empty" and hf.classify_sidecars([], expect_listed=None) == "original"
+
+
+def test_a_blanket_handler_does_not_turn_a_fifo_timeout_into_a_refusal(control_verdicts):
+    # Review of PR 495: the alarm was an Exception, so `except Exception` in a reader swallowed it.
+    got = control_verdicts["control: swallows the alarm"]
+    assert got["fifo_named_file"] == "hang", got
+
+
+def test_a_change_to_any_fixture_file_outside_the_root_is_a_leak(control_verdicts):
+    for name in ("control: rewrites a fixture file outside the root", "control: adds a file outside the root"):
+        got = control_verdicts[name]
+        assert got and set(got.values()) == {"leaked"}, (name, got)
+
+
 def test_a_writer_that_publishes_nothing_is_not_reported_as_written(control_verdicts):
     got = control_verdicts["control: write that publishes nothing"]
     assert got and set(got.values()) == {"unpublished"}, got

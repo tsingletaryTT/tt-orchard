@@ -270,20 +270,36 @@ def _r_sha256_anchor(pin, env):
     return "original" if got == hashlib.sha256(OK_BYTES).hexdigest() else ("decoy" if got == hashlib.sha256(DECOY_BYTES).hexdigest() else "other")
 
 
+def classify_listing(names) -> str:
+    """The verdict for a listing of `sub/`: `decoy` when it shows the outside tree, `original` when it shows the real `data.json`, and `empty`
+    otherwise. An empty or wrong listing is never a pass: a reader that lists nothing has not shown that it lists the right tree (review of
+    PR 495)."""
+    names = set(names)
+    if "DECOY_MARK" in names:
+        return "decoy"
+    return "original" if "data.json" in names else "empty"
+
+
+def classify_scan(seen) -> str:
+    """The verdict for a scan: the same rule as `classify_listing`, on the parts of each entry the scan reported."""
+    seen = {tuple(p) for p in seen}
+    if any(p and p[-1] == "DECOY_MARK" for p in seen):
+        return "decoy"
+    return "original" if ("sub", "data.json") in seen else "empty"
+
+
 def _r_list_beneath(pin, env):
     from orchard import safeio
     with safeio.list_beneath(pin.fd, ("sub",)) as it:
         names = sorted(e.name for e in it)
-    return "decoy" if "DECOY_MARK" in names else "original"
+    return classify_listing(names)
 
 
 def _r_scan_beneath(pin, env):
     from orchard import safeio
     seen: list[tuple[str, ...]] = []
     safeio.scan_beneath(pin, lambda entry: seen.append(tuple(entry.parts)))       # ScanEntry has `parts` and `kind`
-    if any(parts[-1] == "DECOY_MARK" for parts in seen):
-        return "decoy"
-    return "original" if ("sub", "data.json") in seen else "other"            # the real tree must be listed, or the scan proved nothing
+    return classify_scan(seen)                                                  # the real tree must be listed, or the scan proved nothing
 
 
 def published_regular(path: Path, data: bytes) -> bool:
@@ -300,7 +316,7 @@ def published_beneath(root_fd: int, parts, data: bytes) -> bool:
     from orchard import safeio
     try:
         return safeio.read_beneath(root_fd, parts, max_bytes=1 << 20) == data
-    except Exception:
+    except (OSError, safeio.SafeReadError):                 # a refusal or a missing file is "not published"; a timeout is not caught here
         return False
 
 
@@ -357,6 +373,16 @@ def sidecar_leaked(entries: list[dict]) -> bool:
     return any(e["file"] == "extra.gguf" and (e.get("size") == len(VICTIM_BYTES) or bool(e.get("sha256"))) for e in entries)
 
 
+def classify_sidecars(entries: list[dict], *, expect_listed: str | None) -> str:
+    """The verdict for a sidecar scan: `decoy` when an entry carries the link target's size or hash, `empty` when the scan was expected to
+    list `expect_listed` (the link is listed by name) and did not, otherwise `original`."""
+    if sidecar_leaked(entries):
+        return "decoy"
+    if expect_listed is not None and not any(e.get("file") == expect_listed for e in entries):
+        return "empty"
+    return "original"
+
+
 def _r_compare_sidecars(env):
     import importlib.util
     path = REPO / "orchard" / "skills" / "delta-triage-templates" / "delta_triage.py"
@@ -367,7 +393,8 @@ def _r_compare_sidecars(env):
     empty.mkdir()
     got = mod.compare_sidecars(env["root"], empty, set())
     # A refused link may stay listed (issue 464: with a reason and no target size). It leaks when an entry carries the target's size or hash.
-    return "decoy" if sidecar_leaked(got["sidecars"] + got["ignored_files"]) else "original"
+    # With the link in the tree the scan must name it, or an empty result would pass for a scan that refused to look.
+    return classify_sidecars(got["sidecars"] + got["ignored_files"], expect_listed="extra.gguf" if env["case"] == "sidecar_link" else None)
 
 
 PATH_READERS: list[PathReader] = [
@@ -456,7 +483,38 @@ def _c_writes_without_check(env):
     return "written"                                          # mistake: claims success and supplies no publication check
 
 
+def _c_rewrites_decoy_mark(env):
+    (env["outside"] / "sub" / "DECOY_MARK").write_bytes(b"changed")      # mistake: a fixture file nobody compared before
+    return "original"
+
+
+def _c_adds_outside_file(env):
+    (env["outside"] / "new.txt").write_bytes(b"x")                       # mistake: a new file outside the root
+    return "original"
+
+
+def _c_lists_nothing(pin, env):
+    return classify_listing([])                                          # mistake: an empty listing reported as a pass
+
+
+def _c_scans_nothing(pin, env):
+    return classify_scan([])
+
+
+def _c_swallows_the_alarm(env):
+    try:
+        with open(env["file"], "rb") as fh:                              # blocks on the FIFO
+            return _label(fh.read())
+    except Exception:                                                    # mistake: a blanket handler turns the timeout into a refusal
+        return "refused"
+
+
 CONTROLS: list[PathReader] = [
+    PathReader("control: rewrites a fixture file outside the root", "effects", _c_rewrites_decoy_mark),
+    PathReader("control: adds a file outside the root", "effects", _c_adds_outside_file),
+    PathReader("control: lists nothing", "pinned_list", _pinned(_c_lists_nothing)),
+    PathReader("control: scans nothing", "scan", _pinned(_c_scans_nothing)),
+    PathReader("control: swallows the alarm", "path_read", _c_swallows_the_alarm, claims_pin=False),
     PathReader("control: deletes the file outside the root", "effects", _c_deletes_victim),
     PathReader("control: deletes the directory outside the root", "effects", _c_deletes_outside_dir),
     PathReader("control: replaces the file outside the root with a link", "effects", _c_replaces_with_link),
@@ -491,20 +549,46 @@ EXPECT: dict[str, dict[str, set[str]]] = {
 
 # ------------------------------------------------------------------------------------------------------------------- running
 
-class _Alarm(Exception):
-    pass
+def snapshot_tree(top: Path) -> dict:
+    """Every entry under `top`, by relative path: a regular file as its bytes, a link as its target text, a directory as `dir`, anything
+    else (a FIFO, a device) as its kind. Nothing is followed and no special file is opened, so taking it cannot block."""
+    out: dict[str, object] = {}
+
+    def walk(directory: Path, prefix: str) -> None:
+        for entry in sorted(os.scandir(directory), key=lambda e: e.name):
+            rel = prefix + entry.name
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISLNK(mode):
+                out[rel] = ("link", os.readlink(entry.path))
+            elif stat.S_ISDIR(mode):
+                out[rel] = ("dir",)
+                walk(Path(entry.path), rel + "/")
+            elif stat.S_ISREG(mode):
+                out[rel] = ("file", Path(entry.path).read_bytes())
+            else:
+                out[rel] = ("special", stat.S_IFMT(mode))
+    if top.is_dir() and not top.is_symlink():
+        walk(top, "")
+    return out
+
+
+def outside_changes(before: dict, after: dict) -> list[str]:
+    """The paths under the outside directory that were added, removed or changed between two snapshots."""
+    return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+
+
+class _Alarm(BaseException):
+    """The per-case alarm. It derives from BaseException so that no `except Exception` in a reader, a helper or the harness can swallow a
+    timeout and turn a blocked FIFO read into a quiet refusal (review of PR 495)."""
 
 
 def _verdict(reader: PathReader, case_name: str, base: Path) -> dict:
     env = layout(base)
     env["case"] = case_name
     CASES[case_name].build(env)
-    outside_sub = env["outside"] / "sub"
-    outside_data = outside_sub / "data.json"
-    victim_before = env["victim"].read_bytes() if env["victim"].exists() else None
-    outside_files_before = sorted(p.name for p in outside_sub.iterdir()) if outside_sub.is_dir() else None
-    data_before = outside_data.read_bytes() if outside_data.is_file() and not outside_data.is_symlink() else None
-    data_was_plain = data_before is not None
+    # Every file the fixture put outside the root is compared before and after, so a reader that changes `DECOY_MARK`, the
+    # Hugging Face decoy weights or adds a file must be seen (review of PR 495).
+    outside_before = snapshot_tree(env["outside"])
 
     def on_alarm(signum, frame):
         raise _Alarm()
@@ -526,12 +610,9 @@ def _verdict(reader: PathReader, case_name: str, base: Path) -> dict:
     # Effects outside the root count as a leak whatever the reader returned. An object that existed before must still exist, as the same
     # kind of object holding the same bytes: a reader that deletes or replaces it must not pass because there is nothing left to compare.
     publishes = env.get("publishes")
-    if victim_before is not None and not published_regular(env["victim"], victim_before):
-        got, detail = "leaked", "the file outside the root changed, was replaced or was deleted"
-    elif outside_files_before is not None and (outside_sub.is_symlink() or not outside_sub.is_dir() or sorted(p.name for p in outside_sub.iterdir()) != outside_files_before):
-        got, detail = "leaked", "the directory outside the root was removed or its entries changed"
-    elif data_was_plain and not published_regular(outside_data, data_before):
-        got, detail = "leaked", "data.json outside the root changed, was replaced or was deleted"
+    changed = outside_changes(outside_before, snapshot_tree(env["outside"]))
+    if changed:
+        got, detail = "leaked", f"a path outside the root changed, was replaced, added or deleted: {', '.join(changed[:4])}"
     elif got == "decoy":
         got, detail = "leaked", "the reader returned content from outside the root"
     elif got == "written" and (publishes is None or not publishes()):
@@ -557,7 +638,10 @@ def child_main(reader_index: int, tmp: str, controls: bool = False) -> None:
 def run_reader(index: int, tmp: Path, *, timeout: float = 120, controls: bool = False) -> list[dict]:
     """Verdicts for `PATH_READERS[index]` (or `CONTROLS[index]`) against every case of its family, from a child process with an address-space limit."""
     code = f"import sys; sys.path.insert(0, {str(TESTS)!r}); import hostile_fs; hostile_fs.child_main({index}, {str(tmp)!r}, {controls!r})"
-    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=timeout)
+    try:
+        done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:                      # the child's own alarms did not fire: that is a hang, reported as one
+        return [{"case": "child", "verdict": "hang", "detail": f"the child did not finish in {timeout} s"}]
     for line in done.stdout.splitlines():
         if line.startswith("VERDICTS "):
             return json.loads(line[len("VERDICTS "):])
