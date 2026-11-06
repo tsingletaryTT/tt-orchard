@@ -1,0 +1,2 @@
+target = "0.9.119"
+summary = "scripts/hf_find_models.py lists Hugging Face models derived from named parent models or matching a name search, newest first, as a table or JSON."
