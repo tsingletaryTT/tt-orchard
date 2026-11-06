@@ -225,3 +225,76 @@ def test_a_port_that_rewrites_the_model_config_while_it_runs_fails_the_test(tmp_
     done = run_template(tmp_path, run, stage)
     assert done.returncode == 2 and "config.json changed while the port ran" in done.stdout, done.stdout + done.stderr
     assert not (stage / "evidence" / "port-quality.json").exists()
+
+
+# ---- round 4 (second Copilot round of PR 491) -----------------------------------------------------------------------------------------
+
+def test_a_copied_json_file_rewritten_during_the_test_is_refused_by_the_gate(tmp_path):
+    """Finding: only the copied .py files were compared with the ledger, so a rewritten copied data file passed."""
+    from quality_fakes import check, derive_and_write
+    from test_full_port_quality import good
+    import json
+    import hashlib
+    run, stage, seeded = good(tmp_path)
+    data = stage / "port" / "weights_map.json"
+    data.write_text('{"a": 1}')
+    seeded = seeded + [{"path": "stages/6/port/weights_map.json", "sha256": hashlib.sha256(b'{"a": 1}').hexdigest()}]
+    derive_and_write(run, stage)
+    assert not _has(check(run, stage, seeded)[0], "is not the file the supervisor copied")
+    data.write_text('{"a": 2}')
+    assert _has(check(run, stage, seeded)[0], "is not the file the supervisor copied")
+
+
+def test_a_stage_1_file_rewritten_by_the_port_while_it_runs_fails_the_test_and_the_record_never_names_it(tmp_path):
+    """Finding: the prompt was parsed before the worker started and hashed after it stopped, so a rewritten prompt carried a matching hash."""
+    from port_check_fakes import HONEST
+    from quality_fakes import make_run, run_template
+    port = HONEST.replace("def load(model_dir, mesh_device):\n",
+                          "def load(model_dir, mesh_device):\n    import pathlib\n"
+                          "    p = pathlib.Path(model_dir).parent / 'run' / 'stages' / '1' / 'evidence' / 'reference' / 'prompt-ids.json'\n"
+                          "    p.write_text(p.read_text().replace('prompt_text', 'other'))\n", 1)
+    run, stage, snap, seeded = make_run(tmp_path, port)
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "prompt-ids.json changed while the port ran" in done.stdout, done.stdout + done.stderr
+    assert not (stage / "evidence" / "port-quality.json").exists()
+
+
+def test_the_log_probability_keeps_the_normalisation_when_every_logit_has_a_large_common_offset():
+    """Finding: five logits of 1e20 gave 0.0, a perplexity of 1, instead of -ln 5."""
+    import math
+    mod = load_template()
+    assert mod.log_prob([1e20] * 5, 2) == pytest.approx(-math.log(5))
+    assert mod.log_prob([0.0, 1.0, 2.0], 2) == pytest.approx(2.0 - math.log(1 + math.e + math.e ** 2))
+
+
+def test_a_reply_that_needs_only_the_argmax_does_not_convert_the_vocabulary_to_a_list():
+    """Finding: every free-run and benchmark reply turned the whole logits tensor into a Python list."""
+    mod = load_template()
+
+    class Tensor:
+        def reshape(self, *shape):
+            return self
+
+        def argmax(self):
+            return 3
+
+        def tolist(self):
+            raise AssertionError("the whole vocabulary was converted to a list")
+    assert mod.answer(Tensor(), {}) == {"ok": True, "id": 3}
+
+
+def test_a_mean_negative_log_probability_of_701_is_a_finite_perplexity_and_a_larger_one_is_none():
+    """Finding: the perplexity was capped at exp(700) and the capped number was labelled measured."""
+    import math
+    assert full_port_quality.perplexity_of(701.0) == math.exp(701.0)
+    assert full_port_quality.perplexity_of(10_000.0) is None
+
+
+def test_a_credential_that_crosses_the_character_limit_is_redacted_before_the_text_is_cut():
+    """Finding: the text was cut before it was redacted, which left a token prefix that no pattern matched."""
+    import re
+    from orchard import full_port_bundle
+    redact = lambda t: re.sub(r"hf_[A-Za-z0-9]{20,}", "[redacted]", t)  # noqa: E731
+    text = "a" * 390 + " hf_" + "B" * 30 + " tail"
+    out = full_port_bundle._text(redact, text)
+    assert "hf_" not in out and len(out) <= 400
