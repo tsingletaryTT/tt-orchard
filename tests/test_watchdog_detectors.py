@@ -386,11 +386,20 @@ def test_a_shared_cd_prefix_does_not_make_commands_look_alike(a, b):
 
 def test_a_cd_prefix_is_skipped_and_a_repeated_command_after_it_still_matches():
     from orchard.watchdog import command_shape
-    assert command_shape("cd /run/dir && cat port_model.py | head -200") == "cat port_model.py"
+    assert command_shape("cd /run/dir && cat port_model.py | head -200") == "cat /run/dir/port_model.py"
     assert command_shape("cd /run/dir && cat port_model.py | tail -200") == command_shape("cd /run/dir && cat port_model.py | head -50")
-    assert command_shape("cd /run/dir && cd sub && ls -la x/y") == "ls x/y"
-    assert command_shape('cd "/run dir" && cat a.json') == "cat a.json"
+    assert command_shape("cd /run/dir && cd sub && ls -la x/y") == "ls /run/dir/sub/x/y"
+    assert command_shape('cd "/run dir" && cat a.json') == "cat /run dir/a.json"
     assert command_shape("cd /run/dir") == "cd /run/dir"        # a bare cd has nothing after it to describe
+
+
+def test_the_same_relative_file_in_different_directories_has_different_shapes():
+    """Review of PR 504: `cd /run/stage0 && cat config.json` through stage3 read four files, not one."""
+    from orchard.watchdog import command_shape
+    shapes = {command_shape(f"cd /run/stage{k} && cat config.json") for k in range(4)}
+    assert len(shapes) == 4
+    assert command_shape("cd /run && cd s0 && cat c.json") != command_shape("cd /run && cd s1 && cat c.json")
+    assert command_shape("cd /run/a && cat /etc/x.json") == command_shape("cd /run/b && cat /etc/x.json")   # an absolute path ignores the directory
 
 
 def scall(ts, turn, args, shape):
