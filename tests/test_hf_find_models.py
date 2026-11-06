@@ -175,3 +175,19 @@ def test_a_parent_name_is_checked_before_it_goes_into_a_url():
         fm.find(parents=["Qwen/X&limit=999999"], searches=[], authors=[], since_days=None, limit=10, fetch=FakeHub(), now=NOW, token=None)
     with pytest.raises(ValueError):
         fm.find(parents=["no-slash"], searches=[], authors=[], since_days=None, limit=10, fetch=FakeHub(), now=NOW, token=None)
+
+
+def test_an_exception_message_that_quotes_the_token_never_reaches_the_errors():
+    secret = "hf_SECRET456"
+
+    def leaky(url, headers):
+        raise ValueError(f"Invalid header value b'Bearer {secret}\\n'")
+
+    found, errors = fm.find(parents=[], searches=["org"], authors=[], since_days=None, limit=10, fetch=leaky, now=NOW, token=secret)
+    assert len(errors) == 1 and secret not in "\n".join(errors) and "ValueError" in errors[0]
+
+
+def test_non_object_rows_are_skipped_and_later_queries_still_run():
+    hub = FakeHub(by_search={"org": [None, 5, "x", model("org/a")], "two": [model("two/b")]})
+    found, errors = fm.find(parents=[], searches=["org", "two"], authors=[], since_days=None, limit=10, fetch=hub, now=NOW, token=None)
+    assert sorted(m["id"] for m in found) == ["org/a", "two/b"] and errors == []

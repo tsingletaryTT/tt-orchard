@@ -105,9 +105,14 @@ def find(*, parents, searches, authors, since_days, limit, fetch=http_get, now=N
         try:
             rows = json.loads(fetch(url, headers))
         except Exception as exc:  # report and go on: one bad query must not hide the rest
-            errors.append(f"{label}: {type(exc).__name__}: {str(exc)[:120]}")
+            # Report the exception type and any HTTP status only. The exception text can quote the Authorization header
+            # (for example when the token has a trailing newline), so it never goes into the output.
+            code = getattr(exc, "code", None)
+            errors.append(f"{label}: {type(exc).__name__}" + (f" (HTTP {code})" if isinstance(code, int) else ""))
             continue
         for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue  # a null or other non-object row follows the same skip policy as an invalid id
             mid = row.get("id") or row.get("modelId")
             if not isinstance(mid, str):
                 continue
