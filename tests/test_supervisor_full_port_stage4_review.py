@@ -107,14 +107,21 @@ def test_a_symlinked_evidence_directory_inside_an_entry_is_refused_and_its_targe
 
 # ---- an abort or a pause is not a failure (finding: _prepare turned every status into a failed stage) -------------------------
 
-def abort_in_prepare(rig):
+def command_in_prepare(rig, word):
+    """The operator writes `word` to the control file while stage 4's first prepare step is running."""
     inner = rig.script
+    sent = []
 
     def script(request):
-        if "tools" in request and where(request) == (4, "prepare"):
-            Control(rig.run_dir).write("abort")
+        if "tools" in request and where(request) == (4, "prepare") and not sent:
+            sent.append(word)
+            Control(rig.run_dir).write(word)
         return inner(request)
     rig.script = script
+
+
+def abort_in_prepare(rig):
+    command_in_prepare(rig, "abort")
 
 
 def test_an_abort_during_an_entrys_prepare_step_ends_the_run_aborted_and_the_stage_does_not_fail_or_escalate(rig):
@@ -133,3 +140,14 @@ def test_an_entry_runs_under_the_shorter_deadline_of_its_hw_test_json(rig):
     rig.run()
     ran = stage_4_tests(rig)
     assert ran and [r["deadline_s"] for r in ran] == [60] * len(ran), [r["deadline_s"] for r in ran]
+
+
+def test_an_operator_pause_during_an_entrys_prepare_step_pauses_the_run_and_the_stage_does_not_fail_or_escalate(rig):
+    make4(rig)
+    command_in_prepare(rig, "pause")
+    abort_at_pause(rig)                         # the run waits for the operator; the test ends it there
+    rig.run()
+    pauses = [e for e in rig.entries() if e["stage"] == 4 and e["event"] == "decision" and e["data"].get("decision") == "pause"]
+    assert [p["data"].get("reason") for p in pauses][:1] == ["operator"], pauses
+    ends = [e for e in rig.entries() if e["stage"] == 4 and e["event"] in ("stage_end", "escalate")]
+    assert ends == [], f"a pause became a stage end: {ends}"
