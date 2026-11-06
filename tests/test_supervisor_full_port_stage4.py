@@ -350,11 +350,22 @@ def test_the_rehearsal_option_waives_only_coherent_in_each_entry_and_the_ledger_
 
 def test_without_the_rehearsal_option_an_unreadable_free_run_fails_the_entry(rig, monkeypatch):
     from orchard import full_port_result
-    monkeypatch.setattr(full_port_result, "readable", lambda text: (False, "the free-run text was made unreadable by this test"))
+    real = full_port_result.readable
+
+    def readable_until_stage_4(text):
+        # The override must reach stage 4's entry check only: the stage 3 check calls the same function and would fail first (review of PR 489).
+        # (the ledger file is read as text: the running supervisor holds the ledger's lock)
+        rows = [json.loads(line) for line in (rig.run_dir / "ledger.jsonl").read_text().splitlines() if line.strip()]
+        if any(e.get("event") == "stage_end" and e.get("stage") == 3 for e in rows):
+            return False, "the free-run text was made unreadable by this test"
+        return real(text)
+    monkeypatch.setattr(full_port_result, "readable", readable_until_stage_4)
     make4(rig)
     rig.args.unattended = True
     never_wait(rig)
     rig.run()
-    assert "pass" not in [d["result"] for d in rig.ends(4)]
+    # Stage 4 itself must end in a failure (a stage 3 failure would also leave stage 5 unstarted: review of PR 489).
+    results = [d["result"] for d in rig.ends(4)]
+    assert results and results[-1] == "fail" and "pass" not in results, results     # an escalated attempt may come first
     assert not started(rig, 5)
 

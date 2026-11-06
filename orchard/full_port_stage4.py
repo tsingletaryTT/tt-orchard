@@ -39,6 +39,7 @@ ENTRY_RESULT_WHAT = "entry result derived by the supervisor"
 STAGE_RESULT_WHAT = "stage result derived by the supervisor"
 PLAN_WHAT = "hardware test list"                         # the same entry the weights-only stage 4 writes for tests/plan.json
 PREPARED = "prepared.json"                               # written by the supervisor when an entry's prepare step is done (a resume skips it)
+PREPARED_WHAT = "entry prepare step done"                # the `what` of the ledger entry that vouches for a prepared.json (review of PR 489)
 
 
 class _Ended(Exception):
@@ -177,13 +178,41 @@ def _fail(sup, spec, stage_dir, entries, reasons: list[str]):
 
 def _write_stage_marker(sup, stage_dir: Path, entries) -> None:
     """The stage's own test-result.json: which entries have a marker or a covering. It lets a resumed, escalated attempt see an entry that
-    failed (`Supervisor._run_stage`), as the weights-only stage 4's summary does."""
+    failed (`Supervisor._run_stage`), as the weights-only stage 4's summary does.
+
+    The marker is written through its own descriptor of the run directory, because `_fail` and the `_Ended` handler run outside the pin of
+    `run`. A link standing in `stages/` or in the stage directory is refused, never followed (review of PR 489). A refusal must not hide the
+    failure or the pause that led here, so it is written to the ledger and the caller goes on with its own status."""
     rows = []
     for e in entries:
         edir = e.directory(stage_dir)
         rows.append({"chips": e.chips, "covered": (edir / full_port_entries.COVERED_FILE).is_file(),
                      "marker": os.path.relpath(e.record_path(stage_dir), sup.run_dir) if e.record_path(stage_dir).is_file() else None})
-    full_port_entries.write_json(stage_dir / full_port_entries.MARKER_FILE, {"entries": rows})
+    try:
+        with safeio.pinned_root(sup.run_dir) as pin:
+            _write_json_beneath(sup, pin, Path(stage_dir) / full_port_entries.MARKER_FILE, {"entries": rows})
+    except (safeio.SafeReadError, OSError) as exc:
+        sup.ledger.append("decision", _stage_number(stage_dir), decision="the stage's test-result.json was not written",
+                          reason=getattr(exc, "reason", None) or str(exc))
+
+
+def _stage_number(stage_dir) -> int:
+    """The stage number from a stage directory named `stages/<n>`."""
+    return int(Path(stage_dir).name)
+
+
+def _set_aside_results(sup, pin, edir: Path) -> list[str]:
+    """`swap_prepare.set_aside_results` through the pinned run directory: each result file the coder left in the entry moves to
+    `<name>.rejected-from-prepare` with a descriptor-anchored rename. A link standing in the entry's directory or in `evidence/` is refused
+    and the rename never leaves the run; a link at the file's own name is moved as a link (review of PR 489)."""
+    moved = []
+    base = _parts(sup, edir)
+    for name in swap_prepare.RESULT_FILES:
+        src = base + tuple(name.split("/"))
+        dst = src[:-1] + (src[-1] + swap_prepare.REJECTED_SUFFIX,)
+        if safeio.replace_beneath(pin.fd, src, dst):
+            moved.append(name)
+    return moved
 
 
 def _have_boards(sup) -> int | None:
@@ -315,7 +344,10 @@ def _prepare(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool, 
     seed = seed_stage(sup.ledger.read())
     sup._seed_stage_3_port(spec, edir, source=seed)
     prepared = edir / PREPARED
-    if not prepared.is_file():
+    # A prepared.json skips the coder's prepare step only when the ledger holds the supervisor's record of these bytes: a file the coder (or
+    # anything else) wrote there has none, and the prepare step runs (review of PR 489).
+    prepared_rec = full_port.file_record(sup.run_dir, prepared)
+    if prepared_rec is None or not recorded_by_supervisor(sup.ledger, n, prepared_rec, whats=(PREPARED_WHAT,)):
         seeded = getattr(sup, "_port_seed", None) or {}
         note = entry_note(chips=entry.chips, rel=rel, seed=seed, copied=bool(seeded.get("copied") or seeded.get("kept")))
         out, step = sup._step(spec, "prepare", edir, escalated, resumed, extra=note)
@@ -326,8 +358,9 @@ def _prepare(sup, spec, stage_dir: Path, entry, escalated: bool, resumed: bool, 
                 raise _Ended(out.status, [f"the {entry.chips}-chip entry: {why[0]}"])
             return why, None
         _write_json_beneath(sup, pin, prepared, {"chips": entry.chips, "seed_stage": seed})
+        sup.ledger.append("evidence", n, what=PREPARED_WHAT, config=entry.chips, **evidence_record(sup.run_dir, prepared))
     # Nothing in the entry may claim a result before the test has run; the template and the fixed command go back as shipped.
-    if moved := swap_prepare.set_aside_results(edir):
+    if moved := _set_aside_results(sup, pin, edir):
         sup.ledger.append("decision", n, decision="results written before the test were set aside", config=entry.chips, files=moved)
     if problems := sup._pin_full_port(spec, edir, command=True, entry=entry.chips):
         return problems, None
