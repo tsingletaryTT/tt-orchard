@@ -1932,3 +1932,25 @@ def test_write_beneath_if_without_a_hash_creates_only_and_never_replaces_a_file_
         os.close(fd)
     assert (tmp_path / "sub" / "new.py").read_bytes() == b"made" and (tmp_path / "victim").read_bytes() == b"precious"
     assert sorted(p.name for p in (tmp_path / "sub").iterdir()) == ["ln.py", "new.py"]
+
+
+@pytest.mark.parametrize("replace", [True, False])
+def test_write_beneath_if_syncs_the_directory_after_the_file_is_published(tmp_path, monkeypatch, replace):
+    """PR 496, round 6: a rename or a link is not durable until the directory is synced. The order of events is recorded: the directory sync
+    must come after the publishing call."""
+    import hashlib
+    events = []
+    real_fsync, real_rename, real_link = os.fsync, os.rename, os.link
+    monkeypatch.setattr(os, "fsync", lambda fd: (events.append("dir-sync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file-sync"), real_fsync(fd))[1])
+    monkeypatch.setattr(os, "rename", lambda *a, **k: (events.append("publish"), real_rename(*a, **k))[1])
+    monkeypatch.setattr(os, "link", lambda *a, **k: (events.append("publish"), real_link(*a, **k))[1])
+    sha = None
+    if replace:
+        (tmp_path / "f.py").write_bytes(b"old")
+        sha = hashlib.sha256(b"old").hexdigest()
+    fd = _dirfd(tmp_path)
+    try:
+        safeio.write_beneath_if(fd, ("f.py",), b"new", expect_sha256=sha)
+    finally:
+        os.close(fd)
+    assert events.index("publish") < len(events) - 1 and events[events.index("publish") + 1:] == ["dir-sync"], events
