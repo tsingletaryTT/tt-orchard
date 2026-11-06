@@ -359,8 +359,9 @@ def _reference_ids(record: dict, run_dir: Path, reasons: list) -> list | None:
     return ids
 
 
-def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list) -> None:
-    """The supervisor's output file is the file it recorded, and the command printed the record's sha256 into it."""
+def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list, record_sha: str | None = None) -> None:
+    """The supervisor's output file is the file it recorded, and the command printed the record's sha256 into it. With `record_sha` the printed
+    digest is compared with that value (the digest of the bytes the caller parsed) and the record file is not read again."""
     out = stage_dir / OUTPUT_FILE
     rec = marker.get("output")
     want = os.path.relpath(out, run_dir)
@@ -377,7 +378,7 @@ def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list)
     if len(starts) != 1:
         reasons.append(f"{OUTPUT_FILE} has {len(starts)} lines that begin with {OUTPUT_MARK}; the template prints exactly one "
                        "(and prefixes every line the port prints), so something else wrote a line of its own")
-    if not marks or marks[-1] != _sha(stage_dir / RECORD_FILE):
+    if not marks or marks[-1] != (record_sha if record_sha is not None else _sha(stage_dir / RECORD_FILE)):
         reasons.append(f"{OUTPUT_FILE} does not carry a {OUTPUT_MARK} line that matches {RECORD_FILE}, so the record was not "
                        "written by the test the supervisor ran")
 

@@ -3841,6 +3841,8 @@ class Supervisor:
             extra = None
             if judged and passed:
                 helped, outcome = True, "passed"
+                if numbers is not None:          # the successful round keeps its before and after numbers too (review of PR 498, round 4)
+                    extra = {"agreement": numbers["agreement"], "previous_agreement": item.get("failure_agreement")}
             elif judged and numbers is not None and item["failure_op"] == port_repair.NUMERICS_OP:
                 # Both checks ran to the end: the answer helped when the agreement rose.
                 helped = repair_help.agreement_improved(item.get("failure_agreement"), numbers["agreement"])

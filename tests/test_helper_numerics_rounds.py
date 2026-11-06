@@ -115,8 +115,11 @@ def test_a_record_that_cannot_be_trusted_earns_no_round_and_no_pass(tmp_path, mu
         marker["timed_out"] = True
     elif mutate == "no_record":
         record_path(stage).unlink()
-    if mutate not in ("port_changed_after", "no_record"):
-        record_path(stage).write_text(json.dumps(rec))
+    if mutate in ("reference_ids_changed", "chip_ids_short", "chip_ids_long", "schema"):
+        # The digest is refreshed in the output and the test record, so only the guard named by the case can refuse the record; without it the
+        # digest check refuses every one of these and none of the guards is exercised (review of PR 498, round 4).
+        remark(stage, rec)
+    elif mutate in ("exit_code_2", "timed_out"):
         (stage / "test-result.json").write_text(json.dumps(marker))
     assert port_repair.numerics_state(run, stage) == ("unreadable", None)
 
@@ -326,3 +329,66 @@ def test_the_ledger_failure_line_of_a_numerics_round_names_the_numbers_and_not_t
     rig.run()
     line = numeric_rounds(rig)[0]["failure"]
     assert line.startswith("the port ran to the end but top1_agreement 0.5312") and "ignore" not in line
+
+
+# ---- round 4 (second Copilot round of PR 498) -----------------------------------------------------------------------------------------
+
+def test_a_record_swapped_between_the_parse_and_the_digest_check_authenticates_nothing(tmp_path, monkeypatch):
+    """Finding: the record was parsed in one read and hashed in another, so a file replaced between them authenticated other ids."""
+    run, stage = checked(tmp_path, LOW)
+    true_bytes = record_path(stage).read_bytes()
+    forged = json.loads(true_bytes)
+    forged["chip_ids"] = list(forged["reference_ids"])                      # the ids the forger wants parsed: full agreement
+    record_path(stage).write_bytes(json.dumps(forged).encode())              # on disk at the parse
+    real = full_port._sha
+
+    def swapping(path):
+        if str(path).endswith("port-check.json"):
+            record_path(stage).write_bytes(true_bytes)                       # the authenticated bytes are back for the digest
+        return real(path)
+    monkeypatch.setattr(full_port, "_sha", swapping)
+    assert port_repair.numerics_state(run, stage) == ("unreadable", None)
+
+
+@pytest.mark.parametrize("bad", [{"path": ["a"], "sha256": "x"}, {"path": {"a": 1}, "sha256": "x"}, {"path": "stages/2/port/z.py", "sha256": 5}])
+def test_a_port_source_with_a_path_or_hash_that_is_not_text_is_unreadable_and_raises_nothing(tmp_path, bad):
+    """Finding: a path that is an array or an object was an unhashable dictionary key and raised TypeError out of the repair loop."""
+    run, stage = checked(tmp_path, LOW)
+    rec = json.loads(record_path(stage).read_text())
+    rec["port_sources"].append(bad)
+    remark(stage, rec)
+    assert port_repair.numerics_state(run, stage) == ("unreadable", None)
+
+
+def test_a_port_directory_replaced_by_a_link_to_identical_sources_is_not_accepted(tmp_path):
+    """Finding: os.walk followed a linked root, so the same sources outside the run kept the numerical evidence accepted."""
+    import os
+    import shutil
+    run, stage = checked(tmp_path, LOW)
+    assert port_repair.numerics_state(run, stage)[0] == "below"
+    outside = tmp_path / "outside-port"
+    shutil.copytree(stage / "port", outside)
+    shutil.rmtree(stage / "port")
+    os.symlink(outside, stage / "port")
+    assert port_repair.numerics_state(run, stage) == ("unreadable", None)
+    assert port_repair.current_sources(stage) is None
+
+
+def test_a_passing_verdict_keeps_the_agreement_and_the_one_before(tmp_path, monkeypatch):
+    """Finding: the passing branch left `extra` empty, so the ledger lost the before and after numbers of the round that crossed the bar."""
+    from orchard.ledger import Ledger
+    run = tmp_path / "run"
+    (run / "stages" / "2").mkdir(parents=True)
+    led = Ledger(run / "ledger.jsonl")
+    led.append("run_start", None, model="m")
+    led.append("stage_start", 2, escalated=False, resumed=False)
+    led.append("decision", 2, decision=rh.ASKED, round=1, failure_op=port_repair.NUMERICS_OP, failure_agreement=0.53125)
+    led.append("decision", 2, decision=rh.ANSWERED, ok=True, call_id="c1", cached=False)
+    led.append("decision", 2, decision=port_repair.TESTED, sources="x")
+    s = object.__new__(sv.Supervisor)
+    s.run_dir, s.ledger, s.repair_help, s.helper_drives = run, led, True, True
+    s.telegraph = type("T", (), {"report": lambda self, call_id, helped, note="": None})()
+    s._repair_outcome = lambda n, d: (True, None, True, {"agreement": 0.875, "n": 32})
+    s._repair_verdicts(2, run / "stages" / "2")
+    (p,) = [e["data"] for e in led.read() if e["data"].get("decision") == rh.PROGRESS]
+    assert p["outcome"] == "passed" and p["agreement"] == 0.875 and p["previous_agreement"] == 0.53125

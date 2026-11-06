@@ -304,6 +304,8 @@ def current_sources(stage_dir) -> dict | None:
     stage_dir = Path(stage_dir)
     root = stage_dir / PORT_DIR
     out: dict[str, str] = {}
+    if root.is_symlink() or not root.is_dir():
+        return None          # os.walk would follow a linked root to sources outside the run (review of PR 498, round 4), as `fingerprint` refuses it
     try:
         for here, dirs, files in os.walk(root):
             dirs[:] = sorted(d for d in dirs if d != "__pycache__" or os.path.islink(os.path.join(here, d)))
@@ -333,7 +335,10 @@ def numerics_state(run_dir, stage_dir, *, marker: dict | None = None) -> tuple[s
     try:
         if marker is None:
             marker = safeio.read_json(stage_dir / MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
-        record = safeio.read_json(stage_dir / full_port.RECORD_FILE, max_bytes=full_port.JSON_MAX, expect=dict)
+        # The record is read once: the bytes that are parsed are the bytes whose digest the output's mark line is compared with, so a file replaced
+        # between two reads cannot authenticate other ids (review of PR 498, round 4).
+        raw_record = safeio.read_bytes(stage_dir / full_port.RECORD_FILE, max_bytes=full_port.JSON_MAX)
+        record = safeio.parse_json_bytes(raw_record, max_bytes=full_port.JSON_MAX, expect=dict)
     except (safeio.SafeReadError, OSError, ValueError):
         return "unreadable", None
     code = marker.get("returncode")
@@ -344,7 +349,7 @@ def numerics_state(run_dir, stage_dir, *, marker: dict | None = None) -> tuple[s
     reasons: list = []
     # The record must be the file the check printed the digest of into the output the supervisor captured: ids rewritten to agree leave the
     # reference and port hashes valid, and only this digest tells a record the test wrote from one somebody edited (review of PR 498).
-    full_port._output_reasons(stage_dir, run_dir, marker, reasons)
+    full_port._output_reasons(stage_dir, run_dir, marker, reasons, record_sha=hashlib.sha256(raw_record).hexdigest())
     if reasons:
         return "unreadable", None
     reference = full_port._reference_ids(record, run_dir, reasons)
@@ -357,7 +362,9 @@ def numerics_state(run_dir, stage_dir, *, marker: dict | None = None) -> tuple[s
     except (safeio.SafeReadError, OSError, ValueError):
         return "unreadable", None
     sources = record.get("port_sources")
-    if not isinstance(sources, list) or not any(isinstance(s, dict) and s.get("path") == f"stages/2/{PORT_DIR}/port_model.py"
+    if not isinstance(sources, list) or not all(isinstance(s, dict) and isinstance(s.get("path"), str) and isinstance(s.get("sha256"), str) for s in sources):
+        return "unreadable", None            # a path that is a list or an object would be an unhashable key below (review of PR 498, round 4)
+    if not any(isinstance(s, dict) and s.get("path") == f"stages/2/{PORT_DIR}/port_model.py"
                                                 and s.get("sha256") == port_sha for s in sources):
         return "unreadable", None            # the record is about another version of the port
     # Every source the check ran, and no other, must be on disk now with the same hash: a supporting file changed, added or removed after the
