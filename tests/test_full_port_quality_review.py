@@ -311,3 +311,29 @@ def test_the_perplexity_line_survives_a_value_too_large_for_a_float_and_main_use
     assert mod.perplexity_text(1000.0) == "too large to represent"
     main_src = inspect.getsource(mod.main)
     assert "perplexity_text(-sum(logprobs) / n)" in main_src and "math.exp" not in main_src      # the wiring: main prints through the guarded helper
+
+
+# ---- round 6 of PR 491: a huge integer, an overflowing sum and a boolean in place of a number ----------------------------------------------
+
+def test_the_bundle_treats_an_integer_too_large_for_a_float_as_not_a_number():
+    from orchard import full_port_bundle as fb
+    assert fb._num(10**400) is False
+    assert fb._fmt(10**400) == "TODO"
+    assert fb._num(3) is True
+
+
+def test_the_mean_negative_log_probability_does_not_overflow_when_every_input_is_finite():
+    from orchard import full_port_quality as fq
+    assert fq.mean_nll([-1.0] * 28 + [-1e308] * 4) == pytest.approx(1.25e307, rel=1e-9)
+    assert fq.mean_nll([-1.0, -3.0]) == 2.0
+
+
+@pytest.mark.parametrize("recorded, expected", [(True, 1.0), (False, 0.0), (1, 1.0), (0, 0.0)])
+def test_a_boolean_or_an_integer_is_not_accepted_for_a_float_result_field(recorded, expected):
+    from orchard import full_port_quality as fq
+    assert fq._same(recorded, expected) is False
+
+
+def test_the_same_values_of_the_same_types_still_compare_equal():
+    from orchard import full_port_quality as fq
+    assert fq._same({"a": [1.0, 2, None, "x"], "b": 0.5}, {"b": 0.5, "a": [1.0, 2, None, "x"]}) is True

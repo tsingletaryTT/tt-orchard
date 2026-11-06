@@ -20,7 +20,12 @@ HEADING = "Full port: quality against the reference and benchmark"
 
 
 def _num(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        return math.isfinite(x)
+    except OverflowError:         # a JSON integer too large for a float is not a number the bundle can print (review of PR 491, round 6)
+        return False
 
 
 def _d(x) -> dict:
