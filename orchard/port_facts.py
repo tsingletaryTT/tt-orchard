@@ -504,6 +504,24 @@ def stage_3_note(*, chips: int, copied: bool) -> str:
     return " ".join(parts)
 
 
+def tools_text(stage: int = 2, *, facts: bool = True) -> str:
+    """The stage tools (orchard/skills/full-port-templates/stage_tools.py, issue 505) as the coder's task names them: the exact command and one line each,
+    and the optional `layer_outputs` hook that `layer-diff` needs. The commands are the ones the watchdog counts by tool name and arguments."""
+    base = f"python3 stages/{stage}/stage_tools.py"
+    lines = [
+        "Fixed tools. Run them from the run directory in place of `cat`, `head`, `grep` or `python3 -c` on those files. Each prints a short report.",
+        f"- `{base} last-check`: which check failed, where, the numbers and the evidence file.",
+        f"- `{base} layer-diff`: after a numerics failure, the first layer whose output differs from the CPU reference (needs the optional hook below).",
+        f"- `{base} facts KEY`: one value of {FACTS_NAME} by dotted path, for example `facts config.hc_count`; `facts --find TEXT` searches keys and text.",
+        f"- `{base} show FILE --lines A:B`: a range of a file in the run directory, with line numbers.",
+        "Optional hook for `layer-diff`: define `layer_outputs(model, ids)` in `port_model.py`. It runs the prompt `ids` once and returns the hidden state "
+        "after each decoder layer, in order, as a list of torch tensors or numpy arrays. The check calls it only when the agreement is below "
+        f"{full_port.TOP1_MIN}, after the comparison, in the same run; its result cannot change the verdict, and an error in it is printed and ignored."]
+    if not facts:                    # no facts file was written for this run, so no line may name it
+        lines = [l for l in lines if "`facts" not in l]
+    return "\n".join(lines)
+
+
 def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
     """What the supervisor adds to the coder's prepare task for a full port. The generic prepare task names only hw_test.json and
     handoff.json; the port itself is described only in the skill, and the coder explored and wrote nothing."""
@@ -529,6 +547,7 @@ def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
                  "machine for other models' code; the worked example the skill names is enough.")
     parts.append(f"When the port is written, write `hw_test.json` as {{\"command\": \"{full_port.COMMAND}\", \"deadline_s\": "
                  f"{full_port.DEADLINE_S}}} and `handoff.json`, then reply with a short summary and no tool call.")
+    parts.append(tools_text(2, facts=facts))
     return "\n\n".join(parts)
 
 

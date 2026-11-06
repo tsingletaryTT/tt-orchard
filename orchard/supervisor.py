@@ -170,6 +170,7 @@ from orchard import repair_help            # the outside helper inside the port 
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
 from orchard.stages import UNVERIFIED_LEDGER_DECISION
+from orchard import stages as _stages          # `_mask_python`: the interpreter the run names for the reference (issue 505)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (DedupeStreak, FirstWriteDeadline, Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -2411,12 +2412,17 @@ class Supervisor:
         if failure.get("kind") == "numerics":
             return "\n".join([f"Port repair round {k} of {limit} for this attempt. The port ran to the end on the chips but disagrees with the CPU reference.",
                                repair_help.numeric_report(failure), "The supervisor runs the same check again after this step, on the same chips and "
-                               f"with the same reference. Only your edits under stages/{n}/port/ reach it."])
+                               f"with the same reference. Only your edits under stages/{n}/port/ reach it.",
+                               f"Tools: `python3 stages/{n}/stage_tools.py last-check` repeats these numbers. `python3 stages/{n}/stage_tools.py layer-diff` names the first "
+                               "layer that differs from the CPU reference, when port_model.py defines `layer_outputs(model, ids)` (the stage task says what it returns). "
+                               f"`python3 stages/{n}/stage_tools.py facts KEY` and `... show FILE --lines A:B` read the facts and your files."])
         where = f"at the {failure['op']!r} request" if failure.get("op") else "before any request reached the port"
         return "\n".join([f"Port repair round {k} of {limit} for this attempt. The port check failed {where}.",
                           f"The end of the check's output (stages/{n}/{port_repair.OUTPUT}):", "```", port_repair.tail(raw).rstrip(), "```",
                           "The supervisor runs the same check again after this step, on the same chips and with the same reference. "
-                          f"Only your edits under stages/{n}/port/ reach it."])
+                          f"Only your edits under stages/{n}/port/ reach it.",
+                          f"Tools: `python3 stages/{n}/stage_tools.py last-check` summarises this failure. `python3 stages/{n}/stage_tools.py facts KEY` and "
+                          "`... show FILE --lines A:B` read the facts and your files."])
 
     def _port_repair_rounds(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         """Up to `--port-repair-rounds` repair rounds for a full-port stage 2 whose port check failed on the port itself. Returns
@@ -4203,6 +4209,19 @@ class Supervisor:
         safeio.atomic_write(stage_dir / full_port.TEMPLATE_NAME, safeio.read_bytes(shipped, max_bytes=RUN_JSON_MAX), mode=os.stat(shipped).st_mode & 0o777)   # replaces what stands there
         config = stage_dir / full_port.CONFIG_NAME
         _put(config, json.dumps({"model_snapshot": str(Path(snapshot).absolute())}, indent=2) + "\n")
+        # The coder's fixed-name tools (issue 505): the supervisor's file, put back each time, so an edit made during prepare is undone.
+        tools = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TOOLS_NAME
+        safeio.atomic_write(stage_dir / full_port.TOOLS_NAME, safeio.read_bytes(tools, max_bytes=RUN_JSON_MAX), mode=os.stat(tools).st_mode & 0o777)
+        # The interpreter `layer-diff` runs under (torch and transformers). The coder's shell has an allow-listed environment, so the supervisor names it.
+        # A file the coder left there is replaced or removed, so the path in it is always one the supervisor found.
+        python = _stages._mask_python(self.run_dir)
+        if python:
+            _put(stage_dir / "stage_tools.json", json.dumps({"reference_python": python}) + "\n")
+        else:
+            try:
+                (stage_dir / "stage_tools.json").unlink(missing_ok=True)         # a link or a FIFO is removed, not followed
+            except OSError:
+                pass                      # a directory there: the tool refuses anything that is not a regular file
         if command:
             deadline = full_port.DEADLINE_S
             given = self._run_json(stage_dir / "hw_test.json", "hw_test.json", spec.number).value
@@ -4211,7 +4230,8 @@ class Supervisor:
                 deadline = given
             _put(stage_dir / "hw_test.json", json.dumps({"command": full_port.command(spec.number, entry), "deadline_s": deadline}) + "\n")
         else:
-            self.ledger.append("decision", spec.number, decision="port check template copied", copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME])
+            self.ledger.append("decision", spec.number, decision="port check template copied",
+                               copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, full_port.TOOLS_NAME])
         return []
 
     def _pin_scoring(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:

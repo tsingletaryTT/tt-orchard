@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shlex
 from collections import Counter, deque
@@ -223,6 +224,13 @@ _NUMERIC = re.compile(r"-?[\d.,:]+[a-zA-Z]?")
 _EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}$")
 _SED_RANGE = re.compile(r"\d{1,9}(?:,\d{1,9})?p")       # the print range of `sed -n 'a,bp' file`
 SHAPE_CHARS = 40
+# A call of a stage tool (orchard/skills/full-port-templates/stage_tools.py, issue 505) is `python3 <path>/stage_tools.py <tool> <arguments>`. Its shape is the
+# tool name and the arguments, which is exact: two calls share a shape only when they are the same call.
+_TOOL_SCRIPT = "stage_tools.py"
+_PYTHON = re.compile(r"python[0-9.]*")
+_REDIRECT_TOKEN = re.compile(r"(?:\d?>>?|&>)\S*|<\S*")          # `>`, `2>&1`, `>>out`, `<in`, as shlex leaves them
+_OPERATOR_TOKEN = re.compile(r"\|\||\||&&|;|&")
+TOOL_SHAPE_CHARS = 160
 # One leading `cd <dir> &&` (or `;`). Agents start every shell call this way, so it says where the command
 # runs and nothing about what it does.
 _CD_PREFIX = re.compile(r"""^\s*cd\s+("[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*""")
@@ -230,6 +238,36 @@ _CD_PREFIX = re.compile(r"""^\s*cd\s+("[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*""
 
 def _path_like(token: str) -> bool:
     return "/" in token or token.startswith(("~", ".")) or bool(_EXTENSION.search(token))
+
+
+def _tool_shape(command: str) -> str | None:
+    """`stage_tools <tool> <arguments>` for a call of the stage tools' script by a python interpreter (flags such as `-P -s` allowed before the script),
+    with the arguments up to the first pipe, separator or redirect; None for any other command, including one that only reads the script. A long
+    argument list keeps the start and a digest of the whole, so two long calls differ when their arguments differ."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if not tokens or not _PYTHON.fullmatch(os.path.basename(tokens[0])):
+        return None
+    at = None
+    for i, t in enumerate(tokens[1:], start=1):
+        if os.path.basename(t) == _TOOL_SCRIPT:
+            at = i
+            break
+        if not t.startswith("-"):
+            return None                       # python running something else
+    if at is None:
+        return None
+    args = []
+    for t in tokens[at + 1:]:
+        if _OPERATOR_TOKEN.fullmatch(t) or _REDIRECT_TOKEN.fullmatch(t):
+            break
+        args.append(t)
+    text = " ".join(["stage_tools", *args])
+    if len(text) > TOOL_SHAPE_CHARS:
+        text = text[:TOOL_SHAPE_CHARS - 9] + "#" + hashlib.sha256(text.encode()).hexdigest()[:8]
+    return text
 
 
 def command_shape(command: str) -> str:
@@ -257,6 +295,8 @@ def command_shape(command: str) -> str:
         d = m.group(1).strip("\"'")      # `cd X && cd Y && cmd`: skip each leading cd; a bare `cd X` stays
         cwd = d if (not cwd or d.startswith(("/", "~"))) else cwd.rstrip("/") + "/" + d
         command = rest
+    if (tool := _tool_shape(command)) is not None:
+        return tool
     head = _REDIRECT.sub("", _SEPARATOR.split(command, 1)[0])
     try:
         tokens = shlex.split(head)
