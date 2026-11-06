@@ -36,6 +36,7 @@ import json
 import math
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -213,7 +214,8 @@ class Worker:
                                      pass_fds=(c_in, c_out), cwd=str(RUN_DIR))
         os.close(c_in)
         os.close(c_out)
-        self.rd, self.wr = os.fdopen(p_in, "r", encoding="utf-8"), os.fdopen(p_out, "w", encoding="utf-8")  # hardening: ok private pipe descriptors this file's parent made
+        self.rd_fd, self._buf = p_in, b""                                 # replies are read from the descriptor itself, with a deadline (`_readline`)
+        self.wr = os.fdopen(p_out, "w", encoding="utf-8")  # hardening: ok private pipe descriptor this file's parent made
         self.pumps = [threading.Thread(target=self._pump, args=(s,), daemon=True) for s in (self.proc.stdout, self.proc.stderr)]
         for t in self.pumps:
             t.start()
@@ -226,17 +228,33 @@ class Worker:
             sys.stdout.write(PREFIX + raw.decode("utf-8", "replace").rstrip("\r\n") + "\n")
             sys.stdout.flush()
 
+    def _readline(self, timeout_s: float) -> str | None:
+        """One reply line from the worker's pipe: the line, "" when the worker closed the pipe, None when `timeout_s` passed with no whole line.
+        It waits on the descriptor with `select` and a deadline, so a request costs no thread of its own and a request that gets no reply leaves
+        nothing blocked behind (review of PR 491)."""
+        deadline = time.monotonic() + timeout_s
+        while b"\n" not in self._buf:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            ready, _, _ = select.select([self.rd_fd], [], [], left)
+            if not ready:
+                return None
+            chunk = os.read(self.rd_fd, 1 << 16)
+            if not chunk:
+                return ""
+            self._buf += chunk
+        line, _, self._buf = self._buf.partition(b"\n")
+        return line.decode("utf-8", "replace")
+
     def ask(self, **req) -> dict:
         self.wr.write(json.dumps(req) + "\n")
         self.wr.flush()
-        box = []
-        reader = threading.Thread(target=lambda: box.append(self.rd.readline()), daemon=True)
-        reader.start()
-        reader.join(REPLY_TIMEOUT_S)
-        if not box or not box[0]:
+        reply = self._readline(REPLY_TIMEOUT_S)
+        if not reply:
             raise QualityFailed(f"the port worker did not answer {req['op']!r} (it exited or stopped answering)", op=req["op"])
         try:
-            answer_ = json.loads(box[0])
+            answer_ = json.loads(reply)
         except ValueError:
             raise QualityFailed(f"the port worker's answer to {req['op']!r} was not JSON", op=req["op"])
         if not isinstance(answer_, dict) or answer_.get("ok") is not True:
