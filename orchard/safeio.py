@@ -531,6 +531,7 @@ def write_beneath_if(root_fd: int, parts: Sequence[str], data: bytes, *, expect_
                 os.link(tmp, names[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
             except FileExistsError:
                 raise AlreadyExists(f"{names[-1]} already exists, so it is not replaced") from None
+            os.fsync(parent)          # the link is not durable until its directory is synced (review of PR 496, round 6)
         else:
             try:
                 now = hashlib.sha256(read_beneath(parent, (names[-1],), max_bytes=1 << 26)).hexdigest()
@@ -540,6 +541,7 @@ def write_beneath_if(root_fd: int, parts: Sequence[str], data: bytes, *, expect_
                 raise ChangedWhileReading(f"{names[-1]} changed after it was read, so it is not replaced")
             os.rename(tmp, names[-1], src_dir_fd=parent, dst_dir_fd=parent)
             tmp = None
+            os.fsync(parent)          # as above: the rename is durable only after the directory is synced
     except OSError as exc:
         raise _os_failure(exc, "a path part") from None
     except ValueError:

@@ -179,3 +179,29 @@ def test_a_placed_answer_is_still_credited_when_the_check_it_led_to_passed(tmp_p
     sup = _sup(tmp_path, led, monkeypatch)
     sup._repair_verdicts(2, tmp_path)
     assert sup.telegraph.reports == [("aa", True)]
+
+
+# ---- review of PR 496, round 6 ---------------------------------------------------------------------------------------------------
+
+def test_a_watchdog_escalation_that_ends_the_step_with_error_is_consumed_after_a_successful_rescue(rig, monkeypatch, tmp_path):
+    """Finding: the stop was consumed only when the step's status was pause or escalate. A step that raised an escalation and then ended `error`
+    (a capped reply) left the stop in the actuator, so the next agent step exited at once."""
+    wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN, HONEST])
+    start(rig, BROKEN, [PREFILL_BROKEN + "# a\n"])
+    looping_coder(rig)
+    real_step = sv.Supervisor._step
+
+    def step(self, spec, phase, *a, **k):
+        out = real_step(self, spec, phase, *a, **k)
+        if phase == "repair" and "round 2 of" in (k.get("extra") or ""):
+            self.actuator._stop = "escalate"
+            return dataclasses.replace(out[0], status="error"), *out[1:]
+        return out
+    monkeypatch.setattr(sv.Supervisor, "_step", step)
+    seen = []
+    real_hw = sv.Supervisor._hardware_phase
+    monkeypatch.setattr(sv.Supervisor, "_hardware_phase", lambda self, *a, **k: (seen.append(self.actuator._stop), real_hw(self, *a, **k))[1])
+    rig.run()
+    asked = [a for a in decs(rig, rh.ASKED) if a["coder_failed"]]
+    assert asked, "the rescue must have happened for this test to say anything"
+    assert seen[-1] is None, seen
