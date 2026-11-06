@@ -460,6 +460,15 @@ def bench_run(w: Worker, prompt: list, warmup: bool) -> dict:
             "decode_tok_s": BENCH_STEPS / decode_s, "host_loadavg_1m": loadavg_1m()}
 
 
+def perplexity_text(nll: float) -> str:
+    """exp(nll) to four places, or a word when it is too large for a float. The line this is printed on comes before the record's mark line, and an
+    overflow here would end the run without the mark (review of PR 491, round 5); the supervisor reports the unrepresentable value as TODO."""
+    try:
+        return f"{math.exp(nll):.4f}"
+    except OverflowError:
+        return "too large to represent"
+
+
 def main() -> int:
     config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))  # hardening: ok reads the config the supervisor wrote (its sha256 is in the record)
     model_dir = config["model_snapshot"]
@@ -538,7 +547,7 @@ def main() -> int:
     tmp.write_bytes(data)  # hardening: ok writes the record that the gate re-reads through safeio and ties to the output mark
     os.replace(tmp, RECORD)
     measured = [r for r in runs if not r["warmup"]]
-    print(f"perplexity {math.exp(-sum(logprobs) / n):.4f} over {n} positions; "
+    print(f"perplexity {perplexity_text(-sum(logprobs) / n)} over {n} positions; "
           f"decode {sorted(r['decode_tok_s'] for r in measured)[len(measured) // 2]:.2f} tok/s (median of {len(measured)})", flush=True)
     print("PORT_QUALITY_SHA256", sha_bytes(data), flush=True)
     return 0
