@@ -116,4 +116,6 @@ def derive_and_write(run: Path, stage: Path, *, source: int = 2, rehearsal: bool
 def check(run: Path, stage: Path, seeded, **kw):
     kw.setdefault("source_stage", 2)
     kw.setdefault("expected_chips", len(CHIPS))
+    # What the ledger would hold: the hash of the source stage's record as its gate accepted it (the supervisor passes it; a test may override).
+    kw.setdefault("accepted_record_sha", full_port._sha(run / "stages" / str(kw["source_stage"]) / full_port.RECORD_FILE))
     return full_port_quality.check(stage, run, seeded=seeded, **kw)

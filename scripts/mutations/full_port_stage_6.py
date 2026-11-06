@@ -49,7 +49,7 @@ MUTATIONS = {
     "supervisor-gate-hook": (S, "            return full_port_quality_stage.gate(self, spec) ", "            return spec.gate ", SUP),
     "supervisor-no-seeded-in-gate": (QS, "\"seeded\": seeded(sup), ", "\"seeded\": [], ", SUP),
     "supervisor-rehearsal-from-ledger": (QS, "    if full_port_rehearsal(sup.ledger.read()):\n        kwargs", "    if False:\n        kwargs", SUP),
-    "supervisor-marker-from-ledger": (S, "\"full-port-mesh\", \"full-port-quality\"):\n            # One hardware test, one marker.", "\"full-port-mesh\"):\n            # One hardware test, one marker.", SUP),
+    "supervisor-marker-from-ledger": (S, "\"full-port-mesh\", full_port_serve.SKILL, \"full-port-quality\"):\n            # One hardware test, one marker.", "\"full-port-mesh\", full_port_serve.SKILL):\n            # One hardware test, one marker.", SUP),
     "supervisor-source-stage": (QS, "    return 3 if sup._stage_3_chips() else 2", "    return 2", SUP),
 }
 

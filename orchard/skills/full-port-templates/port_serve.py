@@ -305,6 +305,10 @@ def main() -> int:
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(engine))
         port = server.server_address[1]
         if port in FORBIDDEN_PORTS or 8100 <= port <= 8103:
+            # serve_forever has not started, so shutdown() below would wait for a loop that never ran: close the socket and clear `server`
+            # first (review of PR 490).
+            server.server_close()
+            server = None
             raise ServeFailed(f"the operating system gave port {port}, which belongs to other work on this machine")
         threading.Thread(target=server.serve_forever, daemon=True).start()
         print(f"listening on 127.0.0.1:{port}; replaying the corpus before any client is served", flush=True)

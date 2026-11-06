@@ -16,7 +16,7 @@ import json
 import os
 from pathlib import Path
 
-from orchard import full_port, full_port_quality, safeio
+from orchard import full_port, full_port_quality, full_port_serve, safeio
 from orchard.defaults import CHIPS_PER_BOARD
 from orchard.stages import full_port_rehearsal
 
@@ -52,7 +52,9 @@ def seeded(sup) -> list:
 
 def gate(sup, spec):
     """The stage's gate with the arguments that come from the supervisor and the ledger, never from a file the stage directory holds."""
-    kwargs = {"expected_chips": expected_chips(sup), "seeded": seeded(sup), "source_stage": source_stage(sup)}
+    source = source_stage(sup)
+    accepted = full_port_serve.accepted_sha(sup.ledger.read(), source, f"stages/{source}/{full_port.RECORD_FILE}")
+    kwargs = {"expected_chips": expected_chips(sup), "seeded": seeded(sup), "source_stage": source, "accepted_record_sha": accepted}
     if full_port_rehearsal(sup.ledger.read()):
         kwargs["rehearsal"] = True
     return functools.partial(spec.gate, **kwargs)

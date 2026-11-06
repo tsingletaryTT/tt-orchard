@@ -240,3 +240,38 @@ def test_the_wide_phase_without_a_coder_lease_takes_the_whole_test_lease_and_doe
     s._wide_hardware_phase(spec, tmp_path, {}, 2)
     assert [t[:2] for t in calls.taken] == [(2, 2)], "all the boards come from one lease of its own (it waits when they are busy)"
     assert calls.ran == [("lease", {"boards": 2})] and calls.given_back == ["lease"]
+
+
+# ---- the second round of the review of PR 490 -------------------------------------------------------------------------------------
+
+def test_a_config_with_max_len_as_a_string_is_a_reason_and_not_a_skipped_plan_check(tmp_path):
+    reasons: list = []
+    (tmp_path / full_port_serve.CONFIG_NAME).write_text(json.dumps({"max_len": "2048", "passkeys": []}))
+    record = {"passkey": {"runs": [passkey_run(32, 30, "11111"), passkey_run(64, 60, "22222")]}}
+    full_port_serve._passkey_reasons(record, "0" * 64, tmp_path, reasons)
+    assert any("max_len" in r and "whole number" in r for r in reasons), reasons
+
+
+def test_an_unreadable_config_is_a_reason_and_not_a_skipped_plan_check(tmp_path):
+    reasons: list = []
+    record = {"passkey": {"runs": [passkey_run(32, 30, "11111"), passkey_run(64, 60, "22222")]}}
+    full_port_serve._passkey_reasons(record, "0" * 64, tmp_path, reasons)
+    assert any("max_len" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("name", ["boots", "canary"])
+def test_a_result_whose_boot_or_canary_flag_is_false_over_a_passing_record_is_refused(run, name):
+    from test_full_port_serve import refused
+    r = json.loads((run["stage"] / "result.json").read_text())
+    r["checks"][name]["pass"] = False
+    (run["stage"] / "result.json").write_text(json.dumps(r))
+    refused(run, f"checks.{name}.pass is not true")
+
+
+def test_the_template_closes_the_socket_and_does_not_shut_down_a_loop_that_never_started():
+    # The forbidden-port branch raises before serve_forever starts; the finally block calls shutdown() only when `server` is not None.
+    from pathlib import Path
+    text = (Path(full_port_serve.__file__).parent / "skills" / "full-port-templates" / "port_serve.py").read_text()
+    branch = text[text.index("if port in FORBIDDEN_PORTS"):]
+    branch = branch[:branch.index("raise ServeFailed")]
+    assert "server.server_close()" in branch and "server = None" in branch
