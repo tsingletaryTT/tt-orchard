@@ -2466,8 +2466,12 @@ class Supervisor:
                                                                 why=f"the coder's repair step ended: {out.status}", coder_failed=True)
                     if not helped_on:
                         return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
-                    if out.status in ("pause", "escalate"):
-                        self._consume_handled_stop(n, out.status)
+                    # The stop the watchdog raised, whatever status the step returned: a capped or empty reply ends the step `error` after a
+                    # pause or an escalation was raised, and the stop would otherwise end the next agent step at once (review of PR 496, round 6).
+                    # The deadline and the operator's commands were handled above and below.
+                    raised = getattr(self.actuator, "_stop", None)
+                    if out.status in ("pause", "escalate") or raised in ("pause", "escalate"):
+                        self._consume_handled_stop(n, out.status if out.status in ("pause", "escalate") else raised)
                     # The operator may have written abort or pause while the helper's reply was awaited. The rescue does not override it, and no
                     # hardware check starts on its strength (review of PR 496, round 4).
                     if (command := self.actuator.stop_reason()) in ("abort", "operator-pause"):
