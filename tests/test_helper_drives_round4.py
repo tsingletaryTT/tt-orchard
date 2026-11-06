@@ -36,10 +36,10 @@ def test_a_supporting_file_edited_after_the_test_is_still_refused(tmp_path):
 
 def test_a_port_edited_while_the_supervisor_was_stopped_is_not_saved_at_the_failed_checks_rank(tmp_path):
     """Finding: after an edit made between the failed check and the resume, the untested files were saved at the old failure's rank."""
-    s, stage = _passed_check_stub(tmp_path, vouched=True)
+    s, stage = _passed_check_stub(tmp_path, vouched=True, fails_at="prefill")
     s._record_best(2, stage, {"op": "prefill"})
     assert len(_bests(s)) == 1                                              # the control: the files the check ran on are kept
-    s2, stage2 = _passed_check_stub(tmp_path / "other", vouched=True)
+    s2, stage2 = _passed_check_stub(tmp_path / "other", vouched=True, fails_at="prefill")
     (stage2 / "port" / "helper.py").write_text("y = 3  # edited while the supervisor was stopped\n")
     s2._record_best(2, stage2, {"op": "prefill"})
     assert not _bests(s2)
@@ -98,3 +98,23 @@ def test_a_call_whose_latest_report_is_not_helped_is_still_asked_again(tmp_path)
     tel.report(first.call_id, helped=False)
     tel.ask("p", "t", "f1")
     assert len(wire.requests) == 2
+
+
+# ---- review of PR 497, round 5 ---------------------------------------------------------------------------------------------------
+
+def test_the_rank_of_a_best_port_comes_from_the_authenticated_failure_and_not_the_one_passed_in(tmp_path):
+    """Finding: an earlier test's marker and output replayed after a rerun gave the current port that earlier failure's rank, because the
+    failure handed to `_record_best` was read without matching the record to the ledger's newest test."""
+    s, stage = _passed_check_stub(tmp_path, vouched=True, fails_at="load")      # the newest test, vouched by the ledger, failed at load
+    s._record_best(2, stage, {"op": "decode"})                                   # a replayed older record says the check got as far as decode
+    (best,) = _bests(s)
+    assert best["op"] == "load" and best["rank"] == rh.best_rank("load") < rh.best_rank("decode")
+
+
+def test_a_failed_check_the_ledger_never_vouched_for_records_no_best_port(tmp_path):
+    s, stage = _passed_check_stub(tmp_path, vouched=False, fails_at="load")
+    # The ledger holds a test for these files, but its evidence entry names another record: the marker on disk is a replay of an older one.
+    s.ledger.append("decision", 2, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage / "port"))
+    s.ledger.append("evidence", 2, path="stages/2/" + port_repair.MARKER, sha256="0" * 64, returncode=2, timed_out=False)
+    s._record_best(2, stage, {"op": "decode"})
+    assert not _bests(s)

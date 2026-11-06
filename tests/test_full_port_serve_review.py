@@ -472,3 +472,67 @@ def test_a_changed_top_level_passkey_lengths_is_refused(run, value):
     p = run["stage"] / "result.json"
     p.write_text(json.dumps({**json.loads(p.read_text()), "passkey_lengths": value}))
     refused(run, "passkey_lengths")
+
+
+# ---- review of PR 490, round 5 -------------------------------------------------------------------------------------------------
+
+def _served_with_vocab(tmp_path, vocab_size):
+    import threading
+    from http.server import ThreadingHTTPServer
+    mod = _template(tmp_path)
+    worker = _Worker()
+    engine = mod.Engine(worker, 100, _Tok(), [], lambda m: "t", vocab_size=vocab_size)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), mod.make_handler(engine))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    engine.open = True
+    return mod, engine, worker, server
+
+
+@pytest.mark.parametrize("body", [{"prompt": [999], "max_tokens": 1}, {"prompt": [1], "max_tokens": 2, "forced_tokens": [999]},
+                                  {"prompt": [10], "max_tokens": 1}])
+def test_an_id_outside_the_vocabulary_is_a_400_and_the_port_is_not_run(tmp_path, body):
+    """Finding: a positive id beyond the embedding table reached the worker and gave an HTTP 500."""
+    mod, engine, worker, server = _served_with_vocab(tmp_path, 10)
+    try:
+        status, _ = _post(mod, server, body)
+        assert status == 400 and worker.calls == []
+        status, _ = _post(mod, server, {"prompt": [9], "max_tokens": 1})          # the last id inside the range still runs
+        assert status == 200 and worker.calls
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_request_that_is_waiting_when_the_server_closes_never_reaches_the_worker(tmp_path):
+    """Finding: `close` was sent while a completion could still be running under the engine lock, and a request that got the lock afterwards
+    reached a closed worker. `quiesce` takes the lock, so a running completion finishes first, and refuses every later one."""
+    import threading
+    mod, engine, worker, server = _served_with_vocab(tmp_path, None)
+    try:
+        started, release = threading.Event(), threading.Event()
+        real_ask = worker.ask
+
+        def slow_ask(**kw):
+            started.set()
+            release.wait(10)
+            return real_ask(**kw)
+        worker.ask = slow_ask
+        results = []
+        t = threading.Thread(target=lambda: results.append(_post(mod, server, {"prompt": [1], "max_tokens": 1})[0]))
+        t.start()
+        assert started.wait(10)
+        done = []
+        q = threading.Thread(target=lambda: done.append(engine.quiesce(10)))
+        q.start()
+        q.join(0.3)
+        assert q.is_alive() and not done                  # quiesce waits for the running completion
+        release.set()
+        t.join(10)
+        q.join(10)
+        assert done == [True] and results == [200]
+        calls_before = len(worker.calls)
+        status, _ = _post(mod, server, {"prompt": [1], "max_tokens": 1})
+        assert status == 503 and len(worker.calls) == calls_before      # after it, a request is refused and the worker is not asked
+    finally:
+        server.shutdown()
+        server.server_close()

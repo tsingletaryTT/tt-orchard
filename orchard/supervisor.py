@@ -3534,8 +3534,14 @@ class Supervisor:
         if n != 2 or not self._helper_drive_on():
             return
         try:
-            rank_now = repair_help.best_rank(failure.get("op"))
-            agreement_now = failure.get("agreement") if failure.get("kind") == "numerics" else None
+            # The rank and the agreement come from the failure the ledger vouches for: the test record is matched to the newest hardware test's
+            # evidence entry (`_repair_outcome`). The failure passed in was read from the files on disk alone, and an earlier test's marker and
+            # output put back after a rerun would give the current port that earlier failure's rank (review of PR 497, round 5).
+            passed, op_now, readable, numbers = self._repair_outcome(n, stage_dir)
+            if not readable or passed or op_now is None:
+                return
+            rank_now = repair_help.best_rank(op_now)
+            agreement_now = numbers.get("agreement") if op_now == port_repair.NUMERICS_OP and isinstance(numbers, dict) else None
             best = repair_help.best_state(self.ledger.read(), n)
             if best is not None and repair_help.best_key(rank_now, agreement_now) <= repair_help.best_key(best["rank"], best.get("agreement")):
                 return
@@ -3549,7 +3555,7 @@ class Supervisor:
                 return
             # The snapshot is on disk under its own name before the entry that names it: a stop between the two leaves an unreferenced directory
             # and the earlier best port still restorable (review of PR 497).
-            self.ledger.append("decision", n, decision=repair_help.BEST, op=failure.get("op"), rank=rank_now,
+            self.ledger.append("decision", n, decision=repair_help.BEST, op=op_now, rank=rank_now,
                                **({"agreement": agreement_now} if agreement_now is not None else {}), **saved,
                                attempt=len([e for e in self.ledger.read() if e.get("stage") == n and e.get("event") == "stage_start"]))
         except Exception as exc:     # advisory: an error nobody listed leaves the ledger as it was
@@ -3640,7 +3646,9 @@ class Supervisor:
             self.ledger.append("decision", n, decision=repair_help.RESTORED, op=best.get("op"), rank=best["rank"], port_sha256=best["port_sha256"],
                                **({"agreement": best["agreement"]} if best.get("agreement") is not None else {}),
                                snapshot=best.get("snapshot"), skeleton_sha256=hashlib.sha256(skeleton).hexdigest())
-            if best["rank"] >= repair_help.PASSED_RANK:
+            if best.get("legacy"):
+                reached = "its check ran to the end; the agreement was not recorded"
+            elif best["rank"] >= repair_help.PASSED_RANK:
                 reached = "its check ran to the end, and the stage's gate did not accept the result"
             elif best.get("op") == port_repair.NUMERICS_OP and best.get("agreement") is not None:
                 reached = f"its check ran to the end with top1_agreement {best['agreement']}"
@@ -3835,6 +3843,12 @@ class Supervisor:
             return
         passed, after_op, readable, numbers = self._repair_outcome(n, stage_dir) if stage_dir is not None else (False, None, False, None)
         for item in pending:
+            if not item["placed"]:
+                # The supervisor stopped after the answer was recorded and before the placement (or the rejection) was. The reply is not the port,
+                # so a check that passed afterwards was the coder's own work (review of PR 496, round 5).
+                self._repair_report(n, item["round"], item["call_id"], item["failure_op"], None, helped=False,
+                                    outcome="interrupted before the reply was placed: it never became the port")
+                continue
             judged = repair_help.tested_after(entries, n, item["seq"]) and readable
             if not judged and final_helped is None:
                 continue

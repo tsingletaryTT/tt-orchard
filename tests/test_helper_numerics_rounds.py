@@ -217,7 +217,7 @@ def test_the_start_trigger_lets_the_coder_go_on_only_when_the_agreement_rose():
 def test_an_answer_is_listed_with_the_agreement_its_ask_was_made_at():
     entries = [{"seq": 1, "stage": 2, "event": "decision", "data": {"decision": rh.ASKED, "round": 1, "failure_op": "numerics", "failure_agreement": 0.5}},
                {"seq": 2, "stage": 2, "event": "decision", "data": {"decision": rh.ANSWERED, "ok": True, "call_id": "c1"}}]
-    assert rh.unreported(entries, 2) == [{"call_id": "c1", "round": 1, "failure_op": "numerics", "failure_agreement": 0.5, "seq": 2}]
+    assert rh.unreported(entries, 2) == [{"call_id": "c1", "round": 1, "failure_op": "numerics", "failure_agreement": 0.5, "seq": 2, "placed": False}]
 
 
 # ---- the loop ----------------------------------------------------------------------------------------------------------------------------
@@ -385,6 +385,7 @@ def test_a_passing_verdict_keeps_the_agreement_and_the_one_before(tmp_path, monk
     led.append("decision", 2, decision=rh.ASKED, round=1, failure_op=port_repair.NUMERICS_OP, failure_agreement=0.53125)
     led.append("decision", 2, decision=rh.ANSWERED, ok=True, call_id="c1", cached=False)
     led.append("decision", 2, decision=port_repair.TESTED, sources="x")
+    led.append("decision", 2, decision=rh.PLACED, call_id="c1")
     s = object.__new__(sv.Supervisor)
     s.run_dir, s.ledger, s.repair_help, s.helper_drives = run, led, True, True
     s.telegraph = type("T", (), {"report": lambda self, call_id, helped, note="": None})()

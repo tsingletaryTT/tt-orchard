@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 6 of a full port: the findings of the Copilot review of PR 491. Each test names the finding."""
+import math
 import importlib.util
 import os
 import threading
@@ -298,3 +299,15 @@ def test_a_credential_that_crosses_the_character_limit_is_redacted_before_the_te
     text = "a" * 390 + " hf_" + "B" * 30 + " tail"
     out = full_port_bundle._text(redact, text)
     assert "hf_" not in out and len(out) <= 400
+
+
+# ---- review of PR 491, round 5 ---------------------------------------------------------------------------------------------------
+
+def test_the_perplexity_line_survives_a_value_too_large_for_a_float_and_main_uses_it():
+    """Finding: `math.exp(1000)` in the print before the mark line raised OverflowError, so the record was written and the mark never printed."""
+    import inspect
+    mod = load_template()
+    assert mod.perplexity_text(1.0) == f"{math.exp(1.0):.4f}"
+    assert mod.perplexity_text(1000.0) == "too large to represent"
+    main_src = inspect.getsource(mod.main)
+    assert "perplexity_text(-sum(logprobs) / n)" in main_src and "math.exp" not in main_src      # the wiring: main prints through the guarded helper

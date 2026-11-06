@@ -195,16 +195,25 @@ def test_build_gives_a_resumed_supervisor_the_choice_the_run_started_with(rig, m
         assert sup.helper_drives is True
 
 
-def _passed_check_stub(tmp_path, *, vouched):
+def _passed_check_stub(tmp_path, *, vouched, fails_at=None):
     """A stage 2 directory after the real check ran a port that agrees with the reference, and a supervisor that drives with the helper. The
     check's record must be the check's own (its digest is in the captured output), so the check really runs against the fakes."""
     import hashlib
+    import json
+    from orchard import full_port
     from test_helper_numerics_rounds import PASSES
     from port_check_fakes import make_run, run_template
     run, stage, *_ = make_run(tmp_path, PASSES)
     (stage / "port" / "helper.py").write_text("y = 2\n")            # a supporting file the port may import; written before the check, so the record lists it
     done = run_template(tmp_path, run, stage)
     assert done.returncode == 0, done.stdout + done.stderr
+    code = 0
+    if fails_at is not None:      # the newest test failed at request `fails_at`: the output and the record the way the supervisor's test leaves them
+        code = 2
+        out = ("FAILED: x\n" + port_repair.FAILURE_TOKEN + json.dumps({"kind": "port", "op": fails_at}) + "\n").encode()
+        (stage / full_port.OUTPUT_FILE).write_bytes(out)
+        (stage / port_repair.MARKER).write_bytes(json.dumps({"returncode": 2, "timed_out": False, "output": {
+            "path": f"stages/2/{full_port.OUTPUT_FILE}", "sha256": hashlib.sha256(out).hexdigest()}}).encode())
     led = Ledger(run / "ledger.jsonl")
     led.append("run_start", None, model="m")
     led.append("stage_start", 2, escalated=False, resumed=False)
@@ -212,7 +221,7 @@ def _passed_check_stub(tmp_path, *, vouched):
         marker = (stage / port_repair.MARKER).read_bytes()
         # What `_run_test` writes before the test starts: the whole port directory, every regular file (review of PR 497, round 4).
         led.append("decision", 2, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage / "port"))
-        led.append("evidence", 2, path="stages/2/" + port_repair.MARKER, sha256=hashlib.sha256(marker).hexdigest(), returncode=0, timed_out=False)
+        led.append("evidence", 2, path="stages/2/" + port_repair.MARKER, sha256=hashlib.sha256(marker).hexdigest(), returncode=code, timed_out=False)
     s = object.__new__(Supervisor)
     s.run_dir, s.ledger, s.repair_help, s.helper_drives, s.telegraph = run, led, True, True, object()
     return s, stage

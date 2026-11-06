@@ -198,7 +198,9 @@ def start_trigger(entries: list[dict], n: int, k: int, failure: dict) -> tuple[b
 
 def unreported(entries: list[dict], n: int) -> list[dict]:
     """The repair answers of stage `n` (ok, with a call id) that have no `telegraph repair progress` entry yet, oldest first, each with the ask's
-    `round`, `failure_op` and the sequence number of the answer."""
+    `round`, `failure_op`, the sequence number of the answer and `placed`: whether a `telegraph repair placed` entry for it followed. An answer
+    without one never became the port, so whatever a later check found says nothing about it (review of PR 496, round 5)."""
+    placed_ids = {_data(e).get("call_id") for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == PLACED}
     done = {_data(e).get("call_id") for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == PROGRESS}
     asks: dict[int, dict] = {}
     out = []
@@ -213,7 +215,8 @@ def unreported(entries: list[dict], n: int) -> list[dict]:
               and not d.get("cached")):
             out.append({"call_id": d["call_id"], "round": last_ask.get("round") if asks else None,
                         "failure_op": last_ask.get("failure_op") if asks else None,
-                        "failure_agreement": last_ask.get("failure_agreement") if asks else None, "seq": e["seq"]})
+                        "failure_agreement": last_ask.get("failure_agreement") if asks else None, "seq": e["seq"],
+                        "placed": d["call_id"] in placed_ids})
     return out
 
 
@@ -457,12 +460,23 @@ def best_key(rank_value, agreement=None) -> tuple:
     return rank_value, float(agreement) if ok else 0.0
 
 
+def _legacy_best(d: dict) -> dict:
+    """An entry written before `PASSED_RANK` meant "passed the gate's agreement bar": rank 99, with no agreement, for any check that exited 0,
+    including a port below the bar. Compared as it stands it would sit above every numerics failure and keep a newly tested port with a higher
+    agreement from replacing it. It is read as a port that ran to the end with an unknown agreement: the rank of `NUMERICS_OP` and `legacy` set.
+    A later port that reached the bar still replaces it, and so does any numerics failure with a recorded agreement (review of PR 498, round 5)."""
+    agreement = d.get("agreement")
+    if d.get("rank") == PASSED_RANK and (isinstance(agreement, bool) or not isinstance(agreement, (int, float))):
+        return {**d, "rank": rank(port_repair.NUMERICS_OP), "op": port_repair.NUMERICS_OP, "legacy": True}
+    return d
+
+
 def best_state(entries: list[dict], n: int):
     """The best port recorded so far in stage `n` (the `best port recorded` entry with the highest `best_key`, the latest on a tie), or None."""
     best = None
     for e in entries:
         if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == BEST:
-            d = _data(e)
+            d = _legacy_best(_data(e))
             if (isinstance(d.get("rank"), int) and isinstance(d.get("port_sha256"), str)
                     and (best is None or best_key(d["rank"], d.get("agreement")) >= best_key(best["rank"], best.get("agreement")))):
                 best = d
@@ -626,6 +640,15 @@ def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
                             return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
                     except safeio.ChangedWhileReading:
                         return False, "port_model.py changed while the best port was being restored, and the edit is kept"
+                # The writes went through the descriptor. When `port` now names another directory, the descriptor's directory was moved away and the
+                # restore is not where the check will look: it is refused rather than reported, as `place` does (review of PR 497, round 5).
+                try:
+                    now = os.stat("port", dir_fd=pin.fd, follow_symlinks=False)
+                except OSError:
+                    now = None
+                held = os.fstat(port_fd)
+                if now is None or (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino):
+                    return False, "the port directory was replaced while the best port was being restored"
             finally:
                 os.close(port_fd)
     except safeio.SafeReadError as exc:
