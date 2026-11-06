@@ -52,6 +52,17 @@ four functions:
     close(model) -> None
         Release what `load` took. The check closes the device itself.
 
+A port may also define one optional function, used only to localise a numerics failure:
+
+    layer_outputs(model, ids) -> list
+        Run the prompt `ids` once and return the hidden state after each decoder layer, in order, as torch tensors or numpy arrays.
+
+The check calls it only when the agreement ends below the gate's bar, after the comparison, in the same hardware test and under the same lease.
+It never changes the record, the exit code or the gate. The check saves the arrays to `stages/2/evidence/layer-port.npz` and prints one
+`PORT_CHECK_LAYERS <sha256> <count>` line that the supervisor's capture of the output keeps. `python3 stages/2/stage_tools.py layer-diff` compares
+that file with the CPU reference layer by layer (in the reference interpreter) and names the first layer whose relative error is over a threshold
+(default 0.05). The same tool file also has `last-check`, `facts` and `show`; the task text lists them.
+
 If `load` writes a converted copy of the weights to disk (a cache under the cache root that the first boot fills), say so in
 `stages/2/port/converted_cache.json`: `{"writes_converted_cache": true, "cache_dir": "<where>"}`. The supervisor reads it before the hardware
 test and blocks when the cache disk has less free space than the first boot needs. If `load` converts straight onto the chips and writes no

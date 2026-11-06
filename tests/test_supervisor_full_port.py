@@ -13,16 +13,23 @@ from orchard.stages import SKIP_3_FULL_PORT, SKIP_4_FULL_PORT, full_port_enabled
 from orchard.supervisor import EXIT_ABORTED, EXIT_BLOCKED, EXIT_READY, Control, parse
 from orchard import full_port
 from port_check_fakes import HONEST, WRONG, install_fake_ttnn, python_path, tokenizer_json
+from quality_fakes import TINY_CONFIG, top5_file
 from run_fakes import DELTA, FILES, argv, bringup, note
 from test_supervisor import Rig, Stop, step_skills
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "unbuilt_stages_5_6")
 
 REF_IDS = list(range(100, 132))
 
 # What the coder's stage 1 would leave: the reference ids the stage 2 comparison reads.
+# The top-five file is what stage 6 compares the port's logit gaps with (issue 329).
 STAGE_1 = {**FILES[(1, "run")], "evidence/reference/generated-ids.json": {"generated_ids": REF_IDS, "generated_text": "x"},
+           "evidence/reference/top5-logits.json": top5_file(),
            "evidence/reference/prompt-ids.json": {"prompt_ids": [1, 2, 3], "prompt_text": "p"}}
+# The real reference template lists the top-five file as evidence of its decode check, so stage 1's pass records its hash (review of PR 491).
+STAGE_1["reference.json"] = {"verdict": "pass", "checks": [
+    {"name": n, "pass": True, "evidence": [*FILES[(1, "run")]["reference.json"]["checks"][0]["evidence"], "stages/1/evidence/reference/top5-logits.json"]}
+    for n in ("loads", "tokenizer round trip", "decodes forward", "matches the card")]}
 
 # The port the coder writes (the check is the supervisor's template, which these tests run for real on the CPU with a fake `ttnn`).
 PREPARE = {"port/port_model.py": HONEST,
@@ -175,7 +182,8 @@ def test_an_unattended_retry_does_not_pass_the_pause(rig):
     assert not started(rig, 5)
 
 
-def test_an_attended_resume_after_the_pause_goes_on_into_the_generic_stages(rig):
+def test_an_attended_resume_after_the_pause_goes_on_into_the_generic_stages(rig, tmp_path):
+    (tmp_path / "snapshot" / "config.json").write_text(json.dumps(TINY_CONFIG))        # stage 6 (issue 329) reads the model's config for the decode floor
     make(rig)
     rig.args.full_port_rehearsal = True          # stage 5 (issue 329) asks the passkey question, which this test's port cannot answer: random weights
     rig.on_sleep = lambda: Control(rig.run_dir).write("resume")
@@ -747,3 +755,35 @@ def test_an_unexpected_error_in_the_facts_step_leaves_a_ledger_decision_and_does
     assert stub._port_seed["facts"] is False and not (sd / "port_facts.json").exists() and stub._port_seed["skeleton"] is True
     problem = next(k for _, k in entries if k.get("decision") == "port facts not written")["problem"]
     assert "ValueError" in problem and "99999" not in problem
+
+
+def test_the_stage_gets_the_shipped_stage_tools_and_an_edit_of_them_is_undone(rig):
+    """Issue 505: the coder's fixed-name tools are the supervisor's file. A copy the coder edited during prepare is put back."""
+    shipped = full_port.TEMPLATE.parent / "stage_tools.py"
+    coder_writes(rig, {"stage_tools.py": "print('forged')\n"}, unattended=False)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert (stage_2(rig) / "stage_tools.py").read_bytes() == shipped.read_bytes()
+    copied = [d for d in rig.decisions() if d.get("decision") == "port check template copied"]
+    assert copied and "stage_tools.py" in copied[0]["copied"]
+
+
+def test_the_stage_tools_config_names_the_reference_interpreter_the_run_knows(rig, monkeypatch, tmp_path):
+    """Issue 505: `layer-diff` runs under the interpreter that has torch. The coder's shell does not inherit the operator's environment, so the
+    supervisor writes the path into stages/N/stage_tools.json when it knows one, and writes no file when it does not."""
+    fake = tmp_path / "ref-python"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ORCHARD_REFERENCE_PYTHON", str(fake))
+    coder_writes(rig, {}, unattended=False)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert json.loads((stage_2(rig) / "stage_tools.json").read_text()) == {"reference_python": str(fake)}
+
+
+def test_no_known_interpreter_leaves_no_stage_tools_config(rig, monkeypatch):
+    monkeypatch.delenv("ORCHARD_REFERENCE_PYTHON", raising=False)
+    coder_writes(rig, {"stage_tools.json": '{"reference_python": "/tmp/planted"}'}, unattended=False)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert not (stage_2(rig) / "stage_tools.json").exists()

@@ -188,6 +188,7 @@ def wire_two_models(rig, monkeypatch, tmp_path, reply):
     cfg = tg.load(table(models=["small-model", "big-model"], prices={"small-model": [1.0, 5.0], "big-model": [3.0, 15.0]}), base=tmp_path)
     tel = tg.Telegraph(cfg, tmp_path / "tg", transport=wire, environ={"TG_KEY": KEY}, clock=lambda: 1000.0, hostname="node9", home="/home/someone")
     monkeypatch.setattr(sv, "_telegraph_from", lambda *a, **k: tel)
+    monkeypatch.setattr(sv.Supervisor, "REPAIR_HELP_DEFAULT", False)      # these tests are about the asks at attempt starts (tests/test_supervisor_telegraph_in_repair.py turns the round asks on)
     return tel, wire
 
 
@@ -212,7 +213,7 @@ def test_after_a_stub_the_next_ask_in_the_same_problem_goes_to_the_next_model(ri
     tel, wire = wire_two_models(rig, monkeypatch, tmp_path, stub_reply)
     coder(rig, uses_the_draft=False)
     rig.run()
-    tel.ask(paf.PROBLEM, "task", "failure")
+    tel.ask(paf.problem_id(rig.run_dir), "task", "failure")
     assert wire.requests[-1]["body"]["model"] == "big-model"
 
 
@@ -222,7 +223,7 @@ def test_a_real_draft_that_the_stage_then_passes_with_keeps_the_first_model_for_
     rig.run()
     assert not [d for d in rig.decisions() if d.get("decision") == paf.DRAFT_STUB]
     assert [d["helped"] for d in rig.decisions() if d.get("decision") == paf.REPORTED] == [True]
-    tel.ask(paf.PROBLEM, "task", "failure")
+    tel.ask(paf.problem_id(rig.run_dir), "task", "failure")
     assert wire.requests[-1]["body"]["model"] == "small-model"
 
 

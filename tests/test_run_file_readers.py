@@ -618,22 +618,25 @@ def test_the_test_record_writer_replaces_a_fifo_or_link_at_the_record_and_at_its
 def test_the_port_check_files_are_written_over_a_fifo_or_link_and_a_refused_hw_test_does_not_block(shape):
     """PR 347 added the full-port check: the supervisor copies the template, writes its config and rewrites hw_test.json in the stage directory."""
     out = run_child(f'''
+        import os
+        os.environ.pop("ORCHARD_REFERENCE_PYTHON", None)          # no interpreter is known, so a stage_tools.json the coder left must go
         from types import SimpleNamespace
         from orchard import full_port, supervisor
         S = supervisor.Supervisor
         sd = run / "stages" / "2"
         sd.mkdir(parents=True)
-        for name in (full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, "hw_test.json"):
+        for name in (full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, "hw_test.json", full_port.TOOLS_NAME, "stage_tools.json"):
             build({shape!r}, sd / name)
         entries = []
-        stub = SimpleNamespace(inputs={{"model": str(run)}}, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
+        stub = SimpleNamespace(inputs={{"model": str(run)}}, run_dir=run, paths=SimpleNamespace(orchard_dir=str(Path(supervisor.__file__).resolve().parent.parent)),
                                ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
         stub._run_json = lambda *a: S._run_json(stub, *a)
         problems = S._pin_full_port(stub, SimpleNamespace(number=2), sd, command=True)
-        regular = [(sd / n).is_file() and not (sd / n).is_symlink() for n in (full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, "hw_test.json")]
-        report(problems=problems, regular=regular, outside=outside.read_text())
+        regular = [(sd / n).is_file() and not (sd / n).is_symlink() for n in (full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, "hw_test.json", full_port.TOOLS_NAME)]
+        report(problems=problems, regular=regular, outside=outside.read_text(), tools_config_left=(sd / "stage_tools.json").exists() or (sd / "stage_tools.json").is_symlink())
     ''')
     assert out["problems"] == [] and all(out["regular"]) and out["outside"] == "{}", out
+    assert out["tools_config_left"] is False, out          # no interpreter is known here, so the file a hostile coder left is removed (issue 505)
 
 
 # ------------------------------------------------ third Copilot review of PR 345: a refusal while the test's chips are held

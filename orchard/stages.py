@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, full_port_entries, full_port_serve, model_kind, safeio, scoring_check
+from orchard import audio_decision, audio_facts, audio_runtime, bounded_run, full_port, full_port_entries, full_port_quality, full_port_serve, model_kind, safeio, scoring_check
 from orchard import text_runtime as _text_rt
 from orchard.classes import CLASSES, IGNORED_WEIGHT_SUFFIXES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import agreement_core, prompt_suite, raw_evidence, sampling_choice, sampling_probe, sidecar_numbers, token_check
@@ -604,6 +604,22 @@ def gate_full_port_serve(stage_dir, run_dir, *, rehearsal: bool = False, expecte
     waived: list[str] = []
     reasons, seen = full_port_serve.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived, expected_chips=expected_chips, source=source,
                                           corpus_sha256=corpus_sha256)
+    return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
+
+
+def gate_full_port_6(stage_dir, run_dir, *, rehearsal: bool = False, expected_chips: int | None = None, seeded: list | None = None,
+                     source_stage: int = 2, accepted_record_sha: str | None = None,
+                     top5_accepted_sha: str | None = None) -> GateResult:
+    """Stage 6 of a full port (issue 329): the port that passed the earlier stage was run by the supervisor's quality template, and the numbers in
+    result.json (free-run leading match, teacher-forced perplexity, top-5 logit gap difference from the reference, the benchmark and its share of the
+    decode floor) are recomputed from the record. orchard/full_port_quality.py holds the checks. The five keywords come from the supervisor and
+    the ledger: the rehearsal flag waives `coherent` only, `expected_chips` is the chip count the test must have run on, `seeded` is the ledger's
+    list of copied port files, `source_stage` is the stage the port came from, and `accepted_record_sha` is the hash the ledger holds for that
+    stage's accepted port-check record; `top5_accepted_sha` is the hash the ledger holds for stage 1's top-five file."""
+    waived: list[str] = []
+    reasons, seen = full_port_quality.check(stage_dir, run_dir, rehearsal=rehearsal, waived=waived, expected_chips=expected_chips, seeded=seeded,
+                                            source_stage=source_stage, accepted_record_sha=accepted_record_sha,
+                                            top5_accepted_sha=top5_accepted_sha)
     return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
 
 
@@ -2014,6 +2030,13 @@ SKIP_4_FULL_PORT = ("full-port route: the run lists no chip count (`--required-c
 FULL_PORT_STAGE_5 = dataclasses.replace(
     STAGES[5], name="full port behind the chat server: acceptance corpus, passkey and canary", skill=full_port_serve.SKILL,
     gate=gate_full_port_serve, draft="full_port_serve", needs_coder=False)
+
+# Stage 6 of a full port (issue 329): quality against the reference and a benchmark with repeats, run by the supervisor's own template on the port that
+# passed the earlier stage. The supervisor copies the port and writes the result from the template's record, so no agent step runs (`needs_coder` is
+# False). It runs the hardware phase the way stage 3 does (`boards` is the stage's own one; the supervisor widens it to the configured chips).
+FULL_PORT_STAGE_6 = dataclasses.replace(
+    STAGES[6], name="full port: quality against the CPU reference and benchmark with the share of the decode floor", skill="full-port-quality",
+    refs=(), gate=gate_full_port_6, draft="full_port_quality", needs_coder=False)
 SKIP_3_FULL_PORT = ("full-port route: the run configures no chip count above one board (`--required-chips`), so stage 2 already ran the port on "
                     "the configured chips")
 
@@ -2384,6 +2407,9 @@ def spec_for(number: int, path: str | None, package_format: str | None = None,
 
     if full_port and number == 5 and path == "full-port" and cls == "full-port" and not scoring_routed(kind, path, cls, full_port):
         return FULL_PORT_STAGE_5          # a scoring model of this class keeps the generic table after its own stage 2
+
+    if full_port and number == 6 and path == "full-port" and cls == "full-port" and not scoring_routed(kind, path, cls, full_port):
+        return FULL_PORT_STAGE_6          # stage 6 of a full port: the supervisor's quality template (orchard/full_port_quality.py)
     if path == "stock-runtime":
         stock_table = {2: STOCK_STAGE_2, 3: dataclasses.replace(STAGES[3], skip=SKIP_STOCK_3),
                        4: dataclasses.replace(STAGES[4], skip=SKIP_STOCK_4), 5: dataclasses.replace(STAGES[5], skip=SKIP_STOCK_5),
@@ -2598,6 +2624,10 @@ def run_progress(entries: list[dict]) -> RunProgress:
             what = d.get("decision")
             if what == "pause":
                 paused = d.get("reason") or "paused"
+            elif what == "resume" and d.get("keeps_budgets") is True:
+                # A handled pause (a helper-supplied port took over from a repair step the watchdog paused): the pause is answered and nothing
+                # else is reset. The run's counters and wall-clock budget go on, as they do for a run nobody paused (review of PR 496).
+                paused = None
             elif what == "resume":
                 paused, escalations, cold_boots, coder_deaths = None, 0, 0, 0
                 park_boots, park_boot_s = 0, 0.0

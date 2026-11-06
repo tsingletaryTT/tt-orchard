@@ -23,7 +23,7 @@ from test_supervisor import Rig, step_skills
 from test_supervisor_full_port import FULL_PORT, never_wait, started, with_snapshot
 from test_supervisor_full_port_stage3 import PREPARE_3
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "unbuilt_stages_5_6")
 
 # A port that works on a mesh and refuses a single device (the fake runtime opens a single chip as {"device": 0}).
 NO_SINGLE_CHIP = HONEST.replace("def load(model_dir, mesh_device):\n",
@@ -131,7 +131,7 @@ def test_each_entry_starts_from_a_copy_of_the_stage_3_port_and_the_ledger_holds_
     make4(rig)
     abort_at_pause(rig)
     rig.run()
-    copied = [d for d in rig.decisions() if d.get("decision") == "stage 2 port copied" and d.get("source_stage") == 3]
+    copied = [d for d in rig.decisions() if d.get("decision") == "stage 3 port copied" and d.get("source_stage") == 3]
     assert len(copied) == 2
     for d in copied:
         assert {f["path"].rsplit("/port/", 1)[0] for f in d["files"]} <= {"stages/4/configs/1", "stages/4/configs/3"}

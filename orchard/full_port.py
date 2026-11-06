@@ -50,6 +50,8 @@ OUTPUT_MARK = "PORT_CHECK_SHA256"
 MODEL_ROLE = "model"                  # every file under stages/2/port/ is model code; the check is the template's
 TEMPLATE = Path(__file__).resolve().parent / "skills" / "full-port-templates" / "port_check.py"      # the shipped template
 TEMPLATE_NAME = "port_check.py"       # its name in stages/2/
+TOOLS = TEMPLATE.parent / "stage_tools.py"      # the coder's fixed-name tools (issue 505): last-check, layer-diff, facts, show
+TOOLS_NAME = "stage_tools.py"         # its name in the stage directory, next to the template
 CONFIG_NAME = "port_check_config.json"
 # The only command the supervisor runs for this stage. -P and -s keep files the coder leaves in stages/2/ off the template's sys.path.
 COMMAND = "python3 -P -s stages/2/port_check.py"
@@ -359,25 +361,34 @@ def _reference_ids(record: dict, run_dir: Path, reasons: list) -> list | None:
     return ids
 
 
-def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list) -> None:
-    """The supervisor's output file is the file it recorded, and the command printed the record's sha256 into it."""
+def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list, record_sha: str | None = None) -> None:
+    """The supervisor's output file is the file it recorded, and the command printed the record's sha256 into it. With `record_sha` the printed
+    digest is compared with that value (the digest of the bytes the caller parsed) and the record file is not read again."""
     out = stage_dir / OUTPUT_FILE
     rec = marker.get("output")
     want = os.path.relpath(out, run_dir)
-    if not isinstance(rec, dict) or rec.get("path") != want or rec.get("sha256") != _sha(out):
+    # One read: the digest compared with the supervisor's record and the text searched for the mark line come from the same bytes, so a file
+    # replaced between two reads cannot pass with altered text (review of PR 498, round 5).
+    try:
+        raw = safeio.read_bytes(out, max_bytes=JSON_MAX * 4)
+    except safeio.SafeReadError as exc:
+        if not isinstance(rec, dict) or rec.get("path") != want:
+            reasons.append(f"{OUTPUT_FILE} is not the output file the supervisor recorded in test-result.json")
+        else:
+            reasons.append(f"{OUTPUT_FILE} is not readable: {exc.reason}")
+        return
+    # The record's digest covers at most JSON_MAX bytes (`_sha`): a larger file never matched it.
+    if (not isinstance(rec, dict) or rec.get("path") != want or len(raw) > JSON_MAX
+            or rec.get("sha256") != hashlib.sha256(raw).hexdigest()):
         reasons.append(f"{OUTPUT_FILE} is not the output file the supervisor recorded in test-result.json")
         return
-    try:
-        text = safeio.read_bytes(out, max_bytes=JSON_MAX * 4).decode("utf-8", "replace")
-    except safeio.SafeReadError as exc:
-        reasons.append(f"{OUTPUT_FILE} is not readable: {exc.reason}")
-        return
+    text = raw.decode("utf-8", "replace")
     marks = re.findall(rf"^{OUTPUT_MARK} ([0-9a-f]{{64}})\s*$", text, re.M)
     starts = [l for l in text.splitlines() if l.startswith(OUTPUT_MARK)]
     if len(starts) != 1:
         reasons.append(f"{OUTPUT_FILE} has {len(starts)} lines that begin with {OUTPUT_MARK}; the template prints exactly one "
                        "(and prefixes every line the port prints), so something else wrote a line of its own")
-    if not marks or marks[-1] != _sha(stage_dir / RECORD_FILE):
+    if not marks or marks[-1] != (record_sha if record_sha is not None else _sha(stage_dir / RECORD_FILE)):
         reasons.append(f"{OUTPUT_FILE} does not carry a {OUTPUT_MARK} line that matches {RECORD_FILE}, so the record was not "
                        "written by the test the supervisor ran")
 

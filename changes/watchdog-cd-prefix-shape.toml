@@ -1,0 +1,2 @@
+target = "0.9.119"
+summary = "The watchdog shape check skips a leading cd prefix, so commands that run different programs after a shared cd are no longer reported as near-duplicates."

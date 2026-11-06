@@ -32,6 +32,7 @@ they share, the single write with its rollback, and leaves the lock and the torn
 from __future__ import annotations
 
 import errno
+import hashlib
 import fcntl
 import json
 import math
@@ -97,6 +98,10 @@ class TooLarge(SafeReadError):
 
 class ChangedWhileReading(SafeReadError):
     """The file did not hold the size it had when the read began, so the bytes read are not one version of it."""
+
+
+class AlreadyExists(SafeReadError):
+    """`write_beneath_if` was asked to create a file and one is already there."""
 
 
 class NotText(SafeReadError):
@@ -442,8 +447,9 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
     Every directory on the way is made with `mkdir` relative to the descriptor before it and then opened with `O_DIRECTORY | O_NOFOLLOW`, so
     a link standing where a directory should be is refused and nothing is written through it. The bytes go to a new file with a name of its own
     (created with `O_CREAT | O_EXCL | O_NOFOLLOW`, synced) that is then renamed over the final name inside the same directory: a reader sees the
-    old file or the whole new one, and a link already standing at the final name is replaced and not followed. Raises only SafeReadError; the
-    temporary file is removed on failure."""
+    old file or the whole new one, and a link already standing at the final name is replaced and not followed. Each directory it creates and the
+    rename are synced through their parent descriptors before it returns, so a crash cannot leave a later ledger entry durable while the file is
+    not. Raises only SafeReadError; the temporary file is removed on failure."""
     names = _check_parts(parts)
     if not names:
         raise PathRefused("a file needs at least one path part")
@@ -454,6 +460,7 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
         for part in names[:-1]:
             try:
                 os.mkdir(part, 0o755, dir_fd=cur)
+                os.fsync(cur)                                   # the new directory's entry is durable once its parent is synced (review of PR 497)
             except FileExistsError:
                 pass                                            # it may be a link: the open below refuses it
             nxt = os.open(part, _DIR_FLAGS, dir_fd=cur)
@@ -472,6 +479,7 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
             os.close(fd)
         os.rename(tmp, names[-1], src_dir_fd=cur, dst_dir_fd=cur)
         tmp = None
+        os.fsync(cur)                       # the rename is durable only once its directory is synced (review of PR 497)
     except OSError as exc:
         raise _os_failure(exc, "a path part") from None
     except ValueError:                      # UnicodeEncodeError: a lone surrogate cannot be passed to the operating system
@@ -487,6 +495,67 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
                 os.close(cur)
             except OSError:
                 pass
+
+
+def write_beneath_if(root_fd: int, parts: Sequence[str], data: bytes, *, expect_sha256: str | None, mode: int = 0o644) -> None:
+    """Write `data` as the file `parts` beneath the open directory `root_fd` only if the file is still what the caller saw.
+
+    `expect_sha256` is the sha256 (hex) of the bytes the caller read. The new bytes go to a temporary file in the destination directory
+    (created with `O_EXCL | O_NOFOLLOW`, synced). Then the destination is read again through the same directory descriptor, and the temporary file
+    replaces it only if the hash still matches: a file a writer changed after the caller's comparison is left alone and `ChangedWhileReading`
+    is raised. With `expect_sha256=None` the file is created only if no entry of that name exists (`link` fails on an existing name, even a
+    link), and `AlreadyExists` is raised otherwise. The last check and the rename are two system calls, so a writer that lands in that gap is
+    not detected; the gap is a few instructions, where the older code left the whole time between the caller's read and its write.
+    The directories on the way are made and opened as `write_beneath` does. Raises only SafeReadError; the temporary file is removed."""
+    names = _check_parts(parts)
+    if not names:
+        raise PathRefused("a file needs at least one path part")
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise ValueError("data must be bytes")
+    if expect_sha256 is not None and not (isinstance(expect_sha256, str) and len(expect_sha256) == 64):
+        raise ValueError("expect_sha256 must be a 64-character hex digest or None")
+    if len(names) > 1:
+        mkdir_beneath(root_fd, names[:-1])
+    parent = open_beneath(root_fd, names[:-1])
+    tmp = None
+    try:
+        tmp = f".{names[-1][:100]}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, mode, dir_fd=parent)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if expect_sha256 is None:
+            try:
+                os.link(tmp, names[-1], src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+            except FileExistsError:
+                raise AlreadyExists(f"{names[-1]} already exists, so it is not replaced") from None
+            os.fsync(parent)          # the link is not durable until its directory is synced (review of PR 496, round 6)
+        else:
+            try:
+                now = hashlib.sha256(read_beneath(parent, (names[-1],), max_bytes=1 << 26)).hexdigest()
+            except SafeReadError:
+                raise ChangedWhileReading(f"{names[-1]} is missing or is not a plain file any more, so it is not replaced") from None
+            if now != expect_sha256:
+                raise ChangedWhileReading(f"{names[-1]} changed after it was read, so it is not replaced")
+            os.rename(tmp, names[-1], src_dir_fd=parent, dst_dir_fd=parent)
+            tmp = None
+            os.fsync(parent)          # as above: the rename is durable only after the directory is synced
+    except OSError as exc:
+        raise _os_failure(exc, "a path part") from None
+    except ValueError:
+        raise PathRefused("a path part cannot be encoded for the operating system") from None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp, dir_fd=parent)
+            except OSError:
+                pass
+        os.close(parent)
 
 
 def mkdir_beneath(root_fd: int, parts: Sequence[str]) -> None:

@@ -1290,6 +1290,18 @@ def text_section(run: Run, redact: Redactor) -> list[str]:
     return lines
 
 
+def full_port_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Full port: quality against the reference and benchmark" section (orchard/full_port_bundle.py): only for a stage 6 result.json that the full-port
+    quality stage wrote (its schema names it). Other runs get the same RESULTS.md as before."""
+    from orchard import full_port_bundle
+    return full_port_bundle.section(run.results.get(6), redact)
+
+
+def full_port_risks(run: Run, redact: Redactor) -> list[str]:
+    from orchard import full_port_bundle
+    return full_port_bundle.risks(run.results.get(6), redact)
+
+
 def text_risks(run: Run, redact: Redactor) -> list[str]:
     """The "Text run" section of RISKS.md: a stage 2 bar that was not met first, then the fixed limits. No lines without text_result.json."""
     if not run.text_run:
@@ -1765,6 +1777,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += reported_section(run, redact)
     lines += audio_section(run, redact)
     lines += text_section(run, redact)
+    lines += full_port_section(run, redact)
     lines += stock_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
@@ -2274,6 +2287,7 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
              "Every item names its evidence, relative to the run directory.", ""]
     lines += audio_risks(run, redact)
     lines += text_risks(run, redact)
+    lines += full_port_risks(run, redact)
     lines += stock_risks(run, redact)
     lines += ["## TODO numbers", ""]
     lines += [f"- {t}" for t in todo] or ["- None found in the run's files."]

@@ -33,12 +33,13 @@ from pathlib import Path
 
 from orchard import full_port, residency, safeio
 from orchard.commands import run_command
+from orchard.defaults import FIRST_WRITE_TURNS
 
 SCHEMA = "orchard-port-facts/1"
 FACTS_NAME = "port_facts.json"
 SKELETON = Path(__file__).resolve().parent / "skills" / "full-port-templates" / "port_model_skeleton.py"
 SKELETON_NAME = "port_model.py"
-FIRST_VERSION_TURNS = 12          # choice: the watchdog nudges at 20 turns with no file written; a first version by 12 leaves room to refine
+FIRST_VERSION_TURNS = FIRST_WRITE_TURNS   # choice (defaults.py): the watchdog nudges at 20 turns with no file written; a first version by 12 leaves room to refine, and at 12 the write-deadline hint arrives
 MAX_CHARS = 10_500                # choice: under the agent's 12,000-character tool page, so one read_file returns the whole file
 CONFIG_MAX = 1 << 20              # config.json is a few kilobytes; this bound only stops a hostile file
 SOURCE_MAX = 1 << 20              # a transformers configuration module is tens of kilobytes
@@ -503,6 +504,27 @@ def stage_3_note(*, chips: int, copied: bool) -> str:
     return " ".join(parts)
 
 
+def tools_text(stage: int = 2, *, facts: bool = True) -> str:
+    """The stage tools (orchard/skills/full-port-templates/stage_tools.py, issue 505) as the coder's task names them: the exact command and one line each,
+    and the optional `layer_outputs` hook that `layer-diff` needs. The commands are the ones the watchdog counts by tool name and arguments."""
+    base = f"python3 stages/{stage}/stage_tools.py"
+    lines = [
+        "Fixed tools. Run them from the run directory in place of `cat`, `head`, `grep` or `python3 -c` on those files. Each prints a short report.",
+        f"- `{base} last-check`: which check failed, where, the numbers and the evidence file.",
+        f"- `{base} layer-diff`: after a numerics failure, the first layer whose output differs from the CPU reference (needs the optional hook below).",
+        f"- `{base} facts KEY`: one value of {FACTS_NAME} by dotted path, for example `facts config.hc_count`; `facts --find TEXT` searches keys and text.",
+        f"- `{base} show FILE --lines A:B`: a range of a file in the run directory, with line numbers.",
+        f"- `{base} edit stages/{stage}/port/port_model.py --old TEXT --new TEXT`: after your first write, change a port file with this. Do not write the whole file again.",
+        "`edit` needs TEXT to occur once (add the lines around it if it does not). For several lines, write the old and the new text with write_file, a new "
+        "file name for each edit, and pass `--old-file` and `--new-file`.",
+        "Optional hook for `layer-diff`: define `layer_outputs(model, ids)` in `port_model.py`. It runs the prompt `ids` once and returns the hidden state "
+        "after each decoder layer, in order, as a list of torch tensors or numpy arrays. The check calls it only when the agreement is below "
+        f"{full_port.TOP1_MIN}, after the comparison, in the same run; its result cannot change the verdict, and an error in it is printed and ignored."]
+    if not facts:                    # no facts file was written for this run, so no line may name it
+        lines = [l for l in lines if "`facts" not in l]
+    return "\n".join(lines)
+
+
 def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
     """What the supervisor adds to the coder's prepare task for a full port. The generic prepare task names only hw_test.json and
     handoff.json; the port itself is described only in the skill, and the coder explored and wrote nothing."""
@@ -528,4 +550,20 @@ def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
                  "machine for other models' code; the worked example the skill names is enough.")
     parts.append(f"When the port is written, write `hw_test.json` as {{\"command\": \"{full_port.COMMAND}\", \"deadline_s\": "
                  f"{full_port.DEADLINE_S}}} and `handoff.json`, then reply with a short summary and no tool call.")
+    parts.append(tools_text(2, facts=facts))
     return "\n\n".join(parts)
+
+
+def write_deadline_hint(turns: int, *, port_is_skeleton: bool, excerpts: bool) -> str:
+    """The text of the one hint a stage 2 step gets when it has read for `turns` turns and written nothing (watchdog FirstWriteDeadline).
+    While the port is still the supervisor's skeleton it names the file and the four functions to fill in, and where the source to copy
+    from is. Once the port has been edited, the step is a repair or a finish step, and the hint says only to write what the step asks for."""
+    if not port_is_skeleton:
+        return (f"{turns} model turns have passed and you have written no file. Stop reading. Make the edit this step asks for now, "
+                "or say what blocks you.")
+    source = (f"`stages/2/{EXCERPT_FILE}` holds the source of the reference classes, and `stages/2/{FACTS_NAME}` holds the shapes"
+              if excerpts else f"`stages/2/{FACTS_NAME}` holds the shapes")
+    return (f"{turns} model turns have passed and `stages/2/port/port_model.py` is still the skeleton. Write it now with the write_file tool: "
+            "replace the NotImplementedError bodies of `load`, `prefill`, `decode_step` and `close`, keep `read_tensors`, and put the layer "
+            f"code in helper functions above them. {source}; you have everything you need in your context. An incomplete first version is "
+            "what this step needs. Do not open another reference file before you have written it.")
