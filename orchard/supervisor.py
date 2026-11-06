@@ -3859,6 +3859,11 @@ class Supervisor:
                 self._repair_report(n, item["round"], item["call_id"], item["failure_op"], None, helped=False,
                                     outcome="interrupted before the reply was placed: it never became the port")
                 continue
+            if item["discarded"]:
+                # A later attempt began after this answer. Its check records and outcome are the later attempt's, not this answer's.
+                self._repair_report(n, item["round"], item["call_id"], item["failure_op"], None, helped=False,
+                                    outcome="the attempt ended before the check judged it, and a new attempt began")
+                continue
             judged = repair_help.tested_after(entries, n, item["seq"]) and readable
             if not judged and final_helped is None:
                 continue

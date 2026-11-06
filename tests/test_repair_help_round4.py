@@ -205,3 +205,33 @@ def test_a_watchdog_escalation_that_ends_the_step_with_error_is_consumed_after_a
     asked = [a for a in decs(rig, rh.ASKED) if a["coder_failed"]]
     assert asked, "the rescue must have happened for this test to say anything"
     assert seen[-1] is None, seen
+
+
+# ---- review of PR 496, round 7 ---------------------------------------------------------------------------------------------------
+
+def test_a_placed_answer_of_a_discarded_attempt_is_not_credited_with_a_later_attempts_pass(tmp_path, monkeypatch):
+    """Finding: a stop after a watchdog escalation moved the port aside and started a fresh attempt, and that attempt's passing check was credited to
+    the old, placed answer."""
+    from orchard.ledger import Ledger
+    led = Ledger(tmp_path / "ledger.jsonl")
+    led.append("stage_start", 2)
+    led.append("decision", 2, decision=rh.ASKED, round=1, failure_op="load")
+    led.append("decision", 2, decision=rh.ANSWERED, ok=True, call_id="aa", cached=False)
+    led.append("decision", 2, decision=rh.PLACED, call_id="aa")
+    led.append("stage_start", 2)                                   # a fresh attempt, not a resume
+    led.append("decision", 2, decision=rh.port_repair.TESTED)      # the new attempt's check
+    assert rh.unreported(led.read(), 2)[0]["discarded"] is True
+    sup = _sup(tmp_path, led, monkeypatch)
+    sup._repair_verdicts(2, tmp_path)
+    assert sup.telegraph.reports == [("aa", False)]
+    # the control: a resumed start is the same attempt, and the answer is still credited
+    led2 = Ledger(tmp_path / "l2.jsonl")
+    led2.append("stage_start", 2)
+    led2.append("decision", 2, decision=rh.ASKED, round=1, failure_op="load")
+    led2.append("decision", 2, decision=rh.ANSWERED, ok=True, call_id="aa", cached=False)
+    led2.append("decision", 2, decision=rh.PLACED, call_id="aa")
+    led2.append("stage_start", 2, resumed=True)
+    led2.append("decision", 2, decision=rh.port_repair.TESTED)
+    sup2 = _sup(tmp_path, led2, monkeypatch)
+    sup2._repair_verdicts(2, tmp_path)
+    assert sup2.telegraph.reports == [("aa", True)]
