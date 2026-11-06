@@ -77,6 +77,13 @@ def sha_file(path) -> str:
     return sha_bytes(Path(path).read_bytes())  # hardening: ok hashes the supervisor's own copies of files in the run directory, which the gate re-reads through safeio
 
 
+def sha_or_none(path):
+    try:
+        return sha_file(path)
+    except OSError:
+        return None
+
+
 # ---- the worker: the port module's side of the pipes ------------------------------------------------------------------------
 
 def floats(logits) -> list:
@@ -97,12 +104,21 @@ def argmax(values: list) -> int:
     return at
 
 
+def native_argmax(logits) -> int:
+    """The index of the largest value, taken by the tensor or array itself when it has an argmax (as port_check.py does), else in Python."""
+    if hasattr(logits, "reshape") and hasattr(logits, "argmax"):
+        return int(logits.reshape(-1).argmax())
+    return argmax(floats(logits))
+
+
 def log_prob(values: list, target: int) -> float:
     """ln softmax(values)[target], with the maximum taken out first so nothing overflows."""
     if not 0 <= target < len(values):
         raise ValueError(f"target id {target} is outside the {len(values)} logits")
     top = max(values)
-    return values[target] - (top + math.log(sum(math.exp(v - top) for v in values)))
+    # The target is shifted by the maximum before the log of the sum is taken off. Adding `top` back first loses the sum's logarithm when the
+    # logits share a large offset (five logits of 1e20 would give 0.0 instead of -ln 5; review of PR 491).
+    return (values[target] - top) - math.log(sum(math.exp(v - top) for v in values))
 
 
 REPLY_CHARS = 2000
@@ -139,6 +155,8 @@ def declared_policy(mod):
 def answer(logits, req) -> dict:
     """The reply for one prefill or decode request: the argmax, and when the request names a target and probe ids, the log probability of the
     target and the logits at the probes."""
+    if "target" not in req:
+        return {"ok": True, "id": native_argmax(logits)}      # only the id is needed: the whole vocabulary is not turned into a Python list
     v = floats(logits)
     out = {"ok": True, "id": argmax(v)}
     if "target" in req:
@@ -451,6 +469,9 @@ def main() -> int:
     if not (PORT_DIR / f"{PORT_MODULE}.py").is_file():
         raise QualityFailed(f"stages/6/port/{PORT_MODULE}.py does not exist: the supervisor copies the port that passed the earlier stage there")
     refuse_links()
+    # Each stage 1 file is hashed before the port starts, and the record carries that hash: a port that rewrites one of them while it runs
+    # cannot choose the file the gate later hashes (review of PR 491).
+    stage1_sha = {rel: sha_or_none(RUN_DIR / rel) for rel in (REFERENCE, PROMPT, TOP5)}      # None for a missing file; its own check names it below
     reference, prompt = read_ids(REFERENCE, "generated_ids"), read_ids(PROMPT, "prompt_ids")
     n = min(len(reference), MAX_POSITIONS)
     ref = reference[:n]
@@ -493,13 +514,16 @@ def main() -> int:
     refuse_links()
     if sha_file(Path(model_dir) / "config.json") != config_sha:
         raise QualityFailed("the model's config.json changed while the port ran: the floor and the share would describe another configuration")
+    for rel, before in stage1_sha.items():
+        if sha_or_none(RUN_DIR / rel) != before:
+            raise QualityFailed(f"{rel} changed while the port ran: the comparison would describe a file the port chose")
     if FORGED.is_set():
         raise QualityFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
 
     record = {"schema": SCHEMA,
-              "reference": {"path": REFERENCE, "sha256": sha_file(RUN_DIR / REFERENCE)},
-              "prompt": {"path": PROMPT, "sha256": sha_file(RUN_DIR / PROMPT)},
-              "top5": {"path": TOP5, "sha256": sha_file(RUN_DIR / TOP5)},
+              "reference": {"path": REFERENCE, "sha256": stage1_sha[REFERENCE]},
+              "prompt": {"path": PROMPT, "sha256": stage1_sha[PROMPT]},
+              "top5": {"path": TOP5, "sha256": stage1_sha[TOP5]},
               "reference_ids": ref, "reference_top5": top5, "chip_ids": chip, "logprobs": logprobs, "probe_logits": probes,
               "chips": chips, "load_s": load_s, "free_run_ids": free, "free_run_text": free_run_text(model_dir, free),
               "bench": {"warmup_runs": WARMUP_RUNS, "repeats": REPEATS, "steps": BENCH_STEPS, "runs": runs,

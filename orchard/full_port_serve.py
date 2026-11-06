@@ -286,11 +286,12 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     record = full_port._json(stage_dir / RECORD_FILE, RECORD_FILE, reasons)
     if result is None or record is None:
         return reasons, seen
-    for name in EVIDENCE_NAMES:
-        listed = result.get("evidence")
-        if not isinstance(listed, list) or not any(isinstance(e, str) and Path(e).name == name for e in listed):
-            reasons.append(f"result.json evidence must list {name}")
-    for rel in result.get("evidence") if isinstance(result.get("evidence"), list) else []:
+    # The evidence is the three files of this stage, at the run-relative paths `derive` writes: the same names in another directory would be
+    # cited by the gate and the operator bundle although the gate judged these files (review of PR 490, round 4).
+    exact = [os.path.relpath(stage_dir / RECORD_FILE, run_dir), os.path.relpath(stage_dir / OUTPUT_FILE, run_dir), os.path.relpath(stage_dir / CORPUS_NAME, run_dir)]
+    if result.get("evidence") != exact:
+        reasons.append(f"result.json evidence must be exactly {exact}, got {result.get('evidence')!r}")
+    for rel in exact:
         if full_port._inside(run_dir, rel) is None:
             reasons.append(f"result.json: evidence {rel!r} is not a file inside the run directory")
         else:
@@ -586,6 +587,10 @@ def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons, r
         agreement = result.get("corpus_reference_agreement")
         if not full_port._num(agreement) or abs(agreement - replay["agreement"]) > full_port.TOLERANCE:
             reasons.append(f"result.json corpus_reference_agreement {agreement!r} differs from the {replay['agreement']:.6f} the gate recomputed")
+    section = record.get("passkey") if isinstance(record, dict) else None
+    runs_in_record = section.get("runs") if isinstance(section, dict) else None
+    if isinstance(runs_in_record, list) and result.get("passkey_lengths") != [r.get("length") for r in runs_in_record if isinstance(r, dict)]:
+        reasons.append("result.json passkey_lengths differs from the lengths the record's passkey runs hold")
     if answered is not None:
         if result.get("passkey_answered") != answered:
             reasons.append(f"result.json passkey_answered {result.get('passkey_answered')!r} differs from the {answered!r} the gate recomputed from the answers")

@@ -85,6 +85,11 @@ def test_the_chain_with_chips_configured_runs_stage_3_on_four_and_stage_4_covers
     assert rig.run() == EXIT_READY, [(d.get("decision"), d.get("reason") or d.get("code")) for d in rig.decisions() if d.get("decision") in ("pause", "blocked")]
     res = results(rig)
     assert res[3] == ["pass"] and res[4] == ["pass"] and res[5] == ["pass"] and res[6] == ["pass"], res
+    # Stage 4 passes by reuse: the 2-chip entry is covered by stage 2, the 4-chip entry by stage 3, and stage 4 starts no hardware test.
+    # (check_stage also accepts newly tested entries, so a bare "stage 4 passed" would not show the reuse.)
+    four = json.loads((rig.run_dir / "stages" / "4" / "result.json").read_text())
+    assert [(row["chips"], row["covered_by"]) for row in four["entries"]] == [(2, 2), (4, 3)], four["entries"]
+    assert not [e for e in rig.entries() if e["stage"] == 4 and e["event"] == "evidence" and e["data"].get("what") == "hardware test"]
     five = json.loads((rig.run_dir / "stages" / "5" / "result.json").read_text())
     six = json.loads((rig.run_dir / "stages" / "6" / "result.json").read_text())
     stages = rig.run_dir / "stages"
