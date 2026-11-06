@@ -132,3 +132,50 @@ def test_a_deadline_pause_that_ends_the_step_with_error_is_not_rescued(rig, monk
     rig.run()
     asked = decs(rig, rh.ASKED)
     assert not [a for a in asked if a["coder_failed"]], [a["why"] for a in asked]
+
+
+# ---- review of PR 496, round 5 ---------------------------------------------------------------------------------------------------
+
+def _interrupted_ledger(tmp_path, *, placed):
+    """A ledger that stops after the answer (and after the placement when `placed`), then a passing check run by the coder's own edit."""
+    from orchard.ledger import Ledger
+    led = Ledger(tmp_path / "ledger.jsonl")
+    led.append("stage_start", 2)
+    led.append("decision", 2, decision=rh.ASKED, round=1, failure_op="load")
+    led.append("decision", 2, decision=rh.ANSWERED, ok=True, call_id="aa", cached=False)
+    if placed:
+        led.append("decision", 2, decision=rh.PLACED, call_id="aa")
+    led.append("decision", 2, decision=rh.port_repair.TESTED)
+    return led
+
+
+class _Tele:
+    def __init__(self):
+        self.reports = []
+
+    def report(self, call_id, helped, note=""):
+        self.reports.append((call_id, helped))
+
+
+def _sup(tmp_path, led, monkeypatch):
+    sup = sv.Supervisor.__new__(sv.Supervisor)
+    sup.ledger, sup.telegraph, sup.run_dir = led, _Tele(), tmp_path
+    monkeypatch.setattr(sv.Supervisor, "_repair_outcome", lambda self, n, d: (True, None, True))      # the coder's own edit passed the check
+    return sup
+
+
+def test_an_answer_the_supervisor_never_recorded_as_placed_is_not_credited_with_a_later_pass(tmp_path, monkeypatch):
+    """Finding: a stop between the answer and the placement left the answer pending, and a later passing check graded it as helped."""
+    led = _interrupted_ledger(tmp_path, placed=False)
+    sup = _sup(tmp_path, led, monkeypatch)
+    sup._repair_verdicts(2, tmp_path)
+    assert sup.telegraph.reports == [("aa", False)]
+    prog = [e["data"] for e in led.read() if e["data"].get("decision") == rh.PROGRESS]
+    assert prog and prog[-1]["helped"] is False and "never became the port" in prog[-1]["outcome"]
+
+
+def test_a_placed_answer_is_still_credited_when_the_check_it_led_to_passed(tmp_path, monkeypatch):
+    led = _interrupted_ledger(tmp_path, placed=True)       # the control: the same ledger with the placement recorded
+    sup = _sup(tmp_path, led, monkeypatch)
+    sup._repair_verdicts(2, tmp_path)
+    assert sup.telegraph.reports == [("aa", True)]
