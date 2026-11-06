@@ -1,0 +1,4 @@
+target = "0.9.124"
+pr = 529
+summary = "Verified TTNN and TT-Lang cheat sheets for the coder, checked on the CPU against the source trees"
+kind = "feature"

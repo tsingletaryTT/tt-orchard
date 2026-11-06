@@ -1,0 +1,640 @@
+{
+ "schema": "orchard-cheat-sheet/1",
+ "sheet": "ttnn",
+ "title": "TTNN cheat sheet for a decoder port",
+ "roots": {
+  "tt_metal": "tt-metal source tree at the coder image's pinned commit (python bindings, C++ nanobind files and ttnn python)"
+ },
+ "intro": "Each signature was checked against the tt-metal tree the coder image is built from. Arguments not listed here do not exist. `python3 stages/2/stage_tools.py cheat NAME` prints one entry.",
+ "sections": [
+  {
+   "title": "Tensors, layout and dtype",
+   "entries": [
+    {
+     "name": "ttnn.from_torch",
+     "kind": "op",
+     "signature": "ttnn.from_torch(tensor, dtype=None, layout=None, device=None, memory_config=None, mesh_mapper=None)",
+     "usage": "w = ttnn.from_torch(w_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh_device, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device))",
+     "notes": "Host torch tensor to device. Weights go in TILE_LAYOUT; token ids for an embedding go in ROW_MAJOR_LAYOUT as uint32. On a mesh pass a mesh_mapper or the tensor lands on one device.",
+     "seen_in": "models/tt_transformers/tt/rope.py:382 (layout, dtype, device, mesh_mapper)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.to_torch",
+     "kind": "op",
+     "signature": "ttnn.to_torch(tensor, dtype=None, device=None, mesh_composer=None)",
+     "usage": "x = ttnn.to_torch(t, mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1))",
+     "notes": "Device tensor to torch. With a mesh the composer joins the per-device shards; replicated tensors then repeat, so take the first copy. The result is padded to tiles: slice to the real length.",
+     "seen_in": "models/tt_transformers/tt/common.py:689",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.as_tensor",
+     "kind": "op",
+     "signature": "ttnn.as_tensor(tensor, dtype=None, layout=None, device=None, memory_config=None, mesh_mapper=None, cache_file_name=None)",
+     "usage": "w = ttnn.as_tensor(w_torch, dtype=ttnn.bfloat16, device=mesh_device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+     "notes": "Like from_torch, and can cache the converted weight on disk with cache_file_name.",
+     "seen_in": "models/tt_transformers/tt/embedding.py:30",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.to_layout",
+     "kind": "op",
+     "signature": "ttnn.to_layout(tensor, layout, dtype=None, memory_config=None)",
+     "usage": "x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)",
+     "notes": "Changes TILE_LAYOUT and ROW_MAJOR_LAYOUT. Matmul, rms_norm and attention need TILE_LAYOUT; embedding ids and reshapes of odd shapes need ROW_MAJOR_LAYOUT.",
+     "seen_in": "models/tt_transformers/tt/model_config.py:2776",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.typecast",
+     "kind": "op",
+     "signature": "ttnn.typecast(input_tensor, dtype, memory_config=None)",
+     "usage": "x = ttnn.typecast(x, ttnn.bfloat16)",
+     "notes": "Changes dtype on the device. Rotary embedding and attention want bfloat16 inputs; bfloat8_b is for weights and some activations.",
+     "seen_in": "models/tt_transformers/tt/attention.py:665",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.reshape",
+     "kind": "op",
+     "signature": "ttnn.reshape(input_tensor, shape, memory_config=None)",
+     "usage": "x = ttnn.reshape(x, (1, 1, seq_len, hidden))",
+     "notes": "Shapes are 4-D by convention in the reference ports: (1, 1, tokens, features). The last two dims are padded to 32.",
+     "seen_in": "models/tt_transformers/tt/attention.py (27 uses)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.transpose",
+     "kind": "op",
+     "signature": "ttnn.transpose(input_tensor, dim1, dim2, memory_config=None)",
+     "usage": "kt = ttnn.transpose(k, -2, -1)",
+     "notes": "Swaps two dims.",
+     "seen_in": "models/tt_transformers/tt/attention.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.concat",
+     "kind": "op",
+     "signature": "ttnn.concat(tensors, dim=0, memory_config=None)",
+     "usage": "x = ttnn.concat([a, b], dim=-1)",
+     "notes": "Joins a list of tensors along one dim.",
+     "seen_in": "models/tt_transformers/tt/model.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.multiply",
+     "kind": "op",
+     "signature": "ttnn.multiply(a, b)",
+     "usage": "y = ttnn.multiply(gate, up)",
+     "notes": "Elementwise product; b may be a Python scalar. add, subtract and silu are called the same way.",
+     "seen_in": "models/tt_transformers/tt/mlp.py (w1 silu times w3)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.silu",
+     "kind": "op",
+     "signature": "ttnn.silu(x)",
+     "usage": "g = ttnn.silu(w1_out)",
+     "notes": "Activation for the gated MLP: down(silu(gate) * up).",
+     "seen_in": "models/tt_transformers/tt/mlp.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.deallocate",
+     "kind": "op",
+     "signature": "ttnn.deallocate(tensor)",
+     "usage": "ttnn.deallocate(x)",
+     "notes": "Frees a device tensor you no longer need. Needed inside a layer loop on a small chip.",
+     "seen_in": "models/tt_transformers/tt/attention.py (39 uses)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.TILE_LAYOUT",
+     "kind": "symbol",
+     "signature": "ttnn.TILE_LAYOUT",
+     "usage": "x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)",
+     "notes": "32x32 tile layout. Dtypes: ttnn.bfloat16, ttnn.bfloat8_b, ttnn.uint32, ttnn.int32.",
+     "seen_in": "models/tt_transformers/tt/embedding.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.ROW_MAJOR_LAYOUT",
+     "kind": "symbol",
+     "signature": "ttnn.ROW_MAJOR_LAYOUT",
+     "usage": "ids = ttnn.from_torch(ids_t, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=mesh_device)",
+     "notes": "Layout for token ids. Pair it with ttnn.uint32.",
+     "seen_in": "models/tt_transformers/tt/embedding.py:35",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Embedding",
+   "entries": [
+    {
+     "name": "ttnn.embedding",
+     "kind": "op",
+     "signature": "ttnn.embedding(input_tensor, weight, *, padding_idx=None, layout=None, embeddings_type=None, dtype=None, memory_config=None)",
+     "usage": "x = ttnn.embedding(ids, self.weights, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+     "notes": "ids are uint32 ROW_MAJOR; the weight is the [vocab, hidden] table in ROW_MAJOR. The keyword is `weight`; `weights` is an error. Without layout=TILE_LAYOUT the output is row major.",
+     "seen_in": "models/tt_transformers/tt/embedding.py:70",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Linear and matmul",
+   "entries": [
+    {
+     "name": "ttnn.linear",
+     "kind": "op",
+     "signature": "ttnn.linear(input_tensor_a, input_tensor_b, *, bias=None, transpose_a=False, transpose_b=False, memory_config=None, dtype=None, program_config=None, activation=None, compute_kernel_config=None, core_grid=None)",
+     "usage": "y = ttnn.linear(x, w, bias=b, dtype=ttnn.bfloat16, compute_kernel_config=ck, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+     "notes": "x @ w (+ bias). The torch Linear weight is [out, in]: transpose it once at load (w_torch.T) or pass transpose_b=True. With no program_config the op picks one; start there.",
+     "seen_in": "models/tt_transformers/tt/mlp.py:194",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.matmul",
+     "kind": "op",
+     "signature": "ttnn.matmul(input_tensor_a, input_tensor_b, *, transpose_a=False, transpose_b=False, memory_config=None, dtype=None, program_config=None, activation=None, compute_kernel_config=None, core_grid=None)",
+     "usage": "scores = ttnn.matmul(q, k_t, compute_kernel_config=ck)",
+     "notes": "Same as linear without bias. Batched matmul broadcasts the leading dims; both inputs must be TILE_LAYOUT.",
+     "seen_in": "models/tt_transformers/tt/mixtral_mlp.py:135",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.MatmulMultiCoreReuseMultiCastProgramConfig",
+     "kind": "symbol",
+     "signature": "ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(compute_with_storage_grid_size, in0_block_w, out_subblock_h, out_subblock_w, per_core_M, per_core_N, transpose_mcast, fused_activation, fuse_batch)",
+     "usage": "pc = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(compute_with_storage_grid_size=(8, 8), in0_block_w=1, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=56, transpose_mcast=False, fused_activation=None, fuse_batch=False)",
+     "notes": "Program config for a large matmul (prefill, interleaved). per_core_M and per_core_N count tiles per core; out_subblock_h * out_subblock_w <= 4. Skip it in a first port.",
+     "seen_in": "models/tt_transformers/tt/model_config.py:1002",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig",
+     "kind": "symbol",
+     "signature": "ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size, in0_block_w, out_subblock_h, out_subblock_w, per_core_M, per_core_N, fuse_batch, fused_activation, mcast_in0)",
+     "usage": "pc = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 8), in0_block_w=2, out_subblock_h=1, out_subblock_w=4, per_core_M=1, per_core_N=8, fuse_batch=True, fused_activation=None, mcast_in0=True)",
+     "notes": "Program config for decode, where M is one tile row (batch up to 32).",
+     "seen_in": "models/tt_transformers/tt/model_config.py:2078",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.WormholeComputeKernelConfig",
+     "kind": "symbol",
+     "signature": "ttnn.WormholeComputeKernelConfig(math_fidelity, math_approx_mode, fp32_dest_acc_en, packer_l1_acc)",
+     "usage": "ck = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)",
+     "notes": "Precision of a matmul or norm. HiFi4 with fp32 accumulation is the safe choice while matching the CPU reference; lower fidelity comes after the check passes. Blackhole uses the same class.",
+     "seen_in": "models/tt_transformers/tt/model_config.py",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "RMS norm and softmax",
+   "entries": [
+    {
+     "name": "ttnn.rms_norm",
+     "kind": "op",
+     "signature": "ttnn.rms_norm(input_tensor, *, epsilon=1e-12, weight=None, bias=None, residual_input_tensor=None, memory_config=None, program_config=None, compute_kernel_config=None)",
+     "usage": "y = ttnn.rms_norm(x, epsilon=1e-6, weight=w_norm)",
+     "notes": "Set epsilon from the config; the default 1e-12 is rarely right. A ROW_MAJOR weight needs last dim 32 ([1, 1, hidden/32, 32]); a TILE weight needs the input's last dim. If the reference adds 1 to the weight, add it at load. The keywords are epsilon and weight.",
+     "seen_in": "models/tt_transformers/tt/distributed_norm.py; tt-metal tests for rms_norm",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.softmax",
+     "kind": "op",
+     "signature": "ttnn.softmax(input_tensor, dim=-1, *, memory_config=None, compute_kernel_config=None, numeric_stable=False)",
+     "usage": "p = ttnn.softmax(scores, dim=-1, numeric_stable=True)",
+     "notes": "Use numeric_stable=True for attention scores built by hand.",
+     "seen_in": "models/tt_transformers/tt/mixtral_moe.py:121",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Rotary embedding and attention",
+   "entries": [
+    {
+     "name": "ttnn.experimental.rotary_embedding_llama",
+     "kind": "op",
+     "signature": "ttnn.experimental.rotary_embedding_llama(input_tensor, cos_cache, sin_cache, trans_mat, is_decode_mode=False, memory_config=None, compute_kernel_config=None)",
+     "usage": "q = ttnn.experimental.rotary_embedding_llama(q, cos, sin, trans_mat, is_decode_mode=False)",
+     "notes": "Rotation for the Llama pairing (rotate_half layout). cos and sin are [1, 1, seq, head_dim]; trans_mat is a 32x32 transformation matrix built once (see rope.py). The op rotates a whole head: when partial_rotary_factor is below 1, split the head, rotate the first head_dim * factor values and concat the rest.",
+     "seen_in": "models/tt_transformers/tt/attention.py:684",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.experimental.rotary_embedding_hf",
+     "kind": "op",
+     "signature": "ttnn.experimental.rotary_embedding_hf(input_tensor, cos_cache, sin_cache, is_decode_mode=False, memory_config=None, compute_kernel_config=None)",
+     "usage": "q = ttnn.experimental.rotary_embedding_hf(q, cos, sin, is_decode_mode=False)",
+     "notes": "Rotation in the HF layout (first half and second half). Use this when the reference calls rotate_half on the checkpoint's own layout and you did not permute the q and k weights.",
+     "seen_in": "models/tt_transformers/tt/attention.py:706",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.experimental.nlp_create_qkv_heads",
+     "kind": "op",
+     "signature": "ttnn.experimental.nlp_create_qkv_heads(input, input_kv=None, *, num_heads, num_kv_heads=None, transpose_k_heads=True, memory_config=None)",
+     "usage": "q, k, v = ttnn.experimental.nlp_create_qkv_heads(xqkv, num_heads=n_heads, num_kv_heads=n_kv, transpose_k_heads=False, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+     "notes": "Splits a fused [1, 1, seq, (nh + 2*nkv)*hd] qkv tensor into q [1, nh, seq, hd], k and v [1, nkv, seq, hd]. Prefill form. Set transpose_k_heads=False to keep k as [.., seq, hd].",
+     "seen_in": "models/tt_transformers/tt/attention.py:1109",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.experimental.nlp_create_qkv_heads_decode",
+     "kind": "op",
+     "signature": "ttnn.experimental.nlp_create_qkv_heads_decode(input_tensor, *, num_heads, num_kv_heads=None, memory_config=None)",
+     "usage": "q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(xqkv, num_heads=n_heads, num_kv_heads=n_kv, memory_config=mc)",
+     "notes": "Decode form of the head split (batch in dim 1). Takes a sharded input in the fast path.",
+     "seen_in": "models/tt_transformers/tt/attention.py:809",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.experimental.nlp_concat_heads",
+     "kind": "op",
+     "signature": "ttnn.experimental.nlp_concat_heads(input_tensor, memory_config=None)",
+     "usage": "o = ttnn.experimental.nlp_concat_heads(attn_out, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+     "notes": "[1, nh, seq, hd] back to [1, 1, seq, nh*hd] before the output projection.",
+     "seen_in": "models/tt_transformers/tt/attention.py:1278",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.transformer.scaled_dot_product_attention",
+     "kind": "op",
+     "signature": "ttnn.transformer.scaled_dot_product_attention(input_tensor_q, input_tensor_k, input_tensor_v, *, attn_mask=None, is_causal=True, scale=None, sliding_window_size=None, memory_config=None, program_config=None, compute_kernel_config=None)",
+     "usage": "o = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=True, scale=head_dim ** -0.5)",
+     "notes": "Prefill attention. k and v may have fewer heads than q (grouped query): do not repeat them yourself. Give only one of attn_mask and is_causal=True. The mask keyword is attn_mask. The sequence must be padded to a multiple of 32.",
+     "seen_in": "models/tt_transformers/tt/attention.py:1250",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.transformer.scaled_dot_product_attention_decode",
+     "kind": "op",
+     "signature": "ttnn.transformer.scaled_dot_product_attention_decode(input_tensor_q, input_tensor_k, input_tensor_v, *, is_causal=True, attn_mask=None, cur_pos=None, cur_pos_tensor=None, scale=None, sliding_window_size=None, memory_config=None, program_config=None, compute_kernel_config=None)",
+     "usage": "o = ttnn.transformer.scaled_dot_product_attention_decode(q, keys, values, cur_pos_tensor=pos, scale=head_dim ** -0.5)",
+     "notes": "Decode attention over a dense KV cache. q is [1, batch, heads, hd]. cur_pos_tensor is an int32 device tensor with each user's current position.",
+     "seen_in": "models/tt_transformers/tt/attention.py:873",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.transformer.paged_scaled_dot_product_attention_decode",
+     "kind": "op",
+     "signature": "ttnn.transformer.paged_scaled_dot_product_attention_decode(input_tensor_q, input_tensor_k, input_tensor_v, page_table_tensor, *, is_causal=True, attn_mask=None, cur_pos_tensor=None, scale=None, sliding_window_size=None, memory_config=None, program_config=None, compute_kernel_config=None)",
+     "usage": "o = ttnn.transformer.paged_scaled_dot_product_attention_decode(q, keys, values, page_table_tensor=page_table, cur_pos_tensor=pos, scale=head_dim ** -0.5)",
+     "notes": "Decode attention over a paged cache (what vLLM serving uses). Keys and values are the paged cache tensors.",
+     "seen_in": "models/tt_transformers/tt/attention.py:860",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "KV cache",
+   "entries": [
+    {
+     "name": "ttnn.experimental.paged_update_cache",
+     "kind": "op",
+     "signature": "ttnn.experimental.paged_update_cache(cache_tensor, input_tensor, *, update_idxs=None, update_idxs_tensor=None, share_cache=None, page_table=None, batch_offset=0, compute_kernel_config=None)",
+     "usage": "ttnn.experimental.paged_update_cache(keys, k_new, update_idxs_tensor=pos, page_table=page_table)",
+     "notes": "Writes one new token per user into the paged cache at its position. Call it for keys and for values. pos is an int32 device tensor.",
+     "seen_in": "models/tt_transformers/tt/attention.py:846",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.experimental.paged_fill_cache",
+     "kind": "op",
+     "signature": "ttnn.experimental.paged_fill_cache(cache_tensor, input_tensor, page_table, *, batch_idx=0, compute_kernel_config=None)",
+     "usage": "ttnn.experimental.paged_fill_cache(keys, k_fill, page_table, batch_idx=user_id)",
+     "notes": "Writes a whole prefill's keys or values into the paged cache. The cache must be reset or overwritten at the start of each request.",
+     "seen_in": "models/tt_transformers/tt/attention.py:1200",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.fill_cache",
+     "kind": "op",
+     "signature": "ttnn.fill_cache(cache_tensor, input_tensor, batch_idx)",
+     "usage": "ttnn.fill_cache(keys, k_fill, user_id)",
+     "notes": "Dense (not paged) cache fill for one user. Use this in a first port that has no page table.",
+     "seen_in": "models/tt_transformers/tt/attention.py:1204",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Sampling and logits",
+   "entries": [
+    {
+     "name": "ttnn.argmax",
+     "kind": "op",
+     "signature": "ttnn.argmax(input_tensor, *, dim=None, keepdim=False, memory_config=None, output_tensor=None)",
+     "usage": "tok = ttnn.argmax(logits, dim=-1)",
+     "notes": "Index of the largest value along dim; the output is UINT32. TILE input works for bfloat16 and float32 on the last dim (single core); ROW_MAJOR runs multicore. A port returns logits to the check, so use this only for a serving path.",
+     "seen_in": "tt-metal ttnn argmax binding",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.topk",
+     "kind": "op",
+     "signature": "ttnn.topk(input_tensor, k, dim=-1, largest=True, sorted=True, memory_config=None)",
+     "usage": "vals, idx = ttnn.topk(logits, 32)",
+     "notes": "Returns (values, indices). The input is TILE on the device; N*C*H must be a multiple of 32 and the last dim is padded to tiles.",
+     "seen_in": "models/tt_transformers/tt/mixtral_moe.py:117",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.sampling",
+     "kind": "op",
+     "signature": "ttnn.sampling(input_values_tensor, input_indices_tensor, *, k, p, temp, seed=None)",
+     "usage": "tok = ttnn.sampling(vals, idx, k=k_t, p=p_t, temp=inv_t, seed=1234)",
+     "notes": "Samples an index from the output of topk: softmax over input_values_tensor, then top-k and top-p, then multinomial. k and p are tensors, temp is a tensor holding 1/T, seed is an int. Inputs are bfloat16 TILE.",
+     "seen_in": "tt-metal ttnn sampling binding",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Mesh and collectives (more than one chip)",
+   "entries": [
+    {
+     "name": "ttnn.open_mesh_device",
+     "kind": "op",
+     "signature": "ttnn.open_mesh_device(mesh_shape, *, l1_small_size=None, trace_region_size=None, num_command_queues=None)",
+     "usage": "mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)",
+     "notes": "The check opens the mesh and passes it to `load`; a port does not open one. Shown so you know the shape: (1, N) for N chips in a row.",
+     "seen_in": "tt-metal ttnn/distributed",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.ReplicateTensorToMesh",
+     "kind": "symbol",
+     "signature": "ttnn.ReplicateTensorToMesh(mesh_device)",
+     "usage": "m = ttnn.ReplicateTensorToMesh(mesh_device)",
+     "notes": "Mapper for from_torch: every chip gets the full tensor.",
+     "seen_in": "models/tt_transformers/tt/generator_sglang.py:41",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.ShardTensorToMesh",
+     "kind": "symbol",
+     "signature": "ttnn.ShardTensorToMesh(mesh_device, dim)",
+     "usage": "m = ttnn.ShardTensorToMesh(mesh_device, dim=-1)",
+     "notes": "Mapper for from_torch: dim is split across the chips. Column-parallel weights shard the output dim; row-parallel shard the input dim.",
+     "seen_in": "models/tt_transformers/tt/lm_head.py:134",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.ConcatMeshToTensor",
+     "kind": "symbol",
+     "signature": "ttnn.ConcatMeshToTensor(mesh_device, dim)",
+     "usage": "c = ttnn.ConcatMeshToTensor(mesh_device, dim=-1)",
+     "notes": "Composer for to_torch: joins the per-chip shards along dim.",
+     "seen_in": "models/tt_transformers/tt/common.py:689",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.get_device_tensors",
+     "kind": "op",
+     "signature": "ttnn.get_device_tensors(tensor)",
+     "usage": "shards = ttnn.get_device_tensors(t)",
+     "notes": "The list of per-chip tensors of a mesh tensor; to_torch each one to read a single chip.",
+     "seen_in": "models/tt_transformers/tt/model.py:293",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.all_gather",
+     "kind": "op",
+     "signature": "ttnn.all_gather(input_tensor, dim, *, cluster_axis=None, memory_config=None, num_links=None, topology=None)",
+     "usage": "g = ttnn.all_gather(x, dim=3, num_links=1, topology=ttnn.Topology.Linear)",
+     "notes": "Joins the shards of a mesh tensor along dim on every chip. Use after a column-parallel matmul whose output feeds a replicated op.",
+     "seen_in": "models/tt_transformers/tt/multimodal/mistral_24b/vision_attention.py:237",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.reduce_scatter",
+     "kind": "op",
+     "signature": "ttnn.reduce_scatter(input_tensor, dim, *, cluster_axis=None, memory_config=None, num_links=None, topology=None)",
+     "usage": "r = ttnn.reduce_scatter(x, dim=3, cluster_axis=1, topology=ttnn.Topology.Linear)",
+     "notes": "Sums the partial results of a row-parallel matmul and leaves each chip one slice. Pair with all_gather to get a replicated tensor.",
+     "seen_in": "tt-metal ccl_nanobind.cpp docstring",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.all_reduce",
+     "kind": "op",
+     "signature": "ttnn.all_reduce(input_tensor, *, cluster_axis=None, memory_config=None, num_links=None, topology=None)",
+     "usage": "r = ttnn.all_reduce(x, cluster_axis=1, topology=ttnn.Topology.Linear)",
+     "notes": "Sum of the partial results on every chip (reduce_scatter then all_gather in one call). Use it after a row-parallel matmul when the next op needs the full tensor.",
+     "seen_in": "tt-metal all_reduce binding",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.experimental.all_gather_async",
+     "kind": "op",
+     "signature": "ttnn.experimental.all_gather_async(input_tensor, dim, *, multi_device_global_semaphore, num_links=1, memory_config=None, topology=None, cluster_axis=None)",
+     "usage": "g = ttnn.experimental.all_gather_async(x, dim=3, multi_device_global_semaphore=sem, num_links=1, cluster_axis=1)",
+     "notes": "The asynchronous form the reference ports use inside traces. It needs global semaphores made once (ttnn.create_global_semaphore). A first port uses the blocking ttnn.all_gather.",
+     "seen_in": "models/tt_transformers/tt/ccl.py:205",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  }
+ ],
+ "mistakes": [
+  {
+   "symptom": "`NotImplementedError: prefill not implemented yet` at the first check (run 16).",
+   "fix": "The skeleton raises this in load, prefill, decode_step and close. Write all four before the check runs, even if decode_step first calls prefill on the whole sequence.",
+   "seen_in": "run 16"
+  },
+  {
+   "symptom": "`Expected size for first two dimensions of batch2 tensor to be: [6, 32] but got: [6, 6]` (run 18).",
+   "fix": "A matmul between grouped heads of different counts (6 value heads, 2 key heads). Read linear_num_key_heads and linear_num_value_heads with `facts`, repeat the key heads to the value-head count, and print the shapes before each matmul.",
+   "seen_in": "run 18"
+  },
+  {
+   "symptom": "`The size of tensor a (32) must match the size of tensor b (8) at non-singleton dimension 3`.",
+   "fix": "Rotary applies to head_dim * partial_rotary_factor (8 of 32 here). Rotate the first part of the head and leave the rest.",
+   "seen_in": "run 18"
+  },
+  {
+   "symptom": "`Expected 4-dimensional input for 4-dimensional weight [320, 1, 1, 4], but got 3-dimensional input`.",
+   "fix": "A causal depthwise conv: use torch conv1d with a [C, 1, K] weight, input [B, C, T], left padding K-1 and groups=C. Do not mix a 4-D conv2d weight with a 3-D input.",
+   "seen_in": "run 18"
+  },
+  {
+   "symptom": "`SyntaxError: unterminated string literal` at init, after a long write_file.",
+   "fix": "The reply hit the token cap in the middle of the file. Write the port in two or three smaller files or functions and re-read the end of the file after each write.",
+   "seen_in": "run 18"
+  },
+  {
+   "symptom": "Top-1 agreement 0.5625 against the 0.85 bar with every op running (runs 16 and 18).",
+   "fix": "Run `stage_tools.py layer-diff` (define layer_outputs in port_model.py) and fix the first layer that differs before touching decode.",
+   "seen_in": "runs 16, 18"
+  },
+  {
+   "symptom": "A guessed argument that does not exist: `weights=` for embedding, `eps=` or `gamma=` for rms_norm, `mask=` for attention, `bias=` for matmul.",
+   "fix": "The names are weight, epsilon and weight, attn_mask, and bias only on linear.",
+   "seen_in": "CAD benchmark pattern; checked against the tree",
+   "checks": [
+    {
+     "root": "tt_metal",
+     "name": "ttnn.embedding",
+     "absent_args": [
+      "weights"
+     ],
+     "present_args": [
+      "weight"
+     ]
+    },
+    {
+     "root": "tt_metal",
+     "name": "ttnn.rms_norm",
+     "absent_args": [
+      "eps",
+      "gamma"
+     ],
+     "present_args": [
+      "epsilon",
+      "weight"
+     ]
+    },
+    {
+     "root": "tt_metal",
+     "name": "ttnn.transformer.scaled_dot_product_attention",
+     "absent_args": [
+      "mask"
+     ],
+     "present_args": [
+      "attn_mask"
+     ]
+    },
+    {
+     "root": "tt_metal",
+     "name": "ttnn.matmul",
+     "absent_args": [
+      "bias"
+     ]
+    },
+    {
+     "root": "tt_metal",
+     "name": "ttnn.linear",
+     "present_args": [
+      "bias"
+     ]
+    }
+   ]
+  },
+  {
+   "symptom": "`ttnn.conv1d` as a depthwise convolution with dilation above 1 returns a wrong result (PCC 0.2) and raises no error (issue 338).",
+   "fix": "Write the short convolution as shifted multiply-adds: for a kernel of 4 and dilation 3, y = sum_k w[k] * shift(x, (3-k)*3), then silu.",
+   "seen_in": "issue 338",
+   "checks": [
+    {
+     "root": "tt_metal",
+     "name": "ttnn.conv1d",
+     "present_args": [
+      "dilation",
+      "groups"
+     ]
+    }
+   ]
+  },
+  {
+   "symptom": "A 4-chip mesh open times out in fabric router sync (run 17, issue 487).",
+   "fix": "A chip link is unhealthy. The port cannot fix it: report it in handoff.json and let the supervisor reset the chips.",
+   "seen_in": "run 17"
+  }
+ ]
+}
