@@ -63,10 +63,11 @@ RESTORED = "best port restored"            # the best port put back at the start
 BEST_DIR = "2.best"                        # stages/2.best/<snapshot>/: copies of the best port that the move-aside of a failed attempt does not take
 PASSED_RANK = 99                           # a check that passed is further along than any failure
 PER_ROUND = 1
+NUMERIC_REPORT_CAP = 4_000                  # characters of the numbers report sent
 PORT_CAP = 90_000                          # characters of port_model.py sent (a larger file is not sent)
 PORT_PARTS = ("port", "port_model.py")         # the port file beneath the stage directory
 PORT_MAX = 400_000                         # bytes read at all
-OPS = ("init", "load", "prefill", "decode")          # the order the check asks the port; a failure later in it is progress
+OPS = ("init", "load", "prefill", "decode", port_repair.NUMERICS_OP)   # the order the check asks the port; a failure later in it is progress; the last is a port that ran to the end
 PREFIX = "repair"                          # the reply's file: stages/2/telegraph/repair-<k>.py
 
 REQUEST = ("Task for you: the port file below failed the supervisor's check on the chips. Reply with ONE Python code block that holds the "
@@ -76,10 +77,31 @@ REQUEST = ("Task for you: the port file below failed the supervisor's check on t
            "several times, so correctness matters more than polish.")
 
 
+_NUMERICS_HEAD = ("Task for you: the port file below RUNS on the chips (it loads, prefills and decodes) but its tokens disagree with the CPU "
+                  "reference, so the supervisor's check rejects it. Reply with ONE Python code block that holds the COMPLETE corrected "
+                  "`stages/2/port/port_model.py` (the whole file, every function the check calls), and at most two sentences before it. ")
+# Said only when the run is a rehearsal: its checkpoint has random weights. A run outside a rehearsal uses a trained checkpoint, where the
+# generated text means something and the helper must not be told otherwise (review of PR 498).
+_NUMERICS_REHEARSAL = ("The model is a RANDOM-WEIGHT rehearsal checkpoint: the generated text is meaningless and only the numbers matter, so judge "
+                       "the port only by whether its argmax token at each position equals the reference id in the table under 'What the check "
+                       "measured'. ")
+_NUMERICS_PLAIN = ("Judge the port by whether its argmax token at each position equals the reference id in the table under 'What the check "
+                   "measured'. ")
+_NUMERICS_TAIL = ("The check is teacher forced: position 0 is the argmax after prefill, and each later position is one decode step that is fed "
+                  "the REFERENCE id of the position before it, so a wrong position does not make the next one wrong by itself. Typical causes in "
+                  "this kind of port, none of them certain: the partial rotary dimension, the rms norm epsilon and whether its weight has a +1 "
+                  "offset, the gate non-linearity and the order of the gate and the residual, the cache position or an off-by-one in decode, the "
+                  "convolution state update, the order of the hyper-connection mixing, tied embedding scaling. Read the facts file and the "
+                  "reference excerpts for the exact formulas, compare them with the port line by line, and change what differs. Do not "
+                  "repeat a change that did not move the agreement. Do not leave a function empty or raising NotImplementedError.")
+REQUEST_NUMERICS = _NUMERICS_HEAD + _NUMERICS_REHEARSAL + _NUMERICS_TAIL          # a rehearsal's request
+REQUEST_NUMERICS_PLAIN = _NUMERICS_HEAD + _NUMERICS_PLAIN + _NUMERICS_TAIL        # any other run's
+
+
 # ---- the request chain and progress --------------------------------------------------------------------------------------------------------
 
 def rank(op) -> int | None:
-    """How far along the check's request chain a failure at `op` is: 0 for a failure before any request, 1..4 for `OPS`, None for an op this
+    """How far along the check's request chain a failure at `op` is: 0 for a failure before any request, 1..5 for `OPS`, None for an op this
     module does not know (no claim of progress is made for it)."""
     if op is None:
         return 0
@@ -90,6 +112,12 @@ def progressed(before_op, after_op) -> bool:
     """True when a failure at `after_op` is further along the chain than one at `before_op`. Unknown ops are never progress."""
     b, a = rank(before_op), rank(after_op)
     return b is not None and a is not None and a > b
+
+
+def agreement_improved(before, after) -> bool:
+    """True when `after` is a higher agreement than `before` (both numbers between 0 and 1). Anything else is not progress."""
+    ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= 1
+    return ok(before) and ok(after) and after > before + 1e-9
 
 
 # ---- the ledger ----------------------------------------------------------------------------------------------------------------------------
@@ -155,6 +183,11 @@ def start_trigger(entries: list[dict], n: int, k: int, failure: dict) -> tuple[b
     on first; the helper is asked after its step if the step fails (`coder_failed`)."""
     found, before = previous_op(entries, n, k) if k > 1 else (False, None)
     after = failure.get("op")
+    if found and before == after == port_repair.NUMERICS_OP:
+        prev = _round_entry(entries, n, k - 1)
+        if agreement_improved(_data(prev).get("agreement") if prev else None, failure.get("agreement")):
+            return False, "the agreement rose since the previous round"
+        return True, f"the agreement did not rise since the previous round (it is {failure.get('agreement')})"
     if not found:
         return True, ("the first repair round of the attempt: the port failed its first test" if k <= 1
                       else "the previous round is not in the ledger")
@@ -186,7 +219,8 @@ def unreported(entries: list[dict], n: int) -> list[dict]:
         elif (_decision(e) == ANSWERED and d.get("ok") is True and isinstance(d.get("call_id"), str) and d["call_id"] not in done
               and not d.get("cached")):
             out.append({"call_id": d["call_id"], "round": last_ask.get("round") if asks else None,
-                        "failure_op": last_ask.get("failure_op") if asks else None, "seq": e["seq"],
+                        "failure_op": last_ask.get("failure_op") if asks else None,
+                        "failure_agreement": last_ask.get("failure_agreement") if asks else None, "seq": e["seq"],
                         "placed": d["call_id"] in placed_ids, "discarded": False})
     return out
 
@@ -212,14 +246,16 @@ def _read_in(pin) -> bytes:
     return safeio.read_beneath(pin.fd, PORT_PARTS, max_bytes=PORT_MAX)
 
 
-def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listing: str, homes: tuple, previous: str | None = None) -> tuple[str | None, dict]:
-    """(the task text, the inputs record), or (None, the record) when the port is larger than `PORT_CAP` (the helper would answer a cut file)."""
+def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listing: str, homes: tuple, previous: str | None = None,
+               report: str | None = None, rehearsal: bool = False) -> tuple[str | None, dict]:
+    """(the task text, the inputs record), or (None, the record) when the port is larger than `PORT_CAP` (the helper would answer a cut file).
+    `rehearsal` says the run is a rehearsal: only then does a numerics request tell the helper that the checkpoint has random weights."""
     sent: dict[str, object] = {}
     clean_port = port_repair.safe_text(port_text, homes)
     if len(clean_port) > PORT_CAP:
         sent["port"] = {"chars": len(clean_port), "cut": True}
         return None, sent
-    sections = [REQUEST]
+    sections = [(REQUEST_NUMERICS if rehearsal else REQUEST_NUMERICS_PLAIN) if report else REQUEST]
     for key, label, text, cap in (("facts", "facts file (port_facts.json)", facts, paf.FACTS_CAP),
                                   ("excerpts", "reference excerpts (reference_excerpts.md)", excerpts, paf.EXCERPTS_CAP)):
         if text is None:
@@ -228,6 +264,9 @@ def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listi
         clipped, was_cut = paf._clip(key, port_repair.safe_text(text, homes), cap)
         sections.append(f"## The {label}\n" + clipped)
         sent[key] = {"chars": len(clipped), "cut": was_cut}
+    if report:
+        sections.append("## What the check measured\n" + port_repair.safe_text(report, homes)[:NUMERIC_REPORT_CAP])
+        sent["report"] = {"chars": min(len(report), NUMERIC_REPORT_CAP)}
     if previous:
         sections.append("## What the previous round did\n" + port_repair.safe_text(previous, homes)[:1500])
         sent["previous"] = {"chars": min(len(previous), 1500)}
@@ -237,6 +276,32 @@ def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listi
     sections.append("## Files in stages/2/port/ now\n" + listing_text)
     sent["port_listing"] = {"chars": len(listing_text), "cut": listing_cut}
     return "\n\n".join(sections), sent
+
+
+def numeric_report(failure: dict, previous_agreement=None) -> str:
+    """The report on a port that ran and disagrees, built by the supervisor from the check's record (`port_repair.numerics_state`): the agreement,
+    where the mismatches begin, a table of the first mismatching positions with the reference id and the id the port produced, and the previous
+    round's agreement. Numbers only: nothing in it comes from the port's own words."""
+    n, first, bad = failure["n"], failure["first_mismatch"], failure["mismatches"]
+    where = ("position 0, the token after prefill, differs: look at prefill first" if first == 0 else
+             f"position 0 (the prefill token) matches and the first mismatch is at position {first}, a decode step: look at the decode path, the "
+             "cache position and the state updates")
+    lines = [f"top1_agreement {failure['agreement']:.4f}: {n - bad} of {n} ids match; the gate needs {port_repair.full_port.TOP1_MIN}.",
+             f"{bad} positions differ. {where[0].upper() + where[1:]}.",
+             "position | reference id | port id"]
+    lines += [f"{pos} | {ref} | {got}" for pos, ref, got in failure["rows"]]
+    if bad > len(failure["rows"]):
+        lines.append(f"({bad - len(failure['rows'])} more mismatching positions not listed)")
+    if previous_agreement is not None:
+        word = ("up" if agreement_improved(previous_agreement, failure["agreement"]) else "not up")
+        lines.append(f"The previous round's agreement was {previous_agreement:.4f}; this round's is {word}.")
+    lines.append(f"Port file sha256: {failure['port_sha256']}")
+    return "\n".join(lines)
+
+
+def numeric_failure(round_k: int, limit: int, failure_data: dict) -> str:
+    """The failure part of the request for a port that ran: the round and the one-line failure (the numbers are in the task's report)."""
+    return paf.failure_text([f"Port repair round {round_k} of {limit}: {port_repair.numeric_line(failure_data)}"], [], "", ())
 
 
 def failure(round_k: int, limit: int, op, output: str, homes: tuple) -> str:
@@ -371,10 +436,12 @@ def previous_round_section(entries: list[dict], n: int, k: int) -> str | None:
             change = str(_data(e).get("change") or "")
             if change:
                 break
-    lines = [f"Round {k - 1} failed at the {pd.get('op')!r} request: {pd.get('failure')}"]
+    def where(d: dict) -> str:
+        return str(d.get("failure")) if d.get("op") == port_repair.NUMERICS_OP else f"failed at the {d.get('op')!r} request: {d.get('failure')}"
+    lines = [f"Round {k - 1}: {where(pd)}" if pd.get("op") == port_repair.NUMERICS_OP else f"Round {k - 1} {where(pd)}"]
     if change:
         lines.append(f"The file was then changed ({change}).")
-    lines.append(f"This round the check failed at the {cd.get('op')!r} request: {cd.get('failure')}")
+    lines.append(f"This round: {where(cd)}" if cd.get("op") == port_repair.NUMERICS_OP else f"This round the check {where(cd)}")
     lines.append("Do not repeat a change that did not move the failure.")
     return "\n".join(lines)
 
@@ -392,18 +459,37 @@ def same_failure_twice(entries: list[dict], n: int, k: int) -> bool:
 # ---- the best port so far, kept across attempts ----------------------------------------------------------------------------------------
 
 def best_rank(op) -> int:
-    """How far a check got: 0 for a failure before any request or an op this module does not know, 1..4 along `OPS`, `PASSED_RANK` for none."""
+    """How far a check got: 0 for a failure before any request or an op this module does not know, 1..5 along `OPS`, `PASSED_RANK` for none."""
     r = rank(op)
     return r if r is not None else 0
 
 
+def best_key(rank_value, agreement=None) -> tuple:
+    """The order of ports: a port that got further along the request chain beats one that did not, and among ports that ran to the end a higher
+    agreement beats a lower one. A missing agreement is 0.0."""
+    ok = isinstance(agreement, (int, float)) and not isinstance(agreement, bool) and 0 <= agreement <= 1
+    return rank_value, float(agreement) if ok else 0.0
+
+
+def _legacy_best(d: dict) -> dict:
+    """An entry written before `PASSED_RANK` meant "passed the gate's agreement bar": rank 99, with no agreement, for any check that exited 0,
+    including a port below the bar. Compared as it stands it would sit above every numerics failure and keep a newly tested port with a higher
+    agreement from replacing it. It is read as a port that ran to the end with an unknown agreement: the rank of `NUMERICS_OP` and `legacy` set.
+    A later port that reached the bar still replaces it, and so does any numerics failure with a recorded agreement (review of PR 498, round 5)."""
+    agreement = d.get("agreement")
+    if d.get("rank") == PASSED_RANK and (isinstance(agreement, bool) or not isinstance(agreement, (int, float))):
+        return {**d, "rank": rank(port_repair.NUMERICS_OP), "op": port_repair.NUMERICS_OP, "legacy": True}
+    return d
+
+
 def best_state(entries: list[dict], n: int):
-    """The best port recorded so far in stage `n` (the `best port recorded` entry with the highest rank, the latest on a tie), or None."""
+    """The best port recorded so far in stage `n` (the `best port recorded` entry with the highest `best_key`, the latest on a tie), or None."""
     best = None
     for e in entries:
         if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == BEST:
-            d = _data(e)
-            if isinstance(d.get("rank"), int) and isinstance(d.get("port_sha256"), str) and (best is None or d["rank"] >= best["rank"]):
+            d = _legacy_best(_data(e))
+            if (isinstance(d.get("rank"), int) and isinstance(d.get("port_sha256"), str)
+                    and (best is None or best_key(d["rank"], d.get("agreement")) >= best_key(best["rank"], best.get("agreement")))):
                 best = d
     return best
 

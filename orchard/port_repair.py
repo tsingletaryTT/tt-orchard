@@ -285,3 +285,109 @@ def failed_line(text: str, limit: int = 300) -> str:
 def tail(text: str, limit: int = 1500) -> str:
     """The last `limit` characters of a failure text, for a prompt and the ledger."""
     return text if len(text) <= limit else "[cut]\n" + text[-limit:]
+
+
+# ---- a port that RUNS but disagrees with the reference (the helper-driven loop) --------------------------------------------------------------
+#
+# Run16 of the tiny Qwen4 rehearsal produced the first port that loaded, ran prefill and decode on the chips and wrote 32 ids: the check exited 0
+# with top1_agreement 0.5625, below the gate's minimum (full_port.TOP1_MIN). `read_failure` sees only exit code 2, so the repair loop saw "passed"
+# and stopped, and the gate then failed the attempt. `numerics_state` reads the supervisor's own record of such a run and says it is a failure of
+# the port too, with the numbers the helper needs.
+
+NUMERICS_OP = "numerics"                    # the `op` of a failure that is not a crash: the check ran to the end and its agreement is below the bar
+NUMERIC_ROWS = 16                           # mismatching positions listed in the report (the first ones)
+
+
+def current_sources(stage_dir) -> dict | None:
+    """{run-relative path: sha256} of every `.py` file under the stage's port directory as it is now, the set the check's template records in
+    `port_sources` (`rglob("*.py")`, `__pycache__` holds no `.py`). None when a file cannot be read or a link or special file stands in the tree."""
+    stage_dir = Path(stage_dir)
+    root = stage_dir / PORT_DIR
+    out: dict[str, str] = {}
+    if root.is_symlink() or not root.is_dir():
+        return None          # os.walk would follow a linked root to sources outside the run (review of PR 498, round 4), as `fingerprint` refuses it
+    try:
+        for here, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__" or os.path.islink(os.path.join(here, d)))
+            for name in sorted(files + [d for d in dirs if os.path.islink(os.path.join(here, d))]):
+                path = Path(here) / name
+                if path.is_symlink():
+                    return None
+                if name.endswith(".py"):
+                    rel = f"stages/{stage_dir.name}/{PORT_DIR}/{path.relative_to(root).as_posix()}"
+                    out[rel] = hashlib.sha256(safeio.read_bytes(path, max_bytes=full_port.SOURCE_MAX)).hexdigest()
+    except (safeio.SafeReadError, OSError, ValueError):
+        return None
+    return out
+
+
+def numerics_state(run_dir, stage_dir, *, marker: dict | None = None) -> tuple[str, dict | None]:
+    """("below", the numbers), ("passed", {"agreement", "n"}) or ("unreadable", None) for a hardware test that exited 0.
+
+    "below": the test record shows exit code 0 without a timeout, the check's record (evidence/port-check.json) has the shipped schema, names the
+    stage 1 reference files with their current sha256, holds reference ids that are the first ids of the stage 1 reference, holds chip ids of the
+    same length, and lists the port file that is on disk now among its `port_sources`; the agreement is recomputed from the two lists (the record's
+    own `top1_agreement` is not used) and is below `full_port.TOP1_MIN`. The numbers are {"kind": "numerics", "op": NUMERICS_OP, "returncode": 0,
+    "agreement", "n", "mismatches", "first_mismatch", "rows" (the first NUMERIC_ROWS of (position, reference id, chip id)), "port_sha256"}.
+    "passed": the same record is trustworthy and the agreement is at the bar or above. "unreadable": anything else, so a record the coder rewrote
+    or a stale one earns no round and no pass."""
+    stage_dir, run_dir = Path(stage_dir), Path(run_dir)
+    try:
+        if marker is None:
+            marker = safeio.read_json(stage_dir / MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
+        # The record is read once: the bytes that are parsed are the bytes whose digest the output's mark line is compared with, so a file replaced
+        # between two reads cannot authenticate other ids (review of PR 498, round 4).
+        raw_record = safeio.read_bytes(stage_dir / full_port.RECORD_FILE, max_bytes=full_port.JSON_MAX)
+        record = safeio.parse_json_bytes(raw_record, max_bytes=full_port.JSON_MAX, expect=dict)
+    except (safeio.SafeReadError, OSError, ValueError):
+        return "unreadable", None
+    code = marker.get("returncode")
+    if type(code) is not int or code != 0 or marker.get("timed_out") is not False:
+        return "unreadable", None
+    if record.get("schema") != full_port.RECORD_SCHEMA:
+        return "unreadable", None
+    reasons: list = []
+    # The record must be the file the check printed the digest of into the output the supervisor captured: ids rewritten to agree leave the
+    # reference and port hashes valid, and only this digest tells a record the test wrote from one somebody edited (review of PR 498).
+    full_port._output_reasons(stage_dir, run_dir, marker, reasons, record_sha=hashlib.sha256(raw_record).hexdigest())
+    if reasons:
+        return "unreadable", None
+    reference = full_port._reference_ids(record, run_dir, reasons)
+    ref, chip = record.get("reference_ids"), record.get("chip_ids")
+    if (reasons or reference is None or not full_port._ids(ref) or not full_port._ids(chip) or not chip or len(ref) != len(chip)
+            or ref != reference[:len(chip)]):
+        return "unreadable", None
+    try:
+        port_sha = hashlib.sha256(safeio.read_bytes(stage_dir / PORT_DIR / "port_model.py", max_bytes=full_port.SOURCE_MAX)).hexdigest()
+    except (safeio.SafeReadError, OSError, ValueError):
+        return "unreadable", None
+    sources = record.get("port_sources")
+    if not isinstance(sources, list) or not all(isinstance(s, dict) and isinstance(s.get("path"), str) and isinstance(s.get("sha256"), str) for s in sources):
+        return "unreadable", None            # a path that is a list or an object would be an unhashable key below (review of PR 498, round 4)
+    if not any(isinstance(s, dict) and s.get("path") == f"stages/2/{PORT_DIR}/port_model.py"
+                                                and s.get("sha256") == port_sha for s in sources):
+        return "unreadable", None            # the record is about another version of the port
+    # Every source the check ran, and no other, must be on disk now with the same hash: a supporting file changed, added or removed after the
+    # check would leave `port_model.py` matching while the port is another one (review of PR 498, round 3).
+    listed = {s.get("path"): s.get("sha256") for s in sources if isinstance(s, dict)}
+    if len(listed) != len(sources) or listed != current_sources(stage_dir):
+        return "unreadable", None
+    agreement = full_port.agreement(ref, chip)
+    if agreement >= full_port.TOP1_MIN:
+        return "passed", {"agreement": round(agreement, 6), "n": len(chip)}      # kept: the better of two passing ports has the higher agreement
+    rows = [(i, a, b) for i, (a, b) in enumerate(zip(ref, chip)) if a != b]
+    return "below", {"kind": "numerics", "op": NUMERICS_OP, "returncode": 0, "agreement": round(agreement, 6), "n": len(chip),
+                     "mismatches": len(rows), "first_mismatch": rows[0][0], "rows": rows[:NUMERIC_ROWS], "port_sha256": port_sha}
+
+
+def read_numerics(run_dir, stage_dir) -> dict | None:
+    """The numbers of a port that ran and disagrees (`numerics_state` "below"), else None."""
+    state, data = numerics_state(run_dir, stage_dir)
+    return data if state == "below" else None
+
+
+def numeric_line(failure: dict, limit: int = 300) -> str:
+    """The failure line of a numerics failure for the ledger and for `same_failure_twice`: the same agreement and the same first mismatch give the
+    same line. Built from the numbers the supervisor computed, never from the port's words."""
+    return (f"the port ran to the end but top1_agreement {failure['agreement']:.4f} is below the minimum {full_port.TOP1_MIN}; "
+            f"the first mismatch is at position {failure['first_mismatch']} ({failure['mismatches']} of {failure['n']} ids differ)")[:limit]

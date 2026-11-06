@@ -381,8 +381,8 @@ def test_a_rewritten_passing_marker_does_not_make_the_answer_helped(tmp_path):
 
 def test_the_vouched_marker_still_judges_the_answer(tmp_path):
     s, stage, _ = _answered_then_tested(tmp_path, tested=True)
-    passed, op, readable = s._repair_outcome(2, stage)
-    assert (passed, op, readable) == (False, "prefill", True)
+    passed, op, readable, numbers = s._repair_outcome(2, stage)
+    assert (passed, op, readable, numbers) == (False, "prefill", True, None)
 
 
 def test_the_implicit_class_cell_is_a_known_name():

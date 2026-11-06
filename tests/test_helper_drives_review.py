@@ -196,34 +196,29 @@ def test_build_gives_a_resumed_supervisor_the_choice_the_run_started_with(rig, m
 
 
 def _passed_check_stub(tmp_path, *, vouched, fails_at=None):
-    """A stage 2 directory whose supervisor test record says the check passed, and a supervisor that drives with the helper."""
+    """A stage 2 directory after the real check ran a port that agrees with the reference, and a supervisor that drives with the helper. The
+    check's record must be the check's own (its digest is in the captured output), so the check really runs against the fakes."""
     import hashlib
     import json
-    run = tmp_path / "run"
-    stage = run / "stages" / "2"
-    (stage / "port").mkdir(parents=True)
-    (stage / "port" / "port_model.py").write_text("x = 1\n")
-    (stage / "port" / "helper.py").write_text("y = 2\n")
-    # The chain the supervisor's test leaves: a record that lists the sources it ran, an output file that prints the record's hash once, and a
-    # marker that names the output by hash (review of PR 497, round 3).
     from orchard import full_port
-    (stage / "evidence").mkdir()
-    record = json.dumps({"port_sources": [
-        {"path": f"stages/2/port/{name}", "sha256": hashlib.sha256((stage / "port" / name).read_bytes()).hexdigest(), "role": "model"}
-        for name in ("helper.py", "port_model.py")]}).encode()
-    (stage / full_port.RECORD_FILE).write_bytes(record)
-    out = f"loaded\n{full_port.OUTPUT_MARK} {hashlib.sha256(record).hexdigest()}\n".encode()
-    if fails_at is not None:      # a check that failed at request `fails_at`, with the failure line `port_repair.read_failure` reads
+    from test_helper_numerics_rounds import PASSES
+    from port_check_fakes import make_run, run_template
+    run, stage, *_ = make_run(tmp_path, PASSES)
+    (stage / "port" / "helper.py").write_text("y = 2\n")            # a supporting file the port may import; written before the check, so the record lists it
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 0, done.stdout + done.stderr
+    code = 0
+    if fails_at is not None:      # the newest test failed at request `fails_at`: the output and the record the way the supervisor's test leaves them
+        code = 2
         out = ("FAILED: x\n" + port_repair.FAILURE_TOKEN + json.dumps({"kind": "port", "op": fails_at}) + "\n").encode()
-    (stage / full_port.OUTPUT_FILE).write_bytes(out)
-    code = 0 if fails_at is None else 2
-    marker = json.dumps({"returncode": code, "timed_out": False,
-                         "output": {"path": f"stages/2/{full_port.OUTPUT_FILE}", "sha256": hashlib.sha256(out).hexdigest()}}).encode()
-    (stage / port_repair.MARKER).write_bytes(marker)
+        (stage / full_port.OUTPUT_FILE).write_bytes(out)
+        (stage / port_repair.MARKER).write_bytes(json.dumps({"returncode": 2, "timed_out": False, "output": {
+            "path": f"stages/2/{full_port.OUTPUT_FILE}", "sha256": hashlib.sha256(out).hexdigest()}}).encode())
     led = Ledger(run / "ledger.jsonl")
     led.append("run_start", None, model="m")
     led.append("stage_start", 2, escalated=False, resumed=False)
     if vouched:
+        marker = (stage / port_repair.MARKER).read_bytes()
         # What `_run_test` writes before the test starts: the whole port directory, every regular file (review of PR 497, round 4).
         led.append("decision", 2, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage / "port"))
         led.append("evidence", 2, path="stages/2/" + port_repair.MARKER, sha256=hashlib.sha256(marker).hexdigest(), returncode=code, timed_out=False)
@@ -259,7 +254,8 @@ def test_a_port_edited_after_the_passing_check_does_not_displace_the_best_port(t
     s._record_best_passed(2, stage)
     bests = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
     assert bests == [first], "an untested snapshot was recorded as the best port"
-    assert any("not the one the passing check ran on" in e["data"].get("reason", "") for e in s.ledger.read())
+    # (an edit to port_model.py is refused earlier, where the check's numbers are read; the added-file and rewritten-record tests below reach the
+    # sources comparison)
 
 
 def test_a_file_added_to_the_port_after_the_passing_check_is_also_refused(tmp_path):
@@ -325,3 +321,30 @@ def test_without_a_best_port_the_standing_draft_is_still_considered(tmp_path):
     s, stage, spec, calls = _draft_stub(tmp_path, with_best=False)
     s._draft(spec, stage)
     assert calls == ["standing"]
+
+
+# ---- review of PR 498, round 3 -----------------------------------------------------------------------------------------------------------
+
+def _earlier_best(s, agreement):
+    """An earlier attempt's best passing port, as `_record_best_passed` writes it, with the given agreement."""
+    s.ledger.append("decision", 2, decision=rh.BEST, op=None, rank=rh.PASSED_RANK, passed=True, agreement=agreement, port_sha256="a" * 64,
+                    snapshot="b" * 64, files=[{"path": "port_model.py", "sha256": "a" * 64, "bytes": 1}], attempt=1)
+
+
+def test_a_later_passing_port_with_a_lower_agreement_does_not_replace_the_best_one(tmp_path):
+    """Finding: every passing snapshot had rank 99 and the passing agreement was dropped, so a 0.875 port replaced a 1.0 port."""
+    s, stage = _passed_check_stub(tmp_path, vouched=True)               # the check in this stub passes with an agreement of 0.875
+    _earlier_best(s, 1.0)
+    s._record_best_passed(2, stage)
+    bests = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+    assert len(bests) == 1 and bests[0]["agreement"] == 1.0
+    assert rh.best_state(s.ledger.read(), 2)["agreement"] == 1.0
+
+
+def test_a_later_passing_port_with_a_higher_agreement_is_recorded_with_its_agreement(tmp_path):
+    s, stage = _passed_check_stub(tmp_path, vouched=True)
+    _earlier_best(s, 0.5)
+    s._record_best_passed(2, stage)
+    bests = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+    assert len(bests) == 2 and bests[-1]["agreement"] == 0.875 and bests[-1]["passed"] is True
+    assert rh.best_state(s.ledger.read(), 2)["agreement"] == 0.875
