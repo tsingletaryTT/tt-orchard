@@ -32,6 +32,11 @@ def _fmt(x, digits: int = 4) -> str:
     return f"{x:.{digits}g} (measured)" if _num(x) else "TODO"
 
 
+def _datasheet(x, digits: int = 4) -> str:
+    """A fixed input taken from the board's datasheet. No bandwidth is measured in this stage, so it is never labelled measured."""
+    return f"{x:.{digits}g} (datasheet value)" if _num(x) else "TODO"
+
+
 def _text(redact, x, limit: int = 400) -> str:
     return redact(" ".join(str(x).split())[:limit]) if isinstance(x, str) and x.strip() else "not recorded"
 
@@ -71,7 +76,7 @@ def section(res, redact) -> list[str]:
               "### Share of the decode floor", "",
               f"The share is the median decode speed over the floor's speed: {_fmt(bm.get('share_of_floor_median'))} "
               f"({_text(redact, bm.get('share_text'), 600)}). The speed is measured and the floor is an estimate "
-              f"(orchard/decode_floor.py, {redact(str(inputs.get('board', 'board not recorded')))} at {_fmt(inputs.get('per_die_bandwidth_gb_s'))} GB/s per die "
+              f"(orchard/decode_floor.py, {redact(str(inputs.get('board', 'board not recorded')))} at {_datasheet(inputs.get('per_die_bandwidth_gb_s'))} GB/s per die "
               f"over {_fmt(inputs.get('dies'), 3).replace(' (measured)', '')} dies). Weight dtype policy: "
               f"{redact(', '.join(f'{k} {v}' for k, v in sorted(_d(bm.get('dtype_policy')).items())) or 'not recorded')} "
               f"({_text(redact, bm.get('dtype_policy_source'))}).", ""]
@@ -92,7 +97,7 @@ def risks(res, redact) -> list[str]:
     out = ["## Full port quality", ""]
     if isinstance(bm.get("dtype_policy_source"), str) and bm["dtype_policy_source"].startswith("assumed"):
         out.append("- The decode floor assumes every weight is bf16, because the port declares no DTYPE_POLICY. A port that stores weights in a "
-                   "smaller format has a higher floor than the one stated, so its share of the floor is understated. Evidence: `stages/6/result.json`.")
+                   "smaller format has a higher floor than the one stated, so its share of the floor is overstated. Evidence: `stages/6/result.json`.")
     if res.get("coherent") is not True:
         out.append(f"- The free-run text did not pass the supervisor's readable floor, and the run's rehearsal option waived that field "
                    f"({_text(redact, res.get('coherent_basis'), 300)}). Evidence: `stages/6/result.json`.")
