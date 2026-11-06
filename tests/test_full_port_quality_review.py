@@ -347,3 +347,28 @@ def test_a_top_five_file_replaced_after_stage_1_passed_is_refused_and_a_missing_
     assert quality_check(run, stage, seeded, top5_accepted_sha=accepted)[0] == []
     assert _has(quality_check(run, stage, seeded, top5_accepted_sha="0" * 64)[0], "is not the file stage 1's gate accepted")
     assert _has(quality_check(run, stage, seeded, top5_accepted_sha=None)[0], "holds no sha256 for stages/1/evidence/reference/top5-logits.json")
+
+
+def test_hashing_a_stage_1_file_the_port_replaced_with_a_fifo_does_not_block(tmp_path):
+    """Finding (PR 491 review): the port could replace prompt-ids.json with a FIFO, and the post-run hash read then blocked on it and held
+    the hardware lease until the deadline. The hash must be refused at once. Run in a child with an alarm, so a regression fails the test
+    and does not hang the suite."""
+    import subprocess
+    import sys
+    fifo = tmp_path / "prompt-ids.json"
+    os.mkfifo(fifo)
+    code = ("import importlib.util, signal, sys\n"
+            "signal.alarm(20)\n"
+            f"spec = importlib.util.spec_from_file_location('pq', {str(full_port_quality.TEMPLATE)!r})\n"
+            "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+            f"print('RESULT', m.sha_or_none({str(fifo)!r}))\n")
+    done = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    assert "RESULT None" in done.stdout, (done.returncode, done.stdout, done.stderr)
+
+
+def test_hashing_a_regular_file_still_gives_its_sha256_and_a_symlink_or_a_missing_file_gives_none(tmp_path):
+    mod = load_template()
+    real = tmp_path / "a.json"
+    real.write_bytes(b"[1, 2]")
+    assert mod.sha_or_none(real) == mod.sha_bytes(b"[1, 2]")
+    assert mod.sha_or_none(tmp_path / "missing.json") is None

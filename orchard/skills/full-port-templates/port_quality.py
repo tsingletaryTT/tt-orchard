@@ -39,6 +39,7 @@ import os
 import re
 import select
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -73,8 +74,29 @@ def sha_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+MAX_HASHED_BYTES = 256 * 1024 * 1024      # choice: far above any file this run hashes (the stage 1 reference files and the model's config.json)
+
+
 def sha_file(path) -> str:
-    return sha_bytes(Path(path).read_bytes())  # hardening: ok hashes the supervisor's own copies of files in the run directory, which the gate re-reads through safeio
+    """The sha256 of the regular file at `path`. A FIFO or device is refused with OSError at once: the port runs between the two hashes of
+    a stage 1 file and could replace it with a FIFO, and a plain read would then block and hold the hardware lease until the deadline
+    (review of PR 491). The file is opened nonblocking, checked on the opened descriptor, and read in chunks up to a cap. Symlinks are not
+    refused here because the model's config.json is a link inside a Hugging Face snapshot; `refuse_links` covers the run directory."""
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)  # hardening: ok no O_NOFOLLOW on purpose, the model's config.json is a snapshot link; the descriptor is checked regular
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        digest, total = hashlib.sha256(), 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                return digest.hexdigest()
+            total += len(chunk)
+            if total > MAX_HASHED_BYTES:
+                raise OSError(errno.EFBIG, "file too large to hash", str(path))
+            digest.update(chunk)
+    finally:
+        os.close(fd)
 
 
 def sha_or_none(path):
