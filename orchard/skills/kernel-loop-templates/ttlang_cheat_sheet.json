@@ -1,0 +1,505 @@
+{
+ "schema": "orchard-cheat-sheet/1",
+ "sheet": "ttlang",
+ "title": "TT-Lang cheat sheet for a kernel",
+ "roots": {
+  "hardware": "the tt-lang package installed for the chip (1.1.6): what compiles",
+  "tree": "the tt-lang checkout's compiler package (newer than the package)",
+  "sim": "the checkout's simulator (accepts more than the chip's compiler)"
+ },
+ "intro": "Each tag says what is known. [compiles on hardware]: an elementwise kernel built from these calls ran on the chip. [hardware signature only]: the signature is in the hardware package and no compile was shown. [simulator only]: the simulator accepts it and the hardware package does not. A simulator pass does not show a kernel compiles for the chip. Do not import ttl or ttnn to look things up. `python3 stage_tools.py cheat NAME` prints one entry where the tool exists.",
+ "sections": [
+  {
+   "title": "Kernel structure",
+   "entries": [
+    {
+     "name": "ttl.operation",
+     "kind": "op",
+     "signature": "ttl.operation(grid='full')",
+     "usage": "@ttl.operation(grid='full')\ndef add_op(a_in, b_in, out): pass",
+     "notes": "Decorator for the host function. It takes ttnn tensors and writes the output tensor in place. Define the dataflow buffers and the three threads inside it. grid='full' uses every node; a tuple such as (1, 1) is one node. Older text says @ttl.kernel: that name does not exist in the package.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "ttl.compute",
+     "kind": "op",
+     "signature": "ttl.compute()",
+     "usage": "@ttl.compute()\ndef compute(): pass",
+     "notes": "The math thread. It waits on input buffers, reserves the output buffer and calls store. One per kernel.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "ttl.datamovement",
+     "kind": "op",
+     "signature": "ttl.datamovement()",
+     "usage": "@ttl.datamovement()\ndef read(): pass",
+     "notes": "A data-movement thread: it copies tensor slices into buffers (reader) or buffers into tensors (writer). Two per kernel.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "ttl.make_dataflow_buffer_like",
+     "kind": "op",
+     "signature": "ttl.make_dataflow_buffer_like(tensor, shape, block_count=2)",
+     "usage": "a_dfb = ttl.make_dataflow_buffer_like(a_in, shape=(2, 1), block_count=2)",
+     "notes": "A buffer in L1 that takes dtype and layout from a tensor. shape is the block in tiles. The keyword is block_count; buffer_factor does not exist. One producer thread and one consumer thread per buffer, and both loop the same number of times.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "ttl.grid_size",
+     "kind": "op",
+     "signature": "ttl.grid_size(*, dims)",
+     "usage": "cols, rows = ttl.grid_size(dims=2)",
+     "notes": "The grid's size as (columns, rows). Use it at the top of the operation to split the work.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "ttl.node",
+     "kind": "op",
+     "signature": "ttl.node(*, dims)",
+     "usage": "node_col, node_row = ttl.node(dims=2)",
+     "notes": "This node's coordinates, called inside a thread. Split rows or columns of tiles over nodes with it and guard the tail with `if row < row_tiles`.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    }
+   ]
+  },
+  {
+   "title": "Moving data",
+   "entries": [
+    {
+     "name": "DataflowBuffer.wait",
+     "kind": "method",
+     "signature": "a_dfb.wait()",
+     "usage": "with a_dfb.wait() as a_blk, out_dfb.reserve() as o_blk: o_blk.store(a_blk)",
+     "notes": "Consumer side: blocks until a block is ready; the block is released when the with block ends. In the compute thread this is how input is read.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "DataflowBuffer.reserve",
+     "kind": "method",
+     "signature": "a_dfb.reserve()",
+     "usage": "with a_dfb.reserve() as blk: ttl.copy(a_in[0:2, 0:1], blk).wait()",
+     "notes": "Producer side: blocks until there is room; the block is pushed when the with block ends. The reader reserves, the compute thread reserves the output.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "TensorBlock.store",
+     "kind": "method",
+     "signature": "blk.store(rhs)",
+     "usage": "o_blk.store(a_blk + b_blk)",
+     "notes": "Writes a block expression into an output block reserved from a buffer. Elementwise operators (+, -, *, /) work on blocks of the same shape.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    },
+    {
+     "name": "ttl.copy",
+     "kind": "op",
+     "signature": "ttl.copy(src, dst)",
+     "usage": "tx = ttl.copy(a_in[r0:r1, c0:c1], a_blk); tx.wait()",
+     "notes": "Copies a tensor slice into a block, or a block into a tensor slice (slices are in tiles). It returns a handle; wait on it before the block ends. A slice that does not match the buffer's block shape fails to compile.",
+     "seen_in": "examples/eltwise_add.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "compiles on hardware",
+     "evidence": "issue 205 and docs/run-logs/2026-10-28-granite-mamba2-real-port.md: an elementwise kernel built from these calls compiled and ran on the chip with tt-lang 1.1.6"
+    }
+   ]
+  },
+  {
+   "title": "Math on blocks",
+   "entries": [
+    {
+     "name": "ttl.math.reduce_sum",
+     "kind": "op",
+     "signature": "ttl.math.reduce_sum(input, *, dims)",
+     "usage": "s = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1])",
+     "notes": "Sum over the grid dimension in dims (-1 is across a row of tiles). The result keeps one value per row in column 0 of each tile: spread it back with ttl.math.broadcast. There is no shape argument in the hardware package.",
+     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.math.reduce_max",
+     "kind": "op",
+     "signature": "ttl.math.reduce_max(input, *, dims)",
+     "usage": "m = ttl.math.reduce_max(s_blk, dims=[-1])",
+     "notes": "Maximum over dims, same shape rules as reduce_sum (softmax).",
+     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.math.broadcast",
+     "kind": "op",
+     "signature": "ttl.math.broadcast(input, *, dims, shape)",
+     "usage": "r = ttl.math.broadcast(inv, dims=[-1], shape=(1, col_tiles))",
+     "notes": "Spreads a reduced block (a column of values) back across dims to the given shape; the way to multiply a row by its own statistic.",
+     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.matmul",
+     "kind": "op",
+     "signature": "ttl.matmul(lhs, rhs, *, transpose_rhs=False)",
+     "usage": "o_blk.store(ttl.matmul(a_blk, b_blk))",
+     "notes": "Tile matmul of two blocks: (m, k) tiles by (k, n) tiles. Accumulating over k means looping over k blocks and adding the partial results.",
+     "seen_in": "tt-lang 1.1.6 package; examples/single_node_matmul.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.math.transpose",
+     "kind": "op",
+     "signature": "ttl.math.transpose(input)",
+     "usage": "t = ttl.math.transpose(blk)",
+     "notes": "Transposes a block of tiles.",
+     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.math.fill",
+     "kind": "op",
+     "signature": "ttl.math.fill(value, *, shape, dtype=None)",
+     "usage": "half = ttl.math.fill(0.5, shape=(1, 1))",
+     "notes": "A block of one value; use it for scalar constants in an expression, such as epsilon.",
+     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.math.typecast",
+     "kind": "op",
+     "signature": "ttl.math.typecast(input, dtype)",
+     "usage": "y = ttl.math.typecast(x_blk, ttnn.bfloat16)",
+     "notes": "Changes the dtype of a block.",
+     "seen_in": "tt-lang 1.1.6 package (ttl/operators.py)",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.math.rsqrt",
+     "kind": "op",
+     "signature": "ttl.math.rsqrt(input)",
+     "usage": "r = ttl.math.rsqrt(mean_sq + eps_blk)",
+     "notes": "Unary elementwise functions take one block: exp, log, sqrt, rsqrt, recip, tanh, abs, neg, relu, sigmoid, silu, gelu. max and min take two.",
+     "seen_in": "tt-lang 1.1.6 package (ttl/_generated_elementwise.py)",
+     "in": [
+      "hardware"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.math.exp",
+     "kind": "op",
+     "signature": "ttl.math.exp(input)",
+     "usage": "e = ttl.math.exp(s_blk)",
+     "notes": "Exponential of a block.",
+     "seen_in": "tt-lang 1.1.6 package (ttl/_generated_elementwise.py)",
+     "in": [
+      "hardware"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.math.silu",
+     "kind": "op",
+     "signature": "ttl.math.silu(input)",
+     "usage": "g = ttl.math.silu(w1_blk) * w3_blk",
+     "notes": "Activation for a gated MLP, fused with the multiply in one compute body.",
+     "seen_in": "tt-lang 1.1.6 package (ttl/_generated_elementwise.py)",
+     "in": [
+      "hardware"
+     ],
+     "status": "hardware signature only"
+    }
+   ]
+  },
+  {
+   "title": "Several nodes",
+   "entries": [
+    {
+     "name": "ttl.Pipe",
+     "kind": "op",
+     "signature": "ttl.Pipe(src, dst)",
+     "usage": "pipe = ttl.Pipe((0, 0), (0, slice(1, 4)))",
+     "notes": "A transfer from node src to one node or a range of nodes dst, in grid coordinates. One send reaches every node in the range (multicast).",
+     "seen_in": "examples/eltwise_pipe.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.PipeNet",
+     "kind": "op",
+     "signature": "ttl.PipeNet(pipes)",
+     "usage": "net = ttl.PipeNet([pipe])",
+     "notes": "The set of pipes of one kernel. Make it before the main loop.",
+     "seen_in": "examples/eltwise_pipe.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "PipeNet.if_src",
+     "kind": "method",
+     "signature": "net.if_src(callback)",
+     "usage": "net.if_src(send_row)",
+     "notes": "Runs the callback on the sending node: the callback reads a block and sends it (ttl.copy from a block to the pipe).",
+     "seen_in": "examples/eltwise_pipe.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "PipeNet.if_dst",
+     "kind": "method",
+     "signature": "net.if_dst(callback)",
+     "usage": "net.if_dst(receive_row)",
+     "notes": "Runs the callback on a receiving node: it copies from the pipe into a reserved block. Every if_dst callback must match one if_src callback.",
+     "seen_in": "examples/eltwise_pipe.py",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    },
+    {
+     "name": "ttl.signpost",
+     "kind": "op",
+     "signature": "ttl.signpost(name)",
+     "usage": "ttl.signpost('after_reduce')",
+     "notes": "Marks a point for the profiler.",
+     "seen_in": "tt-lang 1.1.6 package",
+     "in": [
+      "hardware",
+      "tree"
+     ],
+     "status": "hardware signature only"
+    }
+   ]
+  },
+  {
+   "title": "Simulator-only forms (do not compile on the hardware package)",
+   "entries": [
+    {
+     "name": "sim.reduce_sum",
+     "kind": "op",
+     "signature": "ttl.math.reduce_sum(block, dims, shape)",
+     "usage": "s = ttl.math.reduce_sum(x_blk * x_blk, dims=[-1], shape=(1, 1))",
+     "notes": "The simulator requires shape and accepts this. The hardware package has no shape argument: `reduce_sum() got an unexpected keyword argument 'shape'`. 0 of 7 simulator-passing reduction kernels compiled on the chip (issue 205). Write the hardware form above.",
+     "seen_in": "issue 205; tt-lang python/sim/math.py",
+     "in": [
+      "sim"
+     ],
+     "status": "simulator only",
+     "hardware_absent": [
+      "shape"
+     ]
+    },
+    {
+     "name": "sim.fill",
+     "kind": "op",
+     "signature": "ttl.block.fill(value, shape, tile=None)",
+     "usage": "half = ttl.block.fill(0.5, shape=(1, 1))",
+     "notes": "The simulator's ttl.block namespace (broadcast, fill, mask, where, squeeze, unsqueeze, transpose) is not in the hardware package; the hardware names live under ttl.math. Check the orchard kernel library before copying from it: its rmsnorm uses ttl.block and the shape argument.",
+     "seen_in": "tt-lang python/sim/__init__.py; orchard kernel-loop-templates/library/rmsnorm.py",
+     "in": [
+      "sim"
+     ],
+     "status": "simulator only",
+     "hardware_absent": [
+      "ttl.block"
+     ]
+    },
+    {
+     "name": "ttl.make_dfb",
+     "kind": "op",
+     "signature": "ttl.make_dfb(dtype, shape, block_count=2, tile=(32, 32))",
+     "usage": "t_dfb = ttl.make_dfb('bf16', shape=(1, 1))",
+     "notes": "A buffer from a dtype with no backing tensor. Present in the newer tt-lang checkout, absent from the 1.1.6 hardware package; use make_dataflow_buffer_like there.",
+     "seen_in": "tt-lang python/ttl/dataflow_buffer.py",
+     "in": [
+      "tree"
+     ],
+     "status": "simulator only",
+     "hardware_absent": [
+      "make_dfb"
+     ]
+    }
+   ]
+  }
+ ],
+ "mistakes": [
+  {
+   "symptom": "`reduce_sum() got an unexpected keyword argument 'shape'` when a kernel that passed the simulator is compiled for the chip (issue 205).",
+   "fix": "Call ttl.math.reduce_sum(x, dims=[-1]) with no shape, then ttl.math.broadcast the result back. A simulator pass does not show the kernel compiles on hardware; for any reduction, read the hardware signature above.",
+   "seen_in": "issue 205 (Granite-4.0-H-1B run, 7 of 7 failed)",
+   "checks": [
+    {
+     "root": "hardware",
+     "name": "ttl.math.reduce_sum",
+     "absent_args": [
+      "shape"
+     ],
+     "present_args": [
+      "input",
+      "dims"
+     ]
+    },
+    {
+     "root": "sim",
+     "name": "ttl.math.reduce_sum",
+     "present_args": [
+      "shape"
+     ]
+    }
+   ]
+  },
+  {
+   "symptom": "`make_dataflow_buffer_like(..., buffer_factor=2)` from older guides fails.",
+   "fix": "The keyword is block_count.",
+   "seen_in": "ttm-tt-lang guide.md against the package",
+   "checks": [
+    {
+     "root": "hardware",
+     "name": "ttl.make_dataflow_buffer_like",
+     "absent_args": [
+      "buffer_factor"
+     ],
+     "present_args": [
+      "block_count"
+     ]
+    }
+   ]
+  },
+  {
+   "symptom": "`@ttl.kernel` from older guides: the attribute does not exist.",
+   "fix": "Use @ttl.operation(grid=...).",
+   "seen_in": "ttm-tt-lang guide.md against the package",
+   "checks": [
+    {
+     "root": "hardware",
+     "name": "ttl.kernel",
+     "absent": true
+    },
+    {
+     "root": "hardware",
+     "name": "ttl.operation",
+     "present_args": [
+      "grid"
+     ]
+    }
+   ]
+  },
+  {
+   "symptom": "`ttl.Semaphore` does not exist in the simulator or the package (issue 176): a kernel that synchronises with a semaphore cannot be checked.",
+   "fix": "Use dataflow buffers and pipes for synchronisation.",
+   "seen_in": "issue 176",
+   "checks": [
+    {
+     "root": "hardware",
+     "name": "ttl.Semaphore",
+     "absent": true
+    },
+    {
+     "root": "sim",
+     "name": "ttl.Semaphore",
+     "absent": true
+    }
+   ]
+  },
+  {
+   "symptom": "The simulator's failures on coder kernels: a broadcast shape mismatch, `not a valid next dataflow step` after a pop, and a deadlock.",
+   "fix": "Each buffer has one producer and one consumer thread and both loop the same number of times; every wait has a matching reserve; a block is used inside its with block only. Start with copy through the buffers, add one arithmetic step, then the reduction, then the broadcast.",
+   "seen_in": "issues 175 and 176 (probe failure classes)"
+  },
+  {
+   "symptom": "A short depthwise convolution with dilation above 1 done with ttnn.conv1d returns a wrong result and no error (issue 338).",
+   "fix": "Write it as shifted multiply-adds (for kernel 4, dilation 3: sum over k of w[k] times x shifted by (3-k)*3), then the activation.",
+   "seen_in": "issue 338"
+  }
+ ]
+}

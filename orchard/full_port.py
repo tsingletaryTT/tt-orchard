@@ -52,6 +52,9 @@ TEMPLATE = Path(__file__).resolve().parent / "skills" / "full-port-templates" / 
 TEMPLATE_NAME = "port_check.py"       # its name in stages/2/
 TOOLS = TEMPLATE.parent / "stage_tools.py"      # the coder's fixed-name tools (issue 505): last-check, layer-diff, facts, show
 TOOLS_NAME = "stage_tools.py"         # its name in the stage directory, next to the template
+CHEAT_SOURCE = TEMPLATE.parent / "ttnn_cheat_sheet.json"      # the verified TTNN cheat sheet (issue 523; orchard/op_cheats.py)
+CHEAT_NAME = "cheat_sheet.json"       # its data in the stage directory: `stage_tools.py cheat NAME` reads it
+CHEAT_MD_NAME = "cheat_sheet.md"      # the rendered sheet the coder reads
 CONFIG_NAME = "port_check_config.json"
 # The only command the supervisor runs for this stage. -P and -s keep files the coder leaves in stages/2/ off the template's sys.path.
 COMMAND = "python3 -P -s stages/2/port_check.py"

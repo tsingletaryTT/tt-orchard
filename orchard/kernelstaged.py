@@ -165,11 +165,11 @@ def _install_in_attempt(adir: Path, tdir: Path, op: str) -> None:
 
 # ---- the attempt -----------------------------------------------------------------------------------------------------
 
-def _user_message(stage: Stage, index: int, total: int, op: str) -> str:
+def _user_message(stage: Stage, index: int, total: int, op: str, adir: Path) -> str:
     start = ("Write kernel.py" if index == 1 else "Change kernel.py, which passed the previous stage,")
     return (f"Stage {index} of {total} of building the op `{op}`: {stage.name}. {stage.instruction}\n"
             f"{start} for this stage only. kernel_spec.json and kernel_check.py describe this stage. "
-            "Start by reading kernel_spec.json" + (" and reference/eltwise_add.py." if index == 1 else " and kernel.py."))
+            "Start by reading kernel_spec.json" + (" and reference/eltwise_add.py." if index == 1 else " and kernel.py.") + kp.cheat_line(adir))
 
 
 def _stage_record(index: int, stage: Stage, outcome, wall_s: float, check: dict) -> dict:
@@ -231,7 +231,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
                              top_p=top_p, seed=seed, max_tokens=kp.BUDGET["max_tokens"])
             stage_started = time.monotonic()
             try:
-                outcome = step.run(system, _user_message(stage, index, len(stages), op))
+                outcome = step.run(system, _user_message(stage, index, len(stages), op, adir))
             finally:
                 swept_all += list(tools.swept) + kp.sweep_strays(adir)      # a shell command's own sweep removes helpers before this one runs
             stage_wall = round(time.monotonic() - stage_started, 2)

@@ -9,7 +9,7 @@ import pytest
 from orchard import full_port, port_facts
 from orchard.watchdog import command_shape
 
-TOOLS = ("last-check", "layer-diff", "facts", "show", "edit")
+TOOLS = ("last-check", "layer-diff", "facts", "show", "cheat", "edit")
 
 
 def command_lines(text: str):
