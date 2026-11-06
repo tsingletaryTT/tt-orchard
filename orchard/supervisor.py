@@ -2448,6 +2448,8 @@ class Supervisor:
                                                                 why=f"the coder's repair step ended: {out.status}", coder_failed=True)
                     if not helped_on:
                         return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
+                    if out.status in ("pause", "escalate"):
+                        self._consume_handled_stop(n, out.status)
                 touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
                 if touched:
                     self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
@@ -3300,6 +3302,11 @@ class Supervisor:
         is_due, why = phone_a_friend.due(state)
         if not is_due:
             return None
+        spent = repair_help.asks_in_stage(entries, n)
+        if spent >= repair_help.TOTAL_PER_STAGE:
+            # The stage's limit counts the repair-round asks too (review of PR 496): an attempt that follows six repair asks sends no seventh call.
+            self._friend_refused(n, f"the helper was already asked {spent} times in this stage, repair rounds included (the limit is {repair_help.TOTAL_PER_STAGE})")
+            return None
         k = state["asked_in_stage"] + 1
         stage_dir = Path(stage_dir)
         try:
@@ -3410,6 +3417,16 @@ class Supervisor:
     def _repair_help_refused(self, n: int, k: int, reason: str) -> None:
         self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=k, reason=reason[:300])
 
+    def _consume_handled_stop(self, n: int, status: str) -> None:
+        """The helper's port took over from a repair step the watchdog stopped, so the stop is handled: the actuator forgets it (the next repair
+        step would otherwise end before it sent a request) and a recorded watchdog pause is answered by a resume entry (the run would otherwise wait
+        for the operator at the stage's end). An operator abort or pause is never consumed here: only these two statuses reach this method
+        (review of PR 496)."""
+        self.actuator.clear()
+        if status == "pause":
+            self.ledger.append("decision", n, decision="resume", by="helper rescue",
+                                note="a helper-supplied port took over from the repair step the watchdog paused")
+
     def _repair_help(self, spec, stage_dir: Path, k: int, limit: int, failure: dict, raw: str, *, why: str, coder_failed: bool) -> tuple[str, bool, bool]:
         """Ask the helper for the whole corrected `port_model.py` in repair round `k` and, when the answer is a whole port and the file on disk is
         still the one that was sent (or the coder's step failed), put it in place. Returns (the sentence for the coder, whether a file was
@@ -3438,6 +3455,11 @@ class Supervisor:
             return "", False, False
         from orchard import telegraph as tg
         room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
+        if len(task) + len(fail) > room:
+            # The helper cuts the middle out of a request over its prompt cap, and its answer would then replace the whole file from a partial
+            # reading of it: the request is not sent (review of PR 496).
+            self._repair_help_refused(n, k, f"the request is {len(task) + len(fail)} characters, more than the {room} the helper's prompt cap leaves room for")
+            return "", False, False
         total = repair_help.asks_in_stage(entries, n) + 1
         sent_sha = hashlib.sha256(port_bytes).hexdigest()
         problem = phone_a_friend.problem_id(self.run_dir)

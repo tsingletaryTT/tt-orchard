@@ -59,7 +59,10 @@ def problem_id(run_dir) -> str:
     run used up the per-problem cap (6 calls) in three runs: run11 of the tiny Qwen4 rehearsal had one call left. One id per run gives every run
     its own calls, its own cost cap and its own ladder (the cheapest model first, a stronger one after a verdict of not helped)."""
     name = "".join(c if c.isalnum() or c in "-_." else "-" for c in Path(run_dir).name)[:40] or "run"
-    return f"{PROBLEM}:{name}"
+    # Two runs can share a directory name, and a long name is cut: the digest of the whole resolved path keeps every run's id its own. It is a
+    # hash, so the id holds no path (review of PR 496).
+    digest = hashlib.sha256(os.path.realpath(run_dir).encode("utf-8", "replace")).hexdigest()[:10]
+    return f"{PROBLEM}:{name}-{digest}"
 PER_ATTEMPT = 1
 PER_STAGE = 2
 DIR = "telegraph"                           # under the stage directory
@@ -389,7 +392,11 @@ def draft_problems(source: str) -> list[str]:
         else:
             most, fewest, rest = _positional(fn)
             want = SIGNATURES[name]
-            if not rest and (most < want or fewest > want):
+            needs_keyword = [a.arg for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults) if d is None]
+            if needs_keyword:
+                # The check passes positional arguments only, so a keyword-only parameter without a default raises TypeError.
+                out.append(f"{name} needs the keyword-only argument(s) {', '.join(needs_keyword)}, which the check does not pass")
+            elif fewest > want or (not rest and most < want):
                 out.append(f"{name} takes {fewest}..{most} arguments, the check passes {want}")
     return out
 
