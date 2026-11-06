@@ -107,6 +107,18 @@ Points that were easy to get wrong:
 
 It does not publish. `can commands` prints text; the supervisor and the stage agents never run it. It does not make `tt-model serve ORG/NAME` work before the bundle is on the Hub, because tt-model installs a v6 bundle only from the Hub. The boot check serves the bundle's own `run.sh`, which is what `tt-model serve` runs after the install.
 
+## Moving a vllm can to a new vLLM release (issue 507)
+
+A kind `vllm` can has two things that name a vLLM release: `vllm_version` in the spec (it goes to package-thin's `--vllm-version` and selects the boot check's `quirks` notes) and the plugin wheel, which `scripts/qwen35/build_wheels.py` cuts from a container image. The spec's version must describe the wheel. `scripts/qwen35/build_wheels.py` records the vLLM release of its default image as `IMAGE_VLLM_VERSION`, and `tests/test_can_vllm_pin_matches_wheel_image.py` fails when it differs from `vllm_version` in `config/can.qwen35.toml`.
+
+To move the Qwen3.5-35B can to vLLM 0.31.0:
+
+1. Build a container image on the plugin's 0.31.0 line (the plugin `main` since PR 254; there is no `compat/vllm-0.31` tag, so pin by commit). `tt-model package --container` builds it; the tt-metal tree and the base image must be present on the host.
+2. Check what the image's plugin carries. The current image (plugin `e37ccd87`) holds local commits that are not on plugin `main`: the prefix-state index for recurrent-state hybrids, `kv_heads_replicated`, `supports_standard_dp` and the Qwen3.5-MoE registration. A can built on a `main` plugin loses them unless they are ported. Until then the can's `[env]` must set `QWEN35_PREFIX_STATE_SLOTS = "0"` so that the model does not declare prefix caching.
+3. Run `build_wheels.py --image <new image>`, then change `IMAGE`, `IMAGE_VLLM_VERSION` and `vllm_version` in one commit. Re-run `can boot` on a leased board; a quirk note keyed to `0.26.0` stops matching and is re-checked.
+
+Until step 3 the can stays at 0.26.0.
+
 ## Qwen3.5-35B-A3B (kind `vllm`, `config/can.qwen35.toml`)
 
 The recipe package ran a published container image with a patched weight loader mounted over the image's own. A thin bundle has no image, so the can ships the same three things as wheels. What this model needed that Granite did not:
