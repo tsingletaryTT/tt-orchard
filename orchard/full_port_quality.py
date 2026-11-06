@@ -190,12 +190,19 @@ def perplexity_of(nll: float):
         return None
 
 
+def mean_nll(lps: list) -> float:
+    """The mean negative log probability. Each term is divided before it is added, so finite inputs near the float limit do not sum to infinity
+    (review of PR 491, round 6)."""
+    n = len(lps)
+    return -sum(lp / n for lp in lps)
+
+
 def summarise(record: dict, model_cfg: dict, source_stage: int) -> dict:
     """The numbers of a record that passed `record_problems`: a dict of the result's computed fields. Raises df.FloorInputError for a policy or
     config the floor cannot count."""
     ref, chip, lps = record["reference_ids"], record["chip_ids"], record["logprobs"]
     n = len(chip)
-    nll = -sum(lps) / n
+    nll = mean_nll(lps)
     ppl = perplexity_of(nll)
     gap = top5_gap_diff(record["reference_top5"], record["probe_logits"])
     free = record["free_run_ids"]
@@ -277,8 +284,9 @@ def evidence_paths(stage_dir, run_dir) -> list[str]:
 
 
 def _same(a, b) -> bool:
+    """True when two values have the same JSON text. Python equality would take `true` for 1.0 and `false` for 0.0 (review of PR 491, round 6)."""
     import json
-    return json.loads(json.dumps(a)) == json.loads(json.dumps(b))
+    return json.dumps(json.loads(json.dumps(a)), sort_keys=True) == json.dumps(json.loads(json.dumps(b)), sort_keys=True)
 
 
 def derive(stage_dir, run_dir, *, source_stage: int, rehearsal: bool = False) -> tuple[dict | None, str]:
