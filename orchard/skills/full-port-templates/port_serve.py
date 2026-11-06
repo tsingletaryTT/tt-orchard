@@ -50,6 +50,7 @@ MODEL_ID = "orchard-port"
 FORBIDDEN_PORTS = {8000, 8011, 8780}                      # other work on this machine; 8100 to 8103 are refused below
 MAX_BODY = 8 << 20
 CLIENT_TIMEOUT_S = 3000.0
+CLOSE_WAIT_S = 60.0           # how long to wait for a running completion before the worker is closed or stopped
 FILLER = "The grass is green. The sky is blue. The sun is warm. Here we go again. "
 NEEDLE = "The pass key is {key}. Remember it. "
 QUESTION = "What is the pass key? The pass key is"
@@ -82,12 +83,20 @@ def load_worker(expected_sha: str):
 
 # ---- the server ----------------------------------------------------------------------------------------------------------------
 
+class ServerClosed(Exception):
+    """The engine has been closed: the worker is shutting down and takes no more requests."""
+
+
 class Engine:
     """The port, one request at a time. `run` returns the ids the port chose for a prompt of ids."""
 
-    def __init__(self, worker, max_len: int, tokenizer, stop_ids, render):
+    def __init__(self, worker, max_len: int, tokenizer, stop_ids, render, vocab_size=None):
         self.w, self.max_len, self.tok, self.stop_ids, self.render = worker, max_len, tokenizer, set(stop_ids), render
+        # The number of token ids the loaded model can look up (the tokenizer's vocabulary, added tokens included). An id at or beyond it is
+        # refused before the port runs, since a lookup past the embedding table fails inside the port (review of PR 490, round 5). None: no check.
+        self.vocab_size = vocab_size
         self.lock = threading.Lock()
+        self.closed = False
         # Until the corpus replay has matched, the server answers only the replay's own requests, which carry this per-run secret in a header.
         # An ordinary loopback client gets 503, so it cannot get a completion from a port that is still on trial, and cannot change the worker's
         # state in the middle of the replay (review of PR 490, round 4).
@@ -106,7 +115,11 @@ class Engine:
         # A negative id would index from the end of an embedding table, or fail inside the port. It is refused here, before the port runs.
         if any(i < 0 for i in prompt) or (forced is not None and any(i < 0 for i in forced)):
             raise ValueError("token ids must not be negative")
+        if self.vocab_size is not None and (any(i >= self.vocab_size for i in prompt) or (forced is not None and any(i >= self.vocab_size for i in forced))):
+            raise ValueError(f"token ids must be below the model's vocabulary size, {self.vocab_size}")
         with self.lock:
+            if self.closed:                 # the lock was held by a running completion while the server was closing: the worker is gone
+                raise ServerClosed("the server is shutting down")
             out, finish = [], "length"
             nxt = self.w.ask(op="prefill", ids=prompt)
             for k in range(max_tokens):
@@ -118,6 +131,16 @@ class Engine:
                     break
                 out.append(nxt)
             return out, finish
+
+
+    def quiesce(self, timeout: float) -> bool:
+        """Wait for the completion that is running (the lock), then refuse every later request, so the worker can be closed or stopped while
+        nothing uses its pipes. False when the running completion did not finish in `timeout` seconds; requests are refused then too."""
+        self.closed = True              # a request that is not yet inside the lock sees this when it gets there
+        got = self.lock.acquire(timeout=timeout)
+        if got:
+            self.lock.release()
+        return got
 
 
 def make_handler(engine: Engine):
@@ -169,6 +192,8 @@ def make_handler(engine: Engine):
                 if forced is not None and not (isinstance(forced, list) and all(type(i) is int for i in forced)):
                     raise ValueError("forced_tokens must be a list of token ids")
                 ids, finish = engine.run(prompt, max_tokens, forced=forced, ignore_eos=req.get("ignore_eos") is True)
+            except ServerClosed as exc:
+                return self._json(503, {"error": {"message": str(exc)}})
             except (ValueError, KeyError, TypeError) as exc:
                 return self._json(400, {"error": {"message": str(exc)[:300]}})
             except Exception as exc:  # noqa: BLE001  a failure in the port must reach the client and the log
@@ -346,14 +371,14 @@ def main() -> int:
         RECORD.unlink()
 
     w = pc.Worker()
-    server = None
+    server = engine = None
     try:
         w.ask(op="init", n_chips=len(chips))
         t0 = time.monotonic()
         w.ask(op="load", model_dir=str(snapshot))
         load_s = max(time.monotonic() - t0, 1e-6)
         print(f"loaded in {load_s}s", flush=True)
-        engine = Engine(w, int(config["max_len"]), tok, stop_ids(snapshot), render)
+        engine = Engine(w, int(config["max_len"]), tok, stop_ids(snapshot), render, vocab_size=tok.get_vocab_size(with_added_tokens=True))
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(engine))
         port = server.server_address[1]
         if port in FORBIDDEN_PORTS or 8100 <= port <= 8103:
@@ -407,8 +432,14 @@ def main() -> int:
         c_first = post(port, "/v1/completions", canary_body)["choices"][0]["token_ids"]
         c_between = post(port, "/v1/completions", other)["choices"][0]["token_ids"]
         c_second = post(port, "/v1/completions", canary_body)["choices"][0]["token_ids"]
+        # Nothing but this script is meant to be talking to the server now. A client that is mid-completion finishes first, and a later one is
+        # refused, so the worker's pipes are used by one caller when `close` goes out (review of PR 490, round 5).
+        if not engine.quiesce(CLOSE_WAIT_S):
+            raise ServeFailed(f"a request was still running {CLOSE_WAIT_S} seconds after the checks ended; the worker was not closed under it")
         w.ask(op="close")
     finally:
+        if engine is not None:
+            engine.quiesce(CLOSE_WAIT_S)        # the failure paths too: stop no worker that a handler is still using
         if server is not None:
             server.shutdown()
             server.server_close()
