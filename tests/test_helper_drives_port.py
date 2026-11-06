@@ -205,9 +205,10 @@ def test_the_furthest_port_is_recorded_with_its_op_and_hash_and_only_when_it_is_
     attempts(rig, [])
     rig.run()
     best = decs(rig, rh.BEST)
-    assert [(b["op"], b["rank"]) for b in best] == [("prefill", 3)]             # the load failures of the rounds are not further
+    # the load failures of the rounds are not further; attempt 2's working port (its check ran to the end) is, and ranks above every failure
+    assert [(b["op"], b["rank"]) for b in best] == [("prefill", 3), (None, rh.PASSED_RANK)]
     assert best[0]["port_sha256"] == hashlib.sha256(PREFILL_BROKEN.encode()).hexdigest()
-    copy = rig.run_dir / "stages" / "2.best" / "port_model.py"
+    copy = rig.run_dir / "stages" / "2.best" / best[0]["snapshot"] / "port_model.py"
     assert copy.is_file() and hashlib.sha256(copy.read_bytes()).hexdigest() == best[0]["port_sha256"]
 
 
@@ -226,45 +227,160 @@ def test_a_later_attempt_starts_from_the_best_port_not_from_the_skeleton(rig, mo
     assert not decs(rig, paf.ASKED)                                               # a restored best port makes the attempt-start ask unnecessary
 
 
-def test_a_port_the_coder_has_written_is_not_replaced_by_the_best_port(tmp_path):
+def _stage_with_port(tmp_path, text: bytes, **extra):
+    """stages/2/port holding port_model.py and the extra files (name: bytes)."""
     stage = tmp_path / "stages" / "2"
     (stage / "port").mkdir(parents=True)
+    (stage / "port" / "port_model.py").write_bytes(text)
+    for name, data in extra.items():
+        (stage / "port" / name).write_bytes(data)
+    return stage
+
+
+def _next_attempt(stage, skeleton, **extra):
+    """The same stage directory as a later attempt starts it: the port directory holds the skeleton (and the extra files, name: bytes)."""
+    import shutil
+    shutil.rmtree(stage / "port")
+    (stage / "port").mkdir()
+    (stage / "port" / "port_model.py").write_bytes(skeleton)
+    for name, data in extra.items():
+        (stage / "port" / name).write_bytes(data)
+
+
+def test_a_port_the_coder_has_written_is_not_replaced_by_the_best_port(tmp_path):
     skeleton = b"# the skeleton\n"
-    best_text = PREFILL_BROKEN.encode()
-    assert rh.save_best(stage, best_text)
-    entry = {"port_sha256": hashlib.sha256(best_text).hexdigest(), "rank": 3, "op": "prefill"}
+    stage = _stage_with_port(tmp_path, PREFILL_BROKEN.encode())
+    entry = rh.save_best(stage)
+    assert entry is not None
     (stage / "port" / "port_model.py").write_bytes(b"# the coder wrote this\n")
     placed, why = rh.restore_best(stage, entry, skeleton)
     assert placed is False and "not the unchanged skeleton" in why
     assert (stage / "port" / "port_model.py").read_bytes() == b"# the coder wrote this\n"
     (stage / "port" / "port_model.py").write_bytes(skeleton)
     assert rh.restore_best(stage, entry, skeleton) == (True, "")
-    assert (stage / "port" / "port_model.py").read_bytes() == best_text
+    assert (stage / "port" / "port_model.py").read_bytes() == PREFILL_BROKEN.encode()
 
 
 def test_a_best_copy_that_does_not_match_the_ledgers_hash_is_not_put_in_place(tmp_path):
-    stage = tmp_path / "stages" / "2"
-    (stage / "port").mkdir(parents=True)
     skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"# something else than the ledger recorded\n")
+    entry = rh.save_best(stage)
     (stage / "port" / "port_model.py").write_bytes(skeleton)
-    rh.save_best(stage, b"# something else than the ledger recorded\n")
-    placed, why = rh.restore_best(stage, {"port_sha256": hashlib.sha256(b"x").hexdigest(), "rank": 3}, skeleton)
+    copy = tmp_path / "stages" / "2.best" / entry["snapshot"] / "port_model.py"
+    copy.write_bytes(b"# changed after the ledger entry\n")
+    placed, why = rh.restore_best(stage, entry, skeleton)
     assert placed is False and "does not match" in why
     assert (stage / "port" / "port_model.py").read_bytes() == skeleton
 
 
 def test_a_link_in_place_of_the_best_copy_is_refused(tmp_path):
-    stage = tmp_path / "stages" / "2"
-    (stage / "port").mkdir(parents=True)
     skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"# a port\n")
+    entry = rh.save_best(stage)
     (stage / "port" / "port_model.py").write_bytes(skeleton)
-    target = tmp_path / "elsewhere.py"
-    target.write_bytes(b"# elsewhere\n")
-    best_dir = tmp_path / "stages" / "2.best"
-    best_dir.mkdir()
-    os.symlink(target, best_dir / "port_model.py")
-    placed, why = rh.restore_best(stage, {"port_sha256": hashlib.sha256(b"# elsewhere\n").hexdigest(), "rank": 3}, skeleton)
+    copy = tmp_path / "stages" / "2.best" / entry["snapshot"] / "port_model.py"
+    elsewhere = tmp_path / "elsewhere.py"
+    elsewhere.write_bytes(b"# a port\n")                      # the same bytes, so only the link can refuse it
+    copy.unlink()
+    os.symlink(elsewhere, copy)
+    placed, why = rh.restore_best(stage, entry, skeleton)
     assert placed is False and "link" in why
+
+
+# ---- round 2 of the review of PR 497: snapshots, supporting files, links -------------------------------------------------------------------
+
+def test_the_snapshot_keeps_the_supporting_files_and_restores_them_all(tmp_path):
+    """Finding: only port_model.py was saved, so a port that imports a neighbour lost it when the failed attempt was moved aside."""
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"import helper\n", **{"helper.py": b"X = 1\n"})
+    (stage / "port" / "pkg").mkdir()
+    (stage / "port" / "pkg" / "__init__.py").write_bytes(b"Y = 2\n")
+    (stage / "port" / "__pycache__").mkdir()
+    (stage / "port" / "__pycache__" / "helper.cpython-312.pyc").write_bytes(b"\0")
+    entry = rh.save_best(stage)
+    assert [f["path"] for f in entry["files"]] == ["helper.py", "pkg/__init__.py", "port_model.py"]
+    _next_attempt(stage, skeleton)
+    fresh = stage
+    assert rh.restore_best(fresh, entry, skeleton) == (True, "")
+    assert (fresh / "port" / "helper.py").read_bytes() == b"X = 1\n"
+    assert (fresh / "port" / "pkg" / "__init__.py").read_bytes() == b"Y = 2\n"
+    assert not (fresh / "port" / "__pycache__").exists()
+
+
+def test_a_supporting_file_the_attempt_already_wrote_is_not_replaced_by_the_restore(tmp_path):
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"import helper\n", **{"helper.py": b"X = 1\n"})
+    entry = rh.save_best(stage)
+    _next_attempt(stage, skeleton, **{"helper.py": b"# the coder's own\n"})
+    fresh = stage
+    placed, why = rh.restore_best(fresh, entry, skeleton)
+    assert placed is False and "already exists" in why
+    assert (fresh / "port" / "port_model.py").read_bytes() == skeleton and (fresh / "port" / "helper.py").read_bytes() == b"# the coder's own\n"
+
+
+def test_a_file_list_that_does_not_hash_to_the_snapshots_name_is_refused(tmp_path):
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"# a port\n")
+    entry = rh.save_best(stage)
+    forged = dict(entry, files=[dict(entry["files"][0], sha256=hashlib.sha256(b"# another port\n").hexdigest())])
+    (stage / "port" / "port_model.py").write_bytes(skeleton)
+    placed, why = rh.restore_best(stage, forged, skeleton)
+    assert placed is False and "does not match the snapshot's name" in why
+
+
+def test_a_restore_that_fails_part_way_leaves_the_skeleton_as_the_entry_module(tmp_path, monkeypatch):
+    """The supporting files go first: when one cannot be written, port_model.py is still the skeleton and the next attempt can try again."""
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"import zz\n")
+    (stage / "port" / "zz").mkdir()
+    (stage / "port" / "zz" / "mod.py").write_bytes(b"Z = 1\n")
+    entry = rh.save_best(stage)
+    _next_attempt(stage, skeleton)
+    real = rh.safeio.write_beneath
+
+    def failing(fd, parts, data, **kw):
+        if tuple(parts) == ("port", "zz", "mod.py"):
+            raise rh.safeio.PathRefused("the disk refused this file")
+        return real(fd, parts, data, **kw)
+    monkeypatch.setattr(rh.safeio, "write_beneath", failing)
+    placed, why = rh.restore_best(stage, entry, skeleton)
+    assert placed is False and "disk refused" in why
+    assert (stage / "port" / "port_model.py").read_bytes() == skeleton
+
+
+def test_a_new_best_port_never_replaces_the_snapshot_an_earlier_entry_names(tmp_path):
+    """Finding: the single saved copy was replaced before its hash reached the ledger, so a stop between the two left the old entry pointing at other bytes."""
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"# first best\n")
+    first = rh.save_best(stage)
+    (stage / "port" / "port_model.py").write_bytes(b"# second best\n")
+    second = rh.save_best(stage)                       # the ledger entry for this one was never written (a stop)
+    assert first["snapshot"] != second["snapshot"]
+    (stage / "port" / "port_model.py").write_bytes(skeleton)
+    assert rh.restore_best(stage, first, skeleton) == (True, "")        # the earlier entry still restores its own bytes
+    assert (stage / "port" / "port_model.py").read_bytes() == b"# first best\n"
+
+
+def test_a_link_in_the_port_directory_refuses_the_snapshot(tmp_path):
+    stage = _stage_with_port(tmp_path, b"# a port\n")
+    os.symlink(tmp_path / "elsewhere.py", stage / "port" / "extra.py")
+    assert rh.save_best(stage) is None
+
+
+def test_the_restore_does_not_write_through_a_port_directory_that_became_a_link(tmp_path):
+    """Finding: the write went to the port path by name, so a `port` directory swapped for a link after the skeleton check redirected it."""
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, b"# a port\n")
+    entry = rh.save_best(stage)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "port_model.py").write_bytes(skeleton)
+    import shutil
+    shutil.rmtree(stage / "port")
+    os.symlink(outside, stage / "port", target_is_directory=True)
+    placed, why = rh.restore_best(stage, entry, skeleton)
+    assert placed is False
+    assert (outside / "port_model.py").read_bytes() == skeleton
 
 
 # ---- the unit parts -------------------------------------------------------------------------------------------------------------------------

@@ -60,7 +60,7 @@ HELPER_TOTAL = 16                          # asks in stage 2 when the helper dri
 DRIVEN = "helper-driven round"             # the ledger entry of a round the helper drove: `round`, `op`, hashes, `cost_usd`, `change`
 BEST = "best port recorded"                # the furthest a port has got along the request chain: `op`, `rank`, `port_sha256`, `attempt`
 RESTORED = "best port restored"            # the best port put back at the start of an attempt: `op`, `port_sha256`, `skeleton_sha256`
-BEST_DIR = "2.best"                        # stages/2.best/port_model.py: a copy that the move-aside of a failed attempt does not take
+BEST_DIR = "2.best"                        # stages/2.best/<snapshot>/: copies of the best port that the move-aside of a failed attempt does not take
 PASSED_RANK = 99                           # a check that passed is further along than any failure
 PER_ROUND = 1
 PORT_CAP = 90_000                          # characters of port_model.py sent (a larger file is not sent)
@@ -374,43 +374,137 @@ def best_state(entries: list[dict], n: int):
     return best
 
 
-def best_path(stage_dir) -> Path:
-    """stages/2.best/port_model.py next to the stage directory: the move-aside of a failed attempt takes stages/2 and leaves this."""
-    return Path(stage_dir).parent / BEST_DIR / "port_model.py"
+SNAPSHOT_MAX_FILES = 64                    # files of the port directory a best snapshot keeps (a port with more is not snapshotted)
+SNAPSHOT_TOTAL_MAX = 4 * PORT_MAX          # bytes in one snapshot
 
 
-def save_best(stage_dir, data: bytes) -> bool:
-    """Write `data` as the best port's copy. True when it was written."""
-    target = best_path(stage_dir)
+def best_root(stage_dir) -> Path:
+    """stages/2.best next to the stage directory: the move-aside of a failed attempt takes stages/2 and leaves this."""
+    return Path(stage_dir).parent / BEST_DIR
+
+
+def manifest_digest(files: list[dict]) -> str:
+    """The sha256 of a snapshot's file list in canonical form. It names the snapshot's directory, so a directory's name says what it must hold."""
+    import json
+    return hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def snapshot_port(stage_dir) -> tuple[list[tuple[str, bytes]] | None, str]:
+    """(the files of stages/2/port as (relative path, bytes), "") or (None, why). Read beneath a pinned stage directory, so a link swapped in for
+    `port` or for a directory under it is refused. A link or a special file in the tree refuses the snapshot, `__pycache__` is left out, and
+    a tree over `SNAPSHOT_MAX_FILES` files or `SNAPSHOT_TOTAL_MAX` bytes is not kept. `port_model.py` must be among the files (the ports may import
+    their neighbours, review of PR 497, so all of them are kept)."""
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        safeio.atomic_write(target, data, mode=0o644, replace=True)
-    except (OSError, safeio.SafeReadError):
-        return False
-    return True
+        with safeio.pinned_root(stage_dir) as pin:
+            pfd = safeio.open_beneath(pin.fd, ("port",))
+            port = safeio.Pin(pfd, "port")
+            try:
+                found: list[tuple[str, ...]] = []
+                bad: list[str] = []
+
+                def visit(entry) -> None:
+                    if "__pycache__" in entry.parts:
+                        return
+                    if entry.kind == "file":
+                        found.append(entry.parts)
+                    elif entry.kind != "dir":
+                        bad.append("/".join(entry.parts))
+
+                scan = safeio.scan_beneath(port, visit, max_entries=4 * SNAPSHOT_MAX_FILES)
+                if scan.incomplete:
+                    return None, "the port directory could not be listed in full"
+                if bad:
+                    return None, f"the port directory holds a link or a special file ({bad[0]})"
+                if len(found) > SNAPSHOT_MAX_FILES:
+                    return None, f"the port directory holds more than {SNAPSHOT_MAX_FILES} files"
+                files, total = [], 0
+                for parts in sorted(found):
+                    data = safeio.read_beneath(port.fd, parts, max_bytes=PORT_MAX)
+                    total += len(data)
+                    if total > SNAPSHOT_TOTAL_MAX:
+                        return None, "the port directory is larger than a snapshot may be"
+                    files.append(("/".join(parts), data))
+            finally:
+                port.close()
+    except safeio.SafeReadError as exc:
+        return None, f"the port directory could not be read ({exc.reason})"
+    if not any(rel == "port_model.py" for rel, _ in files):
+        return None, "port_model.py is not in the port directory"
+    return files, ""
+
+
+def save_best(stage_dir) -> dict | None:
+    """Keep the port directory as it is now in `stages/2.best/<snapshot>/`, where `<snapshot>` is the digest of the file list, and return the record
+    for the ledger: {"snapshot", "files": [{"path", "sha256", "bytes"}], "port_sha256"}. None when it could not be kept.
+
+    A snapshot is written once and never replaced: its name is a digest of what it holds, so a new best port goes to a new directory and the
+    one an earlier ledger entry names stays as it was. The caller writes the ledger entry after this returns; a stop between the two leaves a
+    directory nothing refers to, and the earlier best port is still restorable (review of PR 497)."""
+    files, _ = snapshot_port(stage_dir)
+    if files is None:
+        return None
+    listing = [{"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)} for rel, data in files]
+    digest = manifest_digest(listing)
+    try:
+        with safeio.pinned_root(Path(stage_dir).parent) as pin:
+            for rel, data in files:
+                safeio.write_beneath(pin.fd, (BEST_DIR, digest, *rel.split("/")), data, mode=0o644)
+    except safeio.SafeReadError:
+        return None
+    port_sha = next(item["sha256"] for item in listing if item["path"] == "port_model.py")
+    return {"snapshot": digest, "files": listing, "port_sha256": port_sha}
+
+
+def _exists(pin, parts) -> bool:
+    """Whether anything (even a link or a directory) stands at `parts` beneath the pin."""
+    try:
+        safeio.read_beneath(pin.fd, parts, max_bytes=PORT_MAX)
+        return True
+    except safeio.ReadFailed as exc:
+        return not ("(ENOENT)" in exc.reason or "(ENOTDIR)" in exc.reason)
+    except safeio.SafeReadError:
+        return True
 
 
 def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
-    """Put the best port in place of the unchanged skeleton. (placed, why). The copy's hash must equal the one the ledger recorded, the file
-    in the port directory must still be the skeleton byte for byte, and neither may be a link: a file the coder or the helper has written is
-    never replaced."""
-    port = Path(stage_dir) / "port" / "port_model.py"
+    """Put the best port's snapshot in place of the unchanged skeleton. (placed, why). The ledger entry `best` names the snapshot and lists its
+    files with their hashes; every file of the directory it names must match, and the list must hash to the name. The port directory must still
+    hold the skeleton byte for byte and no other file of the snapshot's list: a file the coder or the helper wrote is never replaced. Reads
+    and writes go beneath pinned directories, so a link swapped in is refused. The supporting files are written before `port_model.py`, so a
+    failure part-way leaves the skeleton as the entry module and the next attempt can try again."""
+    snapshot, listing = best.get("snapshot"), best.get("files")
+    if not (isinstance(snapshot, str) and len(snapshot) == 64 and isinstance(listing, list) and listing):
+        return False, "the ledger entry names no snapshot of the best port"
+    try:
+        files = [(str(item["path"]), str(item["sha256"])) for item in listing]
+    except (KeyError, TypeError):
+        return False, "the ledger entry's file list is malformed"
+    if manifest_digest(listing) != snapshot:
+        return False, "the ledger entry's file list does not match the snapshot's name"
+    if len(files) > SNAPSHOT_MAX_FILES or not any(rel == "port_model.py" for rel, _ in files):
+        return False, "the ledger entry's file list is not a port"
     current, why = read_port(stage_dir)
     if current is None:
         return False, why
     if current.rstrip(b"\n") != skeleton.rstrip(b"\n"):
         return False, "port_model.py is not the unchanged skeleton"
-    source = best_path(stage_dir)
+    blobs: list[tuple[str, bytes]] = []
     try:
-        if os.path.islink(source) or not os.path.isfile(source):
-            return False, "the best port's copy is missing or is a link"
-        data = safeio.read_bytes(source, max_bytes=PORT_MAX)
-    except (OSError, safeio.SafeReadError) as exc:
-        return False, f"the best port's copy could not be read ({exc.__class__.__name__})"
-    if hashlib.sha256(data).hexdigest() != best.get("port_sha256"):
-        return False, "the best port's copy does not match the hash the ledger recorded"
+        with safeio.pinned_root(Path(stage_dir).parent) as pin:
+            for rel, want in files:
+                data = safeio.read_beneath(pin.fd, (BEST_DIR, snapshot, *rel.split("/")), max_bytes=PORT_MAX)
+                if hashlib.sha256(data).hexdigest() != want:
+                    return False, f"the best port's copy of {rel} does not match the hash the ledger recorded"
+                blobs.append((rel, data))
+    except safeio.SafeReadError as exc:
+        return False, f"the best port's copy is missing, is a link, or could not be read ({exc.reason})"
     try:
-        safeio.atomic_write(port, data, mode=0o644, replace=True)
-    except (OSError, safeio.SafeReadError) as exc:
-        return False, f"port_model.py could not be written ({exc.__class__.__name__})"
+        with safeio.pinned_root(stage_dir) as pin:
+            for rel, _ in blobs:
+                if rel != "port_model.py" and _exists(pin, ("port", *rel.split("/"))):
+                    return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
+            for rel, data in sorted(blobs, key=lambda item: item[0] == "port_model.py"):
+                safeio.write_beneath(pin.fd, ("port", *rel.split("/")), data, mode=0o644)
+    except safeio.SafeReadError as exc:
+        return False, f"the port could not be written ({exc.reason})"
     return True, ""
