@@ -107,6 +107,7 @@ def test_an_attempt_start_ask_is_refused_when_the_repair_asks_have_spent_the_sta
     led.append("stage_start", 2, escalated=True, resumed=False)
     s = object.__new__(Supervisor)
     s.ledger = led
+    s.repair_help, s.helper_drives = True, False
     asked = []
     s.telegraph = type("T", (), {"ask": lambda *a, **k: asked.append(a)})()
     stage = tmp_path / "stages" / "2"
@@ -191,6 +192,7 @@ def _supervisor_after_failed_attempt(tmp_path, repair_asks):
     led.append("stage_start", 2, escalated=True, resumed=False)
     s = object.__new__(Supervisor)
     s.ledger = led
+    s.repair_help, s.helper_drives = True, False
     s.telegraph = object()
     placed = []
     s._place_friend_draft = lambda n, stage_dir, draft, call_id: placed.append(draft.name)
@@ -310,6 +312,7 @@ def _answered_then_tested(tmp_path, *, tested, after="prefill", vouch=True):
                    path=str((stage / port_repair.MARKER).relative_to(run)), sha256=hashlib.sha256(raw).hexdigest())
     s = object.__new__(Supervisor)
     s.run_dir, s.ledger, s.repair_help = run, led, True
+    s.helper_drives = False                  # PR 497 adds the flag; the coder drives the rounds in this test
     reported = []
     s.telegraph = type("T", (), {"report": lambda self, call_id, helped, note="": reported.append((call_id, helped, note))})()
     return s, stage, reported

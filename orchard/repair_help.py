@@ -55,6 +55,13 @@ NOT_PLACED = "telegraph repair not placed"
 PROGRESS = "telegraph repair progress"     # the verdict: `call_id`, `before_op`, `after_op`, `outcome`, `helped`
 
 TOTAL_PER_STAGE = 6                        # asks in stage 2, at attempt starts and in repair rounds together
+HELPER_ROUNDS = 10                         # rounds of the helper-driven loop (no coder step) a stage 2 attempt may run
+HELPER_TOTAL = 16                          # asks in stage 2 when the helper drives (attempt starts and rounds together)
+DRIVEN = "helper-driven round"             # the ledger entry of a round the helper drove: `round`, `op`, hashes, `cost_usd`, `change`
+BEST = "best port recorded"                # the furthest a port has got along the request chain: `op`, `rank`, `port_sha256`, `attempt`
+RESTORED = "best port restored"            # the best port put back at the start of an attempt: `op`, `port_sha256`, `skeleton_sha256`
+BEST_DIR = "2.best"                        # stages/2.best/<snapshot>/: copies of the best port that the move-aside of a failed attempt does not take
+PASSED_RANK = 99                           # a check that passed is further along than any failure
 PER_ROUND = 1
 PORT_CAP = 90_000                          # characters of port_model.py sent (a larger file is not sent)
 PORT_PARTS = ("port", "port_model.py")         # the port file beneath the stage directory
@@ -120,13 +127,14 @@ def asked_in_round(entries: list[dict], n: int, k: int) -> bool:
                and _data(e).get("round") == k for e in entries)
 
 
-def due(entries: list[dict], n: int, k: int) -> tuple[bool, str]:
-    """(True, "") when a repair ask for round `k` is within the limits, else (False, why)."""
+def due(entries: list[dict], n: int, k: int, total: int = TOTAL_PER_STAGE) -> tuple[bool, str]:
+    """(True, "") when a repair ask for round `k` is within the limits, else (False, why). `total` is the stage's cap on asks (`HELPER_TOTAL` when
+    the helper drives)."""
     if asked_in_round(entries, n, k):
         return False, f"the helper was already asked in round {k}"
     used = asks_in_stage(entries, n)
-    if used >= TOTAL_PER_STAGE:
-        return False, f"the helper was already asked {used} times in this stage (the limit is {TOTAL_PER_STAGE})"
+    if used >= total:
+        return False, f"the helper was already asked {used} times in this stage (the limit is {total})"
     return True, ""
 
 
@@ -204,7 +212,7 @@ def _read_in(pin) -> bytes:
     return safeio.read_beneath(pin.fd, PORT_PARTS, max_bytes=PORT_MAX)
 
 
-def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listing: str, homes: tuple) -> tuple[str | None, dict]:
+def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listing: str, homes: tuple, previous: str | None = None) -> tuple[str | None, dict]:
     """(the task text, the inputs record), or (None, the record) when the port is larger than `PORT_CAP` (the helper would answer a cut file)."""
     sent: dict[str, object] = {}
     clean_port = port_repair.safe_text(port_text, homes)
@@ -220,6 +228,9 @@ def build_task(*, facts: str | None, excerpts: str | None, port_text: str, listi
         clipped, was_cut = paf._clip(key, port_repair.safe_text(text, homes), cap)
         sections.append(f"## The {label}\n" + clipped)
         sent[key] = {"chars": len(clipped), "cut": was_cut}
+    if previous:
+        sections.append("## What the previous round did\n" + port_repair.safe_text(previous, homes)[:1500])
+        sent["previous"] = {"chars": min(len(previous), 1500)}
     sections.append("## The current stages/2/port/port_model.py (the version the check just failed on)\n```python\n" + clean_port.rstrip("\n") + "\n```")
     sent["port"] = {"chars": len(clean_port), "cut": False}
     listing_text, listing_cut = paf._clip("listing", port_repair.safe_text(listing, homes), paf.FILES_CAP)
@@ -299,3 +310,272 @@ def coder_note(call_id: str, placed: bool, rel_path: str) -> str:
                 "be wrong: read the new file, correct whatever the facts file or the check shows to be wrong, and keep what works. If the file "
                 "already looks right, change nothing that works.")
     return ""
+
+
+# ---- the helper-driven loop: what the helper is told about the round before, and when to hand back to the coder ------------------------------
+
+# Up to this many line pairs the diff counts exactly (repeated lines included). Above it the library's repetition heuristic is on, because the
+# exact search is quadratic for long runs of one line and this runs on the supervisor's thread (review of PR 497, round 6).
+DIFF_EXACT_PRODUCT = 4_000_000
+
+
+def change_summary(old: str, new: str) -> str:
+    """One line on what `new` changes in `old`: the count of lines added and removed and the names of the functions whose text changed (at most
+    six). Computed by the supervisor from the two files, never taken from the helper's words."""
+    import difflib
+    a, b = old.splitlines(), new.splitlines()
+    added = removed = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=len(a) * len(b) > DIFF_EXACT_PRODUCT).get_opcodes():
+        if tag in ("replace", "delete"):
+            removed += i2 - i1
+        if tag in ("replace", "insert"):
+            added += j2 - j1
+    names = _changed_functions(old, new)
+    where = ("; functions changed: " + ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")) if names else ""
+    return f"{added} lines added, {removed} removed{where}"
+
+
+def _changed_functions(old: str, new: str) -> list[str]:
+    import ast
+    def table(src: str) -> dict:
+        try:
+            tree = ast.parse(src)
+            # The dump is inside the guard: a tree that parses can still be too deep to dump (review of PR 497, round 6).
+            return {node.name: ast.dump(node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            return {}
+    before, after = table(old), table(new)
+    return sorted(name for name in after if before.get(name) != after[name])
+
+
+def _round_entry(entries: list[dict], n: int, k: int):
+    floor = _last_start(entries, n)
+    for e in reversed(entries):
+        if (e.get("stage") == n and e.get("event") == "decision" and _decision(e) == port_repair.DECISION and e["seq"] > floor
+                and _data(e).get("round") == k):
+            return e
+    return None
+
+
+def previous_round_section(entries: list[dict], n: int, k: int) -> str | None:
+    """The text that tells the helper what round `k - 1` of this attempt did: the failure it was asked about, the change the supervisor computed
+    between the file it sent and the file it placed, and the failure that followed (this round's). None in the first round or when the ledger
+    holds no such round."""
+    prev, cur = _round_entry(entries, n, k - 1) if k > 1 else None, _round_entry(entries, n, k)
+    if prev is None or cur is None:
+        return None
+    pd, cd = _data(prev), _data(cur)
+    change = ""
+    for e in reversed(entries):
+        if e.get("stage") == n and e.get("event") == "decision" and _decision(e) in (PLACED, DRIVEN) and e["seq"] > prev["seq"] and e["seq"] < cur["seq"]:
+            change = str(_data(e).get("change") or "")
+            if change:
+                break
+    lines = [f"Round {k - 1} failed at the {pd.get('op')!r} request: {pd.get('failure')}"]
+    if change:
+        lines.append(f"The file was then changed ({change}).")
+    lines.append(f"This round the check failed at the {cd.get('op')!r} request: {cd.get('failure')}")
+    lines.append("Do not repeat a change that did not move the failure.")
+    return "\n".join(lines)
+
+
+def same_failure_twice(entries: list[dict], n: int, k: int) -> bool:
+    """True when round `k` and round `k - 1` of this attempt failed at the same request with the same message: the helper's change did not
+    move anything, so the helper-driven loop hands the port back to the coder's repair rounds."""
+    prev, cur = (_round_entry(entries, n, k - 1) if k > 1 else None), _round_entry(entries, n, k)
+    if prev is None or cur is None:
+        return False
+    pd, cd = _data(prev), _data(cur)
+    return pd.get("op") == cd.get("op") and bool(cd.get("failure")) and pd.get("failure") == cd.get("failure")
+
+
+# ---- the best port so far, kept across attempts ----------------------------------------------------------------------------------------
+
+def best_rank(op) -> int:
+    """How far a check got: 0 for a failure before any request or an op this module does not know, 1..4 along `OPS`, `PASSED_RANK` for none."""
+    r = rank(op)
+    return r if r is not None else 0
+
+
+def best_state(entries: list[dict], n: int):
+    """The best port recorded so far in stage `n` (the `best port recorded` entry with the highest rank, the latest on a tie), or None."""
+    best = None
+    for e in entries:
+        if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == BEST:
+            d = _data(e)
+            if isinstance(d.get("rank"), int) and isinstance(d.get("port_sha256"), str) and (best is None or d["rank"] >= best["rank"]):
+                best = d
+    return best
+
+
+SNAPSHOT_MAX_FILES = 64                    # files of the port directory a best snapshot keeps (a port with more is not snapshotted)
+SNAPSHOT_TOTAL_MAX = 4 * PORT_MAX          # bytes in one snapshot
+
+
+def best_root(stage_dir) -> Path:
+    """stages/2.best next to the stage directory: the move-aside of a failed attempt takes stages/2 and leaves this."""
+    return Path(stage_dir).parent / BEST_DIR
+
+
+def manifest_digest(files: list[dict]) -> str:
+    """The sha256 of a snapshot's file list in canonical form. It names the snapshot's directory, so a directory's name says what it must hold."""
+    import json
+    return hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def snapshot_port(stage_dir) -> tuple[list[tuple[str, bytes]] | None, str]:
+    """(the files of stages/2/port as (relative path, bytes), "") or (None, why). Read beneath a pinned stage directory, so a link swapped in for
+    `port` or for a directory under it is refused. A link or a special file in the tree refuses the snapshot, `__pycache__` is left out, and
+    a tree over `SNAPSHOT_MAX_FILES` files or `SNAPSHOT_TOTAL_MAX` bytes is not kept. `port_model.py` must be among the files (the ports may import
+    their neighbours, review of PR 497, so all of them are kept)."""
+    try:
+        with safeio.pinned_root(stage_dir) as pin:
+            pfd = safeio.open_beneath(pin.fd, ("port",))
+            port = safeio.Pin(pfd, "port")
+            try:
+                found: list[tuple[str, ...]] = []
+                bad: list[str] = []
+
+                def visit(entry) -> None:
+                    if "__pycache__" in entry.parts:
+                        return
+                    if entry.kind == "file":
+                        found.append(entry.parts)
+                    elif entry.kind != "dir":
+                        bad.append("/".join(entry.parts))
+
+                scan = safeio.scan_beneath(port, visit, max_entries=4 * SNAPSHOT_MAX_FILES)
+                if scan.incomplete:
+                    return None, "the port directory could not be listed in full"
+                if bad:
+                    return None, f"the port directory holds a link or a special file ({bad[0]})"
+                if len(found) > SNAPSHOT_MAX_FILES:
+                    return None, f"the port directory holds more than {SNAPSHOT_MAX_FILES} files"
+                files, total = [], 0
+                for parts in sorted(found):
+                    data = safeio.read_beneath(port.fd, parts, max_bytes=PORT_MAX)
+                    total += len(data)
+                    if total > SNAPSHOT_TOTAL_MAX:
+                        return None, "the port directory is larger than a snapshot may be"
+                    files.append(("/".join(parts), data))
+            finally:
+                port.close()
+    except safeio.SafeReadError as exc:
+        return None, f"the port directory could not be read ({exc.reason})"
+    if not any(rel == "port_model.py" for rel, _ in files):
+        return None, "port_model.py is not in the port directory"
+    return files, ""
+
+
+def save_best(stage_dir) -> dict | None:
+    """Keep the port directory as it is now in `stages/2.best/<snapshot>/`, where `<snapshot>` is the digest of the file list, and return the record
+    for the ledger: {"snapshot", "files": [{"path", "sha256", "bytes"}], "port_sha256"}. None when it could not be kept.
+
+    A snapshot is written once and never replaced: its name is a digest of what it holds, so a new best port goes to a new directory and the
+    one an earlier ledger entry names stays as it was. The caller writes the ledger entry after this returns; a stop between the two leaves a
+    directory nothing refers to, and the earlier best port is still restorable (review of PR 497)."""
+    files, _ = snapshot_port(stage_dir)
+    if files is None:
+        return None
+    listing = [{"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)} for rel, data in files]
+    digest = manifest_digest(listing)
+    try:
+        with safeio.pinned_root(Path(stage_dir).parent) as pin:
+            for rel, data in files:
+                safeio.write_beneath(pin.fd, (BEST_DIR, digest, *rel.split("/")), data, mode=0o644)
+    except safeio.SafeReadError:
+        return None
+    port_sha = next(item["sha256"] for item in listing if item["path"] == "port_model.py")
+    return {"snapshot": digest, "files": listing, "port_sha256": port_sha}
+
+
+def _exists(pin, parts) -> bool:
+    """Whether anything (even a link or a directory) stands at `parts` beneath the pin."""
+    try:
+        safeio.read_beneath(pin.fd, parts, max_bytes=PORT_MAX)
+        return True
+    except safeio.ReadFailed as exc:
+        return not ("(ENOENT)" in exc.reason or "(ENOTDIR)" in exc.reason)
+    except safeio.SafeReadError:
+        return True
+
+
+def _holds(fd: int, parts, data: bytes) -> bool:
+    """Whether the regular file at `parts` beneath descriptor `fd` holds exactly `data`. A restore interrupted after it wrote a supporting file
+    leaves one; the retry accepts it because replacing it would write the same bytes (review of PR 497, round 4)."""
+    try:
+        return safeio.read_beneath(fd, tuple(parts), max_bytes=PORT_MAX) == data
+    except safeio.SafeReadError:
+        return False
+
+
+def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
+    """Put the best port's snapshot in place of the unchanged skeleton. (placed, why). The ledger entry `best` names the snapshot and lists its
+    files with their hashes; every file of the directory it names must match, and the list must hash to the name. The port directory must still
+    hold the skeleton byte for byte and no other file of the snapshot's list: a file the coder or the helper wrote is never replaced. Reads
+    and writes go beneath pinned directories, so a link swapped in is refused. The supporting files are written before `port_model.py`, so a
+    failure part-way leaves the skeleton as the entry module and the next attempt can try again."""
+    snapshot, listing = best.get("snapshot"), best.get("files")
+    if not (isinstance(snapshot, str) and len(snapshot) == 64 and isinstance(listing, list) and listing):
+        return False, "the ledger entry names no snapshot of the best port"
+    try:
+        files = [(str(item["path"]), str(item["sha256"])) for item in listing]
+    except (KeyError, TypeError):
+        return False, "the ledger entry's file list is malformed"
+    if manifest_digest(listing) != snapshot:
+        return False, "the ledger entry's file list does not match the snapshot's name"
+    if len(files) > SNAPSHOT_MAX_FILES or not any(rel == "port_model.py" for rel, _ in files):
+        return False, "the ledger entry's file list is not a port"
+    current, why = read_port(stage_dir)
+    if current is None:
+        return False, why
+    if current.rstrip(b"\n") != skeleton.rstrip(b"\n"):
+        return False, "port_model.py is not the unchanged skeleton"
+    blobs: list[tuple[str, bytes]] = []
+    try:
+        with safeio.pinned_root(Path(stage_dir).parent) as pin:
+            for rel, want in files:
+                data = safeio.read_beneath(pin.fd, (BEST_DIR, snapshot, *rel.split("/")), max_bytes=PORT_MAX)
+                if hashlib.sha256(data).hexdigest() != want:
+                    return False, f"the best port's copy of {rel} does not match the hash the ledger recorded"
+                blobs.append((rel, data))
+    except safeio.SafeReadError as exc:
+        return False, f"the best port's copy is missing, is a link, or could not be read ({exc.reason})"
+    try:
+        with safeio.pinned_root(stage_dir) as pin:
+            for rel, blob in blobs:
+                if rel != "port_model.py" and _exists(pin, ("port", *rel.split("/"))) and not _holds(pin.fd, ("port", *rel.split("/")), blob):
+                    return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
+            # The writes go through one descriptor of the port directory. The skeleton is read again through it, and port_model.py is replaced only
+            # if it still holds those bytes; a supporting file is created only where nothing exists. An edit made after the checks above, or a
+            # file created in the meantime, is kept and the restore stops (review of PR 497, round 3).
+            port_fd = safeio.open_beneath(pin.fd, ("port",))
+            try:
+                skeleton_now = safeio.read_beneath(port_fd, ("port_model.py",), max_bytes=PORT_MAX)
+                if skeleton_now.rstrip(b"\n") != skeleton.rstrip(b"\n"):
+                    return False, "port_model.py is not the unchanged skeleton"
+                for rel, data in sorted(blobs, key=lambda item: item[0] == "port_model.py"):
+                    try:
+                        safeio.write_beneath_if(port_fd, tuple(rel.split("/")), data, mode=0o644,
+                                                expect_sha256=hashlib.sha256(skeleton_now).hexdigest() if rel == "port_model.py" else None)
+                    except safeio.AlreadyExists:
+                        # A supporting file this restore wrote before it was interrupted holds the snapshot's own bytes: the retry goes on. A
+                        # file with other bytes is somebody's edit and stops the restore.
+                        if rel == "port_model.py" or not _holds(port_fd, tuple(rel.split("/")), data):
+                            return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
+                    except safeio.ChangedWhileReading:
+                        return False, "port_model.py changed while the best port was being restored, and the edit is kept"
+                # The writes went through the descriptor. When `port` now names another directory, the descriptor's directory was moved away and the
+                # restore is not where the check will look: it is refused rather than reported, as `place` does (review of PR 497, round 5).
+                try:
+                    now = os.stat("port", dir_fd=pin.fd, follow_symlinks=False)
+                except OSError:
+                    now = None
+                held = os.fstat(port_fd)
+                if now is None or (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino):
+                    return False, "the port directory was replaced while the best port was being restored"
+            finally:
+                os.close(port_fd)
+    except safeio.SafeReadError as exc:
+        return False, f"the port could not be written ({exc.reason})"
+    return True, ""
