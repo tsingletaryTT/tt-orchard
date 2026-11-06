@@ -672,6 +672,7 @@ def server():
     tok = Tokenizer(models.WordLevel({f"w{i}": i for i in range(200)}, unk_token="w0"))
     tok.pre_tokenizer = pre_tokenizers.Whitespace()
     engine = mod.Engine(Worker(), 64, tok, [105], lambda m: " ".join(x["content"] for x in m))
+    engine.open = True                                      # these tests are of a server whose replay has matched
     srv = ThreadingHTTPServer(("127.0.0.1", 0), mod.make_handler(engine))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield mod, srv.server_address[1]
