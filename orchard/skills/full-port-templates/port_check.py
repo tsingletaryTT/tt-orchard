@@ -41,6 +41,15 @@ Port module interface (stages/2/port/port_model.py), all four functions required
     close(model) -> None
         Release what load took. The device itself is closed by this file.
 
+Optional hook, for localising a numerics failure (issue 505):
+
+    layer_outputs(model, ids: list[int]) -> list
+        Run the prompt `ids` once and return the hidden state after each decoder layer, in order, as torch tensors or numpy arrays (any shape).
+        It is called only when the check ends below the gate's agreement bar, in the same process and under the same lease, after the
+        comparison is done. Its result never changes the record, the exit code or the gate. The worker saves the arrays to
+        evidence/layer-port.npz and this file prints one line, `PORT_CHECK_LAYERS <sha256 of that file> <layer count>`, which the
+        supervisor's capture of the output keeps, so `stage_tools.py layer-diff` can tell this file from one written afterwards.
+
 Output: evidence/port-check.json (orchard-port-check/1, see orchard/skills/full-port-check.md) and the last line of stdout.
 """
 import hashlib
@@ -62,6 +71,11 @@ PORT_DIR = HERE / "port"
 PORT_MODULE = "port_model"
 CONFIG_FILE = HERE / "port_check_config.json"
 RECORD = HERE / "evidence" / "port-check.json"
+LAYER_FILE = HERE / "evidence" / "layer-port.npz"         # written by the worker from the optional `layer_outputs` hook; advice, never evidence the gate reads
+LAYER_MARK = "PORT_CHECK_LAYERS"                          # the parent's line that names that file (it starts with MARK, so the worker cannot print it)
+LAYER_DIAG_BELOW = 0.85          # the hook runs only when the agreement is below this (orchard/full_port.py TOP1_MIN; a test keeps them equal)
+MAX_LAYERS = 512                 # choice: more layers than any decoder stack; a longer list is refused
+MAX_NUMEL = 2 ** 28              # choice: total elements saved (1 GiB as float32); a larger result is refused before anything is written
 REFERENCE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT = "stages/1/evidence/reference/prompt-ids.json"
 MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache
@@ -125,6 +139,46 @@ def open_device(ttnn, n_chips: int):
     return ttnn.open_device(device_id=0), ttnn.close_device
 
 
+def layer_arrays(outputs, ids):
+    """`outputs` of the port's `layer_outputs` as a dict of float32 numpy arrays named layer_000, layer_001, ..., or a ValueError that says what is wrong."""
+    import numpy as np
+    if not isinstance(outputs, (list, tuple)) or not 0 < len(outputs) <= MAX_LAYERS:
+        raise ValueError(f"layer_outputs must return a list of 1 to {MAX_LAYERS} arrays, got {type(outputs).__name__}"
+                         + (f" of {len(outputs)}" if isinstance(outputs, (list, tuple)) else ""))
+    arrays, total = {}, 0
+    for k, x in enumerate(outputs):
+        if hasattr(x, "detach"):                       # a torch tensor
+            x = x.detach().float().cpu().numpy()
+        elif not isinstance(x, np.ndarray):
+            raise ValueError(f"layer {k} is a {type(x).__name__}, not a torch tensor or a numpy array")
+        if x.dtype.kind not in "fiub":
+            raise ValueError(f"layer {k} has dtype {x.dtype}, which is not numeric")
+        total += int(x.size)
+        if total > MAX_NUMEL:
+            raise ValueError(f"the layers hold more than {MAX_NUMEL} elements in all")
+        arrays[f"layer_{k:03d}"] = np.asarray(x, dtype=np.float32)
+    arrays["prompt_ids"] = np.asarray(ids, dtype=np.int64)
+    return arrays
+
+
+def save_layers(mod, model, ids) -> dict:
+    """The worker's reply to the `layers` request: write evidence/layer-port.npz from the port's optional hook (a temporary file, then a rename)."""
+    hook = getattr(mod, "layer_outputs", None)
+    if hook is None:
+        return {"ok": True, "layers": 0}
+    import numpy as np
+    arrays = layer_arrays(hook(model, ids), ids)
+    LAYER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LAYER_FILE.with_name(LAYER_FILE.name + ".tmp")
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    # O_EXCL and O_NOFOLLOW: a link the port left at the temporary name is not followed (the check removed any earlier one before the worker started).
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644), "wb") as f:  # hardening: ok descriptor from os.open with O_EXCL|O_NOFOLLOW
+        np.savez(f, **arrays)
+    os.replace(tmp, LAYER_FILE)
+    return {"ok": True, "layers": len(arrays) - 1}
+
+
 def worker(read_fd: int, write_fd: int) -> int:
     """Answer requests until `close`. Every reply is one JSON line: {"ok": true, ...} or {"ok": false, "error": text}."""
     rd, wr = os.fdopen(read_fd, "r", encoding="utf-8"), os.fdopen(write_fd, "w", encoding="utf-8")
@@ -158,6 +212,8 @@ def worker(read_fd: int, write_fd: int) -> int:
                 reply({"ok": True, "id": argmax(mod.prefill(model, [int(i) for i in req["ids"]]))})
             elif op == "decode":
                 reply({"ok": True, "id": argmax(mod.decode_step(model, int(req["token"]), int(req["position"])))})
+            elif op == "layers":         # optional, untimed, after the comparison: per-layer hidden states for `layer-diff`
+                reply(save_layers(mod, model, [int(i) for i in req["ids"]]))
             elif op == "close":
                 if mod is not None and model is not None:
                     mod.close(model)
@@ -232,6 +288,7 @@ class Worker:
                              kind="setup" if runtime else "port")
         if "id" in answer and (type(answer["id"]) is not int or answer["id"] < 0):
             raise PortFailed(f"the port returned an id that is not a whole number at {req['op']!r}: {answer['id']!r}", op=req["op"])
+        self.last = answer
         return answer.get("id")
 
     def kill_descendants(self) -> None:
@@ -318,8 +375,9 @@ def main() -> int:
     n = min(len(reference), MAX_POSITIONS)
     ref = reference[:n]
     RECORD.parent.mkdir(parents=True, exist_ok=True)
-    if RECORD.exists() or RECORD.is_symlink():
-        RECORD.unlink()
+    for stale in (RECORD, LAYER_FILE, LAYER_FILE.with_name(LAYER_FILE.name + ".tmp")):
+        if stale.exists() or stale.is_symlink():
+            stale.unlink()
 
     w = Worker()
     try:
@@ -336,6 +394,18 @@ def main() -> int:
         free = [w.ask(op="prefill", ids=prompt)]
         for k in range(1, FREE_RUN_TOKENS):
             free.append(w.ask(op="decode", token=free[-1], position=len(prompt) + k - 1))
+        agreement = sum(1 for a, b in zip(ref, chip) if a == b) / n
+        layers_note, n_layers = None, 0
+        if agreement < LAYER_DIAG_BELOW:          # advice for the coder, after everything the record needs; nothing in it can change the record
+            try:
+                w.ask(op="layers", ids=prompt)
+                n_layers = int(w.last.get("layers") or 0)
+                layers_note = ("layer outputs: none (port_model defines no layer_outputs(model, ids))" if not n_layers
+                               else f"layer outputs: {n_layers} layers saved")
+            except PortFailed as exc:
+                if "did not answer" in str(exc):      # the worker is gone or stuck: the same failure as for any other request
+                    raise
+                layers_note = f"layer outputs not written: {str(exc)[:600]}"
         w.ask(op="close")
     finally:
         w.stop()
@@ -343,11 +413,15 @@ def main() -> int:
     if FORGED.is_set():
         raise PortFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
 
+    if layers_note is not None:
+        print(layers_note, flush=True)
+        if LAYER_FILE.is_file():
+            print(LAYER_MARK, sha_file(LAYER_FILE), n_layers, flush=True)      # the worker is stopped: the file is final
     record = {"schema": SCHEMA,
               "reference": {"path": REFERENCE, "sha256": sha_file(RUN_DIR / REFERENCE)},
               "prompt": {"path": PROMPT, "sha256": sha_file(RUN_DIR / PROMPT)},
               "reference_ids": ref, "chip_ids": chip,
-              "top1_agreement": sum(1 for a, b in zip(ref, chip) if a == b) / n,
+              "top1_agreement": agreement,
               "chips": chips, "load_s": load_s, "free_run_ids": free, "free_run_text": free_run_text(model_dir, free),
               "port_sources": port_sources(), "template_sha256": sha_file(__file__),
               "config": {"path": str(CONFIG_FILE.relative_to(RUN_DIR)), "sha256": sha_file(CONFIG_FILE)}}

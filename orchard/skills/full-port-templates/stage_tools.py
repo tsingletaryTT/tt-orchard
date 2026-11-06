@@ -4,6 +4,7 @@
 port_check.py) and the task text names it. Run it from anywhere:
 
     python3 stages/2/stage_tools.py last-check            which check failed, where, the numbers and the evidence file
+    python3 stages/2/stage_tools.py layer-diff            the port against the CPU reference layer by layer: the first layer that diverges
 
 It reads only files in its own stage directory, and writes nothing there except what a tool says it writes. It is standard library only: it must
 run in the coder's shell, where the supervisor's own package is not importable. Everything it prints is advice built from files the coder could
@@ -13,9 +14,13 @@ Why fixed names. In run 18 of the tiny Qwen4 rehearsal the coder spent its repai
 was a new command for the watchdog to guess about. A tool call has a name and arguments, which the watchdog (orchard/watchdog.py `command_shape`)
 counts exactly.
 """
+import hashlib
 import json
+import math
 import os
+import re
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,6 +34,18 @@ TOP1_MIN = 0.85                                      # the gate's bar (orchard/f
 FAILURE_TOKEN = "PORT_CHECK_FAILURE "                # starts the check's structured failure line (orchard/port_repair.py)
 MAX_LINE = 300
 ROWS = 8
+LAYER_PORT_REL = "evidence/layer-port.npz"           # written by the worker of the hardware test from the port's optional `layer_outputs` hook
+LAYER_REF_REL = "evidence/layer-reference.npz"       # the CPU reference's layers, cached here by `layer-diff` (with a sidecar that binds it to its inputs)
+LAYER_REF_META_REL = "evidence/layer-reference.json"
+LAYER_MARK = "PORT_CHECK_LAYERS"                     # the check's line that names the port's file: LAYER_MARK <sha256> <count>
+LAYER_FILE_MAX = 2 ** 31                             # bytes: a larger layer file is refused before it is opened as an archive
+MAX_LAYERS = 512
+THRESHOLD = 0.05                                     # relative L2 error that counts as left the reference (the first_divergence probe's fallback)
+LAYER_TIMEOUT_S = 3600                               # the reference run on the CPU
+CONFIG_REL = "port_check_config.json"
+TOOLS_CONFIG_REL = "stage_tools.json"                # written by the supervisor: {"reference_python": path} when it knows one
+FACTS_REL = "port_facts.json"
+PROMPT_REL = "stages/1/evidence/reference/prompt-ids.json"
 ADVICE_NOTE = "advice from files in this directory; the gate's verdict is the supervisor's"
 
 
@@ -47,8 +64,14 @@ def read_file(path: Path, cap: int):
             return None, "is not a regular file"
         if st.st_size > cap:
             return None, f"is larger than {cap} bytes"
-        with os.fdopen(fd, "rb", closefd=False) as f:
-            data = f.read(cap + 1)
+        chunks, got = [], 0
+        while got <= cap:                              # bounded: at most cap + 1 bytes, whatever the file grows to
+            block = os.read(fd, min(1 << 20, cap + 1 - got))
+            if not block:
+                break
+            chunks.append(block)
+            got += len(block)
+        data = b"".join(chunks)
         if len(data) > cap:
             return None, f"is larger than {cap} bytes"
         return data, None
@@ -68,6 +91,16 @@ def read_json(path: Path, expect=dict):
     if not isinstance(value, expect):
         return None, f"holds {type(value).__name__}, not {expect.__name__}"
     return value, None
+
+
+def new_file(path: Path):
+    """A file object for a new regular file at `path`: any earlier file or link there is removed first, and the open refuses a link (O_EXCL, O_NOFOLLOW)."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o644)
+    return os.fdopen(fd, "wb")  # hardening: ok the descriptor comes from os.open with O_EXCL and O_NOFOLLOW above
 
 
 def clean(text, limit: int = MAX_LINE) -> str:
@@ -115,7 +148,6 @@ def where(position: int) -> str:
 
 def last_check(stage: Path) -> list[str]:
     """The summary of the last check in `stage`, as lines (fewer than 40)."""
-    import hashlib
     stage = Path(stage)
     lines: list[str] = []
     marker, why = read_json(stage / MARKER_REL)
@@ -182,17 +214,366 @@ def numerics(stage: Path) -> list[str]:
     return lines
 
 
-COMMANDS = {"last-check": "which check failed, where, the numbers and the evidence file"}
+# ---- layer-diff --------------------------------------------------------------------------------------------------------------------
+# The outer part (standard library only) checks that the port's layer file is the one the supervisor's captured output names, finds the reference
+# interpreter and runs the inner part under it. The inner part needs numpy, and torch with transformers when the reference is not cached.
+
+def file_sha256(path: Path, cap: int):
+    """(hex digest, None) or (None, reason) of a regular file, read in blocks from the open descriptor (no link followed, no FIFO opened)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError as exc:
+        return None, f"cannot be opened ({exc.__class__.__name__}: a link or an unreadable file)"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "is not a regular file"
+        if st.st_size > cap:
+            return None, f"is larger than {cap} bytes"
+        digest, seen = hashlib.sha256(), 0
+        while True:
+            block = os.read(fd, 1 << 20)
+            if not block:
+                return digest.hexdigest(), None
+            seen += len(block)
+            if seen > cap:
+                return None, f"is larger than {cap} bytes"
+            digest.update(block)
+    finally:
+        os.close(fd)
+
+
+def run_dir_of(stage: Path) -> Path:
+    for p in stage.parents:
+        if p.name == "stages":
+            return p.parent
+    return stage.parent
+
+
+def sealed_layers_line(stage: Path):
+    """((sha256, count), None) from the supervisor's capture of the check's output, or (None, why). The capture must match the sha256 in the
+    supervisor's own test record, and must hold exactly one LAYER_MARK line: only the check prints that line (it prefixes every line the port
+    prints), so a layer file named there is the file the hardware test wrote."""
+    marker, why = read_json(stage / MARKER_REL)
+    if marker is None:
+        return None, f"{MARKER_REL} {why}: no check has run in this directory yet"
+    data, why = read_file(stage / OUTPUT_REL, OUTPUT_MAX)
+    if data is None:
+        return None, f"{OUTPUT_REL} {why}"
+    out = marker.get("output")
+    if not isinstance(out, dict) or out.get("sha256") != hashlib.sha256(data).hexdigest():
+        return None, f"{OUTPUT_REL} does not match the sha256 the supervisor recorded for it, so it may have been edited"
+    text = data.decode("utf-8", "replace")
+    found = re.findall(rf"^{LAYER_MARK} ([0-9a-f]{{64}}) (\d{{1,6}})\s*$", text, re.M)
+    starts = [l for l in text.splitlines() if l.startswith(LAYER_MARK)]
+    if len(starts) > 1:
+        return None, f"{OUTPUT_REL} has {len(starts)} {LAYER_MARK} lines; the check prints one, so something else wrote a line of its own"
+    if not found:
+        if (stage / LAYER_PORT_REL).exists() or (stage / LAYER_PORT_REL).is_symlink():
+            return None, f"{LAYER_PORT_REL} exists but the output has no {LAYER_MARK} line naming it: it was not written by the last check"
+        return None, "none"
+    return (found[0][0], int(found[0][1])), None
+
+
+def reference_python(stage: Path, given):
+    """The interpreter that has torch and transformers: `--python`, else `reference_python` in stage_tools.json, else $ORCHARD_REFERENCE_PYTHON."""
+    config, _ = read_json(stage / TOOLS_CONFIG_REL)
+    for candidate in (given, config.get("reference_python") if config else None, os.environ.get("ORCHARD_REFERENCE_PYTHON")):
+        if isinstance(candidate, str) and candidate and "\0" not in candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def threshold_arg(text):
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and 0 < value <= 1e6 else None
+
+
+def layer_diff(stage: Path, argv: list) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(prog="stage_tools.py layer-diff", add_help=True)
+    parser.add_argument("--threshold", default=str(THRESHOLD), help=f"relative L2 error that counts as diverged (default {THRESHOLD})")
+    parser.add_argument("--python", default=None, help="interpreter with numpy, torch and transformers (default: stage_tools.json, then $ORCHARD_REFERENCE_PYTHON)")
+    parser.add_argument("--dtype", default="float32", choices=("float32", "bfloat16"), help="the reference's dtype on the CPU (bfloat16 halves the memory)")
+    args = parser.parse_args(argv)
+    if threshold_arg(args.threshold) is None:
+        print(f"refused: --threshold must be a number above 0 and at most 1e6, got {clean(args.threshold, 40)!r}")
+        return 2
+    sealed, why = sealed_layers_line(stage)
+    if sealed is None:
+        if why == "none":
+            print("no layer outputs from the last check: either the port module has no `layer_outputs(model, ids)` (see the task text for what it returns), "
+                  f"or the last check ended at or above {TOP1_MIN} agreement (the hook runs only on a numerics failure), or it failed before the comparison.")
+        else:
+            print("refused: " + why + ".")
+        return 2
+    digest, why = file_sha256(stage / LAYER_PORT_REL, LAYER_FILE_MAX)
+    if digest is None:
+        print(f"refused: {LAYER_PORT_REL} {why}.")
+        return 2
+    if digest != sealed[0]:
+        print(f"refused: {LAYER_PORT_REL} is not the file the test wrote (its sha256 differs from the one in the captured output).")
+        return 2
+    python = reference_python(stage, args.python)
+    if python is None:
+        print("refused: no reference interpreter. Pass --python PATH (an interpreter with numpy, torch and transformers), or set ORCHARD_REFERENCE_PYTHON.")
+        return 2
+    cmd = [python, "-I", str(Path(__file__).resolve()), "--layer-diff-inner", args.threshold, args.dtype, digest, str(sealed[1])]
+    env = {"PATH": os.environ.get("PATH", ""), "HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"}
+    try:
+        done = subprocess.run(cmd, cwd=str(stage), env=env, capture_output=True, text=True, timeout=LAYER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        print(f"refused: the reference run did not finish in {LAYER_TIMEOUT_S} s.")
+        return 2
+    except OSError as exc:
+        print(f"refused: the reference interpreter could not start ({exc.__class__.__name__}).")
+        return 2
+    print("\n".join(clean(l, 400) for l in done.stdout.splitlines()[:60]))
+    if done.returncode not in (0, 1, 2):
+        print("the comparison stopped unexpectedly: " + clean(" ".join(done.stderr.strip().splitlines()[-2:]), 300))
+        return 2
+    return done.returncode
+
+
+# ---- the inner part: numpy, and torch when the reference has to be computed ------------------------------------------------------------
+
+def load_layers(path: Path, what: str):
+    """({name: array}, None) or (None, reason) from an .npz of float arrays. Pickled arrays are refused (`allow_pickle=False`), and the member count is bounded."""
+    import numpy as np
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            names = list(z.files)
+            if len(names) > MAX_LAYERS + 1:
+                return None, f"{what} holds more than {MAX_LAYERS} arrays"
+            out = {n: np.array(z[n]) for n in names if re.fullmatch(r"layer_\d{3}|prompt_ids", n)}
+    except Exception as exc:               # a corrupt archive, a pickled array, a bad header: one reason, not a traceback
+        return None, f"{what} cannot be read ({exc.__class__.__name__})"
+    return out, None
+
+
+def ordered(arrays: dict, what: str):
+    """The layers of a loaded file in order, or a reason: the names must be layer_000, layer_001, ... with no gap, and the arrays numeric."""
+    names = sorted(n for n in arrays if n.startswith("layer_"))
+    if not names or names != [f"layer_{k:03d}" for k in range(len(names))]:
+        return None, f"{what} has no layers named layer_000, layer_001, ... in order"
+    if any(arrays[n].dtype.kind not in "fiub" for n in names):
+        return None, f"{what} holds an array that is not numeric"
+    return [arrays[n] for n in names], None
+
+
+def compare_layers(ref: list, port: list, threshold: float) -> dict:
+    """Per layer: relative L2 error ||port - ref|| / ||ref|| (in float64), the cosine, both shapes, and whether the values are finite. `first` is the index
+    of the first layer that is over `threshold`, has non-finite values, or has another number of elements; None when none is."""
+    import numpy as np
+    rows, first = [], None
+    for k in range(min(len(ref), len(port))):
+        a, b = ref[k], port[k]
+        row = {"layer": k, "ref_shape": tuple(a.shape), "port_shape": tuple(b.shape), "rel": None, "cos": None, "bad": None}
+        if a.size != b.size:
+            row["bad"] = f"size differs: {a.size} elements in the reference, {b.size} in the port"
+        else:
+            x, y = np.asarray(a, dtype=np.float64).reshape(-1), np.asarray(b, dtype=np.float64).reshape(-1)
+            if not np.isfinite(y).all():
+                row["bad"] = f"non-finite values in the port ({int((~np.isfinite(y)).sum())} of {y.size})"
+            elif not np.isfinite(x).all():
+                row["bad"] = "non-finite values in the reference"
+            else:
+                nx, ny, diff = float(np.linalg.norm(x)), float(np.linalg.norm(y)), float(np.linalg.norm(x - y))
+                row["rel"] = diff / nx if nx > 0 else diff
+                row["cos"] = float(x @ y / (nx * ny)) if nx > 0 and ny > 0 else None
+                if row["rel"] > threshold:
+                    row["bad"] = f"relative error {row['rel']:.4f} is over {threshold}"
+        rows.append(row)
+        if row["bad"] and first is None:
+            first = k
+    return {"rows": rows, "first": first, "n_ref": len(ref), "n_port": len(port)}
+
+
+def layer_kind(k: int):
+    """The kind of layer k from the facts file's `layer_schedule` ({"linear_attention": "0-2", "full_attention": "3"}), or None."""
+    facts, _ = read_json(HERE / FACTS_REL)
+    schedule = facts.get("layer_schedule") if facts else None
+    if not isinstance(schedule, dict):
+        return None
+    for kind, spec in list(schedule.items())[:20]:
+        if not isinstance(kind, str) or not isinstance(spec, str) or len(spec) > 200:
+            continue
+        for part in spec.split(","):
+            m = re.fullmatch(r"\s*(\d{1,6})(?:\s*-\s*(\d{1,6}))?\s*", part)
+            if m and int(m.group(1)) <= k <= int(m.group(2) or m.group(1)):
+                return clean(kind, 60)
+    return None
+
+
+def render(result: dict, threshold: float, notes: list) -> list:
+    rows, first = result["rows"], result["first"]
+    lines = [clean(n) for n in notes]
+    if result["n_port"] != result["n_ref"]:
+        lines.append(f"the port returned {result['n_port']} layers and the reference has {result['n_ref']}: compared as far as both go.")
+    lines.append("layer | relative error | cosine | shapes (reference / port)")
+    if first is not None:
+        show = range(max(0, first - 3), min(len(rows), first + 5))
+    else:
+        show = sorted(set(range(min(3, len(rows)))) | set(range(max(0, len(rows) - 3), len(rows))))
+    prev = None
+    for k in show:
+        if prev is not None and k != prev + 1:
+            lines.append("  ...")
+        r = rows[k]
+        rel = "n/a" if r["rel"] is None else f"{r['rel']:.4f}"
+        cos = "n/a" if r["cos"] is None else f"{r['cos']:.4f}"
+        shapes = f"{r['ref_shape']} / {r['port_shape']}" if r["ref_shape"] != r["port_shape"] else f"{r['ref_shape']}"
+        lines.append(f"{k:>5} | {rel} | {cos} | {shapes}" + ("   <- first over" if k == first else ""))
+        prev = k
+    if first is None:
+        lines.append(f"all {len(rows)} layers are within a relative error of {threshold} of the reference on this prompt. The difference is outside the layers "
+                     "(the final norm, the output head, the sampling) or only appears in decode (the cache, the positions): these are prefill layer outputs.")
+    else:
+        r = rows[first]
+        kind = layer_kind(first)
+        before = "" if first == 0 or rows[first - 1]["rel"] is None else f" (layer {first - 1} was {rows[first - 1]['rel']:.4f})"
+        lines.append(f"first layer over the threshold: layer {first}: {r['bad']}{before}.")
+        if kind:
+            lines.append(f"layer {first} is {kind} in the layer schedule of port_facts.json: look at what that layer type does that earlier layers do not.")
+    return lines
+
+
+def reference_layers(snapshot: str, ids: list, dtype: str) -> list:
+    """The CPU reference's output of each decoder layer for the prompt `ids`, as float32 numpy arrays, one per layer. Forward hooks on the decoder layers
+    capture the raw layer outputs (transformers' own `hidden_states` ends with the final norm applied, so its last entry is not a layer output)."""
+    import numpy as np
+    import torch
+    from transformers import AutoModelForCausalLM
+    want = getattr(torch, dtype)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(snapshot, dtype=want, local_files_only=True)
+    except TypeError:                                  # an older transformers names the argument torch_dtype
+        model = AutoModelForCausalLM.from_pretrained(snapshot, torch_dtype=want, local_files_only=True)
+    model.eval()
+    stack = None
+    for path in ("model.layers", "layers", "model.model.layers", "transformer.h", "model.decoder.layers"):
+        obj = model
+        for part in path.split("."):
+            obj = getattr(obj, part, None)
+            if obj is None:
+                break
+        if obj is not None and hasattr(obj, "__len__") and len(obj):
+            stack = obj
+            break
+    if stack is None:
+        raise RuntimeError("no decoder layer list found (tried model.layers, layers, transformer.h, model.decoder.layers)")
+    captured = []
+
+    def hook(_module, _inputs, output):
+        out = output[0] if isinstance(output, (tuple, list)) else output
+        captured.append(out.detach().float().cpu().numpy().astype(np.float32))
+
+    handles = [layer.register_forward_hook(hook) for layer in stack]
+    try:
+        with torch.no_grad():
+            model(input_ids=torch.tensor([ids]), use_cache=False)
+    finally:
+        for h in handles:
+            h.remove()
+    return captured
+
+
+def prompt_ids(run_dir: Path):
+    doc, why = read_json(run_dir / PROMPT_REL)
+    ids = doc.get("prompt_ids") if doc else None
+    if not ids_ok(ids):
+        return None, f"{PROMPT_REL} {why or 'holds no list of whole numbers under prompt_ids'}"
+    return ids, None
+
+
+def cached_reference(stage: Path, key: dict):
+    """The cached reference layers when the sidecar names this prompt, snapshot and dtype and the npz is the file it hashed, else None."""
+    meta, _ = read_json(stage / LAYER_REF_META_REL)
+    if not meta or any(meta.get(k) != v for k, v in key.items()):
+        return None
+    digest, _ = file_sha256(stage / LAYER_REF_REL, LAYER_FILE_MAX)
+    if digest is None or meta.get("npz_sha256") != digest:
+        return None
+    arrays, _ = load_layers(stage / LAYER_REF_REL, LAYER_REF_REL)
+    layers, _ = ordered(arrays, LAYER_REF_REL) if arrays is not None else (None, None)
+    return layers
+
+
+def inner(argv: list) -> int:
+    import numpy as np
+    threshold, dtype, digest, count = float(argv[0]), argv[1], argv[2], int(argv[3])
+    stage = HERE
+    run_dir = run_dir_of(stage)
+    arrays, why = load_layers(stage / LAYER_PORT_REL, LAYER_PORT_REL)
+    if arrays is None:
+        print("refused: " + why + ".")
+        return 2
+    port, why = ordered(arrays, LAYER_PORT_REL)
+    if port is None:
+        print("refused: " + why + ".")
+        return 2
+    ids, why = prompt_ids(run_dir)
+    if ids is None:
+        print("refused: " + why + ".")
+        return 2
+    if "prompt_ids" not in arrays or [int(i) for i in arrays["prompt_ids"].reshape(-1)] != ids:
+        print("refused: the port's layer file was computed on a prompt that is not the stage 1 prompt, so the two cannot be compared.")
+        return 2
+    config, why = read_json(stage / CONFIG_REL)
+    snapshot = config.get("model_snapshot") if config else None
+    if not isinstance(snapshot, str) or not snapshot or "\0" in snapshot:
+        print(f"refused: {CONFIG_REL} {why or 'names no model_snapshot'}.")
+        return 2
+    key = {"prompt_sha256": hashlib.sha256(json.dumps(ids).encode()).hexdigest(), "snapshot": snapshot, "dtype": dtype}
+    ref = cached_reference(stage, key)
+    source = "cached reference"
+    if ref is None:
+        try:
+            ref = reference_layers(snapshot, ids, dtype)
+        except BaseException as exc:         # an import that is missing, a model the installed transformers does not know, no memory: a reason
+            print(f"cannot compute the reference: {exc.__class__.__name__}: {clean(str(exc), 250)}")
+            return 2
+        source = f"computed now on the CPU ({dtype})"
+        try:                                  # the cache: a temporary file, a rename, and a sidecar that binds it to the prompt, the snapshot and the dtype
+            tmp = stage / (LAYER_REF_REL + ".tmp")
+            with new_file(tmp) as f:
+                np.savez(f, **{f"layer_{k:03d}": a for k, a in enumerate(ref)})
+            os.replace(tmp, stage / LAYER_REF_REL)
+            side = stage / (LAYER_REF_META_REL + ".tmp")
+            with new_file(side) as f:
+                f.write(json.dumps({**key, "npz_sha256": file_sha256(stage / LAYER_REF_REL, LAYER_FILE_MAX)[0], "layers": len(ref)}).encode())
+            os.replace(side, stage / LAYER_REF_META_REL)
+        except OSError:
+            pass                              # the cache is a convenience
+    result = compare_layers(ref, port, threshold)
+    notes = [f"layer-diff: the port's {count} layer outputs against the CPU reference on the {len(ids)}-token stage 1 prompt; threshold {threshold}.",
+             f"reference: {len(ref)} layers, {source}. port file {LAYER_PORT_REL}, sha256 {digest[:12]}, the one the check's output names.",
+             f"({ADVICE_NOTE})"]
+    print("\n".join(render(result, threshold, notes)))
+    return 0 if result["first"] is None else 1
+
+
+COMMANDS = {"last-check": "which check failed, where, the numbers and the evidence file",
+            "layer-diff": "the port against the CPU reference layer by layer: the first layer whose relative error is over --threshold"}
 
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) == 5 and argv[0] == "--layer-diff-inner":          # the inner part, started by `layer-diff` under the reference interpreter
+        return inner(argv[1:])
     if not argv or argv[0] not in COMMANDS:
         print("usage: python3 stage_tools.py <tool> [arguments]\n" + "\n".join(f"  {k}: {v}" for k, v in COMMANDS.items()))
         return 2
     if argv[0] == "last-check":
         print("\n".join(last_check(HERE)))
         return 0
+    if argv[0] == "layer-diff":
+        return layer_diff(HERE, argv[1:])
     return 2
 
 

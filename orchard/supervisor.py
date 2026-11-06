@@ -170,6 +170,7 @@ from orchard import repair_help            # the outside helper inside the port 
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
 from orchard.stages import UNVERIFIED_LEDGER_DECISION
+from orchard import stages as _stages          # `_mask_python`: the interpreter the run names for the reference (issue 505)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (DedupeStreak, Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -4174,6 +4175,16 @@ class Supervisor:
         # The coder's fixed-name tools (issue 505): the supervisor's file, put back each time, so an edit made during prepare is undone.
         tools = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TOOLS_NAME
         safeio.atomic_write(stage_dir / full_port.TOOLS_NAME, safeio.read_bytes(tools, max_bytes=RUN_JSON_MAX), mode=os.stat(tools).st_mode & 0o777)
+        # The interpreter `layer-diff` runs under (torch and transformers). The coder's shell has an allow-listed environment, so the supervisor names it.
+        # A file the coder left there is replaced or removed, so the path in it is always one the supervisor found.
+        python = _stages._mask_python(self.run_dir)
+        if python:
+            _put(stage_dir / "stage_tools.json", json.dumps({"reference_python": python}) + "\n")
+        else:
+            try:
+                (stage_dir / "stage_tools.json").unlink(missing_ok=True)         # a link or a FIFO is removed, not followed
+            except OSError:
+                pass                      # a directory there: the tool refuses anything that is not a regular file
         if command:
             deadline = full_port.DEADLINE_S
             given = self._run_json(stage_dir / "hw_test.json", "hw_test.json", spec.number).value
