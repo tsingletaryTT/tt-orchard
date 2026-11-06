@@ -225,7 +225,7 @@ _SED_RANGE = re.compile(r"\d{1,9}(?:,\d{1,9})?p")       # the print range of `se
 SHAPE_CHARS = 40
 # One leading `cd <dir> &&` (or `;`). Agents start every shell call this way, so it says where the command
 # runs and nothing about what it does.
-_CD_PREFIX = re.compile(r"""^\s*cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*""")
+_CD_PREFIX = re.compile(r"""^\s*cd\s+("[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*""")
 
 
 def _path_like(token: str) -> bool:
@@ -238,7 +238,9 @@ def command_shape(command: str) -> str:
     Only the part before the first pipe or separator counts, and redirect suffixes are dropped.
     The shape is the first word plus the first path-like argument (one with a slash, a leading
     `~` or `.`, or a file extension). Leading `cd <dir> &&` (or `;`) prefixes are skipped first, so
-    `cd /run && cat a.json` and `cd /run && grep x b.json` do not share the shape `cd /run`.
+    `cd /run && cat a.json` and `cd /run && grep x b.json` do not share the shape `cd /run`. The directory
+    still counts for a relative path argument: `cd /run/s0 && cat c.json` has the shape `cat /run/s0/c.json`,
+    so the same file name in two directories does not look like a loop.
     A command with no path-like argument is cut to its first SHAPE_CHARS characters after
     trailing numeric arguments are removed and whitespace is normalised. So `grep -rn x /src | head -50` and `grep -rn y /src | head -80` share the shape
     `grep /src`, and `tail -n 200` and `tail -n 400` share `tail -n`.
@@ -250,8 +252,11 @@ def command_shape(command: str) -> str:
     """
     if not isinstance(command, str) or not command.strip():
         return ""
-    while (rest := _CD_PREFIX.sub("", command, count=1)).strip() and rest != command:
-        command = rest                    # `cd X && cd Y && cmd`: skip each leading cd; a bare `cd X` stays
+    cwd = ""                              # where the leading cds put the command; a relative path argument is read against it
+    while (m := _CD_PREFIX.match(command)) and (rest := command[m.end():]).strip():
+        d = m.group(1).strip("\"'")      # `cd X && cd Y && cmd`: skip each leading cd; a bare `cd X` stays
+        cwd = d if (not cwd or d.startswith(("/", "~"))) else cwd.rstrip("/") + "/" + d
+        command = rest
     head = _REDIRECT.sub("", _SEPARATOR.split(command, 1)[0])
     try:
         tokens = shlex.split(head)
@@ -265,6 +270,8 @@ def command_shape(command: str) -> str:
                 rng = next((r for r in tokens[1:] if _SED_RANGE.fullmatch(r)), None)
                 if rng is not None:
                     return f"{tokens[0]} {t} {rng}"
+            if cwd and not t.startswith(("/", "~")):
+                t = cwd.rstrip("/") + "/" + t     # `cd /run/stage0 && cat config.json` and `cd /run/stage3 && ...` read different files
             return f"{tokens[0]} {t}"
     while len(tokens) > 1 and _NUMERIC.fullmatch(tokens[-1]):
         tokens.pop()
