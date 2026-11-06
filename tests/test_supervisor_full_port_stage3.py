@@ -20,7 +20,7 @@ from test_supervisor import Rig, step_skills
 from test_supervisor_full_port import FULL_PORT, PREPARE, started, with_snapshot, never_wait
 from run_fakes import bringup, where
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "unbuilt_stages_5_6")
 
 # A port that works on one board and refuses a mesh of four: stage 2 passes it, stage 3 shows the gap.
 NO_FOUR_CHIP_MESH = HONEST.replace("def load(model_dir, mesh_device):\n",

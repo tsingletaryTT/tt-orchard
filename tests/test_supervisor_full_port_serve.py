@@ -16,7 +16,16 @@ from run_fakes import note
 from test_supervisor import Rig, step_skills
 from test_supervisor_full_port import FULL_PORT, PREPARE, make, started, with_snapshot
 
-pytestmark = pytest.mark.usefixtures("stub_tools")
+pytestmark = pytest.mark.usefixtures("stub_tools", "generic_stage_6")
+
+
+@pytest.fixture
+def generic_stage_6(monkeypatch):
+    """These tests are about stage 5 alone. Stage 6 of a full port is its own slice (tests/test_supervisor_full_port_quality.py), so here stage 6 is the
+    generic benchmark stage the scripted coder passes, as it was before stage 6 was built. The chain of all the stages is tested in
+    tests/test_full_port_chain.py."""
+    from orchard import stages
+    monkeypatch.setattr(stages, "FULL_PORT_STAGE_6", stages.STAGES[6])
 
 KEYS = [{"length": 256, "key": "48213"}, {"length": 1984, "key": "90417"}]
 
@@ -39,8 +48,9 @@ def go(rig, port=fk.ANSWERING, *, over=None):
     src = fk.port_source(port, rig.tmp / "snapshot")
     make(rig, over={(2, "prepare"): {**PREPARE, "port/port_model.py": src}, **(over or {})})
     sleeps = []
-    # The first pause (before stage 4) is resumed; a later one means a stage failed, and the run stops there so a failure is an assertion and not a wait.
-    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("resume" if len(sleeps) == 1 else "abort"))
+    # No pause comes before stage 5 any more (stages 3 and 4 are built), so any pause means a stage failed: the run stops there, so a failure is an
+    # assertion and not a wait.
+    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("abort"))
 
 
 def stage_5_tests(rig):
@@ -109,6 +119,7 @@ def test_the_served_port_is_byte_for_byte_the_stage_2_port(rig):
     assert a.read_bytes() == b.read_bytes()
 
 
+@pytest.mark.usefixtures("unbuilt_stages_5_6")          # the pause before stage 5 is where the port is changed under the run
 def test_a_port_that_answers_differently_behind_the_server_is_refused_and_the_run_does_not_reach_stage_6(rig):
     """Stage 2's check passes (the flag file is absent). Before stage 5 the file appears; the port, run behind the server, answers 7 at the first
     position, which differs from the corpus, so the server is refused at boot, on both attempts."""
@@ -137,7 +148,7 @@ def test_a_port_that_answers_differently_behind_the_server_is_refused_and_the_ru
 def test_a_model_with_random_weights_fails_stage_5_without_the_rehearsal_option(rig):
     go(rig, fk.RANDOM_WEIGHTS)
     sleeps = []
-    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("resume" if len(sleeps) == 1 else "abort"))      # resume past the pause before stage 4, then stop at the failure
+    rig.on_sleep = lambda: (sleeps.append(1), Control(rig.run_dir).write("abort"))      # no pause comes before stage 5 any more: a pause is a failure, stop there
     assert rig.run() == EXIT_ABORTED
     assert [d["result"] for d in rig.ends(5)] == ["escalate", "fail"]
     assert any("coherent must be true" in r for r in rig.ends(5)[0]["reasons"])
