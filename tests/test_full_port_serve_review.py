@@ -12,7 +12,7 @@ from orchard import full_port, full_port_serve, full_port_serve_stage, safeio
 from orchard.adapters import ChipState
 from orchard.supervisor import Supervisor
 import port_serve_fakes as fk
-from test_full_port_serve import good, record_of, rewrite, run, sha  # noqa: F401  (good and run are fixtures)
+from test_full_port_serve import good, record_of, refused, rewrite, run, sha  # noqa: F401  (good and run are fixtures)
 
 
 # ---- the port copy anchors both ends beneath the run directory --------------------------------------------------------------------
@@ -275,3 +275,71 @@ def test_the_template_closes_the_socket_and_does_not_shut_down_a_loop_that_never
     branch = text[text.index("if port in FORBIDDEN_PORTS"):]
     branch = branch[:branch.index("raise ServeFailed")]
     assert "server.server_close()" in branch and "server = None" in branch
+
+
+# ---- round 3: the gate compares each check summary with the canonical one -------------------------------------------------------------
+
+def _edit_check(b, name, **over):
+    p = b["stage"] / "result.json"
+    r = json.loads(p.read_text())
+    r["checks"][name].update(over)
+    p.write_text(json.dumps(r))
+
+
+@pytest.mark.parametrize("name,over,word", [
+    ("corpus", {"matched": 1000000}, "checks.corpus.matched"),
+    ("corpus", {"positions": 5}, "checks.corpus.positions"),
+    ("boots", {"seconds": 0.001}, "checks.boots.seconds"),
+    ("passkey", {"answered": [True, True, True]}, "checks.passkey.answered"),
+    ("passkey", {"lengths": [1, 2]}, "checks.passkey.lengths"),
+    ("canary", {"evidence": [None]}, "checks.canary.evidence"),
+    ("corpus", {"evidence": [None]}, "checks.corpus.evidence"),
+])
+def test_an_altered_check_summary_is_refused(run, name, over, word):
+    """Finding: `checks.corpus.matched = 1000000` and an evidence list of `[null]` passed because only the flags and the list's presence were checked."""
+    _edit_check(run, name, **over)
+    refused(run, word)
+
+
+def test_the_unaltered_check_summaries_still_pass(run):
+    reasons, _, _ = fk.gate(run)
+    assert not [r for r in reasons if "checks." in r], reasons
+
+
+# ---- round 3: the record is written without following a link the port planted --------------------------------------------------------
+
+PLANTS = '''
+_close_orig = close
+def close(model):
+    import os
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.basename(here) == "5":
+        PLANT(here)
+    return _close_orig(model)
+'''
+
+
+def _plant_and_run(tmp_path_factory, plant_body):
+    b = fk.build(tmp_path_factory.mktemp("plant"))
+    port = b["stage"] / "port" / "port_model.py"
+    port.write_text(port.read_text() + PLANTS.replace("PLANT(here)", plant_body))
+    return b, fk.run_serve(b)
+
+
+def test_a_link_at_the_temporary_name_does_not_truncate_the_file_it_points_to(tmp_path_factory, tmp_path):
+    """Finding: a port could plant `evidence/port-serve.json.tmp` as a link and the write truncated its target, outside the run."""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious\n")
+    b, done = _plant_and_run(tmp_path_factory, f"os.symlink({str(victim)!r}, os.path.join(here, 'evidence', 'port-serve.json.tmp'))")
+    assert victim.read_text() == "precious\n", done.stdout + done.stderr
+    assert (b["stage"] / "evidence" / "port-serve.json").is_file() and not (b["stage"] / "evidence" / "port-serve.json").is_symlink()
+
+
+def test_an_evidence_directory_replaced_by_a_link_is_refused_and_nothing_is_written_through_it(tmp_path_factory, tmp_path):
+    out = tmp_path / "elsewhere"
+    out.mkdir()
+    b, done = _plant_and_run(
+        tmp_path_factory,
+        f"(os.rename(os.path.join(here, 'evidence'), os.path.join(here, 'evidence.moved')), os.symlink({str(out)!r}, os.path.join(here, 'evidence')))")
+    assert done.returncode == 2 and "link" in done.stdout, done.stdout + done.stderr
+    assert [p.name for p in out.iterdir() if p.name.startswith("port-serve")] == []  # (hw-test-output.txt is the test runner's own)
