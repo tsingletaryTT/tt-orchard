@@ -165,7 +165,9 @@ def start_trigger(entries: list[dict], n: int, k: int, failure: dict) -> tuple[b
 
 def unreported(entries: list[dict], n: int) -> list[dict]:
     """The repair answers of stage `n` (ok, with a call id) that have no `telegraph repair progress` entry yet, oldest first, each with the ask's
-    `round`, `failure_op` and the sequence number of the answer."""
+    `round`, `failure_op`, the sequence number of the answer and `placed`: whether a `telegraph repair placed` entry for it followed. An answer
+    without one never became the port, so whatever a later check found says nothing about it (review of PR 496, round 5)."""
+    placed_ids = {_data(e).get("call_id") for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == PLACED}
     done = {_data(e).get("call_id") for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == PROGRESS}
     asks: dict[int, dict] = {}
     out = []
@@ -179,7 +181,8 @@ def unreported(entries: list[dict], n: int) -> list[dict]:
         elif (_decision(e) == ANSWERED and d.get("ok") is True and isinstance(d.get("call_id"), str) and d["call_id"] not in done
               and not d.get("cached")):
             out.append({"call_id": d["call_id"], "round": last_ask.get("round") if asks else None,
-                        "failure_op": last_ask.get("failure_op") if asks else None, "seq": e["seq"]})
+                        "failure_op": last_ask.get("failure_op") if asks else None, "seq": e["seq"],
+                        "placed": d["call_id"] in placed_ids})
     return out
 
 

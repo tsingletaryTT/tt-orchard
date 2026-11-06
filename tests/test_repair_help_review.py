@@ -301,6 +301,7 @@ def _answered_then_tested(tmp_path, *, tested, after="prefill", vouch=True):
     led.append("decision", 2, decision=port_repair.DECISION, round=1, of=3, op="load")
     led.append("decision", 2, decision=rh.ASKED, round=1, failure_op="load")
     led.append("decision", 2, decision=rh.ANSWERED, ok=True, call_id="c1", cached=False)
+    led.append("decision", 2, decision=rh.PLACED, call_id="c1")        # the answer was placed before the stop (an unplaced one is never credited: review of PR 496, round 5)
     if tested:
         led.append("decision", 2, decision=port_repair.TESTED, sources=port_repair.digest(port_repair.fingerprint(stage / "port")))
     _failed_test_on_disk(run, stage, after)            # by default the test after the answer failed later in the chain: progress

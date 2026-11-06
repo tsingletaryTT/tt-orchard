@@ -3794,6 +3794,12 @@ class Supervisor:
             return
         passed, after_op, readable = self._repair_outcome(n, stage_dir) if stage_dir is not None else (False, None, False)
         for item in pending:
+            if not item["placed"]:
+                # The supervisor stopped after the answer was recorded and before the placement (or the rejection) was. The reply is not the port,
+                # so a check that passed afterwards was the coder's own work (review of PR 496, round 5).
+                self._repair_report(n, item["round"], item["call_id"], item["failure_op"], None, helped=False,
+                                    outcome="interrupted before the reply was placed: it never became the port")
+                continue
             judged = repair_help.tested_after(entries, n, item["seq"]) and readable
             if not judged and final_helped is None:
                 continue

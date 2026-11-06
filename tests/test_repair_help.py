@@ -232,7 +232,7 @@ def test_a_missing_port_file_is_not_created(tmp_path):
 def test_an_answer_without_a_verdict_is_listed_with_its_round_and_request():
     entries = [entry(1, "stage_start"), decision(2, rh.ASKED, round=1, failure_op="load"),
                decision(3, rh.ANSWERED, ok=True, call_id="aa", cached=False)]
-    assert rh.unreported(entries, 2) == [{"call_id": "aa", "round": 1, "failure_op": "load", "seq": 3}]
+    assert rh.unreported(entries, 2) == [{"call_id": "aa", "round": 1, "failure_op": "load", "seq": 3, "placed": False}]
     entries.append(decision(4, rh.PROGRESS, call_id="aa"))
     assert rh.unreported(entries, 2) == []
 
