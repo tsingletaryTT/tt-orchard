@@ -243,7 +243,8 @@ def test_a_port_edited_after_the_passing_check_does_not_displace_the_best_port(t
     s._record_best_passed(2, stage)
     bests = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
     assert bests == [first], "an untested snapshot was recorded as the best port"
-    assert any("not the one the passing check ran on" in e["data"].get("reason", "") for e in s.ledger.read())
+    # (an edit to port_model.py is refused earlier, where the check's numbers are read; the added-file and rewritten-record tests below reach the
+    # sources comparison)
 
 
 def test_a_file_added_to_the_port_after_the_passing_check_is_also_refused(tmp_path):

@@ -3564,14 +3564,7 @@ class Supervisor:
         if n != 2 or not self._helper_drive_on():
             return
         try:
-<<<<<<< HEAD
-            found = full_port.file_record(self.run_dir, Path(stage_dir) / port_repair.MARKER)
-            if found is None or not recorded_by_supervisor(self.ledger, n, found):
-                return
-            passed, _op, readable, _numbers = self._repair_outcome(stage_dir)
-=======
-            passed, _op, readable = self._repair_outcome(n, stage_dir)        # also matches the marker to the ledger's evidence entry
->>>>>>> stack-6-helper-drives
+            passed, _op, readable, _numbers = self._repair_outcome(n, stage_dir)        # also matches the marker to the ledger's evidence entry
             if not (passed and readable):
                 return                  # a record that is not the check's own, or one below the agreement bar, is not a port that passed
             saved = repair_help.save_best(stage_dir)
@@ -3751,16 +3744,12 @@ class Supervisor:
                            cost_usd=record["cost_usd"], driven=driven)
         return repair_help.coder_note(answer.call_id, True, evidence["path"]), True, True
 
-<<<<<<< HEAD
-    def _repair_report(self, n: int, k, call_id: str, before_op, after_op, *, helped: bool, outcome: str, numbers: dict | None = None) -> None:
-=======
     def _repair_unusable(self, n: int, k, call_id: str, failure: dict, why: str) -> None:
         """A reply none of whose content reached the coder or the port is reported as not helped at once. Left pending, a later check that the
         coder's own edit passed would be credited to it and keep its model on the helper's ladder (review of PR 496, round 3)."""
         self._repair_report(n, k, call_id, failure.get("op"), None, helped=False, outcome=f"unusable reply: {why}")
 
-    def _repair_report(self, n: int, k, call_id: str, before_op, after_op, *, helped: bool, outcome: str) -> None:
->>>>>>> stack-6-helper-drives
+    def _repair_report(self, n: int, k, call_id: str, before_op, after_op, *, helped: bool, outcome: str, numbers: dict | None = None) -> None:
         """The verdict on one repair answer, to the helper's ledger and the run's. A verdict that cannot be written is noted and goes on."""
         from orchard import telegraph as tg
         reason = ""
@@ -3771,38 +3760,26 @@ class Supervisor:
         self.ledger.append("decision", n, decision=repair_help.PROGRESS, call_id=call_id, round=k, before_op=before_op, after_op=after_op,
                            outcome=outcome, helped=helped, **(numbers or {}), **({"reason": reason} if reason else {}))
 
-<<<<<<< HEAD
-    def _repair_outcome(self, stage_dir) -> tuple[bool, str | None, bool, dict | None]:
+    def _repair_outcome(self, n: int, stage_dir) -> tuple[bool, str | None, bool, dict | None]:
         """(the check passed the gate's agreement bar, the request it failed at, whether the record could be read, the numbers of a port that ran and
-        disagrees) from the supervisor's test record. A check that exited 0 passes only when its recomputed agreement is at the bar."""
-=======
-    def _repair_outcome(self, n: int, stage_dir) -> tuple[bool, str | None, bool]:
-        """(the check passed, the request it failed at, whether the record could be read) from the supervisor's test record. The record sits in
-        a directory the coder can write, so it is read once, its path and sha256 are matched to the evidence entry the supervisor wrote when the
-        test ended, and both the pass and the failure are taken from those bytes (review of PR 496, round 3)."""
+        disagrees) from the supervisor's test record. A check that exited 0 passes only when its recomputed agreement is at the bar. The record sits
+        in a directory the coder can write, so it is read once, its path and sha256 are matched to the evidence entry the supervisor wrote when the
+        test ended, and the pass, the numbers and the failure are all taken from those bytes (review of PR 496, round 3)."""
         path = Path(stage_dir) / port_repair.MARKER
->>>>>>> stack-6-helper-drives
         try:
             raw = safeio.read_bytes(path, max_bytes=full_port.JSON_MAX)
             data = safeio.parse_json_bytes(raw, max_bytes=full_port.JSON_MAX, expect=dict)
             found = {"path": os.path.relpath(os.path.realpath(path), os.path.realpath(self.run_dir)), "sha256": hashlib.sha256(raw).hexdigest()}
         except (safeio.SafeReadError, OSError, ValueError):
-<<<<<<< HEAD
+            return False, None, False, None
+        if not recorded_by_supervisor(self.ledger, n, found):
             return False, None, False, None
         if data.get("returncode") == 0 and data.get("timed_out") is False:
-            state, numbers = port_repair.numerics_state(self.run_dir, stage_dir)
+            state, numbers = port_repair.numerics_state(self.run_dir, stage_dir, marker=data)
             if state == "below":
                 return False, port_repair.NUMERICS_OP, True, numbers
             return (state == "passed"), None, state != "unreadable", None
-        failure = port_repair.read_failure(self.run_dir, stage_dir)
-=======
-            return False, None, False
-        if not recorded_by_supervisor(self.ledger, n, found):
-            return False, None, False
-        if data.get("returncode") == 0 and data.get("timed_out") is False:
-            return True, None, True
         failure = port_repair.read_failure(self.run_dir, stage_dir, marker=data)
->>>>>>> stack-6-helper-drives
         if failure is None:
             return False, None, False, None
         return False, failure.get("op"), True, None
@@ -3815,11 +3792,7 @@ class Supervisor:
         pending = repair_help.unreported(entries, n)
         if not pending:
             return
-<<<<<<< HEAD
-        passed, after_op, readable, numbers = self._repair_outcome(stage_dir) if stage_dir is not None else (False, None, False, None)
-=======
-        passed, after_op, readable = self._repair_outcome(n, stage_dir) if stage_dir is not None else (False, None, False)
->>>>>>> stack-6-helper-drives
+        passed, after_op, readable, numbers = self._repair_outcome(n, stage_dir) if stage_dir is not None else (False, None, False, None)
         for item in pending:
             judged = repair_help.tested_after(entries, n, item["seq"]) and readable
             if not judged and final_helped is None:

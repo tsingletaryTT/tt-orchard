@@ -295,7 +295,7 @@ NUMERICS_OP = "numerics"                    # the `op` of a failure that is not 
 NUMERIC_ROWS = 16                           # mismatching positions listed in the report (the first ones)
 
 
-def numerics_state(run_dir, stage_dir) -> tuple[str, dict | None]:
+def numerics_state(run_dir, stage_dir, *, marker: dict | None = None) -> tuple[str, dict | None]:
     """("below", the numbers), ("passed", None) or ("unreadable", None) for a hardware test that exited 0.
 
     "below": the test record shows exit code 0 without a timeout, the check's record (evidence/port-check.json) has the shipped schema, names the
@@ -307,7 +307,8 @@ def numerics_state(run_dir, stage_dir) -> tuple[str, dict | None]:
     or a stale one earns no round and no pass."""
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
     try:
-        marker = safeio.read_json(stage_dir / MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
+        if marker is None:
+            marker = safeio.read_json(stage_dir / MARKER, max_bytes=full_port.JSON_MAX, expect=dict)
         record = safeio.read_json(stage_dir / full_port.RECORD_FILE, max_bytes=full_port.JSON_MAX, expect=dict)
     except (safeio.SafeReadError, OSError, ValueError):
         return "unreadable", None
