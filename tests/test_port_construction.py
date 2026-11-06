@@ -365,16 +365,24 @@ def test_the_seed_step_carries_the_section_into_the_facts_and_the_task(tmp_path,
 
 # ---- the real reference interpreter on the tiny checkpoint ----------------------------------------------------------------------------
 
+def _reference_python():
+    """The reference interpreter: $ORCHARD_REFERENCE_PYTHON, else the default venv location. None when neither exists."""
+    for c in (os.environ.get("ORCHARD_REFERENCE_PYTHON"), str(Path.home() / "orchard-venvs" / "reference" / "bin" / "python")):
+        if c and Path(c).is_file():
+            return c
+    return None
+
+
 def _tiny_snapshot():
     root = Path.home() / ".cache" / "huggingface" / "hub" / "models--local--tiny-qwen4-dense" / "snapshots"
     return next((p for p in sorted(root.glob("*")) if (p / "config.json").is_file()), None) if root.is_dir() else None
 
 
-@pytest.mark.skipif(not (Path.home() / "orchard-venvs" / "reference" / "bin" / "python").is_file() or _tiny_snapshot() is None,
-                    reason="needs the reference interpreter (~/orchard-venvs/reference) and the cached tiny Qwen4 checkpoint (models--local--tiny-qwen4-dense)")
+@pytest.mark.skipif(_reference_python() is None or _tiny_snapshot() is None,
+                    reason="needs the reference interpreter ($ORCHARD_REFERENCE_PYTHON or the default venv) and the cached tiny Qwen4 checkpoint (models--local--tiny-qwen4-dense)")
 @pytest.mark.timeout(300)
 def test_the_tiny_qwen4_shows_sigmoid_for_the_gated_norm_in_the_real_reference():
-    python = str(Path.home() / "orchard-venvs" / "reference" / "bin" / "python")
+    python = _reference_python()
     text, flags, summary, why = pc.for_snapshot(python, _tiny_snapshot())
     assert not why, why
     assert any("RMSNormGated.activation: resolved 'sigmoid', class default 'silu'" in f for f in flags)
