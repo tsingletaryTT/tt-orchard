@@ -326,7 +326,9 @@ class RunActuator:
         self._stop = "pause"
         # A pause the stage's wall-clock budget caused is kept apart: no helper rescue lifts it (review of PR 496, round 3).
         findings = evidence.get("findings") if isinstance(evidence, dict) else None
-        self.deadline_pause = any(isinstance(f, dict) and f.get("detector") == "stage_over_budget" for f in findings or [])
+        # Sticky: a later pause from the coder ladder must not lower the flag a budget pause raised, because the agent step goes on feeding events
+        # until it next asks whether to stop. Only `clear()` lowers it (review of PR 496, round 4).
+        self.deadline_pause = self.deadline_pause or any(isinstance(f, dict) and f.get("detector") == "stage_over_budget" for f in findings or [])
 
     def take_nudges(self, agent: str) -> list[str]:
         return self._nudges.pop(agent, [])
@@ -1133,6 +1135,7 @@ class Supervisor:
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                graft_trial=self.graft_trial, sampling=self.sampling, port_repair_rounds=self.port_repair_rounds,
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
+                               **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
                                paths=self.paths.record(), package=self.package,
@@ -2455,7 +2458,8 @@ class Supervisor:
                     # when it was not asked at the start of this round. A placed answer lets the round go on to its check.
                     helped_on = False
                     # A pause the stage's wall-clock budget caused stays in effect: a rescue would run another hardware check past the deadline.
-                    deadline = out.status == "pause" and getattr(self.actuator, "deadline_pause", False)
+                    # The flag is read whatever status the step returned: a step can raise it on a pause and then end `error` on a capped reply.
+                    deadline = bool(getattr(self.actuator, "deadline_pause", False))
                     if (out.status in ("pause", "escalate", "error") and not deadline and not asked_here and self.repair_help
                             and getattr(self, "telegraph", None) is not None):
                         _note, helped_on, _ = self._repair_help(spec, stage_dir, k, limit, failure, raw,
@@ -2464,6 +2468,12 @@ class Supervisor:
                         return out.status, [f"the repair step ended: {out.status} {out.detail}".strip()], None
                     if out.status in ("pause", "escalate"):
                         self._consume_handled_stop(n, out.status)
+                    # The operator may have written abort or pause while the helper's reply was awaited. The rescue does not override it, and no
+                    # hardware check starts on its strength (review of PR 496, round 4).
+                    if (command := self.actuator.stop_reason()) in ("abort", "operator-pause"):
+                        self.ledger.append("decision", n, decision="helper rescue stopped", round=k, command=command,
+                                           reason="the operator's command arrived while the helper's reply was awaited")
+                        return command, [f"the repair step ended: {command} (the operator's command arrived while the helper's reply was awaited)"], None
                 touched = [rel for rel, rec in sealed.items() if self._seal(stage_dir, rel) != rec]
                 if touched:
                     self.ledger.append("decision", n, decision="port repair refused", round=k, files=touched)
@@ -3563,6 +3573,12 @@ class Supervisor:
         except (safeio.SafeReadError, OSError, ValueError):
             return False, None, False
         if not recorded_by_supervisor(self.ledger, n, found):
+            return False, None, False
+        # The record must be the newest hardware test's: an earlier test's marker and output restored over a later rerun's would match its own
+        # old evidence entry and judge the wrong test (review of PR 496, round 4).
+        tests = [e["data"] for e in self.ledger.read() if e.get("event") == "evidence" and e.get("stage") == n
+                 and "returncode" in e["data"] and "timed_out" in e["data"]]
+        if not tests or (tests[-1].get("path"), tests[-1].get("sha256")) != (found["path"], found["sha256"]):
             return False, None, False
         if data.get("returncode") == 0 and data.get("timed_out") is False:
             return True, None, True
@@ -5416,6 +5432,11 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
             raise ValueError("this run started with the tool-result dedupe on; --no-tool-dedupe differs. Leave the option out to resume with the recorded "
                              "value, or move this run's directory aside and start a new run (the dedupe changes what the agent was sent)")
         tool_dedupe = recorded_dedupe
+    # `--no-repair-help` is recorded in run_start only when off. A resumed run keeps it off: the opt-out says the port files are not sent to the
+    # outside helper, and a resume that forgot it would send them (review of PR 496, round 4).
+    repair_help_off = bool(getattr(args, "no_repair_help", False))
+    if progress.started and (progress.run_start or {}).get("repair_help") is False:
+        repair_help_off = True
     home = operator_home() if home is None else home
     paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
                       home=home, environ=environ)
@@ -5466,7 +5487,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
             package = recorded
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
                       telegraph=_telegraph_from(getattr(args, "telegraph_config", None), environ=environ, home=home),
-                      repair_help=False if getattr(args, "no_repair_help", False) else None,
+                      repair_help=False if repair_help_off else None,
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
                       skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,

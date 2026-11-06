@@ -267,6 +267,15 @@ def place(stage_dir, source: str, sent_sha: str, *, coder_failed: bool, call_id:
                                             expect_sha256=found, mode=0o644)
                 except safeio.ChangedWhileReading:
                     return False, "the coder changed port_model.py while the reply was being placed", found
+                # The write went through the descriptor. When `port` now names another directory, the descriptor's directory was moved away and
+                # the reply is not where the check will look: the placement is refused rather than reported (review of PR 496, round 4).
+                try:
+                    now = os.stat(PORT_PARTS[-2], dir_fd=pin.fd, follow_symlinks=False)
+                except OSError:
+                    now = None
+                held = os.fstat(port_fd)
+                if now is None or (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino):
+                    return False, "the port directory was replaced while the reply was being placed", found
             finally:
                 os.close(port_fd)
     except safeio.SafeReadError as exc:
