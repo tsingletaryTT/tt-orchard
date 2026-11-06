@@ -933,6 +933,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--port-repair-rounds` | no | A whole number from 0 to 10, default 3. A full-port stage 2 whose port check failed on the port itself gets up to this many repair rounds in the same attempt (section 5.5e). 0 is no rounds. The ledger records the value in `run_start`, and a resume keeps it and refuses another value. `tt-orchard bringup` takes the same flag |
 | `--no-tool-dedupe` | no | Send the agent every repeat read in full. By default, within one agent step, a repeat read of a file that has not changed since the agent read it (same file, same page, same size and time, same text), and a repeat of a read-only shell command (`ls`, `cat`, `head`, `tail`, `wc`, `stat`, `sed -n`, `grep` without `-r`, `find` with `-name`, `-type` and `-maxdepth` only) that printed the same, is answered with a short note that names the turn holding the text, and three such notes among the last six tool results send the agent one nudge to write. The ledger records the choice when it is off; a resume keeps the recorded choice and refuses to turn it off for a run that started with it on. See [`docs/tool-result-dedupe.md`](docs/tool-result-dedupe.md). |
 | `--telegraph-config` | no | A TOML file with the `[telegraph]` table; `bringup` passes the config it was started with when the table is enabled. A full-port stage 2 whose first attempt failed then asks the outside helper once for a draft port at the start of the next attempt (section 5.9g, "Phone a friend"). Without it, or with the helper off, nothing is sent. A file that cannot be read refuses the start |
+| `--no-repair-help` | no | Do not ask the outside helper inside the port repair rounds of a full-port stage 2 (orchard/repair_help.py); it is still asked at the start of an attempt. By default a configured helper is asked in a round whose check failed on the port and the coder has not moved it on. |
 | `--model-kind` | no | What the model produces: `generative`, `reranker` or `embedding` (issue 378). Without it stage 0 reads the model card's `pipeline_tag` (`text-ranking` is a reranker; `feature-extraction` and `sentence-similarity` are embedding models), then the architecture names (a name with `Embedding`), and records in its `stage_end` which one decided. A reranker or embedding model of class `weights-only`, or of class `full-port` with `--full-port`, takes the scoring route (see Scoring models below). A resume keeps the ledger's answer. `tt-orchard bringup` takes the same flag |
 | `--no-graft-trial` | no | Skip stage 2's graft trial (section 5.5c). The run records the choice, and a resume keeps it. `tt-orchard bringup` takes the same flag |
 | `--sampling` | no | `auto` (default), `needed` or `not-needed`: whether the model's purpose needs sampling (section 5.5d). With `auto`, stage 2 reads the model's files; with a drafter that ignores sampling and a model that needs it, stage 2 serves a drafter-off variant once and chooses by measurement. The run records the setting and a resume keeps it (a different value on a resume is refused). `tt-orchard bringup` takes the same flag |
@@ -2506,6 +2507,21 @@ reached, no key, a network error, a reply with no code) is a ledger decision and
 supervisor reports the answer to the helper's ledger: helped if the stage passed, not helped for any other end except an operator pause or
 abort. `tt-orchard telegraph usage` shows the counts. The ledger entries are `telegraph asked`, `telegraph answered`, `telegraph not asked`,
 `telegraph draft not written` and `telegraph reported`. The first attempt of a stage never asks.
+
+**Phone a friend inside the repair rounds (full-port stage 2).** Run11 of the tiny Qwen4 rehearsal showed that two asks at attempt starts were not
+enough: a helper draft was placed and failed at prefill, the coder fixed it, the check then failed at load, and the coder looped on `read_file`
+while no help was left. `orchard/repair_help.py` asks the helper where the port fails. In a repair round whose check failed on the port, the
+supervisor asks at the start of the round when it is the attempt's first round or the failure is no further along the request chain (init, load,
+prefill, decode) than the round before; after the coder's repair step it asks when that step ended in a watchdog pause or escalation or on capped
+replies. At most one ask per round and six per stage 2 counting the asks at attempt starts. The request holds the whole current `port_model.py` (a
+port over 90,000 characters is not sent), the facts file, the excerpts and the failure. The reply is read with `ast` and run by nothing here; a
+reply with a required function missing, with the wrong arguments, empty, raising `NotImplementedError` or using a name nothing defines is a stub
+and is not placed. A whole port replaces `port_model.py` only when the file is still the one that was sent (its sha256 is on the ask) or the
+coder's step failed, and both hashes go in the ledger (`telegraph repair asked`, `answered`, `placed`, `not placed`, `reply is a stub`). After
+the check runs again each answer gets a verdict: helped when it passed or now fails later in the request chain, and not helped for a different
+message at the same request (`telegraph repair progress`). The helper's problem id is now one per run (`full-port-stage-2:<run name>`), because
+the helper counts a problem's calls across its whole ledger and one id for every run used up the per-problem cap in three runs. `--no-repair-help`
+turns the round asks off.
 
 - `tt-orchard telegraph check`: the setting and whether the key is present (never the key). Exit 2 on a problem.
   - `--ping`: also ask the endpoint for its model list, which spends no tokens, and mark each configured model listed or not.

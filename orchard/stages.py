@@ -2624,6 +2624,10 @@ def run_progress(entries: list[dict]) -> RunProgress:
             what = d.get("decision")
             if what == "pause":
                 paused = d.get("reason") or "paused"
+            elif what == "resume" and d.get("keeps_budgets") is True:
+                # A handled pause (a helper-supplied port took over from a repair step the watchdog paused): the pause is answered and nothing
+                # else is reset. The run's counters and wall-clock budget go on, as they do for a run nobody paused (review of PR 496).
+                paused = None
             elif what == "resume":
                 paused, escalations, cold_boots, coder_deaths = None, 0, 0, 0
                 park_boots, park_boot_s = 0, 0.0

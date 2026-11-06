@@ -38,6 +38,7 @@ def wire_helper(rig, monkeypatch, tmp_path, wire=None, **kw):
     cfg = tg.load(table(models=["helper-model"], prices={"helper-model": [3.0, 15.0]}, **kw), base=tmp_path)
     tel = tg.Telegraph(cfg, tmp_path / "tg", transport=wire, environ={"TG_KEY": KEY}, clock=lambda: 1000.0, hostname="node9", home="/home/someone")
     monkeypatch.setattr(sv, "_telegraph_from", lambda *a, **k: tel)
+    monkeypatch.setattr(sv.Supervisor, "REPAIR_HELP_DEFAULT", False)      # these tests are about the asks at attempt starts; tests/test_supervisor_telegraph_in_repair.py turns it on
     return tel, wire
 
 
@@ -97,7 +98,7 @@ def test_the_request_holds_the_coders_brief_the_facts_and_the_failure_and_no_hom
     assert "What failed:" in sent and "The latest attempt ended with" in sent
     assert str(rig.home) not in sent
     asked = next(d for d in telegraph_decisions(rig) if d["decision"] == paf.ASKED)
-    assert asked["k"] == 1 and asked["problem"] == paf.PROBLEM and asked["inputs"]["facts"]["chars"] > 0 and asked["failed_attempts"] == 1
+    assert asked["k"] == 1 and asked["problem"] == paf.problem_id(rig.run_dir) and asked["inputs"]["facts"]["chars"] > 0 and asked["failed_attempts"] == 1
 
 
 def test_a_prompt_cap_too_small_for_the_request_is_recorded_on_the_ask(rig, monkeypatch, tmp_path):

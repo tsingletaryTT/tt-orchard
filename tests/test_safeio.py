@@ -1886,3 +1886,71 @@ def test_iter_lines_enforces_the_size_cap_while_reading_not_only_from_fstat(tmp_
     monkeypatch.setattr(os, "fstat", lying_fstat)
     with pytest.raises(TooLarge):
         list(safeio.iter_lines(p, max_bytes=100, max_line_bytes=1000))
+
+
+# ---- write_beneath_if: a write that keeps what a later writer put there -------------------------------------------------------------------
+
+def _dirfd(path):
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+
+
+def test_write_beneath_if_replaces_a_file_that_still_matches(tmp_path):
+    import hashlib
+    (tmp_path / "f.py").write_bytes(b"old")
+    fd = _dirfd(tmp_path)
+    try:
+        safeio.write_beneath_if(fd, ("f.py",), b"new", expect_sha256=hashlib.sha256(b"old").hexdigest())
+    finally:
+        os.close(fd)
+    assert (tmp_path / "f.py").read_bytes() == b"new" and [p.name for p in tmp_path.iterdir()] == ["f.py"]
+
+
+def test_write_beneath_if_keeps_a_file_that_changed_and_leaves_no_temporary_file(tmp_path):
+    import hashlib
+    (tmp_path / "f.py").write_bytes(b"edited")
+    fd = _dirfd(tmp_path)
+    try:
+        with pytest.raises(safeio.ChangedWhileReading):
+            safeio.write_beneath_if(fd, ("f.py",), b"new", expect_sha256=hashlib.sha256(b"old").hexdigest())
+    finally:
+        os.close(fd)
+    assert (tmp_path / "f.py").read_bytes() == b"edited" and [p.name for p in tmp_path.iterdir()] == ["f.py"]
+
+
+def test_write_beneath_if_without_a_hash_creates_only_and_never_replaces_a_file_or_a_link(tmp_path):
+    fd = _dirfd(tmp_path)
+    try:
+        safeio.write_beneath_if(fd, ("sub", "new.py"), b"made", expect_sha256=None)
+        assert (tmp_path / "sub" / "new.py").read_bytes() == b"made"
+        with pytest.raises(safeio.AlreadyExists):
+            safeio.write_beneath_if(fd, ("sub", "new.py"), b"again", expect_sha256=None)
+        (tmp_path / "victim").write_bytes(b"precious")
+        (tmp_path / "sub" / "ln.py").symlink_to(tmp_path / "victim")
+        with pytest.raises(safeio.AlreadyExists):
+            safeio.write_beneath_if(fd, ("sub", "ln.py"), b"x", expect_sha256=None)
+    finally:
+        os.close(fd)
+    assert (tmp_path / "sub" / "new.py").read_bytes() == b"made" and (tmp_path / "victim").read_bytes() == b"precious"
+    assert sorted(p.name for p in (tmp_path / "sub").iterdir()) == ["ln.py", "new.py"]
+
+
+@pytest.mark.parametrize("replace", [True, False])
+def test_write_beneath_if_syncs_the_directory_after_the_file_is_published(tmp_path, monkeypatch, replace):
+    """PR 496, round 6: a rename or a link is not durable until the directory is synced. The order of events is recorded: the directory sync
+    must come after the publishing call."""
+    import hashlib
+    events = []
+    real_fsync, real_rename, real_link = os.fsync, os.rename, os.link
+    monkeypatch.setattr(os, "fsync", lambda fd: (events.append("dir-sync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file-sync"), real_fsync(fd))[1])
+    monkeypatch.setattr(os, "rename", lambda *a, **k: (events.append("publish"), real_rename(*a, **k))[1])
+    monkeypatch.setattr(os, "link", lambda *a, **k: (events.append("publish"), real_link(*a, **k))[1])
+    sha = None
+    if replace:
+        (tmp_path / "f.py").write_bytes(b"old")
+        sha = hashlib.sha256(b"old").hexdigest()
+    fd = _dirfd(tmp_path)
+    try:
+        safeio.write_beneath_if(fd, ("f.py",), b"new", expect_sha256=sha)
+    finally:
+        os.close(fd)
+    assert events.index("publish") < len(events) - 1 and events[events.index("publish") + 1:] == ["dir-sync"], events
