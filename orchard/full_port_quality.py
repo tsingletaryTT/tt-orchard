@@ -323,7 +323,8 @@ def derive(stage_dir, run_dir, *, source_stage: int, rehearsal: bool = False) ->
 # ---- the gate -----------------------------------------------------------------------------------------------------------------
 
 def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = None, expected_chips: int | None = None,
-          seeded: list | None = None, source_stage: int = 2, accepted_record_sha: str | None = None) -> tuple[list[str], list[str]]:
+          seeded: list | None = None, source_stage: int = 2, accepted_record_sha: str | None = None,
+          top5_accepted_sha: str | None = None) -> tuple[list[str], list[str]]:
     """(reasons, evidence paths) for a stage 6 directory of a full port. No reasons means the result passes.
 
     `expected_chips` is the chip count the test must have run on (the supervisor's, from the run's `--required-chips` when stage 3 ran, else
@@ -370,7 +371,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
 
     # ---- the record against the stage 1 files on disk ----
     ref_ids = full_port._reference_ids(record, run_dir, reasons)
-    _top5_reasons(record, run_dir, reasons)
+    _top5_reasons(record, run_dir, reasons, top5_accepted_sha)
     arrays = record_problems(record)
     reasons += arrays
     if not arrays and ref_ids is not None:
@@ -439,8 +440,13 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     return reasons, seen
 
 
-def _top5_reasons(record: dict, run_dir: Path, reasons: list) -> None:
-    """The record's reference top-five entries are the ones in the stage 1 file on disk, and the record names that file and its sha256."""
+TOP5_REL = "stages/1/evidence/reference/top5-logits.json"
+
+
+def _top5_reasons(record: dict, run_dir: Path, reasons: list, accepted_sha: str | None = None) -> None:
+    """The record's reference top-five entries are the ones in the stage 1 file on disk, the record names that file and its sha256, and the file
+    is the one stage 1's gate accepted: `accepted_sha` is the hash the ledger holds for it (a missing value is a refusal), so a file replaced
+    after stage 1 passed cannot move the gap bar (review of PR 491)."""
     entry = record.get("top5")
     want = "stages/1/evidence/reference/top5-logits.json"
     if not isinstance(entry, dict) or entry.get("path") != want:
@@ -452,6 +458,10 @@ def _top5_reasons(record: dict, run_dir: Path, reasons: list) -> None:
         return
     if entry.get("sha256") != full_port._sha(f):
         reasons.append(f"top5.sha256 does not match {want} as it is on disk")
+    if not isinstance(accepted_sha, str) or not accepted_sha:
+        reasons.append(f"the ledger holds no sha256 for {want} among the evidence stage 1's gate accepted, so the file cannot be trusted")
+    elif full_port._sha(f) != accepted_sha:
+        reasons.append(f"{want} is not the file stage 1's gate accepted (it changed after stage 1 passed)")
     try:
         data = safeio.read_json(f, max_bytes=JSON_MAX, expect=dict)
         steps = data.get("steps")

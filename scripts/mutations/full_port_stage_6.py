@@ -34,7 +34,7 @@ MUTATIONS = {
     "share-bound": (Q, "    if not _finite(share) or not 0 < share <= SHARE_MAX:", "    if False:", UNIT),
     "speed-is-steps-over-time": (Q, "        elif not math.isclose(r[\"steps\"] / r[\"decode_s\"], r[\"decode_tok_s\"], rel_tol=1e-6):", "        elif False:", UNIT),
     "result-recomputed": (Q, "        elif not _same(result.get(key), want):", "        elif False:", UNIT),
-    "top5-file-match": (Q, "    _top5_reasons(record, run_dir, reasons)\n    arrays", "    arrays", UNIT),
+    "top5-file-match": (Q, "    _top5_reasons(record, run_dir, reasons, top5_accepted_sha)\n    arrays", "    arrays", UNIT),
     "template-hash": (Q, "    elif mine != shipped:", "    elif False:", UNIT),
     "output-mark": (Q, "    if not marks or marks[-1] != full_port._sha(stage_dir / RECORD_FILE):", "    if False:", UNIT),
     "command-fixed": (Q, "        if marker.get(\"command\") != command():", "        if False:", UNIT),
