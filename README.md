@@ -324,7 +324,8 @@ Code that reads a file or a record that something else wrote (a model's output, 
 guards for the failures that reviews keep finding: a link swapped in after a check, a read with no size limit, NaN, repeated keys, deep nesting, a safetensors
 header that does not add up, an atomic write that can be raced. [docs/safe-reading.md](docs/safe-reading.md) says when to use each function and what it does not cover,
 and gives a checklist for reviewing a new reader. `tests/hostile_inputs.py` holds a corpus of hostile inputs and a registry of the readers tested
-against it. `hypothesis` drives the property tests in `tests/test_safeio.py`, with a fixed seed so that a failure reproduces.
+against it. `tests/hostile_fs.py` does the same for the layout of the tree (links, special files, a root swapped after it was pinned, a lock file that is a link,
+a Hugging Face cache link that leaves the cache) and `tests/test_hostile_fs_readers.py` runs each registered reader against it. `hypothesis` drives the property tests in `tests/test_safeio.py`, with a fixed seed so that a failure reproduces.
 
 ## 2. What you need
 

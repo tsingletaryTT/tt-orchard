@@ -31,6 +31,24 @@ hash, an oversized file read without a bound, a file that grows while it is hash
 - Test: register the reader in `tests/hostile_inputs.py` and run FIFO, link to `/dev/zero`, oversize, link out of the directory, and
   a file that grows during the read.
 
+### The symlink and special-file recipe
+
+Copilot raised the same five mistakes on several pull requests: `O_NOFOLLOW` that protects only the last part of a path, a path that is
+pinned and then read by name, a FIFO that passes a size check, a lock or temporary file opened with `"w"` by path, and a Hugging Face
+cache link that is refused when it should be accepted or measured when it leaves the cache. Before you request a review of code that opens a path or walks a tree:
+
+- Register the reader in `tests/hostile_fs.py` (`PATH_READERS`, with a `PathReader` of one line) and run
+  `python3 -m pytest tests/test_hostile_fs_readers.py`. Each reader runs against: a plain file, a link as the last part, a link
+  higher up, a root that is a link, a root swapped for a link after it was pinned, a FIFO, a directory, a sparse file of 1 GiB, a
+  deep tree, long names, a tree with links, a lock file that is a link, and a Hugging Face cache link inside and outside the cache.
+- Open every part of a path with `O_NOFOLLOW` (`safeio.open_beneath`). `O_NOFOLLOW` on the last part alone is not enough.
+- After a root is pinned, read and write through the descriptor. A path built from the root's name can reach something else by then.
+- Check `S_ISREG` on the descriptor you read, open with `O_NONBLOCK`, and cap the bytes. A size check by name does not stop a FIFO.
+- Open a lock or temporary file with `os.open(..., O_CREAT | O_NOFOLLOW)`, never `open(path, "w")`. The ratchet counts both.
+- A Hugging Face cache link is accepted when it resolves inside the pinned cache root and refused otherwise. Measure the target's
+  size from the descriptor. The size of the link itself is the length of its target name.
+- A reader that fails a case today gets an `xfail(strict=True)` entry in `KNOWN_DEFECTS` that names a public issue.
+
 ## 3. Check, then use
 
 Seen in PRs 294, 303, 304, 342: the digest taken after the boot, the spec fingerprint taken after the boot, the cache state taken
@@ -128,3 +146,7 @@ wrote itself, with a reason) carries a `# hardening: ok <reason>` comment and is
 baseline with `python3 scripts/hardening_baseline.py --update` in the same change. `--update` refuses to write when any count rose. When a
 merge from main brought in raw access from another change, run it with `--accept-growth` and say why in the project log. A marker
 goes on the first or last line of the call it marks.
+
+A second count in the same script (`tests/hardening_hazards_baseline.json`) holds link hazards: an `os.open` whose flags never name
+`O_NOFOLLOW` (a `dir_fd` anchors the lookup but a link in the last part is still followed, so it does not exempt the call), and the builtin `open` with a literal write mode (`"w"`, `"a"`, `"x"` or `"+"`). It works like the first count, uses
+the same marker, and `--update` and `--accept-growth` write both files.

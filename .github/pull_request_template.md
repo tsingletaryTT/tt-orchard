@@ -7,7 +7,7 @@ Tests run, mutation results, anything measured (say what was not run).
 Answer each item with `yes (test name)` or `n/a (one sentence)`. The items and their rules are in `docs/pr-hardening-checklist.md`.
 
 1. Wrong type or shape in input: every parsed field is type-checked and a bad one is one refused item:
-2. Files something else controls: reads and writes go through `safeio` (FIFO, link, oversize, growing file tested):
+2. Files something else controls: reads and writes go through `safeio` (FIFO, link, oversize, growing file tested) and the reader is in `tests/hostile_fs.py` `PATH_READERS` when it opens a path or a tree (symlink recipe in the checklist):
 3. Check, then use: identity is captured before the operation and the result is bound to it:
 4. Evidence an agent can write: trusted only through a ledger entry with its hash; deletion fails the check:
 5. Verdicts and labels: each names its evidence; a missing input gives "not checked":
