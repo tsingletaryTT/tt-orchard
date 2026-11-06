@@ -554,6 +554,15 @@ def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
                             return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
                     except safeio.ChangedWhileReading:
                         return False, "port_model.py changed while the best port was being restored, and the edit is kept"
+                # The writes went through the descriptor. When `port` now names another directory, the descriptor's directory was moved away and the
+                # restore is not where the check will look: it is refused rather than reported, as `place` does (review of PR 497, round 5).
+                try:
+                    now = os.stat("port", dir_fd=pin.fd, follow_symlinks=False)
+                except OSError:
+                    now = None
+                held = os.fstat(port_fd)
+                if now is None or (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino):
+                    return False, "the port directory was replaced while the best port was being restored"
             finally:
                 os.close(port_fd)
     except safeio.SafeReadError as exc:

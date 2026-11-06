@@ -195,7 +195,7 @@ def test_build_gives_a_resumed_supervisor_the_choice_the_run_started_with(rig, m
         assert sup.helper_drives is True
 
 
-def _passed_check_stub(tmp_path, *, vouched):
+def _passed_check_stub(tmp_path, *, vouched, fails_at=None):
     """A stage 2 directory whose supervisor test record says the check passed, and a supervisor that drives with the helper."""
     import hashlib
     import json
@@ -213,8 +213,11 @@ def _passed_check_stub(tmp_path, *, vouched):
         for name in ("helper.py", "port_model.py")]}).encode()
     (stage / full_port.RECORD_FILE).write_bytes(record)
     out = f"loaded\n{full_port.OUTPUT_MARK} {hashlib.sha256(record).hexdigest()}\n".encode()
+    if fails_at is not None:      # a check that failed at request `fails_at`, with the failure line `port_repair.read_failure` reads
+        out = ("FAILED: x\n" + port_repair.FAILURE_TOKEN + json.dumps({"kind": "port", "op": fails_at}) + "\n").encode()
     (stage / full_port.OUTPUT_FILE).write_bytes(out)
-    marker = json.dumps({"returncode": 0, "timed_out": False,
+    code = 0 if fails_at is None else 2
+    marker = json.dumps({"returncode": code, "timed_out": False,
                          "output": {"path": f"stages/2/{full_port.OUTPUT_FILE}", "sha256": hashlib.sha256(out).hexdigest()}}).encode()
     (stage / port_repair.MARKER).write_bytes(marker)
     led = Ledger(run / "ledger.jsonl")
@@ -223,7 +226,7 @@ def _passed_check_stub(tmp_path, *, vouched):
     if vouched:
         # What `_run_test` writes before the test starts: the whole port directory, every regular file (review of PR 497, round 4).
         led.append("decision", 2, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage / "port"))
-        led.append("evidence", 2, path="stages/2/" + port_repair.MARKER, sha256=hashlib.sha256(marker).hexdigest(), returncode=0, timed_out=False)
+        led.append("evidence", 2, path="stages/2/" + port_repair.MARKER, sha256=hashlib.sha256(marker).hexdigest(), returncode=code, timed_out=False)
     s = object.__new__(Supervisor)
     s.run_dir, s.ledger, s.repair_help, s.helper_drives, s.telegraph = run, led, True, True, object()
     return s, stage

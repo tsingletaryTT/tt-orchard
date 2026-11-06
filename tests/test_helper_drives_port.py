@@ -506,3 +506,33 @@ def test_a_supporting_file_created_after_its_existence_check_is_not_overwritten(
     assert placed is False and "already exists" in why
     assert (stage / "port" / "helper.py").read_bytes() == b"# written by someone else\n"
     assert (stage / "port" / "port_model.py").read_bytes() == skeleton
+
+
+def test_a_port_directory_swapped_during_the_restore_is_refused_and_not_reported_as_restored(tmp_path, monkeypatch):
+    """Review of PR 497, round 5: the writes went into the moved-away directory and `restore_best` still returned success."""
+    import os
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, PREFILL_BROKEN.encode())
+    entry = rh.save_best(stage)
+    (stage / "port" / "port_model.py").write_bytes(skeleton)
+    real = rh.safeio.write_beneath_if
+
+    def swapping(fd, parts, data, **kw):
+        out = real(fd, parts, data, **kw)
+        if not (stage / "port.old").exists():
+            os.rename(stage / "port", stage / "port.old")
+            (stage / "port").mkdir()
+            (stage / "port" / "port_model.py").write_bytes(skeleton)
+        return out
+    monkeypatch.setattr(rh.safeio, "write_beneath_if", swapping)
+    placed, why = rh.restore_best(stage, entry, skeleton)
+    assert placed is False and "replaced" in why
+    assert (stage / "port" / "port_model.py").read_bytes() == skeleton      # the active port was not restored, and nothing says it was
+
+
+def test_an_unswapped_restore_is_still_restored(tmp_path):
+    skeleton = b"# the skeleton\n"
+    stage = _stage_with_port(tmp_path, PREFILL_BROKEN.encode())
+    entry = rh.save_best(stage)
+    (stage / "port" / "port_model.py").write_bytes(skeleton)
+    assert rh.restore_best(stage, entry, skeleton) == (True, "")

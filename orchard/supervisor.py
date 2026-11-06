@@ -3517,7 +3517,13 @@ class Supervisor:
         if n != 2 or not self._helper_drive_on():
             return
         try:
-            rank_now = repair_help.best_rank(failure.get("op"))
+            # The rank comes from the failure the ledger vouches for: the test record is matched to the newest hardware test's evidence entry
+            # (`_repair_outcome`). The failure passed in was read from the files on disk alone, and an earlier test's marker and output put back
+            # after a rerun would give the current port that earlier failure's rank (review of PR 497, round 5).
+            passed, op_now, readable = self._repair_outcome(n, stage_dir)
+            if not readable or passed or op_now is None:
+                return
+            rank_now = repair_help.best_rank(op_now)
             best = repair_help.best_state(self.ledger.read(), n)
             if best is not None and rank_now <= best["rank"]:
                 return
@@ -3531,7 +3537,7 @@ class Supervisor:
                 return
             # The snapshot is on disk under its own name before the entry that names it: a stop between the two leaves an unreferenced directory
             # and the earlier best port still restorable (review of PR 497).
-            self.ledger.append("decision", n, decision=repair_help.BEST, op=failure.get("op"), rank=rank_now, **saved,
+            self.ledger.append("decision", n, decision=repair_help.BEST, op=op_now, rank=rank_now, **saved,
                                attempt=len([e for e in self.ledger.read() if e.get("stage") == n and e.get("event") == "stage_start"]))
         except Exception as exc:     # advisory: an error nobody listed leaves the ledger as it was
             self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0, reason=f"best port not recorded ({exc.__class__.__name__})")
