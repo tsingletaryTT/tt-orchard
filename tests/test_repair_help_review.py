@@ -116,3 +116,35 @@ def test_an_attempt_start_ask_is_refused_when_the_repair_asks_have_spent_the_sta
     assert not asked, "a seventh paid call was sent"
     refused = [e["data"] for e in led.read() if e["data"].get("decision") == paf.NOT_ASKED]
     assert refused and "limit" in refused[0]["reason"]
+
+
+# ---- finding 1, the pause case: the ledger's pause is answered ------------------------------------------------------------------------
+
+def stub_with_stop(tmp_path, status):
+    led = Ledger(tmp_path / "ledger.jsonl")
+    led.append("run_start", None, model="m")
+    led.append("stage_start", 2, escalated=False, resumed=False)
+    s = object.__new__(Supervisor)
+    s.ledger = led
+    s.actuator = RunActuator(Control(tmp_path))
+    if status == "pause":
+        s.actuator.pause("watchdog", {})
+        led.append("decision", 2, decision="pause", reason="the watchdog paused the stage")
+    else:
+        s.actuator.escalate("stage-agent", 2)
+    return s
+
+
+def test_a_handled_watchdog_pause_is_cleared_in_the_actuator_and_answered_in_the_ledger(tmp_path):
+    s = stub_with_stop(tmp_path, "pause")
+    assert s.actuator.stop_reason() == "pause" and run_progress(s.ledger.read()).paused
+    s._consume_handled_stop(2, "pause")
+    assert s.actuator.stop_reason() is None
+    assert run_progress(s.ledger.read()).paused is None
+
+
+def test_a_handled_escalation_is_cleared_in_the_actuator_and_writes_no_resume(tmp_path):
+    s = stub_with_stop(tmp_path, "escalate")
+    s._consume_handled_stop(2, "escalate")
+    assert s.actuator.stop_reason() is None
+    assert not [e for e in s.ledger.read() if e["data"].get("decision") == "resume"]
