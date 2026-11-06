@@ -365,14 +365,22 @@ def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list,
     out = stage_dir / OUTPUT_FILE
     rec = marker.get("output")
     want = os.path.relpath(out, run_dir)
-    if not isinstance(rec, dict) or rec.get("path") != want or rec.get("sha256") != _sha(out):
+    # One read: the digest compared with the supervisor's record and the text searched for the mark line come from the same bytes, so a file
+    # replaced between two reads cannot pass with altered text (review of PR 498, round 5).
+    try:
+        raw = safeio.read_bytes(out, max_bytes=JSON_MAX * 4)
+    except safeio.SafeReadError as exc:
+        if not isinstance(rec, dict) or rec.get("path") != want:
+            reasons.append(f"{OUTPUT_FILE} is not the output file the supervisor recorded in test-result.json")
+        else:
+            reasons.append(f"{OUTPUT_FILE} is not readable: {exc.reason}")
+        return
+    # The record's digest covers at most JSON_MAX bytes (`_sha`): a larger file never matched it.
+    if (not isinstance(rec, dict) or rec.get("path") != want or len(raw) > JSON_MAX
+            or rec.get("sha256") != hashlib.sha256(raw).hexdigest()):
         reasons.append(f"{OUTPUT_FILE} is not the output file the supervisor recorded in test-result.json")
         return
-    try:
-        text = safeio.read_bytes(out, max_bytes=JSON_MAX * 4).decode("utf-8", "replace")
-    except safeio.SafeReadError as exc:
-        reasons.append(f"{OUTPUT_FILE} is not readable: {exc.reason}")
-        return
+    text = raw.decode("utf-8", "replace")
     marks = re.findall(rf"^{OUTPUT_MARK} ([0-9a-f]{{64}})\s*$", text, re.M)
     starts = [l for l in text.splitlines() if l.startswith(OUTPUT_MARK)]
     if len(starts) != 1:

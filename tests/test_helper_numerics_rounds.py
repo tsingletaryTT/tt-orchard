@@ -393,3 +393,24 @@ def test_a_passing_verdict_keeps_the_agreement_and_the_one_before(tmp_path, monk
     s._repair_verdicts(2, run / "stages" / "2")
     (p,) = [e["data"] for e in led.read() if e["data"].get("decision") == rh.PROGRESS]
     assert p["outcome"] == "passed" and p["agreement"] == 0.875 and p["previous_agreement"] == 0.53125
+
+
+# ---- review of PR 498, round 5: best entries written before rank 99 meant "passed the bar" -------------------------------------------------
+
+def test_a_legacy_rank_99_entry_with_no_agreement_does_not_outrank_a_tested_numerics_failure():
+    """Finding: a ledger from the preceding implementation holds rank 99 with no agreement for a check that merely exited 0. Compared as it
+    stood, it kept a later port with agreement 0.75 from replacing one at 0.5625, and the next attempt restored the lower one."""
+    legacy = best_entry(1, rh.PASSED_RANK, None, "a" * 64)
+    legacy["data"]["passed"] = True
+    newer = best_entry(2, 5, 0.75, "b" * 64)
+    assert rh.best_state([legacy, newer], 2)["port_sha256"] == "b" * 64
+    only = rh.best_state([legacy], 2)
+    assert only["port_sha256"] == "a" * 64 and only["legacy"] is True and only["rank"] == rh.rank("numerics")     # still restorable, ranked as a port that ran
+    passing = best_entry(3, rh.PASSED_RANK, 0.875, "c" * 64)
+    assert rh.best_state([legacy, newer, passing], 2)["port_sha256"] == "c" * 64                                # a port at the bar still beats both
+
+
+def test_a_current_passing_entry_with_an_agreement_is_not_treated_as_legacy():
+    current = best_entry(1, rh.PASSED_RANK, 0.875, "a" * 64)
+    assert rh.best_state([current, best_entry(2, 5, 0.75, "b" * 64)], 2)["port_sha256"] == "a" * 64
+    assert "legacy" not in rh.best_state([current], 2)
