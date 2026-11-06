@@ -294,7 +294,7 @@ def write_record(data: bytes) -> None:
     # swapped for a link at any moment after this point cannot redirect the write, because every descriptor already names the real directory
     # (a realpath comparison followed by a path open leaves a gap between the check and the use; review of PR 490, round 4).
     try:
-        dfd = os.open(RUN_DIR, os.O_RDONLY | os.O_DIRECTORY)
+        dfd = os.open(RUN_DIR, os.O_RDONLY | os.O_DIRECTORY)   # hardening: ok the run directory is the trusted root the descent starts from; every part below it is opened with no following
         for part in evidence.relative_to(RUN_DIR).parts:
             try:
                 nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
