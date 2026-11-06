@@ -452,12 +452,17 @@ def _c_writes_nothing(env):
     return "written"                                          # mistake: claims success, publishes nothing
 
 
+def _c_writes_without_check(env):
+    return "written"                                          # mistake: claims success and supplies no publication check
+
+
 CONTROLS: list[PathReader] = [
     PathReader("control: deletes the file outside the root", "effects", _c_deletes_victim),
     PathReader("control: deletes the directory outside the root", "effects", _c_deletes_outside_dir),
     PathReader("control: replaces the file outside the root with a link", "effects", _c_replaces_with_link),
     PathReader("control: replaces the directory outside the root with a link", "effects", _c_replaces_dir_with_link),
     PathReader("control: write that publishes nothing", "effects", _c_writes_nothing),
+    PathReader("control: write that omits the publication check", "effects", _c_writes_without_check),
     PathReader("control: pin, then walk by pathname", "scan", _c_scan_by_name),
     PathReader("control: builtin open", "path_read", _c_naive_open, claims_pin=False),
     PathReader("control: O_NOFOLLOW on the last part only", "pinned_read", _c_nofollow_last_only),
@@ -529,8 +534,9 @@ def _verdict(reader: PathReader, case_name: str, base: Path) -> dict:
         got, detail = "leaked", "data.json outside the root changed, was replaced or was deleted"
     elif got == "decoy":
         got, detail = "leaked", "the reader returned content from outside the root"
-    elif got == "written" and publishes is not None and not publishes():
-        got, detail = "unpublished", "the writer reported success but the destination does not hold the bytes it wrote"
+    elif got == "written" and (publishes is None or not publishes()):
+        # A writer that reports success without supplying a publication check cannot be verified, so it counts as unpublished.
+        got, detail = "unpublished", "the writer reported success but the destination does not hold the bytes it wrote (or gave no way to check)"
     return {"case": case_name, "verdict": got, "detail": detail}
 
 

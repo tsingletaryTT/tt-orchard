@@ -117,6 +117,12 @@ def test_a_writer_that_publishes_nothing_is_not_reported_as_written(control_verd
     assert got and set(got.values()) == {"unpublished"}, got
 
 
+def test_a_writer_that_omits_the_publication_check_is_not_reported_as_written(control_verdicts):
+    # Review of PR 495, round 4: success with no way to verify the destination must not pass.
+    got = control_verdicts["control: write that omits the publication check"]
+    assert got and set(got.values()) == {"unpublished"}, got
+
+
 def test_published_regular_wants_a_regular_file_holding_the_bytes(tmp_path):
     good = tmp_path / "good"
     good.write_bytes(b"new")
