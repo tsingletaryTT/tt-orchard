@@ -68,7 +68,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from orchard import defaults, safeio, hwtool, ttlang_consistency, ttlang_env, ttlang_pair, ttlang_reference
+from orchard import defaults, op_cheats, safeio, hwtool, ttlang_consistency, ttlang_env, ttlang_pair, ttlang_reference
 from orchard.agent import DEVICE_VARS, SECRET_NAME, TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
@@ -110,6 +110,7 @@ VERDICT_DIR = ".verdict"
 CLEAN_DIR = "authoritative"
 MAX_KERNEL_BYTES = 256 * 1024     # choice: the fixtures are under 4 KiB; a kernel this large is not a kernel
 TEMPLATE_FILES = ("kernel_check.py", "kernel_harness.py", "references.py")
+CHEAT_NAME = "ttlang_cheat_sheet.md"      # the rendered TT-Lang sheet (issue 523), written into each attempt directory next to the spec
 # Every category an attempt can end in. The check and the harness produce all but `hang`, which the probe sets when
 # the stall watcher kills a hardware run.
 CATEGORIES = ("no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
@@ -200,6 +201,30 @@ def write_references(adir: Path, references: list[dict]) -> list[dict]:
     return out
 
 
+def write_cheat_sheet(adir: Path) -> bool:
+    """Render the shipped TT-Lang cheat sheet (orchard/op_cheats.py) into the attempt directory. False when it cannot be read: the attempt
+    then runs without it and the prompt does not name it (`cheat_line`)."""
+    try:
+        text = op_cheats.render(op_cheats.load_sheet(op_cheats.TTLANG_SHEET))
+        safeio.atomic_write(Path(adir) / CHEAT_NAME, text.encode("utf-8"), mode=0o644)
+        return True
+    except (op_cheats.SheetError, OSError, ValueError):
+        return False
+
+
+def cheat_line(adir: Path) -> str:
+    """The sentence the task text adds when the sheet is in the attempt directory, else an empty string."""
+    return (f" Then read {CHEAT_NAME}: the calls of tt-lang's API with the signatures of the package that compiles for the chip. "
+            "A kernel that passes the simulator can still fail to compile for the chip.") if (Path(adir) / CHEAT_NAME).is_file() else ""
+
+
+def attempt_user_message(op: str, adir: Path) -> str:
+    """The task text of a whole-kernel attempt: what to write, what to read first, and the cheat sheet when the directory has it."""
+    return (f"Write kernel.py for the op `{op}` in kernel_spec.json. "
+            "Start by reading kernel_spec.json and reference/eltwise_add.py, then the reference files the skill "
+            "names for this kind of op." + cheat_line(adir))
+
+
 def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
                     references: list[dict] | None = None) -> list[dict]:
     """Fill an EMPTY attempt directory with what the agent reads and runs. `tt_lang` defaults to tt_lang_facts(env).
@@ -220,6 +245,7 @@ def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
     for name in TEMPLATE_FILES:
         shutil.copy2(TEMPLATES / name, adir / name)
     shutil.copy2(TEMPLATES / "ops" / f"{op}.json", adir / "kernel_spec.json")
+    write_cheat_sheet(adir)
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
     safeio.atomic_write(adir / "check_config.json", json.dumps({"sim": str(env.sim), "timeout_s": BUDGET["sim_timeout_s"],
                                                                 "tt_lang": facts}, indent=2) + "\n", mode=0o644)
@@ -1127,9 +1153,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
                          evidence_dir=adir / "evidence", log_path=adir / "log" / "probe-00001.jsonl", http=http,
                          clock=clock, guard=RetryGuard(), max_turns=max_turns, temperature=temperature, top_p=top_p,
                          seed=seed, max_tokens=BUDGET["max_tokens"])
-        user = (f"Write kernel.py for the op `{op}` in kernel_spec.json. "
-                "Start by reading kernel_spec.json and reference/eltwise_add.py, then the reference files the skill "
-                "names for this kind of op.")
+        user = attempt_user_message(op, adir)
         outcome = step.run(SKILL.read_text(encoding="utf-8"), user)
     finally:
         ledger.close()

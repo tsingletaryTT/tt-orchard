@@ -7,6 +7,7 @@ port_check.py) and the task text names it. Run it from anywhere:
     python3 stages/2/stage_tools.py layer-diff            the port against the CPU reference layer by layer: the first layer that diverges
     python3 stages/2/stage_tools.py facts [KEY]           one value of port_facts.json, by dotted path (config.hc_count); --find TEXT searches
     python3 stages/2/stage_tools.py show FILE --lines A:B a range of a file in the run directory, with line numbers
+    python3 stages/2/stage_tools.py cheat [NAME]          one entry of the verified TTNN call sheet (issue 523); --sheet ttlang for the kernel sheet
 
 It reads only files in its own stage directory, and writes nothing there except what a tool says it writes. It is standard library only: it must
 run in the coder's shell, where the supervisor's own package is not importable. Everything it prints is advice built from files the coder could
@@ -719,10 +720,45 @@ def show_cmd(stage: Path, argv: list):
     return 0, [head] + [f"{n:>6}  {clean(rows[n - 1])}" for n in range(first, last + 1)]
 
 
+CHEAT_FILES = {"ttnn": "cheat_sheet.json", "ttlang": "ttlang_cheat_sheet.json"}      # the supervisor's copies of the verified sheets (issue 523)
+CHEAT_LINE = 700
+
+
+def cheat_cmd(stage: Path, argv: list):
+    """(exit code, lines) for `cheat [NAME] [--sheet ttnn|ttlang]`: one entry of a verified cheat sheet, or the names when there is no NAME.
+    The sheet is the supervisor's file in this directory (orchard/op_cheats.py checked it against the source tree); a name matches an entry's
+    full name or its last part when only one entry has it."""
+    import argparse
+    parser = argparse.ArgumentParser(prog="stage_tools.py cheat", add_help=True)
+    parser.add_argument("name", nargs="?", default=None, help="an entry name, for example ttnn.linear")
+    parser.add_argument("--sheet", choices=sorted(CHEAT_FILES), default="ttnn")
+    args = parser.parse_args(argv)
+    sheet, why = read_json(stage / CHEAT_FILES[args.sheet])
+    if sheet is None:
+        return 2, [f"{CHEAT_FILES[args.sheet]} {why}."]
+    found = [e for sec in sheet.get("sections", []) if isinstance(sec, dict) for e in sec.get("entries", []) if isinstance(e, dict)]
+    if args.name is None:
+        return 0, [f"{len(found)} entries in the {args.sheet} sheet; `cheat NAME` prints one:"] + [clean(", ".join(str(e.get("name")) for e in found[i:i + 6]), CHEAT_LINE)
+                                                                                                 for i in range(0, len(found), 6)]
+    if not args.name or len(args.name) > 120 or "\0" in args.name:
+        return 2, ["NAME is 1 to 120 characters."]
+    exact = [e for e in found if e.get("name") == args.name]
+    short = [e for e in found if str(e.get("name")).rsplit(".", 1)[-1] == args.name]
+    hits = exact or short or [e for e in found if args.name.lower() in str(e.get("name")).lower()]
+    if not hits:
+        return 1, [f"no entry in the {args.sheet} sheet matches {clean(args.name, 60)!r}; `cheat` alone lists the names."]
+    out = []
+    for e in hits[:3]:
+        out += [clean(f"{e.get('signature')}" + (f" [{e['status']}]" if e.get("status") else ""), CHEAT_LINE), *["    " + clean(ln, CHEAT_LINE) for ln in str(e.get("usage")).split("\n")[:12]],
+                "    " + clean(e.get("notes"), CHEAT_LINE), "    " + clean(f"seen: {e.get('seen_in')}", CHEAT_LINE)]
+    return 0, out + ([f"({len(hits) - 3} more entries match; give the full name)"] if len(hits) > 3 else [])
+
+
 COMMANDS = {"last-check": "which check failed, where, the numbers and the evidence file",
             "layer-diff": "the port against the CPU reference layer by layer: the first layer whose relative error is over --threshold",
             "facts": "one value of port_facts.json by dotted path, or --find TEXT",
-            "show": "a range of a file in the run directory with line numbers: show FILE --lines A:B"}
+            "show": "a range of a file in the run directory with line numbers: show FILE --lines A:B",
+            "cheat": "one entry of the verified TTNN call sheet (--sheet ttlang for the kernel sheet): cheat NAME"}
 
 
 def main(argv=None) -> int:
@@ -737,7 +773,7 @@ def main(argv=None) -> int:
         return 0
     if argv[0] == "layer-diff":
         return layer_diff(HERE, argv[1:])
-    code, lines = (facts_cmd if argv[0] == "facts" else show_cmd)(HERE, argv[1:])
+    code, lines = {"facts": facts_cmd, "show": show_cmd, "cheat": cheat_cmd}[argv[0]](HERE, argv[1:])
     print("\n".join(lines))
     return code
 

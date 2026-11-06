@@ -503,7 +503,7 @@ def stage_3_note(*, chips: int, copied: bool) -> str:
     return " ".join(parts)
 
 
-def tools_text(stage: int = 2, *, facts: bool = True) -> str:
+def tools_text(stage: int = 2, *, facts: bool = True, cheat: bool = True) -> str:
     """The stage tools (orchard/skills/full-port-templates/stage_tools.py, issue 505) as the coder's task names them: the exact command and one line each,
     and the optional `layer_outputs` hook that `layer-diff` needs. The commands are the ones the watchdog counts by tool name and arguments."""
     base = f"python3 stages/{stage}/stage_tools.py"
@@ -513,15 +513,18 @@ def tools_text(stage: int = 2, *, facts: bool = True) -> str:
         f"- `{base} layer-diff`: after a numerics failure, the first layer whose output differs from the CPU reference (needs the optional hook below).",
         f"- `{base} facts KEY`: one value of {FACTS_NAME} by dotted path, for example `facts config.hc_count`; `facts --find TEXT` searches keys and text.",
         f"- `{base} show FILE --lines A:B`: a range of a file in the run directory, with line numbers.",
+        f"- `{base} cheat NAME`: one entry of the verified TTNN call sheet, for example `cheat ttnn.linear`; `cheat` alone lists the names.",
         "Optional hook for `layer-diff`: define `layer_outputs(model, ids)` in `port_model.py`. It runs the prompt `ids` once and returns the hidden state "
         "after each decoder layer, in order, as a list of torch tensors or numpy arrays. The check calls it only when the agreement is below "
         f"{full_port.TOP1_MIN}, after the comparison, in the same run; its result cannot change the verdict, and an error in it is printed and ignored."]
     if not facts:                    # no facts file was written for this run, so no line may name it
         lines = [l for l in lines if "`facts" not in l]
+    if not cheat:                    # no sheet was copied for this run
+        lines = [l for l in lines if "`" + base + " cheat" not in l]
     return "\n".join(lines)
 
 
-def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
+def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False, cheat: bool = True) -> str:
     """What the supervisor adds to the coder's prepare task for a full port. The generic prepare task names only hw_test.json and
     handoff.json; the port itself is described only in the skill, and the coder explored and wrote nothing."""
     parts = [f"This stage's check is the supervisor's: when you finish, it puts its own `stages/2/port_check.py` back and rewrites "
@@ -541,10 +544,13 @@ def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False) -> str:
         parts.append("`stages/2/port/port_model.py` is a skeleton: `load`, `prefill`, `decode_step` and `close` each raise "
                      "NotImplementedError until you replace them, and `read_tensors` reads the checkpoint whether it is one file or "
                      "shards.")
+    if cheat:
+        parts.append(f"`stages/2/{full_port.CHEAT_MD_NAME}` lists the TTNN calls a decoder port needs, each checked against the tt-metal source: an argument "
+                     "that is not listed there does not exist. Check a call there before you write it.")
     parts.append(f"Write your first version of `port_model.py` within {FIRST_VERSION_TURNS} turns, even if it is incomplete, then refine "
                  "it. Do not page through the stage 1 reference files: the check reads them, and a port may not. Do not search the "
                  "machine for other models' code; the worked example the skill names is enough.")
     parts.append(f"When the port is written, write `hw_test.json` as {{\"command\": \"{full_port.COMMAND}\", \"deadline_s\": "
                  f"{full_port.DEADLINE_S}}} and `handoff.json`, then reply with a short summary and no tool call.")
-    parts.append(tools_text(2, facts=facts))
+    parts.append(tools_text(2, facts=facts, cheat=cheat))
     return "\n\n".join(parts)

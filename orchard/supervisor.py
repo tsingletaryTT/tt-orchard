@@ -165,7 +165,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, FULL_PORT_STAGE_4, SKIP_3_FULL_PORT, SKIP_4_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed)
-from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
+from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, op_cheats, phone_a_friend, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import repair_help            # the outside helper inside the port repair rounds (issue 427, run11)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
@@ -3334,7 +3334,8 @@ class Supervisor:
             if spec.number == 3:
                 return swap_prepare.PrepareOutcome(False, note=port_facts.stage_3_note(chips=self._stage_3_chips() or 0,
                                                                                        copied=bool(seed.get("copied") or seed.get("kept"))))
-            note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")))
+            note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")),
+                                           cheat=(stage_dir / full_port.CHEAT_MD_NAME).is_file())
             if spec.number == 2 and getattr(self, "telegraph", None) is not None:
                 done_dir, done = getattr(self, "_best_restore", (None, None))
                 restored = done if done_dir == str(stage_dir) else self._restore_best_port(spec, stage_dir)      # `_draft` already tried it
@@ -4185,6 +4186,19 @@ class Supervisor:
         # The coder's fixed-name tools (issue 505): the supervisor's file, put back each time, so an edit made during prepare is undone.
         tools = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.TOOLS_NAME
         safeio.atomic_write(stage_dir / full_port.TOOLS_NAME, safeio.read_bytes(tools, max_bytes=RUN_JSON_MAX), mode=os.stat(tools).st_mode & 0o777)
+        # The verified TTNN cheat sheet (issue 523): its data for `stage_tools.py cheat`, and the Markdown the coder reads. Both come from the
+        # supervisor's shipped file and are put back each time. A sheet that cannot be read is skipped with a ledger decision, never a stage failure.
+        copied = [full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, full_port.TOOLS_NAME]
+        try:
+            cheat_src = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.CHEAT_SOURCE.name
+            cheat_bytes = safeio.read_bytes(cheat_src, max_bytes=RUN_JSON_MAX)
+            cheat_text = op_cheats.render(op_cheats.load_sheet(cheat_src))
+            safeio.atomic_write(stage_dir / full_port.CHEAT_NAME, cheat_bytes, mode=0o644)
+            safeio.atomic_write(stage_dir / full_port.CHEAT_MD_NAME, cheat_text.encode("utf-8"), mode=0o644)
+            copied += [full_port.CHEAT_NAME, full_port.CHEAT_MD_NAME]
+        except (safeio.SafeReadError, op_cheats.SheetError, OSError, ValueError) as exc:
+            if not command:
+                self.ledger.append("decision", spec.number, decision="cheat sheet not copied", reason=str(exc)[:200])
         # The interpreter `layer-diff` runs under (torch and transformers). The coder's shell has an allow-listed environment, so the supervisor names it.
         # A file the coder left there is replaced or removed, so the path in it is always one the supervisor found.
         python = _stages._mask_python(self.run_dir)
@@ -4204,7 +4218,7 @@ class Supervisor:
             _put(stage_dir / "hw_test.json", json.dumps({"command": full_port.command(spec.number, entry), "deadline_s": deadline}) + "\n")
         else:
             self.ledger.append("decision", spec.number, decision="port check template copied",
-                               copied=[full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, full_port.TOOLS_NAME])
+                               copied=copied)
         return []
 
     def _pin_scoring(self, spec, stage_dir: Path, *, command: bool = False) -> list[str]:
