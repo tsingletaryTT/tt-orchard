@@ -5,6 +5,8 @@ port_check.py) and the task text names it. Run it from anywhere:
 
     python3 stages/2/stage_tools.py last-check            which check failed, where, the numbers and the evidence file
     python3 stages/2/stage_tools.py layer-diff            the port against the CPU reference layer by layer: the first layer that diverges
+    python3 stages/2/stage_tools.py facts [KEY]           one value of port_facts.json, by dotted path (config.hc_count); --find TEXT searches
+    python3 stages/2/stage_tools.py show FILE --lines A:B a range of a file in the run directory, with line numbers
 
 It reads only files in its own stage directory, and writes nothing there except what a tool says it writes. It is standard library only: it must
 run in the coder's shell, where the supervisor's own package is not importable. Everything it prints is advice built from files the coder could
@@ -558,8 +560,123 @@ def inner(argv: list) -> int:
     return 0 if result["first"] is None else 1
 
 
+# ---- facts and show ---------------------------------------------------------------------------------------------------------------
+
+VALUE_CHARS = 3000                 # characters of one value `facts` prints
+FIND_HITS = 30
+FIND_NODES = 200_000               # nodes visited by --find: a hostile file cannot make it run long
+SHOW_DEFAULT = 200
+SHOW_MAX = 400                     # lines in one `show`
+SHOW_FILE_MAX = 1_000_000
+
+
+def facts_cmd(stage: Path, argv: list):
+    """(exit code, lines) for `facts [KEY] [--find TEXT]` over the stage's port_facts.json."""
+    import argparse
+    parser = argparse.ArgumentParser(prog="stage_tools.py facts", add_help=True)
+    parser.add_argument("key", nargs="?", default=None, help="dotted path, for example config.hc_count or tensors.0")
+    parser.add_argument("--find", default=None, help="list every key or text that contains this (case-insensitive)")
+    args = parser.parse_args(argv)
+    facts, why = read_json(stage / FACTS_REL)
+    if facts is None:
+        return 2, [f"{FACTS_REL} {why}."]
+    if args.find is not None:
+        needle = args.find.lower()
+        if not needle or len(needle) > 100 or "\0" in needle:
+            return 2, ["--find needs 1 to 100 characters of text."]
+        hits, extra, seen, todo = [], 0, 0, [("", facts)]
+        while todo and seen < FIND_NODES:
+            path, node = todo.pop()
+            seen += 1
+            if isinstance(node, dict):
+                kids = [(f"{path}.{k}" if path else str(k), v) for k, v in node.items()]
+            elif isinstance(node, list):
+                kids = [(f"{path}.{i}" if path else str(i), v) for i, v in enumerate(node)]
+            else:
+                kids = []
+            for kid_path, v in reversed(kids):
+                todo.append((kid_path, v))
+            if path and (needle in path.rsplit(".", 1)[-1].lower() or (not isinstance(node, (dict, list)) and needle in str(node).lower())):
+                if len(hits) < FIND_HITS:
+                    hits.append(f"{clean(path, 120)}: {clean(json.dumps(node)[:150], 160)}")
+                else:
+                    extra += 1
+        if not hits:
+            return 1, [f"no key or text contains {clean(args.find, 60)!r}."]
+        return 0, hits + ([f"({extra} more matches not shown; narrow the text)"] if extra else [])
+    if args.key is None:
+        return 0, [f"{k}: {describe(v)}" for k, v in list(facts.items())[:40]] + [f"(`facts KEY` prints one; `facts --find TEXT` searches; {ADVICE_NOTE})"]
+    key = args.key
+    if not key or len(key) > 200 or "\0" in key or any(part == "" for part in key.split(".")):
+        return 2, ["the key is a dotted path such as config.hc_count: no empty parts, at most 200 characters."]
+    node, walked = facts, []
+    for part in key.split("."):
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and re.fullmatch(r"\d{1,9}", part) and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            there = list(node.keys())[:20] if isinstance(node, dict) else ([f"0..{len(node) - 1}"] if isinstance(node, list) and node else [])
+            return 1, [f"no key {clean(part, 60)!r} in {'.'.join(walked) or 'the file'}" + (f"; the keys are: {clean(', '.join(map(str, there)), 400)}" if there else "")]
+        walked.append(part)
+    compact = json.dumps(node)
+    text = compact if len(compact) <= 100 else json.dumps(node, indent=1)
+    if len(text) > VALUE_CHARS:
+        text = text[:VALUE_CHARS] + f"\n... ({len(text) - VALUE_CHARS} more characters not shown; ask for a deeper key)"
+    return 0, text.splitlines()
+
+
+def describe(value) -> str:
+    if isinstance(value, dict):
+        return f"object with {len(value)} keys"
+    if isinstance(value, list):
+        return f"list of {len(value)}"
+    return clean(json.dumps(value), 80)
+
+
+def show_cmd(stage: Path, argv: list):
+    """(exit code, lines) for `show FILE [--lines A:B]`: a range of a regular file inside the run directory, with line numbers."""
+    import argparse
+    parser = argparse.ArgumentParser(prog="stage_tools.py show", add_help=True)
+    parser.add_argument("file", help="a path relative to this stage directory or to the run directory")
+    parser.add_argument("--lines", default=f"1:{SHOW_DEFAULT}", help=f"first:last, 1-based, at most {SHOW_MAX} lines (default 1:{SHOW_DEFAULT})")
+    args = parser.parse_args(argv)
+    m = re.fullmatch(r"(\d{1,9}):(\d{1,9})", args.lines)
+    if not m or int(m.group(1)) < 1 or int(m.group(2)) < int(m.group(1)):
+        return 2, ["--lines must be FIRST:LAST with 1 <= FIRST <= LAST, for example --lines 10:80."]
+    first, last = int(m.group(1)), int(m.group(2))
+    if last - first + 1 > SHOW_MAX:
+        return 2, [f"--lines: at most {SHOW_MAX} lines at a time; ask for the next range."]
+    if not args.file or "\0" in args.file or len(args.file) > 500:
+        return 2, ["the file name is empty, too long or has a NUL."]
+    run = os.path.realpath(run_dir_of(stage))
+    target = None
+    for base in (stage, Path(run)):
+        candidate = os.path.realpath(os.path.join(base, args.file))
+        if candidate == run or not candidate.startswith(run + os.sep):
+            return 2, [f"{clean(args.file, 100)} is outside the run directory: `show` reads only files in the run. The reference classes are in reference_excerpts.md."]
+        if os.path.lexists(candidate):
+            target = candidate
+            break
+    if target is None:
+        return 2, [f"{clean(args.file, 100)} missing (looked in the stage directory and the run directory)."]
+    data, why = read_file(Path(target), SHOW_FILE_MAX)
+    if data is None:
+        return 2, [f"{clean(args.file, 100)} {why}."]
+    if b"\0" in data[:8192]:
+        return 2, [f"{clean(args.file, 100)} is a binary file."]
+    rows = data.decode("utf-8", "replace").splitlines()
+    if first > len(rows):
+        return 2, [f"{clean(args.file, 100)} has {len(rows)} lines; --lines starts at {first}."]
+    last = min(last, len(rows))
+    head = f"{os.path.relpath(target, run)} ({len(rows)} lines), lines {first}-{last}"
+    return 0, [head] + [f"{n:>6}  {clean(rows[n - 1])}" for n in range(first, last + 1)]
+
+
 COMMANDS = {"last-check": "which check failed, where, the numbers and the evidence file",
-            "layer-diff": "the port against the CPU reference layer by layer: the first layer whose relative error is over --threshold"}
+            "layer-diff": "the port against the CPU reference layer by layer: the first layer whose relative error is over --threshold",
+            "facts": "one value of port_facts.json by dotted path, or --find TEXT",
+            "show": "a range of a file in the run directory with line numbers: show FILE --lines A:B"}
 
 
 def main(argv=None) -> int:
@@ -574,7 +691,9 @@ def main(argv=None) -> int:
         return 0
     if argv[0] == "layer-diff":
         return layer_diff(HERE, argv[1:])
-    return 2
+    code, lines = (facts_cmd if argv[0] == "facts" else show_cmd)(HERE, argv[1:])
+    print("\n".join(lines))
+    return code
 
 
 if __name__ == "__main__":
