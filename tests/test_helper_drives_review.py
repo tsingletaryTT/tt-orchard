@@ -142,3 +142,87 @@ def test_a_helper_driven_attempt_runs_more_rounds_than_port_repair_rounds(rig, m
     first_end = next(e["seq"] for e in entries if e["stage"] == 2 and e["event"] == "stage_end")
     rounds = [e for e in entries if e["seq"] < first_end and e["data"].get("decision") == port_repair.DECISION]
     assert len(rounds) >= 2, len(rounds)
+
+
+# ---- round 2 of the review of PR 497 ---------------------------------------------------------------------------------------------------
+
+def test_a_helper_driven_round_past_the_stage_budget_pauses_before_the_chip_check_and_the_next_request(rig, monkeypatch, tmp_path):
+    """Finding: driven rounds skip the agent step that feeds the watchdog, so slow helper calls took the attempt past its budget unnoticed."""
+    from orchard.stages import STAGE_BUDGET_S
+    over = STAGE_BUDGET_S[2] + 1.0
+
+    def answer(body):
+        rig.clock.now += over                                  # the helper call took longer than the stage's whole budget
+        return openai_reply(f"Here.\n```python\n{PREFILL_BROKEN}\n```\n", 1200, 400)
+    tel, wire = wire_helper(monkeypatch, tmp_path, [answer, HONEST])
+    start(rig, BROKEN, ["# c\n"])
+    rig.run()
+    assert len(wire.requests) == 1, "a second paid request went out past the stage budget"
+    assert not decs(rig, port_repair.RERUN), "the chip check ran past the stage budget"
+    assert "pass" not in stage_ends(rig)
+
+
+def test_a_run_started_with_an_explicit_choice_keeps_it_on_a_resume(tmp_path):
+    """Finding: `helper_drives` came only from the current arguments, so a resume without the flag lost an explicit choice."""
+    from orchard import supervisor as sv
+    for choice in (True, False):
+        led = Ledger(tmp_path / f"ledger-{choice}.jsonl")
+        led.append("run_start", None, model="m", helper_drives=choice)
+        progress = sv.run_progress(led.read())
+        assert progress.run_start["helper_drives"] is choice
+    assert sv.recorded_helper_drives(None, {"helper_drives": True}) is True
+    assert sv.recorded_helper_drives(None, {"helper_drives": False}) is False
+    assert sv.recorded_helper_drives(True, {}) is True and sv.recorded_helper_drives(None, {}) is None
+    assert sv.recorded_helper_drives(False, {"helper_drives": True}) is True          # the run's own record wins over a later flag
+
+
+def test_build_gives_a_resumed_supervisor_the_choice_the_run_started_with(rig, monkeypatch, tmp_path):
+    """The wiring: run_start records the explicit choice, and `build` reads it back for a resume that does not repeat the flag."""
+    from orchard import supervisor
+    rig.args.full_port_rehearsal = False
+    rig.args.helper_drives_port = True
+    start(rig, BROKEN, ["# c\n"])
+    rig.run()
+    starts = [e for e in Ledger(rig.run_dir / "ledger.jsonl").read() if e["event"] == "run_start"]
+    assert starts[0]["data"].get("helper_drives") is True
+    rig.args.helper_drives_port = None                         # the resume does not repeat the flag
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        sup = supervisor.build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=100), coder=rig.coder_cls(rig.m),
+                               versions={"tt_model": "test"}, clock=rig.clock, sleep=rig.sleep, disk_usage=lambda p: rig.usage(p),
+                               home=rig.home, containers=rig.containers)
+        assert sup.helper_drives is True
+
+
+def _passed_check_stub(tmp_path, *, vouched):
+    """A stage 2 directory after the real check ran a port that agrees with the reference, and a supervisor that drives with the helper. The
+    check's record must be the check's own (its digest is in the captured output), so the check really runs against the fakes."""
+    import hashlib
+    from test_helper_numerics_rounds import PASSES, checked
+    run, stage = checked(tmp_path, PASSES)
+    (stage / "port" / "helper.py").write_text("y = 2\n")            # a supporting file the port may import
+    led = Ledger(run / "ledger.jsonl")
+    led.append("run_start", None, model="m")
+    led.append("stage_start", 2, escalated=False, resumed=False)
+    if vouched:
+        marker = (stage / port_repair.MARKER).read_bytes()
+        led.append("evidence", 2, path="stages/2/" + port_repair.MARKER, sha256=hashlib.sha256(marker).hexdigest(), returncode=0, timed_out=False)
+    s = object.__new__(Supervisor)
+    s.run_dir, s.ledger, s.repair_help, s.helper_drives, s.telegraph = run, led, True, True, object()
+    return s, stage
+
+
+def test_a_check_that_ran_to_the_end_is_kept_as_the_best_port_with_its_supporting_files(tmp_path):
+    """Finding: only failures were recorded, so a running port that the gate refused for its agreement was lost to the next attempt."""
+    s, stage = _passed_check_stub(tmp_path, vouched=True)
+    s._record_best_passed(2, stage)
+    (best,) = [e["data"] for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]
+    assert best["rank"] == rh.PASSED_RANK > rh.best_rank("decode") and best["passed"] is True
+    assert [f["path"] for f in best["files"]] == ["helper.py", "port_model.py"]
+    s._record_best_passed(2, stage)                                    # the same port again adds nothing
+    assert len([e for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]) == 1
+
+
+def test_a_test_record_the_supervisor_did_not_write_is_not_a_passed_check(tmp_path):
+    s, stage = _passed_check_stub(tmp_path, vouched=False)
+    s._record_best_passed(2, stage)
+    assert not [e for e in s.ledger.read() if e["data"].get("decision") == rh.BEST]

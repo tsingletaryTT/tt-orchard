@@ -50,6 +50,19 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def remark(stage, rec):
+    """Write `rec` as the record and put its digest in the output file's digest line and in the test record, as a forger would have to. The
+    reader then trusts the record's bytes, and only its content (the ids and the port's hash) can still refuse it."""
+    data = json.dumps(rec).encode()
+    record_path(stage).write_bytes(data)
+    out = stage / "evidence" / "hw-test-output.txt"
+    lines = [line for line in out.read_text().splitlines() if not line.startswith("PORT_CHECK_SHA256")]
+    out.write_text("\n".join(lines + [f"PORT_CHECK_SHA256 {hashlib.sha256(data).hexdigest()}"]) + "\n")
+    marker = json.loads((stage / "test-result.json").read_text())
+    marker["output"]["sha256"] = sha(out)
+    (stage / "test-result.json").write_text(json.dumps(marker))
+
+
 # ---- reading a check that ran -----------------------------------------------------------------------------------------------------------
 
 def test_a_port_that_runs_below_the_bar_is_a_numerics_failure_with_the_numbers(tmp_path):
@@ -76,7 +89,7 @@ def test_the_agreement_is_recomputed_from_the_ids_and_not_taken_from_the_record(
     run, stage = checked(tmp_path, LOW)
     rec = json.loads(record_path(stage).read_text())
     rec["top1_agreement"] = 1.0                      # what a rewritten record would claim
-    record_path(stage).write_text(json.dumps(rec))
+    remark(stage, rec)                               # a rewrite that also carries the record's new digest through the output and the test record
     assert port_repair.read_numerics(run, stage)["agreement"] == pytest.approx(17 / 32)
 
 
@@ -138,7 +151,7 @@ def test_the_report_says_whether_the_agreement_rose_since_the_previous_round(tmp
 
 
 def test_the_request_for_a_port_that_runs_says_random_weights_teacher_forcing_and_lists_suspects_without_prescribing(tmp_path):
-    task, sent = rh.build_task(facts="F", excerpts="E", port_text=LOW, listing="port_model.py", homes=(), report="top1_agreement 0.5000")
+    task, sent = rh.build_task(facts="F", excerpts="E", port_text=LOW, listing="port_model.py", homes=(), report="top1_agreement 0.5000", rehearsal=True)
     assert task.startswith(rh.REQUEST_NUMERICS) and "## What the check measured\ntop1_agreement 0.5000" in task
     for word in ("RANDOM-WEIGHT", "teacher forced", "partial rotary dimension", "rms norm epsilon", "gate non-linearity", "cache position",
                  "convolution state", "hyper-connection mixing", "tied embedding scaling", "Do not repeat a change that did not move the agreement"):
@@ -291,10 +304,11 @@ def test_the_best_port_keeps_the_highest_agreement_and_records_it(rig, monkeypat
     start(rig, LOW, ["# c\n"])
     rig.run()
     best = decs(rig, rh.BEST)
-    assert [(b["op"], b["rank"]) for b in best] == [("numerics", 5), ("numerics", 5)]
-    assert [b["agreement"] for b in best] == [pytest.approx(17 / 32), pytest.approx(0.75)]      # the third round's 0.53 did not replace the 0.75
-    kept = (rig.run_dir / "stages" / "2.best" / "port_model.py").read_text()
-    assert hashlib.sha256(kept.encode()).hexdigest() == best[-1]["port_sha256"]
+    # the last reply passes the check: that port ranks above every numerics failure
+    assert [(b["op"], b["rank"]) for b in best] == [("numerics", 5), ("numerics", 5), (None, rh.PASSED_RANK)]
+    assert [b["agreement"] for b in best[:2]] == [pytest.approx(17 / 32), pytest.approx(0.75)]      # the third round's 0.53 did not replace the 0.75
+    kept = (rig.run_dir / "stages" / "2.best" / best[1]["snapshot"] / "port_model.py").read_text()      # snapshots are never replaced
+    assert hashlib.sha256(kept.encode()).hexdigest() == best[1]["port_sha256"]
 
 
 def test_the_coder_driven_rounds_do_not_read_numerics(rig, monkeypatch, tmp_path):

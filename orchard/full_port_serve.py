@@ -498,7 +498,11 @@ def _passkey_reasons(record, corpus_sha256, stage_dir, reasons) -> tuple[list[bo
         return None
     cfg = full_port._json(stage_dir / CONFIG_NAME, CONFIG_NAME, [])
     planned = None
-    if isinstance(cfg, dict) and isinstance(corpus_sha256, str) and _int(cfg.get("max_len"), 1):
+    # A config that cannot be read, or a context limit that is not a whole number of at least 1 (a string such as "2048" is one: the template
+    # takes it through int()), would switch the planned-key and planned-length checks off. It is a reason, not a skipped check (review of PR 490).
+    if not isinstance(cfg, dict) or not _int(cfg.get("max_len"), 1):
+        reasons.append(f"{CONFIG_NAME} must be readable and hold max_len as a whole number of at least 1, so the planned passkeys can be checked")
+    elif isinstance(corpus_sha256, str):
         planned = plan_passkeys(corpus_sha256, cfg["max_len"])
         if cfg.get("passkeys") != planned:
             reasons.append(f"{CONFIG_NAME} passkeys are not the ones the corpus's hash and the context limit give")
@@ -590,6 +594,11 @@ def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons) -
         c = checks.get(name) if isinstance(checks, dict) else None
         if not isinstance(c, dict) or not isinstance(c.get("pass"), bool) or not isinstance(c.get("evidence"), list) or not c["evidence"]:
             reasons.append(f"result.json checks.{name} needs pass (true or false) and evidence")
+    # A passing serving check records a boot and a canary that passed: the gate refuses a result that says otherwise, so the operator bundle
+    # never reports failed checks from a stage that passed (review of PR 490).
+    for name in ("boots", "canary"):
+        if isinstance(checks, dict) and isinstance(checks.get(name), dict) and checks[name].get("pass") is not True:
+            reasons.append(f"result.json checks.{name}.pass is not true, and a passing serving check boots and passes the canary")
     if isinstance(checks, dict) and isinstance(checks.get("corpus"), dict) and isinstance(replay, dict):
         if checks["corpus"].get("pass") is not (replay["matched"] == replay["positions"]):
             reasons.append("result.json checks.corpus.pass differs from whether every position matched")

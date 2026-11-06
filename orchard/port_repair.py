@@ -313,6 +313,11 @@ def numerics_state(run_dir, stage_dir) -> tuple[str, dict | None]:
     if record.get("schema") != full_port.RECORD_SCHEMA:
         return "unreadable", None
     reasons: list = []
+    # The record must be the file the check printed the digest of into the output the supervisor captured: ids rewritten to agree leave the
+    # reference and port hashes valid, and only this digest tells a record the test wrote from one somebody edited (review of PR 498).
+    full_port._output_reasons(stage_dir, run_dir, marker, reasons)
+    if reasons:
+        return "unreadable", None
     reference = full_port._reference_ids(record, run_dir, reasons)
     ref, chip = record.get("reference_ids"), record.get("chip_ids")
     if (reasons or reference is None or not full_port._ids(ref) or not full_port._ids(chip) or not chip or len(ref) != len(chip)

@@ -1135,6 +1135,7 @@ class Supervisor:
                                **({"tool_dedupe": False} if not self.tool_dedupe else {}),
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
+                               **({"helper_drives": self.helper_drives} if self.helper_drives is not None else {}),
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
@@ -2413,12 +2414,24 @@ class Supervisor:
                 self.ledger.append("decision", n, decision=port_repair.TESTED,
                                    sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
                 continue
+            if owed is None:
+                # A test that finished before the supervisor stopped, with its verdict not yet reported, is judged now: before any new ask, so the
+                # helper's model list reacts to that test and not to a later one (review of PR 496). With a rerun owed the record on disk is not
+                # the test's, so nothing is judged until the rerun has been read.
+                self._repair_verdicts(n, stage_dir)
+                entries = self.ledger.read()
             failure = port_repair.read_failure(self.run_dir, stage_dir)
             if failure is None and self._helper_drive_on():
                 # A check that ran to the end with an agreement below the gate's bar is a failure of the port too (run16: top1 0.5625). Only the
                 # helper-driven loop reads it, so a coder-driven stage 2 keeps its rounds as before.
                 failure = port_repair.read_numerics(self.run_dir, stage_dir)
-            if failure is None and owed is None:
+            # A repair edit that was made and not yet tested is not read as the end of the rounds: the old record names the port from before the
+            # edit, so the numbers read as None, and an early return would send the repaired port to the finish step with that stale evidence.
+            # The edit is tested again in the round that already counted it (review of PR 498).
+            edited = (port_repair.rounds_used(entries, n) > 0 and port_repair.tested_digest(entries, n) is not None
+                      and port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)) != port_repair.tested_digest(entries, n))
+            if failure is None and owed is None and not edited:
+                self._record_best_passed(n, stage_dir)         # a check that ran to the end, whatever the gate says next
                 return None
             used = port_repair.rounds_used(entries, n)
             before = port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)
@@ -2473,12 +2486,12 @@ class Supervisor:
                     # round's repair. No coder step runs. A refusal, a stub or a cap hands the round to the coder below.
                     # The operator's controls are read before the paid request and again before the chip check, as a coder step reads them
                     # between turns (review of PR 497).
-                    if stop := self.actuator.stop_reason():
+                    if stop := self._driven_stop(spec):
                         return stop, [f"the helper-driven repair round {k} ended: {stop}"], None
                     # coder_failed is False: no coder step ran, so a file that changed while the helper answered is somebody's edit and is kept.
                     _note, driven_ok, asked_here = self._repair_help(spec, stage_dir, k, limit, failure, raw,
                                                                      why="the helper drives this stage's repairs", coder_failed=False, driven=True)
-                    if stop := self.actuator.stop_reason():
+                    if stop := self._driven_stop(spec):
                         return stop, [f"the helper-driven repair round {k} ended: {stop}"], None
                     if driven_ok:
                         self._repair_baseline = None          # no coder step ends on a baseline in a round the helper drove
@@ -3226,7 +3239,7 @@ class Supervisor:
     def _end_stage_body(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
         if n == 2 and spec.draft == "full_port" and getattr(self, "telegraph", None) is not None and status not in ("abort", "operator-pause"):
-            self._report_phone_a_friend(n, helped=(status == "pass"))
+            self._report_phone_a_friend(n, helped=(status == "pass"), stage_dir=stage_dir)
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
             ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
@@ -3361,9 +3374,9 @@ class Supervisor:
         if not is_due:
             return None
         spent = repair_help.asks_in_stage(entries, n)
-        if spent >= repair_help.TOTAL_PER_STAGE:
+        if spent >= self._stage_ask_limit():
             # The stage's limit counts the repair-round asks too (review of PR 496): an attempt that follows six repair asks sends no seventh call.
-            self._friend_refused(n, f"the helper was already asked {spent} times in this stage, repair rounds included (the limit is {repair_help.TOTAL_PER_STAGE})")
+            self._friend_refused(n, f"the helper was already asked {spent} times in this stage, repair rounds included (the limit is {self._stage_ask_limit()})")
             return None
         k = state["asked_in_stage"] + 1
         stage_dir = Path(stage_dir)
@@ -3428,7 +3441,11 @@ class Supervisor:
         if n != 2 or getattr(self, "telegraph", None) is None:
             return
         try:
-            if phone_a_friend.due(phone_a_friend.attempt_state(self.ledger.read(), n))[0]:
+            entries = self.ledger.read()
+            # An ask is coming only when the attempt-start rule allows one and the stage's combined limit (repair-round asks included) is not
+            # spent. When the limit is spent `_phone_a_friend` refuses, so the standing draft is the help this attempt gets (review of PR 496).
+            if (phone_a_friend.due(phone_a_friend.attempt_state(entries, n))[0]
+                    and repair_help.asks_in_stage(entries, n) < self._stage_ask_limit()):
                 return
             draft = phone_a_friend.standing_draft(stage_dir)
             if draft is None:
@@ -3479,7 +3496,7 @@ class Supervisor:
 
     def _record_best(self, n: int, stage_dir: Path, failure: dict) -> None:
         """Keep the furthest port: when the check that just failed got further along the request chain than every earlier check of this stage
-        (across attempts), save the port it ran as stages/2.best/port_model.py and write `best port recorded` with its op, rank and hash.
+        (across attempts), save the port directory it ran as a snapshot under stages/2.best/ and write `best port recorded` with its op, rank, file list and hashes.
         Advisory: nothing here fails the stage."""
         if n != 2 or not self._helper_drive_on():
             return
@@ -3489,13 +3506,45 @@ class Supervisor:
             best = repair_help.best_state(self.ledger.read(), n)
             if best is not None and repair_help.best_key(rank_now, agreement_now) <= repair_help.best_key(best["rank"], best.get("agreement")):
                 return
-            data, why = repair_help.read_port(stage_dir)
-            if data is None or not repair_help.save_best(stage_dir, data):
+            saved = repair_help.save_best(stage_dir)
+            if saved is None:
                 return
+            # The snapshot is on disk under its own name before the entry that names it: a stop between the two leaves an unreferenced directory
+            # and the earlier best port still restorable (review of PR 497).
             self.ledger.append("decision", n, decision=repair_help.BEST, op=failure.get("op"), rank=rank_now,
-                               **({"agreement": agreement_now} if agreement_now is not None else {}),
-                               port_sha256=hashlib.sha256(data).hexdigest(), attempt=len([e for e in self.ledger.read()
-                                                                                          if e.get("stage") == n and e.get("event") == "stage_start"]))
+                               **({"agreement": agreement_now} if agreement_now is not None else {}), **saved,
+                               attempt=len([e for e in self.ledger.read() if e.get("stage") == n and e.get("event") == "stage_start"]))
+        except Exception as exc:     # advisory: an error nobody listed leaves the ledger as it was
+            self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0, reason=f"best port not recorded ({exc.__class__.__name__})")
+
+    def _driven_stop(self, spec) -> str | None:
+        """The stop a helper-driven round must honour before and after a paid request: the operator's controls and the watchdog's. A coder step
+        feeds the watchdog on every turn; a helper-driven round has no turns, so a current-time event is fed here, and a stage past its
+        wall-clock budget pauses before the next request or chip check (review of PR 497)."""
+        self.watchdog.feed(Event(ts=self.clock(), agent="supervisor", kind="ledger", name="helper-driven round", stage=spec.number))
+        return self.actuator.stop_reason()
+
+    def _record_best_passed(self, n: int, stage_dir: Path) -> None:
+        """Keep a port whose check ran to the end, which ranks above every failure. The stage's gate may still refuse it (the check's agreement
+        with the reference can be below the gate's minimum), and the next attempt should start from this port and not from an earlier failure
+        (review of PR 497). Only a test record the supervisor itself wrote and the ledger holds counts."""
+        if n != 2 or not self._helper_drive_on():
+            return
+        try:
+            found = full_port.file_record(self.run_dir, Path(stage_dir) / port_repair.MARKER)
+            if found is None or not recorded_by_supervisor(self.ledger, n, found):
+                return
+            passed, _op, readable, _numbers = self._repair_outcome(stage_dir)
+            if not (passed and readable):
+                return                  # a record that is not the check's own, or one below the agreement bar, is not a port that passed
+            saved = repair_help.save_best(stage_dir)
+            if saved is None:
+                return
+            best = repair_help.best_state(self.ledger.read(), n)
+            if best is not None and best["rank"] >= repair_help.PASSED_RANK and best.get("snapshot") == saved["snapshot"]:
+                return                  # this very port is already the best one
+            self.ledger.append("decision", n, decision=repair_help.BEST, op=None, rank=repair_help.PASSED_RANK, **saved, passed=True,
+                               attempt=len([e for e in self.ledger.read() if e.get("stage") == n and e.get("event") == "stage_start"]))
         except Exception as exc:     # advisory: an error nobody listed leaves the ledger as it was
             self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0, reason=f"best port not recorded ({exc.__class__.__name__})")
 
@@ -3516,14 +3565,22 @@ class Supervisor:
                 return None
             self.ledger.append("decision", n, decision=repair_help.RESTORED, op=best.get("op"), rank=best["rank"], port_sha256=best["port_sha256"],
                                **({"agreement": best["agreement"]} if best.get("agreement") is not None else {}),
-                               skeleton_sha256=hashlib.sha256(skeleton).hexdigest())
-            reached = (f"its check ran to the end with top1_agreement {best['agreement']}" if best.get("op") == port_repair.NUMERICS_OP
-                       and best.get("agreement") is not None else f"its check failed at the {best.get('op')!r} request")
-            return (f"The file `stages/2/port/port_model.py` already holds the furthest version an earlier attempt reached ({reached}). Start from "
-                    "it: read it, correct what the check shows to be wrong and keep what works.")
+                               snapshot=best.get("snapshot"), skeleton_sha256=hashlib.sha256(skeleton).hexdigest())
+            if best["rank"] >= repair_help.PASSED_RANK:
+                reached = "its check ran to the end, and the stage's gate did not accept the result"
+            elif best.get("op") == port_repair.NUMERICS_OP and best.get("agreement") is not None:
+                reached = f"its check ran to the end with top1_agreement {best['agreement']}"
+            else:
+                reached = f"its check failed at the {best.get('op')!r} request"
+            return (f"The files under `stages/2/port/` already hold the furthest version an earlier attempt reached ({reached}). "
+                    "Start from it: read it, correct what the check shows to be wrong and keep what works.")
         except Exception as exc:     # advisory
             self.ledger.append("decision", n, decision=phone_a_friend.NOT_PLACED, call_id="", reason=f"best port not restored ({exc.__class__.__name__})")
             return None
+
+    def _stage_ask_limit(self) -> int:
+        """The helper's asks in stage 2, attempt starts and repair rounds together: the larger cap when the helper drives the rounds."""
+        return repair_help.HELPER_TOTAL if self._helper_drive_on() else repair_help.TOTAL_PER_STAGE
 
     def _helper_drive_on(self) -> bool:
         """Whether stage 2's repair rounds are driven by the helper: the helper and the round asks are on, and the operator said so
@@ -3543,7 +3600,8 @@ class Supervisor:
         (review of PR 496)."""
         self.actuator.clear()
         if status == "pause":
-            self.ledger.append("decision", n, decision="resume", by="helper rescue",
+            # `keeps_budgets` marks a handled pause: it clears the pause, and the run's budgets and the watchdog's rung counts go on (review of PR 496).
+            self.ledger.append("decision", n, decision="resume", by="helper rescue", keeps_budgets=True,
                                 note="a helper-supplied port took over from the repair step the watchdog paused")
 
     def _repair_help(self, spec, stage_dir: Path, k: int, limit: int, failure: dict, raw: str, *, why: str, coder_failed: bool,
@@ -3553,7 +3611,7 @@ class Supervisor:
         placed, whether an ask was written). Nothing here fails the stage: every refusal and every unusable answer is a ledger decision."""
         n, stage_dir = spec.number, Path(stage_dir)
         entries = self.ledger.read()
-        ok, reason = repair_help.due(entries, n, k, total=repair_help.HELPER_TOTAL if self._helper_drive_on() else repair_help.TOTAL_PER_STAGE)
+        ok, reason = repair_help.due(entries, n, k, total=self._stage_ask_limit())
         if not ok:
             self._repair_help_refused(n, k, reason)
             return "", False, False
@@ -3572,7 +3630,8 @@ class Supervisor:
             task, sent = repair_help.build_task(facts=facts, excerpts=excerpts, port_text=port_bytes.decode("utf-8", "replace"),
                                                 listing=phone_a_friend.port_listing(stage_dir / port_repair.PORT_DIR), homes=self._homes(),
                                                 previous=repair_help.previous_round_section(entries, n, k) if driven else None,
-                                                report=repair_help.numeric_report(failure, previous_agreement) if numerics else None)
+                                                report=repair_help.numeric_report(failure, previous_agreement) if numerics else None,
+                                                rehearsal=bool(self.full_port_rehearsal) or full_port_rehearsal(entries))
             fail = (repair_help.numeric_failure(k, limit, failure) if numerics
                     else repair_help.failure(k, limit, failure.get("op"), raw, self._homes()))
         except Exception as exc:     # the request could not be built: the helper is not asked, the round goes on
@@ -3704,10 +3763,12 @@ class Supervisor:
             self._repair_report(n, item["round"], item["call_id"], item["failure_op"], after_op if judged else None, helped=helped, outcome=outcome,
                                 numbers=extra)
 
-    def _report_phone_a_friend(self, n: int, *, helped: bool) -> None:
-        """Tell the helper's ledger how the attempt it helped with ended, and note it in the run's ledger. A failed report is noted and goes on."""
+    def _report_phone_a_friend(self, n: int, *, helped: bool, stage_dir=None) -> None:
+        """Tell the helper's ledger how the attempt it helped with ended, and note it in the run's ledger. A failed report is noted and goes on.
+        A repair answer that a completed test followed is judged by that test's record (`stage_dir`); only an answer no test judged gets the
+        attempt's outcome (review of PR 496)."""
         from orchard import telegraph as tg
-        self._repair_verdicts(n, None, final_helped=helped)        # repair answers the check never judged get the attempt's outcome
+        self._repair_verdicts(n, stage_dir, final_helped=helped)        # an answer no test judged gets the attempt's outcome
         for call_id in phone_a_friend.unreported(self.ledger.read(), n):
             reason = ""
             try:
@@ -5418,6 +5479,13 @@ def lab_problems(args, run_dir: Path, paths: RunPaths, inputs: dict) -> list[str
             if not (absolute_path(path) + "/").startswith(root)]
 
 
+def recorded_helper_drives(requested: bool | None, run_start: dict) -> bool | None:
+    """The run's choice about the helper driving stage 2: the one run_start holds when it holds one (True or False), else the one asked for now.
+    A resume without the flag keeps an explicit opt-in or opt-out (review of PR 497)."""
+    recorded = run_start.get("helper_drives")
+    return recorded if isinstance(recorded, bool) else requested
+
+
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
           probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
           disk_usage=shutil.disk_usage, home=None, containers=None, environ=None, lab=None, stack_pins=None) -> Supervisor:
@@ -5472,6 +5540,9 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
         full_port_added = True                  # recorded as a decision by the supervisor's first step
     if progress.started and full_port_enabled(entries):
         full_port_req = False                   # a resumed run keeps what the ledger holds; nothing to request again
+    # An explicit choice for or against the helper driving stage 2 is part of the run: run_start records it and a resume keeps it, so a resume
+    # without the flag does not turn a rehearsal's opt-out back on or an opt-in outside a rehearsal off (review of PR 497).
+    helper_drives = recorded_helper_drives(getattr(args, "helper_drives_port", None), (progress.run_start or {}) if progress.started else {})
     rehearsal_req = bool(getattr(args, "full_port_rehearsal", False))
     if rehearsal_req and not (full_port_enabled(entries) or getattr(args, "full_port", False)):
         raise ValueError("--full-port-rehearsal needs --full-port: the waiver applies only to the full-port stage 2")
@@ -5558,7 +5629,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
                       telegraph=_telegraph_from(getattr(args, "telegraph_config", None), environ=environ, home=home),
                       repair_help=False if getattr(args, "no_repair_help", False) else None,
-                      helper_drives=getattr(args, "helper_drives_port", None),
+                      helper_drives=helper_drives,
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
                       skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,
