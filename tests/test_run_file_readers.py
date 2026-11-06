@@ -639,6 +639,7 @@ def test_the_port_check_files_are_written_over_a_fifo_or_link_and_a_refused_hw_t
 # ------------------------------------------------ third Copilot review of PR 345: a refusal while the test's chips are held
 
 LISTED_TEST_SETUP = '''
+    from pathlib import Path
     from types import SimpleNamespace
     from orchard import supervisor
     S = supervisor.Supervisor
@@ -661,7 +662,8 @@ LISTED_TEST_SETUP = '''
     stub._moved_aside_record = lambda p: S._moved_aside_record(stub, p)
     stub._run_listed_test_body = lambda *a: S._run_listed_test_body(stub, *a)
     stub._record_mask_inputs = lambda *a: S._record_mask_inputs(stub, *a)
-    test = SimpleNamespace(chips=4, boards=2, command=lambda n: "cmd", deadline_s=10.0, cache="/c")
+    test = SimpleNamespace(chips=4, boards=2, command=lambda n: "cmd", deadline_s=10.0, cache="/c",
+                           output_path=lambda sd: Path(sd) / "tests" / "4" / "output.txt", record_path=lambda sd: Path(sd) / "tests" / "4" / "test-result.json")
     lease = SimpleNamespace(chips=["a", "b", "c", "d"], dev_indices=[0, 1, 2, 3], lease_id="L")
 '''
 
