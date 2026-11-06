@@ -629,6 +629,8 @@ class Ladder:
         self._hints: Counter = Counter()        # the nudge_only hints sent, per (agent, stage): they are not rungs (see SOFT_RUNG)
         for e in ledger.read():
             d = e["data"]
+            if e["event"] == "decision" and d.get("decision") == "resume" and d.get("keeps_budgets") is True:
+                continue        # a handled pause (a helper rescue) is not a fresh start: the rungs taken stay taken (review of PR 496)
             if e["event"] == "decision" and d.get("decision") == "resume":
                 # A resume (the operator's, or an unattended retry) is a fresh start for the ladder;
                 # only a restart without one must not repeat a rung.

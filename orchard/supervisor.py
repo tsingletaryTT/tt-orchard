@@ -2409,6 +2409,12 @@ class Supervisor:
                 self.ledger.append("decision", n, decision=port_repair.TESTED,
                                    sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
                 continue
+            if owed is None:
+                # A test that finished before the supervisor stopped, with its verdict not yet reported, is judged now: before any new ask, so the
+                # helper's model list reacts to that test and not to a later one (review of PR 496). With a rerun owed the record on disk is not
+                # the test's, so nothing is judged until the rerun has been read.
+                self._repair_verdicts(n, stage_dir)
+                entries = self.ledger.read()
             failure = port_repair.read_failure(self.run_dir, stage_dir)
             if failure is None and owed is None:
                 return None
@@ -3214,7 +3220,7 @@ class Supervisor:
     def _end_stage_body(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
         if n == 2 and spec.draft == "full_port" and getattr(self, "telegraph", None) is not None and status not in ("abort", "operator-pause"):
-            self._report_phone_a_friend(n, helped=(status == "pass"))
+            self._report_phone_a_friend(n, helped=(status == "pass"), stage_dir=stage_dir)
         if status == "pass":
             ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
             ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
@@ -3416,7 +3422,11 @@ class Supervisor:
         if n != 2 or getattr(self, "telegraph", None) is None:
             return
         try:
-            if phone_a_friend.due(phone_a_friend.attempt_state(self.ledger.read(), n))[0]:
+            entries = self.ledger.read()
+            # An ask is coming only when the attempt-start rule allows one and the stage's combined limit (repair-round asks included) is not
+            # spent. When the limit is spent `_phone_a_friend` refuses, so the standing draft is the help this attempt gets (review of PR 496).
+            if (phone_a_friend.due(phone_a_friend.attempt_state(entries, n))[0]
+                    and repair_help.asks_in_stage(entries, n) < repair_help.TOTAL_PER_STAGE):
                 return
             draft = phone_a_friend.standing_draft(stage_dir)
             if draft is None:
@@ -3526,7 +3536,8 @@ class Supervisor:
         (review of PR 496)."""
         self.actuator.clear()
         if status == "pause":
-            self.ledger.append("decision", n, decision="resume", by="helper rescue",
+            # `keeps_budgets` marks a handled pause: it clears the pause, and the run's budgets and the watchdog's rung counts go on (review of PR 496).
+            self.ledger.append("decision", n, decision="resume", by="helper rescue", keeps_budgets=True,
                                 note="a helper-supplied port took over from the repair step the watchdog paused")
 
     def _repair_help(self, spec, stage_dir: Path, k: int, limit: int, failure: dict, raw: str, *, why: str, coder_failed: bool,
@@ -3663,10 +3674,12 @@ class Supervisor:
                 helped, outcome = bool(final_helped), "the attempt ended before the check judged it"
             self._repair_report(n, item["round"], item["call_id"], item["failure_op"], after_op if judged else None, helped=helped, outcome=outcome)
 
-    def _report_phone_a_friend(self, n: int, *, helped: bool) -> None:
-        """Tell the helper's ledger how the attempt it helped with ended, and note it in the run's ledger. A failed report is noted and goes on."""
+    def _report_phone_a_friend(self, n: int, *, helped: bool, stage_dir=None) -> None:
+        """Tell the helper's ledger how the attempt it helped with ended, and note it in the run's ledger. A failed report is noted and goes on.
+        A repair answer that a completed test followed is judged by that test's record (`stage_dir`); only an answer no test judged gets the
+        attempt's outcome (review of PR 496)."""
         from orchard import telegraph as tg
-        self._repair_verdicts(n, None, final_helped=helped)        # repair answers the check never judged get the attempt's outcome
+        self._repair_verdicts(n, stage_dir, final_helped=helped)        # an answer no test judged gets the attempt's outcome
         for call_id in phone_a_friend.unreported(self.ledger.read(), n):
             reason = ""
             try:

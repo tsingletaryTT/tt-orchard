@@ -76,3 +76,83 @@ def test_the_readme_has_one_full_port_class_row_and_it_does_not_say_stages_5_or_
     rows = [l for l in README.read_text().splitlines() if l.startswith("| `full-port` | The model needs new model code")]
     assert len(rows) == 1, f"{len(rows)} rows"
     assert "are not built" not in rows[0] and "Stage 5" in rows[0] and "Stage 6" in rows[0] and "Stage 4" in rows[0]
+
+
+# ---- round 2: the six open findings of the review of PR 491 ----------------------------------------------------------------------------
+
+from quality_fakes import check as quality_check, derive_and_write  # noqa: E402
+from test_full_port_quality import good  # noqa: E402
+from orchard import full_port, full_port_bundle  # noqa: E402
+
+
+def _has(reasons, text):
+    return any(text in r for r in reasons)
+
+
+def test_a_source_record_replaced_with_its_port_after_the_source_stage_passed_is_refused(tmp_path):
+    """Finding: the source stage's port-check.json was trusted without checking its hash against the passing ledger entry."""
+    run, stage, seeded = good(tmp_path)
+    derive_and_write(run, stage)
+    accepted = full_port._sha(run / "stages" / "2" / full_port.RECORD_FILE)
+    assert quality_check(run, stage, seeded, accepted_record_sha=accepted)[0] == []
+    # the record is replaced after the source stage passed (the port file would be replaced in step); the ledger's hash no longer matches
+    rec = run / "stages" / "2" / full_port.RECORD_FILE
+    rec.write_text(rec.read_text() + "\n")
+    reasons = quality_check(run, stage, seeded, accepted_record_sha=accepted)[0]
+    assert _has(reasons, "is not the file its gate accepted")
+
+
+def test_no_ledger_hash_for_the_source_record_is_a_refusal_not_a_skip(tmp_path):
+    run, stage, seeded = good(tmp_path)
+    derive_and_write(run, stage)
+    assert _has(quality_check(run, stage, seeded, accepted_record_sha=None)[0], "holds no sha256 for stage 2")
+
+
+def test_a_record_with_only_warm_up_runs_is_refused_before_it_is_summarised(tmp_path):
+    """Finding: a record of warm-up runs only passed `record_problems`, and `summarise` then indexed an empty list (IndexError)."""
+    run, stage, seeded = good(tmp_path)
+    import json
+    rec_path = stage / full_quality_record_name()
+    rec = json.loads(rec_path.read_text())
+    for r in rec["bench"]["runs"]:
+        r["warmup"] = True
+    rec_path.write_text(json.dumps(rec))
+    result, why = full_port_quality.derive(stage, run, source_stage=2)          # must return a reason, never raise
+    assert result is None and "no measured run" in why
+
+
+def full_quality_record_name():
+    return full_port_quality.RECORD_FILE
+
+
+def test_the_host_load_average_of_each_measured_run_reaches_the_result(tmp_path):
+    """Finding: the projection dropped host_loadavg_1m, so the result held a list of nulls."""
+    run, stage, seeded = good(tmp_path)
+    import json
+    rec_path = stage / full_port_quality.RECORD_FILE
+    rec = json.loads(rec_path.read_text())
+    measured = [r for r in rec["bench"]["runs"] if not r["warmup"]]
+    for i, r in enumerate(measured):
+        r["host_loadavg_1m"] = 1.5 + i
+    rec_path.write_text(json.dumps(rec))
+    result, why = full_port_quality.derive(stage, run, source_stage=2)
+    assert result is not None, why
+    assert result["benchmark"]["host_loadavg_1m"] == [1.5 + i for i in range(len(measured))]
+
+
+def test_the_bundle_labels_the_bandwidth_floor_input_as_a_datasheet_value(tmp_path):
+    """Finding: the bandwidth input was printed with the label (measured), though this stage measures no bandwidth."""
+    run, stage, seeded = good(tmp_path)
+    result, why = derive_and_write(run, stage)
+    assert result is not None, why
+    text = "\n".join(full_port_bundle.section(result, lambda s: s))
+    bw = result["benchmark"]["floor"]["inputs"]["per_die_bandwidth_gb_s"]
+    assert f"{bw:.4g} (datasheet value) GB/s per die" in text
+    assert f"{bw:.4g} (measured) GB/s" not in text
+
+
+def test_the_assumed_bf16_floor_warning_says_the_share_is_overstated():
+    """Finding: smaller weight formats raise the true floor, so dividing by the lower assumed floor overstates the share."""
+    res = {"schema": full_port_quality.RESULT_SCHEMA, "coherent": True, "benchmark": {"dtype_policy_source": "assumed bf16: the port declares none"}}
+    text = "\n".join(full_port_bundle.risks(res, lambda s: s))
+    assert "overstated" in text and "understated" not in text
