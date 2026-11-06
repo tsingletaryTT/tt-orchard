@@ -3,6 +3,7 @@
  "orchard/agent.py": 2,
  "orchard/bench_session.py": 1,
  "orchard/can.py": 1,
+ "orchard/db.py": 1,
  "orchard/handoff.py": 1,
  "orchard/hwtool.py": 1,
  "orchard/ledger.py": 4,
@@ -10,6 +11,7 @@
  "orchard/measure_serving.py": 1,
  "orchard/package.py": 1,
  "orchard/package_templates/verify_bundle.py": 1,
+ "orchard/pinned_files.py": 1,
  "orchard/prefill_bench.py": 1,
  "orchard/server.py": 1,
  "orchard/setup_machine.py": 1,
@@ -30,6 +32,6 @@
  "orchard/transcripts.py": 1,
  "orchard/version.py": 1,
  "orchard/version_cli.py": 1,
- "orchard/virtualspend.py": 1,
+ "orchard/virtualspend.py": 4,
  "orchard/webui.py": 1
 }

@@ -148,5 +148,5 @@ merge from main brought in raw access from another change, run it with `--accept
 goes on the first or last line of the call it marks.
 
 A second count in the same script (`tests/hardening_hazards_baseline.json`) holds link hazards: an `os.open` whose flags never name
-`O_NOFOLLOW` and that has no `dir_fd`, and the builtin `open` with a literal write mode (`"w"`, `"a"`, `"x"` or `"+"`). It works like the first count, uses
+`O_NOFOLLOW` (a `dir_fd` anchors the lookup but a link in the last part is still followed, so it does not exempt the call), and the builtin `open` with a literal write mode (`"w"`, `"a"`, `"x"` or `"+"`). It works like the first count, uses
 the same marker, and `--update` and `--accept-growth` write both files.

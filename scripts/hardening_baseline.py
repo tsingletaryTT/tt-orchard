@@ -72,9 +72,10 @@ def count_source(source: str) -> int:
 
 
 def _mentions_nofollow(node: ast.AST) -> bool:
-    """True when `O_NOFOLLOW` appears anywhere in the expression (a name, an attribute, or a string given to getattr)."""
+    """True when `O_NOFOLLOW` (or a module constant named `NOFOLLOW`) appears anywhere in the expression: a name, an attribute, or a string given to getattr.
+    Flags kept in a variable are not seen through, so such a call is counted until it is marked."""
     for n in ast.walk(node):
-        if (isinstance(n, ast.Name) and n.id == "O_NOFOLLOW") or (isinstance(n, ast.Attribute) and n.attr == "O_NOFOLLOW"):
+        if (isinstance(n, ast.Name) and n.id.endswith("NOFOLLOW")) or (isinstance(n, ast.Attribute) and n.attr == "O_NOFOLLOW"):   # `NOFOLLOW` module constants too
             return True
         if isinstance(n, ast.Constant) and n.value == "O_NOFOLLOW":
             return True
@@ -84,15 +85,15 @@ def _mentions_nofollow(node: ast.AST) -> bool:
 def _is_hazard_call(node: ast.Call) -> bool:
     """A call that makes one of the review mistakes about links (docs/pr-hardening-checklist.md, the symlink recipe):
 
-    * `os.open(...)` whose flags never mention `O_NOFOLLOW` and that is not given a `dir_fd` (a link in the last part is followed);
+    * `os.open(...)` whose flags never mention `O_NOFOLLOW`, with or without a `dir_fd` (a descriptor anchors the lookup but a link in the last part is still followed);
     * the builtin `open(..., "w")` (or "a", "x", "r+" ...) with a literal write mode: it follows a link and truncates the target, the
       way the ledger lock file once did (issue 493). A mode that is not a literal is not counted.
     """
     f = node.func
     if isinstance(f, ast.Attribute) and f.attr == "open" and isinstance(f.value, ast.Name) and f.value.id == "os":
-        if any(kw.arg == "dir_fd" for kw in node.keywords):
-            return False
-        return not any(_mentions_nofollow(a) for a in node.args[1:2])
+        # A descriptor-relative open (`dir_fd`) still follows a link in the last part, so it needs O_NOFOLLOW too.
+        flags = node.args[1:2] + [kw.value for kw in node.keywords if kw.arg == "flags"]
+        return not any(_mentions_nofollow(a) for a in flags)
     if isinstance(f, ast.Name) and f.id == "open":
         mode = node.args[1] if len(node.args) > 1 else next((kw.value for kw in node.keywords if kw.arg == "mode"), None)
         return isinstance(mode, ast.Constant) and isinstance(mode.value, str) and any(c in mode.value for c in "wax+")

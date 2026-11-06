@@ -149,7 +149,10 @@ def test_the_hazard_counter_counts_what_it_says(tmp_path):
         "os.open(p, os.O_RDONLY)",                                       # 1: no O_NOFOLLOW
         "os.open(p, os.O_RDONLY | os.O_NOFOLLOW)",                       # safe
         "os.open(p, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))",        # safe (named through getattr)
-        "os.open(name, os.O_RDONLY, dir_fd=fd)",                         # safe: relative to a descriptor
+        "os.open(name, os.O_RDONLY, dir_fd=fd)",                         # 1: a descriptor anchors the lookup, a last-part link is still followed
+        "os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)",         # safe
+        "os.open(name, flags=os.O_RDONLY, dir_fd=fd)",                   # 1: flags given by keyword
+        "os.open(name, flags=os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)",   # safe
         "open(p, 'w')",                                                  # 1
         "open(p, mode='a')",                                             # 1
         "open(p, 'r+')",                                                 # 1
@@ -157,9 +160,11 @@ def test_the_hazard_counter_counts_what_it_says(tmp_path):
         "open(p, 'rb')",                                                 # a read
         "open(p, mode_variable)",                                        # not a literal: not counted
         "webbrowser.open(u, 'w')",                                       # not the builtin
+        "os.open(name, os.O_RDONLY | NOFOLLOW, dir_fd=fd)",              # safe: a module constant named NOFOLLOW
+        "os.open(name, flags, dir_fd=fd)",                               # 1: flags in a variable are not seen through
         "open(p, 'w')  # hardening: ok our own scratch file",           # marked
     ]) + "\n"
-    assert _hazards(tmp_path, src) == 4
+    assert _hazards(tmp_path, src) == 7
 
 
 def test_a_hazard_marker_in_a_string_does_not_count(tmp_path):
