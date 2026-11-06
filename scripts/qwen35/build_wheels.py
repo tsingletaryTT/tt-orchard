@@ -32,6 +32,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 IMAGE = "tt-model/qwen3-coder-next:0c170421ca1b"
+# The vLLM release that image was built against (its manifest: runtime.vllm.version). config/can.qwen35.toml `vllm_version` must equal
+# this while IMAGE is the source of the wheels; tests/test_can_vllm_pin_matches_wheel_image.py checks it. When the wheels move to an
+# image built on a newer vLLM (issue 507), change IMAGE, this value and the can's `vllm_version` in one commit.
+IMAGE_VLLM_VERSION = "0.26.0"
 VERSION = "0.79.0.dev20261030+qwen35moe"
 AUTOPORT = "models/autoports/qwen_qwen3_coder_next"
 LOADER = f"{AUTOPORT}/tt/weights.py"

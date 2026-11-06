@@ -1,0 +1,4 @@
+target = "0.9.119"
+summary = "A test ties the Qwen3.5 can's vllm_version to the vLLM release of the image its wheels come from, and canning.md says how to move a can to vLLM 0.31.0."
+pr = 508
+kind = "chore"
