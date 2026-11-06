@@ -486,6 +486,15 @@ def _exists(pin, parts) -> bool:
         return True
 
 
+def _holds(fd: int, parts, data: bytes) -> bool:
+    """Whether the regular file at `parts` beneath descriptor `fd` holds exactly `data`. A restore interrupted after it wrote a supporting file
+    leaves one; the retry accepts it because replacing it would write the same bytes (review of PR 497, round 4)."""
+    try:
+        return safeio.read_beneath(fd, tuple(parts), max_bytes=PORT_MAX) == data
+    except safeio.SafeReadError:
+        return False
+
+
 def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
     """Put the best port's snapshot in place of the unchanged skeleton. (placed, why). The ledger entry `best` names the snapshot and lists its
     files with their hashes; every file of the directory it names must match, and the list must hash to the name. The port directory must still
@@ -520,8 +529,8 @@ def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
         return False, f"the best port's copy is missing, is a link, or could not be read ({exc.reason})"
     try:
         with safeio.pinned_root(stage_dir) as pin:
-            for rel, _ in blobs:
-                if rel != "port_model.py" and _exists(pin, ("port", *rel.split("/"))):
+            for rel, blob in blobs:
+                if rel != "port_model.py" and _exists(pin, ("port", *rel.split("/"))) and not _holds(pin.fd, ("port", *rel.split("/")), blob):
                     return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
             # The writes go through one descriptor of the port directory. The skeleton is read again through it, and port_model.py is replaced only
             # if it still holds those bytes; a supporting file is created only where nothing exists. An edit made after the checks above, or a
@@ -536,7 +545,10 @@ def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
                         safeio.write_beneath_if(port_fd, tuple(rel.split("/")), data, mode=0o644,
                                                 expect_sha256=hashlib.sha256(skeleton_now).hexdigest() if rel == "port_model.py" else None)
                     except safeio.AlreadyExists:
-                        return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
+                        # A supporting file this restore wrote before it was interrupted holds the snapshot's own bytes: the retry goes on. A
+                        # file with other bytes is somebody's edit and stops the restore.
+                        if rel == "port_model.py" or not _holds(port_fd, tuple(rel.split("/")), data):
+                            return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
                     except safeio.ChangedWhileReading:
                         return False, "port_model.py changed while the best port was being restored, and the edit is kept"
             finally:

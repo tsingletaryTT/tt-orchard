@@ -537,8 +537,14 @@ def summarise_records(recs: list[dict]) -> dict:
             "by_model": by_model, "by_problem": by_problem}
 
 def _reported_unhelpful(recs) -> set:
-    """The call ids that have a verdict `helped: false` in the ledger's records (a report names the call that made the answer)."""
-    return {r["report"] for r in recs if isinstance(r, dict) and "report" in r and r.get("helped") is False}
+    """The call ids whose LATEST verdict in the ledger's records is `helped: false` (a report names the call that made the answer). The records are
+    in order, so a later `helped: true` for the same call lifts an earlier not-helped, as `summarise_records` and `_choose_model` read them
+    (review of PR 497, round 4)."""
+    latest: dict = {}
+    for r in recs:
+        if isinstance(r, dict) and "report" in r:
+            latest[r["report"]] = r.get("helped") is False
+    return {call for call, unhelpful in latest.items() if unhelpful}
 
 
 

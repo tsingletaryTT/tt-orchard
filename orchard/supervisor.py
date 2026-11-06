@@ -3497,6 +3497,19 @@ class Supervisor:
         data, _ = repair_help.read_port(stage_dir)
         return hashlib.sha256(data).hexdigest() if data is not None else None
 
+    def _saved_is_tested(self, n: int, saved: dict) -> bool:
+        """Whether the snapshot `saved` holds exactly the files the latest hardware test of stage `n` started with: the newest
+        `port files at test start` decision before that test's evidence entry, compared file by file (every regular file, not only the sources the
+        check's record lists). False when no such decision exists."""
+        entries = self.ledger.read()
+        tests = [e for e in entries if e.get("stage") == n and e.get("event") == "evidence" and "returncode" in e["data"] and "timed_out" in e["data"]]
+        if not tests:
+            return False
+        before = [e for e in entries if e.get("stage") == n and e.get("event") == "decision"
+                  and e["data"].get("decision") == port_repair.PORT_AT_TEST and e["seq"] < tests[-1]["seq"]]
+        manifest = before[-1]["data"].get("sources") if before else None
+        return isinstance(manifest, dict) and manifest == {item["path"]: item["sha256"] for item in saved["files"]}
+
     def _record_best(self, n: int, stage_dir: Path, failure: dict) -> None:
         """Keep the furthest port: when the check that just failed got further along the request chain than every earlier check of this stage
         (across attempts), save the port directory it ran as a snapshot under stages/2.best/ and write `best port recorded` with its op, rank, file list and hashes.
@@ -3510,6 +3523,11 @@ class Supervisor:
                 return
             saved = repair_help.save_best(stage_dir)
             if saved is None:
+                return
+            if not self._saved_is_tested(n, saved):
+                # A resume after an edit made while the supervisor was stopped would otherwise save the untested files at the old failure's rank.
+                self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0,
+                                   reason="best port not recorded: the port directory is not the one the failed check ran on")
                 return
             # The snapshot is on disk under its own name before the entry that names it: a stop between the two leaves an unreferenced directory
             # and the earlier best port still restorable (review of PR 497).
@@ -3565,8 +3583,11 @@ class Supervisor:
             # marker alone. The record the test wrote names the sources it ran, and its hash is printed in the output the marker vouches for; the
             # snapshot is kept at the passing rank only when it holds exactly those files (review of PR 497, round 3). Otherwise the earlier
             # best port stays.
+            # The record lists the Python sources it ran; every other regular file of the snapshot (a converted cache the skill asks for) is
+            # authenticated by the supervisor's own manifest from before the test (`_saved_is_tested`), so a port with such a file can still pass.
             tested = self._tested_sources(stage_dir)
-            if tested is None or tested != {f"stages/{n}/port/{item['path']}": item["sha256"] for item in saved["files"]}:
+            if (tested is None or not self._saved_is_tested(n, saved)
+                    or tested != {f"stages/{n}/port/{item['path']}": item["sha256"] for item in saved["files"] if item["path"].endswith(".py")}):
                 self.ledger.append("decision", n, decision=repair_help.NOT_ASKED, round=0,
                                    reason="best port not recorded: the port directory is not the one the passing check ran on")
                 return
@@ -4775,6 +4796,11 @@ class Supervisor:
                   output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,
                   extra: Lease | None = None, boards: int | None = None) -> dict:
         n = spec.number
+        if n == 2 and record == "test-result.json" and self._helper_drive_on():
+            # The port directory as the test is about to run it, written by the supervisor before anything runs: a best-port snapshot is kept
+            # only when it holds exactly these files, so an edit made while the supervisor was stopped, or after the test, is never recorded as
+            # the port a check ran on (review of PR 497, round 4).
+            self.ledger.append("decision", n, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage_dir / port_repair.PORT_DIR))
         k = (boards or spec.boards) * CHIPS_PER_BOARD       # a wider test (issue 60) holds more chips than the stage's own
         deadline = min(float(test["deadline_s"]), spec.budget_s)
         out_path = stage_dir / output
