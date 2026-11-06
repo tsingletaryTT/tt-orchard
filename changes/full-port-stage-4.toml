@@ -1,0 +1,4 @@
+target = "0.9.117"
+summary = "Stage 4 for a full port runs the port on each required chip count, one record and one marker per entry in stages/4/configs/N, and the pause for the unbuilt stages moves to before stage 5."
+pr = 489
+kind = "feature"

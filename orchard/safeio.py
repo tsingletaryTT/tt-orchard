@@ -46,7 +46,7 @@ from typing import Callable, Iterator, Sequence
 __all__ = [
     "SafeReadError", "ReadFailed", "PathRefused", "NotRegular", "TooLarge", "ChangedWhileReading", "NotText", "NotJson",
     "WrongType", "BadValue", "BadHeader", "IncompleteScan", "AppendBroken",
-    "read_bytes", "read_prefix", "read_json", "Checked", "read_json_checked", "read_text_checked", "sha256_file", "read_jsonl", "resolved", "parse_json_bytes", "open_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
+    "read_bytes", "read_prefix", "read_json", "Checked", "read_json_checked", "read_text_checked", "sha256_file", "read_jsonl", "resolved", "parse_json_bytes", "open_beneath", "replace_beneath", "Pin", "pinned_root", "scan_beneath", "ScanEntry",
     "ScanResult", "atomic_write", "create_for_write", "append_line", "finite_number", "whole_number", "bounded_str", "safetensors_header",
     "SafetensorsHeader", "TensorEntry", "DTYPE_BITS",
 ]
@@ -487,6 +487,105 @@ def write_beneath(root_fd: int, parts: Sequence[str], data: bytes, *, mode: int 
                 os.close(cur)
             except OSError:
                 pass
+
+
+def mkdir_beneath(root_fd: int, parts: Sequence[str]) -> None:
+    """Make the directory `parts` beneath the open directory `root_fd`, and every directory on the way that is missing.
+
+    Each directory is made with `mkdir` relative to the descriptor before it and then opened with `O_DIRECTORY | O_NOFOLLOW`, so a link standing
+    where a directory should be is refused and nothing is made through it. A directory that exists is kept. Raises only SafeReadError."""
+    names = _check_parts(parts)
+    cur, owned = root_fd, False
+    try:
+        for part in names:
+            try:
+                os.mkdir(part, 0o755, dir_fd=cur)
+            except FileExistsError:
+                pass                                            # it may be a link: the open below refuses it
+            nxt = os.open(part, _DIR_FLAGS, dir_fd=cur)
+            if owned:
+                os.close(cur)
+            cur, owned = nxt, True
+    except OSError as exc:
+        raise _os_failure(exc, "a path part") from None
+    except ValueError:                      # UnicodeEncodeError: a lone surrogate cannot be passed to the operating system
+        raise PathRefused("a path part cannot be encoded for the operating system") from None
+    finally:
+        if owned:
+            try:
+                os.close(cur)
+            except OSError:
+                pass
+
+
+def replace_beneath(root_fd: int, src_parts: Sequence[str], dst_parts: Sequence[str]) -> bool:
+    """Rename the file or link `src_parts` to `dst_parts`, both beneath the open directory `root_fd`, replacing a file already at the new name.
+    True when something was moved. False when nothing stood at the old name, when the directory that should hold it does not exist, or when
+    a directory stands there (a directory is never moved).
+
+    Both parent directories are opened with `open_beneath`, so a link in any directory part on either side is refused (`os.replace` on
+    two pathnames would follow it and rename a file outside the run), and the rename is made with `src_dir_fd` and `dst_dir_fd`. A link at
+    the old name is moved itself and its target is left alone. Raises only SafeReadError."""
+    src = _check_parts(src_parts)
+    dst = _check_parts(dst_parts)
+    if not src or not dst:
+        raise PathRefused("a rename needs at least one path part on each side")
+    try:
+        src_parent = open_beneath(root_fd, src[:-1])
+    except ReadFailed as exc:
+        if "(ENOENT)" in exc.reason:
+            return False
+        raise
+    dst_parent = -1
+    try:
+        dst_parent = open_beneath(root_fd, dst[:-1])
+        try:
+            if stat.S_ISDIR(os.lstat(src[-1], dir_fd=src_parent).st_mode):
+                return False
+        except FileNotFoundError:
+            return False
+        try:
+            os.replace(src[-1], dst[-1], src_dir_fd=src_parent, dst_dir_fd=dst_parent)
+            return True
+        except FileNotFoundError:
+            return False
+    except OSError as exc:
+        raise _os_failure(exc, "the file") from None
+    except ValueError:                      # UnicodeEncodeError
+        raise PathRefused("a path part cannot be encoded for the operating system") from None
+    finally:
+        os.close(src_parent)
+        if dst_parent >= 0:
+            os.close(dst_parent)
+
+
+def unlink_beneath(root_fd: int, parts: Sequence[str]) -> bool:
+    """Remove the file or link named by `parts` beneath the open directory `root_fd`. True when something was removed, False when nothing
+    stood there or the directory that should hold it does not exist.
+
+    The directory on the way is opened with `open_beneath`, so a link in any directory part is refused and the removal happens inside the
+    directory reached, never inside a link's target. A link standing at the last name is removed itself and its target is left alone. A
+    directory at the last name is not removed (`ReadFailed`). Raises only SafeReadError."""
+    names = _check_parts(parts)
+    if not names:
+        raise PathRefused("a file needs at least one path part")
+    try:
+        parent = open_beneath(root_fd, names[:-1])
+    except ReadFailed as exc:
+        if "(ENOENT)" in exc.reason:
+            return False
+        raise
+    try:
+        os.unlink(names[-1], dir_fd=parent)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise _os_failure(exc, "the file") from None
+    except ValueError:                      # UnicodeEncodeError
+        raise PathRefused("a path part cannot be encoded for the operating system") from None
+    finally:
+        os.close(parent)
 
 
 def iter_lines(path, *, max_bytes: int, max_line_bytes: int, anchor: int | None = None, errors: str = "replace") -> Iterator[str]:

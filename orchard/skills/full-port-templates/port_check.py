@@ -56,8 +56,8 @@ import time
 from pathlib import Path
 
 SCHEMA = "orchard-port-check/1"
-HERE = Path(__file__).resolve().parent                    # stages/2
-RUN_DIR = HERE.parents[1]
+HERE = Path(__file__).resolve().parent                    # stages/2, stages/3, or stage 4's entry directory stages/4/configs/<N>
+RUN_DIR = next(p for p in HERE.parents if p.name == "stages").parent      # the run directory: the nearest `stages` above this file's directory
 PORT_DIR = HERE / "port"
 PORT_MODULE = "port_model"
 CONFIG_FILE = HERE / "port_check_config.json"

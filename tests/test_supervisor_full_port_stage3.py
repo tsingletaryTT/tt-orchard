@@ -97,14 +97,14 @@ def test_stage_3_runs_the_port_on_all_four_configured_chips_and_passes(rig):
     assert rec["port_sources"] and all(s["path"].startswith("stages/3/port/") for s in rec["port_sources"])
 
 
-def test_stage_3_uses_its_own_skill_and_the_pause_moves_to_stage_4(rig):
+def test_stage_3_uses_its_own_skill_and_the_pause_comes_after_stage_4(rig):
     make3(rig)
     abort_at_pause(rig)
     rig.run()
     assert step_skills(rig, 3) and all(s.endswith("orchard/skills/full-port-mesh.md") for s in step_skills(rig, 3))
     pauses = [(d["reason"]) for d in rig.decisions() if d.get("decision") == "pause"]
-    assert pauses == [supervisor.FULL_PORT_STAGES_UNBUILT] and "stages 4 to 6" in pauses[0]
-    for n in (4, 5, 6):
+    assert pauses == [supervisor.FULL_PORT_STAGES_UNBUILT] and "stages 5 and 6" in pauses[0]
+    for n in (5, 6):
         assert not started(rig, n), n
 
 
@@ -162,7 +162,7 @@ def test_a_port_that_fails_on_the_configured_chips_does_not_pass_stage_3_and_the
     assert [d["result"] for d in rig.ends(2)] == ["pass"]
     results3 = [d["result"] for d in rig.ends(3)]
     assert results3 and "pass" not in results3, results3
-    assert not started(rig, 4)
+    assert not started(rig, 5)
     marker = json.loads((rig.run_dir / "stages" / "3" / "test-result.json").read_text()) if (rig.run_dir / "stages" / "3" / "test-result.json").is_file() else None
     ran = stage_3_tests(rig)
     assert ran and all(len(r["chips"]) == 4 for r in ran), ran
@@ -231,7 +231,7 @@ def test_an_unattended_run_that_passed_stage_3_ends_blocked_at_the_stage_4_pause
     assert len(block) == 1 and block[0]["code"] == "full-port-stages-unbuilt"
     assert "stage 3" in (rig.run_dir / "BLOCKED.md").read_text()
     assert not rig.m.coder_running and rig.m.leases == {}
-    assert not started(rig, 4)
+    assert not started(rig, 5)
 
 
 # ---- the skip ---------------------------------------------------------------------------------------
