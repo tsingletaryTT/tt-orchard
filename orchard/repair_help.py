@@ -309,13 +309,18 @@ def coder_note(call_id: str, placed: bool, rel_path: str) -> str:
 
 # ---- the helper-driven loop: what the helper is told about the round before, and when to hand back to the coder ------------------------------
 
+# Up to this many line pairs the diff counts exactly (repeated lines included). Above it the library's repetition heuristic is on, because the
+# exact search is quadratic for long runs of one line and this runs on the supervisor's thread (review of PR 497, round 6).
+DIFF_EXACT_PRODUCT = 4_000_000
+
+
 def change_summary(old: str, new: str) -> str:
     """One line on what `new` changes in `old`: the count of lines added and removed and the names of the functions whose text changed (at most
     six). Computed by the supervisor from the two files, never taken from the helper's words."""
     import difflib
     a, b = old.splitlines(), new.splitlines()
     added = removed = 0
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=len(a) * len(b) > DIFF_EXACT_PRODUCT).get_opcodes():
         if tag in ("replace", "delete"):
             removed += i2 - i1
         if tag in ("replace", "insert"):
@@ -330,9 +335,10 @@ def _changed_functions(old: str, new: str) -> list[str]:
     def table(src: str) -> dict:
         try:
             tree = ast.parse(src)
+            # The dump is inside the guard: a tree that parses can still be too deep to dump (review of PR 497, round 6).
+            return {node.name: ast.dump(node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
         except (SyntaxError, ValueError, RecursionError, MemoryError):
             return {}
-        return {node.name: ast.dump(node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
     before, after = table(old), table(new)
     return sorted(name for name in after if before.get(name) != after[name])
 

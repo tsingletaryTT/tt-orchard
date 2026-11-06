@@ -536,3 +536,22 @@ def test_an_unswapped_restore_is_still_restored(tmp_path):
     entry = rh.save_best(stage)
     (stage / "port" / "port_model.py").write_bytes(skeleton)
     assert rh.restore_best(stage, entry, skeleton) == (True, "")
+
+
+# ---- review of PR 497, round 6 ----------------------------------------------------------------------------------------------------------
+
+def test_change_summary_survives_an_expression_nested_too_deep_for_ast_dump():
+    """Finding: only the parse was guarded, so a file that parses but cannot be dumped raised RecursionError after the reply was placed."""
+    deep = "def f():\n    return " + "+".join(["1"] * 3000) + "\n"
+    line = rh.change_summary("def f():\n    return 1\n", deep)
+    assert "lines added" in line
+
+
+def test_change_summary_does_not_take_quadratic_time_for_tens_of_thousands_of_repeated_lines():
+    """Finding: with autojunk off the diff of two long runs of the same line took many seconds on the supervisor's thread."""
+    import time
+    old = "x = 1\n" * 20000
+    new = "x = 1\n" * 19000 + "y = 2\n" * 1000
+    start = time.monotonic()
+    line = rh.change_summary(old, new)
+    assert time.monotonic() - start < 3 and "lines added" in line
