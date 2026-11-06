@@ -1,0 +1,4 @@
+target = "0.9.125"
+summary = "Stage 0 no longer calls a fine-tune a full port because a newer transformers wrote layer_types (all full_attention) or dtype; the keys set aside are listed in the evidence (issue 537)."
+pr = 538
+kind = "fix"
