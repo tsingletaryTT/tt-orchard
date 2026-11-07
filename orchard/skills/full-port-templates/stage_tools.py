@@ -39,6 +39,7 @@ JSON_MAX = 1_000_000
 TOP1_MIN = 0.85                                      # the gate's bar (orchard/full_port.py TOP1_MIN; a test keeps the two equal)
 FAILURE_TOKEN = "PORT_CHECK_FAILURE "                # starts the check's structured failure line (orchard/port_repair.py)
 MAX_LINE = 300
+HOST_WEIGHT_LINE = 1800        # the load gate's message lists host weight paths (issue 574) and is long; cut here, not at MAX_LINE
 ROWS = 8
 LAYER_PORT_REL = "evidence/layer-port.npz"           # written by the worker of the hardware test from the port's optional `layer_outputs` hook
 LAYER_REF_REL = "evidence/layer-reference.npz"       # the CPU reference's layers, cached here by `layer-diff` (with a sidecar that binds it to its inputs)
@@ -269,7 +270,8 @@ def last_check(stage: Path) -> list[str]:
                 lines.append("  the run around the port was wrong (chips, stage 1 files, runtime). An edit to the port cannot fix it.")
         else:
             lines.append("result: FAILED, with no structured failure line (a crash or a timeout before the check could say what failed).")
-        lines.append("message: " + clean(message if message is not None else "(none printed)"))
+        shown = message if message is not None else "(none printed)"
+        lines.append("message: " + clean(shown, HOST_WEIGHT_LINE if "weight elements as host" in shown else MAX_LINE))
         lines.append(f"evidence: {rel(stage / OUTPUT_REL)}")
         base = rel(stage)
         if kind_op is not None and kind_op["kind"] == "port":

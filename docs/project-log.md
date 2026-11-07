@@ -4848,6 +4848,13 @@ The coder image carries plugin `e37ccd87`, a local branch on plugin commit `cacf
 - Not resolved: the run 22 error `mat1 and mat2 shapes cannot be multiplied (58x256 and 512x8)` is a torch message; the port on disk does not show its source.
 - The checked tree: `~/tt-metal` (a later commit) gives 3 sheet problems on the base commit too (multiply `b`, rms_norm `eps`, sdpa `mask`). The pinned tree in the run notes (`metal-523`) gives none, before and after.
 
+## 2026-11-07 stage 2 load gate lists the host-held weights (issue 574)
+Runs 22 and 24 failed the load gate with a count only (590095 host elements, 581890 device) and the coder never found which dict kept the host
+copies. `scan_weights` in the check template now records the paths of the 8 largest host tensors (visited-id set, 100000 nodes, depth 16;
+`truncated` when a cap stops the walk) and pairs each with the device tensor of the same leaf name. The failure message lists them, says how many
+more there are and ends with the instruction to keep only the ttnn tensor. `last-check` prints that message up to 1800 characters instead of 300.
+Tests: `tests/test_gate_lists_host_weights.py`; mutations (path, depth cap, cycle guard, message cap, sort order, twin pairing, last-check cut,
+instruction) each turn a test red.
 ## 2026-11-07, issues 578, 487 and 560: the coder start and its ready wait
 Prompt: one change for the three issues about the supervisor's coder start. Run 24 waited 4 h 11 min on a load that stopped at layer 20 of 48, then left every chip reading an all-ones serial. Run 17 waited 43 minutes on a container that had exited after 50 seconds. Run 20 was refused twice with "chips already in use by another container" while `docker ps` was empty.
 - Boot wait (`ServerControl.wait_ready`, container kind): each poll reads `docker inspect` (state, exit code) and the last timestamped log line. A container that is exited or dead raises `CoderExited` with the exit code and the end of the log. A log line that has not changed for `--coder-stall-minutes` (default 10; `[coder] boot_stall_minutes`; 0 is off) while `/health` is down raises `BootStalled`. A log that cannot be read counts as no evidence. The absolute deadline is `--coder-deadline-minutes` (default 45, the existing cold-boot budget) and raises `NotReady` with the log tail.
