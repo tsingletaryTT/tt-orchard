@@ -175,3 +175,129 @@ def test_the_command_line_runs_from_the_stage_directory_with_no_orchard_import(t
     imported = {n.module if isinstance(n, ast.ImportFrom) else a.name for n in ast.walk(ast.parse(TOOL.read_text())) if isinstance(n, (ast.Import, ast.ImportFrom))
                 for a in (getattr(n, "names", []) or [None])}
     assert not [m for m in imported if m and m.split(".")[0] == "orchard"], "the tool runs from a stage directory and may not import orchard"
+
+
+# ---- run 20 (the next command, and the stale-output notice) --------------------------------------------------------------------------
+# In run 20 the coder called `last-check` 23 times, mostly right after a write, and each time it printed the old failure: the check runs again
+# only when the step ends. It also never ran `edit` or `layer-diff`: no output named a line to edit, and no output gave the command to run next.
+
+FRAME_OUT = ("port| some log\nFAILED: the port failed at 'prefill': \"[port_model.py:4: logits = ttnn.to_torch(logits)] RuntimeError: TT_FATAL "
+             "Can't convert a tensor distributed on MeshShape([1, 2]) mesh\"\nPORT_CHECK_FAILURE {\"kind\": \"port\", \"op\": \"prefill\"}\n")
+PORT_SRC = "import ttnn\n\ndef prefill(model, ids):\n    logits = ttnn.to_torch(logits)\n    return logits\n"
+
+
+def with_port(stage: Path, src: str = PORT_SRC) -> Path:
+    (stage / "port").mkdir(exist_ok=True)
+    (stage / "port" / "port_model.py").write_text(src)
+    old = stage / "test-result.json"
+    os.utime(stage / "port" / "port_model.py", ns=(old.stat().st_mtime_ns - 10**9, old.stat().st_mtime_ns - 10**9))   # written before the check
+    return stage
+
+
+def next_lines(out: str) -> list[str]:
+    return [l for l in out.splitlines() if l.startswith("next: ")]
+
+
+def test_every_failure_says_the_output_is_from_before_this_step_and_that_a_write_does_not_rerun_it(tmp_path):
+    out = text(load_tool(), make_stage(tmp_path, output=PREFILL_OUT, returncode=2))
+    assert "runs again" in out and "no tool call" in out and "writing a file does not run it" in out
+
+
+def test_a_port_edited_after_the_check_is_called_out(tmp_path):
+    stage = with_port(make_stage(tmp_path, output=FRAME_OUT, returncode=2))
+    os.utime(stage / "port" / "port_model.py", None)               # now: after the check
+    os.utime(stage / "test-result.json", ns=(1, 1))
+    assert "changed after this check" in text(load_tool(), stage)
+    stage2 = with_port(make_stage(tmp_path / "b", output=FRAME_OUT, returncode=2))
+    assert "changed after this check" not in text(load_tool(), stage2)
+
+
+def test_a_failure_at_a_port_line_prints_one_edit_command_with_that_line_as_the_old_text(tmp_path):
+    stage = with_port(make_stage(tmp_path, output=FRAME_OUT, returncode=2))
+    out = text(load_tool(), stage)
+    nxt = next_lines(out)
+    assert len(nxt) == 1
+    assert nxt[0].startswith("next: python3 stages/2/stage_tools.py edit stages/2/port/port_model.py --old 'logits = ttnn.to_torch(logits)' --new ")
+    assert "port_model.py line 4" in out                            # the location is read back to the coder as a sentence
+
+
+def test_the_edit_command_takes_its_old_text_from_the_file_and_is_quoted_for_the_shell(tmp_path):
+    src = "import ttnn\n\ndef prefill(model, ids):\n    x = f(\"it's\")  # $HOME `id`\n    return x\n"
+    out_text = "FAILED: the port failed at 'prefill': '[port_model.py:4: x = f(\"it\\'s\")] ValueError: boom'\nPORT_CHECK_FAILURE {\"kind\": \"port\", \"op\": \"prefill\"}\n"
+    stage = with_port(make_stage(tmp_path, output=out_text, returncode=2), src)
+    nxt = next_lines(text(load_tool(), stage))
+    import shlex
+    words = shlex.split(nxt[0][len("next: "):])                     # one shell command; the old text is one word
+    assert words[words.index("--old") + 1] == "x = f(\"it's\")  # $HOME `id`"
+
+
+def test_a_frame_in_a_port_that_changed_after_the_check_gets_no_edit_command(tmp_path):
+    stage = with_port(make_stage(tmp_path, output=FRAME_OUT, returncode=2))
+    os.utime(stage / "port" / "port_model.py", None)
+    os.utime(stage / "test-result.json", ns=(1, 1))
+    assert not next_lines(text(load_tool(), stage))
+
+
+@pytest.mark.parametrize("src", ["", "   \n", "x" * 400 + "\n", "x" * 151 + "\n"])
+def test_a_line_that_is_missing_empty_or_too_long_gets_no_edit_command(tmp_path, src):
+    stage = with_port(make_stage(tmp_path, output=FRAME_OUT, returncode=2), "\n\n\n" + src)         # the frame names line 4
+    assert not next_lines(text(load_tool(), stage))
+
+
+def test_a_message_that_only_looks_like_a_frame_is_not_taken_as_one(tmp_path):
+    out_text = "FAILED: the port failed at 'prefill': 'ValueError: see [port_model.py:4: logits = 1] in the docs'\nPORT_CHECK_FAILURE {\"kind\": \"port\", \"op\": \"prefill\"}\n"
+    stage = with_port(make_stage(tmp_path, output=out_text, returncode=2))
+    assert not next_lines(text(load_tool(), stage))
+
+
+def test_a_frame_naming_a_file_outside_the_port_directory_gets_no_edit_command(tmp_path):
+    out_text = FRAME_OUT.replace("port_model.py:4", "../port_check.py:4")
+    stage = with_port(make_stage(tmp_path, output=out_text, returncode=2))
+    assert not next_lines(text(load_tool(), stage))
+
+
+def test_a_device_ops_gate_failure_points_at_the_cheat_sheet_for_the_projection_call(tmp_path):
+    out_text = "FAILED: device-ops: no source file makes a reachable ttnn matmul-family call\nPORT_CHECK_FAILURE {\"kind\": \"port\", \"op\": \"device-ops\"}\n"
+    nxt = next_lines(text(load_tool(), make_stage(tmp_path, output=out_text, returncode=2)))
+    assert nxt == ["next: python3 stages/2/stage_tools.py cheat ttnn.linear"]
+
+
+def test_a_setup_failure_has_no_next_command(tmp_path):
+    out_text = 'FAILED: TT_VISIBLE_DEVICES names no chip\nPORT_CHECK_FAILURE {"kind": "setup", "op": null}\n'
+    assert not next_lines(text(load_tool(), make_stage(tmp_path, output=out_text, returncode=2)))
+
+
+def test_a_numerics_failure_with_a_layer_file_names_layer_diff_as_the_next_command(tmp_path):
+    from test_stage_tools_layer_diff import build
+    stage = build(tmp_path)
+    (stage / "evidence" / "port-check.json").write_text(json.dumps(numerics_record()))
+    assert next_lines(text(load_tool(), stage)) == ["next: python3 stages/2/stage_tools.py layer-diff"]
+
+
+def test_a_numerics_failure_without_a_layer_file_says_to_add_the_hook_and_names_no_command(tmp_path):
+    stage = make_stage(tmp_path, output=NUMERICS_OUT, returncode=0, record=numerics_record())
+    nxt = next_lines(text(load_tool(), stage))
+    assert len(nxt) == 1 and "layer_outputs(model, ids)" in nxt[0] and "python3" not in nxt[0]
+
+
+def test_a_passing_check_has_no_next_command(tmp_path):
+    rec = numerics_record(chip_ids=list(REF), top1_agreement=1.0)
+    assert not next_lines(text(load_tool(), make_stage(tmp_path, output=NUMERICS_OUT, returncode=0, record=rec)))
+
+
+def test_a_line_of_exactly_the_limit_still_gets_the_command(tmp_path):
+    stage = with_port(make_stage(tmp_path, output=FRAME_OUT, returncode=2), "\n\n\n" + "x" * 150 + "\n")
+    assert len(next_lines(text(load_tool(), stage))) == 1
+
+
+def test_a_frame_whose_name_climbs_out_of_the_port_directory_gets_no_edit_command(tmp_path):
+    stage = with_port(make_stage(tmp_path, output=FRAME_OUT.replace("port_model.py:4", "a/../../port_check.py:4"), returncode=2))
+    (stage / "port_check.py").write_text("\n\n\nsecret = 1\n")
+    out = text(load_tool(), stage)
+    assert not next_lines(out) and "secret" not in out
+
+
+def test_a_setup_failure_with_a_frame_shaped_message_gets_no_edit_command(tmp_path):
+    out_text = FRAME_OUT.replace('"op": "prefill"', '"op": null').replace('"kind": "port"', '"kind": "setup"')
+    stage = with_port(make_stage(tmp_path, output=out_text, returncode=2))
+    assert not next_lines(text(load_tool(), stage))

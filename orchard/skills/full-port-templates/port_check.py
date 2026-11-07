@@ -310,7 +310,34 @@ _TOKEN = re.compile(r"\b(?:hf_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]
 
 def clip(text: str) -> str:
     """The first REPLY_CHARS characters of `text`, with URL user information and token-shaped words removed from the whole text first."""
-    return _TOKEN.sub("[token removed]", _USERINFO.sub(r"\1", str(text)))[:REPLY_CHARS]
+    return scrub(text)[:REPLY_CHARS]
+
+
+def scrub(text) -> str:
+    """`text` with URL user information and token-shaped words removed, whole. A caller that cuts a text short scrubs first: a cut can leave the
+    start of a credential without the `@` or the length that the patterns look for."""
+    return _TOKEN.sub("[token removed]", _USERINFO.sub(r"\1", str(text)))
+
+
+def port_frame(exc) -> str:
+    """`[port_model.py:LINE: source line] ` for the innermost traceback frame that lies in the port directory, else "". Run 20 of the tiny Qwen4
+    rehearsal: the reply held the exception text alone, a C++ backtrace for a device error, so the coder could not tell which line of its port
+    raised it and rewrote the whole file each round. Only a file under PORT_DIR is named, so the template's own frames add nothing. The source
+    line is the coder's own text: scrubbed of credentials, then cut to 120 characters (PR review of run 20's lessons: the first version cut first and
+    left the start of a URL password in the failure text)."""
+    found = None
+    root = os.path.realpath(PORT_DIR)
+    tb = getattr(exc, "__traceback__", None)
+    while tb is not None:
+        path = os.path.realpath(tb.tb_frame.f_code.co_filename)
+        if path.startswith(root + os.sep):
+            found = (os.path.relpath(path, root), tb.tb_lineno, path)
+        tb = tb.tb_next
+    if found is None:
+        return ""
+    import linecache
+    source = scrub(" ".join(linecache.getline(found[2], found[1]).split()))[:120]       # scrubbed before the cut, never after
+    return f"[{found[0]}:{found[1]}" + (f": {source}" if source else "") + "] "
 
 
 def open_device(ttnn, n_chips: int):
@@ -522,7 +549,7 @@ def worker(read_fd: int, write_fd: int) -> int:
             else:
                 reply({"ok": False, "error": f"unknown op {op!r}"})
         except BaseException as exc:             # the port's failure goes back as text; the parent decides what it means
-            reply({"ok": False, "error": clip(f"{type(exc).__name__}: {exc}")})
+            reply({"ok": False, "error": clip(f"{port_frame(exc)}{type(exc).__name__}: {exc}")})
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 return 1
     return 0

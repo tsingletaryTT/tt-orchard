@@ -524,13 +524,17 @@ def tools_text(stage: int = 2, *, facts: bool = True, cheat: bool = True) -> str
     base = f"python3 stages/{stage}/stage_tools.py"
     lines = [
         "Fixed tools. Run them from the run directory in place of `cat`, `head`, `grep` or `python3 -c` on those files. Each prints a short report.",
-        f"- `{base} last-check`: which check failed, where, the numbers and the evidence file.",
-        f"- `{base} layer-diff`: after a numerics failure, the first layer whose output differs from the CPU reference (needs the optional hook below).",
+        f"- `{base} last-check`: which check failed, where and the numbers, then a `next:` line with the one command to run. It shows the check from before this step.",
+        f"- `{base} layer-diff`: no arguments; after a numerics failure (agreement below {full_port.TOP1_MIN}), the first layer that differs from the CPU reference. Needs the optional hook below.",
         f"- `{base} facts KEY`: one value of {FACTS_NAME} by dotted path, for example `facts config.hc_count`; `facts --find TEXT` searches keys and text.",
         f"- `{base} show FILE --lines A:B`: a range of a file in the run directory, with line numbers.",
         f"- `{base} cheat NAME`: one entry of the verified TTNN call sheet, for example `cheat ttnn.linear`; `cheat` alone lists the names.",
 
         f"- `{base} edit stages/{stage}/port/port_model.py --old TEXT --new TEXT`: after your first write, change a port file with this. Do not write the whole file again.",
+        f"Use `edit` for a fix of a few lines, such as a wrong argument or a missing composer. Example: `{base} edit stages/{stage}/port/port_model.py "
+        "--old 'logits = ttnn.to_torch(logits)' --new 'logits = ttnn.to_torch(logits, mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1))'`.",
+        "The check runs again when you reply with no tool call. Writing a file does not run it, and `last-check` does not run the check again: it keeps showing the "
+        "failure of the last run.",
         "`edit` needs TEXT to occur once (add the lines around it if it does not). For several lines, write the old and the new text with write_file, a new "
         "file name for each edit, and pass `--old-file` and `--new-file`.",
         "Optional hook for `layer-diff`: define `layer_outputs(model, ids)` in `port_model.py`. It runs the prompt `ids` once and returns the hidden state "

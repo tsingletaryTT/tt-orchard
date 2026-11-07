@@ -18,7 +18,7 @@ def command_lines(text: str):
 
 def test_the_prepare_note_names_each_tool_with_its_command_and_one_line():
     note = port_facts.prepare_note(facts=True, skeleton=True, excerpts=True)
-    cmds = command_lines(note)
+    cmds = command_lines("\n".join(l for l in note.splitlines() if l.startswith("- ")))      # one bullet per tool; the edit example is a separate line
     assert len(cmds) == len(TOOLS)
     for tool, cmd in zip(TOOLS, cmds):
         assert cmd.split()[2] == tool
@@ -65,3 +65,38 @@ def test_the_repair_text_names_the_tools_for_a_numerics_failure_and_for_a_run_fa
     run = {"kind": "port", "op": "prefill"}
     text = supervisor.Supervisor._repair_text(SimpleNamespace(), 2, 1, 3, run, "FAILED: boom")
     assert "stage_tools.py last-check" in text and "layer-diff" not in text
+
+
+# ---- run 20: the task text gives the commands with an example, and says when the check runs ----------------------------------------------
+
+def test_the_tools_text_gives_an_edit_example_that_is_one_shell_command_the_watchdog_counts_as_edit():
+    import shlex
+    from orchard.watchdog import command_shape
+    line = next(l for l in port_facts.tools_text(2).splitlines() if "Example:" in l)
+    example = line.split("Example:", 1)[1].strip().strip(".").strip("`")
+    words = shlex.split(example)
+    assert words[:3] == ["python3", "stages/2/stage_tools.py", "edit"] and "--old" in words and "--new" in words
+    assert command_shape(example).startswith("stage_tools edit ")
+
+
+def test_the_tools_text_gives_the_layer_diff_command_and_when_to_run_it():
+    line = next(l for l in port_facts.tools_text(2).splitlines() if "layer-diff`" in l and l.startswith("- "))
+    assert "`python3 stages/2/stage_tools.py layer-diff`" in line
+    assert "below 0.85" in line and "no arguments" in line and len(line) < 330
+
+
+def test_the_tools_text_says_last_check_ends_with_a_next_line_and_does_not_rerun_the_check():
+    line = next(l for l in port_facts.tools_text(2).splitlines() if "last-check`" in l and l.startswith("- "))
+    assert "`next:`" in line and "before this step" in line
+    assert "does not run the check again" in port_facts.tools_text(2) and "reply with no tool call" in port_facts.tools_text(2)
+
+
+@pytest.mark.parametrize("failure", [{"kind": "numerics", "agreement": 0.5625, "n": 32, "mismatches": 14, "first_mismatch": 0, "rows": [(0, 100, 7)],
+                                      "port_sha256": "a" * 64},
+                                     {"kind": "port", "op": "prefill"}])
+def test_the_repair_text_says_when_the_check_runs_and_to_start_with_last_check(failure):
+    from types import SimpleNamespace
+    from orchard import supervisor
+    text = supervisor.Supervisor._repair_text(SimpleNamespace(), 2, 1, 3, failure, "FAILED: boom")
+    assert "runs again only when you reply with no tool call" in text
+    assert "`next:` line" in text
