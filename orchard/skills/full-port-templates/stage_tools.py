@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -51,6 +52,14 @@ CONFIG_REL = "port_check_config.json"
 TOOLS_CONFIG_REL = "stage_tools.json"                # written by the supervisor: {"reference_python": path} when it knows one
 FACTS_REL = "port_facts.json"
 PROMPT_REL = "stages/1/evidence/reference/prompt-ids.json"
+FRAME_RE = re.compile(r"^the port failed at '\w{1,20}': ['\"]\[([A-Za-z0-9_][A-Za-z0-9_./-]{0,79}\.py):(\d{1,6})")   # the check's `[port_model.py:LINE: text]` prefix (port_check.py port_frame)
+# The check's own credential patterns (port_check.py `_USERINFO`, `_TOKEN`). A source line that matches is not offered as the old text of an edit: the
+# check removed the credential from the failure text and the command would read it back from the file and print it.
+SECRET_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,31}://[^/\s@]*@|\b(?:hf_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]")
+EDIT_LINE_MAX = 150                                  # a source line longer than this is not offered as the old text of an edit
+PORT_SCAN_MAX = 200                                  # files looked at when asking whether the port changed after the check
+STALE_NOTE = ("this is the output of the check that ran before this step. The check runs again when you reply with no tool call; writing a file "
+              "does not run it, so another `last-check` shows the same failure.")
 ADVICE_NOTE = "advice from files in this directory; the gate's verdict is the supervisor's"
 
 
@@ -179,6 +188,54 @@ def where(position: int) -> str:
             "a decode step: the prefill token matched, so look at the decode path, the cache position and the state updates")
 
 
+def port_changed_after_check(stage: Path) -> bool:
+    """True when a file under <stage>/port is newer than the supervisor's test record (the port was edited after the check this output is from).
+    Links are not followed; at most PORT_SCAN_MAX files are looked at."""
+    try:
+        checked = os.lstat(Path(stage) / MARKER_REL).st_mtime_ns
+    except OSError:
+        return False
+    seen = 0
+    stack = [Path(stage) / PORT_DIR]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for entry in it:
+                    seen += 1
+                    if seen > PORT_SCAN_MAX:
+                        return False
+                    st = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append(Path(entry.path))
+                    elif stat.S_ISREG(st.st_mode) and st.st_mtime_ns > checked:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def edit_hint(stage: Path, message: str, base: str):
+    """(sentence, command) for a failure that names a line of the port, or (None, None). The check prefixes the failure with `[file:LINE: text]`
+    for the innermost frame in the port directory (port_check.py `port_frame`). The old text of the command is read from the file, not from the
+    message, and only when the port is as it was at the check (an edited file's line numbers have moved). The command is one shell command."""
+    found = FRAME_RE.match(message or "")
+    if found is None:
+        return None, None
+    name, number = found.group(1), int(found.group(2))
+    sentence = f"the failure is at {name} line {number}."
+    if port_changed_after_check(stage):
+        return sentence, None
+    parts, why = port_target(Path(stage), name)
+    if parts is None:
+        return None, None                                           # a name outside the port directory is not offered
+    text, why = _read_text_beneath(Path(stage), parts, EDIT_MAX_BYTES, name)
+    rows = text.splitlines() if text is not None else []
+    line = rows[number - 1].strip() if 0 < number <= len(rows) else ""
+    if not line or len(line) > EDIT_LINE_MAX or not line.isprintable() or SECRET_RE.search(line):
+        return sentence, None
+    return sentence, f"python3 {base}/stage_tools.py edit {base}/{'/'.join(parts)} --old {shlex.quote(line)} --new 'THE FIXED LINE'"
+
+
 def last_check(stage: Path) -> list[str]:
     """The summary of the last check in `stage`, as lines (fewer than 40)."""
     stage = Path(stage)
@@ -214,6 +271,20 @@ def last_check(stage: Path) -> list[str]:
             lines.append("result: FAILED, with no structured failure line (a crash or a timeout before the check could say what failed).")
         lines.append("message: " + clean(message if message is not None else "(none printed)"))
         lines.append(f"evidence: {rel(stage / OUTPUT_REL)}")
+        base = rel(stage)
+        if kind_op is not None and kind_op["kind"] == "port":
+            if kind_op["op"] == "device-ops":
+                lines.append(f"next: python3 {base}/stage_tools.py cheat ttnn.linear")
+            else:
+                sentence, command = edit_hint(stage, message, base)
+                if sentence:
+                    lines.append(sentence)
+                if command:
+                    lines.append("next: " + command)
+    if data is not None:
+        lines.append(STALE_NOTE)
+        if port_changed_after_check(stage):
+            lines.append("warning: a file under port/ changed after this check, so the failure above may already be fixed or its line may have moved.")
     lines.append(f"({ADVICE_NOTE})")
     return lines
 
@@ -243,6 +314,12 @@ def numerics(stage: Path) -> list[str]:
         if len(rows) > ROWS:
             lines.append(f"({len(rows) - ROWS} more not listed)")
         lines.append("this output names no layer or feature; `layer-diff` compares the port with the reference layer by layer.")
+    if agreement < TOP1_MIN:
+        sealed, _why = sealed_layers_line(stage)
+        if sealed is not None:
+            lines.append(f"next: python3 {rel(stage)}/stage_tools.py layer-diff")
+        else:
+            lines.append("next: add `layer_outputs(model, ids)` to port_model.py (the task text says what it returns); `layer-diff` works from the check after that.")
     lines.append(f"evidence: {path}")
     return lines
 

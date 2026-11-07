@@ -861,6 +861,11 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
     return False
 
 
+# Run 20: the coder wrote a file and called `last-check` 23 times, each time reading the old failure and believing the fix had not worked.
+CHECK_RUNS_NOTE = ("The check runs again only when you reply with no tool call. A write does not run it, and `last-check` keeps showing this "
+                    "failure until then. Start with `python3 stages/{n}/stage_tools.py last-check`: its `next:` line is the command to run.")
+
+
 class Supervisor:
     REPAIR_HELP_DEFAULT = True       # the helper is asked inside the port repair rounds when it is configured (a test of the older behaviour turns it off)
 
@@ -2455,7 +2460,7 @@ class Supervisor:
                                f"Tools: `python3 stages/{n}/stage_tools.py last-check` repeats these numbers. `python3 stages/{n}/stage_tools.py layer-diff` names the first "
                                "layer that differs from the CPU reference, when port_model.py defines `layer_outputs(model, ids)` (the stage task says what it returns). "
                                f"`python3 stages/{n}/stage_tools.py facts KEY` and `... show FILE --lines A:B` read the facts and your files. Change a file with "
-                               f"`python3 stages/{n}/stage_tools.py edit FILE --old TEXT --new TEXT` and do not write the whole file again."])
+                               f"`python3 stages/{n}/stage_tools.py edit FILE --old TEXT --new TEXT` and do not write the whole file again. {CHECK_RUNS_NOTE.format(n=n)}"])
         where = f"at the {failure['op']!r} request" if failure.get("op") else "before any request reached the port"
         return "\n".join([f"Port repair round {k} of {limit} for this attempt. The port check failed {where}.",
                           f"The end of the check's output (stages/{n}/{port_repair.OUTPUT}):", "```", port_repair.tail(raw).rstrip(), "```",
@@ -2463,7 +2468,7 @@ class Supervisor:
                           f"Only your edits under stages/{n}/port/ reach it.",
                           f"Tools: `python3 stages/{n}/stage_tools.py last-check` summarises this failure. `python3 stages/{n}/stage_tools.py facts KEY` and "
                           "`... show FILE --lines A:B` read the facts and your files. Change a file with "
-                          f"`python3 stages/{n}/stage_tools.py edit FILE --old TEXT --new TEXT` and do not write the whole file again."])
+                          f"`python3 stages/{n}/stage_tools.py edit FILE --old TEXT --new TEXT` and do not write the whole file again. {CHECK_RUNS_NOTE.format(n=n)}"])
 
     def _port_repair_rounds(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         """Up to `--port-repair-rounds` repair rounds for a full-port stage 2 whose port check failed on the port itself. Returns

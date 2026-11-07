@@ -377,3 +377,45 @@ def test_a_mistake_check_with_a_null_or_list_valued_field_is_a_problem_and_never
     check.update(bad)
     mistake = {"symptom": "s", "fix": "f", "seen_in": "x", "checks": [check]}
     assert any("mistake 0" in p for p in oc.shape_problems(sheet_of(GOOD, mistakes=[mistake])))
+
+
+# ---- run 20's TTNN failures, in the shipped sheet ------------------------------------------------------------------------------------------
+
+RUN20_SYMPTOMS = ("Supply a mesh composer", "width=64 height=320", "ttnn calls found: ttnn.Parameter x2")
+
+
+def run20_mistakes():
+    sheet = oc.load_sheet(oc.TTNN_SHEET)
+    found = []
+    for needle in RUN20_SYMPTOMS:
+        hits = [(i, m) for i, m in enumerate(sheet["mistakes"]) if needle in m["symptom"]]
+        assert len(hits) == 1, needle
+        found.append(hits[0])
+    return sheet, found
+
+
+def test_the_shipped_sheet_carries_the_three_run_20_failures_with_a_fix_a_run_and_a_check_each():
+    sheet, found = run20_mistakes()
+    assert oc.shape_problems(sheet) == []
+    for _i, m in found:
+        assert "run 20" in m["seen_in"] and len(m["fix"]) > 60 and m["checks"], m["symptom"]
+    by = {needle: m for needle, (_i, m) in zip(RUN20_SYMPTOMS, found)}
+    composer = {(c["name"], tuple(c.get("present_args", []))) for c in by[RUN20_SYMPTOMS[0]]["checks"]}
+    assert ("ttnn.to_torch", ("mesh_composer",)) in composer and "ConcatMeshToTensor" in by[RUN20_SYMPTOMS[0]]["fix"]
+    shape = {c["name"] for c in by[RUN20_SYMPTOMS[1]]["checks"]}
+    assert shape == {"ttnn.linear", "ttnn.matmul"} and "transpose_b=True" in by[RUN20_SYMPTOMS[1]]["fix"]
+    assert [c["name"] for c in by[RUN20_SYMPTOMS[2]]["checks"]] == ["ttnn.linear"] and "no wrapper class" in by[RUN20_SYMPTOMS[2]]["fix"]
+
+
+def test_the_rendered_sheet_the_coder_reads_lists_the_run_20_failures():
+    rendered = oc.render(oc.load_sheet(oc.TTNN_SHEET))
+    for needle in RUN20_SYMPTOMS:
+        assert needle in rendered
+
+
+@pytest.mark.skipif(not os.environ.get("ORCHARD_CHEAT_ROOT_TT_METAL"), reason="needs a tt-metal source tree: set ORCHARD_CHEAT_ROOT_TT_METAL (CPU only, text read)")
+def test_the_run_20_checks_hold_in_a_real_tt_metal_tree():
+    sheet, found = run20_mistakes()
+    problems = oc.verify(sheet, {"tt_metal": oc.build_index(os.environ["ORCHARD_CHEAT_ROOT_TT_METAL"])})
+    mine = [p for p in problems if any(p.startswith(f"mistake {i}:") for i, _m in found)]
+    assert mine == []
