@@ -304,13 +304,30 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     text = record.get("free_run_text")
     if result.get("free_run_text") != text:
         reasons.append(f"result.json free_run_text differs from the text in {RECORD_FILE}")
-    if not _text(text) or len("".join(text.split())) < MIN_FREE_RUN_CHARS or len(set(text.split())) < MIN_FREE_RUN_WORDS:
-        reasons.append(f"free_run_text must be at least {MIN_FREE_RUN_CHARS} non-space characters and {MIN_FREE_RUN_WORDS} different words")
+    _text_floor_reasons(text, rehearsal, waived, reasons)
 
     _template_reasons(record, stage_dir, run_dir, reasons)
     _source_reasons(record, stage_dir, run_dir, reasons, stage, entry)
     _device_ops_reasons(record, run_dir, reasons)
     return reasons, seen
+
+
+WORDS_WAIVED = "free_run_words"      # the name `waived` receives when a rehearsal waived the word count of the free-run text (issue 568)
+
+
+def _text_floor_reasons(text, rehearsal: bool, waived: list | None, reasons: list) -> None:
+    """The floor on the free-run text: printable text, at least MIN_FREE_RUN_CHARS non-space characters, MIN_FREE_RUN_WORDS different words.
+    In a rehearsal (the run's `--full-port-rehearsal`, from the ledger) the word count alone is waived: a random-weight model decodes token
+    noise with no spaces, which is one long word. The character floor still applies, and `waived` receives WORDS_WAIVED so the supervisor
+    can write the decision. Outside a rehearsal nothing changes."""
+    if not _text(text) or len("".join(text.split())) < MIN_FREE_RUN_CHARS:
+        reasons.append(f"free_run_text must be at least {MIN_FREE_RUN_CHARS} non-space characters and {MIN_FREE_RUN_WORDS} different words")
+    elif len(set(text.split())) < MIN_FREE_RUN_WORDS:
+        if rehearsal:
+            if waived is not None and WORDS_WAIVED not in waived:
+                waived.append(WORDS_WAIVED)
+        else:
+            reasons.append(f"free_run_text must be at least {MIN_FREE_RUN_CHARS} non-space characters and {MIN_FREE_RUN_WORDS} different words")
 
 
 def _template_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list) -> None:

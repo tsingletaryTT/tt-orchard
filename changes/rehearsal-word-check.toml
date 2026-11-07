@@ -1,0 +1,2 @@
+target = "0.9.127"
+summary = "A full-port rehearsal waives the different-words count of the free-run text (random-weight text has no spaces), with a ledger decision; every other check stays."

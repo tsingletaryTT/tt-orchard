@@ -435,8 +435,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
     if ppl["top5_gap_diff"] > GAP_MAX:
         reasons.append(f"the port's top-5 logit gaps differ from the reference's by {ppl['top5_gap_diff']:.4f} on average; the bar is {GAP_MAX}")
     text = record["free_run_text"]
-    if not full_port._text(text) or len("".join(text.split())) < full_port.MIN_FREE_RUN_CHARS or len(set(text.split())) < full_port.MIN_FREE_RUN_WORDS:
-        reasons.append(f"free_run_text must be at least {full_port.MIN_FREE_RUN_CHARS} non-space characters and {full_port.MIN_FREE_RUN_WORDS} different words")
+    full_port._text_floor_reasons(text, rehearsal, waived, reasons)
     return reasons, seen
 
 
