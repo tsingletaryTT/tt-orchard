@@ -32,6 +32,9 @@ _ZERO_NAMES = frozenset({"TYPE_CHECKING"})
 
 def is_matmul(name: str) -> bool:
     """True when the dotted ttnn name (`ttnn.linear`, `ttnn.experimental.minimal_matmul`) is a matmul-family op."""
+    tail = name.lower().rsplit(".", 1)[-1]
+    if tail.startswith(("create_", "get_")) or "config" in tail or tail.endswith("attributes"):
+        return False                     # a helper that builds a settings object or a name lookup does not run a projection
     return bool(MATMUL_FAMILY.search(name.lower()))
 
 
@@ -147,6 +150,12 @@ def static_calls(source: str) -> dict:
             if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
                 return                       # what follows in this block cannot run
 
+    # Function bodies run after the whole module has loaded, so an import or alias that comes later in the file still binds the names they use.
+    # Bind every import and alias first (twice, so an alias of an alias settles), then count the calls in reading order.
+    for _ in range(2):
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign)):
+                bind(node)
     block(tree.body)
     return {"calls": dict(sorted(calls.items())), "error": None}
 

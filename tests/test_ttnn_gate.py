@@ -93,6 +93,8 @@ def test_a_file_that_does_not_parse_reports_an_error_and_no_calls():
     ("ttnn.transformer.scaled_dot_product_attention", True, True), ("ttnn.conv2d", True, True),
     ("ttnn.add", False, True), ("ttnn.rms_norm", False, True),
     ("ttnn.from_torch", False, False), ("ttnn.open_device", False, False), ("ttnn.experimental.convert_to_chw", False, True),
+    ("ttnn.create_matmul_attributes", False, True), ("ttnn.MatmulMultiCoreReuseProgramConfig", False, True),
+    ("ttnn.linear_program_config", False, True),
 ])
 def test_which_names_are_matmul_family_and_which_are_computation(name, matmul, compute):
     assert ttnn_calls.is_matmul(name) is matmul and ttnn_calls.is_compute(name) is compute
@@ -107,6 +109,13 @@ def test_which_names_are_matmul_family_and_which_are_computation(name, matmul, c
 ])
 def test_the_floor_is_one_matmul_per_layer_and_one_when_the_config_names_no_count(config, expected):
     assert ttnn_calls.layer_floor(config) == expected
+
+
+def test_a_port_that_defines_its_functions_before_importing_ttnn_still_has_its_calls_counted():
+    """Function bodies run after the whole module has loaded, so a later import or alias binds the name they use (Copilot, PR 543)."""
+    src = "def f(x):\n    return ttnn.linear(x, x)\n\ndef g(x):\n    return op(x, x)\n\nimport ttnn\nop = ttnn.matmul\n"
+    got = calls(src)
+    assert got.get("ttnn.linear") == 1 and got.get("ttnn.matmul") == 1
 
 
 def test_the_template_carries_the_same_static_count_and_floor_as_the_gate_byte_for_byte():
