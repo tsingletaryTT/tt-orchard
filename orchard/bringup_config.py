@@ -33,7 +33,7 @@ TOP_KEYS = {"runs_root", "tiers", "cache_root", "hf_home", "operator_home", "goz
 # Where a run's hardware tests run: "local" (this box; the coder is parked when a test needs its boards) or
 # "lab" (the [lab] box; the coder is never parked). `tt-orchard bringup --mode` overrides it per run.
 MODES = ("local", "lab")
-CODER_KEYS = {"target", "kind", "profile", "port", "chips", "image_id", "keep_up"}
+CODER_KEYS = {"target", "kind", "profile", "port", "chips", "image_id", "keep_up", "boot_stall_minutes", "boot_deadline_minutes", "busy_retry_s"}
 LAB_KEYS = {"host", "root", "gozer", "path", "python", "test_python"}
 # An ssh destination: [user@]host. It must not start with "-", or ssh would read it as an option.
 _SSH_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._-]*)?")
@@ -55,6 +55,17 @@ def _flag(value, name: str) -> bool:
     return value
 
 
+def _wait(table: dict, key: str, *, zero_ok: bool = False):
+    """An optional `[coder]` wait: absent gives None (the supervisor's default). Else a finite number, above 0 (or 0 or more when `zero_ok`)."""
+    if key not in table:
+        return None
+    v = table[key]
+    if (isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v in (float("inf"), float("-inf"))
+            or v < 0 or (v == 0 and not zero_ok) or v > 10_000_000):
+        raise BringupConfigError(f"coder.{key} must be a number {'of 0 or more' if zero_ok else 'above 0'}, got {v!r}")
+    return float(v)
+
+
 @dataclass
 class Coder:
     target: str
@@ -64,6 +75,9 @@ class Coder:
     profile: str = "default"
     image_id: str | None = None
     keep_up: bool = False           # lab mode: leave the coder serving for the next run (orchard/kept_coder.py)
+    boot_stall_minutes: float | None = None     # abandon a boot whose container log is silent this long with /health down (issue 578; default 10, 0 = off)
+    boot_deadline_minutes: float | None = None  # abandon a boot that is not healthy after this long in all (issue 578; default 45)
+    busy_retry_s: float | None = None           # wait before the one retry of a start refused as 'in use' with no container (issue 560; default 60, 0 = off)
 
 
 @dataclass
@@ -173,6 +187,9 @@ def load(path) -> BringupConfig:
         profile=_text(coder_raw.get("profile", "default"), "coder.profile"),
         image_id=_text(coder_raw["image_id"], "coder.image_id") if "image_id" in coder_raw else None,
         keep_up=_flag(coder_raw.get("keep_up", False), "coder.keep_up"),
+        boot_stall_minutes=_wait(coder_raw, "boot_stall_minutes", zero_ok=True),
+        boot_deadline_minutes=_wait(coder_raw, "boot_deadline_minutes"),
+        busy_retry_s=_wait(coder_raw, "busy_retry_s", zero_ok=True),
     )
 
     required_chips = raw.get("required_chips")
@@ -317,6 +334,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
             "--tiers", str(cfg.tiers), "--coder-target", c.target, "--coder-kind", c.kind,
             "--coder-profile", c.profile, "--coder-port", str(c.port), "--coder-chips", str(c.chips)]
     for flag, value in (("--coder-image-id", c.image_id), ("--required-chips", cfg.required_chips),
+                        ("--coder-stall-minutes", c.boot_stall_minutes), ("--coder-deadline-minutes", c.boot_deadline_minutes),
+                        ("--coder-busy-retry-s", c.busy_retry_s),
                         ("--cache-root", cfg.cache_root), ("--hf-home", cfg.hf_home),
                         ("--operator-home", cfg.operator_home), ("--package-format", cfg.package_format),
                         ("--package-namespace", cfg.package_namespace),

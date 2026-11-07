@@ -49,6 +49,11 @@ MESH_RESET_EXTRA_S = 60.0       # choice: added to the quiet wait when `tt-model
 POLL_S = 2.0                    # choice: re-read interval while waiting for chips to go quiet
 READY_POLL_S = 5.0              # choice: health poll interval while a server boots
 COLD_BOOT_BUDGET_S = 2700.0     # choice: 1.5 times COLD_BOOT_S; past this the stage blocks (spec section 6)
+BOOT_STALL_S = 600.0            # choice (issue 578): a coder boot whose container log has not grown for this long, with /health still
+                                # down, is abandoned. A normal load logs a line every few seconds; run 24's hung load went silent at layer 20 of 48.
+ABORT_STOP_GRACE_S = 900.0      # choice (issue 578): how long `tt-model stop` may run when a boot is abandoned. A coder stop takes minutes;
+                                # the 120 s STOP_TIMEOUT_S cut the stop of run 24 short. Past this the container is killed, and the ledger says so.
+BUSY_RETRY_WAIT_S = 60.0        # choice (issue 560): the wait before the one retry of a start refused as 'in use' with no container to explain it
 STANDIN_READY_S = 600.0         # choice; not measured: CPU stand-in load time is open (spec section 12)
 CANARY_TIMEOUT_S = 300.0        # choice; not measured: one short greedy answer
 CANARY_MAX_TOKENS = 64          # choice: with thinking switched off the answer is a few tokens; 64 leaves room

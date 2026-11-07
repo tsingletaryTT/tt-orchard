@@ -898,6 +898,7 @@ starts nothing.
 python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
     --coder-target CODER_TARGET [--coder-kind {container,bundle}] [--coder-profile CODER_PROFILE]
     --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID] [--coder-keep-up]
+    [--coder-stall-minutes MIN] [--coder-deadline-minutes MIN] [--coder-busy-retry-s SECONDS]
     [--skills-dir SKILLS_DIR] [--input NAME=PATH] [--env NAME=VALUE]
     [--required-chips N,N] [--four-chip-package ORG/NAME] [--cache-root DIR] [--hf-home DIR] [--operator-home DIR]
     [--package-format {v6,v5.1}] [--package-namespace NS] [--package-models-root DIR]
@@ -916,6 +917,9 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--coder-chips` | yes | How many chips the coder uses. gozer leases whole boards of two chips |
 | `--coder-image-id` | no | The container image id `tt-model list` prints. It helps the supervisor recognise the coder's container in `docker ps` when it confirms a stop |
 | `--coder-keep-up` | no | Lab mode only: leave the coder serving at the end of the run and use a coder an earlier run left up (`[coder] keep_up`, section 5.9) |
+| `--coder-stall-minutes` | no | Abandon the coder boot when its container log has not grown for this many minutes and `/health` still does not answer. Default 10. 0 turns the check off. Config: `[coder] boot_stall_minutes` |
+| `--coder-deadline-minutes` | no | Abandon the coder boot when `/health` has not answered after this many minutes in all. Default 45. Config: `[coder] boot_deadline_minutes` |
+| `--coder-busy-retry-s` | no | When `tt-model serve` refuses with "chips already in use by another container" and no container of the coder's name exists and no holder of the device is a container, wait this many seconds and start once more. Default 60. 0 turns the retry off. Config: `[coder] busy_retry_s` |
 | `--skills-dir` | no, repeatable | More skill directories, searched after `orchard/skills`. Stages on the full-port path use skills from the `tt-model-bringup` plugin (for example `functional-decoder`, `full-model`, `mesh-shrink`), so pass that plugin's `skills` directory. A stage whose skill cannot be found blocks |
 | `--input` | no, repeatable | `NAME=PATH` facts every agent prompt lists, for example `model=<MODEL_SNAPSHOT_DIR>`. Anything you pass here, every agent sees |
 | `--env` | no, repeatable | `NAME=VALUE` variables for agent shells, for example `HF_HOME` and `HF_HUB_OFFLINE=1`. Names that look like credentials are refused |
