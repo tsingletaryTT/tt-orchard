@@ -59,3 +59,6 @@ port = 8000
 chips = 4
 # image_id = ""
 # keep_up = false          # lab mode: leave the coder serving for the next run (README 5.9)
+# boot_stall_minutes = 10     # abandon a boot whose container log is silent this long while /health is down (0 turns it off)
+# boot_deadline_minutes = 45  # abandon a boot that is not healthy after this long in all
+# busy_retry_s = 60           # wait before the one retry of a start refused as "chips already in use" with no container to explain it (0 = no retry)

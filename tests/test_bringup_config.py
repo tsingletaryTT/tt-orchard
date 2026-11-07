@@ -436,3 +436,21 @@ def test_port_repair_rounds_are_added_only_when_the_caller_names_them(tmp_path):
     argv = bc.supervisor_argv(cfg, "Cloudflare/clef", port_repair_rounds=2)
     assert argv[argv.index("--port-repair-rounds") + 1] == "2" and supervisor.parse(argv).port_repair_rounds == 2
     assert "--port-repair-rounds" in bc.supervisor_argv(cfg, "Cloudflare/clef", port_repair_rounds=0)       # zero is a value, not an absence
+
+
+def test_the_coder_boot_waits_come_from_the_config_to_the_run_flags(tmp_path):
+    """Issues 578 and 560: `[coder]` boot_stall_minutes, boot_deadline_minutes and busy_retry_s reach `supervisor run`; absent they are not passed."""
+    text = MINIMAL.replace("chips = 4\n", "chips = 4\nboot_stall_minutes = 12\nboot_deadline_minutes = 50\nbusy_retry_s = 0\n", 1)
+    cfg = load(tmp_path, text)
+    assert (cfg.coder.boot_stall_minutes, cfg.coder.boot_deadline_minutes, cfg.coder.busy_retry_s) == (12.0, 50.0, 0.0)
+    args = supervisor.parse(bc.supervisor_argv(cfg, "Altworld/Hemmingway-1"))
+    assert (args.coder_stall_minutes, args.coder_deadline_minutes, args.coder_busy_retry_s) == (12.0, 50.0, 0.0)
+    plain = supervisor.parse(bc.supervisor_argv(load(tmp_path), "Altworld/Hemmingway-1"))
+    assert (plain.coder_stall_minutes, plain.coder_deadline_minutes, plain.coder_busy_retry_s) == (10.0, 45.0, 60.0)
+
+
+@pytest.mark.parametrize("key,value", [("boot_stall_minutes", "-1"), ("boot_stall_minutes", '"10"'), ("boot_deadline_minutes", "0"),
+                                       ("boot_deadline_minutes", "true"), ("busy_retry_s", "nan"), ("busy_retry_s", "inf"), ("busy_retry_s", "[]")])
+def test_a_boot_wait_that_is_not_a_sensible_number_is_refused(tmp_path, key, value):
+    with pytest.raises(bc.BringupConfigError, match=f"coder.{key}"):
+        load(tmp_path, MINIMAL.replace("chips = 4\n", f"chips = 4\n{key} = {value}\n", 1))

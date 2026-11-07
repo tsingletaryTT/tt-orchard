@@ -39,6 +39,12 @@ OFF_BUS_MARK = "off the PCIe bus or unreadable"
 # A coder-unusable block whose text says a container holds the chips (`tt-model serve` refused: "chip(s) 0, 1 already in use by another
 # container", issue 417) is not retried either: the container stays until someone removes it, and a retry 60 s later is refused the same way.
 CONTAINER_HOLDS_MARK = "in use by another container"
+# A block whose text says the chips read all-ones serial numbers (issue 578): the chips do not answer, gozer cannot reset or lease them, and only a
+# power cycle or reboot of the box brings them back. It is a hardware block and is never retried by itself.
+ALL_ONES_MARK = "all-ones"
+# The fixed start of the block text for a coder boot that was abandoned (issues 487 and 578). The classifier reads these before anything else,
+# because the text that follows holds container log lines, which can contain any word (`disk`, `chip`) the other rows look for.
+BOOT_ABORT_MARKS = ("the coder boot stalled", "the coder container exited", "the coder boot passed its deadline")
 
 
 def retryable(code: str, reason: str = "") -> bool:
@@ -46,16 +52,19 @@ def retryable(code: str, reason: str = "") -> bool:
     reads the lower-cased text, and a reason already in a ledger or in blocked.json may hold either), and a reason that is not text is read
     as its string form."""
     text = "" if reason is None else str(reason).lower()
-    return code in AUTO_RETRY and OFF_BUS_MARK.lower() not in text and CONTAINER_HOLDS_MARK.lower() not in text
+    return (code in AUTO_RETRY and OFF_BUS_MARK.lower() not in text and CONTAINER_HOLDS_MARK.lower() not in text
+            and ALL_ONES_MARK not in text)
 
 
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
 _BLOCKED_WORDS = (
+    ("hardware-unhealthy", (ALL_ONES_MARK,)),                # first: the chips do not answer, whatever else the text says
+    ("hardware-unhealthy", (OFF_BUS_MARK.lower(),)),         # a chip that left the bus outranks a container refusal or a boot abort found in the same text
+    ("coder-unusable", BOOT_ABORT_MARKS),                    # next: the text holds container log lines
     ("stack-stale", ("the stack is stale for a new run", "the stack freshness record", "the stack record of an earlier attempt")),   # first: its text names paths and parts that hold hardware words
     ("model-does-not-fit", ("does not fit this box", "does not fit stage")),                     # before the hardware words: its text says `chips`
     ("package-missing", ("no installed bundle or container package",)),     # before the hardware words: its text says `chip`
     ("disk-full", ("disk", "free space", " gb free")),
-    ("hardware-unhealthy", (OFF_BUS_MARK.lower(),)),         # a chip that left the bus outranks a container refusal found in the same text
     ("coder-unusable", (CONTAINER_HOLDS_MARK,)),     # before the hardware words: the text says `chip(s)`, and the chips are healthy
     ("hardware-unhealthy", ("lease", "chip", "board", "reset", "gozer", "hardware", "device")),
     ("coder-unusable", ("coder", "canary", "server", "model did not")),

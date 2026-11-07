@@ -271,6 +271,7 @@ def test_the_retry_gives_up_when_the_second_start_is_refused_too(rig):
 
 def test_a_refusal_with_no_stopped_container_of_that_name_says_to_list_containers(rig):
     earlier_launch(rig)
+    rig.args.coder_busy_retry_s = 0          # the retry after a refusal with no container (issue 560) has its own tests; this one reads the block text
     made = launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], rows=[]))
     assert rig.run() == 5
     reason = blocks(rig)[-1]
