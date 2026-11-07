@@ -1,0 +1,4 @@
+target = "0.9.129"
+summary = "The coder boot is abandoned when its container log goes silent, its container exits or the deadline passes; a start refused as in use records who holds the device and retries once."
+pr = 580
+kind = "fix"

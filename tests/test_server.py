@@ -14,7 +14,9 @@ SS_LISTEN = SS_HEADER + "LISTEN 0      4096   127.0.0.1:20000      0.0.0.0:*\n"
 CLEAR = {"docker ps": [(0, "", "")], "docker ps-q": [(0, "", "")], "ss -ltn": [(0, SS_HEADER, "")],
          "curl -sS": [(7, "", "curl: (7) Failed to connect to 127.0.0.1 port 20000")],
          "ps -p": [(1, "", "")], "pgrep -g": [(1, "", "")],
-         "tt-model stop": [(0, "stopped 1 container(s)", "")], "tt-model serve": [(0, "", "")]}
+         "tt-model stop": [(0, "stopped 1 container(s)", "")], "tt-model serve": [(0, "", "")],
+         # a container that runs and logs (the boot watch of issues 487 and 578 reads both while it waits)
+         "docker inspect": [(0, "running 0", "")], "docker logs": [(0, "2026-11-07T10:00:00Z loading layer 3", "")]}
 # A real `docker ps` line from the H5 check (2026-10-02), with the container name tt-model gives it.
 H5_LINE = "3c1d2e4f5a6b f0ed6056d85f tt-model-audio8-asr-infinite-p150-default 0.0.0.0:20000->20000/tcp\n"
 CONTAINER = ServerSpec("episod/audio8-asr-infinite-p150", "container", 20000, "audio8",

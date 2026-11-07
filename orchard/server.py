@@ -36,7 +36,7 @@ from orchard.adapters import Lease
 from orchard.canary import ask as canary_ask
 from orchard.canary import post_json
 from orchard.commands import run_command
-from orchard.defaults import (CMD_TIMEOUT_S, READY_POLL_S, STANDIN_READY_S, START_TIMEOUT_S,
+from orchard.defaults import (BOOT_STALL_S, CMD_TIMEOUT_S, READY_POLL_S, STANDIN_READY_S, START_TIMEOUT_S,
                               STOP_TIMEOUT_S)
 
 KINDS = ("container", "bundle", "process")
@@ -86,9 +86,26 @@ class ServerChipsHeld(ServerNotOwned):
 
 
 class NotReady(ServerError):
-    def __init__(self, waited_s: float, detail: str = ""):
+    """The absolute deadline of the boot passed. `log_tail` is the end of the container log (a container server only, else empty)."""
+    def __init__(self, waited_s: float, detail: str = "", log_tail: str = ""):
         super().__init__(f"not ready after {waited_s} s {detail}".strip())
         self.waited_s = waited_s
+        self.log_tail = log_tail
+
+
+class BootStalled(ServerError):
+    """The container log has not grown for `stalled_s` seconds and /health still does not answer (issue 578)."""
+    def __init__(self, waited_s: float, stalled_s: float, log_tail: str = ""):
+        super().__init__(f"the container log did not grow for {round(stalled_s)} s and /health did not answer "
+                         f"(waited {round(waited_s)} s)")
+        self.waited_s, self.stalled_s, self.log_tail = waited_s, stalled_s, log_tail
+
+
+class CoderExited(ServerError):
+    """The container is no longer running while the boot waits for it (issue 487). `exit_code` is docker's, None when it could not be read."""
+    def __init__(self, waited_s: float, status: str, exit_code: int | None, log_tail: str = ""):
+        super().__init__(f"the container is {status} (exit code {exit_code}) {round(waited_s)} s into the boot")
+        self.waited_s, self.status, self.exit_code, self.log_tail = waited_s, status, exit_code, log_tail
 
 
 def container_name_for(target: str, profile: str) -> str:
@@ -170,8 +187,11 @@ class ServerControl:
                  tt_model: str = "tt-model", docker: str = "docker",
                  timeout: float = CMD_TIMEOUT_S, stop_timeout: float = STOP_TIMEOUT_S,
                  start_timeout: float = START_TIMEOUT_S, ready_poll_s: float = READY_POLL_S,
-                 log_path: str | None = None, proc_root: str = "/proc", identity=None):
+                 log_path: str | None = None, proc_root: str = "/proc", identity=None,
+                 stall_s: float | None = BOOT_STALL_S):
         self.spec = spec
+        # How long a container's log may stay silent while /health is down before wait_ready gives up; None or 0 turns the check off.
+        self.stall_s = stall_s
         self.proc_root = proc_root
         # identity(pid) -> (boot id, start time) or None; tests replace it.
         self.identity = identity or (lambda pid: proc_identity(pid, self.proc_root))
@@ -498,8 +518,42 @@ class ServerControl:
 
     # ---- readiness and the canary -------------------------------------------------------------
 
+    # ---- what a container boot shows while it waits (issues 487 and 578) ---------------------------------------------------------
+
+    def container_state(self) -> tuple[str, int | None] | None:
+        """(docker state, exit code) of this server's container from `docker inspect`; None when docker did not answer or the container
+        is not found. Read only."""
+        res = self.run([self.docker, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", self.spec.container_name], self.timeout)
+        parts = res.stdout.split() if res.returncode == 0 else []
+        if not parts:
+            return None
+        try:
+            code = int(parts[1]) if len(parts) > 1 else None
+        except ValueError:
+            code = None
+        return parts[0], code
+
+    def log_marker(self) -> str | None:
+        """The last container log line with its timestamp: it changes whenever the log grows. None when docker could not read the log, which
+        is no evidence either way."""
+        res = self.run([self.docker, "logs", "--tail", "1", "--timestamps", self.spec.container_name], self.timeout)
+        return f"{res.stdout}\n{res.stderr}".strip() if res.returncode == 0 else None
+
+    def log_tail(self, lines: int = 40, limit: int = 400_000) -> str:
+        """The last lines of the container log (both streams), bounded to the last `limit` characters. Empty when docker could not read it.
+        The bound is a memory guard, large enough to keep whole lines: the caller redacts the whole text first and cuts it to the size it
+        wants afterwards, because a cut made first can remove the prefix a credential is recognised by (review of PR 580)."""
+        res = self.run([self.docker, "logs", "--tail", str(lines), self.spec.container_name], self.timeout)
+        if res.returncode != 0:
+            return ""
+        return f"{res.stdout}\n{res.stderr}".strip()[-limit:]
+
     def wait_ready(self, budget_s: float) -> float:
+        """Wait for /health to answer 200. A container server also gives up early in two cases: its container is no longer running
+        (CoderExited), or its log has not grown for `stall_s` seconds (BootStalled). `budget_s` is the absolute deadline (NotReady)."""
         t0 = self.clock()
+        watch = self.spec.kind == "container"
+        marker, last_change = None, t0
         while True:
             if self.proc is not None and self.proc.poll() is not None:
                 raise ServerError(f"the server exited with code {self.proc.returncode} "
@@ -509,9 +563,40 @@ class ServerControl:
             if r.returncode == 0 and r.stdout.strip() == "200":
                 return round(self.clock() - t0, 3)
             waited = self.clock() - t0
+            if watch:
+                state = self.container_state()
+                if state is not None and state[0] in ("exited", "dead"):
+                    raise CoderExited(waited, state[0], state[1], self.log_tail())
+                if self.stall_s:
+                    now_marker = self.log_marker()
+                    if now_marker is None or now_marker != marker:
+                        marker, last_change = now_marker, self.clock()
+                    elif self.clock() - last_change >= self.stall_s:
+                        raise BootStalled(waited, self.clock() - last_change, self.log_tail())
             if waited >= budget_s:
-                raise NotReady(round(waited, 3), r.stderr.strip()[:300])
+                raise NotReady(round(waited, 3), r.stderr.strip()[:300], self.log_tail() if watch else "")
             self.sleep(self.ready_poll_s)
+
+    def abort_stop(self, grace_s: float) -> dict:
+        """Stop an abandoned boot with `tt-model stop` (SIGTERM, then docker's own grace), waiting up to `grace_s` seconds for it: a coder stop
+        takes minutes. Only when that wait expires and the container still runs is it killed with `docker kill`, and the record says so. A
+        container that is not running is left alone. Other kinds of server stop as stop() does."""
+        s = self.spec
+        if s.kind != "container":
+            return self.stop()
+        if self.owned is False:
+            return {"how": "not stopped: another process owns the container", "skipped": True}
+        state = self.container_state()
+        if state is not None and state[0] in ("exited", "dead", "created"):
+            return {"how": f"not stopped: the container is already {state[0]}", "container_state": state[0], "exit_code": state[1]}
+        res = self.run([self.tt_model, "stop", s.target, "--profile", s.profile], grace_s)
+        out = {"how": f"tt-model stop (SIGTERM first), waited up to {round(grace_s)} s", **res.record(),
+               "mesh_reset": bool(MESH_RESET_TEXT.search(res.stdout + res.stderr)), "killed": False}
+        if res.timed_out and not self.confirm_stopped().stopped:
+            kill = self.run([self.docker, "kill", s.container_name], self.timeout)
+            out.update(killed=True, kill_reason=f"tt-model stop did not finish within {round(grace_s)} s and the container still ran",
+                       kill=kill.record())
+        return out
 
     def ask(self, prompt: str) -> str:
         return canary_ask(self.spec.endpoint, self.spec.model, prompt, http=self.http)

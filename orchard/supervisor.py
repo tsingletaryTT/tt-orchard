@@ -132,14 +132,14 @@ from orchard import audio_reference_env, audio_runtime, bus, floor_report, neare
 from orchard import full_port_result, runaway, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
-from orchard.blocked import block_code, last_pause
+from orchard.blocked import ALL_ONES_MARK, BOOT_ABORT_MARKS, block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
 from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
-                              COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
+                              ABORT_STOP_GRACE_S, BOOT_STALL_S, BUSY_RETRY_WAIT_S, COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S, WIDE_FABRIC_RETRIES)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
@@ -157,7 +157,9 @@ from orchard import graft_trial as graft
 from orchard.classes import CLASS_UNKNOWN
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft, swap_prepare
-from orchard.server import ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
+from orchard import device_holders
+from orchard.server import (BootStalled, CoderExited, NotReady, ServerChipsHeld, ServerControl, ServerError, ServerNotOwned, ServerSpec,
+                            StopCheck)
 from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGER_DECISION, MASK_INPUTS_DECISION, mask_input_entries, REFERENCE_IDS_LEDGER_DECISION, agreement_reference_record,
                             reference_ids_record, AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, TEXT_SPECS, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, delta_path_reasons, run_facts, evidence_record,
@@ -883,8 +885,15 @@ class Supervisor:
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
                     port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
-                    helper_drives: bool | None = None):
+                    helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
+                    abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
         self.run_dir = Path(run_dir).resolve()
+        # Issues 560 and 578: the wait before the one retry of a start refused as 'in use' when no container explains it (0 turns the retry
+        # off), how long an abandoned boot's `tt-model stop` may run, and what reads the device holders (tests replace it).
+        self.busy_retry_wait_s = float(busy_retry_wait_s)
+        self.abort_stop_grace_s = float(abort_stop_grace_s)
+        self.holders_scan = holders_scan or device_holders.scan
+        self.chips_all_ones = False          # set when a device-state read found every chip's serial reading all ones
         # The helper inside the repair rounds (orchard/repair_help.py): on when the helper is, unless `--no-repair-help` or the caller says no.
         self.repair_help = self.REPAIR_HELP_DEFAULT if repair_help is None else bool(repair_help)
         # The helper-driven stage 2 (orchard/repair_help.py `HELPER_ROUNDS`): after the first draft is placed, the repair rounds ask the helper for each
@@ -1093,12 +1102,15 @@ class Supervisor:
         coder_back = self._release_all()
         return test_lease_back and coder_back
 
-    @staticmethod
-    def _release_summary(ok: bool) -> str:
+    def _release_summary(self, ok: bool) -> str:
         if ok:
             return "The coder was stopped and every lease this run held was released."
+        if self.chips_all_ones:
+            # The release failed because the chips do not answer (issue 578): say that, not only that the release failed.
+            return ("Releasing the hardware failed because the chips do not answer. " + self._all_ones_note() +
+                    " The last notice in the ledger has the device state.")
         return ("Releasing the hardware failed, so the chips may still be held. Read the last "
-                "notice in the ledger and `gozer status` before doing anything else.")
+                "notice in the ledger (it has the device state) and `gozer status` before doing anything else.")
 
     def _release_test_lease(self) -> bool:
         """Release a stage's own test lease if one is held. The test command is already dead:
@@ -1502,7 +1514,9 @@ class Supervisor:
                 kept_coder.forget(self.paths.cache_root, lease.lease_id)
             return True
         except (AdapterError, ServerError, OSError) as exc:
-            self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
+            # With the device state: a failed release after a hung load can mean the chips no longer answer (issue 578).
+            self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc),
+                               device_state=self._device_state(lease.chips))
             return False
 
     def _release_foreign_lease(self, lease: Lease, adopted: bool) -> bool:
@@ -1513,7 +1527,8 @@ class Supervisor:
         try:
             self.adapter.release(lease, keep_running=True)
         except (AdapterError, OSError) as exc:
-            self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
+            self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc),
+                               device_state=self._device_state(lease.chips))
             return False
         self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id,
                            reset=False)
@@ -1769,10 +1784,12 @@ class Supervisor:
             except ServerChipsHeld as held:
                 # `tt-model serve` counts a stopped container as holding its chips. When this run launched a coder before (a retry), a
                 # stopped container under the coder's name is that launch's leftover: remove it and start once more. Anything else is
-                # not ours to remove, and the block says what holds the chips and how to clear it (issue 417).
+                # not ours to remove, and the block says what holds the chips and how to clear it (issue 417). When no container exists
+                # at all, the claim may be a short host process: the holders are recorded and the start is tried once more (issue 560).
                 if not self._remove_own_leftover(lease):
-                    self._block_chips_held(held, lease)
-                self.coder.start(lease)
+                    self._start_after_busy_refusal(held, lease)
+                else:
+                    self.coder.start(lease)
             self._note_created_container(lease, before)
         except ServerChipsHeld as exc:
             self._block_chips_held(exc, lease, retried=True)
@@ -1804,6 +1821,10 @@ class Supervisor:
             # With no baseline this is the first start of the run. A server that answers with
             # noise still passes the canary, because the canary only needs some answer.
             sanity = self.coder.ask(FIRST_BOOT_PROMPT) if baseline is None else None
+        except (BootStalled, CoderExited, NotReady) as exc:
+            # The container stopped running, stopped logging, or passed the deadline (issues 487 and 578): stop it with a long grace, reset
+            # the chips through the lease and block with the evidence. Does not return.
+            self._abort_boot(lease, exc)
         except (ServerError, CanaryError, OSError) as exc:
             self._block_if_off_bus(None, f"the coder did not start and answer; nothing is retried: {exc}", lease.chips)
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
@@ -1829,6 +1850,76 @@ class Supervisor:
                            server=self.coder.record(), canary=baseline or after, canary_after=after,
                            ready_s=seconds)
         self.coder_lease = lease
+
+    DEVICE_STATE_READ_S = 60.0       # choice: the bus read of a device-state report may take this long before the report goes on without it
+    FABRIC_ERROR = re.compile(r"Fabric Router Sync|Ethernet handshake|active ethernet core|REMOTE_HANDSHAKE", re.IGNORECASE)
+
+    def _abort_boot(self, lease: Lease, exc: ServerError) -> None:
+        """End a coder boot that cannot finish (issues 487 and 578), then block. `exc` is CoderExited (the container is not running),
+        BootStalled (its log stopped growing while /health stayed down) or NotReady (the absolute deadline passed).
+
+        Every step is written to the ledger before the next one: the evidence (the end of the container log), the stop (SIGTERM through
+        `tt-model stop` with a long grace; `docker kill` only if that grace expired, and the record says so), the reset through the lease as a
+        normal park does it, and the device state. A reset is skipped while the container is not confirmed stopped, because it would run
+        under a live process. When the chips read all-ones serial numbers the block text says so and points at the box reset."""
+        waited = round(float(getattr(exc, "waited_s", 0) or 0))
+        if isinstance(exc, CoderExited):
+            kind, head = "exited", (f"the coder container exited with code {exc.exit_code} (docker state {exc.status}) {waited} s into the boot, "
+                                    "so the wait was ended at once")
+        elif isinstance(exc, BootStalled):
+            kind, head = "stalled", (f"the coder boot stalled: the container log did not grow for {round(exc.stalled_s / 60, 1)} minutes while "
+                                     f"/health stayed down ({waited} s into the boot)")
+        else:
+            kind, head = "deadline", f"the coder boot passed its deadline: /health did not answer within {waited} s"
+        tail = self._scrubbed(getattr(exc, "log_tail", "") or "")
+        fabric = bool(self.FABRIC_ERROR.search(tail))
+        self.ledger.append("decision", None, decision="coder boot abandoned", why=kind, lease_id=lease.lease_id, waited_s=waited,
+                           exit_code=getattr(exc, "exit_code", None), log_tail=tail, fabric_error=fabric)
+        stopper = getattr(self.coder, "abort_stop", None)
+        try:
+            result = stopper(self.abort_stop_grace_s) if stopper else self.coder.stop()
+        except (ServerError, OSError) as err:
+            result = {"how": "the stop failed", "error": str(err)[:500]}
+        self.ledger.append("decision", None, decision="coder boot abandoned: container stopped", result=result)
+        stopped = self.coder.confirm_stopped()
+        reset_error = None
+        if stopped.stopped:
+            try:
+                self.adapter.reset(lease)
+                self.ledger.append("decision", None, decision="coder boot abandoned: chips reset", lease_id=lease.lease_id)
+            except (AdapterError, OSError) as err:
+                reset_error = str(err)[:500]
+                self.ledger.append("notice", None, what="the reset after an abandoned coder boot failed", lease_id=lease.lease_id, error=reset_error)
+        else:
+            self.ledger.append("notice", None, what="the chips were not reset: the coder container is not confirmed stopped",
+                               checks=stopped.checks, evidence=stopped.evidence)
+        state = self._device_state(lease.chips)
+        self.ledger.append("decision", None, decision="coder boot abandoned: device state", lease_id=lease.lease_id, device_state=state)
+        if reset_error and ALL_ONES_MARK in reset_error.lower():
+            self.chips_all_ones = True
+        bits = [head[0].upper() + head[1:] + "."]
+        if tail:
+            bits.append("Last log lines: " + " | ".join(ln.strip() for ln in tail.splitlines() if ln.strip())[-700:] + ".")
+        else:
+            bits.append("The container log could not be read.")
+        if fabric:
+            bits.append("The log names a fabric or Ethernet handshake failure; reset all four chips (a gozer lease cycle) before the next try.")
+        if result.get("killed"):
+            bits.append(f"`tt-model stop` did not finish within {round(self.abort_stop_grace_s)} s, so the container was killed with `docker kill`.")
+        if not stopped.stopped:
+            bits.append("The container is not confirmed stopped, so the chips were not reset and the lease is still held.")
+        elif reset_error:
+            bits.append(f"The reset through the lease failed: {reset_error}.")
+        else:
+            bits.append("The container was stopped and the chips were reset through the lease.")
+        if self.chips_all_ones:
+            bits.append(self._all_ones_note())
+        reason = " ".join(bits)
+        if state.get("bus"):
+            # A chip that left the PCIe bus is a hardware block, whatever came first (as `_block_if_off_bus` does for any failed boot).
+            self._block(None, f"{state['bus']}. It was found after this failure: {reason}", off_bus=True, log_tail=tail, device_state=state,
+                        stop=result, why=kind)
+        self._block(None, reason, log_tail=tail, device_state=state, stop=result, why=kind)
 
     def _relaunch_coder(self, old: Lease, canary: dict | None) -> None:
         """After a restart the coder's lease belongs to a dead pid, so nobody can reset it. Stop
@@ -1962,7 +2053,90 @@ class Supervisor:
                    result=result, before_start=True, lease_id=lease.lease_id)
         return bool(result.get("removed"))
 
-    def _block_chips_held(self, exc: Exception, lease: Lease, retried: bool = False) -> None:
+    def _gozer_state(self) -> dict:
+        """What `gozer status` says, for the evidence of a failed start or stop: each chip's state and holder, or the error text. Reads only."""
+        try:
+            chips = self.adapter.status()
+        except (AdapterError, OSError) as exc:
+            text = str(exc)[:500]
+            self.chips_all_ones = self.chips_all_ones or ALL_ONES_MARK in text.lower()
+            return {"error": text, "all_ones": ALL_ONES_MARK in text.lower()}
+        return {"chips": [{"bdf": c.bdf, "state": c.state, "who": c.who, "pids_holding": list(c.pids_holding)} for c in chips]}
+
+    def _device_state(self, held=()) -> dict:
+        """The state of the device for a failed release or an abandoned boot: gozer's chip states (or its refusal, which says when every chip
+        reads an all-ones serial, so the chips are not answering) and the PCIe bus finding for the chips this run holds. Reads sysfs and
+        gozer only; it takes no lease and opens no chip. Never raises."""
+        out = {"gozer": self._gozer_state()}
+        # The bus read goes through sysfs, and a read of a hung chip can block with no timeout of its own. It runs in a daemon thread that is
+        # given DEVICE_STATE_READ_S, so a diagnostic cannot become the next hang (run 24 waited four hours with no ledger entry).
+        box: dict = {}
+
+        def read():
+            try:
+                box["bus"] = self._off_bus(held)
+            except Exception as exc:                     # a diagnostic must not hide the failure it describes
+                box["bus_error"] = f"could not be read: {type(exc).__name__}"
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        reader.join(self.DEVICE_STATE_READ_S)
+        # `bus` is the finding of orchard/bus.py (a chip off the PCIe bus, with the cause) or None when the chips are fine.
+        out["bus"] = box.get("bus")
+        if "bus" not in box:
+            out["bus_error"] = box.get("bus_error") or f"the PCIe bus read did not finish within {round(self.DEVICE_STATE_READ_S)} s"
+        return out
+
+    def _all_ones_note(self) -> str:
+        """The sentence for a block or a stop message when the chips did not answer: what it means and the way out."""
+        return (f"The chips read {ALL_ONES_MARK} serial numbers (every chip returns the value 0xFFFF... and none answers the host). "
+                "`gozer status`, a lease and a reset all refuse in that state, so nothing the supervisor or gozer can do brings them back. "
+                "Reset the box: power cycle it (or reboot it), then check that `gozer status` lists every chip before you resume.")
+
+    def _scrubbed(self, text: str, limit: int = 4000) -> str:
+        """`text` without credentials, the host name and the home directory, cut to its last `limit` characters (log lines go into the
+        ledger and into block texts)."""
+        import socket
+        from orchard.telegraph import redact
+        return redact(text or "", hostname=socket.gethostname(), home=str(Path.home()))[-limit:]
+
+    def _start_after_busy_refusal(self, held: Exception, lease: Lease) -> None:
+        """`tt-model serve` refused the start as 'in use by another container' and this run has no leftover of its own to remove (issue 560).
+
+        The holders of the device nodes and gozer's view are written to the ledger first. When no container of the coder's name exists and no
+        holder is a container process, the claim was a host process (a short ttnn run of another session), which may be gone now: wait
+        `busy_retry_wait_s` and start once more. A second refusal blocks with the evidence of both looks. A container holder, a container of
+        the coder's name, or a wait of 0 blocks at once."""
+        try:
+            found = self.coder.find_container() if hasattr(self.coder, "find_container") else None
+        except (ServerError, OSError):
+            found = None
+        evidence = self._busy_evidence(held, lease, found)
+        retry = (found == [] and not evidence["container_holder"] and self.busy_retry_wait_s > 0)
+        if not retry:
+            self._block_chips_held(held, lease, evidence=evidence)
+        self.ledger.append("decision", None, decision="retrying the coder start once: no container holds the chips",
+                           lease_id=lease.lease_id, wait_s=self.busy_retry_wait_s)
+        self.sleep(self.busy_retry_wait_s)
+        try:
+            self.coder.start(lease)
+        except ServerChipsHeld as again:
+            self._block_chips_held(again, lease, retried=False, evidence=self._busy_evidence(again, lease, found, second=True), after_retry=True)
+
+    def _busy_evidence(self, refusal: Exception, lease: Lease, found, *, second: bool = False) -> dict:
+        """Look at who holds the device nodes now, and write it to the ledger."""
+        try:
+            scanned = self.holders_scan()
+        except Exception as exc:                          # a failed look must not replace the refusal it explains
+            scanned = {"holders": [], "unreadable": 0, "fuser": None, "error": f"{type(exc).__name__}: {exc}"[:200]}
+        gozer = self._gozer_state()
+        evidence = {"refusal": self._scrubbed(str(refusal), 600), "holders": scanned, "gozer": gozer,
+                    "containers_named_like_the_coder": found, "container_holder": device_holders.any_container(scanned),
+                    "look": "second" if second else "first"}
+        self.ledger.append("decision", None, decision="coder start refused: who holds the device", lease_id=lease.lease_id, **evidence)
+        return evidence
+
+    def _block_chips_held(self, exc: Exception, lease: Lease, retried: bool = False, *, evidence: dict | None = None,
+                          after_retry: bool = False) -> None:
         """Block after `tt-model serve` refused because a container holds the chips. The reason names the container that is left over and
         the command that removes it, and says the chips are not at fault, so the block is classed as a coder problem and not a hardware one
         (orchard/blocked.py). A chip that has in fact left the bus is still reported first, as for any failed boot."""
@@ -1985,8 +2159,16 @@ class Supervisor:
             fix = ("No container with the coder's name was found; list containers with `docker ps -a`, remove or stop the container that holds "
                    "the chips, then resume.")
         again = " The leftover of this run's earlier launch was removed once and the start was refused again." if retried else ""
-        reason = (f"the coder did not start and answer; nothing is retried: {exc}. The chips are not at fault: another container holds "
-                  f"them. {fix}{again}")
+        seen = ""
+        if evidence is not None:
+            seen = (f" {'On the second look' if after_retry else 'When it looked'}, {device_holders.describe(evidence['holders'])}."
+                    + (" It started again once after a wait and was refused again." if after_retry else "")
+                    + " The ledger entry `coder start refused: who holds the device` has the device holders and gozer's view. A host "
+                      "process of another session (a short ttnn run, a viewer) can hold the device; `gozer status` and `gozer reconcile` "
+                      "show the leases, and that session has to finish first.")
+        holder = ("another container holds them" if evidence is None or evidence["container_holder"] or evidence["containers_named_like_the_coder"]
+                  else "no container holds them; tt-model also counts a host process with the device open")
+        reason = (f"the coder did not start and answer; nothing is retried: {exc}. The chips are not at fault: {holder}. {fix}{again}{seen}")
         self._block_if_off_bus(None, reason, lease.chips)
         self._block(None, reason)
 
@@ -5630,6 +5812,14 @@ def parse(argv=None):
     r.add_argument("--coder-keep-up", action="store_true",
                    help="lab mode: leave the coder serving at the end of the run, and adopt a coder an "
                         "earlier run left up (orchard/kept_coder.py)")
+    r.add_argument("--coder-stall-minutes", type=float, default=BOOT_STALL_S / 60, metavar="MIN",
+                   help="abandon the coder boot when its container log has not grown for this many minutes and /health is still down "
+                        "(default 10; 0 turns the check off)")
+    r.add_argument("--coder-deadline-minutes", type=float, default=COLD_BOOT_BUDGET_S / 60, metavar="MIN",
+                   help="abandon the coder boot when /health has not answered after this many minutes in all (default 45)")
+    r.add_argument("--coder-busy-retry-s", type=float, default=BUSY_RETRY_WAIT_S, metavar="SECONDS",
+                   help="wait this long and start the coder once more when `tt-model serve` refused with 'chips already in use' and no "
+                        "container explains it (default 60; 0 turns the retry off)")
     r.add_argument("--skills-dir", action="append", default=[],
                    help="more skill directories, searched after orchard/skills")
     r.add_argument("--input", action="append", default=[], metavar="NAME=PATH")
@@ -5798,6 +5988,26 @@ def recorded_helper_drives(requested: bool | None, run_start: dict) -> bool | No
     return recorded if isinstance(recorded, bool) else requested
 
 
+def _seconds(value, default: float, flag: str) -> float:
+    """A wait in seconds from a flag: the default when the flag is absent, else a finite number of 0 or more (0 turns the wait off)."""
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf")) or value < 0:
+        raise ValueError(f"{flag} must be a number of 0 or more, got {value!r}")
+    return float(value)
+
+
+def _minutes(value, default_s: float, flag: str, *, allow_zero: bool = False) -> float | None:
+    """Seconds from a flag given in minutes. Absent: `default_s`. 0 is allowed only for the stall check (it turns it off: None)."""
+    secs = _seconds(None if value is None else value * 60 if isinstance(value, (int, float)) and not isinstance(value, bool) else value,
+                    default_s, flag)
+    if secs == 0:
+        if allow_zero:
+            return None
+        raise ValueError(f"{flag} must be more than 0")
+    return secs
+
+
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
           probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
           disk_usage=shutil.disk_usage, home=None, containers=None, environ=None, lab=None, stack_pins=None) -> Supervisor:
@@ -5823,7 +6033,11 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
         from orchard.adapters.gozer import GozerAdapter
         adapter = GozerAdapter(gozer=args.gozer)
     if coder is None:
-        coder = ServerControl(spec, log_path=str(run_dir / "coder.log"))
+        coder = ServerControl(spec, log_path=str(run_dir / "coder.log"),
+                              stall_s=_minutes(getattr(args, "coder_stall_minutes", None), BOOT_STALL_S, "--coder-stall-minutes", allow_zero=True))
+    # The absolute deadline of the coder boot (issue 578): the cold-boot budget unless the flag names another.
+    budgets = dataclasses.replace(budgets, cold_boot_s=_minutes(getattr(args, "coder_deadline_minutes", None), budgets.cold_boot_s,
+                                                                "--coder-deadline-minutes"))
     cpu = next(t for t in cfg.tiers.values() if t["placement"] == "cpu")
     entries = ledger.read()
     progress = run_progress(entries)
@@ -5962,6 +6176,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
                       keep_up=bool(getattr(args, "coder_keep_up", False)),
+                      busy_retry_wait_s=_seconds(getattr(args, "coder_busy_retry_s", None), BUSY_RETRY_WAIT_S, "--coder-busy-retry-s"),
                       coder_identity={"target": args.coder_target, "kind": args.coder_kind,
                                       "port": args.coder_port, "profile": args.coder_profile,
                                       "image_id": args.coder_image_id, "model": cfg.tiers[tier]["model"],
