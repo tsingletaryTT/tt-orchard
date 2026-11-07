@@ -95,6 +95,8 @@ RUNTIME_FILES = (("skills/audio-chip-templates/chip_generate.py", "orchard/skill
                  ("resident.py", "orchard/resident.py"),
                  ("skills/audio-reference-templates/make_reference.py", "orchard/skills/audio-reference-templates/make_reference.py"),
                  ("audio_reference.py", "orchard/audio_reference.py"),
+                 # audio_reference.py and make_reference.py import the text encoder pin (issue 162)
+                 ("audio_encoder_pin.py", "orchard/audio_encoder_pin.py"),
                  ("pinned_files.py", "orchard/pinned_files.py"))
 RUNTIME_LICENSE = "LICENSE-runtime"
 LIBRARY_LICENSE_NAME = "MIT"

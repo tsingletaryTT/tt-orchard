@@ -41,6 +41,7 @@ from orchard import audio_package as ap  # noqa: E402
 MODEL_REVISION = "8bdfb53c6b0fbc62113cd571fd37373efe15fa14"
 LIBRARY_COMMIT = "77e0398c26f7d22d801ec1bb036307e8b231f741"
 RUNTIME_SRC = (("orchard/resident.py", "orchard/resident.py"), ("orchard/audio_reference.py", "orchard/audio_reference.py"),
+               ("orchard/audio_encoder_pin.py", "orchard/audio_encoder_pin.py"),
                ("orchard/pinned_files.py", "orchard/pinned_files.py"),
                ("orchard/skills/audio-reference-templates/make_reference.py", "orchard/skills/audio-reference-templates/make_reference.py"),
                ("orchard/skills/audio-chip-templates/audio_runtimes.py", "orchard/skills/audio-chip-templates/audio_runtimes.py"),
