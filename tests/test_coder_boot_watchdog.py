@@ -172,3 +172,16 @@ def test_abort_stop_does_nothing_to_a_container_another_process_owns():
     ctl, run, clock = control(lambda t: "x")
     ctl.owned = False
     assert ctl.abort_stop(900)["skipped"] is True and run.calls == []
+
+
+# ---- review of PR 580: the log is redacted whole, then cut ----------------------------------------------------------------------
+
+def test_the_log_tail_keeps_a_token_whole_so_the_redaction_can_find_it():
+    """A 37-character `hf_` token, a newline and 3965 more characters: cutting to the last 4000 before redacting removed the `hf_` prefix and
+    left the payload where no pattern matched it. The tail is returned whole, and the supervisor redacts first and cuts after."""
+    from orchard.telegraph import redact
+    token = "hf_" + "A" * 34
+    ctl, run, clock = control(lambda t: token + "\n" + "x" * 3965)
+    text = ctl.log_tail()
+    assert token in text
+    assert "A" * 34 not in redact(text, hostname="somehost", home="/home/someone")

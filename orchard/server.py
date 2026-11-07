@@ -539,9 +539,10 @@ class ServerControl:
         res = self.run([self.docker, "logs", "--tail", "1", "--timestamps", self.spec.container_name], self.timeout)
         return f"{res.stdout}\n{res.stderr}".strip() if res.returncode == 0 else None
 
-    def log_tail(self, lines: int = 40, limit: int = 4000) -> str:
+    def log_tail(self, lines: int = 40, limit: int = 400_000) -> str:
         """The last lines of the container log (both streams), bounded to the last `limit` characters. Empty when docker could not read it.
-        The caller redacts it before it goes into the ledger or a block text."""
+        The bound is a memory guard, large enough to keep whole lines: the caller redacts the whole text first and cuts it to the size it
+        wants afterwards, because a cut made first can remove the prefix a credential is recognised by (review of PR 580)."""
         res = self.run([self.docker, "logs", "--tail", str(lines), self.spec.container_name], self.timeout)
         if res.returncode != 0:
             return ""
