@@ -141,7 +141,7 @@ from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
-                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
+                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S, WIDE_FABRIC_RETRIES)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (PLAN, failed_tests, load_plan, move_aside, plan_refusal, pending, read_plan, suspect_caches,
@@ -678,6 +678,22 @@ def reset_order(leases) -> tuple[list, str]:
         return leases, "list_order"
     order = sorted(range(len(leases)), key=lambda i: keyed[i], reverse=True)
     return [leases[i] for i in order], key
+
+
+FABRIC_TIMEOUT_SIGNATURE = re.compile(r"Fabric Router Sync.*Timeout")      # the fabric handshake timeout line (issues 26, 487)
+FABRIC_SCAN_MAX = 64 * 1024 * 1024       # the largest test output scanned for the signature; a larger one is not scanned and not retried
+FABRIC_SCAN_LINE_MAX = 1024 * 1024
+
+
+def fabric_timeout_in(path) -> bool:
+    """True when the test output at `path` has a line with `Fabric Router Sync` and `Timeout` (the mesh open failed on the Ethernet
+    handshake: `Fabric Router Sync: Timeout after 10000 ms on Device 2`). An output that cannot be read within the bounds is False, so
+    the test is not run again on a guess."""
+    try:
+        return any(FABRIC_TIMEOUT_SIGNATURE.search(line) for line in
+                   safeio.iter_lines(path, max_bytes=FABRIC_SCAN_MAX, max_line_bytes=FABRIC_SCAN_LINE_MAX))
+    except safeio.SafeReadError:
+        return False
 
 
 # ---- the supervisor -----------------------------------------------------------------------------
@@ -4827,7 +4843,7 @@ class Supervisor:
         if d.action == "use_free" or self.coder_lease is None:
             lease = self._take_test_lease(spec, shape, boards, None)
             try:
-                self._run_test(spec, stage_dir, test, lease, boards=boards, **record)
+                self._run_wide_test(spec, stage_dir, test, [lease], boards=boards, **record)
             finally:
                 self._cleanup_after_test(after_test)
             self._give_back_test_lease(n, lease)
@@ -4843,13 +4859,42 @@ class Supervisor:
             self._release_test_lease()
             raise
         try:
-            self._run_test(spec, stage_dir, test, lease, extra=extra, boards=boards, **record)
+            self._run_wide_test(spec, stage_dir, test, [lease] + ([extra] if extra is not None else []), boards=boards, **record)
         finally:
             self._cleanup_after_test(after_test)
         if extra is not None:
             self._give_back_test_lease(n, extra)
         self._restore_coder(n, h)
         self.coder_lease = h.lease
+
+    def _run_wide_test(self, spec, stage_dir: Path, test: dict, leases: list[Lease], *, boards: int, **kw) -> dict:
+        """`_run_test` for the wide phase, run again after the fabric handshake timeout (issue 487; stage 4's configurations have their own
+        retry in `_run_listed_test_body`). When the output of a test that exited non-zero (not timed out) has a `Fabric Router Sync ...
+        Timeout` line, every chip of every lease goes through the lease tool's reset in the issue 26 order (`reset_order`: the lease whose
+        chips have the lowest PCI address last) and the test runs once more, at most `WIDE_FABRIC_RETRIES` times. Each retry is a ledger
+        decision with the signature, the order (lease ids, first to last), the key and the attempt. The first output of each failed try is
+        kept beside the final one. A failure with another cause, a timeout, or a fabric failure on the last try is the test's result and is
+        not retried."""
+        n = spec.number
+        out_path = stage_dir / kw.get("output", "evidence/hw-test-output.txt")
+        shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
+        extra = {"extra": leases[1]} if len(leases) > 1 else {}
+        result = self._run_test(spec, stage_dir, test, leases[0], boards=boards, **extra, **kw)
+        for attempt in range(1, WIDE_FABRIC_RETRIES + 1):
+            if result["returncode"] in (0, None) or result["timed_out"] or not fabric_timeout_in(out_path):
+                break
+            kept = out_path.with_name(f"{out_path.stem}-try{attempt}{out_path.suffix}")
+            with safeio.pinned_root(self.run_dir) as pin:
+                safeio.replace_beneath(pin.fd, self._run_parts(out_path), self._run_parts(kept))
+            order, key = reset_order(leases)
+            self.ledger.append("decision", n, decision="wide test hit the fabric handshake timeout; resetting every board and trying again",
+                               signature="Fabric Router Sync: Timeout", attempt=attempt, of=WIDE_FABRIC_RETRIES,
+                               reset_order=[lease.lease_id for lease in order], key=key, returncode=result["returncode"],
+                               seconds=result["seconds"], first_output=self._moved_aside_record(kept))
+            for lease in order:
+                self._reset_test_chips(n, shape, lease)
+            result = self._run_test(spec, stage_dir, test, leases[0], boards=boards, **extra, **kw)
+        return result
 
     def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict, after_test=None) -> None:
         """The hardware phase with a lab box: lease the chips there, run the test there, give the

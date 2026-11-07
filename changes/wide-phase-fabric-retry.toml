@@ -1,0 +1,2 @@
+target = "0.9.125"
+summary = "The wide hardware phase runs its test again (at most twice) after the fabric handshake timeout, with every board reset in the issue 26 order first (issue 487)."

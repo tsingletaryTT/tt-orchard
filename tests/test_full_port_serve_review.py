@@ -218,7 +218,7 @@ def stub_supervisor(chips, calls):
     s.ledger = SimpleNamespace(append=lambda *a, **k: {"seq": 1})
     s._release_test_lease = lambda: True
     s._take_test_lease = lambda spec, shape, boards, exact: (calls.taken.append((shape.boards, boards, exact)) or "lease")
-    s._run_test = lambda spec, stage_dir, test, lease, **kw: calls.ran.append((lease, kw))
+    s._run_test = lambda spec, stage_dir, test, lease, **kw: calls.ran.append((lease, kw)) or {"returncode": 0, "timed_out": False, "seconds": 1.0}
     s._cleanup_after_test = lambda after_test: None
     s._give_back_test_lease = lambda n, lease: calls.given_back.append(lease)
     return s
