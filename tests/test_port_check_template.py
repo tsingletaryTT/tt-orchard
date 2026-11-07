@@ -69,6 +69,26 @@ def test_a_port_that_raises_fails_the_run_and_leaves_no_record(tmp_path):
     assert not (stage / "evidence" / "port-check.json").exists()
 
 
+def test_a_failure_in_the_port_names_the_port_file_the_line_and_its_text(tmp_path):
+    # Run 20: a prefill error came back with the exception text only. The coder could not tell which line of its port raised it, so each
+    # repair step rewrote the whole file. The reply now starts with the innermost frame that lies in the port directory.
+    port = HONEST.replace("return _peak(100)", "return helper_that_fails(ids)\n").replace(
+        "def close(model):", "import json\ndef helper_that_fails(ids):\n    logits_torch = json.loads('{' + str(ids[0]))\n    return logits_torch\ndef close(model):")
+    run, stage, _ = make_run(tmp_path, port)
+    done = run_template(tmp_path, run, stage)
+    lines = port.splitlines()
+    line_no = 1 + next(i for i, l in enumerate(lines) if "logits_torch = json.loads(" in l)
+    assert done.returncode == 2
+    assert f"[port_model.py:{line_no}: logits_torch = json.loads('{{' + str(ids[0]))]" in done.stdout and "JSONDecodeError" in done.stdout   # the innermost frame is in the json module; the port's is named
+
+
+def test_a_failure_with_no_frame_in_the_port_gets_no_location(tmp_path):
+    # An error raised by the template's own code (an unknown op or a missing function) has no port frame; nothing is invented.
+    run, stage, _ = make_run(tmp_path, HONEST.replace("def prefill(model, ids):", "prefill = None\ndef _unused(model, ids):"))
+    done = run_template(tmp_path, run, stage)
+    assert done.returncode == 2 and "[port_model.py:" not in done.stdout
+
+
 # ---- the forgeries ----------------------------------------------------------------------------------------
 
 def test_a_port_that_prints_its_own_check_line_fails_the_run(tmp_path):
