@@ -1,0 +1,2 @@
+target = "0.9.126"
+summary = "The Stable Audio 3 T5Gemma text encoder is pinned to float32 with eager attention in the CPU reference and the chip run's host encoder (issue 162); the manifest records it, comparisons refuse a different setting and the reference cache uses a new entry name."

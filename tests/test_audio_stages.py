@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from orchard import audio_encoder_pin as enc_pin
+from orchard import audio_profile
 from orchard import audio_reference as ar
 from orchard import audio_stages as st
 
@@ -30,7 +32,9 @@ def music(seconds=10.0, seed=0, amp=0.3):
 
 def make_run(path, name="small-music", *, dtype="float32", device="cpu", wave=None, latent=None, layer=None, revision=REV, commit=COMMIT,
              settings_override=None, seed=1, config_sha256="0" * 64):
-    s = {**st.settings_for(name), "dtype": dtype, "device": device, **(settings_override or {})}
+    # A Stable Audio run made by this code records the pinned text encoder (issue 162); an ACE-Step profile run has no such encoder.
+    encoder = {} if name in audio_profile.PROFILES else dict(enc_pin.PINNED)
+    s = {**st.settings_for(name), "dtype": dtype, "device": device, **encoder, **(settings_override or {})}
     rec = ar.Recorder(path, model={"name": name, "revision": revision, "config_sha256": config_sha256, "diffusion_objective": "rf_denoiser",
                                    "checkpoint_bytes": 1},
                       library={"commit": commit, "name": "stable-audio-3", "source_verified": True}, settings=s, seeds={"torch": 42})
@@ -203,8 +207,8 @@ def test_the_chip_plan_follows_the_same_rule():
 def test_a_cached_reference_is_used_only_when_everything_it_depends_on_matches(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
-    make_run(cache / "small-music")
-    assert st.cached_run(cache, "small-music", EXP, COMMIT) == cache / "small-music"
+    make_run(cache / enc_pin.cache_entry_name("small-music"))
+    assert st.cached_run(cache, "small-music", EXP, COMMIT) == cache / enc_pin.cache_entry_name("small-music")
     assert st.cached_run(cache, "small-music", {**EXP, "revision": "other-rev"}, COMMIT) is None
     assert st.cached_run(cache, "small-music", REV, "d" * 40) is None
     assert st.cached_run(cache, "small-music", None, COMMIT) is None
@@ -216,14 +220,14 @@ def test_a_cached_reference_is_used_only_when_everything_it_depends_on_matches(t
 def test_a_cached_run_made_with_other_settings_is_not_used(tmp_path, kw):
     cache = tmp_path / "cache"
     cache.mkdir()
-    make_run(cache / "small-music", **kw)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), **kw)
     assert st.cached_run(cache, "small-music", EXP, COMMIT) is None
 
 
 def test_a_cached_run_with_a_changed_array_is_not_used(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
-    run = make_run(cache / "small-music")
+    run = make_run(cache / enc_pin.cache_entry_name("small-music"))
     f = run / "arrays" / "latent__final.npy"
     f.write_bytes(f.read_bytes()[:-4] + b"\x00\x00\x00\x00")
     assert st.cached_run(cache, "small-music", EXP, COMMIT) is None
@@ -233,7 +237,7 @@ def test_a_cache_entry_that_is_a_link_is_not_used(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
     real = make_run(tmp_path / "real")
-    (cache / "small-music").symlink_to(real)
+    (cache / enc_pin.cache_entry_name("small-music")).symlink_to(real)
     assert st.cached_run(cache, "small-music", EXP, COMMIT) is None
 
 
@@ -311,8 +315,8 @@ def test_a_timed_out_cpu_run_is_reported_as_a_timeout(tmp_path):
 def test_a_cached_reference_is_copied_and_not_made_again(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
-    make_run(cache / "small-music", seed=1)
-    make_run(cache / "small-music-base", "small-music-base", seed=2)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), seed=1)
+    make_run(cache / enc_pin.cache_entry_name("small-music-base"), "small-music-base", seed=2)
     _, _, rec, runner = stage1(tmp_path, cache=cache)
     assert rec["runs"]["reference"]["from_cache"] is True and rec["runs"]["control_reference"]["from_cache"] is True
     assert rec["runs"]["host_same_env"]["from_cache"] is False
@@ -322,7 +326,7 @@ def test_a_cached_reference_is_copied_and_not_made_again(tmp_path):
 def test_the_same_environment_run_is_never_taken_from_the_cache(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
-    make_run(cache / "small-music", seed=1)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), seed=1)
     _, _, rec, runner = stage1(tmp_path, cache=cache)
     assert rec["runs"]["host_same_env"]["from_cache"] is False and any(c[0][0] == "/chip/python" for c in runner.calls)
 
@@ -548,7 +552,7 @@ def test_the_summary_lists_the_failing_arrays(tmp_path):
 def test_a_cache_entry_for_another_model_is_not_used(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
-    make_run(cache / "small-music", "small-music-base", settings_override=st.settings_for("small-music"))
+    make_run(cache / enc_pin.cache_entry_name("small-music"), "small-music-base", settings_override=st.settings_for("small-music"))
     assert st.cached_run(cache, "small-music", EXP, COMMIT) is None
 
 
@@ -725,7 +729,7 @@ def test_stage_1_refuses_a_run_made_with_another_library_commit(tmp_path):
 def test_the_cache_is_not_used_for_a_snapshot_with_another_config(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
-    make_run(cache / "small-music")
+    make_run(cache / enc_pin.cache_entry_name("small-music"))
     assert st.cached_run(cache, "small-music", {**EXP, "config_sha256": "3" * 64}, COMMIT) is None
     assert st.cached_run(cache, "small-music", {"revision": REV}, COMMIT) is None
 

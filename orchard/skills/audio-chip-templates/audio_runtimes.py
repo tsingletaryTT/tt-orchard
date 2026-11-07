@@ -111,7 +111,8 @@ class LibraryRuntime:
     def _run_settings(self, s: dict) -> dict:
         sampler = s.get("sampler") or ("pingpong" if self.model.model.diffusion_objective == "rf_denoiser" else "euler")
         return {"prompt": s["prompt"], "duration": s["duration"], "steps": s["steps"], "cfg_scale": s["cfg_scale"], "sampler": sampler,
-                "seed": s["seed"], "dtype": self.dtype, "sample_size": s["sample_size"], "device": self.device_label}
+                "seed": s["seed"], "dtype": self.dtype, "sample_size": s["sample_size"], "device": self.device_label,
+                **self.mk.encoder_settings(self.model)}
 
     def _before_generate(self, record_layers: bool, recorder) -> None:
         """A subclass points its own recording at this generation's recorder."""

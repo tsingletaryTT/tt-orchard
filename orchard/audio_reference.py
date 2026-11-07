@@ -33,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
+from orchard import audio_encoder_pin as enc_pin
 from orchard import pinned_files as pf
 
 SCHEMA = 1
@@ -46,7 +47,9 @@ MAX_ARTIFACTS = 5000
 # Settings that make two runs comparable. A comparison between runs that differ in any of these says nothing about a runtime.
 MATCH_KEYS = ("prompt", "duration", "steps", "cfg_scale", "sampler", "seed", "dtype", "sample_size")
 CONTROL_KEYS = ("prompt", "duration", "seed")      # a base control may use its own steps, sampler and scale
-SETTINGS_KEYS = MATCH_KEYS + ("device",)
+# The text encoder setting a run really had (orchard/audio_encoder_pin.py, issue 162). Optional: a run made before the pin has neither field. They are
+# not in MATCH_KEYS, which a manifest must hold in full, so an older record still loads; `settings_problems` compares them whenever it compares a generation.
+SETTINGS_KEYS = MATCH_KEYS + ("device",) + enc_pin.ENCODER_KEYS
 
 
 class ReferenceError(Exception):
@@ -416,7 +419,12 @@ def verdict(m: dict, bars: Bars) -> tuple[bool, list[str]]:
 
 
 def settings_problems(a: Run, b: Run, keys=MATCH_KEYS) -> list[str]:
-    return [f"settings.{k} differs: {a.settings.get(k)!r} and {b.settings.get(k)!r}" for k in keys if a.settings.get(k) != b.settings.get(k)]
+    """One problem per setting in `keys` that differs. Unless `keys` is the control's short list, a difference in the text encoder setting is a problem
+    too (issue 162): two runs whose encoders ran differently are not a like-for-like comparison."""
+    out = [f"settings.{k} differs: {a.settings.get(k)!r} and {b.settings.get(k)!r}" for k in keys if a.settings.get(k) != b.settings.get(k)]
+    if tuple(keys) != CONTROL_KEYS:
+        out += enc_pin.settings_problems(a.settings, b.settings)
+    return out
 
 
 def compare_runs(ref: Run, cand: Run, bars: dict | None = None, *, cross_precision: bool = False) -> dict:
@@ -429,6 +437,9 @@ def compare_runs(ref: Run, cand: Run, bars: dict | None = None, *, cross_precisi
     problems = settings_problems(ref, cand, keys)
     if problems:
         return {"ok": False, "comparable": False, "cross_precision": cross_precision, "problems": problems, "results": []}
+    # Says which text encoder both runs had: "pinned", "unrecorded" (both predate the pin; their encoder was bfloat16 with whatever attention the
+    # installed transformers chose) or "other". Runs that differ were refused above.
+    encoder_pin = enc_pin.state(ref.settings)
     results, missing = [], []
     for key in sorted(set(ref.entries) | set(cand.entries)):
         kind, name = key
@@ -441,7 +452,7 @@ def compare_runs(ref: Run, cand: Run, bars: dict | None = None, *, cross_precisi
     if not results:
         missing.append("the runs share no array")
     return {"ok": not missing and all(r["ok"] for r in results), "comparable": True, "cross_precision": cross_precision, "problems": missing,
-            "results": results}
+            "results": results, "encoder_pin": encoder_pin}
 
 
 def log_spectrum_distance(ref: np.ndarray, cand: np.ndarray, n_fft: int = 1024, hop: int = 512) -> float | None:

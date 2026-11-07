@@ -16,6 +16,7 @@ import shutil
 import threading
 import time
 
+from orchard import audio_encoder_pin as enc_pin
 from orchard import audio_plan, cache_lock, supervisor
 from orchard import audio_stages as st
 from test_audio_stages import COMMIT, REV, make_run
@@ -38,18 +39,18 @@ def identity(config_sha256=NEW_CONFIG):
 
 def test_the_fresh_reference_replaces_a_stale_entry_and_the_next_run_uses_it(tmp_path):
     cache, fresh = tmp_path / "cache", tmp_path / "run" / "fresh"
-    make_run(cache / "small-music", config_sha256="0" * 64)               # made for an earlier configuration
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256="0" * 64)               # made for an earlier configuration
     make_run(fresh, config_sha256=NEW_CONFIG)
     assert st.cached_run(cache, "small-music", identity(), COMMIT) is None            # the stale entry is refused, as before
     assert supervisor.save_reference(fresh, cache, "small-music") is True
-    assert st.cached_run(cache, "small-music", identity(), COMMIT) == cache / "small-music"      # the second run hits the cache
+    assert st.cached_run(cache, "small-music", identity(), COMMIT) == cache / enc_pin.cache_entry_name("small-music")      # the second run hits the cache
     assert st.cached_run(cache, "small-music", identity("0" * 64), COMMIT) is None
-    assert entries(cache) == ["small-music"]                  # no temporary directory is left behind
+    assert entries(cache) == [enc_pin.cache_entry_name("small-music")]                  # no temporary directory is left behind
 
 
 def test_a_stale_entry_for_another_library_commit_is_replaced_too(tmp_path):
     cache, fresh = tmp_path / "cache", tmp_path / "fresh"
-    make_run(cache / "small-music", config_sha256=NEW_CONFIG, commit="b" * 40)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256=NEW_CONFIG, commit="b" * 40)
     make_run(fresh, config_sha256=NEW_CONFIG)
     assert st.cached_run(cache, "small-music", identity(), COMMIT) is None
     assert supervisor.save_reference(fresh, cache, "small-music")
@@ -58,8 +59,8 @@ def test_a_stale_entry_for_another_library_commit_is_replaced_too(tmp_path):
 
 def test_an_entry_that_is_not_a_run_at_all_is_replaced(tmp_path):
     cache, fresh = tmp_path / "cache", tmp_path / "fresh"
-    (cache / "small-music").mkdir(parents=True)
-    (cache / "small-music" / "manifest.json").write_text("not json")
+    (cache / enc_pin.cache_entry_name("small-music")).mkdir(parents=True)
+    (cache / enc_pin.cache_entry_name("small-music") / "manifest.json").write_text("not json")
     make_run(fresh, config_sha256=NEW_CONFIG)
     assert supervisor.save_reference(fresh, cache, "small-music")
     assert st.cached_run(cache, "small-music", identity(), COMMIT) is not None
@@ -69,17 +70,17 @@ def test_a_link_in_the_cache_is_replaced_and_its_target_is_left_alone(tmp_path):
     cache, fresh, elsewhere = tmp_path / "cache", tmp_path / "fresh", tmp_path / "elsewhere"
     cache.mkdir()
     make_run(elsewhere, config_sha256="0" * 64)
-    (cache / "small-music").symlink_to(elsewhere, target_is_directory=True)
+    (cache / enc_pin.cache_entry_name("small-music")).symlink_to(elsewhere, target_is_directory=True)
     make_run(fresh, config_sha256=NEW_CONFIG)
     assert supervisor.save_reference(fresh, cache, "small-music")
-    assert not (cache / "small-music").is_symlink() and st.cached_run(cache, "small-music", identity(), COMMIT) is not None
+    assert not (cache / enc_pin.cache_entry_name("small-music")).is_symlink() and st.cached_run(cache, "small-music", identity(), COMMIT) is not None
     assert (elsewhere / "manifest.json").is_file()
-    assert entries(cache) == ["small-music"]            # the moved-aside link was removed
+    assert entries(cache) == [enc_pin.cache_entry_name("small-music")]            # the moved-aside link was removed
 
 
 def test_the_other_models_entry_is_not_touched(tmp_path):
     cache, fresh = tmp_path / "cache", tmp_path / "fresh"
-    make_run(cache / "small-music-base", "small-music-base", config_sha256=NEW_CONFIG)
+    make_run(cache / enc_pin.cache_entry_name("small-music-base"), "small-music-base", config_sha256=NEW_CONFIG)
     make_run(fresh, config_sha256=NEW_CONFIG)
     supervisor.save_reference(fresh, cache, "small-music")
     assert st.cached_run(cache, "small-music-base", identity(), COMMIT) is not None
@@ -88,33 +89,33 @@ def test_the_other_models_entry_is_not_touched(tmp_path):
 def test_a_failed_save_leaves_the_old_entry_in_place(tmp_path, monkeypatch):
     """The old entry is kept until the new one is in place: when the final rename fails the old entry is put back."""
     cache, fresh = tmp_path / "cache", tmp_path / "fresh"
-    make_run(cache / "small-music", config_sha256="0" * 64)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256="0" * 64)
     make_run(fresh, config_sha256=NEW_CONFIG)
     real = os.rename
 
     def failing(src, dst, *a, **k):
-        if Path(src).name.startswith(".small-music.tmp-"):
+        if Path(src).name.startswith(f".{enc_pin.cache_entry_name('small-music')}.tmp-"):
             raise OSError("disk went away")
         return real(src, dst, *a, **k)
     monkeypatch.setattr(os, "rename", failing)
     assert supervisor.save_reference(fresh, cache, "small-music") is False
-    assert st.cached_run(cache, "small-music", identity("0" * 64), COMMIT) == cache / "small-music"      # the old entry is back and valid
-    assert entries(cache) == ["small-music"]
+    assert st.cached_run(cache, "small-music", identity("0" * 64), COMMIT) == cache / enc_pin.cache_entry_name("small-music")      # the old entry is back and valid
+    assert entries(cache) == [enc_pin.cache_entry_name("small-music")]
 
 
 def test_a_failed_copy_leaves_the_old_entry_and_no_temporary_directory(tmp_path):
     cache = tmp_path / "cache"
-    make_run(cache / "small-music", config_sha256="0" * 64)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256="0" * 64)
     assert supervisor.save_reference(tmp_path / "no-such-run", cache, "small-music") is False
     assert st.cached_run(cache, "small-music", identity("0" * 64), COMMIT) is not None
-    assert entries(cache) == ["small-music"]
+    assert entries(cache) == [enc_pin.cache_entry_name("small-music")]
 
 
 def test_leftovers_of_an_earlier_crash_in_the_same_process_id_do_not_block_the_save(tmp_path):
     cache, fresh = tmp_path / "cache", tmp_path / "fresh"
-    (cache / f".small-music.tmp-{os.getpid()}").mkdir(parents=True)
-    (cache / f".small-music.tmp-{os.getpid()}" / "junk").write_text("x")
-    (cache / f".small-music.old-{os.getpid()}").mkdir()
+    (cache / f".{enc_pin.cache_entry_name('small-music')}.tmp-{os.getpid()}").mkdir(parents=True)
+    (cache / f".{enc_pin.cache_entry_name('small-music')}.tmp-{os.getpid()}" / "junk").write_text("x")
+    (cache / f".{enc_pin.cache_entry_name('small-music')}.old-{os.getpid()}").mkdir()
     make_run(fresh, config_sha256=NEW_CONFIG)
     assert supervisor.save_reference(fresh, cache, "small-music")
     assert st.cached_run(cache, "small-music", identity(), COMMIT) is not None
@@ -125,8 +126,8 @@ def test_stage_1_replaces_a_stale_cache_entry_in_a_real_run(arig):          # no
     that a later run accepts."""
     make_environment(arig)
     cache = Path(arig.args.run_dir).parent / "cache" / "audio-reference"
-    make_run(cache / "small-music", config_sha256="0" * 64)
-    make_run(cache / "small-music-base", "small-music-base", config_sha256="0" * 64)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256="0" * 64)
+    make_run(cache / enc_pin.cache_entry_name("small-music-base"), "small-music-base", config_sha256="0" * 64)
     assert arig.run() == EXIT_READY
     assert arig.calls["cpu"], "the stale entries were refused, so the CPU references were made"
     snap = [v.split("=", 1)[1] for v in arig.args.input if v.startswith("model=")][-1]
@@ -146,9 +147,9 @@ def run_in_thread(fn):
 
 def test_a_replacement_waits_for_a_run_that_is_copying_the_entry(tmp_path):
     cache, fresh = tmp_path / "cache", tmp_path / "fresh"
-    make_run(cache / "small-music", config_sha256="0" * 64)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256="0" * 64)
     make_run(fresh, config_sha256=NEW_CONFIG)
-    with cache_lock.entry_lock(cache, "small-music", exclusive=False):          # a reader holds the shared lock
+    with cache_lock.entry_lock(cache, enc_pin.cache_entry_name("small-music"), exclusive=False):          # a reader holds the shared lock
         t, box = run_in_thread(lambda: supervisor.save_reference(fresh, cache, "small-music"))
         time.sleep(0.4)
         assert t.is_alive() and "result" not in box, "the replacement went ahead while a run held the entry"
@@ -159,18 +160,18 @@ def test_a_replacement_waits_for_a_run_that_is_copying_the_entry(tmp_path):
 
 def test_a_run_that_validates_and_copies_waits_for_a_replacement_in_progress(tmp_path):
     cache, out = tmp_path / "cache", tmp_path / "out"
-    make_run(cache / "small-music", config_sha256=NEW_CONFIG)
-    with cache_lock.entry_lock(cache, "small-music", exclusive=True):           # a writer is between its two renames
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256=NEW_CONFIG)
+    with cache_lock.entry_lock(cache, enc_pin.cache_entry_name("small-music"), exclusive=True):           # a writer is between its two renames
         t, box = run_in_thread(lambda: st.copy_cached_run(cache, "small-music", identity(), COMMIT, out))
         time.sleep(0.4)
         assert t.is_alive() and "result" not in box
     t.join(10)
-    assert box["result"] == cache / "small-music" and (out / "manifest.json").is_file()
+    assert box["result"] == cache / enc_pin.cache_entry_name("small-music") and (out / "manifest.json").is_file()
 
 
 def test_copy_cached_run_gives_none_for_a_stale_entry_and_for_no_entry(tmp_path):
     cache = tmp_path / "cache"
-    make_run(cache / "small-music", config_sha256="0" * 64)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256="0" * 64)
     assert st.copy_cached_run(cache, "small-music", identity(), COMMIT, tmp_path / "o1") is None and not (tmp_path / "o1").exists()
     assert st.copy_cached_run(cache, "small-music-base", identity(), COMMIT, tmp_path / "o2") is None
     assert st.copy_cached_run(None, "small-music", identity(), COMMIT, tmp_path / "o3") is None
@@ -178,7 +179,7 @@ def test_copy_cached_run_gives_none_for_a_stale_entry_and_for_no_entry(tmp_path)
 
 def test_a_copy_that_fails_leaves_nothing_behind_and_the_run_is_made_fresh(tmp_path, monkeypatch):
     cache, out = tmp_path / "cache", tmp_path / "out"
-    make_run(cache / "small-music", config_sha256=NEW_CONFIG)
+    make_run(cache / enc_pin.cache_entry_name("small-music"), config_sha256=NEW_CONFIG)
     real = shutil.copytree
 
     def failing(src, dst, *a, **k):

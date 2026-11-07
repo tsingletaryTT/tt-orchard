@@ -46,7 +46,9 @@ TT_METAL_TAG = "v0.80.0"
 ROOT = Path(__file__).resolve().parent.parent
 SRC_FILES = (("scripts/acestep/acestep_run.py", "runtime/acestep_run.py"), ("scripts/acestep/acestep_serve.py", "runtime/acestep_serve.py"),
              ("scripts/acestep/acestep_fast.py", "runtime/acestep_fast.py"), ("scripts/acestep/acestep_chip.py", "runtime/acestep_chip.py"),
-             ("orchard/audio_reference.py", "runtime/orchard/audio_reference.py"), ("orchard/pinned_files.py", "runtime/orchard/pinned_files.py"),
+             ("orchard/audio_reference.py", "runtime/orchard/audio_reference.py"),
+             ("orchard/audio_encoder_pin.py", "runtime/orchard/audio_encoder_pin.py"),   # audio_reference.py imports it (issue 162)
+             ("orchard/pinned_files.py", "runtime/orchard/pinned_files.py"),
              ("pkgsrc/acestep/tools/check_bundle.py", "tools/check_bundle.py"), ("pkgsrc/acestep/tools/smoke.py", "tools/smoke.py"))
 RUNTIME_INIT = '"""A stand-in package so the copied runtime files import `orchard.audio_reference` from this directory."""\n'
 WEIGHT_FILES = ("acestep-v15-turbo/model.safetensors", "vae/diffusion_pytorch_model.safetensors", "Qwen3-Embedding-0.6B/model.safetensors")
