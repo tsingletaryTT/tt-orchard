@@ -692,6 +692,37 @@
      ]
     }
    ]
+  },
+  {
+   "symptom": "`FAILED: device-ops: after load() the port holds 590095 weight elements as host torch or numpy tensors and 491778 as ttnn tensors; at most 50% may stay on the host` (run 22). The 590095 is close to the whole checkpoint, and the port had uploaded most projections.",
+   "fix": "The check scans everything reachable from the object load returns, so a second host copy counts. Keep each tensor in one place: the device tensor for an uploaded weight, a host tensor for the rest. Do not keep the dict read_tensors returned, or a torch model, on the model object. Choose the weights to upload by shape (2-D, name ends in .weight, not an embedding table) and not by a list of layer names, which misses projections.",
+   "seen_in": "run 22 (load gate, attempt 1); cause inferred from the element counts",
+   "checks": [
+    {
+     "root": "tt_metal",
+     "name": "ttnn.from_torch",
+     "present_args": [
+      "device",
+      "mesh_mapper"
+     ]
+    }
+   ]
+  },
+  {
+   "symptom": "The port builds `Qwen4ExpForCausalLM(config)` in load (\"Create model on meta device\") and uploads `module.weight.data`; the checkpoint tensors it read are never used (run 20, last written port).",
+   "fix": "A model built from the config holds no checkpoint values: its weights are meta or randomly initialised, so the numbers on the device are wrong even when every shape fits. Upload the tensors that read_tensors(model_dir) returns, by name, with ttnn.from_torch(tensor, ...). Do not construct the Hugging Face model in load; the excerpts show the class so you can write the forward pass over those tensors.",
+   "seen_in": "run 20 (last written port_model.py)",
+   "checks": [
+    {
+     "root": "tt_metal",
+     "name": "ttnn.from_torch",
+     "present_args": [
+      "tensor",
+      "dtype",
+      "layout"
+     ]
+    }
+   ]
   }
  ]
 }
