@@ -204,6 +204,23 @@ def test_a_worker_reply_with_bad_rows_does_not_crash_the_parent():
     assert "model.ok" in msg and "\x1b" not in msg
 
 
+def test_an_incomplete_scan_cannot_pass_the_gate():
+    """Review of PR 582: a walk cut short by a cap showed host=0, so a port with host copies below the cap passed. An incomplete total is a
+    failure whatever the share looks like."""
+    msg = failure({"host_elements": 0, "device_elements": 100, "host_tensors": 0, "device_tensors": 1, "visited": 5, "truncated": True,
+                   "top_host": []})
+    assert "walk truncated" in msg and "complete" in msg
+
+
+def test_a_container_wider_than_the_cap_sets_truncated_even_when_the_extra_children_are_skipped_primitives():
+    """Review of PR 582: one device tensor, SCAN_NODES None entries, then a host tensor: the host tensor is never reached, so the scan is
+    incomplete and must say so."""
+    wide = [device_t(10)] + [None] * PC.SCAN_NODES + [torch_t(900)]
+    r = scan(wide)
+    assert r["truncated"] is True and r["host_tensors"] == 0
+    assert failure(r)
+
+
 def test_a_passing_split_raises_nothing():
     PC.DeviceOps(1, 1).check_weights(scan({"w": torch_t(1)}) | {"host_elements": 1, "device_elements": 9})
 

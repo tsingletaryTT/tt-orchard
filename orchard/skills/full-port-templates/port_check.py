@@ -541,10 +541,12 @@ def scan_weights(*roots, labels=None) -> dict:
                 if len(device_by_leaf) < SCAN_DEVICE_NAMES:
                     device_by_leaf.setdefault(leaf_name(path), {"path": path, "shape": list(shape)})
             continue
+        kids, wide = children(x)
+        cut = cut or wide                              # the container has more entries than the walk reads: it is incomplete
         if depth >= SCAN_DEPTH:
-            cut = cut or bool(children(x))             # a deeper level exists: the walk stops here and says so
+            cut = cut or bool(kids)                    # a deeper level exists: the walk stops here and says so
             continue
-        for step, child in reversed(children(x)):
+        for step, child in reversed(kids):
             stack.append((child, path + step, depth + 1))
     rows = [e for _n, _t, _i, e in sorted(top, key=lambda t: (-t[0], -t[1]))]
     for e in rows:
@@ -553,18 +555,21 @@ def scan_weights(*roots, labels=None) -> dict:
             "truncated": bool(stack) or cut, "top_host": rows}
 
 
-def children(x) -> list:
-    """(path step, child) pairs of a container or object, without calling any property or user code. Capped at SCAN_NODES entries."""
+def children(x) -> tuple:
+    """((path step, child) pairs, wide) of a container or object, without calling any property or user code. At most SCAN_NODES pairs are
+    read; `wide` is True when the container held more, so the caller can mark the scan incomplete."""
     try:
         if isinstance(x, dict):
-            return [(step_name(k), v) for k, v in itertools.islice(x.items(), SCAN_NODES)]
-        if isinstance(x, (list, tuple)):
-            return [(f"[{i}]", v) for i, v in enumerate(itertools.islice(x, SCAN_NODES))]
-        if isinstance(x, (set, frozenset)):
-            return [("{...}", v) for v in itertools.islice(x, SCAN_NODES)]
-        return [("." + str(k)[:PATH_KEY_MAX], v) for k, v in itertools.islice(vars(x).items(), SCAN_NODES)]
+            got = [(step_name(k), v) for k, v in itertools.islice(x.items(), SCAN_NODES + 1)]
+        elif isinstance(x, (list, tuple)):
+            got = [(f"[{i}]", v) for i, v in enumerate(itertools.islice(x, SCAN_NODES + 1))]
+        elif isinstance(x, (set, frozenset)):
+            got = [("{...}", v) for v in itertools.islice(x, SCAN_NODES + 1)]
+        else:
+            got = [("." + str(k)[:PATH_KEY_MAX], v) for k, v in itertools.islice(vars(x).items(), SCAN_NODES + 1)]
     except TypeError:
-        return []
+        return [], False
+    return got[:SCAN_NODES], len(got) > SCAN_NODES
 
 
 def worker(read_fd: int, write_fd: int) -> int:
@@ -793,6 +798,12 @@ class DeviceOps:
         if type(host) is not int or type(dev) is not int or host < 0 or dev < 0:
             return
         self.weights = {k: scan.get(k) for k in ("host_elements", "device_elements", "host_tensors", "device_tensors", "visited", "truncated")}
+        if scan.get("truncated") is True and not (host + dev and host / (host + dev) > HOST_SHARE_MAX):
+            # A cap stopped the walk, so the totals are incomplete and a low host share proves nothing (review of PR 582).
+            raise PortFailed(f"{DEVICE_OPS_FAILURE}: after load() the scan of what the port holds was cut short (walk truncated) after "
+                             f"{scan.get('visited')} objects, so it cannot show where the weights live; a complete scan is required. Hold the "
+                             f"weights in a shallow structure (a dict or a list of layer objects, at most {SCAN_DEPTH} levels deep). "
+                             + self.what_to_do(), op="load")
         if host + dev and host / (host + dev) > HOST_SHARE_MAX:
             raise PortFailed(f"{DEVICE_OPS_FAILURE}: after load() the port holds {host} weight elements as host torch or numpy tensors and "
                              f"{dev} as ttnn tensors; at most {int(HOST_SHARE_MAX * 100)}% may stay on the host. " + self.host_listing(scan)
