@@ -71,7 +71,7 @@ def test_a_port_listed_under_stage_2_is_refused_for_stage_3(tmp_path):
     stage_dir, run = stage3(tmp_path)
     # The record names the stage 2 port module: the files this stage ran are not the files it lists.
     rec = full_port._json(stage_dir / "evidence" / "port-check.json", "r", [])
-    rec["port_sources"] = [{"path": "stages/2/port/port_model.py", "sha256": sha("import ttnn\n"), "role": "model"}]
+    rec["port_sources"] = [{"path": "stages/2/port/port_model.py", "sha256": sha("import ttnn\nttnn.linear(a, b)\n"), "role": "model"}]
     (stage_dir / "evidence" / "port-check.json").write_text(__import__("json").dumps(rec))
     g = gate_full_port_3(stage_dir, run, expected_chips=4)
     assert one(g, "needs a file under stages/3/port/")
