@@ -15,6 +15,9 @@ SKILLS = Path(__file__).resolve().parent.parent / "orchard" / "skills"
 CHIPS = ["0000:01:00.0", "0000:02:00.0"]
 REF_IDS = list(range(100, 132))                      # 32 reference ids
 TEXT = "The sea was calm that morning and the boat left early."
+GOOD_PORT = "import ttnn\nttnn.linear(a, b)\n"             # a port source with a reachable ttnn matmul-family call (issue 541: a mention of ttnn is not a call)
+DEVICE_OPS = {"floor": 1, "layers": None, "prefill_matmul_calls": 4, "decode_matmul_calls_max": 4, "decode_trace_replays": 0, "matmul_calls_total": 200,
+              "static_matmul_calls": 1, "weights": {"host_elements": 0, "device_elements": 5000}, "top_calls": {"ttnn.linear": 200}}
 
 
 def sha(data) -> str:
@@ -28,7 +31,7 @@ def put(run, rel, content):
     return p
 
 
-def build(tmp_path, *, result=None, record=None, marker=None, output=None, model_src="import ttnn\n", ref_ids=REF_IDS, stage=2):
+def build(tmp_path, *, result=None, record=None, marker=None, output=None, model_src=GOOD_PORT, ref_ids=REF_IDS, stage=2):
     """A stage 2 directory (or, with `stage=3`, a stage 3 directory: issue 326) a passing full-port run would leave. Each argument replaces a part (a dict is merged over the good one)
     so a test changes one fact and watches the gate name it."""
     run = tmp_path / "run"
@@ -41,7 +44,7 @@ def build(tmp_path, *, result=None, record=None, marker=None, output=None, model
         "schema": full_port.RECORD_SCHEMA,
         "reference": {"path": "stages/1/evidence/reference/generated-ids.json", "sha256": sha(ref.read_bytes())},
         "prompt": {"path": "stages/1/evidence/reference/prompt-ids.json", "sha256": sha(prm.read_bytes())},
-        "reference_ids": list(ref_ids), "chip_ids": list(ref_ids[:30]) + [0, 0],
+        "device_ops": dict(DEVICE_OPS), "reference_ids": list(ref_ids), "chip_ids": list(ref_ids[:30]) + [0, 0],
         "top1_agreement": 30 / 32, "chips": list(CHIPS), "load_s": 120.5,
         "free_run_ids": [ref_ids[0]] + list(range(1, 48)), "free_run_text": TEXT, "template_sha256": sha(template.read_bytes()),
         "config": {"path": f"stages/{stage}/" + full_port.CONFIG_NAME, "sha256": sha(config.read_bytes())},
@@ -107,7 +110,7 @@ def test_reference_ids_that_differ_from_the_stage_1_file_are_refused(tmp_path):
 
 
 def test_a_reference_file_that_is_not_the_stage_1_file_is_refused(tmp_path):
-    g = reasons(tmp_path, record={"reference": {"path": "stages/2/port/port_model.py", "sha256": sha("import ttnn\n")}})
+    g = reasons(tmp_path, record={"reference": {"path": "stages/2/port/port_model.py", "sha256": sha(GOOD_PORT)}})
     assert one(g, "reference.path")
 
 
@@ -140,7 +143,7 @@ def test_an_output_file_that_is_not_the_one_the_supervisor_recorded_is_refused(t
 
 def test_port_sources_that_changed_after_the_record_are_refused(tmp_path):
     stage_dir, run = build(tmp_path)
-    (stage_dir / "port" / "port_model.py").write_text("import ttnn\n# edited\n")
+    (stage_dir / "port" / "port_model.py").write_text(GOOD_PORT + "# edited\n")
     assert one(gate_full_port(stage_dir, run), "port_sources")
 
 
@@ -149,7 +152,7 @@ def test_a_port_with_no_ttnn_is_refused(tmp_path):
 
 
 def test_a_model_source_that_reads_the_reference_is_refused(tmp_path):
-    src = "import ttnn\nids = open('stages/1/evidence/reference/generated-ids.json')\n"
+    src = GOOD_PORT + "ids = open('stages/1/evidence/reference/generated-ids.json')\n"
     assert one(reasons(tmp_path, model_src=src), "reference")
 
 
@@ -324,13 +327,13 @@ def test_two_lines_that_begin_with_the_check_mark_are_refused(tmp_path):
 
 
 def test_a_port_source_with_the_old_check_role_is_refused(tmp_path):
-    src = [{"path": "stages/2/port/port_model.py", "sha256": sha("import ttnn\n"), "role": "check"}]
+    src = [{"path": "stages/2/port/port_model.py", "sha256": sha(GOOD_PORT), "role": "check"}]
     assert one(reasons(tmp_path, record={"port_sources": src}), "role of 'model'")
 
 
 def test_a_record_that_does_not_list_the_port_module_is_refused(tmp_path):
     stage_dir, run = build(tmp_path)
-    other = put(run, "stages/2/port/other.py", "import ttnn\n")
+    other = put(run, "stages/2/port/other.py", GOOD_PORT)
     rec = json.loads((stage_dir / "evidence" / "port-check.json").read_text())
     rec["port_sources"] = [{"path": "stages/2/port/other.py", "sha256": sha(other.read_bytes()), "role": "model"}]
     put(run, "stages/2/evidence/port-check.json", rec)

@@ -31,7 +31,7 @@ import os
 import re
 from pathlib import Path
 
-from orchard import full_port, residency, safeio
+from orchard import full_port, port_construction, residency, safeio
 from orchard.commands import run_command
 from orchard.defaults import FIRST_WRITE_TURNS
 
@@ -373,10 +373,22 @@ def _excerpts_field(summary) -> dict | None:
     return field
 
 
-def build(snapshot, *, reference_source=None, reference_lookup=None, excerpts=None) -> dict:
+def _construction_field(summary: dict) -> dict:
+    """The facts file's section for the effective construction, rebuilt from the summary so nothing in it is longer than the caps here: the
+    hash must be 64 hex digits, the counts whole numbers, and each flag line a string cut to its cap."""
+    sha, size, total = summary.get("sha256"), summary.get("bytes"), summary.get("resolved_vs_default_total")
+    flags = [f[:port_construction.SUMMARY_FLAG_CHARS] for f in summary.get("resolved_vs_default", []) if isinstance(f, str)][:port_construction.SUMMARY_FLAGS]
+    whole = lambda x: x if isinstance(x, int) and not isinstance(x, bool) else None
+    return {"file": port_construction.FILE_NAME, "sha256": sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha) else None,
+            "bytes": whole(size), "classes": whole(summary.get("classes")), "resolved_vs_default": flags,
+            "resolved_vs_default_total": whole(total) if whole(total) is not None else len(flags), "note": port_construction.NOTE}
+
+
+def build(snapshot, *, reference_source=None, reference_lookup=None, excerpts=None, construction=None) -> dict:
     """The facts of a checkpoint directory as a JSON-ready dict. `reference_source` is the text of the reference's configuration module;
     `reference_lookup(model_type)` finds it when it is not given. `excerpts` is the summary of the excerpts file (port_excerpts), which the
-    facts then point at. Raises PortFactsError when the config or a header cannot be read."""
+    facts then point at. `construction` is `port_construction.summary`'s dict (the effective-construction file's hash and the
+    "resolved vs class default" lines), which the facts carry as `effective_construction` (issue 541). Raises PortFactsError when the config or a header cannot be read."""
     snap = Path(snapshot)
     config = _config(snap)
     try:
@@ -414,6 +426,8 @@ def build(snapshot, *, reference_source=None, reference_lookup=None, excerpts=No
     pointer = _excerpts_field(excerpts)
     if pointer is not None:
         facts["reference_excerpts"] = pointer
+    if isinstance(construction, dict) and construction.get("file") == port_construction.FILE_NAME:
+        facts["effective_construction"] = _construction_field(construction)
     facts.update({"layer_schedule": schedule, "layer_schedule_note": schedule_note, "index_fields": index_fields,
                   "index_fields_left_out": index_more, "layer_flag_fields": sorted(flag_fields),
                   "conventions": notes, "conventions_left_out": len(unlisted), "weights": _weights(snap, headers),
@@ -529,7 +543,7 @@ def tools_text(stage: int = 2, *, facts: bool = True, cheat: bool = True) -> str
     return "\n".join(lines)
 
 
-def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False, cheat: bool = True) -> str:
+def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False, cheat: bool = True, construction: bool = False) -> str:
     """What the supervisor adds to the coder's prepare task for a full port. The generic prepare task names only hw_test.json and
     handoff.json; the port itself is described only in the skill, and the coder explored and wrote nothing."""
     parts = [f"This stage's check is the supervisor's: when you finish, it puts its own `stages/2/port_check.py` back and rewrites "
@@ -540,6 +554,11 @@ def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False, cheat: 
                      "your model uses (constructor signature, `forward` and small helpers), taken from the installed transformers "
                      "package. Write a first `port_model.py` from it within your first turns, before you open any other file or "
                      "page through the reference module yourself.")
+    if construction:
+        parts.append("The excerpts elide constructor bodies, so a default in a signature may not be the value the model uses. "
+                     f"`stages/2/{port_construction.FILE_NAME}` lists what each constructor resolved from the config (activation, eps, group_size, "
+                     "dilation, padding) and, under \"Resolved vs class default\", every setting that differs from its class default. "
+                     f"Read it before you write a class from its excerpt. `{FACTS_NAME}` carries the first lines of that list under `effective_construction`.")
     if facts:
         parts.append(f"Read `stages/2/{FACTS_NAME}` {'next' if excerpts else 'first'}. It holds the config fields, the layer schedule, every tensor's dtype and shape "
                      "from the checkpoint's own headers (the checkpoint may be one file with no index, or sharded), and the index "

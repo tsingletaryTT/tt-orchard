@@ -28,6 +28,14 @@ def open_device(device_id=0): return {"device": device_id}
 def close_device(d): pass
 def open_mesh_device(shape): return {"mesh": shape.shape}
 def close_mesh_device(d): pass
+class Tensor:
+    """A device tensor: only what the weight scan reads."""
+    def __init__(self, shape): self.shape = tuple(shape)
+def from_torch(x, dtype=None, layout=None, device=None): return Tensor((4, 4))
+def linear(x, w, **kw): return x
+def matmul(x, w, **kw): return x
+def add(a, b): return a
+def execute_trace(device, trace_id, **kw): pass
 '''
 
 # An honest port: logits peak at the id after the last one it was given. prefill answers REF[0]; teacher forcing (reference id i - 1 in)
@@ -35,7 +43,10 @@ def close_mesh_device(d): pass
 HONEST = '''
 import ttnn
 VOCAB = 200
+LAYERS = 64                           # a stand-in decoder stack, deeper than any fake config in the tests: one ttnn.linear per layer per pass
 def _peak(i):
+    for _ in range(LAYERS):
+        ttnn.linear(None, None)
     v = [0.0] * VOCAB
     v[i] = 1.0
     return v

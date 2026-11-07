@@ -350,6 +350,8 @@ def build(config, source) -> Excerpts:
         header = ["# Reference excerpts", "",
                   "Source text of the classes this model uses, copied from the installed `transformers` modeling module for its model type. "
                   "Each class shows its constructor signature, its `forward` method and the small helper functions `forward` calls. "
+                  "Constructor bodies are elided: a default in a signature can differ from the value the model uses, so check `effective_construction.txt` "
+                  "(next to this file, when it exists) for the values the constructors resolved. "
                   "Nothing here was run. Write your first `port_model.py` from this file before you read anything else.", ""]
         if shown:
             header += ["Left out or cut:"] + [f"- {_clean(x)[:LEFT_OUT_CHARS]}" for x in shown]

@@ -28,6 +28,11 @@ The supervisor has already put two things in the stage directory, and the prepar
   `config_keys_not_listed`, `text_config_keys_not_listed`, `conventions_left_out`, `layer_schedule_note` and `tensors_with_long_names`. A
   convention note names its reference class; use the class for the section the field is in, and read another class's different numbering as
   a warning to check the tensors. `layer_flag_fields` hold one 0 or 1 per layer and no layer ids. A field in a `*_left_out` list may well be in the checkpoint's config; read `config.json` for that one field.
+- `stages/2/effective_construction.txt` (when the reference interpreter could build the model; `port_facts.json` carries its hash and the
+  first lines of its list under `effective_construction`): what each module's constructor resolved from the config, and under "Resolved vs class
+  default" every setting that differs from the default in the class's signature. The reference excerpts elide constructor bodies, so a default
+  there (`activation: str = "silu"`) may not be the value the model uses (the tiny Qwen4's gated norm resolves to `sigmoid`). Read the lines for the
+  classes you port before you write them, and use the resolved value.
 - `stages/2/port/port_model.py`: a skeleton. Each of the four functions raises `NotImplementedError` until you replace its body, and
   `read_tensors(model_dir)` returns every tensor by name from one file or from shards. A port left as the skeleton fails the check at
   `load` and says so.
@@ -74,7 +79,14 @@ free run), and the gate refuses a record where the second call returns a differe
 a new request and expects prefill to reset that request's state
 (`docs/superpowers/specs/2026-11-02-port-interface-vllm-plugin-mapping.md`).
 
-`port_model.py` may import other files in `stages/2/port/`. Every `.py` file there is model code, and at least one must use `ttnn`.
+`port_model.py` may import other files in `stages/2/port/`. Every `.py` file there is model code, and the port as a whole must make
+`ttnn.<op>(` calls: an `import ttnn` line does not count. The check counts the calls the port makes (issue 541). It fails the run, before
+the device is used, when no file has a reachable `ttnn.matmul`, `ttnn.linear` or similar call. It fails the first prefill when the pass
+makes fewer matmul-family calls than the model has layers (one per layer is the floor). It fails a decode step that makes fewer, unless
+the step replays a captured trace. It fails the run after `load` when most of the weight elements are still host torch or numpy tensors.
+A port that computes in torch on the host and only imports `ttnn` therefore fails with a message that says to upload the weights with
+`ttnn.from_torch(..., device=mesh_device)` and run the projections with `ttnn.linear` or `ttnn.matmul`. The record keeps the counts under
+`device_ops`, and the gate checks them again.
 No file there may read the stage 1 reference files: a model file that opens `generated-ids.json` could copy the reference, and the gate
 refuses it. A worked example of the same shape is `scripts/minicpm3/chip_model.py`.
 

@@ -22,7 +22,7 @@ CHIPS = [f"0000:0{i}:00.0" for i in range(1, 5)]
 REQUIRED = (1, 3, 4)
 
 
-def make_entry(run, n, *, chips=None, record=None, marker=None, result=None, model_src="import ttnn\n", template=None):
+def make_entry(run, n, *, chips=None, record=None, marker=None, result=None, model_src="import ttnn\nttnn.linear(a, b)\n", template=None):
     """The files of one entry directory a passing test leaves."""
     base = f"stages/4/configs/{n}"
     names = list(chips if chips is not None else CHIPS[:n])
@@ -33,6 +33,8 @@ def make_entry(run, n, *, chips=None, record=None, marker=None, result=None, mod
     rec = {"schema": full_port.RECORD_SCHEMA,
            "reference": {"path": "stages/1/evidence/reference/generated-ids.json", "sha256": sha(ref.read_bytes())},
            "prompt": {"path": "stages/1/evidence/reference/prompt-ids.json", "sha256": sha(prm.read_bytes())},
+           "device_ops": {"floor": 1, "layers": None, "prefill_matmul_calls": 4, "decode_matmul_calls_max": 4, "decode_trace_replays": 0,
+                          "matmul_calls_total": 200, "static_matmul_calls": 1, "weights": None, "top_calls": {}},
            "reference_ids": list(REF_IDS), "chip_ids": list(REF_IDS[:30]) + [0, 0], "top1_agreement": 30 / 32, "chips": names, "load_s": 90.5,
            "free_run_ids": [REF_IDS[0]] + list(range(1, 48)), "free_run_text": TEXT, "template_sha256": sha(full_port.TEMPLATE.read_bytes()),
            "config": {"path": f"{base}/{full_port.CONFIG_NAME}", "sha256": sha(config.read_bytes())},
@@ -115,7 +117,7 @@ def test_a_marker_that_lists_more_chips_than_the_record_is_refused(tmp_path):
 def test_a_port_source_outside_the_entry_directory_is_refused(tmp_path):
     stage_dir, run = stage4_run(tmp_path)
     rec = json.loads((stage_dir / "configs/1/evidence/port-check.json").read_text())
-    rec["port_sources"] = [{"path": "stages/3/port/port_model.py", "sha256": sha("import ttnn\n"), "role": "model"}]
+    rec["port_sources"] = [{"path": "stages/3/port/port_model.py", "sha256": sha("import ttnn\nttnn.linear(a, b)\n"), "role": "model"}]
     (stage_dir / "configs/1/evidence/port-check.json").write_text(json.dumps(rec))
     assert one(gate(stage_dir, run), "needs a file under stages/4/configs/1/port/")
 
@@ -123,7 +125,7 @@ def test_a_port_source_outside_the_entry_directory_is_refused(tmp_path):
 def test_a_port_source_in_another_entrys_directory_is_refused(tmp_path):
     stage_dir, run = stage4_run(tmp_path)
     rec = json.loads((stage_dir / "configs/1/evidence/port-check.json").read_text())
-    rec["port_sources"] = [{"path": "stages/4/configs/3/port/port_model.py", "sha256": sha("import ttnn\n"), "role": "model"}]
+    rec["port_sources"] = [{"path": "stages/4/configs/3/port/port_model.py", "sha256": sha("import ttnn\nttnn.linear(a, b)\n"), "role": "model"}]
     (stage_dir / "configs/1/evidence/port-check.json").write_text(json.dumps(rec))
     assert one(gate(stage_dir, run), "the 1-chip entry") and one(gate(stage_dir, run), "needs a file under stages/4/configs/1/port/")
 

@@ -33,7 +33,7 @@ import os
 import re
 from pathlib import Path
 
-from orchard import safeio
+from orchard import safeio, ttnn_calls
 from orchard.defaults import SWAP_MIN_TOKENS, SWAP_TOP1_MIN
 
 RECORD_SCHEMA = "orchard-port-check/1"
@@ -309,6 +309,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
 
     _template_reasons(record, stage_dir, run_dir, reasons)
     _source_reasons(record, stage_dir, run_dir, reasons, stage, entry)
+    _device_ops_reasons(record, run_dir, reasons)
     return reasons, seen
 
 
@@ -396,6 +397,68 @@ def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list,
                        "written by the test the supervisor ran")
 
 
+HOST_SHARE_MAX = 0.5             # the template's bound: more than this share of the weight elements on the host fails (port_check.py)
+
+
+def _snapshot_floor(record: dict, run_dir: Path):
+    """The floor the checkpoint's own config gives (orchard/ttnn_calls.py `layer_floor`), read from the model snapshot the record's config file
+    names, or None when that cannot be read. The record's floor is the template's; this is the gate's own reading of the same input."""
+    cfg = record.get("config")
+    path = cfg.get("path") if isinstance(cfg, dict) else None
+    place = _inside(run_dir, path) if isinstance(path, str) else None
+    if place is None:
+        return None
+    try:
+        snapshot = safeio.read_json(place, max_bytes=1 << 16, expect=dict).get("model_snapshot")
+        if not isinstance(snapshot, str) or not snapshot or "\0" in snapshot:
+            return None
+        config = safeio.read_json(Path(snapshot) / "config.json", max_bytes=1 << 20, expect=dict)
+    except (safeio.SafeReadError, OSError, ValueError):
+        return None
+    return ttnn_calls.layer_floor(config)[0]
+
+
+def _count(x) -> bool:
+    return type(x) is int and 0 <= x <= 10 ** 12
+
+
+def _device_ops_reasons(record: dict, run_dir: Path, reasons: list) -> None:
+    """The record's `device_ops` (written by the template from the calls its worker counted, issue 541) must show the port computed on the device:
+    at least `floor` matmul-family ttnn calls in the first prefill and in some decode step (or trace replays that stand for them), and weights that
+    are mostly ttnn tensors. A record without the field is refused: the check that wrote it did not count."""
+    ops = record.get("device_ops")
+    if not isinstance(ops, dict):
+        reasons.append(f"{RECORD_FILE} has no device_ops: the check that wrote it did not count the port's ttnn calls, so nothing shows the port "
+                       "computed on the device. Run the supervisor's check again")
+        return
+    floor = ops.get("floor")
+    if type(floor) is not int or not 1 <= floor <= 10_000:
+        reasons.append(f"{RECORD_FILE} device_ops.floor must be a whole number from 1 to 10000, got {floor!r}")
+        return
+    own = _snapshot_floor(record, run_dir)
+    if own is not None and floor < own:
+        reasons.append(f"device_ops.floor is {floor}, below the {own} the checkpoint's config gives (one matmul-family call per layer)")
+        floor = own
+    prefill, decode = ops.get("prefill_matmul_calls"), ops.get("decode_matmul_calls_max")
+    replays, total = ops.get("decode_trace_replays"), ops.get("matmul_calls_total")
+    if not all(_count(x) for x in (prefill, decode, replays, total)):
+        reasons.append(f"{RECORD_FILE} device_ops needs whole-number counts in prefill_matmul_calls, decode_matmul_calls_max, "
+                       "decode_trace_replays and matmul_calls_total")
+        return
+    if prefill < floor:
+        reasons.append(f"the first prefill made {prefill} matmul-family ttnn calls, below the floor of {floor} (one per layer): the port did not "
+                       "compute its forward pass on the device. Move the computation onto the ttnn tensors (see stages/2/cheat_sheet.md)")
+    if decode < floor and not (replays and total >= 2 * floor):
+        reasons.append(f"no decode step made {floor} matmul-family ttnn calls (the most was {decode}, trace replays {replays}): the port did "
+                       "not decode on the device")
+    weights = ops.get("weights")
+    if isinstance(weights, dict):
+        host, dev = weights.get("host_elements"), weights.get("device_elements")
+        if _count(host) and _count(dev) and host + dev and host / (host + dev) > HOST_SHARE_MAX:
+            reasons.append(f"the port's weights stayed on the host: {host} elements as torch or numpy tensors, {dev} as ttnn tensors. Upload them "
+                           "with ttnn.from_torch(..., device=mesh_device) in load()")
+
+
 def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list, stage: int = 2, entry: int | None = None) -> None:
     """The port's source files: named, unchanged since the record, and not obviously a way to avoid the chip."""
     PORT_DIR, PORT_MODULE = port_dir(stage, entry), port_module(stage, entry)          # this stage's (or entry's) own; the module constants are stage 2's
@@ -434,6 +497,14 @@ def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list,
         reasons.append(f"{sorted(on_disk - listed)[0]} is in {PORT_DIR} but not in port_sources: it was added after the record was written")
     if not any("ttnn" in t for _, t in model_text):
         reasons.append("no model source in port_sources mentions ttnn, so nothing shows the port runs on the chip")
+    else:
+        # A mention is not a call (issue 541): the 22 versions of run 18's port all had `import ttnn  # noqa` and no call. A source that parses must
+        # have a reachable matmul-family ttnn call somewhere in the port.
+        found = [ttnn_calls.static_calls(t) for _, t in model_text]
+        if all(f["error"] is None for f in found) and not any(ttnn_calls.is_matmul(k) and ttnn_calls.is_compute(k) for f in found for k in f["calls"]):
+            reasons.append("no model source in port_sources makes a reachable ttnn matmul-family call (ttnn.matmul, ttnn.linear and the like): "
+                           "`import ttnn` is not a call, so the port computes on the host. Move the computation onto the device (see stages/2/cheat_sheet.md), "
+                           "then run the check again")
     for path, t in model_text:
         if "generated-ids" in t or "evidence/reference" in t:
             reasons.append(f"model source {path} refers to the stage 1 reference files; model code does not read the reference, "
