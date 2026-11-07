@@ -4847,3 +4847,11 @@ The coder image carries plugin `e37ccd87`, a local branch on plugin commit `cacf
 - Added `orchard/skills/full-port-templates/example_decoder_idioms.md` (88 lines, labelled as idioms to adapt, a test keeps it free of model names, model numbers and ttnn names the sheet lacks), installed as `stages/2/decoder_idioms.md` and named in one line of the task. Two cheat-sheet mistakes (load gate host copy, run 22; weights from a config-built model, run 20), checked against the pinned tree. Issues 573 (ship tested helper functions) and 574 (load gate should say where the host weights are).
 - Not resolved: the run 22 error `mat1 and mat2 shapes cannot be multiplied (58x256 and 512x8)` is a torch message; the port on disk does not show its source.
 - The checked tree: `~/tt-metal` (a later commit) gives 3 sheet problems on the base commit too (multiply `b`, rms_norm `eps`, sdpa `mask`). The pinned tree in the run notes (`metal-523`) gives none, before and after.
+
+## 2026-11-07 stage 2 load gate lists the host-held weights (issue 574)
+Runs 22 and 24 failed the load gate with a count only (590095 host elements, 581890 device) and the coder never found which dict kept the host
+copies. `scan_weights` in the check template now records the paths of the 8 largest host tensors (visited-id set, 100000 nodes, depth 16;
+`truncated` when a cap stops the walk) and pairs each with the device tensor of the same leaf name. The failure message lists them, says how many
+more there are and ends with the instruction to keep only the ttnn tensor. `last-check` prints that message up to 1800 characters instead of 300.
+Tests: `tests/test_gate_lists_host_weights.py`; mutations (path, depth cap, cycle guard, message cap, sort order, twin pairing, last-check cut,
+instruction) each turn a test red.
