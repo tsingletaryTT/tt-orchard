@@ -470,14 +470,16 @@ def _discard(path: Path) -> None:
         pass
 
 
-def save_reference(src: Path, cache: Path, name: str) -> bool:
+def save_reference(src: Path, cache: Path, name: str, *, uses_encoder: bool = True) -> bool:
     """Put the CPU reference made in `src` into the reference cache as `cache/name`, replacing an entry that is already there. The caller runs
     this only for a reference that was made fresh, and a fresh one is made only when the cache had no entry that `audio_stages.cached_run` accepts
     for the run's identity (model revision, configuration, library commit, settings), so an entry found here is stale and must not block the save
     (issue 179). The replacement is safe: the new copy is made completely beside the entry first, the old entry is moved aside, the new one is
     renamed into place, and only then is the old one deleted. When the rename fails the old entry is put back. Returns whether the cache now holds
     the new copy; a failure costs a repeat of a CPU run and nothing else."""
-    from orchard import cache_lock
+    from orchard import audio_encoder_pin, cache_lock
+    # The entry name carries the text encoder pin (issue 162); an entry from before it stays under the plain name, untouched.
+    name = audio_encoder_pin.cache_entry_name(name, uses_encoder=uses_encoder)
     dest = cache / name
     tmp, old = cache / f".{name}.tmp-{os.getpid()}", cache / f".{name}.old-{os.getpid()}"
     moved = False
@@ -2940,7 +2942,7 @@ class Supervisor:
             run = rec["runs"].get(role)
             if run is None or run["from_cache"]:
                 continue
-            save_reference(self.run_dir / run["dir"], cache, run["model"])
+            save_reference(self.run_dir / run["dir"], cache, run["model"], uses_encoder=run.get("encoder_pin") == "pinned")
 
     def _bundle_body(self, spec, stage_dir: Path):
         """Stage 8 as supervisor code: copy build_bundle.py into the stage, write its one-line config,

@@ -14,6 +14,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from audio_encoder_fakes import FakeEncoder, T5GemmaConditioner  # noqa: E402
 from orchard.audio_reference import Recorder, ReferenceError, load_run  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parent.parent / "orchard" / "skills" / "audio-reference-templates" / "make_reference.py"
@@ -66,6 +67,9 @@ class Pretransform(torch.nn.Module):
 
 
 class Conditioner:
+    # The encoder the pin reads (tests/audio_encoder_fakes.py), already in the pinned state: these tests fake the loader, which applies the pin.
+    conditioners = {"prompt": T5GemmaConditioner(FakeEncoder(torch.float32, "eager"))}
+
     def __call__(self, conditioning, device):
         return {"prompt": [torch.arange(6.0).reshape(1, 3, 2), torch.ones(1, 3)], "seconds_total": [torch.tensor([[conditioning[0]["seconds_total"]]])],
                 "note": "not a tensor"}

@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from orchard import audio_bars
+from orchard import audio_encoder_pin as enc_pin
 from orchard import audio_reference as ar
 from orchard import resident
 from orchard import safeio
@@ -309,14 +310,16 @@ def reference_problems(stage_dir, run_dir, expect_roles=(ROLE_REFERENCE, ROLE_HO
     return problems
 
 
-def cached_run(cache_dir, name: str, expected: dict | None, library_commit: str | None):
+def cached_run(cache_dir, name: str, expected: dict | None, library_commit: str | None, *, uses_encoder: bool = True):
     """A saved CPU reference of library model `name` that can stand in for a fresh one, or None: the directory loads and its arrays match their
     hashes, its model revision and library commit are the wanted ones and its settings are the stage's settings for that model. A reference is a
     deterministic float32 CPU run, so the same inputs give the same arrays (measured: a repeat run is bit-identical)."""
     if not cache_dir or not library_commit or not isinstance(expected, dict) or not expected.get("revision") or not expected.get("config_sha256"):
         return None
     revision = expected["revision"]
-    d = Path(cache_dir) / name
+    # The entry name includes the text encoder pin (issue 162): an entry made before it, with a bfloat16 encoder, is under the plain model name, is never
+    # read here and is left on disk. The manifest is checked as well, so a directory under the new name that holds another encoder setting is refused.
+    d = Path(cache_dir) / enc_pin.cache_entry_name(name, uses_encoder=uses_encoder)
     if not d.is_dir() or d.is_symlink():
         return None
     try:
@@ -325,19 +328,20 @@ def cached_run(cache_dir, name: str, expected: dict | None, library_commit: str 
             ok = (m["model"]["name"] == name and m["model"]["revision"] == revision and m["library"]["commit"] == library_commit
                   and m["model"].get("config_sha256") == expected["config_sha256"]
                   and {k: m["settings"].get(k) for k in settings_for(name)} == settings_for(name) and m["settings"].get("dtype") == "float32"
-                  and m["settings"].get("device") == "cpu")
+                  and m["settings"].get("device") == "cpu"
+                  and (not uses_encoder or enc_pin.state(m["settings"]) == "pinned"))
     except (ar.ReferenceError, OSError, KeyError, TypeError):
         return None
     return d if ok else None
 
 
-def copy_cached_run(cache_dir, name: str, expected: dict | None, library_commit: str | None, out):
+def copy_cached_run(cache_dir, name: str, expected: dict | None, library_commit: str | None, out, *, uses_encoder: bool = True):
     """Validate the cache entry `name` (`cached_run`) and copy it to `out`, holding the entry's shared lock for both, so that a run replacing a stale entry
     (orchard/supervisor.py `save_reference`, which holds the exclusive lock) cannot change the directory between the check and the copy. Returns the entry's
     directory, or None when there is no valid entry or the copy failed; a partial copy is removed, and the caller then makes the reference fresh."""
     from orchard import cache_lock
-    with cache_lock.entry_lock(cache_dir, name, exclusive=False):
-        hit = cached_run(cache_dir, name, expected, library_commit)
+    with cache_lock.entry_lock(cache_dir, enc_pin.cache_entry_name(name, uses_encoder=uses_encoder), exclusive=False):
+        hit = cached_run(cache_dir, name, expected, library_commit, uses_encoder=uses_encoder)
         if hit is None:
             return None
         try:
@@ -392,7 +396,8 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, expected: dict, l
         out = stage_dir / item["dir"]
         out.parent.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
-        hit = (copy_cached_run(cache_dir, item["name"], expected.get(item["name"]), library_commit, out)
+        hit = (copy_cached_run(cache_dir, item["name"], expected.get(item["name"]), library_commit, out,
+                               uses_encoder=item.get("profile") is None)
                if item["interpreter"] == "reference" else None)
         if hit is not None:
             say(f"{item['role']}: copied the cached reference {item['name']}")
@@ -417,12 +422,18 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, expected: dict, l
         wrong = identity_problems(facts, expected.get(item["name"]), library_commit, item["role"])
         if wrong:
             raise AudioStageError("; ".join(wrong))
+        # A Stable Audio run made by this code has the pinned text encoder (issue 162). A script that left the encoder as the library loads it is refused here.
+        if item.get("profile") is None and enc_pin.state(facts["settings"]) != "pinned":
+            raise AudioStageError(f"the CPU run for {item['role']} ({item['name']}) did not record the pinned text encoder "
+                                  f"({enc_pin.ENCODER_DTYPE}, {enc_pin.ENCODER_ATTN} attention; issue 162)")
         runs[item["role"]] = {**facts, "role": item["role"], "interpreter": item["interpreter"], "from_cache": from_cache, "wall_seconds": seconds,
+                              "encoder_pin": enc_pin.state(facts["settings"]),
                               "clip": f"{facts['dir']}/clips/{clip_name_of(item)}"}
     rec = {"schema": SCHEMA, "runs": runs, "expected": expected, "library_commit": library_commit,
            "environment_floor": compare(Path(run_dir) / runs[ROLE_REFERENCE]["dir"], Path(run_dir) / runs[ROLE_HOST]["dir"]),
            "limits": ["The reference is the library's own float32 CPU run. The same-environment run is the same code in the interpreter that the chip "
-                      "run uses; the difference between the two is what a change of CPU environment does to these numbers, before any chip is involved."]}
+                      "run uses; the difference between the two is what a change of CPU environment does to these numbers, before any chip is involved.",
+                      enc_pin.LABEL]}
     write_json(stage_dir / REFERENCE_FILE, rec)
     return rec
 

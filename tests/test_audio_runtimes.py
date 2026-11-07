@@ -51,6 +51,10 @@ class StubMk:
     def _numpy(self, v):
         return np.asarray(v)
 
+    def encoder_settings(self, model):
+        """What make_reference.encoder_settings reads from a pinned model (issue 162)."""
+        return {"encoder_dtype": "float32", "encoder_attn": "eager"}
+
     def run_reference(self, model, run_settings, recorder, torch, *, layers=None):
         """A waveform that depends on the seed, the duration and the steps and on nothing else, plus one layer array."""
         self.calls.append(dict(run_settings))
