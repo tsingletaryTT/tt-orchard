@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from orchard import audio_encoder_pin as enc_pin
 from orchard import audio_cli, audio_plan, audio_remote, audio_runtime, audio_stages as st, blocked, status, supervisor
 from orchard.stages import AUDIO_TABLE, GateResult, spec_for
 from orchard.supervisor import EXIT_BLOCKED, EXIT_READY, Control, parse
@@ -215,7 +216,7 @@ def test_stage_1_fills_the_reference_cache_and_a_second_run_uses_it(arig, tmp_pa
     make_environment(arig)
     assert arig.run() == EXIT_READY
     cache = Path(arig.args.run_dir).parent / "cache" / "audio-reference"
-    assert (cache / "small-music" / "manifest.json").is_file() and (cache / "small-music-base" / "manifest.json").is_file()
+    assert (cache / enc_pin.cache_entry_name("small-music") / "manifest.json").is_file() and (cache / enc_pin.cache_entry_name("small-music-base") / "manifest.json").is_file()
     snap = [v.split("=", 1)[1] for v in arig.args.input if v.startswith("model=")][-1]
     assert st.cached_run(cache, "small-music", audio_plan.snapshot_identity(snap), supervisor.audio_reference_env.LIBRARY_COMMIT) is not None
 

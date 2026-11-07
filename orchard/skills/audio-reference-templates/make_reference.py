@@ -15,7 +15,8 @@ What it saves (orchard/audio_reference.py describes the directory; `python -m or
     latent/final     the latent the decoder receives
     waveform/audio   the decoded audio, shape [channels, samples], float32 in [-1, 1]
 
-It uses the CPU in float32, never a chip. It never uses a Hugging Face token: the token variables are removed from the environment and the Hub is
+It uses the CPU in float32, never a chip. The T5Gemma text encoder is pinned to float32 with eager attention (orchard/audio_encoder_pin.py, issue 162) and the
+manifest's settings record what the loaded encoder really had. It never uses a Hugging Face token: the token variables are removed from the environment and the Hub is
 set to offline mode, so the model files must already be in the local cache (a gated model is downloaded by a person, not by this script). It reads the
 model's config and weights through the library and runs the library's own `generate` with callbacks and recording wrappers, so the numbers
 are the library's.
@@ -203,14 +204,39 @@ def run_reference(model, settings: dict, recorder, torch, *, layers=None) -> Non
     recorder.record("waveform", "audio", wave)
 
 
+def _encoder_pin():
+    """orchard/audio_encoder_pin.py, the one place that says how the T5Gemma text encoder runs (issue 162). The repository root is put on the import path
+    first, because the reference interpreter is not the one that has the repository installed."""
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from orchard import audio_encoder_pin
+    return audio_encoder_pin
+
+
+def encoder_settings(model) -> dict:
+    """The text encoder setting the loaded model really has ({"encoder_dtype", "encoder_attn"}), refused when it is not the pin. Recorded in the manifest."""
+    try:
+        return _encoder_pin().require(model)
+    except _encoder_pin().EncoderPinError as exc:
+        raise SystemExit(f"text encoder pin: {exc}") from exc
+
+
 def load_model(name: str, device: str = "cpu"):
-    """The library's own loader. Returns (model, config_path, checkpoint_path)."""
+    """The library's own loader. Returns (model, config_path, checkpoint_path). The library loads the T5Gemma encoder in the checkpoint's bfloat16 with the
+    attention implementation the installed transformers picks; the pin (float32, eager; issue 162) is applied to the loaded model before it is returned,
+    so every caller of this function, the CPU reference and the chip run's host encoder, gets the same encoder."""
     from stable_audio_3.model import StableAudioModel
     from stable_audio_3.model_configs import all_models
     if name not in all_models:
         raise SystemExit(f"unknown model {name!r}; the library knows {sorted(all_models)}")
     config_path, ckpt_path = all_models[name].resolve()
-    return StableAudioModel.from_pretrained(name, device=device, model_half=False), Path(config_path), Path(ckpt_path)
+    model = StableAudioModel.from_pretrained(name, device=device, model_half=False)
+    pin = _encoder_pin()
+    try:
+        pin.apply(model)
+    except pin.EncoderPinError as exc:
+        raise SystemExit(f"text encoder pin: {exc}") from exc
+    return model, Path(config_path), Path(ckpt_path)
 
 
 REF_NAME = re.compile(r"refs/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
@@ -323,7 +349,7 @@ def main(argv=None) -> int:
     model, config_path, ckpt_path = load_model(args.model)
     sampler = args.sampler or ("pingpong" if model.model.diffusion_objective == "rf_denoiser" else "euler")
     settings = {"prompt": args.prompt, "duration": args.duration, "steps": args.steps, "cfg_scale": args.cfg_scale, "sampler": sampler,
-                "seed": args.seed, "dtype": "float32", "sample_size": args.sample_size, "device": "cpu"}
+                "seed": args.seed, "dtype": "float32", "sample_size": args.sample_size, "device": "cpu", **encoder_settings(model)}
     revision = ckpt_path.parent.name       # the snapshot directory; resolving the checkpoint link would give `blobs`
     recorder = Recorder(args.out, model={"name": args.model, "revision": revision, "config_sha256": file_facts(config_path)["sha256"],
                                          "diffusion_objective": str(model.model.diffusion_objective),

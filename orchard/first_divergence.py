@@ -309,7 +309,8 @@ def _settings_problems(a, b, label, *, cross_precision: bool) -> list[str]:
     if sa is None or sb is None:
         return []
     keys = tuple(k for k in ar.MATCH_KEYS if not (cross_precision and k == "dtype"))
-    return [f"{label}: settings.{k} differs: {sa.get(k)!r} and {sb.get(k)!r}" for k in keys if sa.get(k) != sb.get(k)]
+    out = [f"{label}: settings.{k} differs: {sa.get(k)!r} and {sb.get(k)!r}" for k in keys if sa.get(k) != sb.get(k)]
+    return out + [f"{label}: {p}" for p in ar.enc_pin.settings_problems(sa, sb)]
 
 
 def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: Tolerance | None = None, floor=None, top: int = 5,
