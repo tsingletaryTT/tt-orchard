@@ -119,7 +119,7 @@ def _vouched(ledger, run_dir, n: int, path, what: str, label: str, reasons: list
                        "a file the supervisor writes must match the ledger")
 
 
-def vouch(sup, spec, stage_dir, gate: GateResult, *, waived_decision: str) -> GateResult:
+def vouch(sup, spec, stage_dir, gate: GateResult, *, waived_decision: str, words_decision: str | None = None) -> GateResult:
     """The checks the gate cannot make because it has no ledger: the plan, each entry's marker or covering, each entry's result and the stage's
     result are the files the supervisor wrote (their sha256 is in the ledger), and a covering stage still shows a pass in the ledger. A
     passing gate also leaves the rehearsal decision when `coherent` was waived, as stages 2 and 3 do."""
@@ -149,6 +149,10 @@ def vouch(sup, spec, stage_dir, gate: GateResult, *, waived_decision: str) -> Ga
     if gate.ok and "coherent" in gate.waived:
         ledger.append("decision", n, decision=waived_decision, field="coherent", by="--full-port-rehearsal",
                       note=f"the model is a rehearsal with random weights; every other stage {n} check still applied")
+    if gate.ok and words_decision and full_port.WORDS_WAIVED in gate.waived:      # issue 568
+        ledger.append("decision", n, decision=words_decision, field=full_port.WORDS_WAIVED, by="--full-port-rehearsal",
+                      note=f"the model is a rehearsal with random weights, so its free-run text has no words; the word count was waived "
+                           f"and the character floor and every other stage {n} check still applied")
     return gate
 
 

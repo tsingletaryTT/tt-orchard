@@ -787,3 +787,42 @@ def test_no_known_interpreter_leaves_no_stage_tools_config(rig, monkeypatch):
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
     rig.run()
     assert not (stage_2(rig) / "stage_tools.json").exists()
+
+
+# ---- issue 568: the word count of the free-run text in a rehearsal ----
+# The fake chip's text has few different words only when the floor asks for more than it has, so these tests raise the floor (the run
+# 21 model decoded noise with no spaces; the gate saw one word).
+
+@pytest.mark.usefixtures("agent_finish")
+def test_without_the_rehearsal_flag_too_few_words_fail_stage_2(rig, monkeypatch):
+    monkeypatch.setattr(full_port, "MIN_FREE_RUN_WORDS", 10 ** 6)
+    make(rig)
+    rig.args.unattended = True
+    never_wait(rig)
+    assert rig.run() == EXIT_BLOCKED
+    assert failure(rig)["code"] == "stage-failed" and "different words" in failure(rig)["reason"]
+    assert not any(d.get("decision") == supervisor.REHEARSAL_WORDS_WAIVED for d in rig.decisions())
+
+
+@pytest.mark.usefixtures("agent_finish")
+def test_a_rehearsal_passes_stage_2_with_too_few_words_and_the_ledger_says_so_once(rig, monkeypatch):
+    monkeypatch.setattr(full_port, "MIN_FREE_RUN_WORDS", 10 ** 6)
+    make(rig)
+    rig.args.full_port_rehearsal = True
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run()
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    words = [d for d in rig.decisions() if d.get("decision") == supervisor.REHEARSAL_WORDS_WAIVED]
+    assert len(words) == 1 and words[0]["field"] == "free_run_words" and words[0]["by"] == "--full-port-rehearsal"
+    assert "every other stage 2 check still applied" in words[0]["note"]
+
+
+@pytest.mark.usefixtures("agent_finish")
+def test_a_rehearsal_with_too_few_words_still_fails_a_low_top1(rig, monkeypatch):
+    monkeypatch.setattr(full_port, "MIN_FREE_RUN_WORDS", 10 ** 6)
+    make(rig, over={(2, "finish"): lambda good: {"result.json": {**good, "top1_agreement": 0.5}}})
+    rig.args.full_port_rehearsal = True
+    rig.args.unattended = True
+    never_wait(rig)
+    assert rig.run() == EXIT_BLOCKED
+    assert "recomputed" in failure(rig)["reason"]

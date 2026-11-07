@@ -322,8 +322,9 @@ def check_stage(stage_dir, run_dir, *, required, rehearsal: bool = False) -> tup
         got, evidence = check_entry(entry_dir(stage_dir, c), run_dir, c, rehearsal=rehearsal, waived=mine)
         reasons += [f"the {c}-chip entry: {r}" for r in got]
         seen += evidence
-        if mine and "coherent" not in waived:
-            waived.append("coherent")
+        for field in mine:
+            if field not in waived:
+                waived.append(field)
     result = _read(stage_dir / RESULT_FILE)
     if result is None:
         reasons.append("result.json is missing or is not a JSON object")

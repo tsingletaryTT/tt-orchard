@@ -220,6 +220,7 @@ STAGE_3_SEED_FILE_BYTES = 2 * 1024 * 1024  # each at most this big (the gate rea
 STAGE_3_SEED_ENTRIES = 1000               # the scan stops after this many entries of any kind (files, directories, links, caches): the file count alone
                                           # would let a directory of a million subdirectories be read to the end before anything refused it
 STAGE_3_SEED_DEPTH = 8                    # and at this many directory levels below the port directory
+REHEARSAL_WORDS_WAIVED = "full-port rehearsal: word count waived"      # issue 568: the ledger decision written when the word count of the free-run text was waived
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
 FULL_PORT_UNBUILT = ()      # the stages of a full port that are not built yet: empty, because stages 3 to 6 all exist (issues 326, 454, 329). A non-empty
                             # tuple makes a full-port run pause before stage 5 once (unattended: end blocked), as the first slices did; tests set it
@@ -3046,8 +3047,12 @@ class Supervisor:
             if gate.ok and "coherent" in gate.waived:      # the gate's own read: result.json is not opened again
                 self.ledger.append("decision", spec.number, decision=REHEARSAL_WAIVED, field="coherent", by="--full-port-rehearsal",
                                    note=f"the model is a rehearsal with random weights; every other stage {spec.number} check still applied")
+            if gate.ok and full_port.WORDS_WAIVED in gate.waived:
+                self.ledger.append("decision", spec.number, decision=REHEARSAL_WORDS_WAIVED, field=full_port.WORDS_WAIVED, by="--full-port-rehearsal",
+                                   note=f"the model is a rehearsal with random weights, so its free-run text has no words; the word count was waived "
+                                        f"and the character floor and every other stage {spec.number} check still applied")
         if spec.draft == "full_port_entries":
-            gate = full_port_stage4.vouch(self, spec, stage_dir, gate, waived_decision=REHEARSAL_WAIVED)       # the plan, the markers and the results are the supervisor's (the ledger holds them)
+            gate = full_port_stage4.vouch(self, spec, stage_dir, gate, waived_decision=REHEARSAL_WAIVED, words_decision=REHEARSAL_WORDS_WAIVED)       # the plan, the markers and the results are the supervisor's (the ledger holds them)
         self._note_unverified(spec.number, gate)
         return gate
 

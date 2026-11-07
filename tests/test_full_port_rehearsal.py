@@ -55,3 +55,45 @@ def test_the_gate_reports_when_it_waived_the_field(tmp_path):
     assert gate_full_port(stage_dir, run, rehearsal=False).waived == ()
     good_dir, good_run = build(tmp_path / "ok")
     assert gate_full_port(good_dir, good_run, rehearsal=True).waived == ()          # coherent was true: nothing was waived
+
+
+# ---- issue 568: the word check of the free-run text in a rehearsal ----
+# A random-weight model's decoded text is token noise with no spaces: one long "word". The character floor still holds; the count of
+# different words is waived in a rehearsal, with the waiver reported and nothing else relaxed.
+NOISE = "xq9Zk" * 12                       # 60 non-space characters, one word
+NOISY = {"record": {"free_run_text": NOISE}, "result": {"coherent": False, "free_run_text": NOISE}}
+
+
+def test_a_rehearsal_waives_the_word_count_of_noise_text(tmp_path):
+    g = rehearsal_reasons(tmp_path, **NOISY)
+    assert g.ok, g.reasons
+    assert set(g.waived) == {"coherent", "free_run_words"}
+
+
+def test_the_word_count_is_enforced_outside_a_rehearsal(tmp_path):
+    g = reasons(tmp_path, record=NOISY["record"], result={"free_run_text": NOISE})
+    assert one(g, "different words")
+    assert "free_run_words" not in g.waived
+
+
+def test_the_rehearsal_word_waiver_keeps_the_character_floor(tmp_path):
+    short = "ab cd"
+    g = rehearsal_reasons(tmp_path, record={"free_run_text": short}, result={"coherent": False, "free_run_text": short})
+    assert one(g, "non-space characters")
+
+
+def test_the_rehearsal_word_waiver_keeps_the_record_equality_check(tmp_path):
+    g = rehearsal_reasons(tmp_path, record={"free_run_text": NOISE}, result={"coherent": False, "free_run_text": NOISE + "z"})
+    assert one(g, "differs from the text")
+
+
+def test_the_rehearsal_word_waiver_waives_no_other_check(tmp_path):
+    for kw in ({"result": {**NOISY["result"], "top1_agreement": 0.5}}, {"result": {**NOISY["result"], "n_tokens": 4}},
+               {"marker": {"returncode": 1}}, {"record": {**NOISY["record"], "template_sha256": "0" * 64}}):
+        merged = {**NOISY, **kw}
+        assert not rehearsal_reasons(tmp_path / str(len(str(kw))), **merged).ok, kw
+
+
+def test_readable_text_waives_no_words(tmp_path):
+    g = rehearsal_reasons(tmp_path)
+    assert g.ok and "free_run_words" not in g.waived
