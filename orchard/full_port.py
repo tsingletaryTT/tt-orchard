@@ -55,6 +55,8 @@ TOOLS_NAME = "stage_tools.py"         # its name in the stage directory, next to
 CHEAT_SOURCE = TEMPLATE.parent / "ttnn_cheat_sheet.json"      # the verified TTNN cheat sheet (issue 523; orchard/op_cheats.py)
 CHEAT_NAME = "cheat_sheet.json"       # its data in the stage directory: `stage_tools.py cheat NAME` reads it
 CHEAT_MD_NAME = "cheat_sheet.md"      # the rendered sheet the coder reads
+IDIOMS_SOURCE = TEMPLATE.parent / "example_decoder_idioms.md"      # idioms from a port that passed the check (helper-vs-coder); advice, not code to copy
+IDIOMS_NAME = "decoder_idioms.md"     # its name in the stage directory, next to the cheat sheet
 CONFIG_NAME = "port_check_config.json"
 # The only command the supervisor runs for this stage. -P and -s keep files the coder leaves in stages/2/ off the template's sys.path.
 COMMAND = "python3 -P -s stages/2/port_check.py"

@@ -3413,7 +3413,8 @@ class Supervisor:
                 return swap_prepare.PrepareOutcome(False, note=port_facts.stage_3_note(chips=self._stage_3_chips() or 0,
                                                                                        copied=bool(seed.get("copied") or seed.get("kept"))))
             note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")),
-                                           cheat=(stage_dir / full_port.CHEAT_MD_NAME).is_file(), construction=bool(seed.get("construction")))
+                                           cheat=(stage_dir / full_port.CHEAT_MD_NAME).is_file(), construction=bool(seed.get("construction")),
+                                           idioms=(stage_dir / full_port.IDIOMS_NAME).is_file())
             if spec.number == 2 and getattr(self, "telegraph", None) is not None:
                 done_dir, done = getattr(self, "_best_restore", (None, None))
                 restored = done if done_dir == str(stage_dir) else self._restore_best_port(spec, stage_dir)      # `_draft` already tried it
@@ -4279,6 +4280,14 @@ class Supervisor:
         except (safeio.SafeReadError, op_cheats.SheetError, OSError, ValueError) as exc:
             if not command:
                 self.ledger.append("decision", spec.number, decision="cheat sheet not copied", reason=str(exc)[:200])
+        # The decoder idioms (helper-vs-coder): advice from a port that passed, put back each time. A file that cannot be read is skipped with a decision.
+        try:
+            idioms_src = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.IDIOMS_SOURCE.name
+            safeio.atomic_write(stage_dir / full_port.IDIOMS_NAME, safeio.read_bytes(idioms_src, max_bytes=RUN_JSON_MAX), mode=0o644)
+            copied.append(full_port.IDIOMS_NAME)
+        except (safeio.SafeReadError, OSError, ValueError) as exc:
+            if not command:
+                self.ledger.append("decision", spec.number, decision="idioms file not copied", reason=str(exc)[:200])
         # The interpreter `layer-diff` runs under (torch and transformers). The coder's shell has an allow-listed environment, so the supervisor names it.
         # A file the coder left there is replaced or removed, so the path in it is always one the supervisor found.
         python = _stages._mask_python(self.run_dir)

@@ -547,7 +547,8 @@ def tools_text(stage: int = 2, *, facts: bool = True, cheat: bool = True) -> str
     return "\n".join(lines)
 
 
-def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False, cheat: bool = True, construction: bool = False) -> str:
+def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False, cheat: bool = True, construction: bool = False,
+                 idioms: bool = False) -> str:
     """What the supervisor adds to the coder's prepare task for a full port. The generic prepare task names only hw_test.json and
     handoff.json; the port itself is described only in the skill, and the coder explored and wrote nothing."""
     parts = [f"This stage's check is the supervisor's: when you finish, it puts its own `stages/2/port_check.py` back and rewrites "
@@ -575,6 +576,9 @@ def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False, cheat: 
     if cheat:
         parts.append(f"`stages/2/{full_port.CHEAT_MD_NAME}` lists the TTNN calls a decoder port needs, each checked against the tt-metal source: an argument "
                      "that is not listed there does not exist. Check a call there before you write it.")
+    if idioms:
+        parts.append(f"`stages/2/{full_port.IDIOMS_NAME}` shows the ttnn idioms of a port that passed this check (weight upload, one projection helper, "
+                     "mesh read-back, shared prefill and decode). They are idioms to adapt to this model, not code to copy.")
     parts.append(f"Write your first version of `port_model.py` within {FIRST_VERSION_TURNS} turns, even if it is incomplete, then refine "
                  "it. Do not page through the stage 1 reference files: the check reads them, and a port may not. Do not search the "
                  "machine for other models' code; the worked example the skill names is enough.")
