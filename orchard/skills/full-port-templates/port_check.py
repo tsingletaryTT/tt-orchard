@@ -66,8 +66,10 @@ Output: evidence/port-check.json (orchard-port-check/1, see orchard/skills/full-
 """
 import collections
 import hashlib
+import heapq
 import importlib
 import inspect
+import itertools
 import json
 import os
 import re
@@ -103,7 +105,12 @@ COUNTS = collections.Counter()   # the worker's tally of ttnn calls since the la
 OPS_KEY = "ops"                  # the worker's reply field that carries the tally
 DEVICE_OPS_FAILURE = "device-ops"          # the `op` of a failure of the device-op gate (orchard/port_repair.py reads it from the failure line)
 MAX_OP_NAMES = 60                # names kept per request's tally
-SCAN_NODES = 200_000             # objects visited by the weight scan
+SCAN_NODES = 100_000             # objects visited by the weight scan
+SCAN_DEPTH = 16                  # levels of containers and attributes the weight scan goes down
+SCAN_TOP = 8                     # host tensors listed in the failure message, largest first
+SCAN_DEVICE_NAMES = 20_000       # device tensor names kept to pair with a host tensor
+PATH_KEY_MAX = 80                # characters of one dict key or attribute name in a path
+HOST_MESSAGE_MAX = 1500          # characters of the load-gate failure message
 HOST_SHARE_MAX = 0.5             # more than this share of the weight elements on the host fails the run
 CONFIG_MAX = 1 << 20             # the snapshot's config.json is a few kilobytes
 SOURCE_MAX = 1 << 21             # a port source file is read to this size for the static count
@@ -445,15 +452,16 @@ def take_counts() -> dict:
 
 
 def weight_kind(x):
-    """("host" or "device", element count) for a tensor-like object, else None. Torch and numpy tensors are host. A ttnn tensor is device unless
-    it reports a storage type that is not on the device. Read from the type's module and attributes only: no import of torch or numpy."""
+    """("host" or "device", element count, shape, kind) for a tensor-like object, else None. `kind` is "torch", "numpy" or "ttnn". Torch and
+    numpy tensors are host. A ttnn tensor is device unless it reports a storage type that is not on the device. Read from the type's module and
+    attributes only: no import of torch or numpy."""
     t = type(x)
     root = (t.__module__ or "").split(".")[0]
     try:
         if root == "torch" and hasattr(x, "numel") and hasattr(x, "dtype"):
-            return "host", int(x.numel())
+            return "host", int(x.numel()), shape_of(x), "torch"
         if root == "numpy" and t.__name__ == "ndarray":
-            return "host", int(x.size)
+            return "host", int(x.size), shape_of(x), "numpy"
         if root == "ttnn" and hasattr(x, "shape") and not inspect.isclass(x) and not callable(x):
             numel = 1
             for d in tuple(x.shape):
@@ -461,40 +469,102 @@ def weight_kind(x):
             where = "device"
             if hasattr(x, "storage_type"):
                 where = "device" if "DEVICE" in str(x.storage_type()).upper() else "host"
-            return where, numel
+            return where, numel, shape_of(x), "ttnn"
     except Exception:
         return None
     return None
 
 
-def scan_weights(*roots) -> dict:
+def _printable(text, limit: int) -> str:
+    """`text` as one printable line cut to `limit` characters, for a message built from the worker's reply."""
+    text = text if isinstance(text, str) else "?"
+    text = "".join(c if c.isprintable() else "?" for c in text)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def shape_of(x) -> tuple:
+    """The shape as at most 8 whole numbers, or () when the object does not give one."""
+    try:
+        return tuple(int(d) for d in tuple(x.shape))[:8]
+    except Exception:
+        return ()
+
+
+def step_name(key) -> str:
+    """One dict key as it appears in a path: a short string or number in brackets. Any other key type is named by its type, so no user code
+    (a `__repr__`) runs while the walk builds a path."""
+    if isinstance(key, str):
+        key = "".join(c if c.isprintable() else "?" for c in key[:PATH_KEY_MAX]) + ("..." if len(key) > PATH_KEY_MAX else "")
+        return f"[{key!r}]"
+    if type(key) in (int, bool):
+        return f"[{int(key)}]"
+    return f"[<{type(key).__name__}>]"
+
+
+def leaf_name(path: str) -> str:
+    """The last step of a path, the name a host tensor and its device twin share (`'up_proj.weight'` or `.up_proj`)."""
+    for mark in ("['", "."):
+        if mark in path:
+            tail = path.rsplit(mark, 1)[1]
+            return tail.rstrip("']")
+    return path
+
+
+def scan_weights(*roots, labels=None) -> dict:
     """Walk what the port holds (dicts, lists, tuples, sets and object attributes, no modules, classes or functions) and total the weight
-    elements by where they live. Bounded to SCAN_NODES objects; `truncated` says it stopped early. Properties are never called."""
-    seen, stack, host, dev, n_host, n_dev, visited = set(), list(roots), 0, 0, 0, 0, 0
+    elements by where they live. Each object is visited once (a visited-id set, so a cycle ends), at most SCAN_NODES objects and SCAN_DEPTH
+    levels deep; `truncated` says a cap stopped the walk. Properties are never called. Besides the totals it keeps the SCAN_TOP largest host
+    tensors with their paths from the roots (`labels` names the roots, default root0, root1; names and shapes only, never values) and, for
+    each, the device tensor that has the same leaf name, if any."""
+    labels = list(labels or []) + [f"root{i}" for i in range(len(roots))][len(labels or []):]
+    seen, host, dev, n_host, n_dev, visited, cut = set(), 0, 0, 0, 0, 0, False
+    stack = [(r, labels[i], 0) for i, r in reversed(list(enumerate(roots)))]
+    top, tick, device_by_leaf = [], 0, {}              # top: a min-heap of (elements, -arrival, entry), at most SCAN_TOP long
     while stack and visited < SCAN_NODES:
-        x = stack.pop()
+        x, path, depth = stack.pop()
         if id(x) in seen or x is None or isinstance(x, (str, bytes, int, float, bool, types.ModuleType, types.FunctionType, type)):
             continue
         seen.add(id(x))
         visited += 1
         kind = weight_kind(x)
         if kind is not None:
-            if kind[0] == "host":
-                host, n_host = host + kind[1], n_host + 1
+            where, numel, shape, name = kind
+            if where == "host":
+                host, n_host, tick = host + numel, n_host + 1, tick + 1
+                entry = {"path": path, "shape": list(shape), "elements": numel, "kind": name if name != "ttnn" else "ttnn-host"}
+                if len(top) < SCAN_TOP:
+                    heapq.heappush(top, (numel, -tick, id(entry), entry))
+                elif (numel, -tick) > top[0][:2]:
+                    heapq.heapreplace(top, (numel, -tick, id(entry), entry))
             else:
-                dev, n_dev = dev + kind[1], n_dev + 1
+                dev, n_dev = dev + numel, n_dev + 1
+                if len(device_by_leaf) < SCAN_DEVICE_NAMES:
+                    device_by_leaf.setdefault(leaf_name(path), {"path": path, "shape": list(shape)})
             continue
-        if isinstance(x, dict):
-            stack.extend(x.values())
-        elif isinstance(x, (list, tuple, set, frozenset)):
-            stack.extend(x)
-        else:
-            try:
-                stack.extend(vars(x).values())
-            except TypeError:
-                pass
+        if depth >= SCAN_DEPTH:
+            cut = cut or bool(children(x))             # a deeper level exists: the walk stops here and says so
+            continue
+        for step, child in reversed(children(x)):
+            stack.append((child, path + step, depth + 1))
+    rows = [e for _n, _t, _i, e in sorted(top, key=lambda t: (-t[0], -t[1]))]
+    for e in rows:
+        e["device"] = device_by_leaf.get(leaf_name(e["path"]))
     return {"host_elements": host, "device_elements": dev, "host_tensors": n_host, "device_tensors": n_dev, "visited": visited,
-            "truncated": bool(stack)}
+            "truncated": bool(stack) or cut, "top_host": rows}
+
+
+def children(x) -> list:
+    """(path step, child) pairs of a container or object, without calling any property or user code. Capped at SCAN_NODES entries."""
+    try:
+        if isinstance(x, dict):
+            return [(step_name(k), v) for k, v in itertools.islice(x.items(), SCAN_NODES)]
+        if isinstance(x, (list, tuple)):
+            return [(f"[{i}]", v) for i, v in enumerate(itertools.islice(x, SCAN_NODES))]
+        if isinstance(x, (set, frozenset)):
+            return [("{...}", v) for v in itertools.islice(x, SCAN_NODES)]
+        return [("." + str(k)[:PATH_KEY_MAX], v) for k, v in itertools.islice(vars(x).items(), SCAN_NODES)]
+    except TypeError:
+        return []
 
 
 def worker(read_fd: int, write_fd: int) -> int:
@@ -529,7 +599,7 @@ def worker(read_fd: int, write_fd: int) -> int:
                 model = mod.load(req["model_dir"], device)
                 reply({"ok": True, OPS_KEY: take_counts()})
             elif op == "scan":           # untimed, right after `load`: where the port's weights live
-                reply({"ok": True, "weights": scan_weights(model, vars(mod))})
+                reply({"ok": True, "weights": scan_weights(model, vars(mod), labels=["model", "port_module"])})
             elif op == "prefill":
                 COUNTS.clear()
                 reply({"ok": True, "id": argmax(mod.prefill(model, [int(i) for i in req["ids"]])), OPS_KEY: take_counts()})
@@ -725,7 +795,33 @@ class DeviceOps:
         self.weights = {k: scan.get(k) for k in ("host_elements", "device_elements", "host_tensors", "device_tensors", "visited", "truncated")}
         if host + dev and host / (host + dev) > HOST_SHARE_MAX:
             raise PortFailed(f"{DEVICE_OPS_FAILURE}: after load() the port holds {host} weight elements as host torch or numpy tensors and "
-                             f"{dev} as ttnn tensors; at most {int(HOST_SHARE_MAX * 100)}% may stay on the host. " + self.what_to_do(), op="load")
+                             f"{dev} as ttnn tensors; at most {int(HOST_SHARE_MAX * 100)}% may stay on the host. " + self.host_listing(scan)
+                             + self.what_to_do(), op="load")
+
+    @staticmethod
+    def host_listing(scan: dict) -> str:
+        """The largest host-held tensors with their paths (`model` is what load() returned), the count of the rest, and the one thing to do.
+        Every field of the worker's list is type-checked here; a bad row is skipped. The text is cut to HOST_MESSAGE_MAX characters, the
+        closing instruction kept whole."""
+        rows = scan.get("top_host")
+        parts = []
+        for r in (rows if isinstance(rows, list) else [])[:SCAN_TOP]:
+            if not isinstance(r, dict) or type(r.get("elements")) is not int or not isinstance(r.get("path"), str):
+                continue
+            shape = r.get("shape")
+            shape = "x".join(str(d) for d in shape[:8] if type(d) is int) if isinstance(shape, list) else "?"
+            twin = r.get("device")
+            twin = (f"; the device copy is {_printable(twin.get('path'), 90)}" if isinstance(twin, dict) and isinstance(twin.get("path"), str) else "")
+            parts.append(f"{_printable(r['path'], 110)} shape {shape} = {r['elements']} elements, {_printable(r.get('kind'), 10)}{twin}")
+        if not parts:
+            return ""
+        total = scan.get("host_tensors")
+        rest = total - len(parts) if type(total) is int and total > len(parts) else 0
+        head = "Largest host copies, from the value load() returned (named `model` here): " + " | ".join(parts)
+        head += f" | and {rest} more host tensors" if rest else ""
+        head += ". The walk was cut short (walk truncated), so more may exist." if scan.get("truncated") is True else "."
+        tail = (" Delete or do not store the host copy: after ttnn.from_torch(w, ...) keep only the ttnn tensor; see stages/2/decoder_idioms.md. ")
+        return head[:HOST_MESSAGE_MAX - len(tail)] + tail
 
     def add_load(self, ops) -> None:
         self.total.update(self._clean(ops))
