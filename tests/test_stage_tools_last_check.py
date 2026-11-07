@@ -231,6 +231,18 @@ def test_the_edit_command_takes_its_old_text_from_the_file_and_is_quoted_for_the
     assert words[words.index("--old") + 1] == "x = f(\"it's\")  # $HOME `id`"
 
 
+@pytest.mark.parametrize("secret", ['url = "https://user:hunter2@example.com/x"', 'tok = "hf_abcdefghijklmnopqrstuvwx"', 'k = "ghp_abcdefghijklmnopqrstuvwx"'])
+def test_a_line_that_holds_a_credential_gets_no_edit_command_so_the_secret_is_not_printed(tmp_path, secret):
+    # port_check.py's port_frame removes credentials from the failure text; the old text of the command is read back from the file and would restore them.
+    src = "import ttnn\n\ndef prefill(model, ids):\n    " + secret + "\n"
+    out_text = "FAILED: the port failed at 'prefill': '[port_model.py:4: x] ValueError: boom'\nPORT_CHECK_FAILURE {\"kind\": \"port\", \"op\": \"prefill\"}\n"
+    stage = with_port(make_stage(tmp_path, output=out_text, returncode=2), src)
+    out = text(load_tool(), stage)
+    assert not next_lines(out)
+    assert "hunter2" not in out and "hf_abcdef" not in out and "ghp_abcdef" not in out
+    assert "port_model.py line 4" in out                            # the location is still given
+
+
 def test_a_frame_in_a_port_that_changed_after_the_check_gets_no_edit_command(tmp_path):
     stage = with_port(make_stage(tmp_path, output=FRAME_OUT, returncode=2))
     os.utime(stage / "port" / "port_model.py", None)

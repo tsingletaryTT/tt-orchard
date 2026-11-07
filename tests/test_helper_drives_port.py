@@ -425,6 +425,23 @@ def test_same_failure_twice_needs_the_same_op_and_the_same_message_in_two_rounds
     assert rh.same_failure_twice([rnd(1, 1, "load", "boom"), later_start, rnd(3, 2, "load", "boom")], 2, 2) is False      # round 1 belongs to an earlier attempt
 
 
+def _failures(a, b):
+    def rnd(seq, k, failure):
+        return {"seq": seq, "stage": 2, "event": "decision", "data": {"decision": port_repair.DECISION, "round": k, "op": "load", "failure": failure}}
+    return [{"seq": 1, "stage": 2, "event": "stage_start", "data": {}}, rnd(2, 1, a), rnd(3, 2, b)]
+
+
+def test_failures_that_differ_only_in_the_port_frame_prefix_are_the_same_failure():
+    # Run 20's prefix `[port_model.py:LINE: source line]` moves when the helper adds lines above the failing one; the failure has not moved.
+    a = "the port failed at 'load': \"[port_model.py:12: raise KeyError('x')] KeyError: 'x'\""
+    b = "the port failed at 'load': \"[port_model.py:14: raise KeyError('x')] KeyError: 'x'\""
+    c = "the port failed at 'load': \"[port_model.py:14: y = a[0] + b] KeyError: 'x'\""
+    assert rh.same_failure_twice(_failures(a, b), 2, 2) is True
+    assert rh.same_failure_twice(_failures(a, c), 2, 2) is True                 # a source line may hold brackets
+    assert rh.same_failure_twice(_failures(a, a.replace("KeyError: 'x'", "KeyError: 'y'")), 2, 2) is False       # another message is another failure
+    assert rh.same_failure_twice(_failures(a, a.replace("[port_model.py:12: raise KeyError('x')] ", "")), 2, 2) is True   # frame on one side only
+
+
 def test_a_cap_other_than_the_default_is_used_by_due():
     asked = [{"seq": i, "stage": 2, "event": "decision", "data": {"decision": rh.ASKED, "round": i}} for i in range(1, 8)]
     assert rh.due(asked, 2, 8)[0] is False

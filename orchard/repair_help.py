@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 from orchard import phone_a_friend as paf
@@ -453,7 +454,19 @@ def same_failure_twice(entries: list[dict], n: int, k: int) -> bool:
     if prev is None or cur is None:
         return False
     pd, cd = _data(prev), _data(cur)
-    return pd.get("op") == cd.get("op") and bool(cd.get("failure")) and pd.get("failure") == cd.get("failure")
+    return (pd.get("op") == cd.get("op") and bool(cd.get("failure"))
+            and _without_frame(pd.get("failure")) == _without_frame(cd.get("failure")))
+
+
+# The port check puts `[port_model.py:LINE: source line] ` before an exception's text. The line number moves when an edit adds lines above the failing
+# one, so two rounds that fail the same way would differ. The source line may hold brackets, so the group ends at the first `] ` that is followed
+# by an exception name (`KeyError:`) or by the closing quote.
+_FRAME = re.compile(r"\[[\w./-]+:\d+(?:: .*?)?\] (?=[A-Za-z_][\w.]*(?::|\"|$))")
+
+
+def _without_frame(failure):
+    """`failure` with the port frame prefix removed, for comparing two rounds' failures."""
+    return _FRAME.sub("", failure, count=1) if isinstance(failure, str) else failure
 
 
 # ---- the best port so far, kept across attempts ----------------------------------------------------------------------------------------

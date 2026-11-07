@@ -53,6 +53,9 @@ TOOLS_CONFIG_REL = "stage_tools.json"                # written by the supervisor
 FACTS_REL = "port_facts.json"
 PROMPT_REL = "stages/1/evidence/reference/prompt-ids.json"
 FRAME_RE = re.compile(r"^the port failed at '\w{1,20}': ['\"]\[([A-Za-z0-9_][A-Za-z0-9_./-]{0,79}\.py):(\d{1,6})")   # the check's `[port_model.py:LINE: text]` prefix (port_check.py port_frame)
+# The check's own credential patterns (port_check.py `_USERINFO`, `_TOKEN`). A source line that matches is not offered as the old text of an edit: the
+# check removed the credential from the failure text and the command would read it back from the file and print it.
+SECRET_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,31}://[^/\s@]*@|\b(?:hf_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]")
 EDIT_LINE_MAX = 150                                  # a source line longer than this is not offered as the old text of an edit
 PORT_SCAN_MAX = 200                                  # files looked at when asking whether the port changed after the check
 STALE_NOTE = ("this is the output of the check that ran before this step. The check runs again when you reply with no tool call; writing a file "
@@ -228,7 +231,7 @@ def edit_hint(stage: Path, message: str, base: str):
     text, why = _read_text_beneath(Path(stage), parts, EDIT_MAX_BYTES, name)
     rows = text.splitlines() if text is not None else []
     line = rows[number - 1].strip() if 0 < number <= len(rows) else ""
-    if not line or len(line) > EDIT_LINE_MAX or not line.isprintable():
+    if not line or len(line) > EDIT_LINE_MAX or not line.isprintable() or SECRET_RE.search(line):
         return sentence, None
     return sentence, f"python3 {base}/stage_tools.py edit {base}/{'/'.join(parts)} --old {shlex.quote(line)} --new 'THE FIXED LINE'"
 
