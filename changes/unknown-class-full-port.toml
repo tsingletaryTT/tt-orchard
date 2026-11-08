@@ -1,0 +1,3 @@
+target = "0.9.130"
+summary = "Stage 0 calls a model with no shared tensor name and a definite text config difference a full port, not class unknown (issue 594)."
+pr = 595

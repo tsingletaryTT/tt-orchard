@@ -3143,7 +3143,11 @@ def decide_class(c: dict, t: dict, reasons: list[str], sc: dict, vt: dict | None
     reasons for full-port and the sidecar problems (sc["problems"], told apart by value). restricted-head: the backbone matches and the only thing missing is an
     lm_head that a sidecar's rows stand in for (t["head"]["restricted"], set by detect_restricted_head)."""
     ns = t["normalized_name_sets"]
-    could_not_compare = (c.get("errors") and "text_key_values" not in c) or bool(t["errors"]) or ns["common"] == 0
+    # No shared tensor name means the tensors cannot be compared, but the text config can still show a definite difference (a different hidden
+    # size, head count or vocabulary): then the backbone is not the nearest model's and the class is full-port (issue 594, Olmo-Hybrid-7B).
+    # With nothing else known, or with unreadable headers or config, it stays unknown.
+    config_differs = any(r.startswith("text config ") for r in reasons)
+    could_not_compare = (c.get("errors") and "text_key_values" not in c) or bool(t["errors"]) or (ns["common"] == 0 and not config_differs)
     if could_not_compare:
         return "unknown"
     # A definite difference in the backbone is full-port whatever a sidecar's problems are (summerMC/Diffusion-Qwen3.8-27B: 48 extra text tensors
