@@ -476,10 +476,20 @@ def weight_kind(x):
 
 
 def _printable(text, limit: int) -> str:
-    """`text` as one printable line cut to `limit` characters, for a message built from the worker's reply."""
-    text = text if isinstance(text, str) else "?"
+    """`text` as one printable line cut to `limit` characters, for a message built from the worker's reply. Credentials go first, on the whole text
+    (the module's one `scrub`, defined with `clip`; there must not be a second definition, which would replace it for clip and port_frame)."""
+    text = scrub(text) if isinstance(text, str) else "?"
     text = "".join(c if c.isprintable() else "?" for c in text)
     return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+COUNT_MAX = 2 ** 63
+
+
+def _count_ok(n) -> bool:
+    """A whole number a tensor count, element count or dimension can be: not a bool, not negative, below 2**63. A larger one is not printed (it
+    could also overrun the message, and str() of a huge int raises)."""
+    return type(n) is int and 0 <= n < COUNT_MAX
 
 
 def shape_of(x) -> tuple:
@@ -494,6 +504,7 @@ def step_name(key) -> str:
     """One dict key as it appears in a path: a short string or number in brackets. Any other key type is named by its type, so no user code
     (a `__repr__`) runs while the walk builds a path."""
     if isinstance(key, str):
+        key = scrub(key)                    # the whole key first (issue 592), then the cut
         key = "".join(c if c.isprintable() else "?" for c in key[:PATH_KEY_MAX]) + ("..." if len(key) > PATH_KEY_MAX else "")
         return f"[{key!r}]"
     if type(key) in (int, bool):
@@ -501,37 +512,57 @@ def step_name(key) -> str:
     return f"[<{type(key).__name__}>]"
 
 
-def leaf_name(path: str) -> str:
-    """The last step of a path, the name a host tensor and its device twin share (`'up_proj.weight'` or `.up_proj`)."""
-    for mark in ("['", "."):
-        if mark in path:
-            tail = path.rsplit(mark, 1)[1]
-            return tail.rstrip("']")
-    return path
+def step_leaf(step: str) -> str:
+    """The name inside one path step: `['up_proj.weight']` gives `up_proj.weight`, `.up_proj` gives `up_proj`, `[3]` gives `3`. Taken from the step
+    itself, never cut out of the whole path text (issue 583: `model['host'].weight` was read as `host'].weight`)."""
+    if step.startswith("['") and step.endswith("']"):
+        return step[2:-2]
+    if step.startswith(".") or step.startswith("["):
+        return step[1:].rstrip("]")
+    return step
+
+
+def extend_path(path: str, step: str) -> str:
+    """One path with one more step. Every path the walk builds comes through here."""
+    return path + step
 
 
 def scan_weights(*roots, labels=None) -> dict:
     """Walk what the port holds (dicts, lists, tuples, sets and object attributes, no modules, classes or functions) and total the weight
-    elements by where they live. Each object is visited once (a visited-id set, so a cycle ends), at most SCAN_NODES objects and SCAN_DEPTH
-    levels deep; `truncated` says a cap stopped the walk. Properties are never called. Besides the totals it keeps the SCAN_TOP largest host
-    tensors with their paths from the roots (`labels` names the roots, default root0, root1; names and shapes only, never values) and, for
-    each, the device tensor that has the same leaf name, if any."""
+    elements by where they live. Each object is visited once (a visited-id set, so a cycle ends) and at most SCAN_DEPTH levels deep. One work
+    budget, SCAN_NODES, is shared by everything the walk looks at: every entry of every container counts, kept or skipped, so a long list of
+    `None` cannot hide a tensor behind it. `truncated` says a cap stopped the walk. The walk is lazy: a container's children are read one at a
+    time and a path is built only for an object that is kept, so the memory held is bounded by the depth, not by the width (issue 593).
+    Properties are never called. Besides the totals it keeps the SCAN_TOP largest host tensors with their paths from the roots (`labels` names
+    the roots, default root0, root1; names and shapes only, never values) and, for each, the device tensor that has the same leaf name, if any."""
     labels = list(labels or []) + [f"root{i}" for i in range(len(roots))][len(labels or []):]
-    seen, host, dev, n_host, n_dev, visited, cut = set(), 0, 0, 0, 0, 0, False
-    stack = [(r, labels[i], 0) for i, r in reversed(list(enumerate(roots)))]
+    seen, host, dev, n_host, n_dev, visited, work, cut = set(), 0, 0, 0, 0, 0, 0, False
     top, tick, device_by_leaf = [], 0, {}              # top: a min-heap of (elements, -arrival, entry), at most SCAN_TOP long
-    while stack and visited < SCAN_NODES:
-        x, path, depth = stack.pop()
+    # A frame is (iterator of (step, child), path of the container, depth of its children). The roots are the children of a virtual frame.
+    frames = [(iter([("", r, labels[i]) for i, r in enumerate(roots)]), "", 0)]
+    while frames:
+        it, base, depth = frames[-1]
+        try:
+            step, x, root_label = next(it)
+        except StopIteration:
+            frames.pop()                                # an exhausted frame is drained first: it never counts as unread work
+            continue
+        if work >= SCAN_NODES:
+            cut = True                                  # an entry is waiting and the budget is spent: the walk is incomplete
+            break
+        work += 1
         if id(x) in seen or x is None or isinstance(x, (str, bytes, int, float, bool, types.ModuleType, types.FunctionType, type)):
             continue
         seen.add(id(x))
         visited += 1
+        path = root_label if depth == 0 else extend_path(base, step)
         kind = weight_kind(x)
         if kind is not None:
             where, numel, shape, name = kind
             if where == "host":
                 host, n_host, tick = host + numel, n_host + 1, tick + 1
-                entry = {"path": path, "shape": list(shape), "elements": numel, "kind": name if name != "ttnn" else "ttnn-host"}
+                entry = {"path": path, "shape": list(shape), "elements": numel, "kind": name if name != "ttnn" else "ttnn-host",
+                         "_leaf": step_leaf(step) if depth else path}
                 if len(top) < SCAN_TOP:
                     heapq.heappush(top, (numel, -tick, id(entry), entry))
                 elif (numel, -tick) > top[0][:2]:
@@ -539,37 +570,33 @@ def scan_weights(*roots, labels=None) -> dict:
             else:
                 dev, n_dev = dev + numel, n_dev + 1
                 if len(device_by_leaf) < SCAN_DEVICE_NAMES:
-                    device_by_leaf.setdefault(leaf_name(path), {"path": path, "shape": list(shape)})
+                    device_by_leaf.setdefault(step_leaf(step) if depth else path, {"path": path, "shape": list(shape)})
             continue
-        kids, wide = children(x)
-        cut = cut or wide                              # the container has more entries than the walk reads: it is incomplete
+        kids = child_iter(x)
         if depth >= SCAN_DEPTH:
-            cut = cut or bool(kids)                    # a deeper level exists: the walk stops here and says so
+            cut = cut or next(kids, None) is not None   # a deeper level exists: the walk stops here and says so
             continue
-        for step, child in reversed(kids):
-            stack.append((child, path + step, depth + 1))
+        frames.append((kids, path, depth + 1))
     rows = [e for _n, _t, _i, e in sorted(top, key=lambda t: (-t[0], -t[1]))]
     for e in rows:
-        e["device"] = device_by_leaf.get(leaf_name(e["path"]))
+        e["device"] = device_by_leaf.get(e.pop("_leaf"))
     return {"host_elements": host, "device_elements": dev, "host_tensors": n_host, "device_tensors": n_dev, "visited": visited,
-            "truncated": bool(stack) or cut, "top_host": rows}
+            "truncated": cut, "top_host": rows}
 
 
-def children(x) -> tuple:
-    """((path step, child) pairs, wide) of a container or object, without calling any property or user code. At most SCAN_NODES pairs are
-    read; `wide` is True when the container held more, so the caller can mark the scan incomplete."""
+def child_iter(x):
+    """An iterator of (path step, child, None) for a container or object, without calling any property or user code. Lazy: nothing is read until the
+    walk asks for it, and a step string is built when its child is reached."""
     try:
         if isinstance(x, dict):
-            got = [(step_name(k), v) for k, v in itertools.islice(x.items(), SCAN_NODES + 1)]
-        elif isinstance(x, (list, tuple)):
-            got = [(f"[{i}]", v) for i, v in enumerate(itertools.islice(x, SCAN_NODES + 1))]
-        elif isinstance(x, (set, frozenset)):
-            got = [("{...}", v) for v in itertools.islice(x, SCAN_NODES + 1)]
-        else:
-            got = [("." + str(k)[:PATH_KEY_MAX], v) for k, v in itertools.islice(vars(x).items(), SCAN_NODES + 1)]
+            return ((step_name(k), v, None) for k, v in x.items())
+        if isinstance(x, (list, tuple)):
+            return ((f"[{i}]", v, None) for i, v in enumerate(x))
+        if isinstance(x, (set, frozenset)):
+            return (("{...}", v, None) for v in x)
+        return (("." + scrub(str(k))[:PATH_KEY_MAX], v, None) for k, v in vars(x).items())
     except TypeError:
-        return [], False
-    return got[:SCAN_NODES], len(got) > SCAN_NODES
+        return iter(())
 
 
 def worker(read_fd: int, write_fd: int) -> int:
@@ -817,22 +844,37 @@ class DeviceOps:
         rows = scan.get("top_host")
         parts = []
         for r in (rows if isinstance(rows, list) else [])[:SCAN_TOP]:
-            if not isinstance(r, dict) or type(r.get("elements")) is not int or not isinstance(r.get("path"), str):
+            if not isinstance(r, dict) or not _count_ok(r.get("elements")) or not isinstance(r.get("path"), str):
                 continue
             shape = r.get("shape")
-            shape = "x".join(str(d) for d in shape[:8] if type(d) is int) if isinstance(shape, list) else "?"
+            shape = "x".join(str(d) for d in shape[:8] if _count_ok(d)) if isinstance(shape, list) else "?"
             twin = r.get("device")
             twin = (f"; the device copy is {_printable(twin.get('path'), 90)}" if isinstance(twin, dict) and isinstance(twin.get("path"), str) else "")
             parts.append(f"{_printable(r['path'], 110)} shape {shape} = {r['elements']} elements, {_printable(r.get('kind'), 10)}{twin}")
         if not parts:
             return ""
         total = scan.get("host_tensors")
-        rest = total - len(parts) if type(total) is int and total > len(parts) else 0
-        head = "Largest host copies, from the value load() returned (named `model` here): " + " | ".join(parts)
-        head += f" | and {rest} more host tensors" if rest else ""
-        head += ". The walk was cut short (walk truncated), so more may exist." if scan.get("truncated") is True else "."
+        # A genuine scan cannot count more host tensors than the entries it looked at (SCAN_NODES), so a count outside 0..SCAN_NODES is not
+        # believed and no remainder is claimed (review of PR 598). It also bounds the digits the reservation below allows for.
+        total = total if type(total) is int and len(parts) <= total <= SCAN_NODES else len(parts)
+        lead = "Largest host copies, from the value load() returned (named `model` here): "
         tail = (" Delete or do not store the host copy: after ttnn.from_torch(w, ...) keep only the ttnn tensor; see stages/2/decoder_idioms.md. ")
-        return head[:HOST_MESSAGE_MAX - len(tail)] + tail
+        truncated = " The walk was cut short (walk truncated), so more may exist." if scan.get("truncated") is True else ""
+        # The remainder count and the truncation notice are reserved before any row is added (issue 584). Rows go in whole, in order, while
+        # they fit; a row that does not fit is left out and counted in the remainder, so the count always matches what is shown.
+        reserve = len(lead) + len(f" | and {SCAN_NODES} more host tensors") + 1 + len(truncated) + len(tail)
+        shown, used = [], 0
+        for part in parts:
+            cost = len(part) + (3 if shown else 0)
+            if reserve + used + cost > HOST_MESSAGE_MAX:
+                break
+            shown.append(part)
+            used += cost
+        rest = total - len(shown)
+        head = lead + " | ".join(shown)
+        head += f" | and {rest} more host tensors" if rest and shown else (f"and {rest} more host tensors" if rest else "")
+        head += "." + truncated
+        return head[:max(0, HOST_MESSAGE_MAX - len(tail))] + tail     # the reservation already fits; this keeps the cap whatever the rows hold
 
     def add_load(self, ops) -> None:
         self.total.update(self._clean(ops))
