@@ -165,3 +165,31 @@ def test_the_best_port_snapshot_is_fully_synced_before_save_best_returns(tmp_pat
     snap = str(tmp_path / "stages" / "2.best" / rec["snapshot"])
     must = {str(tmp_path / "stages"), str(tmp_path / "stages" / "2.best"), snap, snap + "/sub"}
     assert must <= set(synced), sorted(must - set(synced))
+
+
+def test_an_operator_abort_written_while_the_helper_answers_beats_a_budget_that_ran_out_in_the_same_wait(rig, monkeypatch, tmp_path):
+    """Review of PR 614: the budget branch returned `pause` before the control file was read, so an abort written during the wait stayed unread
+    and the run ended as blocked. Abort beats pause beats budget."""
+    calls = {"asks": 0}
+    clock = {"now": 0.0}
+
+    def answer(body):
+        calls["asks"] += 1
+        if calls["asks"] == 2:                                  # the rescue ask of round 2
+            clock["now"] += 10 ** 7                             # the budget runs out during the wait ...
+            Control(rig.run_dir).write("abort")                 # ... and the operator aborts in the same wait
+        from test_supervisor_telegraph_in_repair import reply
+        return reply(PREFILL_BROKEN if calls["asks"] == 1 else HONEST)(body)
+    wire_helper(monkeypatch, tmp_path, [answer])
+    start(rig, BROKEN, [PREFILL_BROKEN + "# a\n"])
+    looping_coder(rig)
+    base = sv.Supervisor.__init__
+
+    def init(self, *a, **k):
+        base(self, *a, **k)
+        wall = self.clock
+        self.clock = lambda: wall() + clock["now"]
+    monkeypatch.setattr(sv.Supervisor, "__init__", init)
+    rig.run()
+    stopped = decs(rig, "helper rescue stopped")
+    assert stopped and stopped[-1]["command"] == "abort", stopped
