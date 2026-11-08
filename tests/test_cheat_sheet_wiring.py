@@ -111,16 +111,19 @@ def test_the_cheat_tool_prints_the_same_text_as_the_library_for_every_entry_of_e
 
 # ---- what the supervisor installs -------------------------------------------------------------------------------------------------------
 
-def pin(tmp_path, *, orchard_dir=None):
+def pin(tmp_path, *, orchard_dir=None, before=None):
     run = tmp_path / "run"
     sd = run / "stages" / "2"
     sd.mkdir(parents=True)
+    for name, text in (before or {}).items():
+        (sd / name).write_text(text)
     entries = []
     stub = SimpleNamespace(inputs={"model": str(run)}, run_dir=run,
                            paths=SimpleNamespace(orchard_dir=str(orchard_dir or Path(supervisor.__file__).resolve().parent.parent)),
                            ledger=SimpleNamespace(append=lambda *a, **k: entries.append((a, k))))
     stub._run_json = lambda *a: supervisor.Supervisor._run_json(stub, *a)
     problems = supervisor.Supervisor._pin_full_port(stub, SimpleNamespace(number=2), sd)
+    pin.stub = stub          # the supervisor-like object, for the tests that read what the pin recorded on it
     return problems, sd, entries
 
 
@@ -152,6 +155,53 @@ def test_a_sheet_that_cannot_be_read_is_skipped_with_a_ledger_decision_and_the_s
     assert problems == [] and not (sd / full_port.CHEAT_MD_NAME).exists()
     assert any(k.get("decision") == "cheat sheet not copied" for _, k in entries)
     assert full_port.CHEAT_NAME not in entries[-1][1]["copied"]
+
+
+def unreadable_source_orchard(tmp_path):
+    fake = tmp_path / "orchard-copy"
+    templates = fake / "orchard" / "skills" / "full-port-templates"
+    templates.mkdir(parents=True)
+    for name in (full_port.TEMPLATE_NAME, full_port.TOOLS_NAME):
+        (templates / name).write_bytes((full_port.TEMPLATE.parent / name).read_bytes())
+    return fake
+
+
+def test_issue_535_a_failed_refresh_removes_both_installed_copies_so_the_prompt_does_not_call_an_edited_sheet_verified(tmp_path):
+    """The coder had edited the installed sheet; the next pin cannot read the shipped one. The old copies must not stay, and the prompt line
+    that says the sheet is verified must not appear (the documented fallback is: no sheet)."""
+    fake = unreadable_source_orchard(tmp_path)
+    problems, sd, entries = pin(tmp_path, orchard_dir=fake, before={full_port.CHEAT_NAME: "{}", full_port.CHEAT_MD_NAME: "edited by the coder"})
+    assert problems == []
+    assert not (sd / full_port.CHEAT_NAME).exists() and not (sd / full_port.CHEAT_MD_NAME).exists()
+    assert pin.stub._cheat_ok is False
+    note = port_facts.prepare_note(facts=True, skeleton=True, cheat=pin.stub._cheat_ok and (sd / full_port.CHEAT_MD_NAME).is_file())
+    assert full_port.CHEAT_MD_NAME not in note
+
+
+def test_issue_535_a_failed_refresh_after_the_prepare_step_also_removes_a_copy_the_coder_planted(tmp_path):
+    """The second pin (command=True, after prepare) has the same duty: it does not write a ledger line, but it removes what stands there."""
+    fake = unreadable_source_orchard(tmp_path)
+    _, sd, entries = pin(tmp_path, orchard_dir=fake)
+    (sd / full_port.CHEAT_MD_NAME).write_text("planted during prepare")
+    supervisor.Supervisor._pin_full_port(pin.stub, SimpleNamespace(number=2), sd, command=True)
+    assert not (sd / full_port.CHEAT_MD_NAME).exists() and pin.stub._cheat_ok is False
+
+
+def test_issue_535_the_prepare_prompt_follows_the_refresh_result_not_just_the_file(tmp_path):
+    """At the layer that builds the prompt: a copy that is on disk but was not refreshed is not offered as the verified sheet."""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / full_port.CHEAT_MD_NAME).write_text("something a coder left here")
+    spec = SimpleNamespace(draft="full_port", number=2)
+    for ok, expect in ((False, False), (True, True)):
+        stub = SimpleNamespace(_port_seed={}, _cheat_ok=ok, telegraph=None)
+        outcome = supervisor.Supervisor._prepare_in_code(stub, spec, stage)
+        assert (full_port.CHEAT_MD_NAME in outcome.note) is expect, (ok, outcome.note)
+
+
+def test_issue_535_a_good_refresh_marks_the_sheet_usable(tmp_path):
+    pin(tmp_path)
+    assert pin.stub._cheat_ok is True
 
 
 # ---- the kernel probe -------------------------------------------------------------------------------------------------------------------

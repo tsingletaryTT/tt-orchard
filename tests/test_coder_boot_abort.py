@@ -273,8 +273,9 @@ def test_the_scan_runs_fuser_when_it_exists_and_says_when_nothing_holds_the_devi
         seen.append(argv)
         from orchard.commands import CommandResult
         return CommandResult(tuple(argv), 1, "", "")
-    out = device_holders.scan(proc_root=str(tmp_path), which=lambda name: "/usr/bin/fuser", run=fake_run)
-    assert out["holders"] == [] and seen == [["/usr/bin/fuser", "-v", "/dev/tenstorrent"]] and out["fuser"]["returncode"] == 1
+    out = device_holders.scan(proc_root=str(tmp_path), which=lambda name: "/usr/bin/fuser", run=fake_run, listdir=lambda d: ["0", "1"])
+    # issue 587: fuser is given the device nodes, not the directory (it does not look inside one)
+    assert out["holders"] == [] and seen == [["/usr/bin/fuser", "-v", "/dev/tenstorrent/0", "/dev/tenstorrent/1"]] and out["fuser"]["returncode"] == 1
     assert "no process visible" in device_holders.describe(out)
 
 
@@ -346,3 +347,114 @@ def test_a_wait_flag_that_is_not_sensible_is_refused(rig, flag, value):
     with Ledger(rig.run_dir / "ledger.jsonl") as led, pytest.raises(ValueError, match="coder"):
         build(rig.args, led, adapter=MachineAdapter(rig.m, owner_pid=100), coder=None, versions={"tt_model": "test"}, clock=rig.clock,
               sleep=rig.sleep, disk_usage=lambda p: rig.usage(p), home=rig.home, containers=rig.containers)
+
+
+# ---- review of PR 580 (issue 585): log text is evidence, not a hardware verdict ---------------------------------------------------
+
+def test_a_log_line_that_says_all_ones_does_not_make_a_stalled_boot_a_hardware_block(rig):
+    log = "step 12: constructed an all-ones attention mask\nloading layer 20\n"
+    run_with(rig, lambda m: AbortCoder(m, BootStalled(900, 610, log)))
+    assert rig.run() == 5
+    reason = reasons(rig)[-1]
+    assert "all-ones attention mask" in reason                                          # the evidence is still shown
+    assert blocked.block_code({"decision": "pause", "reason": "blocked: " + reason.lower()}) == "coder-unusable"
+    assert blocked.retryable("coder-unusable", reason) is True
+
+
+def test_the_log_lines_come_last_in_the_block_text_after_every_verdict_sentence(rig):
+    class DeadChips(MachineAdapter):
+        def reset(self, lease):
+            raise AdapterError("gozer reset exited 14: " + ALL_ONES_ERROR)
+
+        def status(self):
+            raise AdapterError(ALL_ONES_ERROR)
+    rig.adapter_cls = DeadChips
+    run_with(rig, lambda m: AbortCoder(m, BootStalled(900, 610, "loading layer 20")), waits=True)
+    assert rig.run() == 5
+    reason = reasons(rig)[0]
+    assert reason.index("power cycle") < reason.index(blocked.LOG_LINES_MARK)
+
+
+def test_only_the_text_before_the_log_marker_is_classified():
+    quoted = "The coder boot stalled: no growth. " + blocked.LOG_LINES_MARK + "RuntimeError all-ones chip off the pcie bus disk full."
+    assert blocked.block_code({"decision": "pause", "reason": "blocked: " + quoted.lower()}) == "coder-unusable"
+    assert blocked.retryable("coder-unusable", quoted) is True
+    verdict = "The chips read all-ones serial numbers. " + blocked.LOG_LINES_MARK + "x"
+    assert blocked.block_code({"decision": "pause", "reason": "blocked: " + verdict.lower()}) == "hardware-unhealthy"
+    assert blocked.retryable("coder-unusable", verdict) is False
+
+
+# ---- review of PR 580 (issue 586): the bus read may take as long as the bus settling ---------------------------------------------------
+
+def test_the_device_state_read_is_given_longer_than_the_bus_settling_period():
+    """`bus.diagnose` re-reads a bad chip for up to SETTLE_S seconds before it calls it dead. A 60 s limit on the read ended the wait before
+    that, so a chip that stayed missing gave bus=None and the failure stayed a retryable coder problem."""
+    from orchard import bus
+    from orchard.supervisor import Supervisor
+    assert Supervisor.DEVICE_STATE_READ_S >= bus.SETTLE_S + 10
+
+
+def test_a_bus_read_that_outlasts_the_limit_is_reported_as_unfinished_not_as_a_healthy_bus(rig, monkeypatch):
+    import threading
+    from orchard.supervisor import Supervisor
+    release = threading.Event()
+    sup = Supervisor.__new__(Supervisor)
+    sup.DEVICE_STATE_READ_S = 0.05
+    sup._gozer_state = lambda: {}
+    sup._off_bus = lambda held: release.wait(5) and None
+    state = sup._device_state(())
+    release.set()
+    assert state["bus"] is None and "did not finish" in state["bus_error"]
+
+
+# ---- review of PR 580 (issue 587): only holders of the leased chips decide the retry ------------------------------------------------------
+
+def holders_on(device, container=True):
+    return lambda: {"holders": [dict(pid=88, comm="docker", devices=[f"/dev/tenstorrent/{device}"], container=container)], "unreadable": 0,
+                    "fuser": None}
+
+
+def test_a_container_on_other_chips_does_not_stop_the_retry(rig, monkeypatch):
+    """The coder leased chips 0 and 1. A container on chip 2 is not what refused the start, so the one retry still happens, and the ledger
+    keeps the whole report."""
+    monkeypatch.setattr(device_holders, "scan", holders_on(2))
+    made = run_with(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL), started_ok()], rows=[]), waits=True)
+    assert rig.run() == 0
+    assert decision_names(rig).count("retrying the coder start once: no container holds the chips") == 1 and 60.0 in rig.clock.sleeps
+    seen = next(d for d in rig.decisions() if d["decision"] == "coder start refused: who holds the device")
+    assert seen["container_holder"] is False and seen["container_on_any_chip"] is True
+    assert seen["holders"]["holders"][0]["devices"] == ["/dev/tenstorrent/2"]
+
+
+def test_a_container_on_the_leased_chips_still_blocks_without_a_retry(rig, monkeypatch):
+    monkeypatch.setattr(device_holders, "scan", holders_on(1))
+    made = run_with(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL), started_ok()], rows=[]))
+    assert rig.run() == 5 and len(serves(made[0].run)) == 1
+
+
+# ---- review of PR 580 (issue 590): the refusal is in the ledger before the evidence is gathered or the wait starts ---------------------
+
+def test_the_ledger_says_not_started_while_the_supervisor_waits_to_retry_and_unknown_just_before_the_retry(rig, monkeypatch):
+    """A crash during the 60 s wait must not leave the earlier `owned: None` record as the latest: recovery would take a container that
+    appeared under the coder's name for its own and stop it."""
+    from orchard.stages import coder_state
+    monkeypatch.setattr(device_holders, "scan", holders((4242, "python3", False)))
+    during_wait = []
+    real_sleep = rig.clock.sleep
+
+    def watching_sleep(s):
+        if s == 60.0:
+            import json
+            lines = (rig.run_dir / "ledger.jsonl").read_text().splitlines()      # the supervisor holds the ledger lock: read the file
+            during_wait.append(coder_state([json.loads(x) for x in lines])[1])
+        return real_sleep(s)
+    rig.clock.sleep = watching_sleep
+    run_with(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL), started_ok()], rows=[]), waits=True)
+    assert rig.run() == 0
+    assert during_wait and during_wait[0]["owned"] is False
+    names = decision_names(rig)
+    i_refused, i_looked = names.index("coder not started"), names.index("coder start refused: who holds the device")
+    i_retry, i_again = names.index("retrying the coder start once: no container holds the chips"), len(names) - 1 - names[::-1].index("coder starting")
+    assert i_refused < i_looked < i_retry < i_again
+    starting = [d for d in rig.decisions() if d["decision"] == "coder starting"][-1]
+    assert starting["server"]["owned"] is None

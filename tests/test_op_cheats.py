@@ -419,3 +419,94 @@ def test_the_run_20_checks_hold_in_a_real_tt_metal_tree():
     problems = oc.verify(sheet, {"tt_metal": oc.build_index(os.environ["ORCHARD_CHEAT_ROOT_TT_METAL"])})
     mine = [p for p in problems if any(p.startswith(f"mistake {i}:") for i, _m in found)]
     assert mine == []
+
+
+# ---- review of PR 529: issues 531 to 534 ----------------------------------------------------------------------------------------------
+
+def tree_with(tmp_path: Path, files: dict) -> dict:
+    """A tree whose binding files are `files` ({path under ttnn/cpp/ttnn/operations/: text}); returns {"tt_metal": Index}."""
+    root = tmp_path / "t"
+    for rel, text in files.items():
+        p = root / "ttnn" / "cpp" / "ttnn" / "operations" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return {"tt_metal": oc.build_index(root)}
+
+
+CLASS_BINDING = '''
+nb::class_<Foo>(m, "Foo")
+    .def(nb::init<int, int>(), nb::arg("x"), nb::arg("y"))
+    .def(nb::init<int, float>(), nb::arg("x"), nb::arg("z"))
+    .def("method", &Foo::method, nb::arg("only_method"))
+    .def_rw("prop", &Foo::prop);
+nb::class_<Lam>(m, "Lam")
+    .def("__init__", [](Lam* t, int a, int b) { new (t) Lam(a, b); }, nb::arg("a"), nb::arg("b"));
+'''
+
+
+def test_issue_531_each_constructor_binding_is_its_own_overload_and_methods_and_properties_are_not_arguments(tmp_path):
+    idx = tree_with(tmp_path, {"foo/foo_nanobind.cpp": CLASS_BINDING})
+    ok = entry("ttnn.Foo", "ttnn.Foo(x, y)", "a = ttnn.Foo(x, y)")
+    mixed = entry("ttnn.Foo", "ttnn.Foo(x, y, z)", "a = ttnn.Foo(x, y)")
+    method_arg = entry("ttnn.Foo", "ttnn.Foo(only_method)", "a = ttnn.Foo(only_method)")
+    prop = entry("ttnn.Foo", "ttnn.Foo(prop)", "a = ttnn.Foo(prop)")
+    assert oc.verify(sheet_of(ok), idx) == []
+    assert oc.verify(sheet_of(entry("ttnn.Lam", "ttnn.Lam(a, b)", "q = ttnn.Lam(a, b)")), idx) == []       # a `__init__` lambda binding is a constructor too (the real matmul program configs)
+    assert any("no single definition" in p for p in oc.verify(sheet_of(mixed), idx))
+    assert any("'only_method'" in p for p in oc.verify(sheet_of(method_arg), idx))
+    assert any("'prop'" in p for p in oc.verify(sheet_of(prop), idx))
+
+
+TWO_NAMESPACES = {
+    "experimental/foo/foo_nanobind.cpp": 'ttnn::bind_function<"foo">(mod, d, &f, nb::arg("x"), nb::arg("gamma"));',
+    "norm/norm_nanobind.cpp": 'ttnn::bind_function<"foo">(mod, d, &f, nb::arg("x"), nb::arg("epsilon"));',
+}
+
+
+def test_issue_532_the_arguments_come_from_the_binding_in_the_requested_namespace(tmp_path):
+    idx = tree_with(tmp_path, TWO_NAMESPACES)
+    wrong = entry("ttnn.experimental.foo", "ttnn.experimental.foo(x, epsilon)", "y = ttnn.experimental.foo(x, epsilon=1)")
+    right = entry("ttnn.experimental.foo", "ttnn.experimental.foo(x, gamma)", "y = ttnn.experimental.foo(x, gamma=1)")
+    assert oc.verify(sheet_of(right), idx) == []
+    assert oc.verify(sheet_of(wrong), idx)
+    assert oc.resolve(idx["tt_metal"], "ttnn.experimental.foo")[1] == {"x", "gamma"}
+    assert oc.alternatives(idx["tt_metal"], "ttnn.experimental.foo") == [["x", "gamma"]]
+
+
+def test_issue_533_an_argument_name_or_a_docstring_does_not_make_an_operation(tmp_path):
+    idx = tree_with(tmp_path, {"norm/norm_nanobind.cpp": NANOBIND + '\nstatic const char* doc = "ghost op";\n' + 'mod.attr("MY_CONST") = 1;\n'})
+    assert oc.resolve(idx["tt_metal"], "ttnn.epsilon")[0] is False          # only nb::arg("epsilon") mentions it
+    assert oc.resolve(idx["tt_metal"], "ttnn.ghost")[0] is False
+    assert oc.resolve(idx["tt_metal"], "ttnn.MY_CONST")[0] is True          # a real constant binding still counts
+    assert oc.resolve(idx["tt_metal"], "ttnn.relu")[0] is True              # and so does a template registration
+    assert oc.verify(sheet_of(entry("ttnn.epsilon", "ttnn.epsilon(x)", "y = ttnn.epsilon(x)")), idx)
+
+
+def incomplete_tree(tmp_path, monkeypatch):
+    """One small file is read; the file that holds `target` is over the size limit and is skipped."""
+    monkeypatch.setattr(oc, "FILE_MAX_BYTES", 300)
+    return tree_with(tmp_path, {"a/a_nanobind.cpp": 'ttnn::bind_function<"present">(mod, d, &f, nb::arg("x"));',
+                                "b/big_nanobind.cpp": 'ttnn::bind_function<"target">(mod, d, &f, nb::arg("x"));\n' + "// pad\n" * 100})
+
+
+def test_issue_534_an_absence_claim_is_refused_when_the_index_skipped_a_file(tmp_path, monkeypatch):
+    idx = incomplete_tree(tmp_path, monkeypatch)
+    assert idx["tt_metal"].incomplete and any("big_nanobind.cpp" in s for s in idx["tt_metal"].skipped)
+    absent = {"symptom": "s", "fix": "f", "seen_in": "x", "checks": [{"root": "tt_metal", "name": "ttnn.target", "absent": True}]}
+    absent_arg = {"symptom": "s", "fix": "f", "seen_in": "x", "checks": [{"root": "tt_metal", "name": "ttnn.present", "absent_args": ["y"]}]}
+    for m in (absent, absent_arg):
+        problems = oc.verify(sheet_of(GOOD, mistakes=[m]), idx)
+        assert any("incomplete" in p and "big_nanobind.cpp" in p for p in problems), problems
+
+
+def test_issue_534_a_complete_index_still_certifies_an_absence(tmp_path):
+    idx = tree_with(tmp_path, {"a/a_nanobind.cpp": 'ttnn::bind_function<"present">(mod, d, &f, nb::arg("x"));'})
+    absent = {"symptom": "s", "fix": "f", "seen_in": "x", "checks": [{"root": "tt_metal", "name": "ttnn.nothing", "absent": True}]}
+    assert not any("incomplete" in p for p in oc.verify(sheet_of(mistakes=[absent]), idx))
+
+
+def test_issue_534_a_simulator_only_claim_is_refused_when_the_hardware_index_is_incomplete(tmp_path, monkeypatch):
+    idx = incomplete_tree(tmp_path, monkeypatch)
+    e = {"name": "ttl.ghost", "status": "simulator only", "in": ["sim"], "signature": "ttl.ghost(x)", "hardware_absent": ["ghost"]}
+    problems = oc._status_problems(e, {"hardware": idx["tt_metal"]})
+    assert any("incomplete" in p for p in problems), problems

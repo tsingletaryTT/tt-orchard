@@ -310,7 +310,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
 
     _template_reasons(record, stage_dir, run_dir, reasons)
     _source_reasons(record, stage_dir, run_dir, reasons, stage, entry)
-    _device_ops_reasons(record, run_dir, reasons)
+    _device_ops_reasons(record, run_dir, reasons, stage_dir)
     return reasons, seen
 
 
@@ -353,6 +353,11 @@ def _template_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: lis
     cfg_path = stage_dir / CONFIG_NAME
     if not isinstance(cfg, dict) or cfg.get("sha256") != (_sha(cfg_path) if cfg_path.is_file() else None):
         reasons.append(f"{CONFIG_NAME} is not the file the record names (missing, or changed after the test)")
+    elif cfg.get("path") != os.path.relpath(cfg_path, run_dir):
+        # Issue 546: the hash alone does not say which file the record means. A record could keep the stage config's hash and name another
+        # in-run config (one with a smaller layer count) as its path.
+        reasons.append(f"{RECORD_FILE} config path {str(cfg.get('path'))[:120]!r} is not this stage's {os.path.relpath(cfg_path, run_dir)}: "
+                       f"the record must name the {CONFIG_NAME} it hashed")
     free = record.get("free_run_ids")
     if not _ids(free) or not free:
         reasons.append(f"{RECORD_FILE} free_run_ids must be a non-empty list of whole numbers")
@@ -419,19 +424,16 @@ def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list,
 HOST_SHARE_MAX = 0.5             # the template's bound: more than this share of the weight elements on the host fails (port_check.py)
 
 
-def _snapshot_floor(record: dict, run_dir: Path):
-    """The floor the checkpoint's own config gives (orchard/ttnn_calls.py `layer_floor`), read from the model snapshot the record's config file
-    names, or None when that cannot be read. The record's floor is the template's; this is the gate's own reading of the same input."""
-    cfg = record.get("config")
-    path = cfg.get("path") if isinstance(cfg, dict) else None
-    place = _inside(run_dir, path) if isinstance(path, str) else None
-    if place is None:
-        return None
+def _snapshot_floor(stage_dir: Path):
+    """The floor the checkpoint's own config gives (orchard/ttnn_calls.py `layer_floor`), read from the model snapshot that this stage's own
+    `port_check_config.json` names (not from a path the record names: issue 546), or None when that cannot be read. The record's floor is
+    the template's; this is the gate's own reading of the same input. A Hugging Face cache stores `config.json` as a link, so the link is
+    resolved before the safe read (issue 548)."""
     try:
-        snapshot = safeio.read_json(place, max_bytes=1 << 16, expect=dict).get("model_snapshot")
+        snapshot = safeio.read_json(Path(stage_dir) / CONFIG_NAME, max_bytes=1 << 16, expect=dict).get("model_snapshot")
         if not isinstance(snapshot, str) or not snapshot or "\0" in snapshot:
             return None
-        config = safeio.read_json(Path(snapshot) / "config.json", max_bytes=1 << 20, expect=dict)
+        config = safeio.read_json(safeio.resolved(Path(snapshot) / "config.json"), max_bytes=1 << 20, expect=dict)
     except (safeio.SafeReadError, OSError, ValueError):
         return None
     return ttnn_calls.layer_floor(config)[0]
@@ -441,7 +443,7 @@ def _count(x) -> bool:
     return type(x) is int and 0 <= x <= 10 ** 12
 
 
-def _device_ops_reasons(record: dict, run_dir: Path, reasons: list) -> None:
+def _device_ops_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: Path) -> None:
     """The record's `device_ops` (written by the template from the calls its worker counted, issue 541) must show the port computed on the device:
     at least `floor` matmul-family ttnn calls in the first prefill and in some decode step (or trace replays that stand for them), and weights that
     are mostly ttnn tensors. A record without the field is refused: the check that wrote it did not count."""
@@ -454,7 +456,7 @@ def _device_ops_reasons(record: dict, run_dir: Path, reasons: list) -> None:
     if type(floor) is not int or not 1 <= floor <= 10_000:
         reasons.append(f"{RECORD_FILE} device_ops.floor must be a whole number from 1 to 10000, got {floor!r}")
         return
-    own = _snapshot_floor(record, run_dir)
+    own = _snapshot_floor(stage_dir)
     if own is not None and floor < own:
         reasons.append(f"device_ops.floor is {floor}, below the {own} the checkpoint's config gives (one matmul-family call per layer)")
         floor = own
@@ -471,9 +473,12 @@ def _device_ops_reasons(record: dict, run_dir: Path, reasons: list) -> None:
         reasons.append(f"no decode step made {floor} matmul-family ttnn calls (the most was {decode}, trace replays {replays}): the port did "
                        "not decode on the device")
     weights = ops.get("weights")
-    if isinstance(weights, dict):
+    if weights is not None and not (isinstance(weights, dict) and _count(weights.get("host_elements")) and _count(weights.get("device_elements"))):
+        # Issue 549: absent weight evidence stays allowed (the scan did not run), but evidence that was supplied has to be well formed.
+        reasons.append(f"{RECORD_FILE} device_ops.weights must be an object with whole-number host_elements and device_elements, got {str(weights)[:80]!r}")
+    elif isinstance(weights, dict):
         host, dev = weights.get("host_elements"), weights.get("device_elements")
-        if _count(host) and _count(dev) and host + dev and host / (host + dev) > HOST_SHARE_MAX:
+        if host + dev and host / (host + dev) > HOST_SHARE_MAX:
             reasons.append(f"the port's weights stayed on the host: {host} elements as torch or numpy tensors, {dev} as ttnn tensors. Upload them "
                            "with ttnn.from_torch(..., device=mesh_device) in load()")
 

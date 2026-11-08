@@ -1,0 +1,3 @@
+target = "0.9.134"
+summary = "The full-port record gate ties the record's config path to the stage config, reads the layer floor from it through a snapshot link, and refuses malformed weight evidence (issues 546, 548, 549)."
+pr = 610

@@ -201,6 +201,7 @@ class Index:
         self.text: list[str] = []
         self.files = 0
         self.incomplete = False
+        self.skipped: list[str] = []         # files that were over the size limit or could not be read: a definition in one of them is not in the index
 
     def _add(self, name: str, args, where: str) -> None:
         self.args.setdefault(name, set()).update(args)
@@ -232,12 +233,24 @@ _CLASS = re.compile(r'(?:tt_serializable_class|nb::class_)<[^>]*>\(\s*\w+\s*,\s*
 _FIELD = re.compile(r'\.def_(?:rw|ro)\("(\w+)"')
 
 
+_DEF_STATEMENT = re.compile(r'\.def\w*\(')
+
+
 def _cpp_classes(text: str):
-    """(class name, constructor argument and field names) for each bound class in a C++ file: the text from one class binding to the next."""
+    """(class name, one argument list per constructor binding) for each bound class in a C++ file. The text from one class binding to the next
+    is cut into `.def...(` statements; each `.def(nb::init<...>(), ...)` or `.def("__init__", ...)` is a constructor and its `nb::arg` names are one overload. Method
+    arguments (`.def("method", ..., nb::arg(...))`) and properties (`.def_rw`, `.def_ro`) are not constructor arguments. A class with no
+    constructor binding is one overload with no arguments (the name exists; nothing is read)."""
     marks = list(_CLASS.finditer(text))
     for i, m in enumerate(marks):
         region = text[m.end(): marks[i + 1].start() if i + 1 < len(marks) else len(text)]
-        yield m.group(1), [a or b for a, b in _NB_ARG.findall(region)] + _FIELD.findall(region)
+        starts = [d.start() for d in _DEF_STATEMENT.finditer(region)]
+        ctors = []
+        for j, st in enumerate(starts):
+            statement = region[st: starts[j + 1] if j + 1 < len(starts) else len(region)]
+            if re.match(r'\.def\(\s*(?:nb::init\b|"__init__")', statement):       # `.def(nb::init<...>(), ...)` or a `.def("__init__", lambda, ...)`
+                ctors.append([a or b for a, b in _NB_ARG.findall(statement)])
+        yield m.group(1), ctors or [[]]
 
 
 def _params(fn) -> list:
@@ -285,6 +298,8 @@ def build_index(root, *, max_depth: int = 24) -> Index:
     try:
         found = safeio.scan_beneath(pin, max_depth=max_depth, max_entries=400_000)
         index.incomplete = found.incomplete
+        if found.incomplete:
+            index.skipped.append("(the directory walk stopped early: too deep or too many entries)")
         for entry in found.entries:
             if entry.kind != "file" or any(p in SKIP_DIRS for p in entry.parts[:-1]):
                 continue
@@ -296,6 +311,7 @@ def build_index(root, *, max_depth: int = 24) -> Index:
                 data = safeio.read_beneath(pin.fd, entry.parts, max_bytes=FILE_MAX_BYTES)
             except (safeio.SafeReadError, OSError, ValueError):
                 index.incomplete = True
+                index.skipped.append("/".join(entry.parts))
                 continue
             rel = "/".join(entry.parts)
             source = data.decode("utf-8", "replace")
@@ -306,11 +322,32 @@ def build_index(root, *, max_depth: int = 24) -> Index:
                 index.text.append(source)
                 for leaf, args in _cpp_blocks(source):
                     index._add(leaf, args, rel)
-                for leaf, args in _cpp_classes(source):
-                    index._add(leaf, args, rel)
+                for leaf, overloads in _cpp_classes(source):
+                    for args in overloads:
+                        index._add(leaf, args, rel)           # each constructor binding is its own overload (issue 531)
     finally:
         pin_cm.__exit__(None, None, None)
     return index
+
+
+_SPACES = ("experimental", "transformer")
+
+
+def _bindings(index: Index, name: str) -> list:
+    """(argument list, file) for each separate definition or binding of the last part of `name`, an alias followed once. When the name has a
+    namespace part (`ttnn.experimental.foo`), only the bindings whose file path contains it count, for the signature check and for the
+    lookup alike (issue 532)."""
+    parts = name.split(".")
+    leaf = parts[-1]
+    space = parts[-2] if len(parts) >= 3 and parts[-2] in _SPACES else None
+    out = []
+    for key in (leaf, index.alias.get(leaf)):
+        if key is None:
+            continue
+        for args, where in zip(index.order.get(key, []), index.where.get(key, [])):
+            if space is None or space in where:
+                out.append((list(args), where))
+    return out
 
 
 def alternatives(index: Index, name: str) -> list:
@@ -318,37 +355,36 @@ def alternatives(index: Index, name: str) -> list:
     parts = name.split(".")
     if len(parts) >= 2 and f"{parts[-2]}.{parts[-1]}" in index.qualified:
         return [list(index.qualified[f"{parts[-2]}.{parts[-1]}"])]
-    leaf = parts[-1]
-    out = list(index.order.get(leaf, []))
-    if leaf in index.alias:
-        out += index.order.get(index.alias[leaf], [])
-    return out
+    return [args for args, _ in _bindings(index, name)]
+
+
+def _registered(leaf: str, text: str) -> bool:
+    """Whether a C++ file registers `leaf` as a name: a template registration (`bind_unary<"relu">`) or a binding call that names it first
+    (`.def("leaf"`, `.def_static("leaf"`, `.attr("leaf")`, `.value("leaf"`). A quoted word elsewhere (`nb::arg("leaf")`, a docstring) is not one."""
+    n = re.escape(leaf)
+    return bool(re.search(r'<\s*"%s"\s*[>,]|\.(?:def|def_static|attr|value)\(\s*"%s"' % (n, n), text))
 
 
 def resolve(index: Index, name: str):
     """(found, argument names or None, where) for a dotted `name`. A method is `Class.method`; otherwise only the last part is looked up
-    (the namespace prefix, `experimental` or `transformer`, is checked against the path of the C++ file). An alias (`operation` for
-    `pykernel_gen`) is followed once."""
+    (the namespace prefix, `experimental` or `transformer`, is checked against the path of the C++ file, and the arguments come only from
+    bindings under it). An alias (`operation` for `pykernel_gen`) is followed once."""
     parts = name.split(".")
     if len(parts) >= 2 and f"{parts[-2]}.{parts[-1]}" in index.qualified:
         key = f"{parts[-2]}.{parts[-1]}"
         return True, set(index.qualified[key]), index.where.get(key, [])
     leaf = parts[-1]
-    if leaf in index.alias:
-        merged = Index()
-        merged.args = {leaf: set(index.args.get(leaf, set())) | set(index.args.get(index.alias[leaf], set()))}
-        merged.where = {leaf: index.where.get(leaf, []) + index.where.get(index.alias[leaf], [])}
-        if merged.args[leaf] or merged.where[leaf]:
-            index, name = merged, ".".join(parts[:-1] + [leaf])
-    if leaf in index.args:
-        where = index.where[leaf]
-        space = parts[-2] if len(parts) >= 3 and parts[-2] in ("experimental", "transformer") else None
-        if space and not any(space in w for w in where):
-            return False, None, []
-        return True, set(index.args[leaf]), where
+    bound = _bindings(index, name)
+    if bound:
+        args = set()
+        for a, _ in bound:
+            args.update(a)
+        return True, args, [w for _, w in bound]
+    if leaf in index.args or leaf in index.alias and index.alias[leaf] in index.args:
+        return False, None, []                # bound, but not under the requested namespace
     if leaf in index.imported:
         return True, None, []
-    if any(re.search(r'["\']%s["\']|<\s*"%s"\s*>' % (re.escape(leaf), re.escape(leaf)), t) for t in index.text):
+    if any(_registered(leaf, t) for t in index.text):
         return True, None, []                 # registered by a template or class: the name exists, its arguments are not read
     return False, None, []
 
@@ -451,6 +487,10 @@ def verify(sheet: dict, indexes: dict) -> list[str]:
                 problems.append(f"mistake {i}: root {c['root']!r} was not read")
                 continue
             found, args, _ = resolve(index, c["name"])
+            if (c.get("absent") or c.get("absent_args")) and index.incomplete:
+                problems.append(f"mistake {i}: {c['name']} is claimed absent from {c['root']!r}, but the index of that root is incomplete "
+                                f"(skipped: {', '.join(index.skipped[:3]) or 'unknown'}), so absence cannot be certified")
+                continue
             if c.get("absent"):
                 if found:
                     problems.append(f"mistake {i}: {c['name']} is claimed absent from {c['root']!r} but was found")
@@ -483,6 +523,9 @@ def _status_problems(entry: dict, indexes: dict) -> list[str]:
         elif args is not None and any(a not in args for a in sig):
             out.append(f"{name}: status {status!r} but the signature has an argument the hardware package lacks")
     else:
+        if hw.incomplete and entry.get("hardware_absent"):
+            return [f"{name}: the hardware index is incomplete (skipped: {', '.join(hw.skipped[:3]) or 'unknown'}), so a claim that the hardware "
+                    f"package lacks something cannot be certified"]
         if "hardware" in entry["in"]:
             out.append(f"{name}: a simulator-only entry does not claim the hardware root")
         leaf = name.rsplit(".", 1)[-1]
