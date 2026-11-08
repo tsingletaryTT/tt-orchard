@@ -1,0 +1,3 @@
+target = "0.9.132"
+summary = "Stage 1 loads a model whose config has an auto_map through the Auto class named there, so the shipped code is what loads (issue 602)."
+pr = 607

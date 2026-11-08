@@ -221,3 +221,64 @@ def test_the_audit_is_written_before_the_trusted_retry_runs(tmp_path):
     import json
     audit = json.loads((tmp_path / "evidence" / "remote-code-audit.json").read_text())
     assert "modeling_spark.py" in audit["files"] and "scrubbed" in audit
+
+
+# ---- issue 602: a built-in architecture name with an auto_map must load the shipped code ------------------------------------------
+
+def _auto_map_fakes(auto_map):
+    seen = {"builtin": 0, "auto": []}
+
+    class Stop(Exception):
+        pass
+
+    class Builtin:
+        @staticmethod
+        def from_pretrained(path, **kw):
+            seen["builtin"] += 1
+            raise AssertionError("the built-in class was loaded and the shipped code skipped")
+
+    class Auto:
+        @staticmethod
+        def from_pretrained(path, **kw):
+            seen["auto"].append(kw.get("trust_remote_code"))
+            if not kw.get("trust_remote_code"):
+                raise ValueError(REFUSAL)
+            raise Stop
+
+    class Cfg:
+        architectures = ["LlamaForCausalLM"]
+        model_type = "llama"
+
+    cfg = Cfg()
+    if auto_map is not None:
+        cfg.auto_map = auto_map
+    AutoConfig = type("AutoConfig", (), {"from_pretrained": staticmethod(lambda path, **kw: cfg)})
+    T = type("T", (), {"__version__": "4.57.0", "AutoConfig": AutoConfig, "LlamaForCausalLM": Builtin,
+                       "AutoModelForCausalLM": Auto, "AutoModel": Auto})
+    return T, seen, Stop
+
+
+def test_a_built_in_architecture_with_an_auto_map_loads_through_the_auto_class_with_the_scrub_first(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    T, seen, Stop = _auto_map_fakes({"AutoModelForCausalLM": "modeling_spark.SparkForCausalLM"})
+    with pytest.raises(Stop):
+        rg.load_model(type("Torch", (), {"bfloat16": "bf16"}), T, snap)
+    assert seen["builtin"] == 0
+    assert seen["auto"] == [None, True]                       # refused once, then retried after the scrub and audit
+    assert rg.REMOTE_CODE["used"] is True and "modeling_spark.py" in rg.REMOTE_CODE["files"]
+
+
+def test_without_an_auto_map_the_built_in_class_is_still_chosen(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    T, seen, _ = _auto_map_fakes(None)
+    with pytest.raises(AssertionError, match="built-in class"):
+        rg.load_model(type("Torch", (), {"bfloat16": "bf16"}), T, snap)
+    assert seen["auto"] == [] and seen["builtin"] == 1
+
+
+def test_an_auto_map_with_only_config_or_tokenizer_entries_keeps_the_built_in_class(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    T, seen, _ = _auto_map_fakes({"AutoConfig": "configuration_x.XConfig", "AutoTokenizer": ["tok.X", None]})
+    with pytest.raises(AssertionError, match="built-in class"):
+        rg.load_model(type("Torch", (), {"bfloat16": "bf16"}), T, snap)
+    assert seen["auto"] == []

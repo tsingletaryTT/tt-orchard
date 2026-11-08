@@ -297,6 +297,16 @@ def resolve_class(transformers, config, arch):
     top level, so the model's own module is searched next; then a name with `For` in it is a head model (the causal LM) and a bare name is
     the base model (AutoModel). A bare name must not become AutoModelForCausalLM: on the pplx-decider run the stage agent put that class in
     its copy of this script, and it found none of the headless checkpoint's keys (the stage 1 gate now checks the copy's hash)."""
+    # A config with an auto_map that names a model class ships its own implementation. The concrete transformers class for a built-in
+    # architecture name (LlamaForCausalLM) does not dispatch through that mapping, so the Auto class named there is the one that loads the
+    # shipped code (issue 602). Entries for the config, tokenizer or processor do not count.
+    auto_map = getattr(config, "auto_map", None)
+    if isinstance(auto_map, dict):
+        names = [k for k in auto_map if isinstance(k, str) and k.startswith("AutoModel")]
+        prefer = "AutoModelForCausalLM" if arch and "For" in arch else "AutoModel"
+        pick = prefer if prefer in names else (names[0] if names else None)
+        if pick is not None and getattr(transformers, pick, None) is not None:
+            return getattr(transformers, pick)
     cls = getattr(transformers, arch, None) if arch else None
     model_type = getattr(config, "model_type", None)
     if cls is None and arch and model_type:
