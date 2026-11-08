@@ -31,5 +31,8 @@ read -r lease owner devs vis < <(python3 -c 'import json,sys; p=json.load(open(s
 export TT_LEASE_ID="$lease" TT_LEASE_OWNER_PID="$owner" TT_LEASE_DEV_INDICES="$devs" TT_VISIBLE_DEVICES="$vis"
 echo "lease $lease on devices $devs" >&2
 "$@"; rc=$?
-gozer release "$lease" >&2
-exit $rc
+gozer release "$lease" >&2; relrc=$?
+# A failed release (15 refused, 19 reset failed) is not hidden by a command that succeeded; a failed command keeps its own status.
+if [ $rc -ne 0 ]; then exit $rc; fi
+if [ $relrc -ne 0 ]; then echo "gozer release $lease failed (exit $relrc)" >&2; fi
+exit $relrc

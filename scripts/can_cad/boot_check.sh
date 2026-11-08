@@ -14,19 +14,28 @@ PORT=20161
 mkdir -p logs
 rm -f logs/boot-ready.txt logs/boot-start.txt logs/boot-serve.log logs/boot-bench.log logs/boot-container.log logs/boot-status.txt \
       bench-package-p300.json prefill-package-p300.json
-started=0
+own=0; cid=""
+find_cid() { docker ps -a -q --filter "name=^/${NAME}\$" 2>/dev/null | head -1; }
 cleanup() {
-  if [ "$started" = 1 ]; then
-    docker logs "$NAME" > logs/boot-container.log 2>&1
-    docker stop "$NAME" > /dev/null 2>&1
-    docker rm -f "$NAME" > /dev/null 2>&1
+  # Only a container this invocation created is touched: `own` is set after the name was shown to be free, and the id is read back from
+  # docker after the start attempt (including a start that failed part way).
+  if [ "$own" = 1 ]; then
+    [ -n "$cid" ] || cid=$(find_cid)
+    if [ -n "$cid" ]; then
+      docker logs "$cid" > logs/boot-container.log 2>&1
+      docker stop "$cid" > /dev/null 2>&1
+      docker rm -f "$cid" > /dev/null 2>&1
+    fi
   fi
 }
 trap cleanup EXIT
 fail() { echo "FAILED: $1" | tee logs/boot-status.txt >&2; exit "${2:-1}"; }
+if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then fail "a container named $NAME already exists; stop and remove it first (this check does not touch it)"; fi
+own=1
 date -u +%FT%TZ > logs/boot-start.txt
-started=1
-"${TT_MODEL_PYTHON:-python3}" serve_staged.py --profile p300 --port "$PORT" --detach > logs/boot-serve.log 2>&1 || fail "serve_staged.py exited non-zero (see logs/boot-serve.log)"
+"${TT_MODEL_PYTHON:-python3}" serve_staged.py --profile p300 --port "$PORT" --detach > logs/boot-serve.log 2>&1; serve_rc=$?
+cid=$(find_cid)
+[ $serve_rc -eq 0 ] || fail "serve_staged.py exited $serve_rc (see logs/boot-serve.log)"
 t0=$(date +%s)
 until curl --fail --silent --show-error -m 3 "http://127.0.0.1:$PORT/health" > /dev/null 2>&1; do
   sleep "${BOOT_POLL_S:-10}"

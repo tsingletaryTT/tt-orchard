@@ -64,6 +64,25 @@ def test_a_direct_grant_runs_the_command_with_the_lease_exported_and_releases(tm
     assert "--owner-pid" in calls(tmp_path)[0]
 
 
+def fake_gozer_release_status(tmp: Path, rc: int):
+    """Make the fake gozer's `release` exit with rc."""
+    g = (tmp / "gozer").read_text().replace("if sys.argv[1] == 'release':\n    sys.exit(0)", f"if sys.argv[1] == 'release':\n    print('release refused', file=sys.stderr)\n    sys.exit({rc})")
+    (tmp / "gozer").write_text(g)
+
+
+def test_a_failed_release_after_a_successful_command_is_the_wrappers_exit_status(tmp_path):
+    fake_gozer(tmp_path, [[0, GRANT]])
+    fake_gozer_release_status(tmp_path, 15)
+    r = run_lease(tmp_path, "true")
+    assert r.returncode == 15 and "release refused" in r.stderr
+
+
+def test_a_failed_command_status_wins_over_a_failed_release(tmp_path):
+    fake_gozer(tmp_path, [[0, GRANT]])
+    fake_gozer_release_status(tmp_path, 19)
+    assert run_lease(tmp_path, "bash", "-c", "exit 3").returncode == 3
+
+
 def test_a_queued_ticket_is_claimed_with_acquire_ticket_and_the_owner_pid_never_wait(tmp_path):
     fake_gozer(tmp_path, [[10, {"queued": True, "ticket": "t77", "position": 1}], [10, {"queued": True, "ticket": "t77", "position": 1}], [0, GRANT]])
     r = run_lease(tmp_path, "true")
@@ -145,15 +164,29 @@ def test_no_lease_environment_means_not_covered():
 
 # ---- boot_check.sh --------------------------------------------------------------------------------------------------------------------
 
-def boot_rig(tmp: Path, *, health_ok=True, bench_rc=0, serve_rc=0, container_stays=True):
+def boot_rig(tmp: Path, *, health_ok=True, bench_rc=0, serve_rc=0, container_stays=True, preexisting=False, serve_creates=True):
     work = tmp / "work"; (work / "logs").mkdir(parents=True)
     bin_ = tmp / "bin"; bin_.mkdir()
+    exists = tmp / "container-exists"
+    if preexisting:
+        exists.write_text("1")
     (work / "bench-package-p300.json").write_text("STALE")                  # a stale result from an earlier run must not survive a failed one
-    write_exec(work / "serve_staged.py", f"import sys\nsys.exit({serve_rc})\n")
+    create = f"open({str(exists)!r}, 'w').write('1')\n" if serve_creates else ""
+    write_exec(work / "serve_staged.py", f"import sys\n{create}sys.exit({serve_rc})\n")
     write_exec(work / "bench.py", f"import sys, json\nopen('bench-package-p300.json','w').write('{{}}')\nsys.exit({bench_rc})\n")
     write_exec(work / "bench_prefill.py", "import sys\nopen('prefill-package-p300.json','w').write('[]')\n")
     write_exec(bin_ / "curl", f"#!/bin/bash\n[[ \"$*\" == *--fail* ]] || {{ echo 'curl without --fail' >> {tmp}/curl-bad.log; }}\nexit {0 if health_ok else 22}\n")
-    write_exec(bin_ / "docker", f"#!/bin/bash\necho \"$@\" >> {tmp}/docker.log\nif [ \"$1\" = ps ]; then {'echo tt-model-berkelium-qwen3-32b-cadquery-p300-p300' if container_stays else 'true'}; fi\nexit 0\n")
+    name = "tt-model-berkelium-qwen3-32b-cadquery-p300-p300"
+    running = f"[ -e {exists} ] && echo {name}" if container_stays else "true"
+    write_exec(bin_ / "docker", f"""#!/bin/bash
+echo "$@" >> {tmp}/docker.log
+case "$*" in
+  "ps -a --format {{{{.Names}}}}") [ -e {exists} ] && echo {name};;
+  "ps -a -q "*) [ -e {exists} ] && echo cid123;;
+  "ps --format {{{{.Names}}}}") {running};;
+esac
+exit 0
+""")
     return work, bin_
 
 
@@ -177,7 +210,7 @@ def test_a_health_check_that_never_passes_fails_and_removes_stale_results_and_th
     assert r.returncode != 0
     assert not (work / "bench-package-p300.json").exists() and not (work / "logs" / "boot-ready.txt").exists()
     log = (tmp_path / "docker.log").read_text()
-    assert "stop tt-model-berkelium-qwen3-32b-cadquery-p300-p300" in log and "rm -f tt-model-berkelium-qwen3-32b-cadquery-p300-p300" in log
+    assert "stop cid123" in log and "rm -f cid123" in log
 
 
 def test_a_failed_benchmark_fails_the_check(tmp_path):
@@ -185,10 +218,26 @@ def test_a_failed_benchmark_fails_the_check(tmp_path):
     assert run_boot(tmp_path, work, bin_).returncode != 0
 
 
-def test_a_failed_start_fails_the_check_and_still_cleans_up(tmp_path):
+def test_a_failed_start_that_created_a_container_cleans_up_that_container_by_id(tmp_path):
     work, bin_ = boot_rig(tmp_path, serve_rc=3)
     assert run_boot(tmp_path, work, bin_).returncode != 0
-    assert "stop" in (tmp_path / "docker.log").read_text()
+    log = (tmp_path / "docker.log").read_text()
+    assert "stop cid123" in log and "rm -f cid123" in log
+
+
+def test_a_failed_start_that_created_nothing_stops_and_removes_nothing(tmp_path):
+    work, bin_ = boot_rig(tmp_path, serve_rc=3, serve_creates=False)
+    assert run_boot(tmp_path, work, bin_).returncode != 0
+    log = (tmp_path / "docker.log").read_text()
+    assert " stop " not in f" {log}" and "rm -f" not in log
+
+
+def test_a_pre_existing_container_with_the_name_is_refused_and_left_alone(tmp_path):
+    work, bin_ = boot_rig(tmp_path, preexisting=True)
+    r = run_boot(tmp_path, work, bin_)
+    assert r.returncode != 0 and "already exists" in (work / "logs" / "boot-status.txt").read_text()
+    log = (tmp_path / "docker.log").read_text()
+    assert "stop" not in log and "rm -f" not in log and (tmp_path / "container-exists").exists()
 
 
 def test_a_container_that_disappears_fails_the_check(tmp_path):

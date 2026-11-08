@@ -187,3 +187,152 @@ def test_landlock_is_applied_whenever_the_kernel_has_it():
     if not kernel_has:
         pytest.skip("this kernel has no Landlock")
     assert cq_sandbox.run_code("pass\n")["layers"]["landlock"] is True
+
+
+# ---- Landlock ABI table and the fail-closed path (second review of PR 629) --------------------------------------------------------------
+
+FS_ABI3 = (1 << 15) - 1
+
+
+@pytest.mark.parametrize("abi,fs_bits,net", [(1, 13, 0), (2, 14, 0), (3, 15, 0), (4, 15, 3), (5, 16, 3), (6, 16, 3), (7, 16, 3), (8, 16, 3)])
+def test_the_filesystem_and_network_masks_follow_the_abi(abi, fs_bits, net):
+    assert cq_sandbox.masks_for_abi(abi) == ((1 << fs_bits) - 1, net)
+
+
+def test_abi_4_asks_for_no_ioctl_bit_and_the_same_files_as_abi_3():
+    """On ABI 4 the IOCTL_DEV bit (15) is unknown: asking for it makes ruleset creation fail with EINVAL."""
+    fs, net = cq_sandbox.masks_for_abi(4)
+    assert fs == FS_ABI3 and not fs & (1 << 15) and net == 3
+    assert cq_sandbox.masks_for_abi(0) == (0, 0)
+
+
+class FakeLibc:
+    """A libc whose syscall answers the Landlock calls from a table and records the ruleset attribute it was asked to create."""
+
+    def __init__(self, abi, create_fails=False, restrict_fails=False):
+        self.abi, self.create_fails, self.restrict_fails, self.attrs = abi, create_fails, restrict_fails, []
+        self.fds = []
+
+    def syscall(self, num, *args):
+        import ctypes
+        if num == cq_sandbox.SYS_CREATE:
+            ref, size, flags = args
+            if flags == 1:
+                return self.abi
+            self.attrs.append((ref._obj.handled_access_fs, ref._obj.handled_access_net, size))
+            if self.create_fails:
+                ctypes.set_errno(22)
+                return -1
+            fd = os.open(os.devnull, os.O_RDONLY)
+            self.fds.append(fd)
+            return fd
+        if num == cq_sandbox.SYS_ADD_RULE:
+            return 0
+        if num == cq_sandbox.SYS_RESTRICT:
+            return -1 if self.restrict_fails else 0
+        raise AssertionError(num)
+
+    def prctl(self, *args):
+        return 0
+
+
+def test_on_an_abi_4_kernel_the_ruleset_is_created_with_masks_the_kernel_accepts(tmp_path):
+    libc = FakeLibc(abi=4)
+    out = cq_sandbox._landlock(str(tmp_path), libc=libc)
+    assert out["landlock"] is True and out["abi"] == 4 and out["tcp"] is True
+    fs, net, _ = libc.attrs[0]
+    assert fs == FS_ABI3 and net == 3
+
+
+def test_a_failed_ruleset_creation_reports_landlock_false_and_require_enforced_refuses(tmp_path):
+    out = cq_sandbox._landlock(str(tmp_path), libc=FakeLibc(abi=4, create_fails=True))
+    assert out["landlock"] is False and "create failed" in out["reason"]
+    with pytest.raises(cq_sandbox.SandboxUnavailable):
+        cq_sandbox.require_enforced(out)
+    out2 = cq_sandbox._landlock(str(tmp_path), libc=FakeLibc(abi=8, restrict_fails=True))
+    assert out2["landlock"] is False and "restrict_self" in out2["reason"]
+    with pytest.raises(cq_sandbox.SandboxUnavailable):
+        cq_sandbox.require_enforced({"landlock": False, "reason": "kernel has no Landlock"})
+
+
+def forced_failure_python(tmp_path):
+    forced = tmp_path / "forced.py"
+    forced.write_text(f"import sys\nsys.path.insert(0, {str(SCRIPTS)!r})\nimport cq_sandbox\n"
+                      "cq_sandbox._landlock = lambda workdir, libc=None: {'landlock': False, 'reason': 'forced for test'}\n"
+                      "sys.exit(cq_sandbox.main(sys.argv[1:]))\n")
+    wrapper = tmp_path / "py"
+    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {forced} \"$@\"\n")
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
+def test_when_the_sandbox_cannot_be_enforced_the_reply_is_not_run(tmp_path):
+    r = cq_sandbox.run_code("open('ran.txt', 'w').write('x')\n", python=forced_failure_python(tmp_path))
+    assert r["sandbox_unavailable"] is True and r["returncode"] == cq_sandbox.UNAVAILABLE_EXIT
+    assert "ran.txt" not in r["files"] and "forced for test" in r["stderr"]
+
+
+def test_check_reply_reports_sandbox_unavailable_and_counts_nothing_as_executed():
+    fake = lambda code, epi="": {"returncode": 97, "timed_out": False, "sandbox_unavailable": True, "stderr": "sandbox unavailable: x", "layers": {"landlock": False}, "files": {}, "step_bytes": {}}  # noqa: E731
+    row = check_cq.check_reply(reply(GOOD), run_code=fake)
+    assert row["executed"] is False and row["sandbox_unavailable"] is True and row["executes"] is False and row["valid_solid"] is False
+
+
+# ---- only the epilogue's own result.step is judged -------------------------------------------------------------------------------------
+
+EPI = "open('result.step', 'w').write('FINAL')\n"
+
+
+def test_other_step_files_are_ignored_and_result_step_is_the_artifact():
+    r = cq_sandbox.run_code("open('a_first.step', 'w').write('INTERMEDIATE')\nopen('b.step', 'w').write('OTHER')\n", EPI)
+    assert r["step_bytes"] == {"result.step": b"FINAL"} and "a_first.step" in r["files"]
+
+
+def test_a_result_step_written_by_the_generated_code_is_not_the_artifact():
+    r = cq_sandbox.run_code("open('result.step', 'w').write('FORGED')\n", EPI)
+    assert r["step_bytes"] == {"result.step": b"FINAL"}
+
+
+def test_a_script_that_writes_result_step_and_exits_early_has_no_artifact():
+    r = cq_sandbox.run_code("open('result.step', 'w').write('FORGED')\nraise SystemExit(0)\n", EPI)
+    assert r["step_bytes"] == {}
+
+
+def test_an_epilogue_that_fails_leaves_no_artifact():
+    r = cq_sandbox.run_code("open('result.step', 'w').write('FORGED')\n", "raise ValueError('export failed')\n")
+    assert r["step_bytes"] == {} and r["returncode"] != 0
+
+
+@needs_cq
+def test_an_intermediate_solid_exported_first_does_not_decide_the_verdict():
+    code = ("import cadquery as cq\ncq.exporters.export(cq.Workplane('XY').box(2, 2, 2), 'a_part.step')\n"
+            "result = cq.Workplane('XY').circle(5)")
+    row = check_cq.check_reply(reply(code))
+    assert row["executes"] is True and row["valid_solid"] is False
+
+
+# ---- output cannot fill the parent's memory --------------------------------------------------------------------------------------------
+
+def test_a_stdout_flood_is_discarded_not_buffered_in_the_parent():
+    import resource
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    r = cq_sandbox.run_code("import sys\nchunk = 'x' * (1 << 20)\nfor _ in range(300):\n    sys.stdout.write(chunk)\n", timeout_s=60)
+    grown_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1024
+    assert r["returncode"] == 0 and grown_mb < 100, f"the parent grew by {grown_mb:.0f} MB"
+
+
+def test_a_stderr_flood_is_stopped_by_the_file_size_limit_and_only_its_tail_is_read():
+    r = cq_sandbox.run_code("import sys\nchunk = 'e' * (1 << 20)\nfor _ in range(300):\n    sys.stderr.write(chunk)\n", file_bytes=1 << 20, timeout_s=60)
+    assert r["returncode"] != 0 and len(r["stderr"]) <= 300
+
+
+def test_an_epilogue_that_writes_nothing_does_not_promote_a_result_step_the_script_wrote():
+    r = cq_sandbox.run_code("open('result.step', 'w').write('FORGED')\n", "pass\n")
+    assert r["step_bytes"] == {} and "result.step" not in r["files"]
+
+
+def test_check_reply_judges_only_result_step_even_when_the_runner_returns_other_artifacts():
+    fake = lambda code, epi="": {"returncode": 0, "timed_out": False, "sandbox_unavailable": False, "stderr": "", "layers": {"landlock": True},  # noqa: E731
+                                 "files": {"part.step": 5}, "step_bytes": {"part.step": b"intermediate"}}
+    row = check_cq.check_reply(reply(GOOD), run_code=fake)
+    assert row["executes"] is False and row["valid_solid"] is False

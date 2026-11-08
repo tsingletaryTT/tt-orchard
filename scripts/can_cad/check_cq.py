@@ -95,15 +95,21 @@ def check_reply(text: str, run_code=None) -> dict:
         import cq_sandbox
         run_code = cq_sandbox.run_code
     res = run_code(code, EPILOGUE)
-    row["executed"] = True
     row["sandbox"] = res["layers"]
-    row["executes"] = res["returncode"] == 0 and not res["timed_out"] and bool(res["step_bytes"])
+    if res.get("sandbox_unavailable"):
+        row["executed"] = False                                  # the child refused to start the reply: no confinement, nothing ran
+        row["sandbox_unavailable"] = True
+        row["output"] = res["stderr"][-160:]
+        row["executes"] = row["valid_solid"] = False
+        return row
+    row["executed"] = True
+    row["executes"] = res["returncode"] == 0 and not res["timed_out"] and "result.step" in res["step_bytes"]
     if res["timed_out"]:
         row["output"] = "timeout"
     elif res["returncode"] != 0:
         row["output"] = res["stderr"][-160:]
     if row["executes"]:
-        row.update(verify_step(next(iter(res["step_bytes"].values()))))
+        row.update(verify_step(res["step_bytes"]["result.step"]))
     else:
         row["valid_solid"] = False
     return row
@@ -120,7 +126,7 @@ def main(argv) -> int:
     keys = ("header_json", "one_python_block", "parses", "imports_ok", "ends_with_result", "executes", "valid_solid")
     summary = {k: sum(1 for r in rows if r.get(k)) for k in keys}
     layers = next((r["sandbox"] for r in rows if r.get("sandbox")), {})
-    out = {"n": len(rows), "distinct_prompts": len({r["prompt_index"] for r in rows}), "summary": summary, "executed": sum(1 for r in rows if r["executed"]),
+    out = {"sandbox_unavailable": sum(1 for r in rows if r.get("sandbox_unavailable")), "n": len(rows), "distinct_prompts": len({r["prompt_index"] for r in rows}), "summary": summary, "executed": sum(1 for r in rows if r["executed"]),
            "sandbox": layers, "network": ("TCP connect and bind refused by Landlock; UDP and Unix sockets not covered" if layers.get("tcp") else "not blocked"), "rows": rows}
     json.dump(out, open(argv[2], "w"), indent=1)
     print(out["n"], out["distinct_prompts"], summary, out["sandbox"])
