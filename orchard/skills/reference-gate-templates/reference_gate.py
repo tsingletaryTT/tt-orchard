@@ -292,21 +292,31 @@ MIN_REMAP_TENSORS = 3                   # a prefix rewrite stage 0 saw on fewer 
 MAX_LISTED_KEYS = 50
 
 
+def auto_map_model_entry(transformers, config, arch) -> str | None:
+    """The name of the Auto class that loads the model's own code, or None. A config with an auto_map that names a model class ships its
+    own implementation. The concrete transformers class for a built-in architecture name (LlamaForCausalLM) does not dispatch through that
+    mapping, and an Auto class may load the local implementation without complaint when trust is not given, so the caller forces trust (issue
+    602). Entries for the config, tokenizer or processor do not count. A head architecture ("...For...") takes AutoModelForCausalLM, then
+    AutoModel; a bare name takes AutoModel; any other AutoModel* entry comes last, so the order of the JSON keys never decides."""
+    auto_map = getattr(config, "auto_map", None)
+    if not isinstance(auto_map, dict):
+        return None
+    names = [k for k in auto_map if isinstance(k, str) and k.startswith("AutoModel")]
+    order = ["AutoModelForCausalLM", "AutoModel"] if arch and "For" in arch else ["AutoModel"]
+    for name in order + names:
+        if name in names and getattr(transformers, name, None) is not None:
+            return name
+    return None
+
+
 def resolve_class(transformers, config, arch):
     """The class the checkpoint was saved from. `transformers.<arch>` first; many classes (Qwen3_5Model, for one) are not exported at the
     top level, so the model's own module is searched next; then a name with `For` in it is a head model (the causal LM) and a bare name is
     the base model (AutoModel). A bare name must not become AutoModelForCausalLM: on the pplx-decider run the stage agent put that class in
     its copy of this script, and it found none of the headless checkpoint's keys (the stage 1 gate now checks the copy's hash)."""
-    # A config with an auto_map that names a model class ships its own implementation. The concrete transformers class for a built-in
-    # architecture name (LlamaForCausalLM) does not dispatch through that mapping, so the Auto class named there is the one that loads the
-    # shipped code (issue 602). Entries for the config, tokenizer or processor do not count.
-    auto_map = getattr(config, "auto_map", None)
-    if isinstance(auto_map, dict):
-        names = [k for k in auto_map if isinstance(k, str) and k.startswith("AutoModel")]
-        prefer = "AutoModelForCausalLM" if arch and "For" in arch else "AutoModel"
-        pick = prefer if prefer in names else (names[0] if names else None)
-        if pick is not None and getattr(transformers, pick, None) is not None:
-            return getattr(transformers, pick)
+    pick = auto_map_model_entry(transformers, config, arch)
+    if pick is not None:
+        return getattr(transformers, pick)
     cls = getattr(transformers, arch, None) if arch else None
     model_type = getattr(config, "model_type", None)
     if cls is None and arch and model_type:
@@ -384,6 +394,8 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
     if shim is None:
         config = with_remote_code(transformers.AutoConfig.from_pretrained, str(snapshot), snapshot=snapshot)
     arch = (getattr(config, "architectures", None) or [None])[0]
+    if auto_map_model_entry(transformers, config, arch) is not None and not REMOTE_CODE["used"]:
+        allow_remote_code(snapshot)      # the scrub and the audit come first, and with_remote_code then passes trust_remote_code=True at once
     cls = resolve_class(transformers, config, arch)
     # transformers renamed torch_dtype to dtype in 4.56.
     dkey = "dtype" if version_tuple(transformers.__version__) >= (4, 56) else "torch_dtype"

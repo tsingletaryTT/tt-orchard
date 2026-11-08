@@ -226,7 +226,9 @@ def test_the_audit_is_written_before_the_trusted_retry_runs(tmp_path):
 # ---- issue 602: a built-in architecture name with an auto_map must load the shipped code ------------------------------------------
 
 def _auto_map_fakes(auto_map):
-    seen = {"builtin": 0, "auto": []}
+    """The Auto classes load the LOCAL implementation without complaint when trust_remote_code is omitted (a built-in config such as LlamaConfig
+    does that), so only an explicit trust_remote_code=True loads the shipped code. A refusal would hide that case (review of PR 607)."""
+    seen = {"builtin": 0, "auto": [], "which": []}
 
     class Stop(Exception):
         pass
@@ -237,13 +239,17 @@ def _auto_map_fakes(auto_map):
             seen["builtin"] += 1
             raise AssertionError("the built-in class was loaded and the shipped code skipped")
 
-    class Auto:
-        @staticmethod
-        def from_pretrained(path, **kw):
-            seen["auto"].append(kw.get("trust_remote_code"))
-            if not kw.get("trust_remote_code"):
-                raise ValueError(REFUSAL)
-            raise Stop
+    def auto(name):
+        class Auto:
+            @staticmethod
+            def from_pretrained(path, **kw):
+                seen["auto"].append(kw.get("trust_remote_code"))
+                seen["which"].append(name)
+                if not kw.get("trust_remote_code"):
+                    raise AssertionError("the local implementation loaded without trust_remote_code: the shipped code was skipped")
+                raise Stop
+        Auto.__name__ = name
+        return Auto
 
     class Cfg:
         architectures = ["LlamaForCausalLM"]
@@ -254,31 +260,45 @@ def _auto_map_fakes(auto_map):
         cfg.auto_map = auto_map
     AutoConfig = type("AutoConfig", (), {"from_pretrained": staticmethod(lambda path, **kw: cfg)})
     T = type("T", (), {"__version__": "4.57.0", "AutoConfig": AutoConfig, "LlamaForCausalLM": Builtin,
-                       "AutoModelForCausalLM": Auto, "AutoModel": Auto})
+                       "AutoModelForCausalLM": auto("AutoModelForCausalLM"), "AutoModel": auto("AutoModel"),
+                       "AutoModelForSequenceClassification": auto("AutoModelForSequenceClassification")})
     return T, seen, Stop
 
 
-def test_a_built_in_architecture_with_an_auto_map_loads_through_the_auto_class_with_the_scrub_first(tmp_path):
+TORCH = type("Torch", (), {"bfloat16": "bf16"})
+
+
+def test_a_built_in_architecture_with_an_auto_map_is_audited_and_loaded_with_trust_before_any_load(tmp_path):
     snap = snapshot_with_code(tmp_path)
     T, seen, Stop = _auto_map_fakes({"AutoModelForCausalLM": "modeling_spark.SparkForCausalLM"})
     with pytest.raises(Stop):
-        rg.load_model(type("Torch", (), {"bfloat16": "bf16"}), T, snap)
+        rg.load_model(TORCH, T, snap)
     assert seen["builtin"] == 0
-    assert seen["auto"] == [None, True]                       # refused once, then retried after the scrub and audit
+    assert seen["auto"] == [True]                              # the very first load already carries trust: no refusal is waited for
     assert rg.REMOTE_CODE["used"] is True and "modeling_spark.py" in rg.REMOTE_CODE["files"]
+    assert (tmp_path / "evidence" / "remote-code-audit.json").is_file()
 
 
 def test_without_an_auto_map_the_built_in_class_is_still_chosen(tmp_path):
     snap = snapshot_with_code(tmp_path)
     T, seen, _ = _auto_map_fakes(None)
     with pytest.raises(AssertionError, match="built-in class"):
-        rg.load_model(type("Torch", (), {"bfloat16": "bf16"}), T, snap)
-    assert seen["auto"] == [] and seen["builtin"] == 1
+        rg.load_model(TORCH, T, snap)
+    assert seen["auto"] == [] and seen["builtin"] == 1 and rg.REMOTE_CODE["used"] is False
 
 
 def test_an_auto_map_with_only_config_or_tokenizer_entries_keeps_the_built_in_class(tmp_path):
     snap = snapshot_with_code(tmp_path)
     T, seen, _ = _auto_map_fakes({"AutoConfig": "configuration_x.XConfig", "AutoTokenizer": ["tok.X", None]})
     with pytest.raises(AssertionError, match="built-in class"):
-        rg.load_model(type("Torch", (), {"bfloat16": "bf16"}), T, snap)
-    assert seen["auto"] == []
+        rg.load_model(TORCH, T, snap)
+    assert seen["auto"] == [] and rg.REMOTE_CODE["used"] is False
+
+
+def test_json_key_order_does_not_decide_which_auto_class_loads(tmp_path):
+    """A head architecture with no AutoModelForCausalLM entry takes AutoModel before any other model entry, whatever the order of the keys."""
+    snap = snapshot_with_code(tmp_path)
+    T, seen, Stop = _auto_map_fakes({"AutoModelForSequenceClassification": "m.Seq", "AutoModel": "m.Base"})
+    with pytest.raises(Stop):
+        rg.load_model(TORCH, T, snap)
+    assert seen["which"] == ["AutoModel"]
