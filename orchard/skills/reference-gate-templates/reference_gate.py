@@ -129,7 +129,7 @@ def allow_remote_code(snapshot: Path, scratch_home: Path | None = None) -> None:
     files = {}
     snapshot = Path(snapshot)
     # A Hugging Face snapshot (<model dir>/snapshots/<sha>) links its files into <model dir>/blobs; any other directory may link nowhere.
-    cache_root = snapshot.parent.parent if snapshot.parent.name == "snapshots" else snapshot
+    cache_root = snapshot.parent.parent if snapshot.parent.name == "snapshots" else None     # None: follow no link at all
     for f in sorted(snapshot.rglob("*.py")):
         files[str(f.relative_to(snapshot))] = bounded_sha256(f, root=cache_root)
     REMOTE_CODE.update({"used": True, "files": files, "scrubbed": sorted(set(REMOTE_CODE["scrubbed"]) | set(scrubbed))})

@@ -242,3 +242,15 @@ def test_a_hub_cache_snapshot_file_that_links_into_its_own_blobs_directory_is_ha
     files = rg.REMOTE_CODE["files"]
     assert files["modeling_spark.py"] == hashlib.sha256(b"class Spark: pass\n").hexdigest()
     assert files["escape.py"] == "unreadable"
+
+
+def test_a_directory_that_is_not_a_cache_snapshot_follows_no_links_at_all(tmp_path):
+    """Review of PR 608: for a plain checkout the cache root fell back to the snapshot itself, so a .py link to another file inside the
+    checkout was followed. A directory that is not <model dir>/snapshots/<sha> follows no link."""
+    snap = tmp_path / "checkout"
+    snap.mkdir()
+    (snap / "real.py").write_text("x = 1\n")
+    os.symlink(snap / "real.py", snap / "alias.py")
+    rg.allow_remote_code(snap, scratch_home=tmp_path / "home")
+    files = rg.REMOTE_CODE["files"]
+    assert len(files["real.py"]) == 64 and files["alias.py"] == "unreadable"
