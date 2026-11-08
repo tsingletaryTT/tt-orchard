@@ -588,6 +588,17 @@ def prepare_note(*, facts: bool, skeleton: bool, excerpts: bool = False, cheat: 
     return "\n\n".join(parts)
 
 
+# The two texts write_deadline_hint can start with. is_write_deadline_hint reads them so the agent loop can tell this hint from other nudges.
+_WRITE_DEADLINE_START = re.compile(r"\d+ model turns have passed and (?:`stages/2/port/port_model\.py` is still the skeleton\. Write it now"
+                                   r"|you have written no file\. Stop reading\.)")
+
+
+def is_write_deadline_hint(text) -> bool:
+    """True for the text write_deadline_hint wrote. A step's context restart does not carry it (issue 509): the hint tells the agent to stop
+    reading and says the port is the skeleton, and the restart text tells it to read files again and the port may have changed."""
+    return isinstance(text, str) and _WRITE_DEADLINE_START.match(text) is not None
+
+
 def write_deadline_hint(turns: int, *, port_is_skeleton: bool, excerpts: bool) -> str:
     """The text of the one hint a stage 2 step gets when it has read for `turns` turns and written nothing (watchdog FirstWriteDeadline).
     While the port is still the supervisor's skeleton it names the file and the four functions to fill in, and where the source to copy

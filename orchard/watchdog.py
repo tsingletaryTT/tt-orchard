@@ -236,11 +236,42 @@ TOOL_SHAPE_CHARS = 160
 _CD_PREFIX = re.compile(r"""^\s*cd\s+("[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*""")
 
 
+# A quoted string that holds a shell operator character (`"|"`, `">"`, `"a && b"`). shlex.split drops the quotes, and the shape code cuts at the first
+# operator it sees, so `facts --find "|"` and `facts --find ">"` both stopped at the operator and got one shape (issue 521). Such a string is
+# swapped for a placeholder before the command is read and put back, as the text the shell passes (the quotes gone), where the shape is written.
+_QUOTED = re.compile(r"""\"[^"\\]*(?:\\.[^"\\]*)*\"|'[^']*'""")
+_OPERATOR_CHARS = frozenset("|&;<>")
+_MASK = "\x01{}\x01"
+_MASK_RE = re.compile("\x01(\\d+)\x01")
+
+
+def _mask_quoted_operators(command: str) -> tuple[str, list[str]]:
+    """(command with each quoted operator-like string replaced by a placeholder, the strings in order)."""
+    saved: list[str] = []
+
+    def swap(m: re.Match) -> str:
+        if not _OPERATOR_CHARS.intersection(m.group(0)):
+            return m.group(0)
+        try:
+            literal = shlex.split(m.group(0))[0]          # what the shell passes: the quotes are gone, the characters stay
+        except (ValueError, IndexError):
+            literal = m.group(0).strip("\"'")
+        saved.append(literal)
+        return _MASK.format(len(saved) - 1)
+    return _QUOTED.sub(swap, command), saved
+
+
+def _unmask(text: str, saved: list[str] | None) -> str:
+    if not saved:
+        return text
+    return _MASK_RE.sub(lambda m: saved[int(m.group(1))] if int(m.group(1)) < len(saved) else m.group(0), text)
+
+
 def _path_like(token: str) -> bool:
     return "/" in token or token.startswith(("~", ".")) or bool(_EXTENSION.search(token))
 
 
-def _tool_shape(command: str) -> str | None:
+def _tool_shape(command: str, quoted: list[str] | None = None) -> str | None:
     """`stage_tools <tool> <arguments>` for a call of the stage tools' script by a python interpreter (flags such as `-P -s` allowed before the script),
     with the arguments up to the first pipe, separator or redirect; None for any other command, including one that only reads the script. A long
     argument list keeps the start and a digest of the whole, so two long calls differ when their arguments differ."""
@@ -264,7 +295,7 @@ def _tool_shape(command: str) -> str | None:
         if _OPERATOR_TOKEN.fullmatch(t) or _REDIRECT_TOKEN.fullmatch(t):
             break
         args.append(t)
-    text = " ".join(["stage_tools", *args])
+    text = " ".join(["stage_tools", *[_unmask(a, quoted) for a in args]])      # a quoted operator is an argument here, with its quotes (issue 521)
     if len(text) > TOOL_SHAPE_CHARS:
         text = text[:TOOL_SHAPE_CHARS - 9] + "#" + hashlib.sha256(text.encode()).hexdigest()[:8]
     return text
@@ -290,12 +321,13 @@ def command_shape(command: str) -> str:
     """
     if not isinstance(command, str) or not command.strip():
         return ""
+    command, quoted = _mask_quoted_operators(command)      # `"|"` and `"&&"` are arguments, not operators (issue 521)
     cwd = ""                              # where the leading cds put the command; a relative path argument is read against it
     while (m := _CD_PREFIX.match(command)) and (rest := command[m.end():]).strip():
         d = m.group(1).strip("\"'")      # `cd X && cd Y && cmd`: skip each leading cd; a bare `cd X` stays
         cwd = d if (not cwd or d.startswith(("/", "~"))) else cwd.rstrip("/") + "/" + d
         command = rest
-    if (tool := _tool_shape(command)) is not None:
+    if (tool := _tool_shape(command, quoted)) is not None:
         return tool
     head = _REDIRECT.sub("", _SEPARATOR.split(command, 1)[0])
     try:
@@ -306,16 +338,20 @@ def command_shape(command: str) -> str:
         return ""
     for t in tokens[1:]:
         if not t.startswith("-") and _path_like(t):
+            if cwd and not t.startswith(("/", "~")):
+                t = cwd.rstrip("/") + "/" + t     # `cd /run/stage0 && cat config.json` and `cd /run/stage3 && ...` read different files
+            t = _unmask(t, quoted)
             if tokens[0] == "sed":
                 rng = next((r for r in tokens[1:] if _SED_RANGE.fullmatch(r)), None)
                 if rng is not None:
-                    return f"{tokens[0]} {t} {rng}"
-            if cwd and not t.startswith(("/", "~")):
-                t = cwd.rstrip("/") + "/" + t     # `cd /run/stage0 && cat config.json` and `cd /run/stage3 && ...` read different files
+                    return f"{tokens[0]} {t} {rng}"      # the directory is already in `t`: four files in four directories are four shapes (issue 511)
             return f"{tokens[0]} {t}"
     while len(tokens) > 1 and _NUMERIC.fullmatch(tokens[-1]):
         tokens.pop()
-    return " ".join(tokens)[:SHAPE_CHARS]
+    text = _unmask(" ".join(tokens), quoted)
+    if cwd:
+        text = f"{cwd.rstrip('/') or '/'}$ {text}"       # `cd stage0 && ls -la` and `cd stage1 && ls -la` run in different places (issue 511)
+    return text[:SHAPE_CHARS]
 
 
 class TurnRepeat:

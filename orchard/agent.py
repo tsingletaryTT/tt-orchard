@@ -73,6 +73,7 @@ from pathlib import Path
 
 from orchard import runaway, safeio
 from orchard.canary import CanaryError, post_json
+from orchard.port_facts import is_write_deadline_hint
 from orchard.port_guard import PORT_GUARD_DEPTH, PORT_GUARD_ENTRIES, PORT_GUARD_FILES, PortGuard  # noqa: F401  (names stay importable from here)
 from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_TIMEOUT_S,
                               AGENT_THINKING, AGENT_TOOL_DEDUPE, DEDUPE_HINT_PREFIX, DEDUPE_LISTED_CALLS, DEDUPE_MAX_RECORDS,
@@ -1061,6 +1062,7 @@ class AgentStep:
     def _loop(self, max_turns: int, *, logged: int, fresh: bool = False) -> Outcome:
         messages = self.messages
         bad_run: list[str] = []             # kinds of the replies in a row that ran no command
+        capped_run = 0                      # replies in a row that hit max_tokens, whether or not they ran a complete call (issue 474)
         last_reply = ""                     # the visible text of the last reply that called a tool
         for turn in range(1, max_turns + 1):
             self._turn += 1
@@ -1068,7 +1070,10 @@ class AgentStep:
                 if fresh and turn == 1 and text.startswith(DEDUPE_HINT_PREFIX):
                     continue        # left in the shared actuator by the step before, which held the text it speaks of; this conversation does not
                 messages.append({"role": "user", "content": text})
-                if not text.startswith(DEDUPE_HINT_PREFIX):      # that hint says a file's text is in the context: a restart drops the context (review of PR 488)
+                # Two hints are tied to the conversation they were sent into and are not carried across a restart: the unchanged-read hint says a
+                # file's text is in the context (review of PR 488), and the write-deadline hint says to stop reading and that the port is the
+                # skeleton, while the restart text says to read files again (issue 509). The ledger already records that each was sent.
+                if not text.startswith(DEDUPE_HINT_PREFIX) and not is_write_deadline_hint(text):
                     self._carry_instruction("nudge", text)
             reason = self.control.stop_reason()
             if reason:
@@ -1140,6 +1145,7 @@ class AgentStep:
                         text_hash=sha(content) if content else None, had_tool_call=bool(calls))
             if bad:
                 bad_run.append(bad)
+                capped_run = capped_run + 1 if bad == "truncated" else 0
                 tokens = usage.get("completion_tokens")
                 loop = None
                 capped: dict = {}
@@ -1152,13 +1158,14 @@ class AgentStep:
                                    what="reply cut off at max_tokens" if bad == "truncated" else "empty reply",
                                    phase=self.phase, turn=turn, finish_reason=finish,
                                    completion_tokens=tokens, in_a_row=len(bad_run), **capped)
-                if len(bad_run) >= BAD_REPLIES_IN_A_ROW:
+                if len(bad_run) >= BAD_REPLIES_IN_A_ROW or capped_run >= BAD_REPLIES_IN_A_ROW:
                     if "truncated" in bad_run and self._restarts < self.restart_on_caps:
                         self._restart_fresh(turn)
                         logged = 0                      # the replacement conversation is logged from its start: the next row shows its prompt
-                        bad_run = []
+                        bad_run, capped_run = [], 0
                         continue
-                    return self._end("error", turn, detail=self._bad_detail(bad_run, tokens) + self._loop_detail())
+                    return self._end("error", turn, detail=self._bad_detail(bad_run if len(bad_run) >= BAD_REPLIES_IN_A_ROW else ["truncated"] * 2, tokens)
+                                     + self._loop_detail())
                 messages.append({"role": "user",
                                  "content": (LOOP_NUDGE if loop else TRUNCATION_NUDGE) if bad == "truncated" else EMPTY_NUDGE})
                 continue
@@ -1167,6 +1174,7 @@ class AgentStep:
                 # server's parser dropped what it could not finish and every call left is complete, so no cut call is visible. The cap
                 # counts either way and the next request gets the retry profile (review of PR 462, round 4).
                 tokens = usage.get("completion_tokens") or self.max_tokens
+                capped_run += 1                  # the second capped reply in a row restarts the step after its complete calls have run (issue 474)
                 capped, _ = self._note_capped(content if content.strip() else cut_text, tokens)
                 self.ledger.append("notice", self.stage, watchdog=True, agent=self.agent,
                                    what=("reply cut off at max_tokens (a tool call's arguments were incomplete)" if cut_calls
@@ -1175,6 +1183,7 @@ class AgentStep:
                                    incomplete_tool_calls=len(cut_calls), complete_tool_calls=len(calls), **capped)
             else:
                 self._after_cap = False
+                capped_run = 0
             bad_run = []
             if not calls:
                 return self._end(self.control.stop_reason() or "done", turn, final_text=content)
@@ -1212,6 +1221,16 @@ class AgentStep:
                                    phase=self.phase, turn=turn)
                 return self._end("done", turn, detail="the step's files were written and valid, and the agent "
                                                       "gave the same reply again instead of ending")
+            if capped_run >= BAD_REPLIES_IN_A_ROW:
+                # Two capped replies in a row, the last of which still ran complete calls (they ran above). The runaway tail of each reply is the loop
+                # a fresh context breaks, so restart as the no-call path does, or end a step that may not restart.
+                if self._restarts < self.restart_on_caps:
+                    self._restart_fresh(turn)
+                    logged = 0
+                    bad_run, capped_run = [], 0
+                    continue
+                return self._end("error", turn, detail=self._bad_detail(["truncated", "truncated"], usage.get("completion_tokens") or self.max_tokens)
+                                 + self._loop_detail())
         return self._end("turns", max_turns, detail=f"no final answer after {max_turns} turns")
 
     def _finished(self) -> bool:
