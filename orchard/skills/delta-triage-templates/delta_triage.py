@@ -920,7 +920,9 @@ def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
     None when the check could not run (no numpy)."""
     out = {"restricted": False, "rows": None, "base_rows": None, "matched_rows": 0, "token_ids": [], "min_cosine": None,
            "sidecar": None, "tensor": None, "note": ""}
-    sidecars = [e for e in sc.get("sidecars", []) if str(e.get("file", "")).endswith(".safetensors")]
+    # An entry the sidecar scan refused (a link to a place outside the snapshot, issue 464) is never opened here: its header and its tensor
+    # bytes are a fact about some other file (review of PR 622).
+    sidecars = [e for e in sc.get("sidecars", []) if str(e.get("file", "")).endswith(".safetensors") and not e.get("refused")]
     if not sidecars:
         out["note"] = "the new model has no safetensors sidecar"
         return out
@@ -1050,6 +1052,15 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _link_target_inside(path: Path, model_dir: Path) -> bool:
+    """True when the link `path` resolves inside the snapshot or, for a Hugging Face cache snapshot, the cache's own `blobs` directory."""
+    try:
+        target = Path(os.path.realpath(path))
+    except (OSError, ValueError):
+        return False
+    return any(target == root or root in target.parents for root in _link_roots(model_dir))
+
+
 def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) -> dict:
     """Weights files in the new model that are not backbone shards and that the nearest model lacks.
     `problems` says why a sidecar cannot be trusted (unreadable, or its names overlap the backbone). A GGUF file is listed in
@@ -1059,8 +1070,20 @@ def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) 
     backbone = backbone_names | {normalize(n) for n in backbone_names}
     sidecars, problems, ignored = [], [], []
     for p in sorted(model_dir.iterdir()):
-        if (not p.is_file() or not p.name.endswith(WEIGHT_SUFFIXES) or p.name in shards
+        # A link is followed only when its target is inside the snapshot or the cache's own blobs directory (issue 464); a link that leaves
+        # is listed by name with no size and no hash, because the size of its target is a fact about some other file.
+        refused = p.is_symlink() and not _link_target_inside(p, model_dir)
+        if ((not refused and not p.is_file()) or not p.name.endswith(WEIGHT_SUFFIXES) or p.name in shards
                 or p.name in base_files or BACKBONE_BIN.fullmatch(p.name)):
+            continue
+        if refused:
+            note = "a link to a place outside the snapshot and its cache's blobs directory; its target was not measured or read"
+            if p.name.endswith(IGNORED_SUFFIXES):
+                ignored.append({"file": p.name, "size": None, "reason": IGNORED_REASON + " (" + note + ")"})
+            else:
+                problems.append(f"sidecar {p.name} is {note}")
+                sidecars.append({"file": p.name, "size": None, "sha256": None, "num_tensors": None, "dtypes": [], "tensor_names": [],
+                                 "refused": note})
             continue
         if p.name.endswith(IGNORED_SUFFIXES):          # not read and not hashed: a quantized copy can be several GB
             ignored.append({"file": p.name, "size": p.stat().st_size, "reason": IGNORED_REASON})
@@ -1105,7 +1128,9 @@ def code_files(model_dir: Path) -> list[dict]:
 
 
 def sidecar_finding(sc: dict) -> str:
-    parts = [f"{e['file']} ({e['size'] / 1e6:.1f} MB, {e['num_tensors']} tensors, sha256 {e['sha256'][:12]})"
+    # A refused link has no size, no hash and no tensor count (issue 464): it is named and said not to be measured.
+    parts = [f"{e['file']} (a link that leaves the snapshot and its cache, not measured or read)" if e.get("refused") else
+             f"{e['file']} ({e['size'] / 1e6:.1f} MB, {e['num_tensors']} tensors, sha256 {e['sha256'][:12]})"
              for e in sc["sidecars"]]
     s = ("The new model ships weights outside the backbone that the nearest model's runtime does not load: "
          + "; ".join(parts) + ".")
@@ -1730,7 +1755,11 @@ def _link_roots(model_dir) -> tuple:
         return (Path(model_dir),)
     roots = [snap]
     if snap.parent.name == "snapshots":
-        roots.append((snap.parent.parent / "blobs").resolve())
+        blobs = snap.parent.parent / "blobs"
+        # A `blobs` that is a link is not the cache's own directory: resolving it would make wherever it points an allowed root (review of
+        # PR 622). Only a real directory gives the second root, as in orchard/residency.
+        if blobs.is_dir() and not blobs.is_symlink():
+            roots.append(blobs.resolve())
     return tuple(roots)
 
 

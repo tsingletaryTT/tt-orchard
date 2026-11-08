@@ -28,6 +28,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import time
 from pathlib import Path
 
@@ -52,6 +53,10 @@ class LedgerCorrupt(Exception):
 
 class LedgerLocked(Exception):
     """Another process has this ledger open."""
+
+
+class LedgerLockRefused(LedgerLocked):
+    """The lock file is a link, a pipe or another file that is not a plain file, so it was not opened (issue 493). The ledger does not start."""
 
 
 def _digest(line: str) -> str:
@@ -132,13 +137,30 @@ def entries_from_lines(lines: list[str]) -> list[dict]:
     return entries
 
 
+def _open_lock_file(path: Path):
+    """The lock file as a writable file object, opened without following a link and without waiting on a pipe, and without truncating it:
+    mode `w` by path follows a link and empties the link's target before any lock exists (issue 493). A lock that is not a regular
+    file is refused with a named error."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0), 0o600)
+    except OSError as exc:
+        raise LedgerLockRefused(f"the lock file {path} could not be opened without following a link: {exc.strerror or exc}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise LedgerLockRefused(f"the lock file {path} is not a regular file")
+        return os.fdopen(fd, "w")       # fdopen with "w" does not truncate: the file was opened above and nothing is written to it
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class Ledger:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # flock belongs to the open file, so it is released when close() runs or the
         # process dies. That is what lets a restarted supervisor reopen a crashed run.
-        self._lock_file = open(self.path.with_name(self.path.name + ".lock"), "w")
+        self._lock_file = _open_lock_file(self.path.with_name(self.path.name + ".lock"))
         try:
             fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

@@ -54,7 +54,7 @@ HUGE_SPARSE = 1 << 30                       # a sparse file of 1 GiB: it costs n
 # Class names of the repository's own refusals. A reader's own named error counts as a refusal; a bare KeyError or TypeError does not.
 REFUSAL_NAMES = frozenset({
     "SafeReadError", "ReadFailed", "PathRefused", "NotRegular", "TooLarge", "ChangedWhileReading", "NotText", "NotJson", "WrongType",
-    "BadValue", "BadHeader", "IncompleteScan", "ResidencyError", "LedgerLocked", "LedgerCorrupt",
+    "BadValue", "BadHeader", "IncompleteScan", "ResidencyError", "LedgerLocked", "LedgerLockRefused", "LedgerCorrupt",
 })
 
 

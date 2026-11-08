@@ -162,6 +162,28 @@ def finite_number(x, *, lo=None, hi=None, what: str = "value"):
     return x
 
 
+def is_finite_number(x) -> bool:
+    """True for an int (not a bool) of any size and for a float that is not NaN or an infinity. `math.isfinite(10**400)` raises OverflowError
+    because the int does not fit a float; an int is finite whatever its size, so it is answered without a conversion (issue 461). A value
+    of any other type is not a number and gives False."""
+    if isinstance(x, bool):
+        return False
+    if isinstance(x, int):
+        return True
+    return isinstance(x, float) and math.isfinite(x)
+
+
+def as_float(x, *, what: str = "value") -> float:
+    """`x` as a float, for a place that needs one. A bool, a non-number, NaN and an infinity are refused, and so is an int too large for a float
+    (it is never converted: `float(10**400)` raises OverflowError). Raises BadValue."""
+    if not is_finite_number(x):
+        raise BadValue(f"{what} must be a finite number")
+    try:
+        return float(x)
+    except OverflowError:
+        raise BadValue(f"{what} is too large to be a float") from None
+
+
 def whole_number(x, *, lo: int = 0, hi: int | None = None, what: str = "value") -> int:
     """`x` when it is an int (not a bool) with `lo <= x <= hi`. `lo` defaults to 0, so a count cannot be negative.
 
@@ -899,6 +921,34 @@ def resolved(path) -> str:
         return os.path.realpath(os.fspath(path))
     except (OSError, ValueError, TypeError):
         return os.fspath(path) if isinstance(path, (str, bytes)) or hasattr(path, "__fspath__") else ""
+
+
+def cache_roots(directory) -> list:
+    """The real directories a file of the snapshot `directory` may be, or link to: the snapshot itself and, for a Hugging Face cache
+    layout (`<model dir>/snapshots/<revision>`), the cache's own `blobs` directory. A `blobs` that is itself a link gives no second root,
+    so a link there cannot move the cache elsewhere."""
+    base = os.path.realpath(os.fspath(directory))
+    roots = [base]
+    parent = os.path.dirname(base)
+    if os.path.basename(parent) == "snapshots":
+        blobs = os.path.join(os.path.dirname(parent), "blobs")
+        if os.path.isdir(blobs) and not os.path.islink(blobs):
+            roots.append(os.path.realpath(blobs))
+    return roots
+
+
+def resolved_inside(path, directory) -> str | None:
+    """`resolved(path)` when the result lies inside the snapshot `directory` or its cache's `blobs` directory (see cache_roots), else None.
+    A plain file of the snapshot resolves to itself and passes; a Hugging Face snapshot link into blobs/ passes; a link to anywhere else
+    comes back as None, so the caller names the file and refuses it (issue 494). The check is on the resolved real path; the caller still
+    opens the result through the guarded reader, which refuses a device or a pipe."""
+    target = resolved(path)
+    if not target:
+        return None
+    for root in cache_roots(directory):
+        if target == root or target.startswith(root + os.sep):
+            return target
+    return None
 
 
 # ------------------------------------------------------------------------------------- an outcome as a value

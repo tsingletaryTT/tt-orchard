@@ -300,22 +300,43 @@ NUMERIC_ROWS = 16                           # mismatching positions listed in th
 
 def current_sources(stage_dir) -> dict | None:
     """{run-relative path: sha256} of every `.py` file under the stage's port directory as it is now, the set the check's template records in
-    `port_sources` (`rglob("*.py")`, `__pycache__` holds no `.py`). None when a file cannot be read or a link or special file stands in the tree."""
+    `port_sources` (`rglob("*.py")`, `__pycache__` holds no `.py`). None when a file cannot be read, a link or special file stands in the tree,
+    the scan is incomplete, or the live `port` no longer names the directory that was pinned.
+
+    The tree is walked and read beneath one pinned descriptor (issue 503, review of PR 498 round 6): a path-by-name walk reopened each file
+    after its link check, so a subdirectory swapped for a link in the gap was read through, and a manifest of identical sources matched a tree
+    that was linked. Each read opens every part of the path with no link followed. `repair_help.snapshot_port` walks the same way."""
     stage_dir = Path(stage_dir)
-    root = stage_dir / PORT_DIR
     out: dict[str, str] = {}
-    if root.is_symlink() or not root.is_dir():
-        return None          # os.walk would follow a linked root to sources outside the run (review of PR 498, round 4), as `fingerprint` refuses it
     try:
-        for here, dirs, files in os.walk(root):
-            dirs[:] = sorted(d for d in dirs if d != "__pycache__" or os.path.islink(os.path.join(here, d)))
-            for name in sorted(files + [d for d in dirs if os.path.islink(os.path.join(here, d))]):
-                path = Path(here) / name
-                if path.is_symlink():
+        with safeio.pinned_root(stage_dir) as pin:
+            pfd = safeio.open_beneath(pin.fd, (PORT_DIR,))
+            port = safeio.Pin(pfd, PORT_DIR)
+            try:
+                before = os.fstat(port.fd)
+                found: list[tuple[str, ...]] = []
+                bad: list[str] = []
+
+                def visit(entry) -> None:
+                    if "__pycache__" in entry.parts and entry.kind != "link":
+                        return
+                    if entry.kind in ("link", "other"):       # a link, or a pipe, socket or device (scan_beneath says "other"): the tree is refused
+                        bad.append("/".join(entry.parts))
+                    elif entry.kind == "file" and entry.parts[-1].endswith(".py"):
+                        found.append(entry.parts)
+
+                scan = safeio.scan_beneath(port, visit)
+                if scan.incomplete or bad:
                     return None
-                if name.endswith(".py"):
-                    rel = f"stages/{stage_dir.name}/{PORT_DIR}/{path.relative_to(root).as_posix()}"
-                    out[rel] = hashlib.sha256(safeio.read_bytes(path, max_bytes=full_port.SOURCE_MAX)).hexdigest()
+                for parts in sorted(found):
+                    rel = f"stages/{stage_dir.name}/{PORT_DIR}/{'/'.join(parts)}"
+                    out[rel] = hashlib.sha256(safeio.read_beneath(port.fd, parts, max_bytes=full_port.SOURCE_MAX)).hexdigest()
+                # The live `port` must still be the directory that was pinned (same device and inode), or the tree read is not the tree on disk.
+                live = os.stat(os.path.join(stage_dir, PORT_DIR), follow_symlinks=False)
+                if (live.st_dev, live.st_ino) != (before.st_dev, before.st_ino):
+                    return None
+            finally:
+                port.close()
     except (safeio.SafeReadError, OSError, ValueError):
         return None
     return out

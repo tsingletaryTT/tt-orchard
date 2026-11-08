@@ -22,9 +22,6 @@ import hostile_fs as hf
 
 # (reader name, case) -> the issue that tracks the defect and what is wrong
 KNOWN_DEFECTS: dict[tuple[str, str], tuple[int, str]] = {
-    ("ledger.Ledger lock file", "lock_link"): (493, "the lock file is opened with mode w by path: a link there truncates its target"),
-    ("residency.read_headers", "hf_blob_outside"): (494, "a snapshot link that leaves the cache root is followed and its header counted"),
-    ("delta_triage.compare_sidecars", "sidecar_link"): (464, "the sidecar scan follows a link to any target and lists the target's size"),
 }
 
 PAIRS = [(i, r.name, case) for i, r in enumerate(hf.PATH_READERS) for case in hf.EXPECT[r.family]]
