@@ -28,6 +28,7 @@ import inspect
 import math
 import re
 import sys
+from pathlib import Path
 
 MARK = "ORCHARD_EFFECTIVE_CONSTRUCTION"
 MAX_CLASSES = 80                # classes kept; the rest are counted
@@ -137,18 +138,59 @@ def describe(model) -> dict:
             "classes_left_out": max(0, len(classes) - len(kept)), "modules_cut": total > MAX_MODULES}
 
 
+def dense_shim(snapshot: str):
+    """(shim module, raw config dict) when the snapshot is a dense `qwen4_exp` checkpoint that stage 1 loads through the shim
+    (reference-gate-templates/qwen4_dense.py, next to this template's directory), else (None, None). The config is read as a plain dict by
+    a bounded read of a regular file, no link followed."""
+    import importlib.util
+    import json
+    import os
+    import stat
+    path = Path(snapshot) / "config.json"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)        # hardening: ok a snapshot file is a link into the cache by design; the size and kind are checked on the descriptor
+    except OSError:
+        return None, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, None
+        data = os.read(fd, 2 * 1024 * 1024 + 1)
+    finally:
+        os.close(fd)
+    try:
+        raw = json.loads(data[: 2 * 1024 * 1024])
+    except ValueError:
+        return None, None
+    if not isinstance(raw, dict) or len(data) > 2 * 1024 * 1024:
+        return None, None
+    shim_path = Path(__file__).resolve().parent.parent / "reference-gate-templates" / "qwen4_dense.py"
+    if not shim_path.is_file():
+        return None, None
+    spec = importlib.util.spec_from_file_location("qwen4_dense", shim_path)
+    shim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shim)
+    return (shim, raw) if shim.needs_dense_shim(raw) else (None, None)
+
+
 def build_model(snapshot: str):
     """The reference model for the snapshot's config on the meta device (no weights are read or allocated)."""
+    import contextlib
     import torch
     import transformers
-    config = transformers.AutoConfig.from_pretrained(snapshot, trust_remote_code=False)
+    shim, raw = dense_shim(snapshot)
+    if shim is not None:
+        config = shim.prepare_config(transformers, raw)         # stage 1's config preparation for a dense Qwen4 checkpoint (issue 550)
+        context = shim.dense_layers()
+    else:
+        config = transformers.AutoConfig.from_pretrained(snapshot, trust_remote_code=False)
+        context = contextlib.nullcontext()
     names = [a for a in (getattr(config, "architectures", None) or []) if isinstance(a, str)]
     last = None
     for factory in [*(getattr(transformers, a, None) for a in names), transformers.AutoModelForCausalLM, transformers.AutoModel]:
         if factory is None:
             continue
         try:
-            with torch.device("meta"):
+            with torch.device("meta"), context:
                 if hasattr(factory, "from_config"):             # an Auto class
                     return factory.from_config(config)
                 return factory(config)                          # the architecture class the config names

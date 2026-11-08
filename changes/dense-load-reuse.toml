@@ -1,0 +1,3 @@
+target = "0.9.137"
+summary = "Layer-diff and the effective-construction report load a dense Qwen4 checkpoint through stage 1 dense-layer shim (issues 520, 550)."
+pr = 627
