@@ -1,0 +1,3 @@
+target = "0.9.139"
+summary = "README, site, proofs, canning notes, CLAUDE.md and the project log updated for the full-port runs, the three 2026-11-08 packages and the stage 1 remote-code path."
+pr = 640

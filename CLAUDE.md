@@ -68,17 +68,23 @@ using the skills, with open-source models only. The run ends at an operator revi
   the values and a resume keeps them, as with `--required-chips`. A repo test fails on any `/home/`
   or `/mnt/` path in orchard/skills or orchard/package_templates. hardware_check.py lost its
   machine defaults: `--gozer` and the child paths come from flags or `ORCHARD_*` variables.
+- Stage 1 tries a model that ships its own code (2026-11-08; operator: "goonies never say die", "i'll try anything once (or twice)", "why not?"): it
+  scrubs credential-like environment variables, goes offline, moves HOME, hashes every `.py` file and loads with `trust_remote_code`. Not a sandbox.
+- Helper for the real Qwen4 bring-up (2026-11-08): no spend cap, but written rules for when the supervisor may ask for it; the rules are not written yet.
+- A person publishes (2026-11-08): the three published packages were uploaded by a person with the operator's yes for each model. Upload `SHA256SUMS` last and
+  check the catalog tag after every card upload (`docs/canning.md`).
 
 ## Layout
 Spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`. Code: `orchard/`. Tests: `tests/`.
 
 ## Status
-Plan 1 is implemented through Task 4 (ledger, runner, tiers, sizing). Task 5 (run the sizing tool
-against a real ollama, which downloads models and loads the host) was not run. It needs the
-operator. Plan 2 is merged to `main` in tt-gozer. Plan 3 (adapters, server control, park and restore, watchdog) is implemented on branch `plan3-supervisor-behavior`. Plan 4 (stage machine, agent steps, supervisor loop, draft stage skills) is implemented on branch
-`plan4-stage-machine`. The Hemmingway-1 run in the runbook has not been run. Plan 5 (stage 7: a v6
-thin package, its boot check, card and publish commands as text) is implemented on branch
-`stage7-wiring` (modules merged to main earlier); its hardware run has not been done.
+Plans 1 to 5 are merged to `main` (ledger, runner, tiers, sizing, adapters, server control, park and restore, watchdog, the stage machine,
+stage 7 packaging). The weights-only route has run end to end on real chips for Hemmingway-1, openthai, Clef, RAG-Gate-27B, bytkim, AREX-2 and
+CJK-Trim (run logs in `docs/run-logs/`). Since 2026-11-03 the full-port path has run too, with the outside helper writing the stage 2 repair
+rounds: run 23 of the tiny Qwen4 rehearsal and Olmo-Hybrid-7B passed stages 0 to 6 and 8 (`docs/project-log.md`, entry 2026-11-08). The coder alone
+has not written a passing port (runs 18, 20, 24). Full-port models are packaged by hand with `tt-orchard can`; three packages were published on
+2026-11-08 with the operator's yes (Olmo-Hybrid-7B, MiniCPM3-4B, the Berkelium two-chip package). In progress: the Qwen3.8-27B-QSA bring-up and a
+Qwen4 frankenmodel generator. <!-- UPDATE WHEN THE RUN ENDS -->
 
 Overnight 2 (2026-10-28, PR 210): MiniCPM3-4B (multi-latent attention) runs on one Blackhole chip through scripts in `scripts/minicpm3` (not through the supervisor): 33.7 tok/s decode, batched prefill, a chat server; log in `docs/run-logs/2026-10-29-overnight-minicpm3-4b.md`.
 

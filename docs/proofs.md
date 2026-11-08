@@ -20,6 +20,11 @@ for each item; the run logs under `docs/run-logs/` hold the longer write-ups.
 | The coder can run the agent role | Qwen3-Coder-Next on one board: 50 of 50 replayed turns well formed, no repeat of 35 replays of the 27B's failures, for the earlier package (41.8 tokens/s at 8K) and for the fused-decode bundle that is now the default (median 79 tokens/s in 28 samples on a busy host) | `docs/run-logs/2026-10-06-rolefit-qwen3-coder-next.md`, `docs/run-logs/2026-10-28-coder-fused-decode.md` |
 | The park and restore of the coder and the pre-test reset work | The 4-chip tests of runs with the coder on one board park it and restore it (first: Clef); the 4-chip fabric timeout is not fully understood (issue 26) | `CLAUDE.md` 2026-10-07, 2026-10-13, 2026-10-18 |
 | A model whose head reads rows under another attention mask can be checked | pplx-decider: 14 of 14 top-1 agree, largest probability difference 0.048, against 0.47 for a causal runtime | `docs/run-logs/2026-10-19-pplx-decider-parity.md` |
+| A model that needs new code goes through the full-port stages with the outside helper | Olmo-Hybrid-7B: stages 0 to 6 and 8 passed (stage 7 skipped); stage 2 top-1 agreement 1.0 over 32 tokens; served acceptance corpus 80 of 80 positions; passkey answered at 256 and 8,192 tokens; helper spend $8.60 over 7 calls. The tiny Qwen4 rehearsal run 23 passed the same stages with random weights (coherence and word count waived by the rehearsal flag). A person started and restarted both runs | `docs/run-logs/2026-11-08-olmo-hybrid-7b-can.md`; `docs/project-log.md` (2026-11-08 entry); `docs/run-logs/2026-11-03-tiny-qwen4-rehearsal-first-run.md` |
+| A full-port model can be packaged by hand and installed from the Hub | Olmo-Hybrid-7B: `episod/olmo-hybrid-7b-blackhole`, a fresh download verifies against its `SHA256SUMS` and served through `tt-model serve` (ready in 30 s, one completion and one chat answered). Served decode 7.3 tok/s median, range 2.2 to 11.6 across boot checks and runs under changing host load; four chips; one request at a time | `docs/run-logs/2026-11-08-olmo-hybrid-7b-can.md`, `docs/run-logs/evidence/olmo-hybrid-7b/` |
+| A two-chip package profile for a container package | Berkelium CadQuery model: `episod/berkelium-qwen3-32b-cadquery-p300`, decode 14.4 tok/s median on one board; 21 of 24 sample replies make a valid solid in a sandboxed check (8 prompts, 3 repeats). The Hub repo carries the base container image blobs, and the card says the base image's repository states no licence | `docs/run-logs/2026-11-08-berkelium-2chip-package.md` |
+| A thin bundle for MiniCPM3-4B installs and serves from the Hub | `episod/minicpm3-4b-blackhole`: decode 33.3 tok/s median (12 runs at 2,048 context), prefill 30 to 33 tok/s, 16 of 16 teacher-forced steps match the float32 CPU reference on the untraced path | `docs/run-logs/2026-11-08-minicpm3-can-catalog.md` |
+| Stage 1 loads a model that ships its own code, with an audit | Spark-X2.6-4B-Loop-mHC: the audit file lists its four `.py` files; the load worked under transformers 4.57.6 on CPU (a pilot, stage 1 passed, no chip) and failed inside the model's own code under 5.19. This is not a sandbox | PRs 597, 607, 608; `docs/project-log.md` (2026-11-08 entry) |
 
 ## Shown only with fakes, or by one hand-run
 
@@ -29,7 +34,9 @@ for each item; the run logs under `docs/run-logs/` hold the longer write-ups.
 
 ## Not shown
 
-- Any model that needs new model code (`full-port`, stages 3, 5 and 6): issue 61.
+- A model that needs new model code going through the full-port stages without a helper: the coder alone failed stage 2 in runs 18, 20 and 24 of the tiny Qwen4 rehearsal. Issue 61 is out of date; two models have passed with the helper.
+- Any measurement of the helper-free port quality with the stage tools and the decoder idioms file: they were added after those failures and have not been measured.
+- The Qwen3.8-27B-QSA bring-up: stages 0 to 4 passed on four chips; the stage 5 serving check escalated on its passkey test and the run is not finished. <!-- UPDATE WHEN THE RUN ENDS -->
 - A run from start to end with nobody touching the machine. The latest ones needed a person for disk space or for a restart.
 - A fidelity bar measured from controls: the prompt suite and the 32-token check use choices (issue 15).
 - Long-context behaviour (issue 18), agent-style benchmarks (issue 21), 4-chip packages from the harness, and 1-chip packages for the later models (issue 23). 1-chip packages were staged and booted from local copies only for Hemmingway-1 and openthai.
