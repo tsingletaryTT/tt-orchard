@@ -1,0 +1,3 @@
+target = "0.9.138"
+summary = "A run that ends ready archives an earlier BLOCKED.md and blocked.json; the idioms line in the stage 2 task needs this stage's copy to have succeeded; the idioms snippet keeps integer tensors; tool use per stage can be counted from every step log (issues 572, 576, 577, 581)."
+pr = 632

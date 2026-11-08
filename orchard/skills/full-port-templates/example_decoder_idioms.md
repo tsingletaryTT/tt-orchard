@@ -21,7 +21,7 @@ for name, t in read_tensors(model_dir).items():             # read the checkpoin
     if t.dim() == 2 and name.endswith(".weight") and "embed" not in name:
         dev[name] = upload(mesh, t.to(torch.bfloat16).t().contiguous())    # x @ W, so W is [in, out]
     else:
-        host[name] = t.float()                              # norms, conv kernels, embedding tables, integer tables
+        host[name] = t.float() if t.is_floating_point() else t   # norms, conv kernels, embedding tables as float32; integer tables stay as they are
 ```
 - Select by tensor shape. A list of layer names misses any projection that is not on the list.
 - Keep each tensor in one dict only. Do not keep the `read_tensors` result in the model object.

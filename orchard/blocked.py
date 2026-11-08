@@ -17,6 +17,7 @@ hang an unattended run.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -128,6 +129,25 @@ def last_pause(entries: list[dict]) -> dict | None:
 
 def _stage_names() -> dict[int, str]:
     return {s.number: s.name for s in STAGES}
+
+
+def archive_bundle(run_dir) -> None:
+    """Move an earlier BLOCKED.md and blocked.json to blocked.<n>.json and BLOCKED.<n>.md (the first n with neither name taken), so a run that
+    recovered from a block does not leave a file saying it is stopped (issue 572). A file is moved, never opened or followed, so a link or a
+    pipe in that place is moved as it is. Nothing there is not an error, and a name that cannot be moved is left where it is."""
+    run_dir = Path(run_dir)
+    pair = (run_dir / "blocked.json", run_dir / "BLOCKED.md")
+    if not any(os.path.lexists(p) for p in pair):
+        return
+    n = 1
+    while os.path.lexists(run_dir / f"blocked.{n}.json") or os.path.lexists(run_dir / f"BLOCKED.{n}.md"):
+        n += 1
+    for src, dst in ((pair[0], run_dir / f"blocked.{n}.json"), (pair[1], run_dir / f"BLOCKED.{n}.md")):
+        try:
+            if os.path.lexists(src):
+                os.rename(src, dst)
+        except OSError:
+            pass
 
 
 def write_bundle(run_dir, entries: list[dict], code: str, reason: str, *, now: float) -> None:
