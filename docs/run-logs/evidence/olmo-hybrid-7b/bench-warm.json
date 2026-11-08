@@ -1,0 +1,109 @@
+{
+  "schema": "olmo-hybrid-7b-bench/1",
+  "cache_state": "warm",
+  "repeats": 3,
+  "load_before": [
+    3.64208984375,
+    7.55859375,
+    9.08154296875
+  ],
+  "started": "2026-11-08T18:28:29Z",
+  "first_request_s": 0.74,
+  "decode": {
+    "prompts": 5,
+    "new_tokens_each": 64,
+    "runs": 15,
+    "tok_s": {
+      "n": 15,
+      "min": 3.589,
+      "median": 7.277,
+      "max": 9.295
+    },
+    "tokens_per_run": {
+      "n": 15,
+      "min": 64,
+      "median": 64,
+      "max": 64
+    }
+  },
+  "prefill": [
+    {
+      "prompt_tokens": 141,
+      "seconds": {
+        "n": 3,
+        "min": 0.996,
+        "median": 1.077,
+        "max": 1.129
+      },
+      "tok_s_median": 130.9
+    },
+    {
+      "prompt_tokens": 561,
+      "seconds": {
+        "n": 3,
+        "min": 4.417,
+        "median": 4.623,
+        "max": 4.788
+      },
+      "tok_s_median": 121.4
+    },
+    {
+      "prompt_tokens": 2261,
+      "seconds": {
+        "n": 3,
+        "min": 22.256,
+        "median": 22.368,
+        "max": 22.6
+      },
+      "tok_s_median": 101.1
+    },
+    {
+      "prompt_tokens": 9101,
+      "seconds": {
+        "n": 3,
+        "min": 130.653,
+        "median": 137.655,
+        "max": 165.194
+      },
+      "tok_s_median": 66.1
+    }
+  ],
+  "concurrency": {
+    "two_at_once_status_codes": [
+      200,
+      503
+    ],
+    "batching": "not supported: a second request gets 503 while one runs"
+  },
+  "load_after": [
+    9.18505859375,
+    9.91845703125,
+    9.9208984375
+  ],
+  "reference_match": [
+    {
+      "prompt": "The capital of France is",
+      "compared": 32,
+      "leading_match": 1,
+      "matching_positions": 1
+    },
+    {
+      "prompt": "Water boils at a temperature of",
+      "compared": 32,
+      "leading_match": 32,
+      "matching_positions": 32
+    },
+    {
+      "prompt": "def fibonacci(n):\n    \"\"\"Return the n-th",
+      "compared": 32,
+      "leading_match": 32,
+      "matching_positions": 32
+    },
+    {
+      "prompt": "In 1969, the first humans to walk on the",
+      "compared": 32,
+      "leading_match": 32,
+      "matching_positions": 32
+    }
+  ]
+}

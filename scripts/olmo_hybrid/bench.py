@@ -59,7 +59,9 @@ def main():
     a = ap.parse_args()
     rec = {"schema": "olmo-hybrid-7b-bench/1", "cache_state": a.cache_state, "repeats": REPEATS, "load_before": os.getloadavg(),
            "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    post(a.port, "/v1/completions", {"prompt": DECODE_PROMPTS[0], "max_tokens": 8})          # discarded warm-up
+    t0 = time.time()
+    post(a.port, "/v1/completions", {"prompt": DECODE_PROMPTS[0], "max_tokens": 8})          # discarded warm-up; its time shows kernel compilation
+    rec["first_request_s"] = round(time.time() - t0, 2)
     dec = []
     for p in DECODE_PROMPTS:
         for _ in range(REPEATS):
@@ -67,8 +69,11 @@ def main():
             if code != 200:
                 sys.exit(f"decode request failed: {code} {out}")
             dec.append({"tok_s": out["timings"].get("decode_tok_s"), "tokens": out["usage"]["completion_tokens"], "prefill_s": out["timings"]["prefill_s"]})
+    def save():
+        json.dump(rec, open(a.out, "w"), indent=2)
     rec["decode"] = {"prompts": len(DECODE_PROMPTS), "new_tokens_each": DECODE_TOKENS, "runs": len(dec), "tok_s": spread([d["tok_s"] for d in dec]),
                      "tokens_per_run": spread([d["tokens"] for d in dec])}
+    save()
     pre = []
     for target in PREFILL_TARGETS:
         text = FILLER * max(1, target // 18)
@@ -83,6 +88,7 @@ def main():
         else:
             pre.append({"prompt_tokens": ntok, "seconds": spread(secs), "tok_s_median": round(ntok / statistics.median(secs), 1)})
     rec["prefill"] = pre
+    save()
     res = []
     long_prompt = FILLER * 40
     def one():
@@ -94,12 +100,14 @@ def main():
     for t in ts:
         t.join()
     rec["concurrency"] = {"two_at_once_status_codes": sorted(res), "batching": "not supported: a second request gets 503 while one runs"}
+    rec["load_after"] = os.getloadavg()
+    save()
     if a.reference_ids:
         ref = json.load(open(a.reference_ids))
         rows = []
         for item in ref["items"]:
             code, out = post(a.port, "/v1/completions", {"prompt": item["prompt"], "max_tokens": len(item["ids"]), "return_token_ids": True})
-            ids = out["choices"][0]["token_ids"] if code == 200 else []
+            ids = out["choices"][0].get("token_ids", []) if code == 200 else []
             lead = next((i for i, (x, y) in enumerate(zip(ids, item["ids"])) if x != y), min(len(ids), len(item["ids"])))
             rows.append({"prompt": item["prompt"][:40], "compared": len(item["ids"]), "leading_match": lead,
                          "matching_positions": sum(1 for x, y in zip(ids, item["ids"]) if x == y)})

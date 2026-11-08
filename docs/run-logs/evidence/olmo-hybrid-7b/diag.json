@@ -1,0 +1,81 @@
+{
+ "near_tie_logits": 0.25,
+ "prompts": [
+  {
+   "prompt": "The capital of France is",
+   "compared": 32,
+   "leading_match": 1,
+   "matching_positions": 1,
+   "matched_fully": false,
+   "first_difference_at_token_index": 1,
+   "reference_top2": [
+    {
+     "id": 13,
+     "text": ".",
+     "logit": 9.3125
+    },
+    {
+     "id": 11,
+     "text": ",",
+     "logit": 9.25
+    }
+   ],
+   "reference_gap": 0.0625,
+   "chip_top2": [
+    {
+     "id": 13,
+     "text": ".",
+     "logit": 9.25
+    },
+    {
+     "id": 11,
+     "text": ",",
+     "logit": 9.1875
+    }
+   ],
+   "chip_gap": 0.0625,
+   "chip_agrees_with_reference_top1_in_teacher_forcing": true,
+   "near_tie": true,
+   "reference_generate_choice": {
+    "id": 11,
+    "text": ","
+   },
+   "reference_generate_choice_differs_from_its_full_forward_top1": true,
+   "served_repeats": {
+    "runs": 6,
+    "token_at_index": [
+     13,
+     13,
+     13,
+     13,
+     13,
+     13
+    ],
+    "all_identical": true
+   },
+   "chip_logit_of_reference_top1": 9.25,
+   "chip_logit_of_reference_top2": 9.1875
+  },
+  {
+   "prompt": "Water boils at a temperature of",
+   "compared": 32,
+   "leading_match": 32,
+   "matching_positions": 32,
+   "matched_fully": true
+  },
+  {
+   "prompt": "def fibonacci(n):\n    \"\"\"Return the n-th",
+   "compared": 32,
+   "leading_match": 32,
+   "matching_positions": 32,
+   "matched_fully": true
+  },
+  {
+   "prompt": "In 1969, the first humans to walk on the",
+   "compared": 32,
+   "leading_match": 32,
+   "matching_positions": 32,
+   "matched_fully": true
+  }
+ ]
+}

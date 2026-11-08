@@ -1,0 +1,83 @@
+{
+  "schema": "olmo-hybrid-7b-bench/1",
+  "cache_state": "cold",
+  "repeats": 3,
+  "load_before": [
+    5.8876953125,
+    8.22021484375,
+    8.00732421875
+  ],
+  "started": "2026-11-08T18:01:36Z",
+  "first_request_s": 6.74,
+  "decode": {
+    "prompts": 5,
+    "new_tokens_each": 64,
+    "runs": 15,
+    "tok_s": {
+      "n": 15,
+      "min": 7.963,
+      "median": 9.68,
+      "max": 11.467
+    },
+    "tokens_per_run": {
+      "n": 15,
+      "min": 64,
+      "median": 64,
+      "max": 64
+    }
+  },
+  "prefill": [
+    {
+      "prompt_tokens": 141,
+      "seconds": {
+        "n": 3,
+        "min": 1.009,
+        "median": 1.041,
+        "max": 4.883
+      },
+      "tok_s_median": 135.5
+    },
+    {
+      "prompt_tokens": 561,
+      "seconds": {
+        "n": 3,
+        "min": 5.064,
+        "median": 7.527,
+        "max": 11.171
+      },
+      "tok_s_median": 74.5
+    },
+    {
+      "prompt_tokens": 2261,
+      "seconds": {
+        "n": 3,
+        "min": 24.378,
+        "median": 24.908,
+        "max": 29.411
+      },
+      "tok_s_median": 90.8
+    },
+    {
+      "prompt_tokens": 9101,
+      "seconds": {
+        "n": 3,
+        "min": 130.415,
+        "median": 141.383,
+        "max": 143.593
+      },
+      "tok_s_median": 64.4
+    }
+  ],
+  "concurrency": {
+    "two_at_once_status_codes": [
+      200,
+      503
+    ],
+    "batching": "not supported: a second request gets 503 while one runs"
+  },
+  "load_after": [
+    7.77880859375,
+    9.3046875,
+    8.95068359375
+  ]
+}
