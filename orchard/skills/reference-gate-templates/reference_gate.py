@@ -63,6 +63,7 @@ import json
 import os
 import platform
 import re
+import stat
 import struct
 import sys
 import time
@@ -72,6 +73,78 @@ HERE_DIR = Path(__file__).resolve().parent
 # The sha256 of this file, written into summary.json so the stage gate can compare it with the shipped template.
 THIS_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 EVIDENCE = HERE_DIR / "evidence"
+
+# Stage 1 tries a model that ships its own code instead of refusing it (operator, 2026-11-08: "goonies never say die", "i'll try anything once
+# (or twice)", "why not?"). The one refusal it catches is transformers' "pass trust_remote_code=True". It then scrubs what it can, lists every .py
+# file that may run, and loads again. This is not a sandbox: the code runs with this user's file permissions and may use the network.
+REMOTE_CODE = {"used": False, "files": {}, "scrubbed": []}
+HOME_SCRATCH = HERE_DIR / "remote_code_home"
+CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|API_?KEY|CREDENTIAL|PASSPHRASE", re.IGNORECASE)
+
+
+def bounded_sha256(path: Path, limit: int = 16 * 1024 * 1024) -> str:
+    """sha256 of a regular file, read without following a link or blocking on a FIFO and stopped at `limit` bytes. The snapshot is a third
+    party's repository, so a link or a pipe named *.py must not hang or redirect the read. Anything else gives a word, not a hash."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # hardening: ok flags refuse links and do not block on a FIFO
+    except OSError:
+        return "unreadable"
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "not a regular file"
+        h, left = hashlib.sha256(), limit
+        while left > 0:
+            chunk = os.read(fd, min(1 << 20, left))
+            if not chunk:
+                break
+            h.update(chunk)
+            left -= len(chunk)
+        return h.hexdigest() if left > 0 else "over the size limit"
+    except OSError:
+        return "unreadable"
+    finally:
+        os.close(fd)
+
+
+def allow_remote_code(snapshot: Path, scratch_home: Path | None = None) -> None:
+    """Let the model's own code run, with the credentials this process can drop dropped: environment variables whose names look like secrets
+    are removed (their names are recorded, never their values), the hub and transformers go offline, and HOME moves to an empty scratch
+    directory so `~/.ssh` and `~/.config` are not where the code looks. Every .py file under the snapshot is listed with its sha256."""
+    scrubbed = sorted(k for k in os.environ if CREDENTIAL_NAME.search(k))
+    for k in scrubbed:
+        del os.environ[k]
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    home = Path(scratch_home or HOME_SCRATCH)
+    home.mkdir(parents=True, exist_ok=True)
+    os.environ["HOME"] = str(home)
+    files = {}
+    for f in sorted(Path(snapshot).rglob("*.py")):
+        files[str(f.relative_to(snapshot))] = bounded_sha256(f)
+    REMOTE_CODE.update({"used": True, "files": files, "scrubbed": sorted(set(REMOTE_CODE["scrubbed"]) | set(scrubbed))})
+    # huggingface_hub and transformers 4.x read the offline variables when they are imported, which was before this call: set their own flags too.
+    hub = sys.modules.get("huggingface_hub.constants")
+    if hub is not None and hasattr(hub, "HF_HUB_OFFLINE"):
+        hub.HF_HUB_OFFLINE = True
+    thub = sys.modules.get("transformers.utils.hub")
+    if thub is not None and hasattr(thub, "_is_offline_mode"):
+        thub._is_offline_mode = True
+    # The audit is on disk before the code runs, so a retry that fails or hangs still leaves the file list and the scrubbed names.
+    write_json(EVIDENCE / "remote-code-audit.json", dict(REMOTE_CODE))
+
+
+def with_remote_code(fn, *args, snapshot: Path, **kw):
+    """fn(*args, **kw); when transformers refuses because the repository has custom code, allow it (once) and call again with
+    trust_remote_code=True. Once allowed, every later call passes it at once. Any other error goes up unchanged."""
+    if REMOTE_CODE["used"]:
+        return fn(*args, trust_remote_code=True, **kw)
+    try:
+        return fn(*args, **kw)
+    except ValueError as exc:
+        if "trust_remote_code" not in str(exc):
+            raise
+    allow_remote_code(snapshot)
+    return fn(*args, trust_remote_code=True, **kw)
 REFERENCE = EVIDENCE / "reference"
 CONFIG_KEYS = ("run_dir", "model_snapshot", "python")
 
@@ -299,7 +372,7 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
     that leaves fewer keys unresolved is kept. The report lists both attempts."""
     shim, config = dense_qwen4_shim(transformers, snapshot)
     if shim is None:
-        config = transformers.AutoConfig.from_pretrained(str(snapshot))
+        config = with_remote_code(transformers.AutoConfig.from_pretrained, str(snapshot), snapshot=snapshot)
     arch = (getattr(config, "architectures", None) or [None])[0]
     cls = resolve_class(transformers, config, arch)
     # transformers renamed torch_dtype to dtype in 4.56.
@@ -311,8 +384,8 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
         if shim is not None:
             kw["config"] = config        # the config with placeholder expert settings; the dense layers are built inside the context
         with (shim.dense_layers() if shim is not None else contextlib.nullcontext()):
-            got, got_info = cls.from_pretrained(str(snapshot), low_cpu_mem_usage=True, output_loading_info=True,
-                                                **{dkey: torch.bfloat16}, **kw)
+            got, got_info = with_remote_code(cls.from_pretrained, str(snapshot), snapshot=snapshot, low_cpu_mem_usage=True,
+                                             output_loading_info=True, **{dkey: torch.bfloat16}, **kw)
         return got, got_info, round(time.time() - t0, 2)
 
     def unresolved(i):
@@ -363,6 +436,7 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
     report = {
         "class": cls.__name__, "architecture": arch, "seconds": seconds, "device": "cpu", "attempts": tried,
         "dtype": str(next(model.parameters()).dtype), "low_cpu_mem_usage": True,
+        **({"remote_code": dict(REMOTE_CODE)} if REMOTE_CODE["used"] else {}),
         "missing_keys": missing, "unexpected_keys": unexpected, "mismatched_keys": mismatched,
         "error_msgs": errors, "ignore_patterns": patterns, "ignored_checkpoint_keys": ignored,
         "checkpoint_key_count": len(ckpt), "model_key_count": len(model_keys),
@@ -502,7 +576,7 @@ def main() -> int:
     say(f"torch {torch.__version__}, transformers {transformers.__version__}")
 
     say("loading the tokenizer")
-    tokenizer = transformers.AutoTokenizer.from_pretrained(str(snapshot))
+    tokenizer = with_remote_code(transformers.AutoTokenizer.from_pretrained, str(snapshot), snapshot=snapshot)
     rt = roundtrip(tokenizer)
     write_json(EVIDENCE / "tokenizer-roundtrip.json", rt)
     say(f"wrote evidence/tokenizer-roundtrip.json ({rt['ok']} of {rt['total']} round trips exact)")
@@ -514,7 +588,8 @@ def main() -> int:
             say(f"stage 0 paired names by prefix; a load that misses keys is retried with {len(remap)} key rewrites")
         model, rep = load_model(torch, transformers, snapshot, remap=remap)
     except Exception as exc:  # noqa: BLE001 - the failure goes into the evidence and reference.json
-        rep = {"pass": False, "error": f"{type(exc).__name__}: {exc}"[:4000]}
+        rep = {"pass": False, "error": f"{type(exc).__name__}: {exc}"[:4000],
+               **({"remote_code": dict(REMOTE_CODE)} if REMOTE_CODE["used"] else {})}
         write_json(EVIDENCE / "load-report.json", rep)
         note = f"from_pretrained raised {rep['error'][:600]}"
         checks = [{"name": "loads", "pass": False, "note": note, "evidence": [rel(EVIDENCE / "load-report.json")]}]
