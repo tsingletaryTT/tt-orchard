@@ -268,7 +268,7 @@ def test_a_credential_in_a_dict_key_is_scrubbed_before_the_key_is_shortened():
     """Issue 592: cutting a key at 80 characters left the start of a URL's user:password; a later scrub no longer recognised it."""
     key = "https://" + "u" * 40 + ":" + "P" * 60 + "@host/model.bin"
     msg = failure(scan({key: torch_t(5)}) | {"host_elements": 9, "device_elements": 1})
-    assert "PPPP" not in msg and "uuuuu" not in msg and "@host" in msg
+    assert "PPPP" not in msg and "uuuuu" not in msg and "@" not in msg.split("Largest host copies", 1)[1].split("Delete or do not store")[0]
 
 
 def test_a_token_that_would_be_cut_in_half_is_scrubbed_whole():
@@ -308,6 +308,62 @@ def test_the_work_budget_counts_entries_that_are_skipped_and_marks_the_scan_trun
     assert r["truncated"] is True and r["host_tensors"] == 0 and failure(r)
 
 
+# ---- review of PR 598 -----------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("prefix", ["hf_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"])
+def test_every_credential_shape_the_modules_scrub_caught_is_still_caught_by_clip(prefix):
+    """The scan once defined a second `scrub` that replaced the module's own (used by clip and port_frame) and lost ghu_ and ghr_ and the
+    8-character minimum. There is one scrub. The shortest suffix the original pattern caught is 8 characters."""
+    token = prefix + "A1b2C3d4"
+    out = PC.clip(f"fail: header was {token} here")
+    assert token not in out and "A1b2C3d4" not in out
+    assert PC.scrub(f"x {prefix}A1b2C3d4E5") == "x [token removed]"
+
+
+def test_a_url_password_is_still_removed_by_clip_and_there_is_one_scrub_function():
+    out = PC.clip("cannot reach https://user:hunter2@example.org/x")
+    assert "hunter2" not in out and "user" not in out
+    src = Path(PC.__file__).read_text(encoding="utf-8")
+    assert src.count("\ndef scrub(") == 1, "a second `def scrub` shadows the first"
+
+
+def test_a_scan_that_uses_exactly_the_budget_is_complete(monkeypatch):
+    """SCAN_NODES = 2 and the list [None]: the root and its only child use the whole budget, and nothing is left unread."""
+    monkeypatch.setattr(PC, "SCAN_NODES", 2)
+    assert scan([None])["truncated"] is False
+
+
+def test_one_entry_beyond_the_budget_is_truncated(monkeypatch):
+    monkeypatch.setattr(PC, "SCAN_NODES", 2)
+    assert scan([None, None])["truncated"] is True
+
+
+def test_an_exhausted_frame_below_a_full_budget_is_drained_not_counted_as_unread(monkeypatch):
+    monkeypatch.setattr(PC, "SCAN_NODES", 3)
+    assert scan([[None]])["truncated"] is False         # root, inner list, None: three entries and three exhausted frames
+    assert scan([[None], None])["truncated"] is True    # a fourth entry exists
+
+
+def test_a_huge_host_tensor_count_from_the_worker_cannot_overrun_the_message_or_the_cap():
+    """host_tensors comes from the worker with no bound. A genuine scan cannot count more host tensors than entries it looked at."""
+    one = {"path": "model.w", "shape": [2], "elements": 2, "kind": "torch"}
+    for huge in (10 ** 1600, SCAN_BOUND + 1, -5, True):
+        msg = PC.DeviceOps.host_listing({"host_elements": 9, "device_elements": 1, "host_tensors": huge, "truncated": True, "top_host": [one]})
+        assert len(msg) <= PC.HOST_MESSAGE_MAX and "model.w" in msg and "walk truncated" in msg
+        assert "more host tensors" not in msg                      # the count was not believed, so no remainder is claimed
+    msg = PC.DeviceOps.host_listing({"host_elements": 9, "device_elements": 1, "host_tensors": SCAN_BOUND, "top_host": [one]})
+    assert f"and {SCAN_BOUND - 1} more host tensors" in msg and len(msg) <= PC.HOST_MESSAGE_MAX
+
+
+def test_huge_element_and_shape_numbers_are_refused_and_never_printed():
+    rows = [{"path": "model.a", "shape": [10 ** 5000], "elements": 3, "kind": "torch"},
+            {"path": "model.b", "shape": [2], "elements": 10 ** 5000, "kind": "torch"},
+            {"path": "model.c", "shape": [2], "elements": 4, "kind": "torch"}]
+    msg = PC.DeviceOps.host_listing({"host_elements": 9, "device_elements": 1, "host_tensors": 3, "top_host": rows})
+    assert "model.c" in msg and "model.b" not in msg and len(msg) <= PC.HOST_MESSAGE_MAX
+    assert "model.a" in msg and "x" not in msg.split("model.a", 1)[1].split("elements")[0].split("shape")[1]      # the bad dimension is left out
+
+
 def test_a_passing_split_raises_nothing():
     PC.DeviceOps(1, 1).check_weights(scan({"w": torch_t(1)}) | {"host_elements": 1, "device_elements": 9})
 
@@ -345,3 +401,6 @@ def test_the_real_check_fails_the_load_gate_with_the_path_and_last_check_prints_
     stage2 = make_stage(tmp_path / "ls", output=done.stdout, returncode=2)
     out = "\n".join(load_tool().last_check(stage2))
     assert "decoder_idioms.md" in out and "model['params']['layers.0.mlp.up_proj.weight']" in out and len(line) > 300
+
+
+SCAN_BOUND = PC.SCAN_NODES

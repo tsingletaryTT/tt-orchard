@@ -475,21 +475,21 @@ def weight_kind(x):
     return None
 
 
-URL_USERINFO = re.compile(r"(://)[^/\s@]*@")
-TOKEN_LIKE = re.compile(r"\b(?:hf|ghp|gho|ghs|github_pat|sk|xox[a-z])[-_][A-Za-z0-9_-]{10,}")
-
-
-def scrub(text: str) -> str:
-    """`text` with a URL's user:password and anything shaped like an access token replaced. It runs on the WHOLE string, before any cut to a
-    shorter length: a cut made first can remove the part a pattern recognises and leave the rest looking harmless (issue 592)."""
-    return TOKEN_LIKE.sub("***", URL_USERINFO.sub(r"\1***@", text))
-
-
 def _printable(text, limit: int) -> str:
-    """`text` as one printable line cut to `limit` characters, for a message built from the worker's reply. Credentials go first, on the whole text."""
+    """`text` as one printable line cut to `limit` characters, for a message built from the worker's reply. Credentials go first, on the whole text
+    (the module's one `scrub`, defined with `clip`; there must not be a second definition, which would replace it for clip and port_frame)."""
     text = scrub(text) if isinstance(text, str) else "?"
     text = "".join(c if c.isprintable() else "?" for c in text)
     return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+COUNT_MAX = 2 ** 63
+
+
+def _count_ok(n) -> bool:
+    """A whole number a tensor count, element count or dimension can be: not a bool, not negative, below 2**63. A larger one is not printed (it
+    could also overrun the message, and str() of a huge int raises)."""
+    return type(n) is int and 0 <= n < COUNT_MAX
 
 
 def shape_of(x) -> tuple:
@@ -541,15 +541,15 @@ def scan_weights(*roots, labels=None) -> dict:
     # A frame is (iterator of (step, child), path of the container, depth of its children). The roots are the children of a virtual frame.
     frames = [(iter([("", r, labels[i]) for i, r in enumerate(roots)]), "", 0)]
     while frames:
-        if work >= SCAN_NODES:
-            cut = True                                  # the budget ran out with a frame still open
-            break
         it, base, depth = frames[-1]
         try:
             step, x, root_label = next(it)
         except StopIteration:
-            frames.pop()
+            frames.pop()                                # an exhausted frame is drained first: it never counts as unread work
             continue
+        if work >= SCAN_NODES:
+            cut = True                                  # an entry is waiting and the budget is spent: the walk is incomplete
+            break
         work += 1
         if id(x) in seen or x is None or isinstance(x, (str, bytes, int, float, bool, types.ModuleType, types.FunctionType, type)):
             continue
@@ -844,23 +844,25 @@ class DeviceOps:
         rows = scan.get("top_host")
         parts = []
         for r in (rows if isinstance(rows, list) else [])[:SCAN_TOP]:
-            if not isinstance(r, dict) or type(r.get("elements")) is not int or not isinstance(r.get("path"), str):
+            if not isinstance(r, dict) or not _count_ok(r.get("elements")) or not isinstance(r.get("path"), str):
                 continue
             shape = r.get("shape")
-            shape = "x".join(str(d) for d in shape[:8] if type(d) is int) if isinstance(shape, list) else "?"
+            shape = "x".join(str(d) for d in shape[:8] if _count_ok(d)) if isinstance(shape, list) else "?"
             twin = r.get("device")
             twin = (f"; the device copy is {_printable(twin.get('path'), 90)}" if isinstance(twin, dict) and isinstance(twin.get("path"), str) else "")
             parts.append(f"{_printable(r['path'], 110)} shape {shape} = {r['elements']} elements, {_printable(r.get('kind'), 10)}{twin}")
         if not parts:
             return ""
         total = scan.get("host_tensors")
-        total = total if type(total) is int and total >= len(parts) else len(parts)
+        # A genuine scan cannot count more host tensors than the entries it looked at (SCAN_NODES), so a count outside 0..SCAN_NODES is not
+        # believed and no remainder is claimed (review of PR 598). It also bounds the digits the reservation below allows for.
+        total = total if type(total) is int and len(parts) <= total <= SCAN_NODES else len(parts)
         lead = "Largest host copies, from the value load() returned (named `model` here): "
         tail = (" Delete or do not store the host copy: after ttnn.from_torch(w, ...) keep only the ttnn tensor; see stages/2/decoder_idioms.md. ")
         truncated = " The walk was cut short (walk truncated), so more may exist." if scan.get("truncated") is True else ""
         # The remainder count and the truncation notice are reserved before any row is added (issue 584). Rows go in whole, in order, while
         # they fit; a row that does not fit is left out and counted in the remainder, so the count always matches what is shown.
-        reserve = len(lead) + len(" | and 99999999 more host tensors") + 1 + len(truncated) + len(tail)
+        reserve = len(lead) + len(f" | and {SCAN_NODES} more host tensors") + 1 + len(truncated) + len(tail)
         shown, used = [], 0
         for part in parts:
             cost = len(part) + (3 if shown else 0)
@@ -872,7 +874,7 @@ class DeviceOps:
         head = lead + " | ".join(shown)
         head += f" | and {rest} more host tensors" if rest and shown else (f"and {rest} more host tensors" if rest else "")
         head += "." + truncated
-        return head + tail
+        return head[:max(0, HOST_MESSAGE_MAX - len(tail))] + tail     # the reservation already fits; this keeps the cap whatever the rows hold
 
     def add_load(self, ops) -> None:
         self.total.update(self._clean(ops))
