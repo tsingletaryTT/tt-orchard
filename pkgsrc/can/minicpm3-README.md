@@ -26,7 +26,7 @@ Runs on **p150** (mesh `P150`).
 | Architecture | 62 layers, hidden size 2560, 40 attention heads, multi-latent attention (absorbed form on the chip), a dense gated-SiLU MLP. The prompt goes through the decode step one token at a time; the decode step is captured as a trace. |
 | Hardware | p150 |
 | License | apache-2.0 (the authors also point to a weights license whose link was unreachable; see License) |
-| Status | Beta. Installed and served from a local copy with tt-model's own installer on one chip of a p300c board; not yet installed from the Hub and not validated on other hosts. |
+| Status | Beta. Pulled from the Hub and served with `tt-model serve` on one chip of a p300c board on 2026-11-08 (answer "Paris", decode 33.0 to 33.6 tok/s over 12 runs, `bench-from-hub.json` in the tt-orchard repository); not validated on other hosts. |
 
 ## License
 
@@ -111,6 +111,7 @@ The checks above do not cover output quality beyond the agreement and perplexity
 
 ## Not measured
 
+- a pull of the bundle from the Hub on a host other than the one it was built on;
 - concurrent use and load (the server takes one request at a time);
 - perplexity and free-running text agreement under this bundle's pins (the figures above come from the earlier run's source-build ttnn);
 - decode speed at a context between 2,048 and 8,704 tokens, and at positions beyond 8,704;

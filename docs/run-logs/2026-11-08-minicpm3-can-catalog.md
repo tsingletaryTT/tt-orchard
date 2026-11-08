@@ -13,7 +13,15 @@ The can itself came from `docs/run-logs/2026-10-30-minicpm3-thin-bundle.md` (spe
 
 ## Results
 
-See the card (`pkgsrc/can/minicpm3-README.md`, Expected performance) and the evidence folder `docs/run-logs/evidence/2026-11-08-minicpm3-can/`.
+See the card (`pkgsrc/can/minicpm3-README.md`, Expected performance) and the evidence folder `docs/run-logs/evidence/2026-11-08-minicpm3-can/`. In short: decode 33.27, 33.50 and 33.64 tok/s (minimum, median, maximum of 12 runs at context 2048; 32.23, 33.60 and 33.74 at context 8704); prefill 15.8 s for 522 tokens, 59.6 s for 1,910 tokens and 268.5 s for 8,202 tokens (30.5 to 33 tok/s); 16 of 16 teacher-forced tokens agree with the float32 reference with 0 flips under the PyPI pins.
+
+## Publication
+
+The staged bundle (18 files; `SHA256SUMS` verified before the upload) was uploaded to the operator's existing repository `episod/minicpm3-4b-blackhole` (Hub commit `0782529d`; a second commit, `fc61a041`, updated the card status line after the Hub check). `tt-model publish episod/minicpm3-4b-blackhole` was run afterwards, because the card upload had dropped the `tt-model-catalog` tag; the tag is back. The repository already held files from the 2026-10-30 recipe package (`LICENSE-runtime`, `docs/running.md`, `evidence/context-bench.json`, `evidence/text_*.json`); they were left in place. The publish step rewrites the card's front matter, so `README.md` no longer matches its line in `SHA256SUMS`.
+
+Final check from the Hub: `tt-model pull episod/minicpm3-4b-blackhole` built the virtual environment, and `tt-model serve episod/minicpm3-4b-blackhole --refresh` served it on one chip (under tt-model the server listens on port 20000). The answer was "Paris". Decode over the same four prompts, 3 runs each, was 33.03, 33.21 and 33.63 tok/s (minimum, median, maximum; host load average 4.4 to 7.1); the record is `bench-from-hub.json`. The warm-cache boot check of the final staged bundle (`can boot`, 2026-11-08) passed all 9 checks at 33.61 tok/s (`boot-check-warm.json`). In short: decode 33.27, 33.50 and 33.64 tok/s (minimum, median, maximum of 12 runs at context 2048; 32.23, 33.60 and 33.74 at context 8704); prefill 15.8 s for 522 tokens, 59.6 s for 1,910 tokens and 268.5 s for 8,202 tokens (30.5 to 33 tok/s); 16 of 16 teacher-forced tokens agree with the float32 reference with 0 flips under the PyPI pins.
+
+
 
 ## Things to know
 
