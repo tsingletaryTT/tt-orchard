@@ -189,29 +189,33 @@ def where(position: int) -> str:
             "a decode step: the prefill token matched, so look at the decode path, the cache position and the state updates")
 
 
-def port_changed_after_check(stage: Path) -> bool:
-    """True when a file under <stage>/port is newer than the supervisor's test record (the port was edited after the check this output is from).
-    Links are not followed; at most PORT_SCAN_MAX files are looked at."""
+def port_changed_after_check(stage: Path):
+    """True when a file under <stage>/port is newer than the supervisor's test record (the port was edited after the check this output is from),
+    False when the whole port was looked at and none is, and None when that could not be established: the test record cannot be read, a directory
+    cannot be read, or the scan reached PORT_SCAN_MAX files. Links are not followed. Directories and `__pycache__` do not count toward the limit
+    (issue 565)."""
     try:
         checked = os.lstat(Path(stage) / MARKER_REL).st_mtime_ns
     except OSError:
-        return False
+        return None
     seen = 0
     stack = [Path(stage) / PORT_DIR]
     while stack:
         try:
             with os.scandir(stack.pop()) as it:
                 for entry in it:
-                    seen += 1
-                    if seen > PORT_SCAN_MAX:
-                        return False
                     st = entry.stat(follow_symlinks=False)
                     if stat.S_ISDIR(st.st_mode):
-                        stack.append(Path(entry.path))
-                    elif stat.S_ISREG(st.st_mode) and st.st_mtime_ns > checked:
+                        if entry.name != "__pycache__":
+                            stack.append(Path(entry.path))
+                        continue
+                    seen += 1
+                    if seen > PORT_SCAN_MAX:
+                        return None
+                    if stat.S_ISREG(st.st_mode) and st.st_mtime_ns > checked:
                         return True
         except OSError:
-            continue
+            return None
     return False
 
 
@@ -224,8 +228,11 @@ def edit_hint(stage: Path, message: str, base: str):
         return None, None
     name, number = found.group(1), int(found.group(2))
     sentence = f"the failure is at {name} line {number}."
-    if port_changed_after_check(stage):
+    changed = port_changed_after_check(stage)
+    if changed is True:
         return sentence, None
+    if changed is None:
+        return sentence + " Whether the port changed after the check could not be established (a scan of port/ was incomplete or failed), so no edit command is offered.", None
     parts, why = port_target(Path(stage), name)
     if parts is None:
         return None, None                                           # a name outside the port directory is not offered
@@ -234,6 +241,8 @@ def edit_hint(stage: Path, message: str, base: str):
     line = rows[number - 1].strip() if 0 < number <= len(rows) else ""
     if not line or len(line) > EDIT_LINE_MAX or not line.isprintable() or SECRET_RE.search(line):
         return sentence, None
+    if text.count(line) != 1:               # `edit` refuses an --old that matches several places, so such a command could never work (issue 566)
+        return sentence + " That line occurs in more than one place in the file, so no edit command is offered; use `show` and give `edit` more surrounding text.", None
     return sentence, f"python3 {base}/stage_tools.py edit {base}/{'/'.join(parts)} --old {shlex.quote(line)} --new 'THE FIXED LINE'"
 
 
@@ -275,7 +284,8 @@ def last_check(stage: Path) -> list[str]:
         lines.append(f"evidence: {rel(stage / OUTPUT_REL)}")
         base = rel(stage)
         if kind_op is not None and kind_op["kind"] == "port":
-            if kind_op["op"] == "device-ops":
+            # The static gate names the op `device-ops`; the runtime checks name load, prefill or decode and only their message starts with `device-ops:`.
+            if kind_op["op"] == "device-ops" or (message or "").startswith("device-ops:"):
                 lines.append(f"next: python3 {base}/stage_tools.py cheat ttnn.linear")
             else:
                 sentence, command = edit_hint(stage, message, base)
@@ -285,8 +295,11 @@ def last_check(stage: Path) -> list[str]:
                     lines.append("next: " + command)
     if data is not None:
         lines.append(STALE_NOTE)
-        if port_changed_after_check(stage):
+        changed = port_changed_after_check(stage)
+        if changed is True:
             lines.append("warning: a file under port/ changed after this check, so the failure above may already be fixed or its line may have moved.")
+        elif changed is None:
+            lines.append("warning: whether port/ changed after this check could not be established (the scan was incomplete or failed), so the failure above may be out of date.")
     lines.append(f"({ADVICE_NOTE})")
     return lines
 
@@ -353,6 +366,36 @@ def file_sha256(path: Path, cap: int, dir_fd=None):
             if seen > cap:
                 return None, f"is larger than {cap} bytes"
             digest.update(block)
+    finally:
+        os.close(fd)
+
+
+def read_snapshot(path: Path, cap: int, dir_fd=None):
+    """(bytes, hex digest, None) or (None, None, reason): a regular file read once, in blocks, from one open descriptor (no link followed, no FIFO
+    opened, at most `cap` bytes). The digest is of the bytes returned, so what is hashed is what the caller uses (issue 518)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None, None, "missing"
+    except OSError as exc:
+        return None, None, f"cannot be opened ({exc.__class__.__name__}: a link or an unreadable file)"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, None, "is not a regular file"
+        if st.st_size > cap:
+            return None, None, f"is larger than {cap} bytes"
+        chunks, seen = [], 0
+        while True:
+            block = os.read(fd, 1 << 20)
+            if not block:
+                break
+            seen += len(block)
+            if seen > cap:
+                return None, None, f"is larger than {cap} bytes"
+            chunks.append(block)
+        data = b"".join(chunks)
+        return data, hashlib.sha256(data).hexdigest(), None
     finally:
         os.close(fd)
 
@@ -454,11 +497,13 @@ def layer_diff(stage: Path, argv: list) -> int:
 
 # ---- the inner part: numpy, and torch when the reference has to be computed ------------------------------------------------------------
 
-def load_layers(path: Path, what: str):
-    """({name: array}, None) or (None, reason) from an .npz of float arrays. Pickled arrays are refused (`allow_pickle=False`), and the member count is bounded."""
+def load_layers(path: Path, what: str, data: bytes | None = None):
+    """({name: array}, None) or (None, reason) from an .npz of float arrays. Pickled arrays are refused (`allow_pickle=False`), and the member count is bounded.
+    With `data` the archive is read from those bytes (the ones that were hashed) and `path` is not opened."""
+    import io
     import numpy as np
     try:
-        with np.load(path, allow_pickle=False) as z:
+        with np.load(io.BytesIO(data) if data is not None else path, allow_pickle=False) as z:
             names = list(z.files)
             if len(names) > MAX_LAYERS + 1:
                 return None, f"{what} holds more than {MAX_LAYERS} arrays"
@@ -525,8 +570,12 @@ def layer_kind(k: int):
 def render(result: dict, threshold: float, notes: list) -> list:
     rows, first = result["rows"], result["first"]
     lines = [clean(n) for n in notes]
+    compared = len(rows)
+    lines.append(f"compared {compared} of {result['n_ref']} reference layers (relative L2 error against the threshold {threshold}).")
     if result["n_port"] != result["n_ref"]:
         lines.append(f"the port returned {result['n_port']} layers and the reference has {result['n_ref']}: compared as far as both go.")
+        if compared < result["n_ref"]:
+            lines.append(f"layers {compared} to {result['n_ref'] - 1} were not compared, so a divergence in them is not ruled out.")
     lines.append("layer | relative error | cosine | shapes (reference / port)")
     if first is not None:
         show = range(max(0, first - 3), min(len(rows), first + 5))
@@ -543,8 +592,10 @@ def render(result: dict, threshold: float, notes: list) -> list:
         lines.append(f"{k:>5} | {rel} | {cos} | {shapes}" + ("   <- first over" if k == first else ""))
         prev = k
     if first is None:
-        lines.append(f"all {len(rows)} layers are within a relative error of {threshold} of the reference on this prompt. The difference is outside the layers "
-                     "(the final norm, the output head, the sampling) or only appears in decode (the cache, the positions): these are prefill layer outputs.")
+        which = f"all {len(rows)} compared layers" if compared == result["n_ref"] else f"the {len(rows)} compared layers (of {result['n_ref']})"
+        lines.append(f"{which} are within a relative error of {threshold} of the reference on this prompt. That does not show they are identical: an error under "
+                     "the threshold can still change which token comes next. If the check still disagrees, the difference may be outside the layers "
+                     "(the final norm, the output head, the sampling) or only appear in decode (the cache, the positions): these are prefill layer outputs.")
     else:
         r = rows[first]
         kind = layer_kind(first)
@@ -608,10 +659,10 @@ def cached_reference(stage: Path, key: dict):
     meta, _ = read_json(stage / LAYER_REF_META_REL)
     if not meta or any(meta.get(k) != v for k, v in key.items()):
         return None
-    digest, _ = file_sha256(stage / LAYER_REF_REL, LAYER_FILE_MAX)
-    if digest is None or meta.get("npz_sha256") != digest:
+    data, digest, _ = read_snapshot(stage / LAYER_REF_REL, LAYER_FILE_MAX)
+    if data is None or meta.get("npz_sha256") != digest:
         return None
-    arrays, _ = load_layers(stage / LAYER_REF_REL, LAYER_REF_REL)
+    arrays, _ = load_layers(stage / LAYER_REF_REL, LAYER_REF_REL, data=data)       # the arrays come from the bytes that were hashed
     layers, _ = ordered(arrays, LAYER_REF_REL) if arrays is not None else (None, None)
     return layers
 
@@ -646,7 +697,14 @@ def inner(argv: list) -> int:
     threshold, dtype, digest, count = float(argv[0]), argv[1], argv[2], int(argv[3])
     stage = HERE
     run_dir = run_dir_of(stage)
-    arrays, why = load_layers(stage / LAYER_PORT_REL, LAYER_PORT_REL)
+    data, got, why = read_snapshot(stage / LAYER_PORT_REL, LAYER_FILE_MAX)
+    if data is None:
+        print(f"refused: {LAYER_PORT_REL} {why}.")
+        return 2
+    if got != digest:             # the outer part hashed a file; this is the file now, and the arrays are read from these bytes only
+        print(f"refused: {LAYER_PORT_REL} is not the file whose sha256 was checked a moment ago (its sha256 changed since).")
+        return 2
+    arrays, why = load_layers(stage / LAYER_PORT_REL, LAYER_PORT_REL, data=data)
     if arrays is None:
         print("refused: " + why + ".")
         return 2
