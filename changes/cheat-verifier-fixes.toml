@@ -1,0 +1,3 @@
+target = "0.9.131"
+summary = "The cheat sheet verifier reads each constructor and namespace on its own, stops treating quoted words as operations, refuses absence claims from an incomplete index, and a failed sheet refresh removes the old copies (issues 531 to 535)."
+pr = 601

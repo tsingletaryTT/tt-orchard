@@ -3595,7 +3595,8 @@ class Supervisor:
                 return swap_prepare.PrepareOutcome(False, note=port_facts.stage_3_note(chips=self._stage_3_chips() or 0,
                                                                                        copied=bool(seed.get("copied") or seed.get("kept"))))
             note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")),
-                                           cheat=(stage_dir / full_port.CHEAT_MD_NAME).is_file(), construction=bool(seed.get("construction")),
+                                           cheat=getattr(self, "_cheat_ok", True) and (stage_dir / full_port.CHEAT_MD_NAME).is_file(),
+                                           construction=bool(seed.get("construction")),
                                            idioms=(stage_dir / full_port.IDIOMS_NAME).is_file())
             if spec.number == 2 and getattr(self, "telegraph", None) is not None:
                 done_dir, done = getattr(self, "_best_restore", (None, None))
@@ -4459,7 +4460,16 @@ class Supervisor:
             safeio.atomic_write(stage_dir / full_port.CHEAT_NAME, cheat_bytes, mode=0o644)
             safeio.atomic_write(stage_dir / full_port.CHEAT_MD_NAME, cheat_text.encode("utf-8"), mode=0o644)
             copied += [full_port.CHEAT_NAME, full_port.CHEAT_MD_NAME]
+            self._cheat_ok = True
         except (safeio.SafeReadError, op_cheats.SheetError, OSError, ValueError) as exc:
+            self._cheat_ok = False
+            # An earlier copy (the coder may have edited it) must not stay: the prompt would call it verified. Both are removed, a link or a
+            # FIFO is unlinked and not followed, and the documented fallback (no sheet) runs (review of PR 529, issue 535).
+            for stale in (full_port.CHEAT_NAME, full_port.CHEAT_MD_NAME):
+                try:
+                    (stage_dir / stale).unlink(missing_ok=True)
+                except OSError:
+                    pass
             if not command:
                 self.ledger.append("decision", spec.number, decision="cheat sheet not copied", reason=str(exc)[:200])
         # The decoder idioms (helper-vs-coder): advice from a port that passed, put back each time. A file that cannot be read is skipped with a decision.
