@@ -292,6 +292,10 @@ MIN_REMAP_TENSORS = 3                   # a prefix rewrite stage 0 saw on fewer 
 MAX_LISTED_KEYS = 50
 
 
+class UnsupportedDispatcher(RuntimeError):
+    """The config's auto_map names a model class through an Auto class the installed transformers does not have."""
+
+
 def auto_map_model_entry(transformers, config, arch) -> str | None:
     """The name of the Auto class that loads the model's own code, or None. A config with an auto_map that names a model class ships its
     own implementation. The concrete transformers class for a built-in architecture name (LlamaForCausalLM) does not dispatch through that
@@ -306,6 +310,11 @@ def auto_map_model_entry(transformers, config, arch) -> str | None:
     for name in order + names:
         if name in names and getattr(transformers, name, None) is not None:
             return name
+    if names:
+        # The config does ship model code, but this transformers has none of the Auto classes it names. Loading the built-in class here would
+        # skip the shipped code, so the load fails and says why (review of PR 607).
+        raise UnsupportedDispatcher(f"the config's auto_map names {', '.join(sorted(names))}, and transformers "
+                                    f"{getattr(transformers, '__version__', '?')} has none of them, so the model's own code cannot be loaded")
     return None
 
 

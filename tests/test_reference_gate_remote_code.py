@@ -302,3 +302,32 @@ def test_json_key_order_does_not_decide_which_auto_class_loads(tmp_path):
     with pytest.raises(Stop):
         rg.load_model(TORCH, T, snap)
     assert seen["which"] == ["AutoModel"]
+
+
+def test_a_model_mapping_the_installed_transformers_cannot_dispatch_fails_instead_of_loading_the_built_in_class(tmp_path):
+    """Review of PR 607: the only model mapping names an Auto class this transformers lacks. That is not a config with no model mapping:
+    loading the built-in LlamaForCausalLM would skip the shipped code. The load fails, naming the class and the version."""
+    snap = snapshot_with_code(tmp_path)
+    T, seen, _ = _auto_map_fakes({"AutoModelForVideoGeneration": "modeling_x.X"})
+    with pytest.raises(rg.UnsupportedDispatcher) as err:
+        rg.load_model(TORCH, T, snap)
+    assert "AutoModelForVideoGeneration" in str(err.value) and "4.57.0" in str(err.value)
+    assert seen["builtin"] == 0 and seen["auto"] == []
+
+
+def test_the_unsupported_dispatcher_error_reaches_the_load_report_text(tmp_path):
+    """main() writes `f"{type(exc).__name__}: {exc}"` into the load report for any load failure; this is what it would say."""
+    snap = snapshot_with_code(tmp_path)
+    T, _, _ = _auto_map_fakes({"AutoModelForVideoGeneration": "modeling_x.X"})
+    with pytest.raises(Exception) as err:
+        rg.load_model(TORCH, T, snap)
+    text = f"{type(err.value).__name__}: {err.value}"
+    assert text.startswith("UnsupportedDispatcher: ") and "AutoModelForVideoGeneration" in text
+
+
+def test_a_mapping_with_one_resolvable_entry_among_unresolvable_ones_still_loads(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    T, seen, Stop = _auto_map_fakes({"AutoModelForVideoGeneration": "m.X", "AutoModel": "m.Base"})
+    with pytest.raises(Stop):
+        rg.load_model(TORCH, T, snap)
+    assert seen["which"] == ["AutoModel"]
