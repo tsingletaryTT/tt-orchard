@@ -29,7 +29,7 @@ The package is not verified by Tenstorrent.
    called tt-model's own `serve_container` with that one check replaced, only while a gozer lease held the chips (`scripts/can_cad/serve_staged.py`). The cause of the refusal was not found.
    It looks like the same refusal as issue 560.
 5. The tensor cache for this package is large. The root disk went to 100% while it was written under `~/.cache/tt-model`; the caches now live on the bonus drive and are linked in.
-   Plan for 35 to 45 GB of cache per profile.
+   Plan for 35 to 45 GB of cache per profile: one profile needs about 96 to 106 GB (61 GB of weights plus the cache) before the Docker image and the kernel cache.
 
 ## Measurements
 
@@ -45,8 +45,13 @@ First boot with empty caches: 532 s to a ready server (the first attempt, which 
 An earlier pilot with the serve command of the stage 2 check (no tt-model, same image, `P300`, 32 sequences, same prompts) gave decode 14.7 tok/s median (13.69 to 15.0) and a 1,975-token prefill of 0.144 s.
 The prefill figure differs from the package run by a factor of four and the cause was not found. The card uses the package figures.
 
-CadQuery check: 8 prompts, greedy, 3 identical repeats, 24 replies. All 24 have the JSON header line and one python block that parses, imports only cadquery and math and ends with `result = ...`;
-21 of 24 execute to a valid solid in CadQuery 2.8.0 (7 of 8 prompts; the failing prompt raised `No free edges available`). Eight prompts are too few to call this an evaluation.
+CadQuery check (the checker was rewritten after the review of PR 629 and the saved replies were checked again; the counts did not change):
+8 prompts, greedy, 3 identical repeats, 24 replies. Static checks, no code run: 24 of 24 have a first line that parses as JSON, exactly one python block, a block that
+parses, imports of only cadquery and math (every alias is checked), and a last top-level statement that assigns `result`. All 24 passed those checks, so all 24 were run.
+Each ran in a child process with an empty environment, resource limits and a timeout; Landlock refused file writes outside its work directory and TCP connections.
+No network namespace was used (unprivileged ones are not available here), so UDP and Unix sockets were not blocked. The verdict comes from a STEP file that a trusted epilogue
+exports after the generated code ends, loaded in a separate step: 21 of 24 export a CadQuery solid that is valid and has a positive volume (7 of 8 prompts). The failing prompt raised
+`No free edges available`. Eight prompts are too few to call this an evaluation. A reply written to attack the sandbox is not what it is built to stop.
 
 ## What is not done
 
