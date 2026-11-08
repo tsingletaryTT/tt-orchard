@@ -920,7 +920,9 @@ def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
     None when the check could not run (no numpy)."""
     out = {"restricted": False, "rows": None, "base_rows": None, "matched_rows": 0, "token_ids": [], "min_cosine": None,
            "sidecar": None, "tensor": None, "note": ""}
-    sidecars = [e for e in sc.get("sidecars", []) if str(e.get("file", "")).endswith(".safetensors")]
+    # An entry the sidecar scan refused (a link to a place outside the snapshot, issue 464) is never opened here: its header and its tensor
+    # bytes are a fact about some other file (review of PR 622).
+    sidecars = [e for e in sc.get("sidecars", []) if str(e.get("file", "")).endswith(".safetensors") and not e.get("refused")]
     if not sidecars:
         out["note"] = "the new model has no safetensors sidecar"
         return out
@@ -1126,7 +1128,9 @@ def code_files(model_dir: Path) -> list[dict]:
 
 
 def sidecar_finding(sc: dict) -> str:
-    parts = [f"{e['file']} ({e['size'] / 1e6:.1f} MB, {e['num_tensors']} tensors, sha256 {e['sha256'][:12]})"
+    # A refused link has no size, no hash and no tensor count (issue 464): it is named and said not to be measured.
+    parts = [f"{e['file']} (a link that leaves the snapshot and its cache, not measured or read)" if e.get("refused") else
+             f"{e['file']} ({e['size'] / 1e6:.1f} MB, {e['num_tensors']} tensors, sha256 {e['sha256'][:12]})"
              for e in sc["sidecars"]]
     s = ("The new model ships weights outside the backbone that the nearest model's runtime does not load: "
          + "; ".join(parts) + ".")

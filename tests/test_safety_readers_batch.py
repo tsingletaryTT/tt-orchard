@@ -352,3 +352,57 @@ def test_a_pipe_not_named_py_also_refuses_the_tree(tmp_path):
     stage = _port_tree(tmp_path)
     os.mkfifo(stage / "port" / "notes.txt")
     assert port_repair.current_sources(stage) is None
+
+
+def test_a_refused_sidecar_is_never_opened_by_the_restricted_head_check(tmp_path, monkeypatch):
+    """Review of PR 622: detect_restricted_head selected every safetensors sidecar, refused ones too, and opened the original path with
+    raw_header, so a link to an outside file was read before stage 0 reached the draft. The assertion is on the open itself: no call opens the
+    refused file, by raw_header or by a tensor read."""
+    pytest.importorskip("numpy")
+    import builtins
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    outside = tmp_path / "outside.safetensors"
+    outside.write_bytes(b"\x00" * 64)
+    os.symlink(outside, snap / "extra.safetensors")
+    opened, headers = [], []
+    real_open = builtins.open
+
+    def watching_open(file, *a, **kw):
+        opened.append(str(file))
+        return real_open(file, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", watching_open)
+    monkeypatch.setattr(dt, "raw_header", lambda p: headers.append(str(p)) or ({}, 0))
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(dt, "tensor_index", lambda d: {"lm_head.weight": {"shape": [100, 4], "dtype": "F32", "file": str(base / "x")}}
+                        if Path(d) == base else {})
+    sc = {"sidecars": [{"file": "extra.safetensors", "size": None, "sha256": None, "refused": "a link to a place outside the snapshot"}],
+          "problems": []}
+    out = dt.detect_restricted_head(snap, base, sc)
+    assert headers == [] and not any("extra.safetensors" in o or "outside.safetensors" in o for o in opened)
+    assert out["restricted"] is False
+
+
+def test_a_sidecar_that_was_not_refused_is_still_looked_at_by_the_restricted_head_check(tmp_path, monkeypatch):
+    pytest.importorskip("numpy")
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "readout.safetensors").write_bytes(b"\x00" * 64)
+    headers = []
+    monkeypatch.setattr(dt, "raw_header", lambda p: headers.append(Path(p).name) or ({}, 0))
+    base = tmp_path / "base"
+    base.mkdir()
+    monkeypatch.setattr(dt, "tensor_index", lambda d: {"lm_head.weight": {"shape": [100, 4], "dtype": "F32", "file": str(base / "x")}}
+                        if Path(d) == base else {})
+    dt.detect_restricted_head(snap, base, {"sidecars": [{"file": "readout.safetensors", "size": 64, "sha256": "ab"}], "problems": []})
+    assert headers == ["readout.safetensors"]
+
+
+def test_the_finding_text_names_a_refused_sidecar_and_does_not_crash_on_its_missing_size():
+    sc = {"sidecars": [{"file": "extra.safetensors", "size": None, "sha256": None, "num_tensors": None, "refused": "a link"},
+                       {"file": "readout.safetensors", "size": 2_000_000, "sha256": "ab" * 32, "num_tensors": 3}],
+          "problems": []}
+    text = dt.sidecar_finding(sc)
+    assert "extra.safetensors" in text and "not measured" in text and "readout.safetensors (2.0 MB, 3 tensors" in text
