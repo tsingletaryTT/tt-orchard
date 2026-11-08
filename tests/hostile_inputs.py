@@ -389,6 +389,12 @@ def _collect(base: Path):
                           disk_free_gb=lambda path: 1.0, gozer_status=lambda: "", home=base)
 
 
+def _tool_use_count(base: Path):
+    """The hostile item is a step log (`stages/2/log/prepare-00001.jsonl`): a file, link, FIFO, directory or damaged file where the coder's log goes."""
+    from orchard import tool_use
+    return tool_use.count(base)
+
+
 def _ledger_read_entries(base: Path):
     from orchard import ledger
     return ledger.read_entries(base / "input.json")
@@ -1060,6 +1066,7 @@ READERS: list[Reader] = [
     Reader("profile_summary.analyze_raw_file", _profile_analyze_raw_file, documented=(_SafeReadError, _ProfileError)),
     Reader("profile_summary.read_report_file", _profile_read_report_file, documented=(_SafeReadError, _ProfileError)),
     Reader("profile_summary.summarise_dir (hostile ops CSV)", _profile_summarise_dir, rel="ops_perf_results_hostile.csv"),
+    Reader("tool_use.count", _tool_use_count, suffix=b"\n", rel="stages/2/log/prepare-00001.jsonl"),
     Reader("preflight._config_json", _preflight_config_json),
     Reader("preflight._index_problem", _preflight_index_problem),
     Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),

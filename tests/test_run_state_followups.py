@@ -176,3 +176,15 @@ def test_the_task_does_not_name_the_idioms_file_when_the_stale_copy_cannot_be_re
     supervisor.Supervisor._pin_full_port(stub, SimpleNamespace(number=2), sd)
     assert (sd / full_port.IDIOMS_NAME).is_file()                      # it is still there
     assert not supervisor.idioms_advertised(stub._idioms_ok, sd)      # and the task does not name it
+
+
+def test_a_tool_name_that_is_not_plain_text_is_reported_as_other(tmp_path):
+    d = tmp_path / "stages" / "2" / "log"
+    d.mkdir(parents=True)
+    weird = json.dumps({"turn": 1, "sent": [], "received": {"tool_calls": [
+        {"function": {"name": "bad\ud800name", "arguments": "{}"}}, {"function": {"name": "x" * 200, "arguments": "{}"}},
+        {"function": {"name": "read_file", "arguments": "{}"}}]}}) + "\n"
+    (d / "prepare-00001.jsonl").write_text(weird, encoding="utf-8", errors="surrogatepass")
+    got = tool_use.count(tmp_path)
+    assert got["2"] == {"other": 2, "read_file": 1}
+    assert not any(0xD800 <= ord(c) <= 0xDFFF for name in got["2"] for c in name)

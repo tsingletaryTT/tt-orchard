@@ -23,8 +23,10 @@ from pathlib import Path
 
 from orchard import safeio
 
-LOG_MAX_BYTES = 64 * 1024 * 1024
+LOG_MAX_BYTES = 1024 * 1024 * 1024      # one step log: each turn line repeats the whole conversation so far, so a long step is large
+LINE_MAX_BYTES = 16 * 1024 * 1024       # one turn
 STAGE_DIR = re.compile(r"^(\d+)(?:\.partial-\d+)?$")
+TOOL_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,60}")
 STAGE_TOOL = re.compile(r"stage_tools(?:\.py)?\s+([a-z][a-z-]*)")
 
 
@@ -42,7 +44,7 @@ def _name(call) -> str | None:
         m = STAGE_TOOL.search(command) if isinstance(command, str) else None
         if m:
             return f"stage_tools {m.group(1)}"
-    return name[:60]
+    return name if TOOL_NAME.fullmatch(name) else "other"       # a name from a log is text a coder wrote: only a plain one is reported as it is
 
 
 def count(run_dir) -> dict:
@@ -69,26 +71,29 @@ def count(run_dir) -> dict:
                 if not stat.S_ISREG(f.stat(follow_symlinks=False).st_mode):
                     out["skipped"] += 1               # a link, a pipe or anything else: never opened
                     continue
-                data = safeio.read_bytes(f.path, max_bytes=LOG_MAX_BYTES)
+                # One line at a time: a step log can be large, and a hostile one (a single 50 MB line) is refused at LINE_MAX_BYTES.
+                for line in safeio.iter_lines(f.path, max_bytes=LOG_MAX_BYTES, max_line_bytes=LINE_MAX_BYTES):
+                    _count_line(line, tools, out)
             except (safeio.SafeReadError, OSError):
-                out["skipped"] += 1
-                continue
-            for line in data.decode("utf-8", "replace").splitlines():
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    out["skipped"] += 1
-                    continue
-                received = rec.get("received") if isinstance(rec, dict) else None
-                calls = received.get("tool_calls") if isinstance(received, dict) else None
-                if not isinstance(received, dict):
-                    out["skipped"] += 1
-                    continue
-                for call in calls if isinstance(calls, list) else []:
-                    name = _name(call)
-                    if name:
-                        tools[name] = tools.get(name, 0) + 1
+                out["skipped"] += 1                   # the rest of this file is not read
     return out
+
+
+def _count_line(line: str, tools: dict, out: dict) -> None:
+    try:
+        rec = json.loads(line)
+    except (ValueError, RecursionError):
+        out["skipped"] += 1
+        return
+    received = rec.get("received") if isinstance(rec, dict) else None
+    if not isinstance(received, dict):
+        out["skipped"] += 1
+        return
+    calls = received.get("tool_calls")
+    for call in calls if isinstance(calls, list) else []:
+        name = _name(call)
+        if name:
+            tools[name] = tools.get(name, 0) + 1
 
 
 def main(argv=None) -> int:
