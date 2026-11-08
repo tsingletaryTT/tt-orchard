@@ -15,7 +15,7 @@
      "kind": "op",
      "signature": "ttnn.from_torch(tensor, dtype=None, layout=None, device=None, memory_config=None, mesh_mapper=None)",
      "usage": "w = ttnn.from_torch(w_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh_device, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device))",
-     "notes": "Host torch tensor to device. Weights go in TILE_LAYOUT; token ids for an embedding go in ROW_MAJOR_LAYOUT as uint32. On a mesh pass a mesh_mapper or the tensor lands on one device.",
+     "notes": "Host torch tensor to device. Weights go in TILE_LAYOUT; token ids for an embedding go in ROW_MAJOR_LAYOUT as uint32. On a mesh device the result is a tensor distributed on the mesh: reading it back with ttnn.to_torch needs a mesh_composer (run 20 got \"Can't convert a tensor distributed on MeshShape([1, 2]) mesh to row-major logical tensor. Supply a mesh composer\" after a from_torch with no mapper). Pass mesh_mapper=ttnn.ReplicateTensorToMesh(mesh) to state that every chip holds a copy. What omitting the mapper does (replicate or shard) is not measured; issue 563.",
      "seen_in": "models/tt_transformers/tt/rope.py:382 (layout, dtype, device, mesh_mapper)",
      "in": [
       "tt_metal"

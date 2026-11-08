@@ -511,6 +511,13 @@ def remember_record(table: dict, tables: tuple, key, value) -> None:
     table[key] = value
 
 
+# Issue 562: how often a repair round rewrites a whole port file and how often it runs the `edit` stage tool. A write_file that replaces an
+# existing file of at least REWRITE_MIN_LINES lines with different content is a whole-file rewrite. Counted and listed (at most
+# DEDUPE_LISTED_CALLS) for the step's ledger record; nothing is refused.
+REWRITE_MIN_LINES = 80
+EDIT_TOOL_COMMAND = re.compile(r"^\s*(?:python3?\s+)?\S*stage_tools\.py\s+edit\b")
+
+
 class Tools:
     def __init__(self, run_dir, stage_dir, env: dict, *, timeout: float = TOOL_TIMEOUT_S,
                  limit: int = TOOL_OUTPUT_CHARS, scratch=None, dedupe: bool = AGENT_TOOL_DEDUPE):
@@ -524,6 +531,9 @@ class Tools:
         self.dedupe_count = 0
         self.dedupe_calls: list[list] = []                                    # [tool, turn, first turn], at most DEDUPE_LISTED_CALLS of them
         self.last_dedupe: dict | None = None                                  # set by the call that was answered with a note, else None
+        self.rewrite_count = 0                                                # whole-file rewrites by write_file (issue 562)
+        self.rewrite_calls: list[list] = []                                   # [path, turn, lines of the old file, characters written], bounded
+        self.edit_calls = 0                                                   # shell commands that ran the `edit` stage tool (issue 562)
         # <run>/tt-metal-scratch, offered only to stages 2 to 4 of a stock-runtime run (orchard.stages.scratch_stage): a copy of the
         # host tt-metal tree's models/ that those stages may change. write_file reaches it by a path that starts with its name.
         self.scratch = Path(scratch) if scratch is not None else None
@@ -566,6 +576,8 @@ class Tools:
             return "error: the arguments must be a JSON object"
         if name == "shell":
             command = args.get("command")
+            if isinstance(command, str) and EDIT_TOOL_COMMAND.match(command):
+                self.edit_calls += 1
             return self._deduped_shell(command, self.shell(command))
         if name == "read_file":
             unknown = self.unknown_read_args(args, ("path", "offset"),
@@ -782,10 +794,17 @@ class Tools:
                     "do not repeat blocks, and split a long file into parts you write one at a time.")
         # A repeat of the last write is answered, not done: an agent that has finished sometimes writes
         # the same file again and again instead of ending the step (the first lab run).
-        if p.is_file() and p.read_text(encoding="utf-8", errors="replace") == content:
+        existing = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
+        if existing is not None and existing == content:
             return (f"unchanged: {rel} already holds exactly this content; nothing was written. If every "
                     "file this step needs is written, end the step now: reply with a short summary and no "
                     "tool call.")
+        if existing is not None:
+            old_lines = existing.count("\n")
+            if old_lines >= REWRITE_MIN_LINES:      # a different long file is being replaced as a whole (issue 562)
+                self.rewrite_count += 1
+                if len(self.rewrite_calls) < DEDUPE_LISTED_CALLS:
+                    self.rewrite_calls.append([rel, self._turn, old_lines, len(content)])
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return f"wrote {len(content)} characters to {rel}"
@@ -931,7 +950,13 @@ class AgentStep:
             # How many of this step's tool results were the "unchanged" note (Tools dedupe), and which calls (the first few). Left out when none.
             count = getattr(self.tools, "dedupe_count", 0)
             deduped = {"tool_deduped": count, "tool_deduped_calls": [list(c) for c in getattr(self.tools, "dedupe_calls", [])]} if count else {}
-            self.ledger.append("evidence", self.stage, what="transcript", phase=self.phase, status=status, turns=turns, **rec, **deduped)
+            writes = {}
+            if getattr(self.tools, "rewrite_count", 0):
+                writes["whole_file_rewrites"] = self.tools.rewrite_count
+                writes["whole_file_rewrite_calls"] = [list(c) for c in self.tools.rewrite_calls]
+            if getattr(self.tools, "edit_calls", 0):
+                writes["edit_calls"] = self.tools.edit_calls
+            self.ledger.append("evidence", self.stage, what="transcript", phase=self.phase, status=status, turns=turns, **rec, **deduped, **writes)
         return Outcome(status, turns, final_text, detail)
 
     @staticmethod
