@@ -133,6 +133,7 @@ from orchard import full_port_result, runaway, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
 from orchard.blocked import ALL_ONES_MARK, BOOT_ABORT_MARKS, LOG_LINES_MARK, block_code, last_pause
+from orchard.blocked import archive_bundle as archive_blocked_bundle
 from orchard.blocked import write_bundle as write_blocked_bundle
 from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
@@ -204,6 +205,11 @@ EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
 # CLASS_UNKNOWN (the fixed start of the unknown-class pause reason) lives in orchard/classes.py, so status.py can read it first without this module.
+
+
+def idioms_advertised(copy_ok: bool, stage_dir) -> bool:
+    """Whether the stage 2 task may name the idioms file: this stage's copy of the shipped file succeeded and the file is there (issue 576)."""
+    return bool(copy_ok) and (Path(stage_dir) / full_port.IDIOMS_NAME).is_file()
 
 
 def class_unknown_reason(reasons) -> str:
@@ -1328,6 +1334,7 @@ class Supervisor:
                 return self._abort()
         self.ledger.append("decision", None, decision="ready for operator review",
                            bundle="stages/8/bundle")
+        archive_blocked_bundle(self.run_dir)       # an earlier block (an automatic retry or a resume followed it) must not look current (issue 572)
         # Nothing owns the coder once this process exits. gozer would then show a lease whose owner
         # pid is dead while the container still has the devices open. So the run gives the
         # hardware back, or (keep_up) hands the coder's chips to a lease its container owns.
@@ -3676,7 +3683,7 @@ class Supervisor:
             note = port_facts.prepare_note(facts=bool(seed.get("facts")), skeleton=bool(seed.get("skeleton")), excerpts=bool(seed.get("excerpts")),
                                            cheat=getattr(self, "_cheat_ok", True) and (stage_dir / full_port.CHEAT_MD_NAME).is_file(),
                                            construction=bool(seed.get("construction")),
-                                           idioms=(stage_dir / full_port.IDIOMS_NAME).is_file())
+                                           idioms=idioms_advertised(getattr(self, "_idioms_ok", True), stage_dir))
             if spec.number == 2 and getattr(self, "telegraph", None) is not None:
                 done_dir, done = getattr(self, "_best_restore", (None, None))
                 restored = done if done_dir == str(stage_dir) else self._restore_best_port(spec, stage_dir)      # `_draft` already tried it
@@ -4552,11 +4559,19 @@ class Supervisor:
             if not command:
                 self.ledger.append("decision", spec.number, decision="cheat sheet not copied", reason=str(exc)[:200])
         # The decoder idioms (helper-vs-coder): advice from a port that passed, put back each time. A file that cannot be read is skipped with a decision.
+        # `_idioms_ok` says this stage's copy succeeded; the task names the file only then, and an earlier copy (the coder may have edited it) is
+        # removed, so the task never advertises a file that is not the shipped advice (issue 576).
         try:
             idioms_src = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.IDIOMS_SOURCE.name
             safeio.atomic_write(stage_dir / full_port.IDIOMS_NAME, safeio.read_bytes(idioms_src, max_bytes=RUN_JSON_MAX), mode=0o644)
             copied.append(full_port.IDIOMS_NAME)
+            self._idioms_ok = True
         except (safeio.SafeReadError, OSError, ValueError) as exc:
+            self._idioms_ok = False
+            try:
+                (stage_dir / full_port.IDIOMS_NAME).unlink(missing_ok=True)      # a link or a FIFO is unlinked, not followed
+            except OSError:
+                pass
             if not command:
                 self.ledger.append("decision", spec.number, decision="idioms file not copied", reason=str(exc)[:200])
         # The interpreter `layer-diff` runs under (torch and transformers). The coder's shell has an allow-listed environment, so the supervisor names it.
