@@ -1,0 +1,3 @@
+target = "0.9.139"
+summary = "Olmo-Hybrid-7B: boot check of the republished bundle from the Hub passed (12.34 tok/s); the card lists all seven boot-check rates."
+pr = 642

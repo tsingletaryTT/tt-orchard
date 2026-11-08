@@ -80,7 +80,7 @@ def main():
         extra = [cc["min"], cc["max"]]
     boot_text = ""
     if boots:
-        boot_text = (f"\nIn {len(boots)} boot checks of this bundle run before this card was written (one 64-token request each, host load not recorded) the served decode rate was "
+        boot_text = (f"\nIn {len(boots)} boot checks of this bundle (one 64-token request each, host load not recorded) the served decode rate was "
                      + ", ".join(f"{x:.1f}" for x in sorted(boots)) + " tok/s. Taken together, the served decode rate of this package has been anywhere from "
                      f"{min(boots + extra + [w['decode']['tok_s']['min']]):.1f} to {max(boots + extra + [w['decode']['tok_s']['max']]):.1f} tok/s across the benchmark runs above and these boot checks, depending on what else the host was doing.\n")
     cold = ""
