@@ -11,6 +11,18 @@ status: draft. A local tt-orchard copy. Since 2026-10-04 a tested template scrip
 A failed bring-up on this machine built a CPU reference that decoded the wrong way, and every
 later measurement was made against it. This stage checks the reference itself first.
 
+## The attitude of this stage
+
+The operator's words for stage 1, 2026-11-08: "goonies never say die", "i'll try anything once (or twice)", "why not?"
+
+In practice: a model that does not load the usual way gets a second and a third way, and the stage ends with a written record of
+what was tried. A model that ships its own code (an `auto_map` in its `config.json`, a `modeling_*.py` file) is loaded with that code.
+The script catches transformers' request for `trust_remote_code=True`, drops the environment variables that look like secrets, turns the
+hub and transformers offline, moves HOME to an empty directory, lists every `.py` file with its sha256 under `remote_code` in
+`evidence/load-report.json`, and loads again. This is not a sandbox: that code runs with this user's file permissions and can use the
+network. So when `remote_code` is in the load report, say so in the `loads` note and name the files it lists. Never run code from the
+snapshot yourself; only the script does.
+
 ## Goal
 
 Write `reference.json` in your stage directory. A tested script does all of the work and writes a

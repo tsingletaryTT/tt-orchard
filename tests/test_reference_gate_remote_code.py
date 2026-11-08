@@ -1,0 +1,159 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Stage 1 tries a model that ships its own code instead of refusing it.
+
+The operator's rule for stage 1 (2026-11-08): "goonies never say die", "i'll try anything once (or twice)", "why not?".
+Spark-X2.6-4B-Loop-mHC carries `modeling_spark.py` (auto_map), transformers refuses to load it without trust_remote_code, and the gate used to
+stop there with a failed `loads` check. Now the gate catches that one refusal, scrubs the credentials it can scrub, turns the hub and
+transformers offline, lists the hash of every .py file it is about to let run, and loads again with trust_remote_code=True. The
+report says so. This is not a sandbox: the code runs with the user's file permissions and may use the network.
+Fakes only (no torch, no transformers needed)."""
+import importlib.util
+import os
+from pathlib import Path
+
+import pytest
+
+TEMPLATE = Path(__file__).resolve().parent.parent / "orchard" / "skills" / "reference-gate-templates" / "reference_gate.py"
+spec = importlib.util.spec_from_file_location("reference_gate_remote_under_test", TEMPLATE)
+rg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rg)
+
+REFUSAL = ("ValueError: The repository /x contains custom code which must be executed to correctly load the model. "
+           "Please pass the argument `trust_remote_code=True` to allow custom code to be run.")
+
+
+@pytest.fixture(autouse=True)
+def clean_state(monkeypatch):
+    rg.REMOTE_CODE.clear()
+    rg.REMOTE_CODE.update({"used": False, "files": {}, "scrubbed": []})
+    for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "GH_TOKEN", "SOME_API_KEY", "KEEP_ME"):
+        monkeypatch.delenv(k, raising=False)
+    yield
+
+
+def snapshot_with_code(tmp_path):
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "modeling_spark.py").write_text("class Spark: pass\n")
+    (snap / "config.json").write_text("{}")
+    return snap
+
+
+def test_a_refusal_is_retried_once_with_trust_remote_code(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    calls = []
+
+    def loader(path, **kw):
+        calls.append(dict(kw))
+        if not kw.get("trust_remote_code"):
+            raise ValueError(REFUSAL)
+        return "loaded"
+
+    assert rg.with_remote_code(loader, str(snap), snapshot=snap) == "loaded"
+    assert [bool(c.get("trust_remote_code")) for c in calls] == [False, True]
+    assert rg.REMOTE_CODE["used"] is True
+
+
+def test_once_allowed_later_calls_go_straight_to_trust_remote_code(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    calls = []
+
+    def loader(path, **kw):
+        calls.append(kw.get("trust_remote_code"))
+        return "ok"
+
+    rg.with_remote_code(lambda p, **kw: (_ for _ in ()).throw(ValueError(REFUSAL)) if not kw.get("trust_remote_code") else "ok",
+                        str(snap), snapshot=snap)
+    rg.with_remote_code(loader, str(snap), snapshot=snap)
+    assert calls == [True]
+
+
+def test_another_error_is_not_swallowed(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+
+    def loader(path, **kw):
+        raise ValueError("shapes do not match")
+
+    with pytest.raises(ValueError, match="shapes do not match"):
+        rg.with_remote_code(loader, str(snap), snapshot=snap)
+    assert rg.REMOTE_CODE["used"] is False
+
+
+def test_credentials_in_the_environment_are_scrubbed_and_named(tmp_path, monkeypatch):
+    snap = snapshot_with_code(tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "hf_SECRET")
+    monkeypatch.setenv("GH_TOKEN", "gh_SECRET")
+    monkeypatch.setenv("SOME_API_KEY", "k")
+    monkeypatch.setenv("KEEP_ME", "yes")
+    rg.allow_remote_code(snap, scratch_home=tmp_path / "home")
+    assert "HF_TOKEN" not in os.environ and "GH_TOKEN" not in os.environ and "SOME_API_KEY" not in os.environ
+    assert os.environ["KEEP_ME"] == "yes"
+    assert set(rg.REMOTE_CODE["scrubbed"]) >= {"HF_TOKEN", "GH_TOKEN", "SOME_API_KEY"}
+    assert "hf_SECRET" not in repr(rg.REMOTE_CODE)           # names only, never values
+
+
+def test_the_hub_and_transformers_go_offline_and_home_moves_to_scratch(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    rg.allow_remote_code(snap, scratch_home=tmp_path / "home")
+    assert os.environ["HF_HUB_OFFLINE"] == "1" and os.environ["TRANSFORMERS_OFFLINE"] == "1"
+    assert os.environ["HOME"] == str(tmp_path / "home") and (tmp_path / "home").is_dir()
+
+
+def test_every_py_file_that_may_run_is_listed_with_its_sha256(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    (snap / "sub").mkdir()
+    (snap / "sub" / "extra.py").write_text("x = 1\n")
+    rg.allow_remote_code(snap, scratch_home=tmp_path / "home")
+    files = rg.REMOTE_CODE["files"]
+    assert set(files) == {"modeling_spark.py", "sub/extra.py"} and all(len(v) == 64 for v in files.values())
+
+
+def test_load_model_passes_trust_remote_code_to_the_config_and_the_class(tmp_path, monkeypatch):
+    """The wiring at the layer that used to fail: a config that raises the refusal gets loaded with trust_remote_code, and so does the
+    class's from_pretrained."""
+    snap = snapshot_with_code(tmp_path)
+    seen = {}
+
+    class Cfg:
+        architectures = ["SparkForCausalLM"]
+        model_type = "spark"
+
+    class Stop(Exception):
+        pass
+
+    class Cls:
+        @staticmethod
+        def from_pretrained(path, **kw):
+            seen["class_kw"] = kw
+            raise Stop
+
+    class AutoConfig:
+        @staticmethod
+        def from_pretrained(path, **kw):
+            seen["config_kw"] = kw
+            if not kw.get("trust_remote_code"):
+                raise ValueError(REFUSAL)
+            return Cfg()
+
+    T = type("T", (), {"__version__": "4.57.0", "AutoConfig": AutoConfig, "SparkForCausalLM": Cls})
+
+    class Torch:
+        bfloat16 = "bf16"
+
+    monkeypatch.setattr(rg, "HOME_SCRATCH", tmp_path / "home", raising=False)
+    with pytest.raises(Stop):
+        rg.load_model(Torch, T, snap)
+    assert seen["config_kw"].get("trust_remote_code") is True and seen["class_kw"].get("trust_remote_code") is True
+
+
+def test_a_link_or_a_pipe_named_py_is_listed_but_never_followed(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do not hash me")
+    os.symlink(secret, snap / "linked.py")
+    os.mkfifo(snap / "pipe.py")
+    rg.allow_remote_code(snap, scratch_home=tmp_path / "home")      # a FIFO that was opened for reading would hang here
+    files = rg.REMOTE_CODE["files"]
+    assert files["linked.py"] == "unreadable" and files["pipe.py"] == "not a regular file"
+    assert len(files["modeling_spark.py"]) == 64

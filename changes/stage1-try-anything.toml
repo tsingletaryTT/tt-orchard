@@ -1,0 +1,3 @@
+target = "0.9.131"
+summary = "Stage 1 loads a model that ships its own code (trust_remote_code) after scrubbing credentials and listing the files, instead of failing the load check."
+pr = 597
