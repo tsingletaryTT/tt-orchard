@@ -221,6 +221,93 @@ def test_a_container_wider_than_the_cap_sets_truncated_even_when_the_extra_child
     assert failure(r)
 
 
+# ---- follow-ups from the PR 582 review (issues 583, 584, 592, 593) ---------------------------------------------------------------------
+
+def test_a_device_twin_is_found_when_the_path_mixes_key_and_attribute_steps():
+    """Issue 583: the leaf was cut from the whole path text, so `model['host'].weight` was named `host'].weight`."""
+    m = {"host": Holder(), "dev": Holder()}
+    m["host"].weight = torch_t(4, 4)
+    m["dev"].weight = device_t(4, 4)
+    row = scan(m)["top_host"][0]
+    assert row["path"] == "model['host'].weight"
+    assert row["device"] is not None and row["device"]["path"] == "model['dev'].weight"
+
+
+def test_the_leaf_is_the_last_step_for_each_kind_of_step():
+    assert PC.step_leaf("['layers.0.up_proj.weight']") == "layers.0.up_proj.weight"
+    assert PC.step_leaf(".weight") == "weight"
+    assert PC.step_leaf("[3]") == "3"
+
+
+def _rows(n, path_len=110, twin_len=90):
+    return [{"path": "model." + "p" * path_len + str(i), "shape": [8, 4], "elements": 1000 - i, "kind": "torch",
+             "device": {"path": "model." + "d" * twin_len + str(i), "shape": [8, 4]}} for i in range(n)]
+
+
+def test_eight_long_rows_keep_the_remainder_count_and_the_truncation_notice_and_every_row_is_whole():
+    """Issue 584: the final slice cut the notices off the end, or cut a row in half. Rows that do not fit are left out and counted."""
+    scan_result = {"host_elements": 9000, "device_elements": 10, "host_tensors": 40, "truncated": True, "top_host": _rows(8)}
+    msg = PC.DeviceOps.host_listing(scan_result)
+    assert len(msg) <= PC.HOST_MESSAGE_MAX
+    assert "walk truncated" in msg
+    shown = msg.count("shape 8x4")
+    assert 0 < shown < 8, "some rows must be left out for this input to test the budget"
+    assert f"and {40 - shown} more host tensors" in msg
+    assert msg.endswith("see stages/2/decoder_idioms.md. ")
+    for line in msg.split(" | "):
+        if "shape 8x4" in line:
+            assert "elements, torch" in line       # a row is never cut in the middle
+
+
+def test_a_short_listing_is_unchanged():
+    msg = failure({"host_elements": 9, "device_elements": 1, "host_tensors": 2, "top_host": _rows(2, 10, 10)})
+    assert msg.count("shape 8x4") == 2 and "more host tensors" not in msg and "walk truncated" not in msg
+
+
+def test_a_credential_in_a_dict_key_is_scrubbed_before_the_key_is_shortened():
+    """Issue 592: cutting a key at 80 characters left the start of a URL's user:password; a later scrub no longer recognised it."""
+    key = "https://" + "u" * 40 + ":" + "P" * 60 + "@host/model.bin"
+    msg = failure(scan({key: torch_t(5)}) | {"host_elements": 9, "device_elements": 1})
+    assert "PPPP" not in msg and "uuuuu" not in msg and "@host" in msg
+
+
+def test_a_token_that_would_be_cut_in_half_is_scrubbed_whole():
+    key = "x" * 70 + "/hf_" + "A" * 34
+    row = scan({key: torch_t(5)})["top_host"][0]
+    assert "AAAA" not in row["path"] and "hf_" not in row["path"]
+
+
+def test_an_attribute_name_and_a_printed_row_are_scrubbed_too():
+    m = Holder()
+    setattr(m, "https://" + "u" * 40 + ":" + "P" * 60 + "@h", torch_t(3))
+    assert "PPPP" not in paths(scan(m))[0]
+    msg = failure({"host_elements": 9, "device_elements": 1,
+                   "top_host": [{"path": "model.https://" + "u" * 30 + ":" + "P" * 100 + "@h", "elements": 4, "shape": [1], "kind": "torch"}]})
+    assert "PPPP" not in msg
+
+
+def test_the_walk_builds_paths_lazily_under_one_work_budget(monkeypatch):
+    """Issue 593: every child was queued with its concatenated path before the visited check, so nested lists that share children queued
+    thousands of paths while visiting 17 objects. A path is now built only for an object that is kept."""
+    monkeypatch.setattr(PC, "SCAN_NODES", 1000)
+    built = []
+    real = PC.extend_path
+    monkeypatch.setattr(PC, "extend_path", lambda path, step: built.append(step) or real(path, step))
+    node = [torch_t(1)]
+    for _ in range(12):
+        node = [node] * 16                      # 16 references to the same child at each of 12 levels
+    r = scan(node)
+    assert r["visited"] <= 40 and len(built) <= r["visited"] + 1
+    assert r["truncated"] is False
+
+
+def test_the_work_budget_counts_entries_that_are_skipped_and_marks_the_scan_truncated(monkeypatch):
+    monkeypatch.setattr(PC, "SCAN_NODES", 1000)
+    flat = [None] * 5000 + [torch_t(9)]
+    r = scan(flat)
+    assert r["truncated"] is True and r["host_tensors"] == 0 and failure(r)
+
+
 def test_a_passing_split_raises_nothing():
     PC.DeviceOps(1, 1).check_weights(scan({"w": torch_t(1)}) | {"host_elements": 1, "device_elements": 9})
 
