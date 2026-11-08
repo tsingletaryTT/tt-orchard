@@ -223,6 +223,114 @@ def test_the_audit_is_written_before_the_trusted_retry_runs(tmp_path):
     assert "modeling_spark.py" in audit["files"] and "scrubbed" in audit
 
 
+# ---- issue 602: a built-in architecture name with an auto_map must load the shipped code ------------------------------------------
+
+def _auto_map_fakes(auto_map):
+    """The Auto classes load the LOCAL implementation without complaint when trust_remote_code is omitted (a built-in config such as LlamaConfig
+    does that), so only an explicit trust_remote_code=True loads the shipped code. A refusal would hide that case (review of PR 607)."""
+    seen = {"builtin": 0, "auto": [], "which": []}
+
+    class Stop(Exception):
+        pass
+
+    class Builtin:
+        @staticmethod
+        def from_pretrained(path, **kw):
+            seen["builtin"] += 1
+            raise AssertionError("the built-in class was loaded and the shipped code skipped")
+
+    def auto(name):
+        class Auto:
+            @staticmethod
+            def from_pretrained(path, **kw):
+                seen["auto"].append(kw.get("trust_remote_code"))
+                seen["which"].append(name)
+                if not kw.get("trust_remote_code"):
+                    raise AssertionError("the local implementation loaded without trust_remote_code: the shipped code was skipped")
+                raise Stop
+        Auto.__name__ = name
+        return Auto
+
+    class Cfg:
+        architectures = ["LlamaForCausalLM"]
+        model_type = "llama"
+
+    cfg = Cfg()
+    if auto_map is not None:
+        cfg.auto_map = auto_map
+    AutoConfig = type("AutoConfig", (), {"from_pretrained": staticmethod(lambda path, **kw: cfg)})
+    T = type("T", (), {"__version__": "4.57.0", "AutoConfig": AutoConfig, "LlamaForCausalLM": Builtin,
+                       "AutoModelForCausalLM": auto("AutoModelForCausalLM"), "AutoModel": auto("AutoModel"),
+                       "AutoModelForSequenceClassification": auto("AutoModelForSequenceClassification")})
+    return T, seen, Stop
+
+
+TORCH = type("Torch", (), {"bfloat16": "bf16"})
+
+
+def test_a_built_in_architecture_with_an_auto_map_is_audited_and_loaded_with_trust_before_any_load(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    T, seen, Stop = _auto_map_fakes({"AutoModelForCausalLM": "modeling_spark.SparkForCausalLM"})
+    with pytest.raises(Stop):
+        rg.load_model(TORCH, T, snap)
+    assert seen["builtin"] == 0
+    assert seen["auto"] == [True]                              # the very first load already carries trust: no refusal is waited for
+    assert rg.REMOTE_CODE["used"] is True and "modeling_spark.py" in rg.REMOTE_CODE["files"]
+    assert (tmp_path / "evidence" / "remote-code-audit.json").is_file()
+
+
+def test_without_an_auto_map_the_built_in_class_is_still_chosen(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    T, seen, _ = _auto_map_fakes(None)
+    with pytest.raises(AssertionError, match="built-in class"):
+        rg.load_model(TORCH, T, snap)
+    assert seen["auto"] == [] and seen["builtin"] == 1 and rg.REMOTE_CODE["used"] is False
+
+
+def test_an_auto_map_with_only_config_or_tokenizer_entries_keeps_the_built_in_class(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    T, seen, _ = _auto_map_fakes({"AutoConfig": "configuration_x.XConfig", "AutoTokenizer": ["tok.X", None]})
+    with pytest.raises(AssertionError, match="built-in class"):
+        rg.load_model(TORCH, T, snap)
+    assert seen["auto"] == [] and rg.REMOTE_CODE["used"] is False
+
+
+def test_json_key_order_does_not_decide_which_auto_class_loads(tmp_path):
+    """A head architecture with no AutoModelForCausalLM entry takes AutoModel before any other model entry, whatever the order of the keys."""
+    snap = snapshot_with_code(tmp_path)
+    T, seen, Stop = _auto_map_fakes({"AutoModelForSequenceClassification": "m.Seq", "AutoModel": "m.Base"})
+    with pytest.raises(Stop):
+        rg.load_model(TORCH, T, snap)
+    assert seen["which"] == ["AutoModel"]
+
+
+def test_a_model_mapping_the_installed_transformers_cannot_dispatch_fails_instead_of_loading_the_built_in_class(tmp_path):
+    """Review of PR 607: the only model mapping names an Auto class this transformers lacks. That is not a config with no model mapping:
+    loading the built-in LlamaForCausalLM would skip the shipped code. The load fails, naming the class and the version."""
+    snap = snapshot_with_code(tmp_path)
+    T, seen, _ = _auto_map_fakes({"AutoModelForVideoGeneration": "modeling_x.X"})
+    with pytest.raises(rg.UnsupportedDispatcher) as err:
+        rg.load_model(TORCH, T, snap)
+    assert "AutoModelForVideoGeneration" in str(err.value) and "4.57.0" in str(err.value)
+    assert seen["builtin"] == 0 and seen["auto"] == []
+
+
+def test_the_unsupported_dispatcher_error_reaches_the_load_report_text(tmp_path):
+    """main() writes `f"{type(exc).__name__}: {exc}"` into the load report for any load failure; this is what it would say."""
+    snap = snapshot_with_code(tmp_path)
+    T, _, _ = _auto_map_fakes({"AutoModelForVideoGeneration": "modeling_x.X"})
+    with pytest.raises(Exception) as err:
+        rg.load_model(TORCH, T, snap)
+    text = f"{type(err.value).__name__}: {err.value}"
+    assert text.startswith("UnsupportedDispatcher: ") and "AutoModelForVideoGeneration" in text
+
+
+def test_a_mapping_with_one_resolvable_entry_among_unresolvable_ones_still_loads(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    T, seen, Stop = _auto_map_fakes({"AutoModelForVideoGeneration": "m.X", "AutoModel": "m.Base"})
+    with pytest.raises(Stop):
+        rg.load_model(TORCH, T, snap)
+    assert seen["which"] == ["AutoModel"]
 def test_a_hub_cache_snapshot_file_that_links_into_its_own_blobs_directory_is_hashed(tmp_path):
     """Found on the Spark run 2 (2026-11-08): every file in a Hugging Face cache snapshot is a link to ../../blobs/<hash>, and the first
     version of the hash read refused all links, so the audit listed every file as unreadable. A link whose target stays inside the model's
