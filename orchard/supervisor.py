@@ -3185,11 +3185,33 @@ class Supervisor:
                                          timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
         except AudioStageError:
             return False
-        return isinstance(problems, list) and any(audio_encoder_pin.UNPINNED_PROBLEM in str(p) for p in problems)
+        # Only a pure pin answer counts: a nonempty list of strings that are all about the pin. A pin problem next to another one (a manifest
+        # hash that is not the recorded one, a changed array) is a record the stage gate has to reject, and it is not replaced (review of PR 615).
+        return (isinstance(problems, list) and bool(problems)
+                and all(isinstance(p, str) and audio_encoder_pin.UNPINNED_PROBLEM in p for p in problems))
+
+    def _audio_set_aside_stage_1(self, stage_dir: Path, plan: list) -> None:
+        """Move what an earlier attempt left in the stage directory (the run directories the plan writes and `audio_reference.json`) into a new
+        `superseded-stage-1-<k>` directory beside them, so the references are made into fresh directories: the reference script refuses a run
+        directory that exists. Nothing is deleted. The ledger says what is about to move before it moves, so a crash at any point leaves the old
+        evidence either in place or in the aside directory, and the next attempt finds what is left and moves that too (review of PR 615)."""
+        names = sorted({item["dir"].split("/")[0] for item in plan} | {"acestep-root"})
+        present = [n for n in names + [audio_runtime.REFERENCE_FILE] if os.path.lexists(stage_dir / n)]
+        if not present:
+            return
+        k = 1
+        while os.path.lexists(stage_dir / f"superseded-stage-1-{k}"):
+            k += 1
+        aside = stage_dir / f"superseded-stage-1-{k}"
+        self.ledger.append("decision", 1, decision="audio reference set aside", aside=aside.name, moving=present)
+        aside.mkdir()
+        for n in present:
+            os.rename(stage_dir / n, aside / n)
 
     def _audio_stage_1(self, stage_dir: Path, paths, model_id, base_id, expected: dict) -> None:
         from orchard import audio_plan, audio_remote
         plan = audio_plan.reference_plan(model_id, base_id)
+        self._audio_set_aside_stage_1(stage_dir, plan)
         cache = Path(self.paths.cache_root) / "audio-reference"
         result = audio_remote.call(paths.reference_python, "references", {
             "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "paths": paths.record(), "plan": plan, "expected": expected,

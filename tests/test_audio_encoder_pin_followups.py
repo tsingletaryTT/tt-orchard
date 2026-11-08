@@ -88,6 +88,7 @@ def replace_reference_run(run_dir, stage_dir, rec, **override):
     d = run_dir / rec["runs"]["reference"]["dir"]
     shutil.rmtree(d)
     make_run(d, settings_override=override)
+    st.write_clip(d, st.SAMPLE_RATE, "audio.flac")            # like run_references: the only thing wrong with this run is its encoder
     data = json.loads((stage_dir / "audio_reference.json").read_text())
     entry = data["runs"]["reference"]
     entry["manifest_sha256"] = st.sha256_file(d / "manifest.json")
@@ -177,3 +178,103 @@ def test_a_fresh_start_always_makes_the_references(tmp_path):
     fake = resume_fake(stage_dir, run_dir)
     supervisor.Supervisor._audio_stage_1_or_resume(fake, stage_dir, SimpleNamespace(reference_python="/ref/python"), "m", "b", {}, resumed=False)
     assert len(fake.stage_calls) == 1
+
+
+# ---- 556 review fixes (PR 615): regenerate into fresh directories, and only for a pure pin problem -------------------------------------
+
+class RefusingRunner:
+    """The reference script as it really behaves: it refuses an --out directory that already exists (make_reference.py), and writes a run
+    otherwise. `crash_on` names a role-less model after which it raises, to leave a partial stage behind."""
+
+    def __init__(self, crash_after_first=False):
+        self.calls, self.crash_after_first = [], crash_after_first
+
+    def __call__(self, argv, env, timeout_s, log_path):
+        import numpy as np
+        from test_audio_stages import PATHS, music
+        self.calls.append(argv)
+        out = Path(argv[argv.index("--out") + 1])
+        if out.exists():
+            return 1                                    # "<out> exists; a run is never overwritten"
+        model = argv[argv.index("--model") + 1]
+        seed = {"small-music": 1, "small-music-base": 2}[model]
+        host = argv[0] == PATHS.chip_python
+        make_run(out, model, wave=music(seed=seed) + (0.002 * np.ones((2, 1), dtype=np.float32) if host else 0), seed=seed,
+                 commit=supervisor.audio_reference_env.LIBRARY_COMMIT)
+        if self.crash_after_first:
+            raise KeyboardInterrupt("the supervisor died after the first run")
+        return 0
+
+
+from pathlib import Path     # noqa: E402  (kept beside its use)
+
+
+def regen_fake(tmp_path, run_dir):
+    from test_audio_stages import EXP
+    fake = SimpleNamespace(run_dir=run_dir, ledger=FakeLedger(), paths=SimpleNamespace(cache_root=str(tmp_path / "cache")),
+                           _audio_env=lambda: {}, expected={"small-music": EXP, "small-music-base": EXP})
+    for name in ("_audio_stage_1", "_audio_set_aside_stage_1", "_audio_reference_pin_stale"):
+        setattr(fake, name, (lambda n: lambda *a, **k: getattr(supervisor.Supervisor, n)(fake, *a, **k))(name))
+    return fake
+
+
+def run_resume(fake, stage_dir):
+    from orchard.audio_runtime import AudioPaths
+    from test_audio_stages import BASE, MODEL, PATHS
+    paths = AudioPaths(PATHS.reference_python, PATHS.chip_python, PATHS.src_dir)
+    supervisor.Supervisor._audio_stage_1_or_resume(fake, stage_dir, paths, MODEL, BASE, fake.expected, resumed=True)
+
+
+def aside_dirs(stage_dir):
+    return sorted(p.name for p in Path(stage_dir).iterdir() if p.name.startswith("superseded-stage-1-"))
+
+
+def test_regeneration_makes_fresh_directories_and_keeps_the_old_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(audio_remote, "call", in_process)
+    runner = RefusingRunner()
+    monkeypatch.setattr(st, "subprocess_runner", lambda env: runner)
+    run_dir, stage_dir, rec, _ = stage1(tmp_path)
+    replace_reference_run(run_dir, stage_dir, rec, encoder_attn="sdpa")
+    fake = regen_fake(tmp_path, run_dir)
+    run_resume(fake, stage_dir)
+    assert st.reference_problems(stage_dir, run_dir) == []                 # a new, pinned record, made although the script refuses old directories
+    assert all(c[c.index("--out") + 1] for c in runner.calls) and len(runner.calls) == 3
+    aside = aside_dirs(stage_dir)
+    assert len(aside) == 1
+    old = json.loads((stage_dir / aside[0] / "audio_reference.json").read_text())
+    assert old["runs"]["reference"]["settings"]["encoder_attn"] == "sdpa"           # the evidence that was replaced is kept, not deleted
+    assert (stage_dir / aside[0] / "reference").is_dir() and (stage_dir / aside[0] / "host").is_dir()
+    decisions_ = [r[2].get("decision") for r in fake.ledger.rows]
+    assert decisions_.index("audio reference regenerated") < decisions_.index("audio reference set aside")
+
+
+def test_a_crash_after_the_move_leaves_the_old_evidence_aside_and_the_next_resume_makes_the_new(tmp_path, monkeypatch):
+    monkeypatch.setattr(audio_remote, "call", in_process)
+    run_dir, stage_dir, rec, _ = stage1(tmp_path)
+    replace_reference_run(run_dir, stage_dir, rec, encoder_attn="sdpa")
+    fake = regen_fake(tmp_path, run_dir)
+    crashing = RefusingRunner(crash_after_first=True)
+    monkeypatch.setattr(st, "subprocess_runner", lambda env: crashing)
+    with pytest.raises(KeyboardInterrupt):
+        run_resume(fake, stage_dir)
+    assert not (stage_dir / "audio_reference.json").exists() and len(aside_dirs(stage_dir)) == 1     # neither a half record nor lost evidence
+    healthy = RefusingRunner()
+    monkeypatch.setattr(st, "subprocess_runner", lambda env: healthy)
+    run_resume(fake, stage_dir)                                                  # the partial run directory of the crash is set aside too
+    assert st.reference_problems(stage_dir, run_dir) == []
+    aside = aside_dirs(stage_dir)
+    assert len(aside) == 2
+    olds = [json.loads((stage_dir / a / "audio_reference.json").read_text()) for a in aside if (stage_dir / a / "audio_reference.json").exists()]
+    assert len(olds) == 1 and olds[0]["runs"]["reference"]["settings"]["encoder_attn"] == "sdpa"
+
+
+def test_a_mixed_answer_from_the_gate_does_not_regenerate(tmp_path, monkeypatch):
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+    fake = SimpleNamespace(run_dir=tmp_path)
+    pin_problem = f"reference: it {pin.UNPINNED_PROBLEM} (float32, eager attention; issue 162); its settings say other"
+    other = "host_same_env: the manifest is not the one the result recorded"
+    for answer, expect in ((None, False), ([], False), ([pin_problem], True), ([pin_problem, other], False), ([other], False),
+                           ([pin_problem, 5], False), ("not a list", False)):
+        monkeypatch.setattr(audio_remote, "call", lambda *a, _answer=answer, **k: _answer)
+        assert supervisor.Supervisor._audio_reference_pin_stale(fake, stage_dir, SimpleNamespace(reference_python="/ref/python")) is expect, answer
