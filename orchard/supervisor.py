@@ -349,7 +349,9 @@ class RunActuator:
         cmd = self.control.take()
         if cmd == "abort":
             self._stop = "abort"
-        elif cmd == "pause" and self._stop is None:
+        elif cmd == "pause" and self._stop != "abort":
+            # The operator's pause wins over a watchdog's pause or escalation that is already active (issue 512). It used to be read and dropped
+            # when `_stop` was set, and the rescue that cleared the watchdog's stop then left no pause behind. An abort still beats it.
             self._stop = "operator-pause"
         return self._stop
 
@@ -2810,6 +2812,20 @@ class Supervisor:
                         # pause or an escalation was raised, and the stop would otherwise end the next agent step at once (review of PR 496, round 6).
                         # The deadline and the operator's commands were handled above and below.
                         raised = getattr(self.actuator, "_stop", None)
+                        # What happened during the blocking helper call is read now, in this order: the operator's commands first (abort beats pause
+                        # beats budget, review of PR 614), then the stage's wall-clock budget (issue 513). A current-time event reaches the budget
+                        # detector the way a helper-driven round's does.
+                        self.watchdog.feed(Event(ts=self.clock(), agent="supervisor", kind="ledger", name="helper-driven round", stage=n))
+                        # An operator's command read during the wait, or earlier while the watchdog's stop was active (stop_reason keeps it as `_stop`,
+                        # issue 512), is not a stop the helper's port handled: it is not consumed, and no hardware check starts on the rescue.
+                        if (command := self.actuator.stop_reason()) in ("abort", "operator-pause"):
+                            self.ledger.append("decision", n, decision="helper rescue stopped", round=k, command=command,
+                                               reason="the operator's command was read when the helper's reply came back")
+                            return command, [f"the repair step ended: {command} (the operator's command was read when the helper's reply came back)"], None
+                        if getattr(self.actuator, "deadline_pause", False):
+                            self.ledger.append("decision", n, decision="helper rescue stopped", round=k, command="stage-budget",
+                                               reason="the stage's wall-clock budget ran out while the helper's reply was awaited")
+                            return "pause", ["the repair step ended: pause (the stage's wall-clock budget ran out while the helper's reply was awaited)"], None
                         if out.status in ("pause", "escalate") or raised in ("pause", "escalate"):
                             self._consume_handled_stop(n, out.status if out.status in ("pause", "escalate") else raised)
                         # The operator may have written abort or pause while the helper's reply was awaited. The rescue does not override it, and no
