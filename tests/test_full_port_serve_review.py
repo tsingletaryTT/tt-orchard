@@ -220,6 +220,7 @@ def stub_supervisor(chips, calls):
     s._take_test_lease = lambda spec, shape, boards, exact: (calls.taken.append((shape.boards, boards, exact)) or "lease")
     s._run_test = lambda spec, stage_dir, test, lease, **kw: calls.ran.append((lease, kw)) or {"returncode": 0, "timed_out": False, "seconds": 1.0}
     s._cleanup_after_test = lambda after_test: None
+    s._publish_test_result = lambda spec, stage_dir, result, **kw: result      # the wide runner publishes the marker once, for the final try (issue 553)
     s._give_back_test_lease = lambda n, lease: calls.given_back.append(lease)
     return s
 
@@ -239,7 +240,7 @@ def test_the_wide_phase_without_a_coder_lease_takes_the_whole_test_lease_and_doe
     spec = SimpleNamespace(number=5, skill=full_port_serve.SKILL, boards=1)
     s._wide_hardware_phase(spec, tmp_path, {}, 2)
     assert [t[:2] for t in calls.taken] == [(2, 2)], "all the boards come from one lease of its own (it waits when they are busy)"
-    assert calls.ran == [("lease", {"boards": 2})] and calls.given_back == ["lease"]
+    assert calls.ran == [("lease", {"boards": 2, "final": False})] and calls.given_back == ["lease"]
 
 
 # ---- the second round of the review of PR 490 -------------------------------------------------------------------------------------

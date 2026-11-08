@@ -694,11 +694,16 @@ def fabric_timeout_in(path) -> bool:
     """True when the test output at `path` has a line with `Fabric Router Sync` and `Timeout` (the mesh open failed on the Ethernet
     handshake: `Fabric Router Sync: Timeout after 10000 ms on Device 2`). An output that cannot be read within the bounds is False, so
     the test is not run again on a guess."""
+    seen = False
     try:
-        return any(FABRIC_TIMEOUT_SIGNATURE.search(line) for line in
-                   safeio.iter_lines(path, max_bytes=FABRIC_SCAN_MAX, max_line_bytes=FABRIC_SCAN_LINE_MAX))
+        # The whole output is read before the answer is given (issue 552): `any()` stopped at the first matching line, so a later line over
+        # the limit was never checked and an output a full scan refuses as too large still started resets and a retry.
+        for line in safeio.iter_lines(path, max_bytes=FABRIC_SCAN_MAX, max_line_bytes=FABRIC_SCAN_LINE_MAX):
+            if FABRIC_TIMEOUT_SIGNATURE.search(line):
+                seen = True
     except safeio.SafeReadError:
         return False
+    return seen
 
 
 # ---- the supervisor -----------------------------------------------------------------------------
@@ -5128,7 +5133,7 @@ class Supervisor:
         if d.action == "use_free" or self.coder_lease is None:
             lease = self._take_test_lease(spec, shape, boards, None)
             try:
-                self._run_wide_test(spec, stage_dir, test, [lease], boards=boards, **record)
+                self._run_wide_test(spec, stage_dir, test, [lease], boards=boards, after_test=after_test, **record)
             finally:
                 self._cleanup_after_test(after_test)
             self._give_back_test_lease(n, lease)
@@ -5144,7 +5149,8 @@ class Supervisor:
             self._release_test_lease()
             raise
         try:
-            self._run_wide_test(spec, stage_dir, test, [lease] + ([extra] if extra is not None else []), boards=boards, **record)
+            self._run_wide_test(spec, stage_dir, test, [lease] + ([extra] if extra is not None else []), boards=boards,
+                                after_test=after_test, **record)
         finally:
             self._cleanup_after_test(after_test)
         if extra is not None:
@@ -5152,19 +5158,22 @@ class Supervisor:
         self._restore_coder(n, h)
         self.coder_lease = h.lease
 
-    def _run_wide_test(self, spec, stage_dir: Path, test: dict, leases: list[Lease], *, boards: int, **kw) -> dict:
+    def _run_wide_test(self, spec, stage_dir: Path, test: dict, leases: list[Lease], *, boards: int, after_test=None, **kw) -> dict:
         """`_run_test` for the wide phase, run again after the fabric handshake timeout (issue 487; stage 4's configurations have their own
         retry in `_run_listed_test_body`). When the output of a test that exited non-zero (not timed out) has a `Fabric Router Sync ...
         Timeout` line, every chip of every lease goes through the lease tool's reset in the issue 26 order (`reset_order`: the lease whose
         chips have the lowest PCI address last) and the test runs once more, at most `WIDE_FABRIC_RETRIES` times. Each retry is a ledger
         decision with the signature, the order (lease ids, first to last), the key and the attempt. The first output of each failed try is
         kept beside the final one. A failure with another cause, a timeout, or a fabric failure on the last try is the test's result and is
-        not retried."""
+        not retried. `after_test` (the phase's container sweep) also runs before each retry's resets (issue 554): a container left behind by
+        the failed try would hold the chips the reset needs. The resume marker is written once, for the result that stands (issue 553):
+        until then each try leaves its result in `<record>.attempt`, so a stop or a refused reset between tries leaves no marker and a
+        resume runs the hardware phase again."""
         n = spec.number
         out_path = stage_dir / kw.get("output", "evidence/hw-test-output.txt")
         shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
         extra = {"extra": leases[1]} if len(leases) > 1 else {}
-        result = self._run_test(spec, stage_dir, test, leases[0], boards=boards, **extra, **kw)
+        result = self._run_test(spec, stage_dir, test, leases[0], boards=boards, final=False, **extra, **kw)
         for attempt in range(1, WIDE_FABRIC_RETRIES + 1):
             if result["returncode"] in (0, None) or result["timed_out"] or not fabric_timeout_in(out_path):
                 break
@@ -5176,10 +5185,12 @@ class Supervisor:
                                signature="Fabric Router Sync: Timeout", attempt=attempt, of=WIDE_FABRIC_RETRIES,
                                reset_order=[lease.lease_id for lease in order], key=key, returncode=result["returncode"],
                                seconds=result["seconds"], first_output=self._moved_aside_record(kept))
+            self._cleanup_after_test(after_test)          # before the resets (issue 554); a block here stops the retry
             for lease in order:
                 self._reset_test_chips(n, shape, lease)
-            result = self._run_test(spec, stage_dir, test, leases[0], boards=boards, **extra, **kw)
-        return result
+            result = self._run_test(spec, stage_dir, test, leases[0], boards=boards, final=False, **extra, **kw)
+        return self._publish_test_result(spec, stage_dir, result, record=kw.get("record", "test-result.json"),
+                                         what=kw.get("what", "hardware test"))
 
     def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict, after_test=None) -> None:
         """The hardware phase with a lab box: lease the chips there, run the test there, give the
@@ -5290,7 +5301,7 @@ class Supervisor:
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
                   output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,
-                  extra: Lease | None = None, boards: int | None = None) -> dict:
+                  extra: Lease | None = None, boards: int | None = None, final: bool = True) -> dict:
         n = spec.number
         if n == 2 and record == "test-result.json" and self._helper_drive_on():
             # The port directory as the test is about to run it, written by the supervisor before anything runs: a best-port snapshot is kept
@@ -5309,6 +5320,19 @@ class Supervisor:
             held = sorted((i, c) for each in (lease, extra) for c, i in zip(each.chips, each.dev_indices))
             result = self._spawn(n, test["command"], [c for _, c in held], [i for i, _ in held], deadline, out_path,
                                  env_extra=env_extra, lease_ids=[lease.lease_id, extra.lease_id])
+        if not final:
+            # An attempt that may be retried (the wide phase, issue 553) leaves its result beside the marker, never as the marker: a resume
+            # that finds test-result.json takes the hardware phase as done, and a retry still owed would be lost.
+            attempt = (stage_dir / record).with_name(Path(record).name + ".attempt")
+            _put(attempt, json.dumps(result, indent=2))
+            return result
+        return self._publish_test_result(spec, stage_dir, result, record=record, what=what)
+
+    def _publish_test_result(self, spec, stage_dir: Path, result: dict, *, record: str = "test-result.json",
+                             what: str = "hardware test") -> dict:
+        """The end of a hardware test: the resume marker, the ledger's evidence entry and the raw-file hashes. Run once, for the result that
+        stands (the last attempt when the wide phase retries)."""
+        n = spec.number
         self._record_mask_inputs(n, stage_dir)
         marker = stage_dir / record
         tmp = marker.with_name(marker.name + ".tmp")
