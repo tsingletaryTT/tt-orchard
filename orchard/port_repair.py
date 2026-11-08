@@ -320,7 +320,7 @@ def current_sources(stage_dir) -> dict | None:
                 def visit(entry) -> None:
                     if "__pycache__" in entry.parts and entry.kind != "link":
                         return
-                    if entry.kind == "link":
+                    if entry.kind in ("link", "other"):       # a link, or a pipe, socket or device (scan_beneath says "other"): the tree is refused
                         bad.append("/".join(entry.parts))
                     elif entry.kind == "file" and entry.parts[-1].endswith(".py"):
                         found.append(entry.parts)

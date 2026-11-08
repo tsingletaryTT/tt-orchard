@@ -321,3 +321,34 @@ def test_the_counter_counts_what_it_says(tmp_path):
     f = tmp_path / "m.py"
     f.write_text("import math\na = math.isfinite(x)\nb = math.isfinite(y) and math.isfinite(z)\nc = other.isfinite(w)\n# math.isfinite(q)\n")
     assert _count_isfinite(f) == 3
+
+
+# ---- review of PR 622 ---------------------------------------------------------------------------------------------------------------------
+
+def test_a_symlinked_blobs_directory_is_not_an_allowed_root_for_the_sidecar_scan(tmp_path):
+    """With blobs -> a directory outside and extra.gguf -> ../../blobs/blob, the target resolves inside the (resolved) blobs path. A blobs
+    that is itself a link gives no second root, as in residency, so the file is refused and its size is not listed."""
+    model = tmp_path / "models--org--name"
+    snap = model / "snapshots" / ("a" * 40)
+    snap.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "blob").write_bytes(b"x" * 4242)
+    os.symlink(outside, model / "blobs")
+    os.symlink("../../blobs/blob", snap / "extra.gguf")
+    entry = next(e for e in _scan(snap, tmp_path)["ignored_files"] if e["file"] == "extra.gguf")
+    assert entry["size"] is None and "outside" in entry["reason"]
+
+
+def test_a_fifo_named_like_a_source_leaves_current_sources_refused_and_is_never_opened(tmp_path):
+    """scan_beneath reports a pipe as `other`. Ignoring it left the manifest unchanged, so evidence that matched the valid files was accepted
+    for a tree that holds a pipe. The pipe has no reader here and is never opened by the test or by the code under test."""
+    stage = _port_tree(tmp_path)
+    os.mkfifo(stage / "port" / "extra.py")
+    assert port_repair.current_sources(stage) is None
+
+
+def test_a_pipe_not_named_py_also_refuses_the_tree(tmp_path):
+    stage = _port_tree(tmp_path)
+    os.mkfifo(stage / "port" / "notes.txt")
+    assert port_repair.current_sources(stage) is None

@@ -1751,7 +1751,11 @@ def _link_roots(model_dir) -> tuple:
         return (Path(model_dir),)
     roots = [snap]
     if snap.parent.name == "snapshots":
-        roots.append((snap.parent.parent / "blobs").resolve())
+        blobs = snap.parent.parent / "blobs"
+        # A `blobs` that is a link is not the cache's own directory: resolving it would make wherever it points an allowed root (review of
+        # PR 622). Only a real directory gives the second root, as in orchard/residency.
+        if blobs.is_dir() and not blobs.is_symlink():
+            roots.append(blobs.resolve())
     return tuple(roots)
 
 
