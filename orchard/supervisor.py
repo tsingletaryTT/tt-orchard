@@ -132,7 +132,7 @@ from orchard import audio_reference_env, audio_runtime, bus, floor_report, neare
 from orchard import full_port_result, runaway, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
-from orchard.blocked import ALL_ONES_MARK, BOOT_ABORT_MARKS, block_code, last_pause
+from orchard.blocked import ALL_ONES_MARK, BOOT_ABORT_MARKS, LOG_LINES_MARK, block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
 from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
@@ -1016,7 +1016,7 @@ class Supervisor:
                        standin=self.standin, lease=lease, canary_prompt=RUN_CANARY_PROMPT,
                        note_path=self.run_dir / "stages" / str(stage) / "handoff.json",
                        evidence_dir=self.run_dir / "handoff", budgets=self.budgets,
-                       clock=self.clock, sleep=self.sleep)
+                       clock=self.clock, sleep=self.sleep, boot_abort=self._abort_boot)
 
     # ---- the run ----------------------------------------------------------------------------
 
@@ -1851,7 +1851,7 @@ class Supervisor:
                            ready_s=seconds)
         self.coder_lease = lease
 
-    DEVICE_STATE_READ_S = 60.0       # choice: the bus read of a device-state report may take this long before the report goes on without it
+    DEVICE_STATE_READ_S = bus.SETTLE_S + 30.0       # choice: the bus read may take the whole settling period (it re-reads a bad chip for SETTLE_S s before calling it dead, issue 586) plus 30 s before the report goes on without it
     FABRIC_ERROR = re.compile(r"Fabric Router Sync|Ethernet handshake|active ethernet core|REMOTE_HANDSHAKE", re.IGNORECASE)
 
     def _abort_boot(self, lease: Lease, exc: ServerError) -> None:
@@ -1898,14 +1898,13 @@ class Supervisor:
         if reset_error and ALL_ONES_MARK in reset_error.lower():
             self.chips_all_ones = True
         bits = [head[0].upper() + head[1:] + "."]
-        if tail:
-            bits.append("Last log lines: " + " | ".join(ln.strip() for ln in tail.splitlines() if ln.strip())[-700:] + ".")
-        else:
-            bits.append("The container log could not be read.")
         if fabric:
             bits.append("The log names a fabric or Ethernet handshake failure; reset all four chips (a gozer lease cycle) before the next try.")
         if result.get("killed"):
             bits.append(f"`tt-model stop` did not finish within {round(self.abort_stop_grace_s)} s, so the container was killed with `docker kill`.")
+        elif result.get("kill_failed"):
+            bits.append(f"`tt-model stop` did not finish within {round(self.abort_stop_grace_s)} s and `docker kill` was refused, so the container "
+                        "may still run.")
         if not stopped.stopped:
             bits.append("The container is not confirmed stopped, so the chips were not reset and the lease is still held.")
         elif reset_error:
@@ -1914,6 +1913,12 @@ class Supervisor:
             bits.append("The container was stopped and the chips were reset through the lease.")
         if self.chips_all_ones:
             bits.append(self._all_ones_note())
+        # The log lines go last, after every sentence the supervisor wrote itself: orchard/blocked.py classifies only the text before the mark
+        # (issue 585), so a word in a log line cannot decide what kind of block this is.
+        if tail:
+            bits.append(LOG_LINES_MARK + " | ".join(ln.strip() for ln in tail.splitlines() if ln.strip())[-700:] + ".")
+        else:
+            bits.append("The container log could not be read.")
         reason = " ".join(bits)
         if state.get("bus"):
             # A chip that left the PCIe bus is a hardware block, whatever came first (as `_block_if_off_bus` does for any failed boot).
@@ -2106,6 +2111,10 @@ class Supervisor:
         holder is a container process, the claim was a host process (a short ttnn run of another session), which may be gone now: wait
         `busy_retry_wait_s` and start once more. A second refusal blocks with the evidence of both looks. A container holder, a container of
         the coder's name, or a wait of 0 blocks at once."""
+        # Recorded first (issue 590): gathering the evidence reads docker, /proc and gozer, and the wait below lasts a minute. A supervisor
+        # that crashed in either would otherwise leave "coder starting ... owned: None" as the latest record, and recovery would take a
+        # container that appeared under the coder's name for its own and stop it. This refusal launched nothing.
+        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(), reason=str(held))
         try:
             found = self.coder.find_container() if hasattr(self.coder, "find_container") else None
         except (ServerError, OSError):
@@ -2117,6 +2126,8 @@ class Supervisor:
         self.ledger.append("decision", None, decision="retrying the coder start once: no container holds the chips",
                            lease_id=lease.lease_id, wait_s=self.busy_retry_wait_s)
         self.sleep(self.busy_retry_wait_s)
+        # Unknown ownership again, recorded immediately before the second launch, as "coder starting" does for the first (issue 590).
+        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(), server={**self.coder.record(), "owned": None})
         try:
             self.coder.start(lease)
         except ServerChipsHeld as again:
@@ -2130,7 +2141,10 @@ class Supervisor:
             scanned = {"holders": [], "unreadable": 0, "fuser": None, "error": f"{type(exc).__name__}: {exc}"[:200]}
         gozer = self._gozer_state()
         evidence = {"refusal": self._scrubbed(str(refusal), 600), "holders": scanned, "gozer": gozer,
-                    "containers_named_like_the_coder": found, "container_holder": device_holders.any_container(scanned),
+                    "containers_named_like_the_coder": found,
+                    # Only holders of the chips this lease holds decide the retry and the block text (issue 587); the full report stays whole.
+                    "container_holder": device_holders.any_container(scanned, lease.dev_indices),
+                    "container_on_any_chip": device_holders.any_container(scanned),
                     "look": "second" if second else "first"}
         self.ledger.append("decision", None, decision="coder start refused: who holds the device", lease_id=lease.lease_id, **evidence)
         return evidence

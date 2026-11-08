@@ -47,11 +47,23 @@ ALL_ONES_MARK = "all-ones"
 BOOT_ABORT_MARKS = ("the coder boot stalled", "the coder container exited", "the coder boot passed its deadline")
 
 
+# The fixed start of the container log lines in a coder boot abort's block text (issue 585). Everything after it is log text from the
+# container, which can say any word (`all-ones`, `chip`, `disk`). The classifier and the retry rule read only what comes before it, so a log
+# line cannot make a boot abort a hardware block, and the supervisor's own verdict sentences stay in front of it.
+LOG_LINES_MARK = "Last log lines: "
+
+
+def verdict_text(reason) -> str:
+    """The lower-cased block text without the container log lines: the part the supervisor wrote itself. A text with no marker is all verdict."""
+    text = "" if reason is None else str(reason).lower()
+    return text.split(LOG_LINES_MARK.lower(), 1)[0]
+
+
 def retryable(code: str, reason: str = "") -> bool:
     """Whether `tt-orchard bringup` may retry this block by itself. The marks are matched without regard to case (the classifier below
     reads the lower-cased text, and a reason already in a ledger or in blocked.json may hold either), and a reason that is not text is read
     as its string form."""
-    text = "" if reason is None else str(reason).lower()
+    text = verdict_text(reason)
     return (code in AUTO_RETRY and OFF_BUS_MARK.lower() not in text and CONTAINER_HOLDS_MARK.lower() not in text
             and ALL_ONES_MARK not in text)
 
@@ -93,7 +105,7 @@ def block_code(pause: dict) -> str | None:
     if kind == "watchdog":
         return "agent-stuck"
     if kind == "blocked":
-        text = str(pause.get("reason", "")).lower()
+        text = verdict_text(pause.get("reason", ""))
         for code, words in _BLOCKED_WORDS:
             if any(w in text for w in words):
                 return code

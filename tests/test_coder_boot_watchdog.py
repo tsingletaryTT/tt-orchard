@@ -23,8 +23,10 @@ class BootRun:
     (docker state, exit code), `health_at(t)` is the curl exit code and body. `stop_rc` is what `tt-model stop` returns; "timeout" makes it
     run out its wait. `after_stop` is the container state once a stop or a kill ran."""
 
-    def __init__(self, clock, log_at, state_at=lambda t: ("running", 0), health_at=lambda t: (7, ""), stop_rc=0):
+    def __init__(self, clock, log_at, state_at=lambda t: ("running", 0), health_at=lambda t: (7, ""), stop_rc=0, kill_rc=0, listener=False,
+                 inspect_fails=False):
         self.clock, self.log_at, self.state_at, self.health_at, self.stop_rc = clock, log_at, state_at, health_at, stop_rc
+        self.kill_rc, self.listener, self.inspect_fails = kill_rc, listener, inspect_fails
         self.calls, self.stopped, self.killed = [], False, False
 
     def argvs(self):
@@ -40,6 +42,8 @@ class BootRun:
         if argv[0] == "curl":
             rc, body = self.health_at(t)
             return out(rc, body)
+        if argv[:2] == ["docker", "inspect"] and self.inspect_fails:
+            return out(1, "", "no such container")
         if argv[:2] == ["docker", "inspect"]:
             st, code = ("exited", 137) if (self.stopped or self.killed) else self.state_at(t)
             return out(0, f"{st} {code}")
@@ -53,11 +57,14 @@ class BootRun:
             self.stopped = True
             return out(self.stop_rc, "stopping\n")
         if argv[:2] == ["docker", "kill"]:
-            self.killed = True
-            return out(0, NAME)
+            if self.kill_rc == 0:
+                self.killed = True
+            return out(self.kill_rc, NAME if self.kill_rc == 0 else "", "" if self.kill_rc == 0 else "permission denied")
         if argv[:2] == ["docker", "ps"]:
             running = not (self.stopped or self.killed) and self.state_at(t)[0] == "running"
             return out(0, f"c1 img {NAME} \n" if running and "-q" not in argv else ("c1\n" if running else ""))
+        if argv[:2] == ["ss", "-ltn"] and self.listener:
+            return out(0, "State\nLISTEN 0 128 0.0.0.0:8011 0.0.0.0:*\n")
         if argv[:2] == ["docker", "inspect"] or argv[:2] == ["ss", "-ltn"]:
             return out(0, "State\n")
         raise AssertionError(f"unexpected call: {argv}")
@@ -185,3 +192,40 @@ def test_the_log_tail_keeps_a_token_whole_so_the_redaction_can_find_it():
     text = ctl.log_tail()
     assert token in text
     assert "A" * 34 not in redact(text, hostname="somehost", home="/home/someone")
+
+
+# ---- review of PR 580 (issue 588): the kill is decided on this container's own state ------------------------------------------------
+
+def test_an_unrelated_listener_on_the_port_does_not_cause_a_kill_of_a_container_that_already_exited():
+    """The stop wait expired, but the container is already exited; something else listens on the port, so confirm_stopped() fails. The old
+    code ran docker kill on the exited container and recorded killed=True."""
+    seen = []
+
+    def state(t):
+        seen.append(t)
+        return ("running", 0) if len(seen) == 1 else ("exited", 137)      # running when abort_stop looks first, exited after the wait
+
+    ctl, run, clock = control(lambda t: "x", stop_rc="timeout", state_at=state, listener=True)
+    out = ctl.abort_stop(900)
+    assert out["killed"] is False
+    assert not [a for a in run.argvs() if a[:2] == ["docker", "kill"]]
+
+
+def test_an_unreadable_container_state_is_not_a_reason_to_kill():
+    ctl, run, clock = control(lambda t: "x", stop_rc="timeout", inspect_fails=True)
+    out = ctl.abort_stop(900)
+    assert out["killed"] is False and "kill_skipped" in out
+    assert not [a for a in run.argvs() if a[:2] == ["docker", "kill"]]
+
+
+def test_a_kill_that_docker_rejects_is_not_recorded_as_a_kill():
+    ctl, run, clock = control(lambda t: "x", stop_rc="timeout", kill_rc=1)
+    out = ctl.abort_stop(900)
+    assert [a for a in run.argvs() if a[:2] == ["docker", "kill"]] == [["docker", "kill", NAME]]
+    assert out["killed"] is False and out["kill_failed"] is True and out["kill"]["returncode"] == 1
+
+
+def test_a_running_container_after_a_timed_out_stop_is_still_killed_and_recorded():
+    ctl, run, clock = control(lambda t: "x", stop_rc="timeout")
+    out = ctl.abort_stop(900)
+    assert out["killed"] is True and "kill_failed" not in out

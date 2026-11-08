@@ -337,7 +337,7 @@ def test_a_coder_that_does_not_come_back_after_a_park_on_a_dead_board_is_off_the
     assert rig.run() == supervisor.EXIT_BLOCKED
     end = decisions(rig, "blocked")[-1]
     assert end["code"] == "hardware-unhealthy" and bus.OFF_BUS in end["reason"]
-    assert "cold-boot budget" in end["reason"], "the failure that came first is kept"
+    assert "passed its deadline" in end["reason"], "the failure that came first is kept (a restore-time boot failure now ends through the boot abort, issue 589)"
     assert blocked.retryable(end["code"], end["reason"]) is False
 
 
@@ -345,7 +345,7 @@ def test_a_coder_that_does_not_come_back_after_a_park_on_a_healthy_bus_keeps_its
     monkeypatch.setattr(supervisor, "spawn_checked", restore_fails_after_the_4_chip_test(rig, fake_bus, dead=False))
     assert rig.run() == supervisor.EXIT_BLOCKED
     end = decisions(rig, "blocked")[-1]
-    assert bus.OFF_BUS not in end["reason"] and "cold-boot budget" in end["reason"]
+    assert bus.OFF_BUS not in end["reason"] and "passed its deadline" in end["reason"]
     assert fake_bus.reads >= 1
     assert not rig.ends(4), "stage 4 did not end as if the restore had worked"
 
@@ -382,7 +382,7 @@ def test_a_coder_that_does_not_come_back_after_the_stage_2_park_is_off_the_bus(t
         assert r.run() == supervisor.EXIT_BLOCKED
         assert [d for d in decisions(r, "hardware phase") if d.get("action") == "park"]
         end = decisions(r, "blocked")[-1]
-        assert bus.OFF_BUS in end["reason"] and "cold-boot budget" in end["reason"]
+        assert bus.OFF_BUS in end["reason"] and "passed its deadline" in end["reason"]
     finally:
         r.close()
 
@@ -396,7 +396,7 @@ def test_a_coder_that_does_not_come_back_after_a_wide_container_test_is_off_the_
         die_after_the_first_test(r, fake_bus, monkeypatch)
         assert r.run() == supervisor.EXIT_BLOCKED
         end = decisions(r, "blocked")[-1]
-        assert bus.OFF_BUS in end["reason"] and "cold-boot budget" in end["reason"]
+        assert bus.OFF_BUS in end["reason"] and "passed its deadline" in end["reason"]
     finally:
         r.close()
 

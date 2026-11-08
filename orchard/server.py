@@ -592,10 +592,22 @@ class ServerControl:
         res = self.run([self.tt_model, "stop", s.target, "--profile", s.profile], grace_s)
         out = {"how": f"tt-model stop (SIGTERM first), waited up to {round(grace_s)} s", **res.record(),
                "mesh_reset": bool(MESH_RESET_TEXT.search(res.stdout + res.stderr)), "killed": False}
-        if res.timed_out and not self.confirm_stopped().stopped:
-            kill = self.run([self.docker, "kill", s.container_name], self.timeout)
-            out.update(killed=True, kill_reason=f"tt-model stop did not finish within {round(grace_s)} s and the container still ran",
-                       kill=kill.record())
+        if res.timed_out:
+            # Decided on this container's own state, read again now (review of PR 580, issue 588). confirm_stopped() also fails for an
+            # unrelated listener on the port, another container on the devices or a docker listing that did not answer, none of which
+            # says this container runs.
+            after = self.container_state()
+            if after is None:
+                out["kill_skipped"] = "docker did not report this container's state, so it was not killed"
+            elif after[0] in ("exited", "dead", "created"):
+                out["kill_skipped"] = f"the container is already {after[0]}"
+            else:
+                kill = self.run([self.docker, "kill", s.container_name], self.timeout)
+                ok = kill.returncode == 0
+                out.update(killed=ok, kill=kill.record(),
+                           kill_reason=f"tt-model stop did not finish within {round(grace_s)} s and the container still ran")
+                if not ok:
+                    out["kill_failed"] = True       # docker refused: the container may still run, so the record does not say it was killed
         return out
 
     def ask(self, prompt: str) -> str:
