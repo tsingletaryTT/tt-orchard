@@ -1,0 +1,11 @@
+olmo-hybrid-7b-blackhole
+
+Model: allenai/Olmo-Hybrid-7B (revision 4f1cc566f9fdf3ce68da2ab6a788a83d89896dcf), Copyright Allen Institute for AI, licensed under the Apache License, Version 2.0.
+The model weights are not part of this package.
+
+Port, server and tools in this package: Copyright 2026 Tenstorrent USA, Inc., licensed under the Apache License, Version 2.0 (see LICENSE).
+The port in extra_code/olmo_hybrid_port.py was written by language models in the tt-orchard bring-up harness (a local coder model and, in repair rounds,
+a hosted model) and passed the harness checks described in the card.
+
+Licensed under the Apache License, Version 2.0; you may not use this package except in compliance with the License. Unless required by applicable
+law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
