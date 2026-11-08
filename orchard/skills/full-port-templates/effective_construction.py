@@ -180,17 +180,17 @@ def build_model(snapshot: str):
     shim, raw = dense_shim(snapshot)
     if shim is not None:
         config = shim.prepare_config(transformers, raw)         # stage 1's config preparation for a dense Qwen4 checkpoint (issue 550)
-        context = shim.dense_layers()
+        make_context = shim.dense_layers                        # a generator-based context manager can be entered once: one per attempt
     else:
         config = transformers.AutoConfig.from_pretrained(snapshot, trust_remote_code=False)
-        context = contextlib.nullcontext()
+        make_context = contextlib.nullcontext
     names = [a for a in (getattr(config, "architectures", None) or []) if isinstance(a, str)]
     last = None
     for factory in [*(getattr(transformers, a, None) for a in names), transformers.AutoModelForCausalLM, transformers.AutoModel]:
         if factory is None:
             continue
         try:
-            with torch.device("meta"), context:
+            with torch.device("meta"), make_context():
                 if hasattr(factory, "from_config"):             # an Auto class
                     return factory.from_config(config)
                 return factory(config)                          # the architecture class the config names

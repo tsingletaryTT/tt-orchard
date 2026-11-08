@@ -144,3 +144,86 @@ def test_layer_diff_computes_reference_layers_for_a_dense_checkpoint_end_to_end(
     done = run(LAYERS, stage2 / "stage_tools.py", snap)
     assert done.returncode == 0, done.stderr[-1500:]
     assert json.loads(done.stdout.strip().splitlines()[-1])["layers"] == 4
+
+
+# ---- review of PR 627 -------------------------------------------------------------------------------------------------------------------
+
+import contextlib
+import importlib.util
+import os
+import sys
+import types
+
+
+def load_module(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_stage_4_config_entries_find_the_stage_1_shim(tmp_path):
+    """Stage 4 copies stage_tools.py into stages/4/configs/<N>/ and its HERE is that entry directory, so `HERE.parent / "1"` is
+    stages/4/configs/1. The shim lives in <run>/stages/1/, found from the run directory."""
+    run = tmp_path / "run"
+    (run / "stages" / "1").mkdir(parents=True)
+    entry = run / "stages" / "4" / "configs" / "1"
+    entry.mkdir(parents=True)
+    (run / "stages" / "1" / "qwen4_dense.py").write_text("FOUND_IN_STAGE_1 = True\n")
+    tools = load_module(TOOLS, "stage_tools_nested_under_test")
+    tools.HERE = entry
+    shim = tools.dense_shim()
+    assert shim is not None and getattr(shim, "FOUND_IN_STAGE_1", False) is True
+
+
+def test_a_hub_cache_config_link_is_followed_for_the_config_read_only(tmp_path):
+    """Review of PR 627: a Hugging Face snapshot stores config.json as a link into ../../blobs/, and read_json refuses a link in the last
+    component, so the shim was silently skipped. The config read resolves the snapshot's link; run evidence files keep the refusal."""
+    model_dir = tmp_path / "models--org--name"
+    (model_dir / "blobs").mkdir(parents=True)
+    snap = model_dir / "snapshots" / ("b" * 40)
+    snap.mkdir(parents=True)
+    (model_dir / "blobs" / "abc").write_text(json.dumps({"model_type": "qwen4_exp", "num_hidden_layers": 2}))
+    os.symlink("../../blobs/abc", snap / "config.json")
+    tools = load_module(TOOLS, "stage_tools_hubcache_under_test")
+    raw = tools.snapshot_config(str(snap))
+    assert isinstance(raw, dict) and raw["model_type"] == "qwen4_exp"
+    evidence = tmp_path / "evidence.json"
+    os.symlink(model_dir / "blobs" / "abc", evidence)
+    value, why = tools.read_json(evidence)
+    assert value is None and why        # the refusal for run evidence is unchanged
+
+
+def test_each_factory_gets_a_fresh_dense_layers_context(tmp_path, monkeypatch):
+    """Review of PR 627: the shim's dense_layers() is a generator-based context manager and can be entered once. A first factory that raises
+    must not consume the context the next factory needs."""
+    construction = load_module(CONSTRUCTION, "effective_construction_under_test")
+    entered = []
+
+    class Shim:
+        @staticmethod
+        def prepare_config(transformers, raw):
+            return types.SimpleNamespace(architectures=["First"])
+
+        @staticmethod
+        @contextlib.contextmanager
+        def dense_layers():
+            entered.append(1)
+            yield
+
+    class First:
+        def __init__(self, config):
+            raise RuntimeError("the named class fails")
+
+    class Auto:
+        @staticmethod
+        def from_config(config):
+            return "built"
+
+    transformers = types.SimpleNamespace(First=First, AutoModelForCausalLM=Auto, AutoModel=Auto)
+    torch = types.SimpleNamespace(device=lambda name: contextlib.nullcontext())
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(construction, "dense_shim", lambda snapshot: (Shim, {"model_type": "qwen4_exp"}))
+    assert construction.build_model(str(tmp_path)) == "built"
+    assert len(entered) >= 2

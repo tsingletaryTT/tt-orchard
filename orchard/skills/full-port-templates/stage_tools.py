@@ -613,13 +613,23 @@ def dense_shim():
     """The Qwen4 dense-layer shim module that stage 1 used, or None. Stage 1 copies it to stages/1/ for a Qwen4 model; a run without that copy
     (a hand-made one) falls back to the shipped file next to the reference gate template. Issue 520."""
     import importlib.util
-    for path in (HERE.parent / "1" / DENSE_SHIM_NAME, HERE.parent / "reference-gate-templates" / DENSE_SHIM_NAME):
+    # Stage 4 copies this tool into stages/4/configs/<N>/, so HERE.parent is not stages/: the stage 1 copy is found from the run directory.
+    for path in (run_dir_of(HERE) / "stages" / "1" / DENSE_SHIM_NAME, HERE.parent / "1" / DENSE_SHIM_NAME,
+                 HERE.parent / "reference-gate-templates" / DENSE_SHIM_NAME):
         if path.is_file():
             spec = importlib.util.spec_from_file_location("qwen4_dense", path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
     return None
+
+
+def snapshot_config(snapshot: str):
+    """The model snapshot's config.json as a dict, or None. A Hugging Face cache stores each snapshot file as a link into the cache's blobs
+    directory, and read_json refuses a link in the last component, so the snapshot's own link is resolved first (the way the gate reads the
+    same file). Files in the run directory keep the refusal."""
+    raw, _why = read_json(Path(os.path.realpath(Path(snapshot) / "config.json")))
+    return raw
 
 
 def load_reference_model(snapshot: str, dtype: str):
@@ -632,7 +642,7 @@ def load_reference_model(snapshot: str, dtype: str):
     want = getattr(torch, dtype)
     kw = {"local_files_only": True}
     context = contextlib.nullcontext()
-    raw, _why = read_json(Path(snapshot) / "config.json")
+    raw = snapshot_config(snapshot)
     shim = dense_shim() if raw else None
     if shim is not None and shim.needs_dense_shim(raw):
         import transformers
