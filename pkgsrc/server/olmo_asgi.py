@@ -36,6 +36,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 MODEL_ID = "allenai/Olmo-Hybrid-7B"
 MAX_BODY = 1 << 20
+MAX_STOP_CHARS = 256          # each stop string may be at most this long (up to four of them), so matching one costs a bounded amount per character
+CLOSE_WAIT_S = 600.0         # shutdown waits this long for a running request before it closes the model anyway
 LOCK = threading.Lock()
 STATE = {}
 
@@ -101,6 +103,8 @@ def parse_request(body: bytes, chat: bool) -> dict:
         raise RequestError("seed must be a whole number")
     if not isinstance(stop, list) or len(stop) > 4 or not all(isinstance(x, str) and x for x in stop):
         raise RequestError("stop must be a string or up to 4 non-empty strings")
+    if any(len(x) > MAX_STOP_CHARS for x in stop):
+        raise RequestError(f"each stop string may be at most {MAX_STOP_CHARS} characters")
     return {"prompt": prompt, "max_tokens": mt, "temperature": float(temp), "top_p": float(top_p), "seed": seed, "stop": stop,
             "stream": obj.get("stream", False), "return_token_ids": obj.get("return_token_ids", False)}
 
@@ -179,16 +183,49 @@ def _pick(logits, temperature, top_p, gen):
     return int(torch.multinomial(p, 1, generator=gen))
 
 
-def _held_back(text: str, stops) -> int:
-    """How many characters at the end of `text` could be the start of a stop string (so they cannot be emitted yet). An unfinished multi-byte
-    character at the end also waits."""
-    hold = 1 if text.endswith("\ufffd") else 0
-    for x in stops:
-        for k in range(min(len(x) - 1, len(text)), hold, -1):
-            if text.endswith(x[:k]):
-                hold = max(hold, k)
-                break
-    return hold
+def _failure(pattern: str) -> list:
+    """The Knuth-Morris-Pratt failure table of `pattern`."""
+    fail, k = [0] * len(pattern), 0
+    for i in range(1, len(pattern)):
+        while k and pattern[i] != pattern[k]:
+            k = fail[k - 1]
+        if pattern[i] == pattern[k]:
+            k += 1
+        fail[i] = k
+    return fail
+
+
+class StopMatcher:
+    """Finds the first stop string to complete in text that arrives in pieces, doing a bounded amount of work per character (Knuth-Morris-Pratt,
+    one state per stop string). `state[j]` is the length of the longest prefix of stop j that ends the text so far, so `hold` is how many
+    trailing characters might still become a stop string and cannot be emitted yet. `ops` counts steps, for the tests."""
+
+    def __init__(self, stops):
+        self.stops = list(stops)
+        self.fail = [_failure(x) for x in self.stops]
+        self.state = [0] * len(self.stops)
+        self.ops = 0
+
+    def feed(self, text: str, base: int):
+        """Process `text`, which starts at offset `base` of the whole output. Returns (end offset, length of the stop string) of the first stop string
+        to complete, or None."""
+        for i, ch in enumerate(text):
+            for j, x in enumerate(self.stops):
+                s = self.state[j]
+                while s and x[s] != ch:
+                    s = self.fail[j][s - 1]
+                    self.ops += 1
+                if x[s] == ch:
+                    s += 1
+                self.state[j] = s
+                self.ops += 1
+                if s == len(x):
+                    return base + i + 1, len(x)
+        return None
+
+    @property
+    def hold(self) -> int:
+        return max(self.state, default=0)
 
 
 def generate(prompt_ids, r, timings, cancelled=None):
@@ -197,7 +234,8 @@ def generate(prompt_ids, r, timings, cancelled=None):
     port, model, tok = STATE["port"], STATE["model"], STATE["tok"]
     gen = torch.Generator().manual_seed(r["seed"] if r["seed"] is not None else int(time.time_ns() % (1 << 31)))
     limit = min(r["max_tokens"], STATE["max_len"] - len(prompt_ids))
-    out, emitted = [], 0
+    out, emitted, fed = [], 0, 0
+    matcher = StopMatcher(r["stop"])
     t0 = time.time()
     logits = port.prefill(model, prompt_ids)
     t1 = time.time()
@@ -214,20 +252,23 @@ def generate(prompt_ids, r, timings, cancelled=None):
         out.append(nxt)
         timings["completion_tokens"] = len(out)
         full = tok.decode(out)
-        cut = min((full.find(x) for x in r["stop"] if x in full), default=-1)
-        if cut >= 0:
+        stable = len(full) - (1 if full.endswith("\ufffd") else 0)      # an unfinished multi-byte character waits for the next token
+        hit = matcher.feed(full[fed:stable], fed)
+        fed = stable
+        if hit:
+            cut = hit[0] - hit[1]
             if cut > emitted:
                 yield full[emitted:cut], None
             emitted = len(full)
             finish = "stop"
             break
-        safe = len(full) - _held_back(full, r["stop"])      # text that could still turn into a stop string waits for the next token
+        safe = stable - matcher.hold                      # text that could still turn into a stop string waits for the next token
         if safe > emitted:
             yield full[emitted:safe], None
             emitted = safe
         if step + 1 < limit:
             logits = port.decode_step(model, nxt, len(prompt_ids) + step)
-    if len(full) > emitted and not (finish == "stop" and any(x in full for x in r["stop"])):
+    if len(full) > emitted:
         yield full[emitted:], None                        # generation ended without completing a stop string: the held text is output
     t2 = time.time()
     n = timings["completion_tokens"]
@@ -235,6 +276,49 @@ def generate(prompt_ids, r, timings, cancelled=None):
     timings["_ids"] = list(out)
     timings["decode_tok_s"] = (n - 1) / (t2 - t1) if n > 1 and t2 > t1 else None
     yield "", finish
+
+
+def _set_done(future):
+    if not future.done():
+        future.set_result(None)
+
+
+def _run_in_thread(loop, fn, *args):
+    """Run fn(*args) in a worker thread. Returns (the result future, `done`). `done` resolves when the thread has finished, even if the task that
+    awaits the result future is cancelled: cancelling that future does not stop the thread, so cleanup waits on `done`."""
+    done = loop.create_future()
+
+    def call():
+        try:
+            return fn(*args)
+        finally:
+            try:
+                loop.call_soon_threadsafe(_set_done, done)
+            except RuntimeError:        # the loop is already closed
+                pass
+    return loop.run_in_executor(None, call), done
+
+
+async def _wait_done(done):
+    """Wait until the worker thread has finished, however many times this task is cancelled meanwhile. The slot is released and the model may be
+    closed only after that. Returns True when a cancellation arrived during the wait (the caller re-raises it)."""
+    cancelled = False
+    while not done.done():
+        try:
+            await asyncio.shield(done)
+        except asyncio.CancelledError:
+            cancelled = True
+    return cancelled
+
+
+def _close_when_idle(close, timeout=None):
+    """Close the model once no request holds the single inference slot (waits at most CLOSE_WAIT_S for a running one)."""
+    got = LOCK.acquire(timeout=CLOSE_WAIT_S if timeout is None else timeout)
+    try:
+        close()
+    finally:
+        if got:
+            LOCK.release()
 
 
 async def _reply(send, code, obj, headers=()):
@@ -341,7 +425,7 @@ async def _complete_route(receive, send, chat):
                     return
 
         watcher = asyncio.ensure_future(watch())
-        worker = loop.run_in_executor(None, _complete, ids, r, cid, created, chat, cancelled)
+        worker, done = _run_in_thread(loop, _complete, ids, r, cid, created, chat, cancelled)
         try:
             out = await worker
         except Exception as exc:  # noqa: BLE001
@@ -352,8 +436,7 @@ async def _complete_route(receive, send, chat):
         finally:
             cancelled.set()
             watcher.cancel()
-            if not worker.done():
-                await asyncio.wait([worker])    # the worker releases the slot in its own finally; wait for it
+            await _wait_done(done)              # the thread releases the slot in its own finally; wait for it even when this task was cancelled
         if left:
             return                              # the client left: nothing to send
         try:
@@ -370,7 +453,7 @@ async def _complete_route(receive, send, chat):
                 return
 
     watcher = asyncio.ensure_future(watch_disconnect())
-    worker = loop.run_in_executor(None, _stream_worker, ids, r, cid, created, chat, put, cancelled)
+    worker, done = _run_in_thread(loop, _stream_worker, ids, r, cid, created, chat, put, cancelled)
     try:
         await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]})
         while (item := await queue.get()) is not None:
@@ -379,7 +462,7 @@ async def _complete_route(receive, send, chat):
     finally:
         cancelled.set()
         watcher.cancel()
-        await worker
+        await _wait_done(done)
 
 
 async def _http(scope, receive, send):
@@ -410,7 +493,7 @@ async def app(scope, receive, send):
                 await send({"type": "lifespan.startup.complete"})
             elif msg["type"] == "lifespan.shutdown":
                 if close:
-                    await asyncio.get_running_loop().run_in_executor(None, close)
+                    await asyncio.get_running_loop().run_in_executor(None, _close_when_idle, close)
                 await send({"type": "lifespan.shutdown.complete"})
                 return
     elif scope["type"] == "http":

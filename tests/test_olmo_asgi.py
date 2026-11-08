@@ -205,3 +205,151 @@ def test_a_contradicted_explanation_is_reported_as_unexplained(tmp_path, over):
     card = render(tmp_path, diag(tmp_path, **over))
     assert "bf16 near tie" not in card and "took the other side of the tie" not in card
     assert "not explained" in card
+
+
+# ---- review round 3: the worker outlives a cancelled request; stop strings are bounded and matched incrementally ----------------------
+
+def test_a_cancelled_request_task_still_waits_for_the_inference_thread(monkeypatch):
+    """Cancelling the ASGI task cancels the executor future, but the thread keeps running. Cleanup must wait for the thread, so the slot and
+    a later close of the model never overlap with inference."""
+    gate = threading.Event()
+    entered = threading.Event()
+
+    def blocking_generate(ids, r, timings, cancelled=None):
+        entered.set()
+        gate.wait(30)                                  # a long chip step that does not look at the cancel event
+        yield "x", None
+        yield "", "length"
+
+    class T:
+        def encode(self, text):
+            return type("E", (), {"ids": [1, 2, 3]})()
+
+    oa.STATE.update(tok=T(), max_len=1000)
+    monkeypatch.setattr(oa, "generate", blocking_generate)
+    inbox = asyncio.Queue()
+
+    async def receive():
+        return await inbox.get()
+
+    async def send(msg):
+        pass
+
+    async def drive():
+        await inbox.put({"type": "http.request", "body": json.dumps({"prompt": "hi", "max_tokens": 5}).encode(), "more_body": False})
+        task = asyncio.ensure_future(oa._complete_route(receive, send, False))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.sleep(0.2)
+        task.cancel()                                  # a second cancellation while cleanup waits must not cut the wait short either
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the request task must not finish while the inference thread is still running"
+        assert not oa.LOCK.acquire(blocking=False), "the slot must stay taken while the thread runs"
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(drive())
+    assert oa.LOCK.acquire(blocking=False), "the slot is free once the thread has finished"
+    oa.LOCK.release()
+
+
+def test_shutdown_waits_for_a_running_request_before_it_closes_the_model():
+    closed = []
+    oa.LOCK.acquire()
+    t = threading.Thread(target=oa._close_when_idle, args=(lambda: closed.append(time.time()),), daemon=True)
+    t.start()
+    time.sleep(0.3)
+    assert closed == [], "close ran while a request still held the slot"
+    oa.LOCK.release()
+    t.join(5)
+    assert len(closed) == 1
+
+
+def test_the_lifespan_shutdown_goes_through_the_wait(monkeypatch):
+    closed = []
+    monkeypatch.setattr(oa, "startup", lambda a: (lambda: closed.append(1)))
+    inbox = asyncio.Queue()
+    sent = []
+
+    async def receive():
+        return await inbox.get()
+
+    async def send(msg):
+        sent.append(msg["type"])
+
+    async def drive():
+        task = asyncio.ensure_future(oa.app({"type": "lifespan"}, receive, send))
+        await inbox.put({"type": "lifespan.startup"})
+        await asyncio.sleep(0.1)
+        oa.LOCK.acquire()
+        await inbox.put({"type": "lifespan.shutdown"})
+        await asyncio.sleep(0.5)
+        assert closed == [] and "lifespan.shutdown.complete" not in sent
+        oa.LOCK.release()
+        await asyncio.wait_for(task, timeout=10)
+
+    asyncio.run(drive())
+    assert closed == [1] and "lifespan.shutdown.complete" in sent
+
+
+def test_a_stop_string_over_the_length_limit_is_a_400():
+    assert parse(stop="x" * oa.MAX_STOP_CHARS)["stop"] == ["x" * oa.MAX_STOP_CHARS]
+    with pytest.raises(oa.RequestError, match="characters"):
+        parse(stop="x" * (oa.MAX_STOP_CHARS + 1))
+    with pytest.raises(oa.RequestError):
+        parse(stop=["ok", "y" * (1 << 20)])
+
+
+def test_the_stop_matcher_does_a_bounded_amount_of_work_per_character():
+    stops = ["a" * 255 + "b", "ab" * 120 + "c", "z" * 256, "q" * 100]
+    m = oa.StopMatcher(stops)
+    text = ("a" * 200 + "ab" * 50) * 40                  # input that makes a naive matcher backtrack
+    for k in range(0, len(text), 7):
+        assert m.feed(text[k:k + 7], k) is None
+    assert m.ops <= 2 * len(text) * len(stops) + 4 * sum(len(s) for s in stops), (m.ops, len(text))
+
+
+def test_the_stop_matcher_finds_overlapping_starts_and_reports_the_end():
+    m = oa.StopMatcher(["aab"])
+    assert m.feed("aa", 0) is None and m.hold == 2
+    assert m.feed("ab", 2) == (4, 3)
+
+
+def test_generate_matches_incrementally_and_never_rescans_the_text(monkeypatch):
+    pytest.importorskip("torch")
+    made = []
+
+    class Counting(oa.StopMatcher):
+        def __init__(self, stops):
+            super().__init__(stops)
+            made.append(self)
+
+    monkeypatch.setattr(oa, "StopMatcher", Counting)
+    pieces = [chr(ord("a") + i % 26) for i in range(100)]
+    stop = ["q" * 256]                                   # never matches
+    out, _ = run_generate(pieces, list(range(60)), stop, max_tokens=60)
+    chars = len(text_of(out))
+    assert chars == 60 and made and made[0].ops <= 2 * chars + 4 * 256
+
+
+def test_the_stop_matcher_agrees_with_a_brute_force_search_on_random_input():
+    import random
+    rng = random.Random(7)
+    for _ in range(300):
+        stops = ["".join(rng.choice("ab") for _ in range(rng.randint(1, 6))) for _ in range(rng.randint(1, 3))]
+        text = "".join(rng.choice("ab") for _ in range(rng.randint(0, 30)))
+        # the first stop string to complete: the smallest end offset over all occurrences of all stop strings
+        ends = [(text.find(x) + len(x), len(x)) for x in stops if x in text]
+        want = min(ends) if ends else None
+        m = oa.StopMatcher(stops)
+        got = None
+        for k in range(0, len(text), 3):
+            got = m.feed(text[k:k + 3], k)
+            if got:
+                break
+        assert (got[0] if got else None) == (want[0] if want else None), (stops, text, got, want)
+        if want is None:
+            longest = max((k for x in stops for k in range(len(x)) if text.endswith(x[:k])), default=0)
+            assert m.hold == longest, (stops, text)

@@ -30,9 +30,9 @@ tt-model serve <owner>/olmo-hybrid-7b-blackhole     # installs the bundle into i
 `GET /health`, `GET /v1/models`, `POST /v1/completions` and `POST /v1/chat/completions`.
 
 - Olmo-Hybrid-7B is a base model with no chat template. Use `/v1/completions` with a prompt. The chat route writes the messages as `role: content` lines that end with `assistant:`, which a base model follows only loosely.
-- Fields: `prompt` or `messages`, `max_tokens` (default 128, at most 65,536) or `max_completion_tokens`, `stream`, `stop` (up to four strings), `temperature`, `top_p`, `seed`, and `return_token_ids` (adds the generated token ids to the response). Decoding is greedy unless `temperature` is above 0; this card's numbers use greedy decoding.
+- Fields: `prompt` or `messages`, `max_tokens` (default 128, at most 65,536) or `max_completion_tokens`, `stream`, `stop` (up to four strings of at most 256 characters each; a longer one gets a `400`), `temperature`, `top_p`, `seed`, and `return_token_ids` (adds the generated token ids to the response). Decoding is greedy unless `temperature` is above 0; this card's numbers use greedy decoding.
 - A response carries `usage` and a `timings` object (prefill seconds, decode seconds, decode tokens per second).
-- One request runs at a time. A second one gets `503` with `Retry-After: 5`. A body over 1 MiB, malformed JSON, bad fields or a prompt longer than the context get a `400`.
+- One request runs at a time. A second one gets `503` with `Retry-After: 5`. A body over 1 MiB, malformed JSON, bad or unsupported fields (`n` other than 1, `tools`, `logprobs`, `response_format` and the like) or a prompt longer than the context get a `400`.
 
 ```bash
 curl -s http://127.0.0.1:20120/v1/completions -H 'Content-Type: application/json' \
