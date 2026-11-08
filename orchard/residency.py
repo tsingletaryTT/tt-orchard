@@ -319,7 +319,8 @@ def _collect(per_file, source: str, local: bool, weight_map=None) -> HeaderSet:
 def read_headers(directory) -> HeaderSet:
     """The tensors in every top-level `.safetensors` file of a snapshot directory, from the headers only.
 
-    A Hugging Face cache snapshot holds each file as a link into blobs/, so each path is resolved before the guarded open. Raises
+    A Hugging Face cache snapshot holds each file as a link into blobs/, so each path is resolved before the guarded open, and a link whose
+    target is outside the snapshot and the cache's own blobs/ is refused (issue 494). Raises
     ResidencyError for a missing directory, no shard, too many shards or tensors, and any shard whose header is not usable."""
     try:
         base = Path(directory)
@@ -333,14 +334,23 @@ def read_headers(directory) -> HeaderSet:
     weight_map = None
     if os.path.lexists(base / INDEX_FILE):
         try:
-            index = safeio.read_json(safeio.resolved(base / INDEX_FILE), max_bytes=MAX_HEADER_BYTES, expect=dict)
+            index_path = safeio.resolved_inside(base / INDEX_FILE, base)
+            if index_path is None:
+                raise ResidencyError(f"{INDEX_FILE}: a link that leaves the snapshot and the cache's blobs directory")
+            index = safeio.read_json(index_path, max_bytes=MAX_HEADER_BYTES, expect=dict)
         except safeio.SafeReadError as exc:
             raise ResidencyError(f"{INDEX_FILE}: the index is not usable ({exc.reason})") from None
         weight_map = index.get("weight_map")
         if not isinstance(weight_map, dict):
             raise ResidencyError(f"{INDEX_FILE}: the index has no weight_map object")
     budget = [MAX_TOTAL_HEADER_BYTES]
-    per_file = ((n, _read_file_header(safeio.resolved(base / n), n, budget)) for n in names)
+    def shard_path(n):
+        inside = safeio.resolved_inside(base / n, base)
+        if inside is None:
+            raise ResidencyError(f"{n}: a link that leaves the snapshot and the cache's blobs directory")
+        return inside
+
+    per_file = ((n, _read_file_header(shard_path(n), n, budget)) for n in names)
     return _collect(per_file, f"local:{base.name}", True, weight_map)
 
 

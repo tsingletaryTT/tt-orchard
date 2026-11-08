@@ -297,12 +297,51 @@ def test_only_the_header_is_read_never_the_tensor_data(tmp_path, monkeypatch):
 
 
 def test_a_snapshot_link_into_blobs_is_followed_like_a_hugging_face_cache(tmp_path):
-    blobs, snap = tmp_path / "blobs", tmp_path / "snap"
-    blobs.mkdir()
-    snap.mkdir()
+    model = tmp_path / "models--org--name"
+    blobs, snap = model / "blobs", model / "snapshots" / ("a" * 40)       # the real cache layout (issue 494: a link is followed only inside it)
+    blobs.mkdir(parents=True)
+    snap.mkdir(parents=True)
     (blobs / "abc").write_bytes(header_bytes([("model.layers.0.mlp.gate_proj.weight", "BF16", [8, 8])]))
     (snap / "model.safetensors").symlink_to(blobs / "abc")
     assert rs.read_headers(snap).checkpoint_bytes == 128
+
+
+def test_a_snapshot_link_that_leaves_the_cache_is_refused_and_named(tmp_path):
+    model = tmp_path / "models--org--name"
+    snap = model / "snapshots" / ("a" * 40)
+    (model / "blobs").mkdir(parents=True)
+    snap.mkdir(parents=True)
+    other = tmp_path / "elsewhere.safetensors"
+    other.write_bytes(header_bytes([("model.layers.0.mlp.gate_proj.weight", "BF16", [8, 8])]))
+    (snap / "model.safetensors").symlink_to(other)
+    with pytest.raises(rs.ResidencyError, match="model.safetensors.*leaves"):
+        rs.read_headers(snap)
+
+
+def test_a_cache_whose_blobs_directory_is_a_link_gives_no_second_root(tmp_path):
+    model = tmp_path / "models--org--name"
+    snap = model / "snapshots" / ("a" * 40)
+    real_blobs = tmp_path / "real-blobs"
+    real_blobs.mkdir()
+    snap.mkdir(parents=True)
+    (model / "blobs").symlink_to(real_blobs)
+    (real_blobs / "abc").write_bytes(header_bytes([("model.layers.0.mlp.gate_proj.weight", "BF16", [8, 8])]))
+    (snap / "model.safetensors").symlink_to(model / "blobs" / "abc")
+    with pytest.raises(rs.ResidencyError, match="leaves"):
+        rs.read_headers(snap)
+
+
+def test_a_snapshot_index_link_that_leaves_the_cache_is_refused(tmp_path):
+    model = tmp_path / "models--org--name"
+    snap = model / "snapshots" / ("a" * 40)
+    (model / "blobs").mkdir(parents=True)
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").write_bytes(header_bytes([("model.layers.0.mlp.gate_proj.weight", "BF16", [8, 8])]))
+    outside = tmp_path / "index.json"
+    outside.write_text('{"weight_map": {}}')
+    (snap / rs.INDEX_FILE).symlink_to(outside)
+    with pytest.raises(rs.ResidencyError, match=r"index.*leaves|leaves"):
+        rs.read_headers(snap)
 
 
 def _write(path, header: dict | bytes, declared: int | None = None):

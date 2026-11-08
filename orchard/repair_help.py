@@ -653,7 +653,7 @@ def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
                 skeleton_now = safeio.read_beneath(port_fd, ("port_model.py",), max_bytes=PORT_MAX)
                 if skeleton_now.rstrip(b"\n") != skeleton.rstrip(b"\n"):
                     return False, "port_model.py is not the unchanged skeleton"
-                for rel, data in sorted(blobs, key=lambda item: item[0] == "port_model.py"):
+                def write_one(rel: str, data: bytes) -> tuple[bool, str]:
                     try:
                         safeio.write_beneath_if(port_fd, tuple(rel.split("/")), data, mode=0o644,
                                                 expect_sha256=hashlib.sha256(skeleton_now).hexdigest() if rel == "port_model.py" else None)
@@ -664,6 +664,29 @@ def restore_best(stage_dir, best: dict, skeleton: bytes) -> tuple[bool, str]:
                             return False, f"port/{rel} already exists, and a file written in the attempt is not replaced"
                     except safeio.ChangedWhileReading:
                         return False, "port_model.py changed while the best port was being restored, and the edit is kept"
+                    return True, ""
+
+                supporting = [(rel, data) for rel, data in blobs if rel != "port_model.py"]
+                entry_module = [(rel, data) for rel, data in blobs if rel == "port_model.py"]
+                for rel, data in supporting:
+                    ok, why = write_one(rel, data)
+                    if not ok:
+                        return False, why
+                # Before port_model.py is committed, every supporting file is read back from where the check will look: opened again beneath
+                # the pinned port descriptor, every part of its path without a link, and compared with the bytes of the snapshot. A nested
+                # directory renamed away and recreated after its file was written leaves the file missing there, and the restore is refused
+                # with the skeleton still the entry module, so the supervisor does not skip the draft for a port that is not whole (issue 502).
+                for rel, data in supporting:
+                    try:
+                        live = safeio.read_beneath(port_fd, tuple(rel.split("/")), max_bytes=PORT_MAX)
+                    except safeio.SafeReadError:
+                        return False, f"port/{rel} is not there after it was restored: its directory was replaced while the best port was being restored"
+                    if hashlib.sha256(live).hexdigest() != hashlib.sha256(data).hexdigest():
+                        return False, f"port/{rel} does not hold the best port's bytes after it was restored"
+                for rel, data in entry_module:
+                    ok, why = write_one(rel, data)
+                    if not ok:
+                        return False, why
                 # The writes went through the descriptor. When `port` now names another directory, the descriptor's directory was moved away and the
                 # restore is not where the check will look: it is refused rather than reported, as `place` does (review of PR 497, round 5).
                 try:

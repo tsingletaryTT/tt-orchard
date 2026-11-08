@@ -1050,6 +1050,15 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _link_target_inside(path: Path, model_dir: Path) -> bool:
+    """True when the link `path` resolves inside the snapshot or, for a Hugging Face cache snapshot, the cache's own `blobs` directory."""
+    try:
+        target = Path(os.path.realpath(path))
+    except (OSError, ValueError):
+        return False
+    return any(target == root or root in target.parents for root in _link_roots(model_dir))
+
+
 def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) -> dict:
     """Weights files in the new model that are not backbone shards and that the nearest model lacks.
     `problems` says why a sidecar cannot be trusted (unreadable, or its names overlap the backbone). A GGUF file is listed in
@@ -1059,8 +1068,20 @@ def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) 
     backbone = backbone_names | {normalize(n) for n in backbone_names}
     sidecars, problems, ignored = [], [], []
     for p in sorted(model_dir.iterdir()):
-        if (not p.is_file() or not p.name.endswith(WEIGHT_SUFFIXES) or p.name in shards
+        # A link is followed only when its target is inside the snapshot or the cache's own blobs directory (issue 464); a link that leaves
+        # is listed by name with no size and no hash, because the size of its target is a fact about some other file.
+        refused = p.is_symlink() and not _link_target_inside(p, model_dir)
+        if ((not refused and not p.is_file()) or not p.name.endswith(WEIGHT_SUFFIXES) or p.name in shards
                 or p.name in base_files or BACKBONE_BIN.fullmatch(p.name)):
+            continue
+        if refused:
+            note = "a link to a place outside the snapshot and its cache's blobs directory; its target was not measured or read"
+            if p.name.endswith(IGNORED_SUFFIXES):
+                ignored.append({"file": p.name, "size": None, "reason": IGNORED_REASON + " (" + note + ")"})
+            else:
+                problems.append(f"sidecar {p.name} is {note}")
+                sidecars.append({"file": p.name, "size": None, "sha256": None, "num_tensors": None, "dtypes": [], "tensor_names": [],
+                                 "refused": note})
             continue
         if p.name.endswith(IGNORED_SUFFIXES):          # not read and not hashed: a quantized copy can be several GB
             ignored.append({"file": p.name, "size": p.stat().st_size, "reason": IGNORED_REASON})
