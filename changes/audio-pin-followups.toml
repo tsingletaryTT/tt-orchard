@@ -1,0 +1,3 @@
+target = "0.9.135"
+summary = "The encoder pin reads every submodule attention config, tells an absent field from a recorded null, and the stage 1 gate and a resume refuse or regenerate unpinned references (issues 555, 556, 557)."
+pr = 615

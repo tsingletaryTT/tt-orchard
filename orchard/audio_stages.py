@@ -231,7 +231,7 @@ def identity_problems(facts: dict, expected: dict | None, library_commit: str | 
 
 
 def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, problems: list, *, expected: dict | None = None,
-                  library_commit: str | None = None, profile=None) -> dict | None:
+                  library_commit: str | None = None, profile=None, require_pin: bool = False) -> dict | None:
     """Verify one recorded run named by a result entry: it is inside the run directory, its arrays match their hashes, its manifest hash is the
     recorded one, its settings are the expected ones and its waveform passes the sound checks (and the clip is that waveform). Returns the
     sound-check record, or None after adding to `problems`. `profile` (an `orchard.audio_profile.AudioProfile`) sets the sample rate, the clip file and
@@ -261,6 +261,11 @@ def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, 
         from orchard import audio_profile
         with ar.load_run(p) as run:
             problems += [f"{label}: {x}" for x in audio_profile.layout_problems(run.manifest, profile)]
+    if require_pin and enc_pin.state(facts["settings"]) != "pinned":
+        # A reference made before the pin, or by a script that left the encoder as the library loads it (issue 556). The gate says so by the words
+        # in enc_pin.UNPINNED_PROBLEM, which the supervisor reads to regenerate such a record on a resume.
+        problems.append(f"{label}: it {enc_pin.UNPINNED_PROBLEM} ({enc_pin.ENCODER_DTYPE}, {enc_pin.ENCODER_ATTN} attention; issue 162); "
+                        f"its settings say {enc_pin.state(facts['settings'])}")
     if want_settings is not None:
         got = {k: facts["settings"].get(k) for k in want_settings}
         if got != want_settings:
@@ -279,6 +284,7 @@ def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, 
 def reference_problems(stage_dir, run_dir, expect_roles=(ROLE_REFERENCE, ROLE_HOST)) -> list[str]:
     """The gate of stage 1, from the files: every run in `audio_reference.json` verifies, has the expected settings and passes the sound checks;
     the same-environment floor is recomputed and equals the recorded one."""
+    from orchard import audio_profile
     problems: list[str] = []
     try:
         rec = load_json(Path(stage_dir) / REFERENCE_FILE, REFERENCE_FILE)
@@ -298,7 +304,7 @@ def reference_problems(stage_dir, run_dir, expect_roles=(ROLE_REFERENCE, ROLE_HO
             continue
         sound[role] = check_run_dir(run_dir, entry, settings_for(name), role, problems,
                                     expected=(rec.get("expected") or {}).get(name) if isinstance(rec.get("expected"), dict) else None,
-                                    library_commit=rec.get("library_commit"))
+                                    library_commit=rec.get("library_commit"), require_pin=name not in audio_profile.PROFILES)
     if ROLE_REFERENCE in runs and ROLE_HOST in runs and not problems:
         a, b = inside(run_dir, runs[ROLE_REFERENCE].get("dir")), inside(run_dir, runs[ROLE_HOST].get("dir"))
         try:

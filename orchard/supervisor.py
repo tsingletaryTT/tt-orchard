@@ -3130,8 +3130,7 @@ class Supervisor:
         try:
             expected, base_id = self._audio_expected(model_id, base_id)
             if n == 1:
-                if not (resumed and (stage_dir / audio_runtime.REFERENCE_FILE).is_file()):
-                    self._audio_stage_1(stage_dir, paths, model_id, base_id, expected)
+                self._audio_stage_1_or_resume(stage_dir, paths, model_id, base_id, expected, resumed=resumed)
             else:
                 if not (resumed and (stage_dir / "test-result.json").is_file()):
                     plan = audio_plan.chip_plan(model_id, base_id)
@@ -3164,6 +3163,29 @@ class Supervisor:
         self.ledger.append("evidence", n, what="audio stage record", **evidence_record(self.run_dir, stage_dir / spec.gate_file))
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _audio_stage_1_or_resume(self, stage_dir: Path, paths, model_id, base_id, expected: dict, *, resumed: bool) -> None:
+        """Make the stage 1 references, unless this is a resume that finds a record it can keep. A record whose runs did not record the pinned text
+        encoder (made before the pin, issue 162) is regenerated, and the ledger says so (issue 556); every other problem with an existing record is the
+        stage gate's to report, so the evidence is not thrown away for it."""
+        if resumed and (stage_dir / audio_runtime.REFERENCE_FILE).is_file():
+            if not self._audio_reference_pin_stale(stage_dir, paths):
+                return
+            self.ledger.append("decision", 1, decision="audio reference regenerated",
+                               reason="the stage 1 record has a run that did not record the pinned text encoder (issue 162), so it is made again")
+        self._audio_stage_1(stage_dir, paths, model_id, base_id, expected)
+
+    def _audio_reference_pin_stale(self, stage_dir: Path, paths) -> bool:
+        """True when the stage 1 gate, run now over the existing record, reports a run without the pinned encoder. Any other answer, or no answer at
+        all, is False: the record stays and the stage gate decides."""
+        from orchard import audio_encoder_pin, audio_remote
+        from orchard.audio_plan import AudioStageError
+        try:
+            problems = audio_remote.call(paths.reference_python, "gate_reference", {"stage_dir": str(stage_dir), "run_dir": str(self.run_dir)},
+                                         timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+        except AudioStageError:
+            return False
+        return isinstance(problems, list) and any(audio_encoder_pin.UNPINNED_PROBLEM in str(p) for p in problems)
 
     def _audio_stage_1(self, stage_dir: Path, paths, model_id, base_id, expected: dict) -> None:
         from orchard import audio_plan, audio_remote
