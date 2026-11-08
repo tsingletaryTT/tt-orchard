@@ -24,6 +24,7 @@ from orchard.commands import run_command
 DEVICE_PREFIX = "/dev/tenstorrent"
 MAX_PROCESSES = 200_000        # a bound on the walk of /proc
 MAX_HOLDERS = 50               # a bound on the report
+MAX_NODES = 64                 # a bound on the device nodes listed and handed to fuser
 READ_BYTES = 4096              # /proc/<pid>/comm and cgroup are short; this bounds a hostile one
 CONTAINER_CGROUP = re.compile(r"docker|containerd|libpod|kubepods|crio", re.IGNORECASE)
 FUSER_LIMIT = 2000
@@ -56,13 +57,27 @@ def _holder(pid: int, proc_root: str, dev_prefix: str):
     return tuple(sorted(devices)), False
 
 
-def scan(*, proc_root: str = "/proc", dev_prefix: str = DEVICE_PREFIX, which=shutil.which, run=run_command, timeout: float = 10.0) -> dict:
-    """What holds the device nodes: {"holders": [{pid, comm, devices, container}], "unreadable": n, "fuser": {...} | None, "truncated": bool}."""
+def list_nodes(dev_prefix: str, listdir) -> tuple[list[str], str | None]:
+    """(device nodes, error): the numbered entries of the device directory as full paths, at most MAX_NODES, in numeric order. `fuser` does
+    not look inside a directory, so the nodes are named one by one. A listing that fails gives no nodes and says why."""
+    try:
+        names = [n for n in listdir(dev_prefix) if isinstance(n, str) and n.isdigit()]
+    except (OSError, ValueError) as exc:
+        return [], f"cannot list {dev_prefix}: {type(exc).__name__}"
+    return [f"{dev_prefix}/{n}" for n in sorted(names, key=int)[:MAX_NODES]], None
+
+
+def scan(*, proc_root: str = "/proc", dev_prefix: str = DEVICE_PREFIX, which=shutil.which, run=run_command, timeout: float = 10.0,
+         listdir=os.listdir) -> dict:
+    """What holds the device nodes: {"holders": [{pid, comm, devices, container}], "unreadable": n, "fuser": {...} | None, "truncated": bool,
+    "nodes": [...], "nodes_error": str | None}."""
     holders, unreadable, seen, truncated = [], 0, 0, False
+    nodes, nodes_error = list_nodes(dev_prefix, listdir)
     try:
         entries = os.listdir(proc_root)
     except OSError as exc:
-        return {"holders": [], "unreadable": 0, "fuser": None, "truncated": False, "error": f"cannot read {proc_root}: {type(exc).__name__}"}
+        return {"holders": [], "unreadable": 0, "fuser": None, "truncated": False, "nodes": nodes, "nodes_error": nodes_error,
+                "error": f"cannot read {proc_root}: {type(exc).__name__}"}
     for entry in entries:
         if not entry.isdigit():
             continue
@@ -82,16 +97,19 @@ def scan(*, proc_root: str = "/proc", dev_prefix: str = DEVICE_PREFIX, which=shu
                         "devices": list(devices), "container": bool(CONTAINER_CGROUP.search(cgroup))})
     fuser = None
     exe = which("fuser")
-    if exe:
+    if exe and not nodes:
+        # Never the directory: fuser would find nothing in it and the report would look like "no holder".
+        fuser = {"skipped": nodes_error or f"no numbered device node under {dev_prefix}"}
+    elif exe:
         # fuser -v prints its table on stderr and exits 1 when nothing holds the files; both are kept as they are.
-        nodes = sorted({d for h in holders for d in h["devices"]}) or [dev_prefix]
         try:
-            res = run([exe, "-v", *nodes[:16]], timeout)
+            res = run([exe, "-v", *nodes], timeout)
             fuser = {"argv": list(res.argv), "returncode": res.returncode,
                      "output": f"{res.stdout}\n{res.stderr}".strip()[:FUSER_LIMIT]}
         except OSError as exc:
             fuser = {"error": f"{type(exc).__name__}"}
-    return {"holders": sorted(holders, key=lambda h: h["pid"]), "unreadable": unreadable, "fuser": fuser, "truncated": truncated}
+    return {"holders": sorted(holders, key=lambda h: h["pid"]), "unreadable": unreadable, "fuser": fuser, "truncated": truncated,
+            "nodes": nodes, "nodes_error": nodes_error}
 
 
 def describe(found: dict) -> str:
@@ -104,5 +122,21 @@ def describe(found: dict) -> str:
     return "device nodes were open in " + ", ".join(parts) + (f" and {len(holders) - 8} more" if len(holders) > 8 else "")
 
 
-def any_container(found: dict) -> bool:
-    return any(h.get("container") for h in found.get("holders") or [])
+def _node_index(device: str) -> int | None:
+    tail = str(device).rsplit("/", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+def any_container(found: dict, dev_indices=None) -> bool:
+    """Whether a container process holds a device node. With `dev_indices` (the leased chips' device numbers) only holders of those chips
+    count; a holder whose node is not a chip number counts for every lease, because nothing says it is elsewhere (issue 587)."""
+    wanted = None if dev_indices is None else {int(i) for i in dev_indices}
+    for h in found.get("holders") or []:
+        if not h.get("container"):
+            continue
+        if wanted is None:
+            return True
+        indices = [_node_index(d) for d in h.get("devices") or []]
+        if not indices or any(i is None or i in wanted for i in indices):
+            return True
+    return False

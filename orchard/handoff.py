@@ -47,7 +47,7 @@ from orchard.canary import CanaryError, CanaryResult, compare
 from orchard.defaults import (COLD_BOOT_BUDGET_S, IDLE_RELEASE_S, MESH_RESET_EXTRA_S, POLL_S,
                               QUEUE_POLL_S, QUIET_WAIT_S)
 from orchard.ledger import file_evidence
-from orchard.server import NotReady, ServerError, ServerNotOwned, ServerStarting
+from orchard.server import BootStalled, CoderExited, NotReady, ServerError, ServerNotOwned, ServerStarting
 
 PARK_STEPS = ("note", "canary_before", "standin_started", "standin", "stop_sent", "stopped",
               "reset")
@@ -218,7 +218,10 @@ class Handoff:
 
     def __init__(self, *, ledger, stage, adapter, server, standin, lease: Lease, canary_prompt: str,
                  note_path, evidence_dir, budgets: Budgets = Budgets(), clock=time.monotonic,
-                 sleep=time.sleep):
+                 sleep=time.sleep, boot_abort=None):
+        # `boot_abort(lease, exc)`: what ends a coder boot that cannot finish (the supervisor's `_abort_boot`: the log tail as evidence, a long
+        # stop, a reset through the lease, the device state, then a block). It does not return. Without it a restore blocks with a bare message.
+        self.boot_abort = boot_abort
         self.ledger, self.stage = ledger, stage
         self.adapter, self.server, self.standin = adapter, server, standin
         self.lease, self.canary_prompt = lease, canary_prompt
@@ -437,10 +440,14 @@ class Handoff:
         if "ready" not in done:
             try:
                 seconds = self.server.wait_ready(self.budgets.cold_boot_s)
-            except NotReady as exc:
-                self._block("the coder did not return within the cold-boot budget; the run is "
-                            "paused and nothing is retried", waited_s=exc.waited_s,
-                            budget_s=self.budgets.cold_boot_s)
+            except (BootStalled, CoderExited, NotReady) as exc:
+                if self.boot_abort is not None:
+                    self.boot_abort(self.lease, exc)          # does not return (issue 589)
+                if isinstance(exc, NotReady):
+                    self._block("the coder did not return within the cold-boot budget; the run is "
+                                "paused and nothing is retried", waited_s=exc.waited_s,
+                                budget_s=self.budgets.cold_boot_s)
+                self._block(f"the coder exited before it was ready; nothing is retried: {exc}")
             except ServerError as exc:
                 self._block(f"the coder exited before it was ready; nothing is retried: {exc}")
             self._record("restore", "ready", seconds=seconds)

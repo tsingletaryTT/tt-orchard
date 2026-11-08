@@ -1,0 +1,3 @@
+target = "0.9.132"
+summary = "Coder boot follow-ups from the PR 580 review: classify on the supervisor's verdict, a longer bus read, device-node scan, a kill decided on container state, restore-time boot aborts, ledger order around the busy retry (issues 585 to 590)."
+pr = 599
