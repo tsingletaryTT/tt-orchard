@@ -804,14 +804,20 @@ def test_without_the_rehearsal_flag_too_few_words_fail_stage_2(rig, monkeypatch)
     assert not any(d.get("decision") == supervisor.REHEARSAL_WORDS_WAIVED for d in rig.decisions())
 
 
-@pytest.mark.usefixtures("agent_finish")
 def test_a_rehearsal_passes_stage_2_with_too_few_words_and_the_ledger_says_so_once(rig, monkeypatch):
+    """Real result derivation stays on here (issue 571): the supervisor derives result.json from the check's record, and no stage 2 finish
+    agent step runs. A derivation that refused a noise-text record would hand the finish step to the coder and this test would see it."""
     monkeypatch.setattr(full_port, "MIN_FREE_RUN_WORDS", 10 ** 6)
     make(rig)
     rig.args.full_port_rehearsal = True
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
     rig.run()
     assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    derived = [d for d in rig.decisions() if d.get("decision") == "result derived by the supervisor" and d.get("file") == "stages/2/result.json"]
+    assert len(derived) == 1, "the supervisor must derive stage 2's result.json itself"
+    finish = [e for e in rig.entries() if e["event"] == "decision" and e["stage"] == 2
+              and e["data"].get("decision") == "agent step" and e["data"].get("phase") == "finish"]
+    assert finish == [], "no stage 2 finish agent step may run when the result is derived"
     words = [d for d in rig.decisions() if d.get("decision") == supervisor.REHEARSAL_WORDS_WAIVED]
     assert len(words) == 1 and words[0]["field"] == "free_run_words" and words[0]["by"] == "--full-port-rehearsal"
     assert "every other stage 2 check still applied" in words[0]["note"]
