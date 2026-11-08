@@ -116,19 +116,20 @@ What the first one taught, each item recorded in `docs/run-logs/2026-11-08-olmo-
 
 - The port needs all four chips (a 1x4 mesh), so the boot check and the benchmark each take a four-chip lease from gozer. Queue for it; while four chips are leased, no other job on the box can use a board.
 - The server takes one request at a time and answers a second one with 503. The adapter validates request fields and refuses what it cannot honour with a 400, holds back text that could begin a stop string, bounds stop strings (256 characters, four of them), watches for a client that left and keeps the model open until the inference thread finishes.
-- The served decode rate depends on host load because the port does part of its work on the host (7.3 tok/s median, 2.2 to 11.6 across runs). The card states the load and shows the stage 6 harness figure (13.9 tok/s) as a separate row. The spec's decode floor is a liveness check, set low on purpose.
+- The served decode rate depends on host load because the port does part of its work on the host (7.3 tok/s median, 2.2 to 12.3 across runs and boot checks). The card states the load and shows the stage 6 harness figure (13.9 tok/s) as a separate row. The spec's decode floor is a liveness check, set low on purpose.
 - `tt-model serve` listens on port 20000 whatever the bundle's own default says. A check that waits on the bundle's port holds its lease until it times out.
 
 The same page's other cans were written for models that did not come from a full-port run. The Berkelium CadQuery model has a different shape: a container (v5.1) package that reuses its base bundle's image and adds a two-chip profile (`scripts/can_cad/`, `docs/run-logs/2026-11-08-berkelium-2chip-package.md`).
 
 ## Publishing a can, and what `tt-model publish` does to the card
 
-A person runs the publish commands; the supervisor never does. Four things to do every time:
+A person runs the publish commands; the supervisor never does. These steps apply every time:
 
 1. Upload the staged bundle to the Hub (`hf upload`; add `--private` first and serve from the private repository if you want a check before it is public).
 2. Run `tt-model publish`. It rewrites the card's front matter on the Hub (it adds the `tt-model-catalog` tag and reorders tags), so the README on the Hub no longer matches the hash in the `SHA256SUMS` you staged.
 3. Regenerate `SHA256SUMS` from the files as published (a fresh download), upload it last, and verify a second fresh download against it.
 4. After any later card upload, run `tt-model publish` again and check that the `tt-model-catalog` tag is still on the card. A card upload drops it.
+5. A later card upload changes `README.md`, and `tt-model publish` can change it again. Repeat step 3 after the final publish of every later card update: regenerate `SHA256SUMS` from a fresh download, upload it last, and verify a second fresh download. The Olmo republish record (`docs/run-logs/2026-11-08-olmo-hybrid-7b-can.md`) follows this order.
 
 The card must carry its own limits. For a model whose rate varies with host load, state the load and the range. State which agreement checks ran traced and which did not, and leave out a figure that the records measure differently than the heading says (a time to first token that is the whole request, for example).
 
