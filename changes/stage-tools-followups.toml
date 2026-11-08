@@ -1,0 +1,3 @@
+target = "0.9.134"
+summary = "Stage tools: layer-diff checks the element cap before float32, hashes the bytes NumPy loads and reports layers compared; last-check says unknown for an incomplete scan, offers an edit only for a line that occurs once, and points runtime device-ops failures at the cheat sheet."
+pr = 610

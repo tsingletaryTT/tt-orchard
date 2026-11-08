@@ -370,6 +370,12 @@ def layer_arrays(outputs, ids):
     arrays, total = {}, 0
     for k, x in enumerate(outputs):
         if hasattr(x, "detach"):                       # a torch tensor
+            try:
+                size = int(x.numel())
+            except Exception:                          # noqa: BLE001 - a tensor that cannot say its size is refused, not converted
+                raise ValueError(f"layer {k} is a tensor that does not report its size") from None
+            if total + size > MAX_NUMEL:               # checked before .float(): an expanded bfloat16 tensor can need gigabytes as float32
+                raise ValueError(f"the layers hold more than {MAX_NUMEL} elements in all")
             x = x.detach().float().cpu().numpy()
         elif not isinstance(x, np.ndarray):
             raise ValueError(f"layer {k} is a {type(x).__name__}; expected a torch tensor or a numpy array")

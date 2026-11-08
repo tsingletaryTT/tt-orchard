@@ -76,7 +76,7 @@ def run_tool(stage, *args, python=sys.executable, cwd=None):
 def test_identical_layers_all_pass_and_the_report_says_the_error_is_outside_the_layers(tmp_path):
     done = run_tool(build(tmp_path))
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "all 6 layers are within" in done.stdout and "outside the layers" in done.stdout
+    assert "all 6 compared layers are within" in done.stdout and "outside the layers" in done.stdout
 
 
 def test_the_first_layer_over_the_threshold_is_named_with_its_numbers_and_the_one_before(tmp_path):
@@ -237,7 +237,7 @@ def test_the_tool_reads_stage_tools_json_for_the_interpreter(tmp_path):
     shutil.copy2(TOOL, stage / "stage_tools.py")
     done = subprocess.run([sys.executable, "-I", str(stage / "stage_tools.py"), "layer-diff"], cwd=tmp_path, env={"PATH": os.environ.get("PATH", "")},
                           capture_output=True, text=True, timeout=120)
-    assert done.returncode == 0 and "all 6 layers" in done.stdout
+    assert done.returncode == 0 and "all 6 compared layers" in done.stdout
 
 
 def pickled_npz() -> bytes:
