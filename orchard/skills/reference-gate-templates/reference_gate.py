@@ -122,6 +122,15 @@ def allow_remote_code(snapshot: Path, scratch_home: Path | None = None) -> None:
     for f in sorted(Path(snapshot).rglob("*.py")):
         files[str(f.relative_to(snapshot))] = bounded_sha256(f)
     REMOTE_CODE.update({"used": True, "files": files, "scrubbed": sorted(set(REMOTE_CODE["scrubbed"]) | set(scrubbed))})
+    # huggingface_hub and transformers 4.x read the offline variables when they are imported, which was before this call: set their own flags too.
+    hub = sys.modules.get("huggingface_hub.constants")
+    if hub is not None and hasattr(hub, "HF_HUB_OFFLINE"):
+        hub.HF_HUB_OFFLINE = True
+    thub = sys.modules.get("transformers.utils.hub")
+    if thub is not None and hasattr(thub, "_is_offline_mode"):
+        thub._is_offline_mode = True
+    # The audit is on disk before the code runs, so a retry that fails or hangs still leaves the file list and the scrubbed names.
+    write_json(EVIDENCE / "remote-code-audit.json", dict(REMOTE_CODE))
 
 
 def with_remote_code(fn, *args, snapshot: Path, **kw):
@@ -372,13 +381,11 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
     def attempt(key_mapping):
         t0 = time.time()
         kw = {"key_mapping": key_mapping} if key_mapping else {}
-        if REMOTE_CODE["used"]:
-            kw["trust_remote_code"] = True      # the config needed the model's own code (see with_remote_code)
         if shim is not None:
             kw["config"] = config        # the config with placeholder expert settings; the dense layers are built inside the context
         with (shim.dense_layers() if shim is not None else contextlib.nullcontext()):
-            got, got_info = cls.from_pretrained(str(snapshot), low_cpu_mem_usage=True, output_loading_info=True,
-                                                **{dkey: torch.bfloat16}, **kw)
+            got, got_info = with_remote_code(cls.from_pretrained, str(snapshot), snapshot=snapshot, low_cpu_mem_usage=True,
+                                             output_loading_info=True, **{dkey: torch.bfloat16}, **kw)
         return got, got_info, round(time.time() - t0, 2)
 
     def unresolved(i):
@@ -581,7 +588,8 @@ def main() -> int:
             say(f"stage 0 paired names by prefix; a load that misses keys is retried with {len(remap)} key rewrites")
         model, rep = load_model(torch, transformers, snapshot, remap=remap)
     except Exception as exc:  # noqa: BLE001 - the failure goes into the evidence and reference.json
-        rep = {"pass": False, "error": f"{type(exc).__name__}: {exc}"[:4000]}
+        rep = {"pass": False, "error": f"{type(exc).__name__}: {exc}"[:4000],
+               **({"remote_code": dict(REMOTE_CODE)} if REMOTE_CODE["used"] else {})}
         write_json(EVIDENCE / "load-report.json", rep)
         note = f"from_pretrained raised {rep['error'][:600]}"
         checks = [{"name": "loads", "pass": False, "note": note, "evidence": [rel(EVIDENCE / "load-report.json")]}]

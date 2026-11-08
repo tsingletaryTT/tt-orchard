@@ -24,12 +24,19 @@ REFUSAL = ("ValueError: The repository /x contains custom code which must be exe
 
 
 @pytest.fixture(autouse=True)
-def clean_state(monkeypatch):
+def clean_state(monkeypatch, tmp_path):
+    """allow_remote_code changes os.environ directly, so the whole environment is saved and restored, and the scratch home and the evidence
+    directory live under tmp_path, never beside the shipped template (review of PR 597)."""
+    saved = dict(os.environ)
     rg.REMOTE_CODE.clear()
     rg.REMOTE_CODE.update({"used": False, "files": {}, "scrubbed": []})
+    monkeypatch.setattr(rg, "HOME_SCRATCH", tmp_path / "default-home")
+    monkeypatch.setattr(rg, "EVIDENCE", tmp_path / "evidence")
     for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "GH_TOKEN", "SOME_API_KEY", "KEEP_ME"):
         monkeypatch.delenv(k, raising=False)
     yield
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 def snapshot_with_code(tmp_path):
@@ -141,7 +148,6 @@ def test_load_model_passes_trust_remote_code_to_the_config_and_the_class(tmp_pat
     class Torch:
         bfloat16 = "bf16"
 
-    monkeypatch.setattr(rg, "HOME_SCRATCH", tmp_path / "home", raising=False)
     with pytest.raises(Stop):
         rg.load_model(Torch, T, snap)
     assert seen["config_kw"].get("trust_remote_code") is True and seen["class_kw"].get("trust_remote_code") is True
@@ -157,3 +163,61 @@ def test_a_link_or_a_pipe_named_py_is_listed_but_never_followed(tmp_path):
     files = rg.REMOTE_CODE["files"]
     assert files["linked.py"] == "unreadable" and files["pipe.py"] == "not a regular file"
     assert len(files["modeling_spark.py"]) == 64
+
+
+def test_the_offline_flags_reach_the_modules_that_were_imported_before(tmp_path, monkeypatch):
+    """Review of PR 597: huggingface_hub and transformers 4.x read the environment when they are imported, so setting it afterwards does
+    nothing. The gate sets the modules' own flags too."""
+    import sys
+    import types
+    hub = types.SimpleNamespace(HF_HUB_OFFLINE=False)
+    thub = types.SimpleNamespace(_is_offline_mode=False)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", hub)
+    monkeypatch.setitem(sys.modules, "transformers.utils.hub", thub)
+    rg.allow_remote_code(snapshot_with_code(tmp_path), scratch_home=tmp_path / "home")
+    assert hub.HF_HUB_OFFLINE is True and thub._is_offline_mode is True
+
+
+def test_a_builtin_config_with_a_custom_model_class_is_also_retried(tmp_path):
+    """Review of PR 597: only the model class asks for trust_remote_code. The class load goes through the same retry."""
+    snap = snapshot_with_code(tmp_path)
+    seen = []
+
+    class Cfg:
+        architectures = ["SparkForCausalLM"]
+        model_type = "spark"
+
+    class Stop(Exception):
+        pass
+
+    class Cls:
+        @staticmethod
+        def from_pretrained(path, **kw):
+            seen.append(kw.get("trust_remote_code"))
+            if not kw.get("trust_remote_code"):
+                raise ValueError(REFUSAL)
+            raise Stop
+
+    AutoConfig = type("AutoConfig", (), {"from_pretrained": staticmethod(lambda path, **kw: Cfg())})
+    T = type("T", (), {"__version__": "4.57.0", "AutoConfig": AutoConfig, "SparkForCausalLM": Cls})
+    with pytest.raises(Stop):
+        rg.load_model(type("Torch", (), {"bfloat16": "bf16"}), T, snap)
+    assert seen == [None, True] and rg.REMOTE_CODE["used"] is True
+
+
+def test_the_audit_is_written_before_the_trusted_retry_runs(tmp_path):
+    snap = snapshot_with_code(tmp_path)
+    audit_seen = []
+
+    def loader(path, **kw):
+        if not kw.get("trust_remote_code"):
+            raise ValueError(REFUSAL)
+        audit_seen.append((tmp_path / "evidence" / "remote-code-audit.json").is_file())
+        raise RuntimeError("the code failed")
+
+    with pytest.raises(RuntimeError):
+        rg.with_remote_code(loader, str(snap), snapshot=snap)
+    assert audit_seen == [True]
+    import json
+    audit = json.loads((tmp_path / "evidence" / "remote-code-audit.json").read_text())
+    assert "modeling_spark.py" in audit["files"] and "scrubbed" in audit
