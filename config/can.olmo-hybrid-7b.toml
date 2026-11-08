@@ -1,0 +1,68 @@
+# The can for allenai/Olmo-Hybrid-7B on a 1x4 mesh of Blackhole chips (two p300c boards), orchard/can.py. Run from the repository root:
+#   tt-orchard can stage config/can.olmo-hybrid-7b.toml --out <new directory>/olmo-hybrid-7b-blackhole
+# Paths are relative to the directory the command runs in (or --base).
+
+[can]
+name = "olmo-hybrid-7b-blackhole"
+kind = "tt-dit-server"                 # the server is not a vLLM model; run.sh serves the ASGI app below with uvicorn
+app = "olmo_asgi:app"
+model_py = "pkgsrc/can/olmo_model.py"
+readme = "pkgsrc/can/olmo-README.md"
+arch = "blackhole"
+mesh = "1x4"
+device_count = 4
+python = "3.12"
+port = 20120
+card_profile = "catalog-measured"
+# Exact pins. ttnn 0.80.0 is the PyPI wheel; it needs numpy below 2. The CPU wheel of torch comes from the PyTorch index.
+requirements = [
+  "ttnn==0.80.0",
+  "numpy==1.26.4",
+  "torch==2.7.0",
+  "safetensors==0.8.0",
+  "tokenizers==0.23.2",
+  "huggingface_hub==1.33.0",
+  "fastapi==0.136.3",
+  "uvicorn==0.45.0",
+  "pydantic==2.12.5",
+  "pillow==10.4.0",
+  "loguru==0.7.3",
+  "networkx==3.6.1",
+  "graphviz==0.21",
+  "pyyaml==6.0.2",
+  "click==8.5.0",
+  "pandas==2.3.3",
+  "seaborn==0.13.2",
+  "ml_dtypes==0.5.4",
+]
+verify = [
+  "import importlib.metadata as m; assert m.version('ttnn') == '0.80.0', m.version('ttnn')",
+  "import olmo_asgi",
+]
+
+[weights]
+repo = "allenai/Olmo-Hybrid-7B"
+revision = "4f1cc566f9fdf3ce68da2ab6a788a83d89896dcf"
+
+[[extra_code]]
+src = "pkgsrc/server/olmo_asgi.py"
+dst = "olmo_asgi.py"
+[[extra_code]]
+src = "pkgsrc/runtime/olmo_hybrid_port.py"
+dst = "olmo_hybrid_port.py"
+
+[[bundle_file]]
+src = "LICENSE"
+dst = "LICENSE"
+[[bundle_file]]
+src = "pkgsrc/can/olmo-NOTICE"
+dst = "NOTICE"
+
+# what the boot check asks of the served bundle (the chat route writes role: content lines for this base model)
+[check]
+prompt = "The capital of France is"
+expect = "Paris"
+max_tokens = 48
+stream = true
+min_decode_tok_s = 1.0                # a liveness floor only: it fails a server that is stuck, not a slow one. The port runs partly on the host, so the served rate moved between 2.2 and 11.5 tok/s with host load; the measured rates are on the card
+ready_contains = ['"event": "ready"', '"mesh": "1x4"']

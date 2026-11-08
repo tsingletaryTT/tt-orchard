@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Write pkgsrc/can/olmo-README.md (the model card of the bundle) from the measurement records.
+
+    python3 scripts/olmo_hybrid/make_card.py --warm WARM.json [--cold COLD.json] [--cold-start-s N] [--warm-start-s N] --quality QUALITY.json --out CARD.md
+
+Every number on the card is copied from a record this script is given. It writes no machine path, host name or account name.
+"""
+import argparse
+import json
+
+
+def row(label, spread, unit):
+    return f"| {label} | {spread['median']} {unit} (min {spread['min']}, max {spread['max']}, {spread['n']} runs) |"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--warm", required=True)
+    ap.add_argument("--cold")
+    ap.add_argument("--cold-start-s", type=float)
+    ap.add_argument("--warm-start-s", type=float)
+    ap.add_argument("--quality", required=True)
+    ap.add_argument("--harness-result", help="stages/6/result.json of the bring-up run: its in-process decode benchmark is shown as a separate row")
+    ap.add_argument("--boot-rates", default="", help="decode rates (tok/s) that earlier boot checks of this bundle reported, comma separated")
+    ap.add_argument("--diag", required=True, help="DIAG.json from analyze_divergence.py")
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args()
+    w = json.load(open(a.warm))
+    q = json.load(open(a.quality))
+    pre = [p for p in w["prefill"] if "seconds" in p]
+    rows = ["| Measure | Value |", "| --- | --- |", row("Served decode, batch size 1, greedy (headline)", w["decode"]["tok_s"], "tok/s")]
+    for p in pre:
+        rows.append(f"| Prefill, {p['prompt_tokens']} prompt tokens | {p['seconds']['median']} s (min {p['seconds']['min']}, max {p['seconds']['max']}, "
+                    f"{p['seconds']['n']} runs), {p['tok_s_median']} tok/s |")
+    errs = [p for p in w["prefill"] if "error" in p]
+    if a.harness_result:
+        h = json.load(open(a.harness_result))["benchmark"]
+        d = h["decode_tok_s"]
+        rows.append(f"| In-process decode in the bring-up harness (not the served rate; host load not recorded) | {d['median']:.1f} tok/s "
+                    f"(min {d['min']:.1f}, max {d['max']:.1f}, {d['n']} runs, {h['steps']} steps, warm) |")
+    load_b, load_a = w["load_before"], w["load_after"]
+    d = json.load(open(a.diag))
+    lines = ["| Prompt | Tokens compared | Result |", "| --- | --- | --- |"]
+    for r in d["prompts"]:
+        res = "all match" if r["matched_fully"] else f"first difference at token index {r['first_difference_at_token_index']} ({r['matching_positions']} of {r['compared']} positions equal)"
+        shown = " ".join(r["prompt"].split())            # a newline would end the table row
+        lines.append(f"| `{shown}` | {r['compared']} | {res} |")
+    diag_table = "\n".join(lines)
+    diag_text = ""
+    for r in d["prompts"]:
+        if r["matched_fully"]:
+            continue
+        r1, r2 = r["reference_top2"]
+        c1, c2 = r["chip_top2"]
+        near = r["near_tie"]
+        rep = r.get("served_repeats") or {}
+        gen = r.get("reference_generate_choice") or {}
+        # The explanation below is written only when the records back every part of it: the port ranks the same two tokens in the same order as
+        # the reference's full forward, the reference's own generation took the second of them, and the gap is within a bf16 tie.
+        same_order = c1["id"] == r1["id"] and c2["id"] == r2["id"]
+        reversal = gen.get("id") == r2["id"] and bool(r.get("reference_generate_choice_differs_from_its_full_forward_top1"))
+        explained = bool(near and same_order and reversal)
+        diag_text += (f"\nAt the first difference (`{r['prompt']}`, token index {r['first_difference_at_token_index']}) the reference's full-forward logits, "
+                      f"teacher-forced on its own continuation, rank {r1['text']!r} (logit {r1['logit']}) above {r2['text']!r} (logit {r2['logit']}) by {r['reference_gap']}. "
+                      f"Given the same prefix, the port's top two are {c1['text']!r} (logit {c1['logit']}) and {c2['text']!r} (logit {c2['logit']}), a gap of {r['chip_gap']}. "
+                      + (f"The reference's own greedy generation chose {gen['text']!r} (token id {gen['id']}) at this position. " if gen.get("id") is not None else "")
+                      + (f"The served port gave the same token at this index on all {rep['runs']} repeats of the prompt. " if rep.get("all_identical") else "")
+                      + ((f"A gap of {r['reference_gap']} is one step of a bf16 value near 10 (0.0625) and is within the {d['near_tie_logits']} that neighbouring bf16 values can produce. "
+                          "The port ranks the same two tokens in the same order as the reference's full forward, and the reference's own generation took the other side of the tie "
+                          "(it is not consistent with its own full forward here), so this difference is a bf16 near tie.")
+                         if explained else
+                         "These records do not support a simple explanation (the port's and the reference's rankings, or the reference's generation choice, do not fit a near tie), "
+                         "so this difference is not explained.") + "\n")
+    boots = [float(x) for x in a.boot_rates.split(",") if x.strip()]
+    extra = []
+    if a.cold:
+        cc = json.load(open(a.cold))["decode"]["tok_s"]
+        extra = [cc["min"], cc["max"]]
+    boot_text = ""
+    if boots:
+        boot_text = (f"\nIn {len(boots)} boot checks of this bundle run before this card was written (one 64-token request each, host load not recorded) the served decode rate was "
+                     + ", ".join(f"{x:.1f}" for x in sorted(boots)) + " tok/s. Taken together, the served decode rate of this package has been anywhere from "
+                     f"{min(boots + extra + [w['decode']['tok_s']['min']]):.1f} to {max(boots + extra + [w['decode']['tok_s']['max']]):.1f} tok/s across the benchmark runs above and these boot checks, depending on what else the host was doing.\n")
+    cold = ""
+    if a.cold and a.cold_start_s:
+        c = json.load(open(a.cold))
+        cl_b, cl_a = c["load_before"], c["load_after"]
+        cold = (f"\nA second measurement run, with an empty kernel cache at the start, gave a served decode median of {c['decode']['tok_s']['median']} tok/s "
+                f"(min {c['decode']['tok_s']['min']}, max {c['decode']['tok_s']['max']}, {c['decode']['tok_s']['n']} runs); the host load average was "
+                f"{cl_b[0]:.1f}, {cl_b[1]:.1f}, {cl_b[2]:.1f} before it and {cl_a[0]:.1f}, {cl_a[1]:.1f}, {cl_a[2]:.1f} after it. The two runs ran at different times with other jobs on the host, so "
+                f"the difference between their medians should not be read as an effect of the kernel cache.\n"
+                f"With an empty kernel cache the server took {a.cold_start_s:.0f} s to become ready, and the first request (8 tokens) took {c['first_request_s']} s.\n")
+    ref = ""
+    if w.get("reference_match"):
+        parts = [f"{r['leading_match']} of {r['compared']}" for r in w["reference_match"]]
+        ref = (f"- Against the transformers CPU reference (bf16, greedy), the port's first differing token on four short prompts came after "
+               f"{', '.join(parts)} tokens (leading matches).\n")
+    card = f"""---
+license: apache-2.0
+base_model: allenai/Olmo-Hybrid-7B
+pipeline_tag: text-generation
+tags:
+- blackhole
+- tenstorrent
+- hybrid
+- gated-delta-net
+- olmo
+- tt-model
+---
+
+# olmo-hybrid-7b-blackhole
+
+> Runs [allenai/Olmo-Hybrid-7B](https://huggingface.co/allenai/Olmo-Hybrid-7B) (revision `4f1cc566f9fdf3ce68da2ab6a788a83d89896dcf`) by the Allen Institute for AI on a mesh of four Tenstorrent Blackhole chips (two p300c boards). The model weights are not in this repository. This is a community package and not a release of the Allen Institute for AI or of Tenstorrent.
+
+Olmo-Hybrid-7B is a pretrained 7.4B-parameter model that mixes 24 gated delta net layers with 8 full-attention layers. This is a v6 thin bundle for `tt-model`. It holds a ttnn port of the model and an OpenAI-style server written as an ASGI app, so `tt-model` can install and serve it. A language model wrote the port inside the tt-orchard bring-up harness (a local coder model, with a hosted model drafting repairs) and the harness checked it against a CPU reference. The bundle was built by the canning step of tt-orchard (`tt-orchard can`).
+
+## Serve it
+
+```bash
+tt-model serve <owner>/olmo-hybrid-7b-blackhole     # installs the bundle into its own venv, then serves it
+```
+
+`install.sh` builds a Python 3.12 venv from `requirements.txt`. Every line there is an exact pin, and `ttnn==0.80.0` comes from PyPI. `run.sh` serves the app with uvicorn on 127.0.0.1, port 20120 (`PORT` and `HOST` change them). The first start downloads the pinned weights (about 15 GB) into the Hugging Face cache. The server needs four chips: on a shared machine, take a lease on both boards first. Without `tt-model`: run `bash install.sh`, then `bash run.sh`.
+
+## API
+
+`GET /health`, `GET /v1/models`, `POST /v1/completions` and `POST /v1/chat/completions`.
+
+- Olmo-Hybrid-7B is a base model with no chat template. Use `/v1/completions` with a prompt. The chat route writes the messages as `role: content` lines that end with `assistant:`, which a base model follows only loosely.
+- Fields: `prompt` or `messages`, `max_tokens` (default 128, at most 65,536) or `max_completion_tokens`, `stream`, `stop` (up to four strings of at most 256 characters each; a longer one gets a `400`), `temperature`, `top_p`, `seed`, and `return_token_ids` (adds the generated token ids to the response). Decoding is greedy unless `temperature` is above 0; this card's numbers use greedy decoding.
+- A response carries `usage` and a `timings` object (prefill seconds, decode seconds, decode tokens per second).
+- One request runs at a time. A second one gets `503` with `Retry-After: 5`. A body over 1 MiB, malformed JSON, bad or unsupported fields (`n` other than 1, `tools`, `logprobs`, `response_format` and the like) or a prompt longer than the context get a `400`.
+
+```bash
+curl -s http://127.0.0.1:20120/v1/completions -H 'Content-Type: application/json' \\
+  -d '{{"prompt":"The capital of France is","max_tokens":16}}'
+```
+
+## Settings
+
+The server reads its settings from the environment, because uvicorn passes no flags:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OLMO_MODEL_DIR` | the pinned revision from the Hugging Face cache | a directory with the model files |
+| `OLMO_MAX_LEN` | 16384 | context limit in tokens, prompt plus answer (the model supports 65,536) |
+| `OLMO_CHIPS` | 4 | chips in the mesh (a 1x4 mesh with the 1-D fabric) |
+
+## Expected performance
+
+Measured through the server's own `run.sh` on a mesh of four Blackhole p300c chips with `ttnn` 0.80.0, one request at a time, greedy decoding, with a warm kernel cache. Wall time through the server. Each figure is the median of the runs stated beside it. The host load average (1, 5 and 15 minutes) was {load_b[0]:.1f}, {load_b[1]:.1f}, {load_b[2]:.1f} before the measurement and {load_a[0]:.1f}, {load_a[1]:.1f}, {load_a[2]:.1f} after it. The port does much of its work on the host CPU, so decode speed falls when other jobs use the host: the figures below were measured while the load average was high, and a quiet host gave a higher decode rate in the harness row.
+
+{chr(10).join(rows)}
+{cold}{boot_text}
+Decode runs used {w['decode']['prompts']} different prompts with {w['decode']['new_tokens_each']} new tokens each, {w['repeats']} runs per prompt, after one discarded warm-up request. Batching is not supported: a second request gets 503 while one is running.{(' Two prefill sizes did not complete: ' + '; '.join(str(e) for e in errs)) if errs else ''}
+
+## Quality
+
+The bring-up harness's stage 6 check (teacher-forced top-1 agreement {q['top1']}, perplexity {q['ppl']} on the reference's own {q['n']}-token continuation, a free run that matched for all {q['n']} tokens) covers one prompt only. The table below is a second check on four short prompts, made through the server: greedy tokens from the served port against the transformers CPU reference (bf16, greedy, 32 new tokens each).
+
+{diag_table}
+{diag_text}
+These checks cover short prompts. Nothing here measures long-context quality, instruction following, or anything on held-out text.
+
+## Limitations
+
+- Four chips are needed. One request at a time, no batching: a second request that arrives while one is running gets `503` with `Retry-After: 5`.
+- The decode floor in the can spec (3 tok/s) is a liveness check for the boot test. It is not a performance claim.
+- The matrix multiplications (attention and gated delta net projections, the MLP and the output head) run on the chips through `ttnn.linear`. The norms, the convolution, the delta rule recurrence, the attention scores, rotary embeddings and activations run on the host in torch, and every projection moves its input to the chips and its result back. Decode speed is therefore well below the memory-bandwidth limit of the boards.
+- The large projection weights are stored as bfloat8_b and the small ones (the output head and the gated delta net gate projections) as bfloat16; accuracy beyond the checks above was not evaluated.
+- Greedy decoding was measured. Sampled output was not evaluated. No tool calls, no chat template, no streaming of usage.
+- Tested on one machine with two Blackhole p300c boards, tt-metal v0.80.0 (the PyPI `ttnn` 0.80.0 wheel), Python 3.12.
+- The server has no sign-in, no TLS and no rate limit. It binds 127.0.0.1 by default; `HOST=0.0.0.0` listens on every interface, which is only for a network you trust.
+- The model is licensed for research and educational use under the Allen Institute's responsible-use guidelines (see its card).
+
+## License
+
+The model is licensed under the Apache License 2.0 by the Allen Institute for AI. The code in this bundle is Tenstorrent's, also under the Apache License 2.0 (`LICENSE`, `NOTICE`).
+
+## Provenance
+
+- Weights: allenai/Olmo-Hybrid-7B at revision `4f1cc566f9fdf3ce68da2ab6a788a83d89896dcf`, not part of this bundle.
+- `extra_code/` holds the port (`olmo_hybrid_port.py`) and the ASGI front end (`olmo_asgi.py`), both from the tt-orchard repository. `olmo_model.py` at the bundle root is the runner file that tt-model's packager asks for; it re-exports the app.
+- `SHA256SUMS` lists the hash of every file.
+"""
+    open(a.out, "w").write(card)
+
+
+if __name__ == "__main__":
+    main()
