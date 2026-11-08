@@ -83,8 +83,7 @@ stage 7 packaging). The weights-only route has run end to end on real chips for 
 CJK-Trim (run logs in `docs/run-logs/`). Since 2026-11-03 the full-port path has run too, with the outside helper writing the stage 2 repair
 rounds: run 23 of the tiny Qwen4 rehearsal and Olmo-Hybrid-7B passed stages 0 to 6 and 8 (`docs/project-log.md`, entry 2026-11-08). The coder alone
 has not written a passing port (runs 18, 20, 24). Full-port models are packaged by hand with `tt-orchard can`; three packages were published on
-2026-11-08 with the operator's yes (Olmo-Hybrid-7B, MiniCPM3-4B, the Berkelium two-chip package). In progress: the Qwen3.8-27B-QSA bring-up and a
-Qwen4 frankenmodel generator. <!-- UPDATE WHEN THE RUN ENDS -->
+2026-11-08 with the operator's yes (Olmo-Hybrid-7B, MiniCPM3-4B, the Berkelium two-chip package). In progress: the Qwen3.8-27B-QSA bring-up (QSA was not shown working: the stage 2 port ignores the indexer tensors and the agreement prompts are shorter than the 2,048 budget, issue 638) and the Qwen4 frankenmodel (generator and CPU proofs done in PR 639, chip run pending). <!-- UPDATE WHEN THE RUN ENDS -->
 
 Overnight 2 (2026-10-28, PR 210): MiniCPM3-4B (multi-latent attention) runs on one Blackhole chip through scripts in `scripts/minicpm3` (not through the supervisor): 33.7 tok/s decode, batched prefill, a chat server; log in `docs/run-logs/2026-10-29-overnight-minicpm3-4b.md`.
 
