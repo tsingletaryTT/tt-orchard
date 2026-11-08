@@ -26,7 +26,7 @@ Runs on **p150** (mesh `P150`).
 | Architecture | 62 layers, hidden size 2560, 40 attention heads, multi-latent attention (absorbed form on the chip), a dense gated-SiLU MLP. The prompt goes through the decode step one token at a time; the decode step is captured as a trace. |
 | Hardware | p150 |
 | License | apache-2.0 (the authors also point to a weights license whose link was unreachable; see License) |
-| Status | Beta. Installed and served from a local copy with tt-model's own installer on one chip of a p300c board; not yet installed from the Hub and not validated on other hosts. |
+| Status | Beta. Pulled from the Hub and served with `tt-model serve` on one chip of a p300c board on 2026-11-08 (answer "Paris", decode 33.0 to 33.6 tok/s over 12 runs, `bench-from-hub.json` in the tt-orchard repository); not validated on other hosts. |
 
 ## License
 
@@ -62,51 +62,62 @@ tt-model serve <owner>/minicpm3-4b-blackhole     # installs the bundle into its 
 
 ## Expected performance
 
-Every number is labelled. A `measured` number names its evidence files, which are in the tt-orchard repository under `docs/run-logs/evidence/2026-10-30-minicpm3-thin/`; the first file holds the value. Conditions for every row: 2026-10-31 (UTC), one chip of a p300c board in a QuietBox 2 (board with chips 2 and 3, one chip used, under a gozer lease), tt-metal runtime of `ttnn==0.80.0` (the PyPI wheel), bundle installed by tt-model's own installer into a fresh directory, bf16 weights, HiFi2 MLP, context 2048, trace on, greedy decoding. The host was shared with other jobs: its load average was 16 to 24 during these runs. The recipe package's own card measured 33.87 tok/s at a load average of about 3.6 and 31.6 at 55, and an earlier run of this bundle on the same board gave 33.2 to 33.7 tok/s at a load average of 15 to 24, so the speed moves by about one tok/s with the host load.
+Every number is labelled. A `measured` number names its evidence file; the files are in the tt-orchard repository under `docs/run-logs/evidence/2026-11-08-minicpm3-can/` and in this bundle's `evidence/` folder. Conditions for every row unless it says otherwise: 2026-11-08, one chip of a p300c board in a QuietBox 2 (one chip used, under a gozer lease; the second chip of the board was idle), `ttnn==0.80.0` (the PyPI wheel) and numpy 1.26.4 in the bundle's own virtual environment, bf16 weights, HiFi2 MLP, trace on, greedy decoding, one request at a time (the agreement rows are the exception for the trace: see the note under the table). The kernel cache was warm for every row except the one that says cold. The host was shared with other jobs: its one-minute load average was 5.5 to 10.3 during the decode and prefill runs, and each run's start and end load is in the evidence file. A run is one request. Every decode and prefill row has one discarded warm-up request and 3 measured runs per prompt.
 
 | Number | Value | Label | Evidence |
 |---|---|---|---|
-| decode speed, `chat` prompt (21 tokens), 64 output tokens, warm kernel cache (second start), mean of 3 runs (range 32.65 to 32.67) | 32.7 tok/s | measured | `ttmodel-warm-cache.json` |
-| decode speed, `chat, empty cache` prompt (21 tokens), 64 output tokens, empty kernel cache (first start of a fresh install), mean of 3 runs (range 32.57 to 33.35) | 32.9 tok/s | measured | `ttmodel-cold-cache.json` |
-| time to first token, `chat` prompt (21 tokens), mean of 3 warm runs | 0.63 s | measured | `ttmodel-warm-cache.json` |
-| prefill, 494-token prompt, 1 output token | 15.1 to 15.6 s over 4 runs (about 32 tok/s: the prompt goes through the chip one token per step) | measured | `ttmodel-cold-cache.json`, `ttmodel-warm-cache.json` |
-| server ready after start, empty kernel cache, converted weights already on disk | 68.1 s (host load average 24 to 21) | measured | `ttmodel-cold-cache.json` |
-| server ready after start, warm kernel cache, converted weights on disk | 50.1 s (host load average 21 to 16) | measured | `ttmodel-warm-cache.json` |
-| first request after ready, empty kernel cache, short answer | 0.73 s wall (0.65 s to the first token) | measured | `ttmodel-cold-cache.json` |
-| server ready after the first start of a copy that still had to convert the 8 GB weights file (pickle already downloaded, empty kernel cache) | 66.0 s | measured in the earlier run on the same board | `first-pass/can-boot-check.json` |
-| same runtime as the recipe package (source build of ttnn, numpy 2.5.3), decode speed, 64 tokens, streamed, 2 runs | 32.9 tok/s against 32.3 to 32.8 tok/s for this bundle (warm, 2 runs), measured with the same script on the same board | measured | `recipe-package.json`, `ttmodel-warm-cache.json` |
-| teacher-forced next-token agreement with the float32 CPU reference, perplexity and block errors | the recipe package's numbers (16 of 16 tokens; perplexity 8.007 on the chip against 8.0574 on the CPU over 767 tokens) were measured with a source build of ttnn and numpy 2.5; they were not re-measured under this bundle's pins | not measured here | see the recipe package's card |
+| decode speed, 4 prompts (a story, a Python function, a French translation, a two-sentence summary), 53 to 64 output tokens each, 3 runs per prompt, 12 runs in all, context 2048, warm cache: minimum, median, maximum | 33.27, 33.50, 33.64 tok/s | measured | `bench-ctx2048.json` |
+| decode rate sampled by the boot check after a cold start: the check sends a short chat request first, which warms the kernels, and then a separate 64-token request; the rate comes from that second request (1 run, so a warm-kernel sample taken after an empty-cache start) | 33.64 tok/s | measured, single sample | `boot-check-cold.json` |
+| time to first token for a 21-token prompt (1 prompt, 3 runs) | 0.62 s | measured | `bench-ctx2048.json` |
+| prefill, 522-token prompt, 1 output token, 3 runs: minimum, median, maximum | 15.75, 15.79, 15.80 s (33 tok/s) | measured | `bench-ctx2048.json` |
+| prefill, 1,910-token prompt, 1 output token, 3 runs | 58.94, 59.57, 60.29 s (32 tok/s) | measured | `bench-ctx2048.json` |
+| prefill, 8,202-token prompt, 1 output token, context 8704 (`MINICPM3_MAX_LEN=8704`), 3 runs | 268.23, 268.53, 268.74 s (30.5 tok/s; host load average 5.0 to 6.9) | measured | `bench-ctx8704.json` |
+| decode speed at context 8704, same 4 prompts, 12 runs: minimum, median, maximum (host load average 4.5 to 6.7) | 32.23, 33.60, 33.74 tok/s | measured | `bench-ctx8704.json` |
+| cold start: server ready after the first start of a fresh install (empty kernel cache, and the one-time conversion of the weights to one safetensors file; the pickle was already downloaded) | 126 s | measured, single sample | `boot-check-cold.json` |
+| next-token agreement with the float32 CPU reference over 16 teacher-forced steps, `ttnn==0.80.0` from PyPI and numpy 1.26.4, untraced step | 16 of 16 (0 flips) | measured | `agreement-pypi-pins.txt` |
+| logits agreement, last prompt position (40-token prompt), untraced step | PCC 0.9992, relative L2 0.021 | measured | `agreement-pypi-pins.txt` |
+| logits agreement, first decode step, untraced step | PCC 0.9978, relative L2 0.050 | measured | `agreement-pypi-pins.txt` |
+| block error against the float32 reference, layers 0, 30 and 61, untraced step | 0.0077, 0.0052, 0.0556 (the CPU bfloat16 floor at layer 61 is 0.0199) | measured | `agreement-pypi-pins.txt` |
+| teacher-forced perplexity over 767 WikiText-2 tokens | 8.007 on the chip against 8.057 for float32, with a source build of ttnn (not repeated under this bundle's pins) | measured in the earlier run on this model's port | `docs/run-logs/2026-10-29-overnight-minicpm3-4b.md` in tt-orchard |
 
-### p150 (1 chip), warm kernel cache, tt-model's installed bundle
+The agreement rows were measured with `run_chip.py agree`, which calls the model's decode step directly and does not capture a trace. The served bundle runs the traced step (`enable_trace()`), and agreement through the traced path was not measured here. The earlier run of the port measured a traced and an untraced step with the same logits agreement and the same generated text (`docs/run-logs/2026-10-29-overnight-minicpm3-4b.md`, update 3), which is the only evidence about the traced path.
 
-One row per prompt, one user, means over the runs in `ttmodel-warm-cache.json` (3 runs for `chat`, 2 for `long prompt`). The `long prompt` row asks for one output token, so it has no decode rate.
+### p150 (1 chip), warm kernel cache, the served bundle
+
+One row per prompt length, one user. The decode column is the server's own report. The prefill column is the prompt tokens divided by the whole request time with one output token (the prompt goes through the chip one token per step). TTFT is shown only for the chat row, where it is the server's `first_token_s`; the three prefill rows have no TTFT because the client recorded the whole request time and not `first_token_s` for them, and E2EL is that whole request time.
 
 | profile | ISL | OSL | concurrency | N | TTFT (ms) | prefill tok/s/u | decode tok/s/u | E2EL (s) |
 |---|---|---|---|---|---|---|---|---|
-| chat | 21 | 64 | 1 | 3 | 633 | 33.2 | 32.7 | 2.60 |
-| long prompt | 494 | 1 | 1 | 2 | 15158 | 32.6 | - | 15.2 |
+| chat (the story prompt) | 31 | 64 | 1 | 3 | 934 | 33.2 | 33.6 | 2.8 |
+| short prompt | 522 | 1 | 1 | 3 | - | 33.1 | - | 15.8 |
+| long prompt | 1910 | 1 | 1 | 3 | - | 32.1 | - | 59.6 |
+| 8k prompt (context 8704) | 8202 | 1 | 1 | 3 | - | 30.5 | - | 268.5 |
 
-The first start downloads the pinned weights (about 8 GB, a PyTorch pickle) into the Hugging Face cache and converts them once to one safetensors file (another 8 GB, kept in `tt-orchard-minicpm3` inside `HF_HOME`). The download time was not measured: the weights were already in the cache. The server answers `/health` only after the model is loaded and the decode step is traced.
+The first start downloads the pinned weights (about 8 GB, a PyTorch pickle) into the Hugging Face cache and converts them once to one safetensors file (another 8 GB, kept in `tt-orchard-minicpm3` inside `HF_HOME`). The server answers `/health` only after the model is loaded and the decode step is traced.
 
 ## Limitations
 
-- One chip only; the two-chip tensor-parallel version is in tt-orchard and is not in this bundle.
+- One chip only. A two-chip tensor-parallel version exists in tt-orchard (about 38 tok/s, measured in the earlier run) and is not in this bundle.
 - Decoding is greedy; `temperature` and `top_p` are accepted and ignored.
-- The server feeds the prompt one token per decode step (about 30 ms each), so a 2,000-token prompt takes about a minute before the first token. The batched prefill is not in this bundle: in the recipe server it hung the chip on the second request after a trace.
+- The prompt goes through the chip one token per decode step, so prefill runs at about 32 tok/s: a 2,000-token prompt takes about one minute and an 8,000-token prompt about four minutes before the first token. A batched prefill exists in tt-orchard (0.37 s for a 922-token prompt in the earlier run) and is not in this bundle, because in the server it hung the chip on the second request after a trace was captured. The cause has not been found.
 - One request at a time: a second request gets `503` with `Retry-After: 5`. After a failure inside a chip step, `/health` and every request return `503` until the server is restarted.
-- The default context is 2048 tokens (`MINICPM3_MAX_LEN` raises it, up to 32768). Speed was measured out to position 4000 on the recipe package (30.78 tok/s over 32 steps). Agreement and perplexity were measured over the first few hundred positions only.
-- The 8-bit MLP variant (`MINICPM3_MLP_DTYPE=bfp8`, `MINICPM3_MLP_FIDELITY=lofi`) did not meet the stage 2 bar on the recipe package, and is not measured here.
+- The default context is 2048 tokens. `MINICPM3_MAX_LEN` raises it, up to 32768; the larger context sizes the cache and was measured here to 8,704 tokens. Decode speed at a long position was measured in the earlier run: 30.8 tok/s at position 4,000.
+- Agreement was measured over 16 teacher-forced steps after a 40-token prompt, and perplexity (earlier run, source-build ttnn) over the first 767 tokens of one text. Neither says how the model behaves on other text, in Chinese, or over long outputs.
+- Only 3 runs stand behind each speed figure, on a shared host whose load average moved the decode rate by about 0.4 tok/s in these runs and by about 2 tok/s between the recipe package's quiet and loaded measurements.
+- The 8-bit MLP variant (`MINICPM3_MLP_DTYPE=bfp8`, `MINICPM3_MLP_FIDELITY=lofi`) is not measured under this bundle's pins.
 - Function calls, the code interpreter and the 32k window that the authors describe are not tested.
 
 ## Risks and safety considerations
 
-The checks above do not cover output quality beyond the agreement and perplexity numbers of the recipe package, long outputs, tool calling or safety behaviour. Output can differ from MiniCPM3-4B run on a CPU or GPU in ways those checks do not show. The server binds to 127.0.0.1 and has no sign-in; put authentication in front of it before exposing it.
+The checks above do not cover output quality beyond the agreement and perplexity numbers listed in Expected performance, long outputs, tool calling or safety behaviour. Output can differ from MiniCPM3-4B run on a CPU or GPU in ways those checks do not show. The server binds to 127.0.0.1 and has no sign-in; put authentication in front of it before exposing it.
 
 ## Not measured
 
-- a download of the weights through `tt-model pull`, and a boot of the bundle from the Hub (it was installed and served from a local copy);
-- agreement with the CPU reference under `ttnn==0.80.0` from PyPI and numpy 1.26.4;
-- concurrent use and load.
+- a pull of the bundle from the Hub on a host other than the one it was built on;
+- concurrent use and load (the server takes one request at a time);
+- perplexity and free-running text agreement under this bundle's pins (the figures above come from the earlier run's source-build ttnn);
+- decode speed at a context between 2,048 and 8,704 tokens, and at positions beyond 8,704;
+- the 8-bit MLP variant and the two-chip version under this bundle.
 
 ## Using it
 
@@ -137,4 +148,4 @@ The server reads its settings from the environment, because uvicorn passes no fl
 
 ## Boot check
 
-`tt-orchard can boot` copied the staged bundle, ran the copy's `install.sh`, served the copy's `run.sh` on one leased chip and checked the answer ("Paris"), the decode rate (31.5 tok/s over a 64-token answer at a host load average of about 20, against a floor of 25; ready after 75.0 s), the stream's `[DONE]` and the start-up log (`"traced": true`, `"context": 2048`). All 9 checks passed. The same bundle was then installed with tt-model's own installer and served by `tt-model serve local/minicpm3-4b-blackhole`; the numbers above come from that run.
+`tt-orchard can boot` (2026-11-08) copied the staged bundle, ran the copy's `install.sh` (a new virtual environment from the exact pins, `ttnn==0.80.0` from PyPI), served the copy's `run.sh` on one leased chip with an empty kernel cache and checked the answer ("Paris"), the decode rate (33.64 tok/s over a 64-token answer, against a floor of 25), the stream's `[DONE]` and the start-up log (`"traced": true`, `"context": 2048`). All 9 checks passed, and the server was ready 126 s after it started, including the one-time conversion of the weights. The record is `boot-check-cold.json`. An earlier boot check of the same bundle (2026-10-31, host load average about 20) passed with 31.5 tok/s, and the bundle was also installed and served by tt-model's own installer from a local copy.
