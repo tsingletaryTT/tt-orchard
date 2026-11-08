@@ -1,0 +1,3 @@
+target = "0.9.135"
+summary = "An operator pause read during a watchdog stop is kept, a stage budget that runs out while the helper answers stops the rescue, and the helper-reply attempt and snapshot-sync cases of issues 514 and 515 get regression tests."
+pr = 614
