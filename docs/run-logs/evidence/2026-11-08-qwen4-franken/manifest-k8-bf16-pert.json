@@ -1,0 +1,184 @@
+{
+  "config": {
+    "architectures": [
+      "Qwen4ExpForCausalLM"
+    ],
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "bos_token_id": 248044,
+    "dtype": "bfloat16",
+    "eos_token_id": 248044,
+    "full_attention_interval": 4,
+    "hc_count": 4,
+    "hc_lowrank": 640,
+    "head_dim": 256,
+    "hidden_act": "silu",
+    "hidden_size": 5120,
+    "indexer_budget": 2048,
+    "indexer_compress_ratio": 4,
+    "indexer_head_dim": 128,
+    "indexer_kv_heads": 1,
+    "indexer_n_heads": 4,
+    "intermediate_size": 17408,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 128,
+    "linear_num_key_heads": 16,
+    "linear_num_value_heads": 48,
+    "linear_value_head_dim": 128,
+    "max_position_embeddings": 262144,
+    "model_type": "qwen4_exp_text",
+    "num_attention_heads": 24,
+    "num_hidden_layers": 8,
+    "num_key_value_heads": 4,
+    "output_gate_type": "silu",
+    "pad_token_id": null,
+    "ple_layer_ids": [],
+    "rms_norm_eps": 1e-06,
+    "rope_parameters": {
+      "mrope_interleaved": true,
+      "mrope_section": [
+        11,
+        11,
+        10
+      ],
+      "partial_rotary_factor": 0.25,
+      "rope_theta": 10000000,
+      "rope_type": "default"
+    },
+    "tie_word_embeddings": false,
+    "vocab_size": 248320
+  },
+  "dtype": "bfloat16",
+  "estimated_bytes": 12081444480,
+  "files": {
+    "chat_template.jinja": {
+      "bytes": 8952,
+      "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+    },
+    "config.json": {
+      "bytes": 1175,
+      "sha256": "bfa41a962f1dab796ae53de093ad97fdc88e6a1ceb0606a3763d8465eb111716"
+    },
+    "generation_config.json": {
+      "bytes": 77,
+      "sha256": "f7e3271303b1db6a036d659681626cea77aacc2263c3280218146a48b746ae26"
+    },
+    "merges.txt": {
+      "bytes": 3353259,
+      "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+    },
+    "model.safetensors": {
+      "bytes": 12081465168,
+      "sha256": "5f5967ff1406cfbd91ffc4d5576a25495f64f1549f2d844db1c8fc44592dc125"
+    },
+    "proofs.json": {
+      "bytes": 1167,
+      "sha256": "12a7af672e75430a1afe8c8ea06391454fb3450d7c9eded7f0fcde34e7ad0950"
+    },
+    "tokenizer.json": {
+      "bytes": 12809320,
+      "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+    },
+    "tokenizer_config.json": {
+      "bytes": 17928,
+      "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27"
+    },
+    "vocab.json": {
+      "bytes": 6722759,
+      "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+    }
+  },
+  "hc_sigma": 0.02,
+  "identity_initialised": null,
+  "indexers": "the higa2515 release's q_proj, k_proj, q_norm and k_block_norm (the mapping is unverified past the budget)",
+  "kind": "qwen4-franken",
+  "layer_types": [
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention"
+  ],
+  "layers": 8,
+  "not_carried": [
+    "visual tower",
+    "mtp head (transformers' Qwen4Exp has none)",
+    "per-layer embedding and n-gram table (ple_layer_ids is empty)"
+  ],
+  "proofs": {
+    "against_base": {
+      "max_abs_diff": 5.230632305145264,
+      "prompts": [
+        {
+          "last_top1_equal": true,
+          "max_abs_diff": 4.064627647399902,
+          "max_abs_logit": 17.329753875732422,
+          "prompt_tokens": 8,
+          "top1_equal": false
+        },
+        {
+          "last_top1_equal": false,
+          "max_abs_diff": 3.65610671043396,
+          "max_abs_logit": 16.72277069091797,
+          "prompt_tokens": 16,
+          "top1_equal": false
+        },
+        {
+          "last_top1_equal": false,
+          "max_abs_diff": 5.230632305145264,
+          "max_abs_logit": 16.601404190063477,
+          "prompt_tokens": 33,
+          "top1_equal": false
+        }
+      ],
+      "tolerance": 0.8664876937866212,
+      "tolerance_rule": "0.05 of the largest logit; top-1 may flip on near ties",
+      "top1_equal_all": false
+    },
+    "deterministic": true,
+    "dtype": "bfloat16",
+    "hc_sigma": 0.02,
+    "indexer": {
+      "budget": 2048,
+      "longest_prompt": 33,
+      "narrow_budget": 8,
+      "narrow_differs": true,
+      "narrow_vs_wide_max_abs_diff": 1.3077449798583984,
+      "wide_equals_base": true
+    },
+    "perturbed_differs": true,
+    "prompt_lengths": [
+      8,
+      16,
+      33
+    ]
+  },
+  "provisional": "built from public readings of an unreleased model; see the design note",
+  "real": "embedding, lm_head, every attention, delta-net and feed-forward tensor of the first K layers (copied from the base, cast to dtype)",
+  "seed": 1234,
+  "seeded": "hyper-connection weights drawn from N(0, hc_sigma^2)",
+  "sources": {
+    "base_repo_dir": "models--Qwen--Qwen3.8-27B",
+    "base_snapshot": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "indexers": {
+      "repo_dir": "models--higa2515--Qwen3.8-27B-QSA-BF16",
+      "snapshot": "aedae2c5304698f58d30c5ec709ebf5b37339b1d"
+    }
+  },
+  "tensor_counts": {
+    "hc_identity": 0,
+    "hc_norm_derived": 17,
+    "hc_seeded": 50,
+    "indexer_real": 6,
+    "indexer_seeded": 0,
+    "real": 92
+  },
+  "versions": {
+    "python": "3.12.12",
+    "torch": "2.14.1+cpu",
+    "transformers": "5.19.0"
+  }
+}

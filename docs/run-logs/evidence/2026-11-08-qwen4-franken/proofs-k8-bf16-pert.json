@@ -1,0 +1,48 @@
+{
+  "against_base": {
+    "max_abs_diff": 5.230632305145264,
+    "prompts": [
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 4.064627647399902,
+        "max_abs_logit": 17.329753875732422,
+        "prompt_tokens": 8,
+        "top1_equal": false
+      },
+      {
+        "last_top1_equal": false,
+        "max_abs_diff": 3.65610671043396,
+        "max_abs_logit": 16.72277069091797,
+        "prompt_tokens": 16,
+        "top1_equal": false
+      },
+      {
+        "last_top1_equal": false,
+        "max_abs_diff": 5.230632305145264,
+        "max_abs_logit": 16.601404190063477,
+        "prompt_tokens": 33,
+        "top1_equal": false
+      }
+    ],
+    "tolerance": 0.8664876937866212,
+    "tolerance_rule": "0.05 of the largest logit; top-1 may flip on near ties",
+    "top1_equal_all": false
+  },
+  "deterministic": true,
+  "dtype": "bfloat16",
+  "hc_sigma": 0.02,
+  "indexer": {
+    "budget": 2048,
+    "longest_prompt": 33,
+    "narrow_budget": 8,
+    "narrow_differs": true,
+    "narrow_vs_wide_max_abs_diff": 1.3077449798583984,
+    "wide_equals_base": true
+  },
+  "perturbed_differs": true,
+  "prompt_lengths": [
+    8,
+    16,
+    33
+  ]
+}

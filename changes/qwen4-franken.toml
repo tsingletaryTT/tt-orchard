@@ -1,0 +1,3 @@
+target = "0.9.139"
+summary = "A Qwen4-shaped frankenmodel generator: real Qwen3.8-27B weights in the Qwen4 skeleton with identity hyper-connections, and its CPU proofs."
+pr = 639

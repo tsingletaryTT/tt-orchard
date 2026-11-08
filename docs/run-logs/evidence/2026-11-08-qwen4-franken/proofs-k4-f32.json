@@ -1,0 +1,48 @@
+{
+  "against_base": {
+    "max_abs_diff": 0.0,
+    "prompts": [
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.0,
+        "max_abs_logit": 17.79155731201172,
+        "prompt_tokens": 8,
+        "top1_equal": true
+      },
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.0,
+        "max_abs_logit": 17.07377052307129,
+        "prompt_tokens": 16,
+        "top1_equal": true
+      },
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.0,
+        "max_abs_logit": 17.588659286499023,
+        "prompt_tokens": 33,
+        "top1_equal": true
+      }
+    ],
+    "tolerance": 0.0005,
+    "tolerance_rule": "absolute, and every top-1 equal",
+    "top1_equal_all": true
+  },
+  "deterministic": true,
+  "dtype": "float32",
+  "hc_sigma": 0.0,
+  "identity_holds": true,
+  "indexer": {
+    "budget": 2048,
+    "longest_prompt": 33,
+    "narrow_budget": 8,
+    "narrow_differs": true,
+    "narrow_vs_wide_max_abs_diff": 0.877659797668457,
+    "wide_equals_base": true
+  },
+  "prompt_lengths": [
+    8,
+    16,
+    33
+  ]
+}
