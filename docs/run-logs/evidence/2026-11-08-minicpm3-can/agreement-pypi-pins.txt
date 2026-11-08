@@ -1,0 +1,1 @@
+chip-agree                   layer0 0.0077 layer30 0.0052 layer61 0.0556 (floor 0.0199) | prefill logits rel 0.0208 pcc 0.9992 | decode0 rel 0.0499 pcc 0.9978 | decode15 rel 0.0364 | flips 0/16

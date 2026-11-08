@@ -13,6 +13,7 @@ mesh = "P150"
 device_count = 1
 python = "3.12"
 port = 20130
+card_profile = "catalog-measured"      # the gate reads the card: Expected performance with a number, Limitations, and the warm or cold, run-count and host-load statements
 # Exact pins. ttnn 0.80.0 is the PyPI wheel; it needs numpy below 2. The CPU wheel of torch comes from the PyTorch index (the default PyPI
 # wheel pulls the CUDA libraries, several gigabytes the host does not use). transformers is here for the tokenizer and its chat template only;
 # torch is here for the one-time conversion of pytorch_model.bin and for the chip model's host-side tables.
@@ -71,6 +72,21 @@ dst = "LICENSE"
 [[bundle_file]]
 src = "pkgsrc/can/minicpm3-NOTICE"
 dst = "NOTICE"
+[[bundle_file]]
+src = "docs/run-logs/evidence/2026-11-08-minicpm3-can/bench-ctx2048.json"
+dst = "evidence/bench-ctx2048.json"
+[[bundle_file]]
+src = "docs/run-logs/evidence/2026-11-08-minicpm3-can/bench-ctx8704.json"
+dst = "evidence/bench-ctx8704.json"
+[[bundle_file]]
+src = "docs/run-logs/evidence/2026-11-08-minicpm3-can/agreement-pypi-pins.txt"
+dst = "evidence/agreement-pypi-pins.txt"
+[[bundle_file]]
+src = "docs/run-logs/evidence/2026-11-08-minicpm3-can/boot-check-cold.json"
+dst = "evidence/boot-check-cold.json"
+[[bundle_file]]
+src = "docs/run-logs/evidence/2026-11-08-minicpm3-can/bench.py"
+dst = "evidence/bench.py"
 
 # what the boot check asks of the served bundle
 [check]
