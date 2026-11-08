@@ -7,7 +7,7 @@ Decode: five different prompts, one discarded warm-up run per prompt and 3 measu
 server reports decode tokens per second in `timings`). Prefill: a prompt of about N tokens (counted with the model's tokenizer), one
 output token, 1 warm-up and 3 measured runs; the time is the whole request (the bundle feeds the prompt one token per decode step).
 The one-minute load average is recorded at the start and end of every run. Nothing is read from the environment but the arguments."""
-import argparse, json, os, statistics, sys, time, urllib.request
+import argparse, json, os, statistics, sys, time, urllib.parse, urllib.request
 
 PROMPTS = {
     "capital": "What is the capital of France? Answer in one word.",
@@ -20,6 +20,15 @@ PROMPTS = {
 }
 FILLER = ("The harbour town kept a ledger of every ship that passed the lamp, and each entry named the cargo, the weather and the hour. "
           "A clerk copied the entries into a second book each morning so that one copy would survive a fire. ")
+
+
+def is_loopback(url):
+    """True only for plain http to 127.0.0.1, localhost or ::1, judged by the parsed host name (a prefix test accepts http://127.0.0.1.example)."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1")
+    except ValueError:
+        return False
 
 
 def post(url, body, timeout):
@@ -55,7 +64,9 @@ def main():
     ap.add_argument("--decode-runs", type=int, default=3)
     ap.add_argument("--skip-decode", action="store_true")
     a = ap.parse_args()
-    res = {"url_is_loopback": a.url.startswith("http://127.0.0.1"), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "load_start": load1(), "decode": {}, "prefill": {}}
+    if not is_loopback(a.url):
+        ap.error("--url must be plain http to 127.0.0.1, localhost or ::1: the client measures a server on this host")
+    res = {"url_is_loopback": True, "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "load_start": load1(), "decode": {}, "prefill": {}}
     if not a.skip_decode:
         for name, text in PROMPTS.items():
             body = {"messages": [{"role": "user", "content": text}], "max_tokens": 64}
