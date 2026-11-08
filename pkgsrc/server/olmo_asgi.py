@@ -49,6 +49,12 @@ class RequestError(ValueError):
     pass
 
 
+# The fields the server honours. Any other field is refused with a 400 rather than ignored, because ignoring `n`, `tools`, `logprobs` or
+# `response_format` would answer a different question than the one asked.
+ALLOWED_FIELDS = {"prompt", "messages", "model", "max_tokens", "max_completion_tokens", "stream", "stream_options", "stop", "temperature", "top_p",
+                  "seed", "return_token_ids", "n"}
+
+
 def parse_request(body: bytes, chat: bool) -> dict:
     """The checked fields of a request body. Raises RequestError with a message for the client."""
     try:
@@ -57,6 +63,16 @@ def parse_request(body: bytes, chat: bool) -> dict:
         raise RequestError(f"the body is not JSON: {exc}") from None
     if not isinstance(obj, dict):
         raise RequestError("the body must be a JSON object")
+    unknown = sorted(k for k in obj if k not in ALLOWED_FIELDS)
+    if unknown:
+        raise RequestError(f"unsupported field(s): {', '.join(str(k) for k in unknown[:5])}")
+    if "n" in obj and (isinstance(obj["n"], bool) or obj["n"] != 1 or not isinstance(obj["n"], int)):
+        raise RequestError("n must be 1: the server returns one completion")
+    for flag in ("stream", "return_token_ids"):
+        if flag in obj and not isinstance(obj[flag], bool):
+            raise RequestError(f"{flag} must be true or false")
+    if "stream_options" in obj and not isinstance(obj["stream_options"], dict):
+        raise RequestError("stream_options must be an object")
     if chat:
         msgs = obj.get("messages")
         if not isinstance(msgs, list) or not msgs or not all(isinstance(m, dict) and isinstance(m.get("content"), str) for m in msgs):
@@ -72,18 +88,21 @@ def parse_request(body: bytes, chat: bool) -> dict:
     temp = obj.get("temperature", 0)
     top_p = obj.get("top_p", 1)
     seed = obj.get("seed")
-    stop = obj.get("stop") or []
-    stop = [stop] if isinstance(stop, str) else stop
+    stop = obj.get("stop")
+    if stop is None:
+        stop = []
+    elif isinstance(stop, str):
+        stop = [stop]
     if isinstance(temp, bool) or not isinstance(temp, (int, float)) or not 0 <= temp <= 5:
         raise RequestError("temperature must be a number from 0 to 5")
     if isinstance(top_p, bool) or not isinstance(top_p, (int, float)) or not 0 < top_p <= 1:
         raise RequestError("top_p must be a number above 0 and at most 1")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
         raise RequestError("seed must be a whole number")
-    if not isinstance(stop, list) or len(stop) > 4 or not all(isinstance(s, str) and s for s in stop):
-        raise RequestError("stop must be up to 4 non-empty strings")
+    if not isinstance(stop, list) or len(stop) > 4 or not all(isinstance(x, str) and x for x in stop):
+        raise RequestError("stop must be a string or up to 4 non-empty strings")
     return {"prompt": prompt, "max_tokens": mt, "temperature": float(temp), "top_p": float(top_p), "seed": seed, "stop": stop,
-            "stream": obj.get("stream") is True, "return_token_ids": obj.get("return_token_ids") is True}
+            "stream": obj.get("stream", False), "return_token_ids": obj.get("return_token_ids", False)}
 
 
 def _load_port():
@@ -160,6 +179,18 @@ def _pick(logits, temperature, top_p, gen):
     return int(torch.multinomial(p, 1, generator=gen))
 
 
+def _held_back(text: str, stops) -> int:
+    """How many characters at the end of `text` could be the start of a stop string (so they cannot be emitted yet). An unfinished multi-byte
+    character at the end also waits."""
+    hold = 1 if text.endswith("\ufffd") else 0
+    for x in stops:
+        for k in range(min(len(x) - 1, len(text)), hold, -1):
+            if text.endswith(x[:k]):
+                hold = max(hold, k)
+                break
+    return hold
+
+
 def generate(prompt_ids, r, timings, cancelled=None):
     """Yield (text piece, finish reason or None). Fills `timings`. Stops on an end token, a stop string, the token budget or the context limit."""
     import torch
@@ -172,6 +203,7 @@ def generate(prompt_ids, r, timings, cancelled=None):
     t1 = time.time()
     timings.update(prompt_tokens=len(prompt_ids), prefill_s=t1 - t0, completion_tokens=0)
     finish = "length"
+    full = ""
     for step in range(limit):
         if cancelled is not None and cancelled.is_set():
             return
@@ -182,18 +214,21 @@ def generate(prompt_ids, r, timings, cancelled=None):
         out.append(nxt)
         timings["completion_tokens"] = len(out)
         full = tok.decode(out)
-        if not full.endswith("\ufffd"):          # an unfinished multi-byte character waits for the next token
-            cut = min((full.find(s) for s in r["stop"] if s in full), default=-1)
-            if cut >= 0:
-                if cut > emitted:
-                    yield full[emitted:cut], None
-                finish = "stop"
-                break
-            if len(full) > emitted:
-                yield full[emitted:], None
-                emitted = len(full)
+        cut = min((full.find(x) for x in r["stop"] if x in full), default=-1)
+        if cut >= 0:
+            if cut > emitted:
+                yield full[emitted:cut], None
+            emitted = len(full)
+            finish = "stop"
+            break
+        safe = len(full) - _held_back(full, r["stop"])      # text that could still turn into a stop string waits for the next token
+        if safe > emitted:
+            yield full[emitted:safe], None
+            emitted = safe
         if step + 1 < limit:
             logits = port.decode_step(model, nxt, len(prompt_ids) + step)
+    if len(full) > emitted and not (finish == "stop" and any(x in full for x in r["stop"])):
+        yield full[emitted:], None                        # generation ended without completing a stop string: the held text is output
     t2 = time.time()
     n = timings["completion_tokens"]
     timings["decode_s"] = t2 - t1
@@ -237,10 +272,10 @@ def _round(timings):
     return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in timings.items()}
 
 
-def _complete(ids, r, cid, created, chat):
+def _complete(ids, r, cid, created, chat, cancelled=None):
     timings, pieces, finish = {}, [], "length"
     try:
-        for piece, fin in generate(ids, r, timings):
+        for piece, fin in generate(ids, r, timings, cancelled):
             pieces.append(piece)
             finish = fin or finish
     finally:
@@ -296,12 +331,35 @@ async def _complete_route(receive, send, chat):
         return await _reply(send, 503, {"error": {"message": "the server is busy with another request; retry shortly"}}, [("Retry-After", "5")])
     loop = asyncio.get_running_loop()
     if not r["stream"]:
+        cancelled, left = threading.Event(), []
+
+        async def watch():                      # an abandoned request must stop generating and free the single slot
+            while True:
+                if (await receive())["type"] == "http.disconnect":
+                    left.append(True)
+                    cancelled.set()
+                    return
+
+        watcher = asyncio.ensure_future(watch())
+        worker = loop.run_in_executor(None, _complete, ids, r, cid, created, chat, cancelled)
         try:
-            out = await loop.run_in_executor(None, _complete, ids, r, cid, created, chat)
+            out = await worker
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write(f"serve: generation failed: {type(exc).__name__}: {exc}\n")
+            if left:
+                return
             return await _reply(send, 500, {"error": {"message": f"generation failed: {type(exc).__name__}"}})
-        return await _reply(send, 200, out)
+        finally:
+            cancelled.set()
+            watcher.cancel()
+            if not worker.done():
+                await asyncio.wait([worker])    # the worker releases the slot in its own finally; wait for it
+        if left:
+            return                              # the client left: nothing to send
+        try:
+            return await _reply(send, 200, out)
+        except Exception:  # noqa: BLE001  the connection may already be closed
+            return
     queue, cancelled = asyncio.Queue(), threading.Event()
     put = lambda item: loop.call_soon_threadsafe(queue.put_nowait, item)  # noqa: E731
 

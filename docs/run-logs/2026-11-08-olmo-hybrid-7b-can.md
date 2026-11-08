@@ -46,3 +46,13 @@ and one chat request answered), then the repository was made public and `tt-mode
 - The first two attempts to start the server on the 1x4 mesh failed (a Fabric Router Sync timeout once; a failed systemd unit name left over the second time). The pipeline now resets the lease's chips before the first start and retries once after a reset.
 - A health check of `tt-model serve` waited on the bundle's own port (20120) while `tt-model serve` listens on 20000, so one run held a four-chip lease for 90 minutes before it was stopped. The check now uses 20000.
 - The boot check's decode floor and the card were changed several times as numbers came in; the card's headline is now the served rate with its spread.
+
+## Republish after the review of PR 633 (2026-11-08)
+
+Copilot found four problems in the published adapter and card; each was fixed test-first (`tests/test_olmo_asgi.py`, a mutation per guard went red):
+the request parser now refuses fields it cannot honour (`n` other than 1, `tools`, `logprobs`, `response_format`, wrong types for `stream` and `stop`, unknown fields) with a 400;
+text that could be the start of a stop string waits for the next token and is flushed if the string never completes; a non-streaming request watches for a disconnect and frees the single slot;
+and the card writes the near-tie explanation only when the records back it (same two tokens in the same order, and the reference's generation took the second one), otherwise it says the difference is not explained.
+The changed files were uploaded to `episod/olmo-hybrid-7b-blackhole`, `tt-model publish` was run again, and the catalog tag was checked.
+`tt-model publish` edits the card on the Hub (it adds the tag), so the README there no longer matches the hash the staged `SHA256SUMS` holds. `SHA256SUMS` was therefore regenerated from the files as published and uploaded last; a fresh download verifies against it (10 of 10).
+The re-check on hardware was not made: a four-chip mesh was not free (another bring-up held two chips). The adapter changes are in the request and generation layers, covered by the fakes; a boot check on four chips is still owed.

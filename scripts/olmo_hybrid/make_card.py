@@ -57,16 +57,22 @@ def main():
         near = r["near_tie"]
         rep = r.get("served_repeats") or {}
         gen = r.get("reference_generate_choice") or {}
+        # The explanation below is written only when the records back every part of it: the port ranks the same two tokens in the same order as
+        # the reference's full forward, the reference's own generation took the second of them, and the gap is within a bf16 tie.
+        same_order = c1["id"] == r1["id"] and c2["id"] == r2["id"]
+        reversal = gen.get("id") == r2["id"] and bool(r.get("reference_generate_choice_differs_from_its_full_forward_top1"))
+        explained = bool(near and same_order and reversal)
         diag_text += (f"\nAt the first difference (`{r['prompt']}`, token index {r['first_difference_at_token_index']}) the reference's full-forward logits, "
                       f"teacher-forced on its own continuation, rank {r1['text']!r} (logit {r1['logit']}) above {r2['text']!r} (logit {r2['logit']}) by {r['reference_gap']}. "
-                      f"Given the same prefix, the port ranks the same two tokens the same way: {c1['text']!r} (logit {c1['logit']}) above {c2['text']!r} (logit {c2['logit']}), "
-                      f"a gap of {r['chip_gap']}. "
-                      + (f"The reference's own greedy generation (incremental decoding) chose {gen['text']!r} (token id {gen['id']}) at this position, so the reference "
-                         "itself is not consistent here between its full-forward and incremental paths. " if r.get("reference_generate_choice_differs_from_its_full_forward_top1") else "")
+                      f"Given the same prefix, the port's top two are {c1['text']!r} (logit {c1['logit']}) and {c2['text']!r} (logit {c2['logit']}), a gap of {r['chip_gap']}. "
+                      + (f"The reference's own greedy generation chose {gen['text']!r} (token id {gen['id']}) at this position. " if gen.get("id") is not None else "")
                       + (f"The served port gave the same token at this index on all {rep['runs']} repeats of the prompt. " if rep.get("all_identical") else "")
-                      + (f"A gap of {r['reference_gap']} is one step of a bf16 value near 10 (0.0625) and is within the {d['near_tie_logits']} that neighbouring bf16 values can produce, so this difference is a bf16 near tie: the port and the reference's full forward agree on the order, and the reference's generation took the other side of the tie."
-                         if near else
-                         f"A gap of {r['reference_gap']} is larger than the {d['near_tie_logits']} that two neighbouring bf16 values can produce, so this difference is not a near tie and is not explained.") + "\n")
+                      + ((f"A gap of {r['reference_gap']} is one step of a bf16 value near 10 (0.0625) and is within the {d['near_tie_logits']} that neighbouring bf16 values can produce. "
+                          "The port ranks the same two tokens in the same order as the reference's full forward, and the reference's own generation took the other side of the tie "
+                          "(it is not consistent with its own full forward here), so this difference is a bf16 near tie.")
+                         if explained else
+                         "These records do not support a simple explanation (the port's and the reference's rankings, or the reference's generation choice, do not fit a near tie), "
+                         "so this difference is not explained.") + "\n")
     boots = [float(x) for x in a.boot_rates.split(",") if x.strip()]
     extra = []
     if a.cold:
