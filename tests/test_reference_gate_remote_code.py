@@ -221,3 +221,36 @@ def test_the_audit_is_written_before_the_trusted_retry_runs(tmp_path):
     import json
     audit = json.loads((tmp_path / "evidence" / "remote-code-audit.json").read_text())
     assert "modeling_spark.py" in audit["files"] and "scrubbed" in audit
+
+
+def test_a_hub_cache_snapshot_file_that_links_into_its_own_blobs_directory_is_hashed(tmp_path):
+    """Found on the Spark run 2 (2026-11-08): every file in a Hugging Face cache snapshot is a link to ../../blobs/<hash>, and the first
+    version of the hash read refused all links, so the audit listed every file as unreadable. A link whose target stays inside the model's
+    cache directory (the parent of snapshots/ and blobs/) is followed; a link that leaves it is still refused."""
+    import hashlib
+    model_dir = tmp_path / "models--org--name"
+    blobs = model_dir / "blobs"
+    snap = model_dir / "snapshots" / ("a" * 40)
+    blobs.mkdir(parents=True)
+    snap.mkdir(parents=True)
+    (blobs / "abc123").write_bytes(b"class Spark: pass\n")
+    os.symlink("../../blobs/abc123", snap / "modeling_spark.py")
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_text("not in the cache")
+    os.symlink(outside, snap / "escape.py")
+    rg.allow_remote_code(snap, scratch_home=tmp_path / "home")
+    files = rg.REMOTE_CODE["files"]
+    assert files["modeling_spark.py"] == hashlib.sha256(b"class Spark: pass\n").hexdigest()
+    assert files["escape.py"] == "unreadable"
+
+
+def test_a_directory_that_is_not_a_cache_snapshot_follows_no_links_at_all(tmp_path):
+    """Review of PR 608: for a plain checkout the cache root fell back to the snapshot itself, so a .py link to another file inside the
+    checkout was followed. A directory that is not <model dir>/snapshots/<sha> follows no link."""
+    snap = tmp_path / "checkout"
+    snap.mkdir()
+    (snap / "real.py").write_text("x = 1\n")
+    os.symlink(snap / "real.py", snap / "alias.py")
+    rg.allow_remote_code(snap, scratch_home=tmp_path / "home")
+    files = rg.REMOTE_CODE["files"]
+    assert len(files["real.py"]) == 64 and files["alias.py"] == "unreadable"

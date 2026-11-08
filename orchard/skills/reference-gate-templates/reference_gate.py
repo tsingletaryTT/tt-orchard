@@ -82,9 +82,17 @@ HOME_SCRATCH = HERE_DIR / "remote_code_home"
 CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|PASSWORD|API_?KEY|CREDENTIAL|PASSPHRASE", re.IGNORECASE)
 
 
-def bounded_sha256(path: Path, limit: int = 16 * 1024 * 1024) -> str:
-    """sha256 of a regular file, read without following a link or blocking on a FIFO and stopped at `limit` bytes. The snapshot is a third
-    party's repository, so a link or a pipe named *.py must not hang or redirect the read. Anything else gives a word, not a hash."""
+def bounded_sha256(path: Path, limit: int = 16 * 1024 * 1024, root: Path | None = None) -> str:
+    """sha256 of a regular file, read without blocking on a FIFO and stopped at `limit` bytes. The snapshot is a third party's repository, so
+    a link named *.py must not redirect the read: a link is followed only when its target is inside `root` (the model's cache directory,
+    where a Hugging Face snapshot keeps its links to blobs/), and the target is then opened without following another link. Anything else
+    gives a word, not a hash."""
+    if root is not None and os.path.islink(path):
+        target = os.path.realpath(path)
+        base = os.path.realpath(root)
+        if target != base and not target.startswith(base + os.sep):
+            return "unreadable"
+        path = target
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # hardening: ok flags refuse links and do not block on a FIFO
     except OSError:
@@ -119,8 +127,11 @@ def allow_remote_code(snapshot: Path, scratch_home: Path | None = None) -> None:
     home.mkdir(parents=True, exist_ok=True)
     os.environ["HOME"] = str(home)
     files = {}
-    for f in sorted(Path(snapshot).rglob("*.py")):
-        files[str(f.relative_to(snapshot))] = bounded_sha256(f)
+    snapshot = Path(snapshot)
+    # A Hugging Face snapshot (<model dir>/snapshots/<sha>) links its files into <model dir>/blobs; any other directory may link nowhere.
+    cache_root = snapshot.parent.parent if snapshot.parent.name == "snapshots" else None     # None: follow no link at all
+    for f in sorted(snapshot.rglob("*.py")):
+        files[str(f.relative_to(snapshot))] = bounded_sha256(f, root=cache_root)
     REMOTE_CODE.update({"used": True, "files": files, "scrubbed": sorted(set(REMOTE_CODE["scrubbed"]) | set(scrubbed))})
     # huggingface_hub and transformers 4.x read the offline variables when they are imported, which was before this call: set their own flags too.
     hub = sys.modules.get("huggingface_hub.constants")
