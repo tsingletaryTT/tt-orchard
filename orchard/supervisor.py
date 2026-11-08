@@ -3146,8 +3146,7 @@ class Supervisor:
         try:
             expected, base_id = self._audio_expected(model_id, base_id)
             if n == 1:
-                if not (resumed and (stage_dir / audio_runtime.REFERENCE_FILE).is_file()):
-                    self._audio_stage_1(stage_dir, paths, model_id, base_id, expected)
+                self._audio_stage_1_or_resume(stage_dir, paths, model_id, base_id, expected, resumed=resumed)
             else:
                 if not (resumed and (stage_dir / "test-result.json").is_file()):
                     plan = audio_plan.chip_plan(model_id, base_id)
@@ -3181,9 +3180,54 @@ class Supervisor:
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
+    def _audio_stage_1_or_resume(self, stage_dir: Path, paths, model_id, base_id, expected: dict, *, resumed: bool) -> None:
+        """Make the stage 1 references, unless this is a resume that finds a record it can keep. A record whose runs did not record the pinned text
+        encoder (made before the pin, issue 162) is regenerated, and the ledger says so (issue 556); every other problem with an existing record is the
+        stage gate's to report, so the evidence is not thrown away for it."""
+        if resumed and (stage_dir / audio_runtime.REFERENCE_FILE).is_file():
+            if not self._audio_reference_pin_stale(stage_dir, paths):
+                return
+            self.ledger.append("decision", 1, decision="audio reference regenerated",
+                               reason="the stage 1 record has a run that did not record the pinned text encoder (issue 162), so it is made again")
+        self._audio_stage_1(stage_dir, paths, model_id, base_id, expected)
+
+    def _audio_reference_pin_stale(self, stage_dir: Path, paths) -> bool:
+        """True when the stage 1 gate, run now over the existing record, reports a run without the pinned encoder. Any other answer, or no answer at
+        all, is False: the record stays and the stage gate decides."""
+        from orchard import audio_encoder_pin, audio_remote
+        from orchard.audio_plan import AudioStageError
+        try:
+            problems = audio_remote.call(paths.reference_python, "gate_reference", {"stage_dir": str(stage_dir), "run_dir": str(self.run_dir)},
+                                         timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+        except AudioStageError:
+            return False
+        # Only a pure pin answer counts: a nonempty list of strings that are all about the pin. A pin problem next to another one (a manifest
+        # hash that is not the recorded one, a changed array) is a record the stage gate has to reject, and it is not replaced (review of PR 615).
+        return (isinstance(problems, list) and bool(problems)
+                and all(isinstance(p, str) and audio_encoder_pin.UNPINNED_PROBLEM in p for p in problems))
+
+    def _audio_set_aside_stage_1(self, stage_dir: Path, plan: list) -> None:
+        """Move what an earlier attempt left in the stage directory (the run directories the plan writes and `audio_reference.json`) into a new
+        `superseded-stage-1-<k>` directory beside them, so the references are made into fresh directories: the reference script refuses a run
+        directory that exists. Nothing is deleted. The ledger says what is about to move before it moves, so a crash at any point leaves the old
+        evidence either in place or in the aside directory, and the next attempt finds what is left and moves that too (review of PR 615)."""
+        names = sorted({item["dir"].split("/")[0] for item in plan} | {"acestep-root"})
+        present = [n for n in names + [audio_runtime.REFERENCE_FILE] if os.path.lexists(stage_dir / n)]
+        if not present:
+            return
+        k = 1
+        while os.path.lexists(stage_dir / f"superseded-stage-1-{k}"):
+            k += 1
+        aside = stage_dir / f"superseded-stage-1-{k}"
+        self.ledger.append("decision", 1, decision="audio reference set aside", aside=aside.name, moving=present)
+        aside.mkdir()
+        for n in present:
+            os.rename(stage_dir / n, aside / n)
+
     def _audio_stage_1(self, stage_dir: Path, paths, model_id, base_id, expected: dict) -> None:
         from orchard import audio_plan, audio_remote
         plan = audio_plan.reference_plan(model_id, base_id)
+        self._audio_set_aside_stage_1(stage_dir, plan)
         cache = Path(self.paths.cache_root) / "audio-reference"
         result = audio_remote.call(paths.reference_python, "references", {
             "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "paths": paths.record(), "plan": plan, "expected": expected,

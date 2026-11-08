@@ -28,6 +28,10 @@ ENCODER_KEYS = (DTYPE_KEY, ATTN_KEY)
 PINNED = {DTYPE_KEY: ENCODER_DTYPE, ATTN_KEY: ENCODER_ATTN}
 # One line that says where a quoted number was measured. Anything that prints a number from a run made with the pin carries it.
 LABEL = f"text encoder: {ENCODER_DTYPE}, {ENCODER_ATTN} attention (issue 162)"
+# The words a gate puts in the problem for a run that did not record the pin. The supervisor reads them (and nothing else) to decide that a stage 1
+# record made before the pin is regenerated on a resume (issue 556).
+UNPINNED_PROBLEM = "did not record the pinned text encoder"
+_ABSENT = object()                       # a settings key that is not there, which is not the same as one recorded as null (issue 557)
 
 
 class EncoderPinError(Exception):
@@ -79,11 +83,28 @@ def apply(model) -> dict:
     return require(model)
 
 
+def _attention(encoder):
+    """The attention implementation of the encoder: the one value every config in it has, "mixed" when two configs differ, None when none has the
+    setting. Every submodule config is read, not only the top-level one: a child config that refused the switch must not be recorded as `eager`
+    (issue 555). A config with no such setting cannot run attention and is not a difference."""
+    values, seen = [], set()
+    for module in encoder.modules():
+        cfg = getattr(module, "config", None)
+        if cfg is None or id(cfg) in seen:
+            continue
+        seen.add(id(cfg))
+        if hasattr(cfg, "_attn_implementation"):
+            value = getattr(cfg, "_attn_implementation")
+            if value not in values:
+                values.append(value)
+    return values[0] if len(values) == 1 else "mixed" if values else None
+
+
 def _read(encoder) -> tuple:
     params = list(encoder.parameters())
     dtypes = {str(p.dtype).removeprefix("torch.") for p in params}
     dtype = dtypes.pop() if len(dtypes) == 1 else "mixed" if dtypes else None
-    return dtype, getattr(getattr(encoder, "config", None), "_attn_implementation", None)
+    return dtype, _attention(encoder)
 
 
 def observed(model) -> dict:
@@ -122,8 +143,14 @@ def state(settings) -> str:
 
 
 def settings_problems(a, b) -> list[str]:
-    """One problem for each encoder setting that differs between two runs' settings (a missing field differs from a recorded one). Two runs that
+    """One problem for each encoder setting that differs between two runs' settings (a missing field differs from a recorded one, and from a recorded null). Two runs that
     both predate the pin have no fields and no problem; `state` says they are unrecorded."""
     a = a if isinstance(a, dict) else {}
     b = b if isinstance(b, dict) else {}
-    return [f"settings.{k} differs: {a.get(k)!r} and {b.get(k)!r} (the text encoder ran differently; issue 162)" for k in ENCODER_KEYS if a.get(k) != b.get(k)]
+    out = []
+    for k in ENCODER_KEYS:
+        x, y = a.get(k, _ABSENT), b.get(k, _ABSENT)       # key presence counts: a missing field is not a recorded null (issue 557)
+        if x is not y and x != y:
+            show = lambda v: "absent" if v is _ABSENT else repr(v)  # noqa: E731
+            out.append(f"settings.{k} differs: {show(x)} and {show(y)} (the text encoder ran differently; issue 162)")
+    return out
