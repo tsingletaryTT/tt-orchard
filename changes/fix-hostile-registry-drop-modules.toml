@@ -1,0 +1,3 @@
+target = "0.9.145"
+summary = "tests/hostile_inputs.py lists drop_check.py and drop_watch.py as unregistered JSON readers, so test_the_registry_covers_these_modules_and_the_rest_are_listed passes on main again."
+kind = "fix"
