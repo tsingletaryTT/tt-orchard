@@ -99,7 +99,7 @@ class Config:
     dir: Path | None = None                             # where the ledger, cache and reply files live (None: the default)
     connect_timeout_s: int = 10                         # the TCP connect gets this long, apart from timeout_s (the wait for the reply); issue 650
     unreachable_after: int = 2                          # this many connection failures in a row open the breaker: the run stops asking
-    unreachable_action: str = "block"                   # when the breaker opens in an unattended run: "block" (code helper-unreachable) or "continue"
+    unreachable_action: str = "continue"                # when the breaker opens: "continue" (the default: go on without help, keep probing) or "block" (an unattended run stops, code helper-unreachable)
     required: bool = False                              # the preflight row blocks (not warns) when the endpoint cannot be reached
     unreachable_probe_s: int = 300                      # an open breaker lets one ask through after this long, to see whether the endpoint is back
 
@@ -296,7 +296,7 @@ def load(table: dict | None, *, base: Path) -> Config:
         directory = _dir(directory, base) if directory else None
     except (RuntimeError, ValueError) as exc:                    # "~user" with no such user, or a NUL character
         raise ConfigError(f"telegraph.dir cannot be used ({_shown(table.get('dir'))}): {exc}") from exc
-    action = table.get("unreachable_action", "block")
+    action = table.get("unreachable_action", "continue")
     if action not in UNREACHABLE_ACTIONS:
         raise ConfigError(f"telegraph.unreachable_action must be one of {', '.join(UNREACHABLE_ACTIONS)}")
     required = table.get("required", False)

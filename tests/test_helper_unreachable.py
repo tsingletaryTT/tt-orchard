@@ -43,7 +43,7 @@ class Clock:
 
 def test_the_new_keys_have_defaults_and_are_checked(tmp_path):
     cfg = tg.load(table(), base=tmp_path)
-    assert (cfg.connect_timeout_s, cfg.unreachable_after, cfg.unreachable_action, cfg.required, cfg.unreachable_probe_s) == (10, 2, "block", False, 300)
+    assert (cfg.connect_timeout_s, cfg.unreachable_after, cfg.unreachable_action, cfg.required, cfg.unreachable_probe_s) == (10, 2, "continue", False, 300)
     cfg = tg.load(table(connect_timeout_s=3, unreachable_after=1, unreachable_action="continue", required=True, unreachable_probe_s=60), base=tmp_path)
     assert (cfg.connect_timeout_s, cfg.unreachable_after, cfg.unreachable_action, cfg.required, cfg.unreachable_probe_s) == (3, 1, "continue", True, 60)
     for bad in ({"connect_timeout_s": 0}, {"connect_timeout_s": "10"}, {"unreachable_after": 0}, {"unreachable_after": True},
@@ -309,7 +309,7 @@ def trip(tmp_path, **kw):
 
 
 def test_an_unattended_run_blocks_with_the_helper_unreachable_code_once_the_breaker_opens(tmp_path):
-    tel, answer = trip(tmp_path)
+    tel, answer = trip(tmp_path, unreachable_action="block")
     ns = supervisor_stub(tel)
     with pytest.raises(handoff.Blocked) as err:
         sup.Supervisor._helper_unreachable(ns, 2, answer)
@@ -383,7 +383,7 @@ def gate_rig(tmp_path, up, **kw):
 
 
 def test_the_gate_probes_once_and_blocks_a_restart_while_the_endpoint_is_still_down(tmp_path):
-    tel, ns, prober = gate_rig(tmp_path, up=False)
+    tel, ns, prober = gate_rig(tmp_path, up=False, unreachable_action="block")
     open_outage(ns)
     with pytest.raises(handoff.Blocked) as err:
         sup.Supervisor._helper_gate(ns, 2, round=3)
@@ -396,7 +396,7 @@ def test_the_gate_probes_once_and_blocks_a_restart_while_the_endpoint_is_still_d
 
 
 def test_the_gate_at_an_attempt_start_blocks_without_withdrawing_a_round(tmp_path):
-    tel, ns, prober = gate_rig(tmp_path, up=False)
+    tel, ns, prober = gate_rig(tmp_path, up=False, unreachable_action="block")
     open_outage(ns)
     with pytest.raises(handoff.Blocked):
         sup.Supervisor._helper_gate(ns, 2)
@@ -418,8 +418,16 @@ def test_the_gate_does_nothing_when_the_ledger_holds_no_outage(tmp_path):
     assert prober.calls == 0 and ns.ledger.rows == []
 
 
-def test_an_attended_or_continue_run_probes_and_holds_the_breaker_but_does_not_block(tmp_path):
-    tel, ns, prober = gate_rig(tmp_path, up=False)
+def test_with_the_default_action_the_gate_probes_and_holds_the_breaker_open_and_never_blocks(tmp_path):
+    tel, ns, prober = gate_rig(tmp_path, up=False)                           # unattended, the default action
+    open_outage(ns)
+    sup.Supervisor._helper_gate(ns, 2, round=1)                              # no Blocked raised
+    assert prober.calls == 1 and tel.tripped
+    assert not [r for r in ns.ledger.rows if r[2].get("decision") == port_repair.WITHDRAWN]
+
+
+def test_an_attended_run_set_to_block_probes_and_holds_the_breaker_but_does_not_block(tmp_path):
+    tel, ns, prober = gate_rig(tmp_path, up=False, unreachable_action="block")
     ns.unattended = False
     open_outage(ns)
     sup.Supervisor._helper_gate(ns, 2, round=1)

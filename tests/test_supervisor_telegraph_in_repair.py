@@ -385,7 +385,7 @@ def _down_helper(monkeypatch, tmp_path, **kw):
 
 def test_an_unattended_run_whose_helper_cannot_be_reached_ends_blocked_with_the_helper_unreachable_code(rig, monkeypatch, tmp_path):
     rig.args.unattended = True
-    tel, down = _down_helper(monkeypatch, tmp_path)
+    tel, down = _down_helper(monkeypatch, tmp_path, unreachable_action="block")
     make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
     repairs(rig, [{PORT: BROKEN}])
     assert rig.run() == sv.EXIT_BLOCKED
@@ -397,14 +397,28 @@ def test_an_unattended_run_whose_helper_cannot_be_reached_ends_blocked_with_the_
     assert rig.ends(2) == [] and len(decs(rig, rh.ASKED)) == 1
 
 
-def test_with_the_action_set_to_continue_the_run_goes_on_without_the_helper_and_asks_no_more(rig, monkeypatch, tmp_path):
+def test_by_default_an_unattended_run_goes_on_without_the_helper_and_asks_no_more(rig, monkeypatch, tmp_path):
     rig.args.unattended = True
-    tel, down = _down_helper(monkeypatch, tmp_path, unreachable_action="continue")
+    tel, down = _down_helper(monkeypatch, tmp_path)
     make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
     repairs(rig, [{PORT: BROKEN}])
     rig.run()
     assert not [d for d in rig.decisions() if d.get("decision") == "blocked" and d.get("code") == "helper-unreachable"]
     assert len(decs(rig, "helper unreachable, not asking")) == 1 and down.calls == 1      # the breaker kept every later ask off the wire
+    assert "helper-unreachable" not in _block_codes(rig)                                  # a helper that is down never stops the run (operator, 2026-11-09)
+
+
+def test_a_restart_in_an_outage_with_the_default_action_probes_first_then_goes_on_without_spending_the_call_caps(rig, monkeypatch, tmp_path):
+    rig.args.unattended = True
+    state = {"up": False}
+    _fresh_helper(monkeypatch, tmp_path, state)                              # the default action: continue
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    rig.run(pid=100)
+    assert state["calls"] == 1 and len(decs(rig, "helper unreachable, not asking")) == 1
+    rig.run(pid=101)
+    assert "helper-unreachable" not in _block_codes(rig)
+    assert state["calls"] == 1 and state["probes"] >= 1                      # the restart probed, and no request went out while it was down
 
 
 def _fresh_helper(monkeypatch, tmp_path, state, **kw):
@@ -442,7 +456,7 @@ def test_a_restart_in_the_middle_of_an_outage_probes_first_blocks_again_without_
     """Review of PR 651: the breaker is new in a new process, so a restart must not forget the outage and spend its caps without help."""
     rig.args.unattended = True
     state = {"up": False}
-    _fresh_helper(monkeypatch, tmp_path, state)
+    _fresh_helper(monkeypatch, tmp_path, state, unreachable_action="block")
     make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
     repairs(rig, [{PORT: BROKEN}])
     assert rig.run(pid=100) == sv.EXIT_BLOCKED
@@ -465,7 +479,7 @@ def test_a_round_interrupted_by_the_outage_is_taken_again_after_the_restart_and_
     rig.args.unattended = True
     rig.args.port_repair_rounds = 1                                         # the only round: skipping it would end the repair rounds as spent
     state = {"up": False}
-    _fresh_helper(monkeypatch, tmp_path, state)
+    _fresh_helper(monkeypatch, tmp_path, state, unreachable_action="block")
     make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
     repairs(rig, [{PORT: BROKEN}])
     assert rig.run(pid=100) == sv.EXIT_BLOCKED
@@ -486,7 +500,7 @@ def test_the_retaken_round_asks_the_helper_again_and_a_restart_in_a_continuing_o
     rig.args.unattended = True
     rig.args.port_repair_rounds = 1
     state = {"up": False}
-    _fresh_helper(monkeypatch, tmp_path, state)
+    _fresh_helper(monkeypatch, tmp_path, state, unreachable_action="block")
     make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
     repairs(rig, [{PORT: BROKEN}])
     assert rig.run(pid=100) == sv.EXIT_BLOCKED

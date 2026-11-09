@@ -266,7 +266,7 @@ def test_an_unattended_run_whose_helper_cannot_be_reached_at_an_attempt_start_en
             Down.calls += 1
             raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
 
-    wire_helper(rig, monkeypatch, tmp_path, wire=Down(), after_failures=1, unreachable_after=1)
+    wire_helper(rig, monkeypatch, tmp_path, wire=Down(), after_failures=1, unreachable_after=1, unreachable_action="block")
     coder(rig)
     rig.run()
     block = [d for d in rig.decisions() if d.get("decision") == "blocked"]

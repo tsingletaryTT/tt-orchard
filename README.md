@@ -2531,7 +2531,7 @@ max_calls_per_problem = 3                    # one problem (the id passed to ask
 # prices = { "cheap-model" = [0.25, 1.25], "strong-model" = [5.0, 25.0] }   # dollars per million tokens, input and output
 connect_timeout_s = 10                       # the TCP connect gets this long, apart from timeout_s (the wait for the reply)
 unreachable_after = 2                        # this many connection failures in a row stop the run from asking (the breaker opens)
-unreachable_action = "block"                 # an unattended run then blocks with the code helper-unreachable; "continue" goes on without help
+unreachable_action = "continue"              # the run goes on without help and keeps probing; "block" stops an unattended run (code helper-unreachable)
 unreachable_probe_s = 300                    # an open breaker lets one ask through after this long, to see whether the endpoint is back
 required = false                             # true: the preflight row blocks the start when the endpoint cannot be reached (false: it warns)
 ```
@@ -2548,18 +2548,19 @@ minutes for the TCP connect to give up, the run kept asking, and hardware time w
 endpoint (or to the proxy, when one is configured) gets `connect_timeout_s` (10 s), and the reply gets `timeout_s` once the connection is made.
 Only a failure to connect is an `Unreachable` answer, and only that one is recorded as costing nothing. A timeout after the request began to
 go out keeps its cost unknown, because the provider may have billed it. After `unreachable_after` connect failures in a row the breaker opens:
-the run makes no more requests, writes one ledger decision (`helper unreachable, not asking`) and one notice, and an unattended run whose
-`unreachable_action` is `block` stops with the block code `helper-unreachable`. `bringup --auto-retries` retries that code like the other
-recoverable ones. An attended run gets the notice and goes on. An open breaker lets one ask through every `unreachable_probe_s` seconds, and a
-reply closes it.
+the run makes no more requests and writes one ledger decision (`helper unreachable, not asking`) and one notice. By default
+(`unreachable_action = "continue"`) the run then goes on without help. A helper that is down never stops a run. The run keeps probing: an open
+breaker lets one ask through every `unreachable_probe_s` seconds, and a reply closes it, so help resumes by itself when the endpoint returns.
+Setting `unreachable_action = "block"` is an opt-in: an unattended run then stops with the block code `helper-unreachable`, which
+`bringup --auto-retries` retries like the other recoverable ones. An attended run always gets the notice and goes on.
 
 A restart does not forget the outage. The ledger holds it until a `helper reachable again` decision follows, so the first helper ask of a new
 process probes the models route first (status line only, no key, the short timeout). While the probe fails, the new process opens its breaker
-without spending an ask or a call cap and blocks again with the same code. When the block came at the start of a repair round, the round is
-written as withdrawn (`port repair round interrupted`): the resume takes that round again and asks in it, and the failed ask does not count
+without spending a call cap and goes on without help (with `block`, it stops again with the same code). With `block`, when the stop came at
+the start of a repair round, the round is written as withdrawn (`port repair round interrupted`): the resume takes that round again and asks in it, and the failed ask does not count
 against the stage's asks.
 
-A preflight row (`helper`) makes the same status-line probe and says whether the endpoint answers; with `required = true` it blocks the start.
+A preflight row (`helper`) makes the same status-line probe and says whether the endpoint answers. It only warns unless `required = true`, which blocks the start.
 A server that answers its status line and then stalls does not fail the row. Error text never holds the key or a header.
 
 Every call, refusal and cache hit is one record in the ledger (model, tokens, seconds, cost when a price is known, outcome). The ledger

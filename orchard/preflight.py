@@ -519,7 +519,7 @@ def check_helper(problem: str | None, endpoint: str, required: bool) -> Check:
         return Check("helper", BLOCK, f"the helper endpoint {endpoint} cannot be reached: {problem}. The config says the helper is required; "
                      "restore the route to it (a VPN or the office network) and start again", "helper-unreachable")
     return Check("helper", WARN, f"the helper endpoint {endpoint} cannot be reached: {problem}. The run can start and goes on without help "
-                 "from it; an unattended run blocks with the code helper-unreachable once its asks keep failing")
+                 "from it, and probes again later so help resumes when the route is back")
 
 
 def helper_problem(endpoint: str, api: str, connect_timeout: float) -> str | None:
