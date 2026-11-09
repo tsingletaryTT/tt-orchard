@@ -1,0 +1,3 @@
+target = "0.9.147"
+summary = "Stage 2 arm F: the device-ops message and the cheat sheet put the projection call first, the supervisor runs the static device-ops check before it leases a board or parks the coder, and a gate-check stage tool runs it for the coder."
+kind = "feature"

@@ -144,8 +144,11 @@
       <p class="callout callout-warn" id="settings-running" hidden></p>
       <section aria-labelledby="updates-h" class="tg-block" id="updates-block">
         <h2 id="updates-h">Updates <span class="muted small" id="updates-age"></span></h2>
-        <p class="muted small">The rows of <code>tt-orchard updates</code>, read from its cache file. This page only reads: it makes no request and
-          runs nothing. To check again, run <code id="updates-cmd">tt-orchard updates --refresh</code> in a terminal and reload.</p>
+        <p class="muted small">The rows of <code>tt-orchard updates</code>, read from its cache file. Showing the rows reads the file and runs nothing.
+          To check again, press the button, or run <code id="updates-cmd">tt-orchard updates --refresh</code> in a terminal and reload.
+          <button type="button" class="btn btn-small" id="updates-refresh" hidden
+            title="Runs 'tt-orchard updates --refresh' on this machine. It makes network requests to public repositories on GitHub and to the Hugging Face Hub, and writes the cache file this table reads. One run at a time, at most one a minute.">Check now</button>
+          <span class="muted small" id="updates-refresh-status" role="status"></span></p>
         <p class="tg-banner" id="updates-note" data-tone="warn" role="status" hidden></p>
         <div class="table-wrap">
           <table class="tg-table" id="updates-table" hidden>

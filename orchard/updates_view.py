@@ -18,7 +18,7 @@ from orchard import skillsfresh, updates
 
 MAX_ROWS = 40
 MAX_LINES = 8
-RUN_COMMAND = "tt-orchard updates --refresh"          # shown as text: the page never runs it
+RUN_COMMAND = "tt-orchard updates --refresh"          # shown as text; the page's button runs it through orchard/updates_refresh.py, this module never does
 STATUS_TONE = {updates.CURRENT: "good", updates.BEHIND: "warn", updates.CANDIDATE: "warn", updates.UNKNOWN: "dim"}
 
 

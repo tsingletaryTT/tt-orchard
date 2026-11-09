@@ -604,6 +604,7 @@ def tools_text(stage: int = 2, *, facts: bool = True, cheat: bool = True) -> str
     lines = [
         "Fixed tools. Run them from the run directory in place of `cat`, `head`, `grep` or `python3 -c` on those files. Each prints a short report.",
         f"- `{base} last-check`: which check failed, where and the numbers, then a `next:` line with the one command to run. It shows the check from before this step.",
+        f"- `{base} gate-check`: the board check's device-ops test on your port, run now in seconds with no board. Run it before you reply: a port that makes no ttnn.linear or ttnn.matmul call fails the board check, which comes after a park and a reset.",
         f"- `{base} layer-diff`: no arguments; after a numerics failure (agreement below {full_port.TOP1_MIN}), the first layer that differs from the CPU reference. Needs the optional hook below.",
         f"- `{base} facts KEY`: one value of {FACTS_NAME} by dotted path, for example `facts config.hc_count`; `facts --find TEXT` searches keys and text.",
         f"- `{base} show FILE --lines A:B`: a range of a file in the run directory, with line numbers.",

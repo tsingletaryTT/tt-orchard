@@ -11,8 +11,9 @@ tt-orchard drop-watch init --watch-dir ~/orchard-runs/qwen4-watch --target Qwen/
   --run-dir ~/orchard-runs/qwen--qwen4-27b
 ```
 
-Add `--capabilities <path>/orchard-capabilities.json` once the Qwen4 package passes milestone M5. Until then every Qwen4 release
-is "not covered" and takes the full-port fallback. Add `--bringup-arg --accept-credentials-visible` only if you accept that the
+Add `--bundle-dir <tt-model models directory>/mando2222/qwen4-27b-dense-v6-thin` once the Qwen4 package passes milestone M5: the
+watcher then reads the package's `orchard-capabilities.json` and the config of its own weights, as stage 0 does. Until then
+every Qwen4 release is "not covered" and takes the full-port fallback. Add `--bringup-arg --accept-credentials-visible` only if you accept that the
 agents can see this home directory's credential files (README section 5.6); without it the run blocks at the preflight and the
 watcher reports that.
 

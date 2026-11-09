@@ -230,6 +230,47 @@ def test_a_corrupt_state_file_starts_nothing(tmp_path):
     assert res["state"] == "needs-operator" and w.launched == []
 
 
+class OversizeRecordHub(FakeHub):
+    def info(self, repo, revision=None):
+        raise dc.TooLarge("the Hub record is larger than 8388608 bytes")
+
+
+def test_an_unreadable_hub_record_waits_for_the_operator(tmp_path):
+    w = World(tmp_path, hub=OversizeRecordHub())
+    res = w.tick()
+    assert res["state"] == "needs-operator" and w.launched == []
+    assert any("Hub record cannot be read" in e["text"] for e in res["events"] if e["kind"] == "needs-operator")
+
+
+class ListingOpener:
+    def __init__(self, body):
+        self.body = body
+
+    def __call__(self, req, timeout=None):
+        import io
+
+        class R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return R(self.body)
+
+
+@pytest.mark.parametrize("body", [b"[" * 100_000, b'[{"id": "\\ud800"}]', b'[{"id": "Qwen/x"}, NaN]'],
+                         ids=["nested-100000", "lone-surrogate", "nan"])
+def test_a_hub_listing_that_is_not_strict_json_lists_nothing(body):
+    assert dw.Hub(opener=ListingOpener(body)).list_models("Qwen", "Qwen4-27B") == []
+
+
+@pytest.mark.parametrize("stdout", ["[" * 100_000, '{"chips": [{"state": "HELD", "who": "\\ud800"}]}'], ids=["nested-100000", "lone-surrogate"])
+def test_gozer_status_that_is_not_strict_json_is_not_free(stdout):
+    import subprocess
+    got = dw.gozer_chips(run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=""))
+    assert got["free"] is False and all("\ud800" not in h for h in got["holders"])
+
+
 def test_a_held_lock_skips_the_tick(tmp_path):
     w = World(tmp_path)
     with dw.locked(w.watch_dir) as got:
@@ -364,3 +405,27 @@ def test_tt_orchard_cli_drop_watch_show(tmp_path):
     buf = io.StringIO()
     assert cli.main(["drop-watch", "show", "--watch-dir", str(wd)], env={"HOME": str(tmp_path / "none")}, stdout=buf) == 0
     assert json.loads(buf.getvalue())["state"] == "waiting"
+
+
+def test_the_watcher_reads_the_installed_package_and_its_weights_config(tmp_path):
+    """With bundle_dir set, the check gets the package's capabilities and its own weights config, so an undeclared difference
+    from those weights (64 layers against the 20-layer franken) takes the fallback route, as stage 0 would."""
+    rel = json.loads(cfg_bytes())
+    dev = json.loads(json.dumps(rel))
+    dev["text_config"]["num_hidden_layers"] = 20
+    dev["text_config"]["layer_types"] = dev["text_config"]["layer_types"][:20]
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "orchard-capabilities.json").write_text(json.dumps(dc.EXAMPLE_CAPABILITIES))
+    (bundle / "tt_kernel_manifest.json").write_text(json.dumps({"weights": {"repo_id": "mando2222/franken", "revision": SHA}}))
+    snap = tmp_path / "hf" / "hub" / "models--mando2222--franken" / "snapshots" / SHA
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps(dev))
+    w = World(tmp_path)
+    c = dw.load_config(w.watch_dir)
+    c.bundle_dir, c.hf_home = str(bundle), str(tmp_path / "hf")
+    dw.write_config(w.watch_dir, c)
+    w.tick()
+    state = json.loads((w.watch_dir / "state.json").read_text())
+    assert state["route"] == "full-port"
+    assert any("num_hidden_layers differs" in r for r in state["check"]["reasons"])
