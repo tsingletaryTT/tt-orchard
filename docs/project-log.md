@@ -4883,3 +4883,21 @@ Prompt (operator): "make sure we've updated all our literature (site, readme, et
 - **In progress and not claimed as done:** The Qwen4 frankenmodel generator and its CPU proofs are done (PR 639, open): the first K layers of real Qwen3.8-27B weights in the `qwen4_exp_text` skeleton with identity-initialised hyper-connections. With K=4 in float32 the logits equal the base exactly (maximum difference 0.0 on three prompts). With K=8 in bf16 the maximum difference is 0.119 and the top-1 token is equal. A seeded perturbation of the hyper-connections changes the logits by 5.23 and the top-1 token differs. An indexer budget of 2,048 equals the base, and a budget of 8 moves the logits by about 1. The checkpoint does not carry the visual tower, the MTP head, per-layer embeddings or the n-gram table, and the truncated weights give incoherent text, so the result shows equivalence only and says nothing about quality. Generator and CPU proofs done, chip run pending. <!-- UPDATE WHEN THE CHIP RUN ENDS -->
 - **Limits that stay:** single runs; agreement over 32 tokens on one to four prompts; the coder alone has not written a passing port; full-port models are packaged by hand; served speeds are low and depend on host load; nothing has run on another machine; the four-chip boot check of the Olmo adapter as republished passed (9 checks, 12.34 tok/s warm; record in PR 642, open), and the served-rate range across runs and boot checks is 2.2 to 12.3 tok/s under host load.
 - **Issue 61** (the full-port stages have never run on a real model) is out of date.
+
+## 2026-11-09: the drafter is switched off by the kind of drafter the bundle uses (Qwen4 drop-in plan, Track C item C6)
+Prompt (from the session that runs the Qwen4 drop-in plan): decide drafter-off from the drafter the bundle uses (DFlash2 needs Qwen3.8 hidden
+states), and strip `TT_AUXILIARY_WEIGHTS` when it is off.
+- Read in the installed bundle's code: `QWEN36_DRAFTER="dflash2"` is the DFlash block-diffusion drafter, a separate checkpoint (`DFLASH_WEIGHTS`,
+  `incoai/Qwen3.8-27B-DFlash2`) whose config names the target layers it reads (`target_layer_ids` 5, 19, 33, 47, 61 of 64); "mtp" is the model's own
+  MTP head; an empty value turns speculation off. The bundle's launcher downloads every comma-separated entry of `TT_AUXILIARY_WEIGHTS` before vLLM
+  starts, and the Qwen bundles name the drafter's repo there.
+- `prepare_swap.py`: with a DFlash drafter, the drafter is switched off when the new model's text config differs from the nearest model's in
+  model_type (a `_text` suffix aside), the widths, the layer count or the layer types (a key only one config states is not compared), or when
+  either config cannot be read, whatever `mtp.*` tensors the new model has. Before, a Qwen4 release with an MTP head would have kept the Qwen3.8
+  drafter on. With the drafter off for any reason, the drafter's repo (the one `DFLASH_WEIGHTS` names, at any revision) leaves the run script's
+  `TT_AUXILIARY_WEIGHTS`; other entries stay.
+- `orchard/package.py`: a package served with the drafter off carries no `TT_AUXILIARY_WEIGHTS` (the card names every repo in the package
+  environment as the drafter), and the package check refuses one left in the environment or exported by run.sh.
+- Tests: `tests/test_drafter_by_kind.py`. 15 mutations; one survived (working head_dim out of the widths). Qwen3.8 states head_dim 256 while
+  hidden_size / num_attention_heads is 213, so that derivation was wrong for this family: it was removed and a test says so. A second survivor
+  (reading the first drafter line instead of the last) got a test. All guards are red now. No hardware was used.
