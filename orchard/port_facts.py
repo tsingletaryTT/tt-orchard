@@ -55,6 +55,7 @@ MAX_INDEX_FIELDS = 24             # id-list fields described in `index_fields`; 
 MAX_SHARDS_LISTED = 8
 MAX_EXTRA_FILES = 4               # weights files the index does not name that are described one by one (issue 647); the rest are counted
 MAX_EXTRA_PREFIXES = 6            # first name components listed for one such file
+EXTRA_MAX_CHARS = 1800            # the encoded length of extra_files (json.dumps escapes a non-ASCII character to six characters, so counts alone do not bound it)
 MAX_SCHEDULE = 4096
 MAX_NAME_CHARS = 200              # a tensor name longer than this is counted and not listed: the header reader bounds names only by the header's size
 MAX_NUMBER_DIGITS = 6             # a numeric name component of more digits is no layer or expert number and stays in the pattern as it is
@@ -347,9 +348,25 @@ def _extra_files(snapshot: Path, headers) -> tuple:
             entry[0] += 1
             if len(t.name) <= MAX_NAME_CHARS:
                 entry[1].setdefault(t.name.split(".")[0], None)
-    out = [{"file": f[:MAX_NAME_CHARS], "tensors": n, "prefixes": sorted(p[:MAX_KEY_CHARS] for p in prefixes)[:MAX_EXTRA_PREFIXES]}
-           for f, (n, prefixes) in sorted(by_file.items())]
-    return out[:MAX_EXTRA_FILES], max(0, len(out) - MAX_EXTRA_FILES)
+    # The section is budgeted by its encoded length: a file name appears twice (the list and the note) and a prefix once, and each costs its
+    # json.dumps length. A file that does not fit is counted, a prefix that does not fit is counted in the file's `prefixes_left_out`.
+    out, used, more = [], 0, 0
+    for f, (n, prefixes) in sorted(by_file.items()):
+        name = f[:MAX_NAME_CHARS]
+        base = 2 * len(json.dumps(name)) + 80
+        if len(out) >= MAX_EXTRA_FILES or used + base > EXTRA_MAX_CHARS:
+            more += 1
+            continue
+        used += base
+        listed = []
+        for prefix in sorted(p[:MAX_KEY_CHARS] for p in prefixes):
+            cost = len(json.dumps(prefix)) + 2
+            if len(listed) >= MAX_EXTRA_PREFIXES or used + cost > EXTRA_MAX_CHARS:
+                break
+            used += cost
+            listed.append(prefix)
+        out.append({"file": name, "tensors": n, "prefixes": listed, "prefixes_left_out": len(prefixes) - len(listed)})
+    return out, more
 
 
 def _weights(snapshot: Path, headers) -> dict:

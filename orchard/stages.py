@@ -327,7 +327,8 @@ def _class_reasons(d: dict) -> list[str]:
             reasons.append(f"sidecars[{i}] needs a file")
         elif item.get("refused"):
             reasons.append(f"sidecars[{i}] ({item['file']}) was refused by the stage 0 scan, so it has no sha256: {str(item['refused'])[:200]}")
-        elif not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
+        elif not isinstance(item.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"]):
+            # A string of 64 lower-case hex digits: a 64-digit JSON integer must not pass through str() (review of PR 648).
             reasons.append(f"sidecars[{i}] ({item['file']}) needs a sha256 of 64 hex digits")
     ignored = d.get("ignored_files", [])
     if not isinstance(ignored, list):

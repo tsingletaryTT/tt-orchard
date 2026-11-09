@@ -112,3 +112,43 @@ def test_the_extra_files_section_stays_inside_the_facts_size_cap_with_many_files
     assert len(json.dumps(facts, indent=2)) + 1 <= port_facts.MAX_CHARS
     assert len(facts["weights"]["extra_files"]) <= port_facts.MAX_EXTRA_FILES
     assert all(len(e["prefixes"]) <= port_facts.MAX_EXTRA_PREFIXES for e in facts["weights"]["extra_files"])
+
+
+# ---- review of PR 648 --------------------------------------------------------------------------------------------------------------------
+
+def test_non_ascii_prefixes_and_file_names_cannot_push_the_facts_over_the_page(tmp_path):
+    """Four extra files with six 80-character non-ASCII prefixes each: json.dumps writes every character as a six-character escape, so counts
+    of files and prefixes do not bound the size. The section is budgeted by its encoded length and records what it left out."""
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    _write_st(snap / "model.safetensors", {"model.layers.0.w": (2, 2)})
+    for k in range(4):
+        name = "é" * 100 + f"{k}.safetensors"
+        _write_st(snap / name, {("é" * 79 + chr(ord("a") + j) + f"{k}.w"): (2, 2) for j in range(6)})
+    (snap / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"model.layers.0.w": "model.safetensors"}}))
+    facts = port_facts.build(snap)                                           # raised PortFactsError before the budget
+    assert len(json.dumps(facts, indent=2)) + 1 <= port_facts.MAX_CHARS
+    w = facts["weights"]
+    assert w["extra_files"] or w["extra_files_more"]
+    assert len(json.dumps(w["extra_files"])) <= port_facts.EXTRA_MAX_CHARS
+    assert w["extra_files_more"] + len(w["extra_files"]) == 4                  # every file is either described or counted
+    assert all("prefixes_left_out" in e for e in w["extra_files"])
+
+
+def test_a_small_ascii_case_is_described_in_full(tmp_path):
+    facts = port_facts.build(snapshot_with_a_second_weights_file(tmp_path))
+    e = facts["weights"]["extra_files"][0]
+    assert e["prefixes_left_out"] == 0 and facts["weights"]["extra_files_more"] == 0
+
+
+@pytest.mark.parametrize("bad", [10 ** 63, 10 ** 63 + 1, 12345, 1.5, ["ab" * 32], None, True])
+def test_a_full_port_sidecar_whose_sha256_is_not_a_string_of_64_hex_digits_is_refused(bad):
+    text = " ".join(reasons(sidecars=[{**GOOD, "sha256": bad}]))
+    assert "loop_modules.safetensors" in text and "sha256" in text
+
+
+def test_a_sha256_with_upper_case_or_a_wrong_length_is_refused_for_every_class():
+    for cls, path in (("weights+sidecar", "weights-only"), ("full-port", "full-port")):
+        for bad in ("AB" * 32, "ab" * 31, "ab" * 33):
+            assert any("sha256" in r for r in reasons(cls=cls, path=path, sidecars=[{**GOOD, "sha256": bad}])), (cls, bad)
