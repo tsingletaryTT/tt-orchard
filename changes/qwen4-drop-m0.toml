@@ -1,3 +1,4 @@
 target = "0.9.143"
 summary = "Release day for Qwen4-27B: tt-orchard drop-check says which route a release takes from its config alone, tt-orchard drop-watch starts the bring-up when the release appears and the chips are free, and scripts/reference_venv.py builds a second reference interpreter for a new model type."
 kind = "feature"
+pr = 657
