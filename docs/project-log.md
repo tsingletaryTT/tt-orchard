@@ -4884,6 +4884,50 @@ Prompt (operator): "make sure we've updated all our literature (site, readme, et
 - **Limits that stay:** single runs; agreement over 32 tokens on one to four prompts; the coder alone has not written a passing port; full-port models are packaged by hand; served speeds are low and depend on host load; nothing has run on another machine; the four-chip boot check of the Olmo adapter as republished passed (9 checks, 12.34 tok/s warm; record in PR 642, open), and the served-rate range across runs and boot checks is 2.2 to 12.3 tok/s under host load.
 - **Issue 61** (the full-port stages have never run on a real model) is out of date.
 
+## 2026-11-09: the franken's config and model card (Qwen4 drop-in plan, Track C item C4; branch `c4-franken-config-readme`)
+Prompt (operator plan for the Qwen4-27B drop-in, through the controller session): Track C item C4, "write `layer_types`, drop the extra
+`seed` key, add a README with the Apache-2.0 license (stage 7 needs one)", coordinated with issue 646.
+- `scripts/tiny_qwen4/make_franken.py` writes `layer_types` into config.json: one entry per kept layer, the base's own `linear_attention`
+  and `full_attention` names. A real Qwen4 config is expected to carry that key (transformers' Qwen4Exp maps `full_attention` to its
+  `indexed_attention`), and stage 0 compares `layer_types` as a deciding key.
+- config.json loses `seed`. In a Qwen4Exp config `seed` is the n-gram hash seed (transformers 5.19.0, default 1234), a different setting from
+  the generator's `--seed`. The generator's seed stays in franken-manifest.json, where it already was.
+- The output gets README.md with `license: apache-2.0` in its front matter, read by stage 0 (`license_side`) and stage 7 (`read_license`).
+  It names the base repository and revision from the Hugging Face cache layout only (no local folder name), the options, the indexer
+  source, and that the checkpoint is not to be uploaded. The base snapshot's own card is read first, through the same link check as the
+  other snapshot files and with a 4 MiB cap: a base card that names another license is refused before anything is written, and a base
+  card with no license is accepted and the written card says the license was not checked against it.
+- Not done: sharded output with an index (left out to keep the change small), and the four items of issue 646 (a comment on the issue
+  says so).
+- Tests: `tests/test_make_franken.py` (new tests for the config keys, the card, its license, the refusals and the cache-layout naming).
+  Mutation table in the pull request.
+
+## 2026-11-09: `--weights-only-rehearsal` (Qwen4 drop-in plan, Track C item C5)
+Prompt (main session, from the approved Qwen4 drop-in plan): a weights-only rehearsal option like `--full-port-rehearsal` that waives only
+`coherent` on the swap gate, recorded in `run_start`. The M4 rehearsal serves the Qwen4 frankenmodel with perturbed hyper-connection weights through
+the Qwen4 bundle on the weights-only route; its text is not readable, so every gate that judges the free-run text fails it today.
+- Gates: three weights-only gates judge `coherent`. Each takes a `rehearsal` keyword and waives a `coherent` that is exactly `false`: stage 2
+  (`gate_weights_swap` and `gate_weights_swap_sidecar`, through `_swap_reasons`), each passing stage 4 configuration (`gate_mesh_swap`) and the
+  stage 7 boot check (`gate_package`). A missing or malformed `coherent` still fails, and so does every other field (top-1 agreement, token
+  count, ready time, the 32-token recompute, the prompt suite, the sidecar parity, the package checks). The gate result lists `coherent` in
+  `waived`. All three are needed for M4 to end `ready` with a stage 7 package. Stage 8's verdict text still says the output is not readable, and
+  the graft trial and the sampling trial still refuse an incoherent variant (both are choices, so neither blocks the run).
+- Supervisor: the run_start entry records `weights_only_rehearsal: true`; `stages.weights_only_rehearsal(entries)` reads only that, so a
+  decision, an evidence entry or a field in result.json turns nothing on. `_gate` gives the keyword to the four gates in
+  `WEIGHTS_ONLY_REHEARSAL_GATES` (stage 4 keeps its required counts). A gate that passed with the waiver leaves the decision
+  `weights-only rehearsal: coherence waived` (field, the flag, a note). A resume keeps the option and cannot add it.
+- Options: `--weights-only-rehearsal` with `--full-port` and without `--full-port-rehearsal` is refused by `tt-orchard bringup` and by the
+  supervisor (also when `--full-port` comes on a resume), because a run that stage 0 classes full-port would then block on readable text in the
+  full-port stages. With all three options a rehearsal model goes on whichever route stage 0 measures. The skills `weights-swap-check`,
+  `weights-swap-configs` and `weights-sidecar-check` tell the finish step to copy `coherent` as the draft has it.
+- Tests: `tests/test_weights_only_rehearsal.py` (the gates, the ledger answer, the option rule, the supervisor's gate choice and decision, and
+  whole runs on the fake two-board machine: with the option the incoherent run reaches ready with decisions at stages 2 and 4, without it the
+  same run blocks at stage 2), plus rows in `tests/test_cli.py` and `tests/test_bringup_config.py`. 22 mutations, all red.
+- The first full-suite run stopped at its 3,500 s timeout at 98% on a host with a load average near 100, so it printed no list of failures.
+  A run of the 54 test files that touch the changed code found one regression: the supervisor read `spec.gate`, which the stand-in spec of
+  `tests/test_token_check_numbers.py` does not have. Both reads now use `getattr`; that set then passed (2,347 passed, 2 skipped), and the four
+  mutations on those lines were run again and are red.
+
 ## 2026-11-09: the bundle the operator names is the bundle the run uses (Qwen4 drop-in plan, Track C item C3)
 Prompt (from the session that runs the Qwen4 drop-in plan): keep the chosen bundle through `resolve_base` and `check_base`, refuse a weights repo
 two bundles share, and choose the bundle by chip count.

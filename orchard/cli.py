@@ -153,6 +153,10 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--full-port-rehearsal", action="store_true",
                    help="with --full-port, for a rehearsal model with random weights: stage 2 waives its `coherent` field and no other check, "
                         "and the ledger says so. Given when the run starts; a resume keeps it and cannot add it")
+    b.add_argument("--weights-only-rehearsal", action="store_true",
+                   help="for a rehearsal model on the weights-only route whose text is not readable on purpose (the perturbed Qwen4 "
+                        "frankenmodel): a measured `coherent` of false is waived in stages 2, 4 and 7 and no other check, and the ledger says "
+                        "so. Given when the run starts; a resume keeps it and cannot add it. With --full-port it needs --full-port-rehearsal")
     b.add_argument("--port-repair-rounds", type=_port_repair_rounds_arg, default=None, metavar="N",
                    help="a full-port stage 2 whose port check failed on the port itself (a missing weight, a bad import, an index off by one) "
                         "gives the coder up to N repair rounds in the same attempt: it edits only stages/2/port/, and the supervisor runs the "
@@ -1234,6 +1238,10 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             return supervisor_main(fwd)
         return supervisor_main(["control", "--run-dir", run_dir, args.cmd])
 
+    from orchard.stages import rehearsal_options_problem
+    if why := rehearsal_options_problem(full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal,
+                                        weights_only_rehearsal=args.weights_only_rehearsal):
+        return _refuse(why)
     try:
         cfg, cfg_path = config()
         cfg = bringup_config.for_mode(cfg, args.mode or cfg.mode)
@@ -1366,6 +1374,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               graft_trial=not args.no_graft_trial,
                                               resume_aborted=args.resume_aborted, sampling=args.sampling,
                                               full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal, model_kind=args.model_kind,
+                                              weights_only_rehearsal=args.weights_only_rehearsal,
                                               port_repair_rounds=args.port_repair_rounds, telegraph_config=cfg_path,
                                               tool_dedupe=not args.no_tool_dedupe)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
