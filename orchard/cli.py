@@ -125,7 +125,8 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--refuse-credentials-visible", action="store_true",
                    help="block the run while credential files are visible to agent shells")
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
-                                  "it) or a Hugging Face model id. Default: the model card's base_model")
+                                  "it; the run then uses that bundle, or a bundle of its family for another chip count) or a Hugging "
+                                  "Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
     b.add_argument("--no-graft-trial", action="store_true",
                    help="skip stage 2's graft trial. When the model has no mtp.* tensors and the nearest model has a head that "
@@ -226,6 +227,13 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import caches as _caches
     sub.add_parser("caches", parents=[common, _caches.parser(add_help=False)],
                    help="list the tensor caches (here and on the lab) and prune the ones no run uses")
+    from orchard import drop_check as _drop_check
+    sub.add_parser("drop-check", parents=[common, _drop_check.parser(add_help=False)],
+                   help="say which bring-up route a new Qwen release takes, from its config alone (read-only)")
+    dwp = sub.add_parser("drop-watch", parents=[common],
+                         help="watch for a release and start its bring-up when the chips are free (`drop-watch tick --help`)")
+    dwp.add_argument("action", choices=["init", "tick", "show"])
+    dwp.add_argument("rest", nargs=argparse.REMAINDER, help="--watch-dir DIR and the other options")
     from orchard import kept_coder as _kept
     sub.add_parser("coder", parents=[common, _kept.parser(add_help=False)],
                    help="show or stop the coder a lab run kept up ([coder] keep_up)")
@@ -752,27 +760,34 @@ def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
 
 
 def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False, pull: bool = True) -> tuple[str | None, str | None]:
-    """(the weights repo to base the run on, an error text). `arg` is an installed bundle, a model id that
-    an installed bundle serves, a published bundle (installed here with `tt-model pull`), or any other
-    model id, which the base check then judges. With `pull=False` nothing is searched or installed: an installed bundle's name gives its
-    weights repo and anything else is taken as a model id."""
+    """(the weights repo to base the run on, an error text): resolve_base_bundle without the bundle name."""
+    repo, _, why = resolve_base_bundle(arg, sig, puller, out, style, dry_run=dry_run, pull=pull)
+    return repo, why
+
+
+def resolve_base_bundle(arg: str, sig, puller, out, style, *, dry_run: bool = False,
+                        pull: bool = True) -> tuple[str | None, str | None, str | None]:
+    """(the weights repo to base the run on, the bundle `arg` names or None, an error text). `arg` is an installed bundle, a model id that
+    an installed bundle serves, a published bundle (installed here with `tt-model pull`), or any other model id, which the base check then
+    judges. A bundle name is kept: the run uses that bundle (preflight.check_base `base_bundle`). With `pull=False` nothing is searched or
+    installed: an installed bundle's name gives its weights repo and anything else is taken as a model id."""
     inst = _installed(sig)
     for b in inst:
         if b.name == arg:
-            return b.weights_repo, None
+            return b.weights_repo, b.name, None
     if any(b.weights_repo == arg for b in inst) or dry_run or not pull:
-        return arg, None
+        return arg, None, None
     found = sig.search_bundles(nearest.family_query(arg)) if sig.search_bundles else None
     if arg not in {c["name"] for c in found or []}:
-        return arg, None                                  # a model id
+        return arg, None, None                            # a model id
     print(f"{style.icon('📦')}installing the bundle {arg} with `tt-model pull` (this can take a while)", file=out)
     ok, why = puller(arg)
     if not ok:
-        return None, f"`tt-model pull {arg}` failed: {why}"
+        return None, None, f"`tt-model pull {arg}` failed: {why}"
     for b in _installed(sig):
         if b.name == arg:
-            return b.weights_repo, None
-    return None, f"{arg} was pulled but is not among the installed bundles tt-orchard looks at"
+            return b.weights_repo, b.name, None
+    return None, None, f"{arg} was pulled but is not among the installed bundles tt-orchard looks at"
 
 
 def _run_start_inputs(run_dir: Path) -> dict | None:
@@ -1188,6 +1203,18 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _coder_speed(args, env, home, out)
     if args.cmd == "ui":
         return _ui(args, env, home, out)
+    if args.cmd == "drop-check":
+        from orchard import drop_check
+        if not args.reference_python:
+            try:
+                rp = config()[0].reference_python
+                args.reference_python = str(rp) if rp else None
+            except Exception:  # noqa: BLE001  (no bringup.toml: the class probe reports "not checked")
+                args.reference_python = None
+        return drop_check.report(args, out)
+    if args.cmd == "drop-watch":
+        from orchard import drop_watch
+        return drop_watch.run_args(drop_watch.parser().parse_args([args.action, *args.rest]), out)
     if args.cmd == "caches":
         from orchard import caches
         try:
@@ -1254,12 +1281,12 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                offline=args.offline, no_github=args.no_github, refresh=args.refresh_research,
                                progress=progress)
     sig = signals or preflight.default_signals(cfg, research_options=research_options)
-    override = None
+    override = named_bundle = None
     if args.base:
         state, why = audio_base_decision(args.base, args.model, sig)
         if why:
             return _refuse(why)
-        override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run, pull=state == "text")
+        override, named_bundle, why = resolve_base_bundle(args.base, sig, puller, out, style, dry_run=args.dry_run, pull=state == "text")
         if why:
             return _refuse(why)
 
@@ -1270,7 +1297,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override,
                                       accept_inferred_base=args.accept_inferred_base, progress=progress,
-                                      stock_recorded=recorded_stock, no_fetch=args.no_fetch)
+                                      stock_recorded=recorded_stock, no_fetch=args.no_fetch, base_bundle=named_bundle)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -1283,7 +1310,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                                 inferred=bool(base_check.data.get("inferred")))
         pick = chooser(base_check.data["candidates"], args.model, base_check.data["base"]) if chooser else None
         if pick:
-            override, why = resolve_base(pick, sig, puller, out, style)
+            override, named_bundle, why = resolve_base_bundle(pick, sig, puller, out, style)
             if why:
                 return _refuse(why)
             checks = preflight_page()
@@ -1348,11 +1375,16 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     # (orchard/stock_runtime.py). No flag is involved; the base row found the support.
     stock = base_data.get("stock_runtime")
     stock_dir = stock["params_dir"] if isinstance(stock, dict) and stock.get("params_dir") else None
+    bundle_dir = base_data.get("bundle_dir") if isinstance(base_data.get("bundle_dir"), str) else None
     if run_started and resuming:       # `resuming` is false again when the earlier run was set aside above
         # A resume keeps the run's recorded choice. The supervisor picks the stock-runtime stages from the run_start entry, so a
         # preflight that now selects a bundle (or finds the parameters) must not change the input stage 2's draft reads.
         stock_dir = recorded_stock
+        # Stage 0 judged the model against the bundle the run started with (its orchard-capabilities.json), so a resume keeps it.
+        recorded_bundle = (_run_start_inputs(run_dir) or {}).get("bundle")
+        bundle_dir = recorded_bundle if isinstance(recorded_bundle, str) and recorded_bundle else None
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
+              **({"bundle": bundle_dir} if bundle_dir else {}),
               **({"stock_params": stock_dir} if stock_dir else {}),
               **({"text_runtime": base_data["text_runtime"]} if isinstance(base_data.get("text_runtime"), str) else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}

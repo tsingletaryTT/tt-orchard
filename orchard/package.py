@@ -117,7 +117,11 @@ def splice_extra_args(text: str, extra: str) -> str:
 
 
 ADDITIONAL = re.compile(r"--additional-config\s+'([^']*)'")
-DRAFTER_ENV = re.compile(r"^(DFLASH_WEIGHTS|QWEN36_DFLASH_\w+)$")
+# The drafter's own settings. TT_AUXILIARY_WEIGHTS is here too: the bundles that set it name the drafter's repo there (the launcher downloads
+# every entry before vLLM starts), and the card names every repo in a package's environment as the drafter (aux_repos), so a package served
+# with the drafter off carries none of it.
+DRAFTER_ENV = re.compile(r"^(DFLASH_WEIGHTS|QWEN36_DFLASH_\w+|TT_AUXILIARY_WEIGHTS)$")
+AUX_EXPORT = re.compile(r"^\s*export\s+TT_AUXILIARY_WEIGHTS=(.*)$")
 
 
 def drop_device_sampling(extra: str) -> str:
@@ -145,8 +149,9 @@ def drop_device_sampling(extra: str) -> str:
 
 def serving_env(env: dict, *, drafter_off: bool) -> dict:
     """The manifest environment package-thin is given. With the drafter off, QWEN36_DRAFTER is empty
-    and the drafter's own settings (its repo, tensor-parallel size, block sizes) are not passed, so the
-    package names no drafter repo and downloads none."""
+    and the drafter's own settings (its repo, tensor-parallel size, block sizes, and TT_AUXILIARY_WEIGHTS, which
+    names the drafter's repo for the launcher to download) are not passed, so the package names no drafter repo and
+    downloads none."""
     if not drafter_off:
         return dict(env)
     out = {k: v for k, v in env.items() if not DRAFTER_ENV.match(k)}
@@ -179,9 +184,15 @@ def serving_problems(run_sh: str, env: dict, *, drafter_off: bool, host_sampling
             problems.append(f"the manifest sets QWEN36_DRAFTER={env['QWEN36_DRAFTER']!r}; stage 2 "
                             "served with the drafter off")
         left = sorted(k for k in env if DRAFTER_ENV.match(k)) + \
-            (["DFLASH_WEIGHTS in run.sh"] if "DFLASH_WEIGHTS" in run_sh else [])
+            (["DFLASH_WEIGHTS in run.sh"] if "DFLASH_WEIGHTS" in run_sh else []) + \
+            (["TT_AUXILIARY_WEIGHTS in run.sh"] if any((m := AUX_EXPORT.match(ln)) and m.group(1).strip().strip("\"'")
+                                                       for ln in run_sh.splitlines()) else [])
         if left:
             problems.append(f"the drafter's settings are still in the package: {left}")
+        repos = aux_repos(env, nearest_model="")
+        if repos:
+            problems.append(f"the package's environment names {', '.join(repos)} with the drafter off, and the card would name it as the "
+                            "drafter")
     if host_sampling and "sample_on_device_mode" in run_sh:
         problems.append("run.sh sets sample_on_device_mode; stage 2 served with host sampling")
     on = _drafter_on(run_sh, env)
@@ -228,6 +239,17 @@ def stage_2_vocab(run_dir) -> tuple[int, int] | None:
     if v.get("trimmed") is not True or any(isinstance(x, bool) or not isinstance(x, int) for x in (m, b)) or not 0 < m < b:
         return None
     return m, b
+
+
+def stage_2_own_config(run_dir) -> bool:
+    """Did stage 2 serve the new model's own config.json (model-dir-sources.json's `config_json`, written by prepare_swap.py for a bundle
+    that ships orchard-capabilities.json)? Stage 7 packages that file as base_config/config.json, and the card says whose it is."""
+    try:
+        rec = safeio.read_json(safeio.resolved(Path(run_dir) / "stages/2/model-dir-sources.json"), max_bytes=MAX_RECORD_BYTES)
+    except safeio.SafeReadError:
+        return False
+    cj = rec.get("config_json") if isinstance(rec, dict) else None
+    return isinstance(cj, dict) and cj.get("source") == "model"
 
 
 def _stage_2_grafted(run: Path) -> bool:
@@ -730,6 +752,7 @@ class RunFacts:
     graft_decision: str | None = None   # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
     vocab: tuple[int, int] | None = None   # (the model's vocabulary size, the nearest model's) for a vocabulary trim
     sampling_decision: dict | None = None  # stage 2's sampling decision (orchard/sampling_choice.py), None when it made none
+    own_config: bool = False         # base_config/config.json is the new model's own, with only architectures set to the nearest model's
 
 
 def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> RunFacts:
@@ -783,7 +806,7 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
     md = run / "stages/2/model-dir"
     base = tuple(md / n for n in BASE_CONFIG_FILES if (md / n).is_file() and not (md / n).is_symlink())
     if md / "config.json" not in base:
-        raise PackageError(f"{md}/config.json (the nearest model's config) is missing")
+        raise PackageError(f"{md}/config.json (the config stage 2 served) is missing")
     configs = _json(run / "stages/4/result.json", "stage 4's result").get("configs") or []
     passing = frozenset(c["chips"] for c in configs if isinstance(c, dict) and c.get("pass") is True
                         and isinstance(c.get("chips"), int) and not isinstance(c.get("chips"), bool))
@@ -797,7 +820,8 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
     facts = RunFacts(run, model_id, revision, nearest_model, snap,
                      Path(cfg.get("hf_home") or ""), source, base, passing, license_id,
                      drafter_off, host_sampling, tuple(delta.get("sidecars") or ()), reported, reported_source,
-                     Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run), vocab=stage_2_vocab(run))
+                     Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run), vocab=stage_2_vocab(run),
+                     own_config=stage_2_own_config(run))
     decision = read_decision(run / "stages/2")
     decided = decision is not None and decision["choice"] == "graft"
     # A drafter-off sampling decision supersedes what stage 2's own build suggests: the sampling trial builds its variant without the graft, so
@@ -1416,7 +1440,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         numbers=numbers, not_measured=tuple(not_measured), acceptance_measured=acceptance_measured, acceptance_from=acceptance_from,
         drafter_off=facts.drafter_off, host_sampling=facts.host_sampling,
         sidecars=tuple(s["file"] for s in facts.sidecars),
-        base_files=tuple(sorted(f.name for f in facts.base_config)),
+        base_files=tuple(sorted(f.name for f in facts.base_config)), own_config=facts.own_config,
         sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
         reported=facts.reported, reported_source=facts.reported_source,
         graft=facts.graft, graft_decision=facts.graft_decision, use=use, vocab=facts.vocab, sampling=sampling,

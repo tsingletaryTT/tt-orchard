@@ -10,7 +10,9 @@ builds model-dir/ next to itself from both:
 
 - COPIED from base_config/ (shipped in the bundle): every file there, for example config.json. When the
   fine-tune ships no generation_config.json, base_config/ holds the base model's, and the server needs
-  its eos_token_id.
+  its eos_token_id. When the package was built from a bundle that ships orchard-capabilities.json, stage 2
+  served the model's own config.json with only `architectures` set to the base model's, and base_config/config.json
+  is that file, so it is copied here as it is.
 - LINKED from the fine-tune's Hugging Face snapshot (absolute links to the resolved files):
   tokenizer.json, tokenizer_config.json, chat_template.jinja, generation_config.json,
   model.safetensors.index.json and every *.safetensors file. tokenizer.json and at least one

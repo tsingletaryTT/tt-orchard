@@ -113,6 +113,7 @@ class CardFacts:
     host_sampling: bool = False      # tokens are sampled on the host
     sidecars: tuple[str, ...] = ()   # sidecar files the model's repository ships and the bundle does not serve
     base_files: tuple[str, ...] = () # files the package ships in base_config/, taken from the nearest model
+    own_config: bool = False         # base_config/config.json is the model's own with only architectures set to the nearest model's
     sampling_from_base: bool = False # the model ships no generation_config.json, so the nearest model's is used
     reported: tuple[Reported, ...] = ()   # scores the authors report, shown apart from the measured numbers
     reported_source: str = ""        # where the authors report them (a card or paper), for the sentence above them
@@ -128,6 +129,18 @@ class CardFacts:
     drafter_off_by_sampling: bool = False   # stage 2 chose the drafter-off configuration because the model needs sampling (every profile)
     sampling_trial_chips: int | None = None  # the chip count the sampling trial ran on (stage 2's), which may differ from this profile's
     sampling: dict | None = None     # what stage 2's sampling probe found (package.sampling_summary): card_sentence, serving; only the required profile
+
+
+def _own_config_lines(f: CardFacts) -> list[str]:
+    """The two "What it runs" lines for a package whose bundle reads the model's configuration at run time (docs/bundle-capabilities.md)."""
+    others = "".join(f"`{n}`, " for n in f.base_files if n != "config.json")
+    return [f"- Model code: the Tenstorrent implementation taken from the bundle {f.source_name}, built for {f.nearest_model}. Its code "
+            f"reads the model's configuration at run time and declares the differences it handles in `orchard-capabilities.json`; "
+            f"stage 0 checked {f.model_id}'s config and tensor headers against those declarations.",
+            f"- At each start the launcher builds `model-dir/` from {f.model_id}'s own `config.json` with `architectures` set to "
+            f"{f.nearest_model}'s" + (f", the other configuration files of {f.nearest_model} ({others}" if others else " (")
+            + f"shipped in `base_config/`) and the tokenizer and weights of {f.model_id}. It sets MODEL_WEIGHTS_DIR and HF_MODEL to "
+            f"that directory, so the chips load the weights of {f.model_id}."]
 
 
 def _count(n: int) -> str:
@@ -247,13 +260,14 @@ def render_card(f: CardFacts) -> str:
               f"{f.model_id} with your own Hugging Face account.", "",
               "## What it runs", "",
               f"- Weights: {f.model_id} at revision `{f.revision}`.",
-              f"- Model code: the Tenstorrent implementation of {f.nearest_model}, taken from the "
-              f"bundle {f.source_name}. {f.model_id} has the same text architecture, so only the "
-              "weights differ.",
-              f"- At each start the launcher builds `model-dir/` from the configuration files of "
-              f"{f.nearest_model} ({_base_files(f)}shipped in `base_config/`) and the tokenizer and weights of "
-              f"{f.model_id}. It sets MODEL_WEIGHTS_DIR and HF_MODEL to that directory, so the chips "
-              f"load the weights of {f.model_id}.",
+              *(_own_config_lines(f) if f.own_config else [
+                  f"- Model code: the Tenstorrent implementation of {f.nearest_model}, taken from the "
+                  f"bundle {f.source_name}. {f.model_id} has the same text architecture, so only the "
+                  "weights differ.",
+                  f"- At each start the launcher builds `model-dir/` from the configuration files of "
+                  f"{f.nearest_model} ({_base_files(f)}shipped in `base_config/`) and the tokenizer and weights of "
+                  f"{f.model_id}. It sets MODEL_WEIGHTS_DIR and HF_MODEL to that directory, so the chips "
+                  f"load the weights of {f.model_id}."]),
               f"- Context length {f.max_model_len} tokens; up to {f.max_num_seqs} sequences at a time."]
     if f.sampling_from_base:
         lines.append(f"- {sampling_disclosures(f.model_id, f.nearest_model)[0]}")

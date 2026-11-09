@@ -129,7 +129,7 @@ from urllib.parse import urlparse
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
-from orchard import full_port_result, runaway, text_runtime
+from orchard import bundle_capabilities, full_port_result, runaway, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
 from orchard.blocked import ALL_ONES_MARK, BOOT_ABORT_MARKS, LOG_LINES_MARK, block_code, last_pause
@@ -2398,7 +2398,7 @@ class Supervisor:
         if spec.number == 4 and self.required_chips:
             return functools.partial(spec.gate, required=self.required_chips)
         if spec.number == 0:
-            return self._with_stack_pins(spec.gate)
+            return self._with_capabilities(self._with_stack_pins(spec.gate))
         if spec.skill == "full-port-mesh":
             # The chip count is the supervisor's own (the run's --required-chips), and so is the rehearsal flag (from the ledger): the coder can
             # write neither.
@@ -2450,6 +2450,22 @@ class Supervisor:
         def gate(stage_dir, run_dir):
             result = base(stage_dir, run_dir)
             extra = stack_pins_mod.gate_reasons(stage_dir, self._stack_pins_sha(stage_dir))
+            if not extra:
+                return result
+            return dataclasses.replace(result, ok=False, reasons=tuple(result.reasons) + tuple(extra))
+        return gate
+
+    def _with_capabilities(self, base):
+        """Stage 0's gate plus the bundle capabilities check (orchard/bundle_capabilities.py): when the run's `bundle` input ships
+        orchard-capabilities.json, delta.json must record that stage 0 applied it, with the file's current sha256. The bundle directory is
+        the supervisor's own input; the file is read here, never taken from the stage directory. With no bundle input the check still runs: a
+        delta.json that says capabilities were found or applied is refused, because the agent writes the config that names the folder."""
+        bundle = self.inputs.get(bundle_capabilities.INPUT)
+        bundle = bundle if isinstance(bundle, str) and bundle else None
+
+        def gate(stage_dir, run_dir):
+            result = base(stage_dir, run_dir)
+            extra = bundle_capabilities.gate_reasons(stage_dir, bundle)
             if not extra:
                 return result
             return dataclasses.replace(result, ok=False, reasons=tuple(result.reasons) + tuple(extra))
@@ -4854,7 +4870,8 @@ class Supervisor:
         tests, problems = read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
                                     budget_s=spec.budget_s, home=self.home)
         return tests, problems + swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
-                                                                       operator_home=self.paths.operator_home, counts=[t.chips for t in tests])
+                                                                       operator_home=self.paths.operator_home, counts=[t.chips for t in tests],
+                                                                       bundle=self._run_bundle())
 
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
@@ -4888,6 +4905,12 @@ class Supervisor:
 
     # ---- the hardware test ----------------------------------------------------------------------
 
+    def _run_bundle(self) -> str | None:
+        """The run's `bundle` input: the directory of the bundle the operator named or the preflight chose (cli.py). Stages 2 and 4 use it
+        or a bundle of its family (swap_draft.nearest_problem)."""
+        value = (getattr(self, "inputs", None) or {}).get("bundle")
+        return value if isinstance(value, str) and value else None
+
     def _read_test(self, stage_dir: Path) -> tuple[dict | None, list[str]]:
         problems = []
         got = {name: safeio.read_json_checked(stage_dir / name, max_bytes=RUN_JSON_MAX) for name in ("hw_test.json", "handoff.json")}
@@ -4901,7 +4924,7 @@ class Supervisor:
         if isinstance(d, bool) or not isinstance(d, (int, float)) or d <= 0:
             problems.append("hw_test.json needs a positive deadline_s")
         if (wrong := swap_draft.nearest_problem(self.run_dir, stage_dir / "swap_config.json", tt_model_root=self.paths.tt_model_root,
-                                                operator_home=self.paths.operator_home)):
+                                                operator_home=self.paths.operator_home, bundle=self._run_bundle())):
             problems.append(wrong)
         if not isinstance(note, dict) or any(note.get(k) in (None, "") for k in NOTE_KEYS):
             problems.append(f"handoff.json needs {', '.join(NOTE_KEYS)}")
@@ -5687,7 +5710,7 @@ class Supervisor:
             self.ledger.append("decision", n, decision="hardware test plan refused, so the prepare step runs again", file=PLAN, reason=why)
         if tests is not None and (wrong := swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
                                                                               operator_home=self.paths.operator_home,
-                                                                              counts=[t.chips for t in tests])):
+                                                                              counts=[t.chips for t in tests], bundle=self._run_bundle())):
             return "fail", wrong, None             # a plan saved before the check existed can still name the wrong model's package
         if tests is None:
             self._draft(spec, stage_dir)
