@@ -211,6 +211,51 @@ def extract_code(reply: str) -> str:
     return blocks[0] if blocks else reply
 
 
+# What a port function has no use for. This is a guard on a coder reply, not a sandbox: the coder can already write any file in the port
+# directory, and the port runs with the run's own settings. The guard keeps a reply from reaching the host by accident or by a trick the
+# plain import list would miss (review of PR 685). Names that run code from a string, open files, load modules by name, reach the
+# interpreter's internals or unpickle are refused anywhere in the reply, including default arguments and decorators, which run when the
+# port is imported.
+DENIED_MODULES = ("transformers", "subprocess", "os", "sys", "socket", "urllib", "requests", "importlib", "ctypes", "pickle", "marshal",
+                  "shutil", "pathlib", "builtins", "runpy", "code", "codeop", "pty", "tempfile", "glob", "http", "ftplib", "smtplib",
+                  "multiprocessing", "signal", "inspect", "gc", "atexit", "pdb", "site", "sysconfig", "webbrowser")
+DENIED_CALLS = ("exec", "eval", "compile", "open", "input", "breakpoint", "setattr", "delattr", "globals", "locals", "vars")
+DENIED_TORCH_CALLS = ("load", "save")
+
+
+def _dunder(name) -> bool:
+    return isinstance(name, str) and len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _refuse_unusable(tree: ast.Module) -> None:
+    """Raises SpliceError for the first thing in the reply's syntax tree that a port function has no use for."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.decorator_list:
+            raise SpliceError(f"{node.name} has a decorator; a decorator runs when the port is imported, and no port function needs one")
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            if any(n.split(".")[0] in DENIED_MODULES for n in names):
+                raise SpliceError("the reply imports a module a port function may not use")
+        elif isinstance(node, ast.Name) and _dunder(node.id):
+            raise SpliceError(f"the reply uses the dunder name {node.id}, which a port function has no use for")
+        elif isinstance(node, ast.Attribute) and _dunder(node.attr):
+            raise SpliceError(f"the reply uses the dunder attribute {node.attr}, which a port function has no use for")
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name) and fn.id in DENIED_CALLS:
+                raise SpliceError(f"the reply may not call {fn.id}")
+            if isinstance(fn, ast.Name) and fn.id == "getattr":
+                second = node.args[1] if len(node.args) > 1 else None
+                if not (isinstance(second, ast.Constant) and isinstance(second.value, str)):
+                    raise SpliceError("getattr needs a constant attribute name in a port function")
+                if second.value.startswith("_"):
+                    raise SpliceError(f"getattr of {second.value!r}: a dunder or private attribute name is not allowed (dunder)")
+            if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) and fn.value.id == "torch" and fn.attr in DENIED_TORCH_CALLS:
+                raise SpliceError(f"the reply may not call torch.{fn.attr}; the weights are loaded by load()")
+        elif isinstance(node, ast.Raise) and port_template._stub_raise_text(node) is not None:
+            raise SpliceError("the reply keeps the generated stub text (a NotImplementedError that says the block is not written yet)")
+
+
 def splice(port_text: str, function: str, reply: str) -> str:
     """`port_text` with the stub function `function` replaced by the reply's definition of it. Raises SpliceError when the reply is not one
     code block of imports and function definitions that defines `function` with the stub's argument names, keeps the marker, or does not
@@ -237,11 +282,7 @@ def splice(port_text: str, function: str, reply: str) -> str:
             raise SpliceError(f"the reply redefines {name}, which the port already has")
     if any(l.strip().startswith(port_template.STUB_MARK) for l in code.split("\n")):
         raise SpliceError("the reply keeps the stub marker")
-    for node in ast.walk(new):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-            if any(n.split(".")[0] in ("transformers", "subprocess", "os", "sys", "socket", "urllib", "requests") for n in names):
-                raise SpliceError("the reply imports a module a port function may not use")
+    _refuse_unusable(new)
     lines = port_text.split("\n")
     new_lines = lines[: stub.lineno - 1] + code.strip("\n").split("\n") + lines[stub.end_lineno:]
     text = "\n".join(new_lines)

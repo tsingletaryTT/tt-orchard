@@ -529,3 +529,35 @@ def test_the_command_line_generates_from_files_and_checks_a_directory(tmp_path, 
     out.write_text(HOST_PORT)
     assert pt.main(["check", str(out.parent)]) == 1
     assert pt.main(["generate", "--snapshot", str(tmp_path / "none"), "--construction", str(con), "--out", str(out)]) == 1
+
+
+# ---- a stub whose marker was deleted (review of PR 685) ------------------------------------------------------------------------------------
+
+STUB_TEXT = "_B_ple: Qwen4ExpTextPLELayer at model.layers.1.ple is not written yet"
+
+
+def _port_with(body: str) -> str:
+    return ("import ttnn\n\n\ndef _lin(x, w):\n    return ttnn.linear(x, w)\n\n\ndef _B_ple(model, i, x, ids):\n" + body + "\n")
+
+
+def test_deleting_the_marker_comment_does_not_remove_a_stub():
+    kept = pt.check_sources({"port_model.py": _port_with(f"    # AGENT: write it\n    raise NotImplementedError({STUB_TEXT!r})")})
+    gone = pt.check_sources({"port_model.py": _port_with(f"    raise NotImplementedError({STUB_TEXT!r})")})
+    assert not kept["ok"] and not gone["ok"]
+    assert len(kept["stubs"]) == 1 and len(gone["stubs"]) == 1                   # counted once, by function, not once per sign
+    assert any("stub(s) remain" in p for p in gone["problems"])
+
+
+def test_a_function_that_raises_another_not_implemented_error_is_not_a_stub():
+    ok = pt.check_sources({"port_model.py": _port_with("    raise NotImplementedError('decode_step is not supported for this block')")})
+    assert not ok["stubs"]
+
+
+def test_the_generated_stub_text_is_found_in_a_nested_function_and_a_method_too():
+    text = _port_with("    def inner():\n        raise NotImplementedError(" + repr(STUB_TEXT) + ")\n    return inner")
+    assert len(pt.check_sources({"port_model.py": text})["stubs"]) == 1
+
+
+def test_the_stub_marker_in_a_string_is_still_not_a_stub():
+    text = _port_with("    return 'x'  # fine\n    s = '# AGENT: not a stub'")
+    assert not pt.check_sources({"port_model.py": text})["stubs"]

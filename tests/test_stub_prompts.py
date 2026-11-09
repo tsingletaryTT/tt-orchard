@@ -146,6 +146,47 @@ def test_a_bad_reply_is_refused_with_a_reason(tiny, reply, why):
     assert sp.function_source(text, "_A_linear_attn") in text          # the port is unchanged
 
 
+# The splice is a guard on what a coder reply may contain, not a sandbox: the coder can already write any file in the port directory.
+# These replies are refused because a port function has no use for them (review of PR 685).
+def _fn(body: str, *, head: str = "") -> str:
+    return "```python\n" + head + "def _A_linear_attn(model, i, x, ids):\n" + "\n".join("    " + l for l in body.split("\n")) + "\n```"
+
+
+@pytest.mark.parametrize("reply,why", [
+    (_fn("exec('x = 1')\nreturn x"), "may not call exec"),
+    (_fn("return eval('x')"), "may not call eval"),
+    (_fn("return compile('x', 'f', 'eval')"), "may not call compile"),
+    (_fn("return open('/etc/passwd').read()"), "may not call open"),
+    (_fn("return __import__('os').getcwd()"), "dunder"),
+    (_fn("return x.__class__.__subclasses__()"), "dunder"),
+    (_fn("return getattr(x, '__class__')"), "dunder"),
+    (_fn("return getattr(x, name)"), "getattr"),
+    (_fn("import importlib\nreturn x"), "may not use"),
+    (_fn("import ctypes\nreturn x"), "may not use"),
+    (_fn("import pickle\nreturn pickle.loads(x)"), "may not use"),
+    (_fn("from pathlib import Path\nreturn Path('.')"), "may not use"),
+    (_fn("import shutil\nreturn x"), "may not use"),
+    (_fn("import builtins\nreturn x"), "may not use"),
+    (_fn("import torch\nreturn torch.load('f')"), "torch.load"),
+    ("```python\ndef _helper(a, y=open('/etc/passwd')):\n    return a\ndef _A_linear_attn(model, i, x, ids):\n    return _helper(x)\n```", "may not call open"),
+    ("```python\ndef deco(f):\n    return f\n@deco\ndef _A_linear_attn(model, i, x, ids):\n    return x\n```", "decorator"),
+    ("```python\ndef _A_linear_attn(model, i, x, ids):\n    raise NotImplementedError('_A_linear_attn: Qwen4ExpTextGatedDeltaNet at model.layers.0.linear_attn is not written yet')\n```",
+     "generated stub text"),
+])
+def test_a_reply_with_a_call_or_import_a_port_function_has_no_use_for_is_refused(tiny, reply, why):
+    text, _ = tiny
+    with pytest.raises(sp.SpliceError, match=why):
+        sp.splice(text, "_A_linear_attn", reply)
+    assert sp.function_source(text, "_A_linear_attn") in text
+
+
+def test_a_reply_that_uses_ordinary_port_idioms_is_still_accepted(tiny):
+    text, _ = tiny
+    reply = _fn("import torch\nimport ttnn\nscale = getattr(model['cfg'], 'scale', 1.0)\nh = ttnn.linear(x, model['dev']['w'])\n"
+                "return torch.nn.functional.silu(h) * scale")
+    assert "ttnn.linear" in sp.function_source(sp.splice(text, "_A_linear_attn", reply), "_A_linear_attn")
+
+
 def test_splice_refuses_a_function_the_port_lacks_and_a_port_that_does_not_parse(tiny):
     text, _ = tiny
     with pytest.raises(sp.SpliceError, match="no top-level function"):

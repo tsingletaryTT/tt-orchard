@@ -715,13 +715,47 @@ def generate(*, config, construction, tensors, inventory=None, excerpts=None) ->
 
 # ---- the CPU check -----------------------------------------------------------------------------------------------------------------------
 
+STUB_RAISE_TAIL = " is not written yet"          # the end of the message every generated stub raises (`_stub_function`)
+
+
+def _stub_raise_text(node) -> str | None:
+    """The message of `raise NotImplementedError("... is not written yet")`, the generator's own stub body, else None."""
+    exc = node.exc if isinstance(node, ast.Raise) else None
+    if not (isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name) and exc.func.id == "NotImplementedError" and exc.args):
+        return None
+    arg = exc.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value.endswith(STUB_RAISE_TAIL):
+        return arg.value
+    return None
+
+
 def stub_lines(source: str) -> list[tuple]:
-    """(line number, text) of every comment line that starts with the stub marker. A string that holds the marker is not a stub."""
-    out = []
-    for n, line in enumerate(source.split("\n"), 1):
-        if line.strip().startswith(STUB_MARK):
-            out.append((n, line.strip()[:160]))
-    return out
+    """(line number, text) of every stub: a function that holds a comment line starting with the stub marker, or that raises the generator's
+    own `NotImplementedError("... is not written yet")`. A function is counted once however many of these signs it holds, so deleting the
+    marker comment does not remove the stub (review of PR 685). A string that holds the marker is not a stub. A source that does not parse is
+    judged by its marker comments alone (the parse error is reported by the check)."""
+    marks = [(n, line.strip()[:160]) for n, line in enumerate(source.split("\n"), 1) if line.strip().startswith(STUB_MARK)]
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return marks
+    spans = [(node.lineno, node.end_lineno, node.name) for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+
+    def owner(n: int):
+        for first, last, name in spans:
+            if first <= n <= last:
+                return name
+        return ("line", n)
+
+    found: dict = {}
+    for n, text in marks:
+        found.setdefault(owner(n), (n, text))
+    for node in ast.walk(tree):
+        text = _stub_raise_text(node)
+        if text is not None:
+            found.setdefault(owner(node.lineno), (node.lineno, ("raise NotImplementedError: " + text)[:160]))
+    return sorted(found.values())
 
 
 def check_sources(sources: dict) -> dict:
