@@ -34,12 +34,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import re
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+from orchard.safeio import is_finite_number
 
 ALLOWED_ORGS = ("Qwen",)
 QWEN4_BUNDLE = "mando2222/qwen4-27b-dense-v6-thin"
@@ -149,12 +150,12 @@ def _count(tc: dict, key: str, reasons: list) -> int | None:
 
 
 def _show(v) -> str:
-    text = json.dumps(v, default=repr) if not isinstance(v, float) or math.isfinite(v) else repr(v)
+    text = json.dumps(v, default=repr) if not isinstance(v, float) or is_finite_number(v) else repr(v)
     return text if len(text) <= 60 else text[:57] + "..."
 
 
 def _number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    return is_finite_number(v)
 
 
 def _parse_json(raw, name: str, reasons: list):

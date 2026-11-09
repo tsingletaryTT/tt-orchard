@@ -402,3 +402,14 @@ def test_rules_compare_json_values(key, rule, value):
     c["keys"][key] = rule
     out = verdict(cfg, capabilities=c)
     assert any(r.startswith(f"{key} is ") and "the package serves" in r for r in out["reasons"]), out["reasons"]
+
+
+@pytest.mark.parametrize("value", [10 ** 400, -(10 ** 400)])
+def test_a_huge_integer_is_a_named_reason_not_a_crash(value):
+    """math.isfinite(10**400) raises OverflowError; a config value that large must still give a named reason."""
+    cfg = qwen4_dense()
+    cfg["text_config"]["hc_lowrank"] = value
+    c = bare_caps()
+    c["keys"]["hc_lowrank"] = {"min": 1, "max": 4096}
+    out = verdict(cfg, capabilities=c)
+    assert out["verdict"] == "not-covered" and any(r.startswith("hc_lowrank is ") for r in out["reasons"])
