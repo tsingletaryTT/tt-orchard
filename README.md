@@ -2544,14 +2544,23 @@ model does not help (earlier runs on `linear_scan` spent $0.83 on one model with
 count against the caps and it is not cached); `extra_body` is how to turn thinking off for a model that thinks by default. The reply is advice from another model and is shown marked as untrusted text; nothing runs it.
 
 **An unreachable endpoint (issue 650).** On 2026-11-09 the network behind the helper's endpoint went away. Each call then waited about seven
-minutes for the TCP connect to give up, the run kept asking, and hardware time went on repair rounds with no help. Now a connect gets
-`connect_timeout_s` (10 s) and fails with an `Unreachable` answer that costs nothing. After `unreachable_after` such failures in a row the
-breaker opens: the run makes no more requests, writes one ledger decision (`helper unreachable, not asking`) and one notice, and an unattended
-run whose `unreachable_action` is `block` stops with the block code `helper-unreachable`. `bringup --auto-retries` retries that code like the
-other recoverable ones, and each retry starts with a fresh probe. An attended run gets the notice and goes on. An open breaker lets one ask
-through every `unreachable_probe_s` seconds, and a reply closes it. A preflight row (`helper`) connects to the models route with the short
-timeout and no key and says whether the endpoint answers; with `required = true` it blocks the start. A proxy in the environment skips the
-direct connect test, because the route is the proxy's. Error text never holds the key or a header.
+minutes for the TCP connect to give up, the run kept asking, and hardware time went on repair rounds with no help. Now the connection to the
+endpoint (or to the proxy, when one is configured) gets `connect_timeout_s` (10 s), and the reply gets `timeout_s` once the connection is made.
+Only a failure to connect is an `Unreachable` answer, and only that one is recorded as costing nothing. A timeout after the request began to
+go out keeps its cost unknown, because the provider may have billed it. After `unreachable_after` connect failures in a row the breaker opens:
+the run makes no more requests, writes one ledger decision (`helper unreachable, not asking`) and one notice, and an unattended run whose
+`unreachable_action` is `block` stops with the block code `helper-unreachable`. `bringup --auto-retries` retries that code like the other
+recoverable ones. An attended run gets the notice and goes on. An open breaker lets one ask through every `unreachable_probe_s` seconds, and a
+reply closes it.
+
+A restart does not forget the outage. The ledger holds it until a `helper reachable again` decision follows, so the first helper ask of a new
+process probes the models route first (status line only, no key, the short timeout). While the probe fails, the new process opens its breaker
+without spending an ask or a call cap and blocks again with the same code. When the block came at the start of a repair round, the round is
+written as withdrawn (`port repair round interrupted`): the resume takes that round again and asks in it, and the failed ask does not count
+against the stage's asks.
+
+A preflight row (`helper`) makes the same status-line probe and says whether the endpoint answers; with `required = true` it blocks the start.
+A server that answers its status line and then stalls does not fail the row. Error text never holds the key or a header.
 
 Every call, refusal and cache hit is one record in the ledger (model, tokens, seconds, cost when a price is known, outcome). The ledger
 and the answer cache are in one SQLite database, `project.db`, in the telegraph state directory (see "The ledger database" below); before

@@ -523,18 +523,11 @@ def check_helper(problem: str | None, endpoint: str, required: bool) -> Check:
 
 
 def helper_problem(endpoint: str, api: str, connect_timeout: float) -> str | None:
-    """Try the helper's models route with the short connect timeout and no credentials. Any HTTP status means the host answers (a 401 is a
-    reachable endpoint that wants a key); None. A connection that cannot be made returns the cause."""
+    """Try the helper's models route with the short connect timeout and no credentials, reading the status line only: any HTTP status means the
+    host answers (a 401 is a reachable endpoint that wants a key), and a body that stalls cannot block the start. None when it answers, else
+    the cause."""
     from orchard import telegraph as tg
-    base = endpoint[:-3] if api == "anthropic" and endpoint.endswith("/v1") else endpoint
-    url = base.rstrip("/") + ("/v1/models" if api == "anthropic" else "/models")
-    try:
-        tg.http_get(url, {"Accept": "application/json"}, connect_timeout, connect_timeout=connect_timeout)
-    except tg.Unreachable as exc:
-        return str(exc)
-    except OSError as exc:
-        return f"{type(exc).__name__}"
-    return None
+    return tg.probe_endpoint(endpoint, api, connect_timeout)
 
 
 def check_reference(python: Path | None, problem: str | None) -> Check:

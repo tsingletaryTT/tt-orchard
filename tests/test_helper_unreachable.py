@@ -14,7 +14,7 @@ import urllib.error
 
 import pytest
 
-from orchard import blocked, handoff, preflight
+from orchard import blocked, handoff, port_repair, preflight
 from orchard import telegraph as tg
 from orchard import supervisor as sup
 from test_telegraph import KEY, Wire, make, openai_reply, records, table  # noqa: F401 - the shared fakes
@@ -54,32 +54,122 @@ def test_the_new_keys_have_defaults_and_are_checked(tmp_path):
 
 # ---- the connect timeout -----------------------------------------------------------------------------------------------------------
 
-def test_the_connect_is_tried_with_the_short_timeout_and_a_failure_is_unreachable(monkeypatch):
-    seen = []
+class FakeResponse:
+    def __init__(self, status=200, body=b"{}", stall=False):
+        self.status, self._body, self.stall, self.read_calls = status, body, stall, 0
 
-    def refuse(addr, timeout=None, **kw):
-        seen.append((addr, timeout))
-        raise socket.timeout("timed out")
+    def read(self, n=None):
+        self.read_calls += 1
+        if self.stall:
+            raise AssertionError("the body was read although only the status was needed")
+        return self._body
 
-    monkeypatch.setattr(tg.socket, "create_connection", refuse)
+
+class FakeConnection:
+    """A stand-in for http.client's connection classes: it records the constructor arguments, the timeouts and what was sent, and never opens a
+    socket. `fail_connect` and `fail_request` choose the phase in which it fails."""
+    made: list = []
+    fail_connect = None
+    fail_request = None
+    response = None
+
+    def __init__(self, host, port=None, timeout=None, context=None):
+        self.host, self.port, self.timeout, self.tunnel, self.sent, self.closed = host, port, timeout, None, None, False
+        self.sock = types.SimpleNamespace(timeouts=[], settimeout=lambda t: self.sock.timeouts.append(t))
+        FakeConnection.made.append(self)
+
+    def set_tunnel(self, host, port=None, headers=None):
+        self.tunnel = (host, port, dict(headers or {}))
+
+    def connect(self):
+        if FakeConnection.fail_connect is not None:
+            raise FakeConnection.fail_connect
+
+    def request(self, method, target, body=None, headers=None):
+        if FakeConnection.fail_request is not None:
+            raise FakeConnection.fail_request
+        self.sent = (method, target, body, dict(headers or {}))
+
+    def getresponse(self):
+        return FakeConnection.response or FakeResponse()
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    FakeConnection.made, FakeConnection.fail_connect, FakeConnection.fail_request, FakeConnection.response = [], None, None, None
+    monkeypatch.setattr(tg.http.client, "HTTPSConnection", FakeConnection)
+    monkeypatch.setattr(tg.http.client, "HTTPConnection", FakeConnection)
     monkeypatch.setattr(tg.urllib.request, "getproxies", lambda: {})
+    return FakeConnection
+
+
+def test_the_connection_is_made_with_the_short_timeout_and_the_reply_timeout_applies_once_connected(fake_http):
+    status, body = tg.http_post("https://llm.example.org/v1/chat/completions", {"Authorization": "Bearer " + KEY}, b"{}", 900, connect_timeout=10)
+    conn = fake_http.made[0]
+    assert (conn.host, conn.port, conn.timeout) == ("llm.example.org", 443, 10)          # the connect used 10 s, not the 900 s reply timeout
+    assert conn.sock.timeouts == [900]                                                      # and once connected the reply gets 900 s
+    assert conn.sent[:2] == ("POST", "/v1/chat/completions") and status == 200 and conn.closed
+
+
+def test_a_failure_to_connect_is_unreachable_and_never_quotes_the_headers(fake_http):
+    fake_http.fail_connect = socket.timeout("timed out")
     with pytest.raises(tg.Unreachable) as err:
         tg.http_post("https://llm.example.org/v1/chat/completions", {"Authorization": "Bearer " + KEY}, b"{}", 900, connect_timeout=10)
-    assert seen == [(("llm.example.org", 443), 10)]                 # the connect used 10 s, not the 900 s read timeout
-    assert KEY not in str(err.value) and "Authorization" not in str(err.value)
+    assert KEY not in str(err.value) and "Authorization" not in str(err.value) and "timed out after 10 s" in str(err.value)
+    assert fake_http.made[0].closed
 
 
-def test_a_proxy_in_the_environment_skips_the_direct_probe(monkeypatch):
-    """With a proxy the direct connect says nothing about the route, so the request goes through urllib as before."""
-    monkeypatch.setattr(tg.urllib.request, "getproxies", lambda: {"https": "http://proxy.example.org:3128"})
-    monkeypatch.setattr(tg.socket, "create_connection", lambda *a, **k: pytest.fail("the direct probe ran although a proxy is set"))
-
-    def fake_open(self, req, timeout=None):
-        raise urllib.error.URLError(socket.timeout("timed out"))
-
-    monkeypatch.setattr(tg.urllib.request.OpenerDirector, "open", fake_open)
-    with pytest.raises(tg.Unreachable):
+def test_a_failure_after_the_connection_was_made_is_not_unreachable(fake_http):
+    """The provider may have the request: a timeout while sending or waiting is an ordinary error, with unknown cost (review of PR 651)."""
+    fake_http.fail_request = socket.timeout("timed out while sending")
+    with pytest.raises(socket.timeout):
         tg.http_post("https://llm.example.org/v1/chat/completions", {}, b"{}", 900, connect_timeout=10)
+
+
+def test_such_a_failure_keeps_the_usage_unknown_and_does_not_count_toward_the_breaker(tmp_path):
+    def sent_then_stalled(url, headers, body, timeout):
+        raise socket.timeout("timed out waiting for the reply")
+
+    tel, _ = make(tmp_path, wire=sent_then_stalled, unreachable_after=1)
+    ans = tel.ask("p", "t1", "f1")
+    assert not ans.ok and not ans.unreachable and not tel.tripped
+    rec = records(tmp_path)[-1]
+    assert rec["usage_known"] is False and rec["cost_usd"] is None and "unreachable" not in rec
+
+
+def test_a_proxy_gets_the_same_short_connect_timeout_and_the_target_is_tunnelled(fake_http, monkeypatch):
+    monkeypatch.setattr(tg.urllib.request, "getproxies", lambda: {"https": "http://user:p%40ss@proxy.example.org:3128"})
+    monkeypatch.setattr(tg.urllib.request, "proxy_bypass", lambda host: False)
+    tg.http_post("https://llm.example.org/v1/chat/completions", {}, b"{}", 900, connect_timeout=10)
+    conn = fake_http.made[0]
+    assert (conn.host, conn.port, conn.timeout) == ("proxy.example.org", 3128, 10)
+    assert conn.tunnel[:2] == ("llm.example.org", 443) and conn.tunnel[2]["Proxy-Authorization"].startswith("Basic ")
+    assert conn.sock.timeouts == [900] and conn.sent[1] == "/v1/chat/completions"
+
+
+def test_a_plain_http_proxy_gets_the_absolute_url_and_the_short_connect_timeout(fake_http, monkeypatch):
+    monkeypatch.setattr(tg.urllib.request, "getproxies", lambda: {"http": "http://proxy.example.org:3128"})
+    monkeypatch.setattr(tg.urllib.request, "proxy_bypass", lambda host: False)
+    tg.http_post("http://10.1.2.3:8000/v1/chat/completions", {}, b"{}", 900, connect_timeout=10)
+    conn = fake_http.made[0]
+    assert (conn.host, conn.port, conn.timeout) == ("proxy.example.org", 3128, 10) and conn.sent[1] == "http://10.1.2.3:8000/v1/chat/completions"
+
+
+def test_a_failure_to_connect_through_a_proxy_is_unreachable(fake_http, monkeypatch):
+    monkeypatch.setattr(tg.urllib.request, "getproxies", lambda: {"https": "http://proxy.example.org:3128"})
+    monkeypatch.setattr(tg.urllib.request, "proxy_bypass", lambda host: False)
+    fake_http.fail_connect = OSError("Tunnel connection failed: 403 Forbidden")
+    with pytest.raises(tg.Unreachable):
+        tg.http_get("https://llm.example.org/v1/models", {}, 900, connect_timeout=10)
+
+
+def test_the_status_probe_returns_as_soon_as_the_headers_arrive_and_never_reads_the_body(fake_http):
+    fake_http.response = FakeResponse(status=401, stall=True)
+    assert tg.http_status("https://llm.example.org/v1/models", {}, 10, connect_timeout=10) == 401
+    assert fake_http.response.read_calls == 0 and fake_http.made[0].closed
 
 
 def test_the_telegraph_passes_its_connect_timeout_to_the_default_transport(tmp_path, monkeypatch):
@@ -200,10 +290,16 @@ class FakeLedger:
     def append(self, kind, stage, **data):
         self.rows.append((kind, stage, data))
 
+    def read(self):
+        """The rows in the shape the supervisor reads from the real ledger."""
+        return [{"event": k, "stage": s, "data": d} for k, s, d in self.rows]
+
 
 def supervisor_stub(tel, unattended=True):
     ns = types.SimpleNamespace(telegraph=tel, unattended=unattended, ledger=FakeLedger(), _helper_down_noted=False)
     ns._block = lambda stage, reason, **ev: sup.Supervisor._block(ns, stage, reason, **ev)
+    ns._helper_block_text = lambda failures: sup.Supervisor._helper_block_text(ns, failures)
+    ns._helper_outage_open = lambda: sup.Supervisor._helper_outage_open(ns)
     return ns
 
 
@@ -249,6 +345,87 @@ def test_a_helper_that_answered_or_failed_another_way_does_nothing(tmp_path):
     assert ns.ledger.rows == []
 
 
+def test_an_answered_request_closes_the_outage_in_the_ledger_and_an_unanswered_one_does_not(tmp_path):
+    tel, _ = make(tmp_path)
+    ns = supervisor_stub(tel)
+    ns._helper_down_noted = True
+    sup.Supervisor._helper_reached(ns, 2, tg.Answer(False, reason="HTTP 500"))              # no call id: nothing was answered
+    assert ns.ledger.rows == []
+    sup.Supervisor._helper_reached(ns, 2, tg.Answer(True, "text", call_id="abc"))
+    sup.Supervisor._helper_reached(ns, 2, tg.Answer(True, "text", call_id="def"))           # the second is a no-op: the outage is already closed
+    assert [r[2]["decision"] for r in ns.ledger.rows] == ["helper reachable again"] and ns._helper_down_noted is False
+
+
+# ---- the gate at the start of a restarted process (review of PR 651, finding 3) -----------------------------------------------------
+
+def open_outage(ns):
+    ns.ledger.append("decision", 2, decision="helper unreachable, not asking", failures=2)
+
+
+class Prober:
+    """A stand-in for the models-route probe: counts calls and either answers or fails to connect."""
+    def __init__(self, up):
+        self.up, self.calls = up, 0
+
+    def __call__(self, url, headers, timeout, connect_timeout=None):
+        self.calls += 1
+        if not self.up:
+            raise tg.Unreachable("cannot connect")
+
+
+def gate_rig(tmp_path, up, **kw):
+    prober = Prober(up)
+    tel, _ = make(tmp_path, **kw)
+    tel.prober = prober
+    ns = supervisor_stub(tel)
+    ns._helper_gate_done = False
+    return tel, ns, prober
+
+
+def test_the_gate_probes_once_and_blocks_a_restart_while_the_endpoint_is_still_down(tmp_path):
+    tel, ns, prober = gate_rig(tmp_path, up=False)
+    open_outage(ns)
+    with pytest.raises(handoff.Blocked) as err:
+        sup.Supervisor._helper_gate(ns, 2, round=3)
+    assert err.value.reason.startswith(blocked.HELPER_UNREACHABLE_MARK)
+    assert prober.calls == 1 and tel.tripped                                  # probed, and the breaker is held open without an ask
+    withdrawn = [r[2] for r in ns.ledger.rows if r[2].get("decision") == port_repair.WITHDRAWN]
+    assert len(withdrawn) == 1 and withdrawn[0]["round"] == 3
+    sup.Supervisor._helper_gate(ns, 2, round=3)                               # once per process: the second call does nothing
+    assert prober.calls == 1
+
+
+def test_the_gate_at_an_attempt_start_blocks_without_withdrawing_a_round(tmp_path):
+    tel, ns, prober = gate_rig(tmp_path, up=False)
+    open_outage(ns)
+    with pytest.raises(handoff.Blocked):
+        sup.Supervisor._helper_gate(ns, 2)
+    assert not [r for r in ns.ledger.rows if r[2].get("decision") == port_repair.WITHDRAWN]
+
+
+def test_the_gate_clears_the_outage_when_the_probe_is_answered(tmp_path):
+    tel, ns, prober = gate_rig(tmp_path, up=True)
+    open_outage(ns)
+    sup.Supervisor._helper_gate(ns, 2, round=1)                               # no block
+    assert prober.calls == 1 and not tel.tripped
+    assert ns.ledger.rows[-1][2]["decision"] == "helper reachable again"
+    assert sup.Supervisor._helper_outage_open(ns) is False
+
+
+def test_the_gate_does_nothing_when_the_ledger_holds_no_outage(tmp_path):
+    tel, ns, prober = gate_rig(tmp_path, up=False)
+    sup.Supervisor._helper_gate(ns, 2, round=1)
+    assert prober.calls == 0 and ns.ledger.rows == []
+
+
+def test_an_attended_or_continue_run_probes_and_holds_the_breaker_but_does_not_block(tmp_path):
+    tel, ns, prober = gate_rig(tmp_path, up=False)
+    ns.unattended = False
+    open_outage(ns)
+    sup.Supervisor._helper_gate(ns, 2, round=1)
+    assert tel.tripped and not [r for r in ns.ledger.rows if r[2].get("decision") == port_repair.WITHDRAWN]
+
+
 def test_the_block_code_is_listed_and_read_before_the_hardware_words():
     assert "helper-unreachable" in blocked.REASONS and "helper-unreachable" in blocked.AUTO_RETRY
     text = f"blocked: {blocked.HELPER_UNREACHABLE_MARK}: 2 connection attempts failed (connect to the host timed out; chip and board and device)"
@@ -269,22 +446,19 @@ def test_the_preflight_row_warns_when_the_helper_is_optional_and_blocks_when_req
     assert "timed out" in hard.detail and "without help" in soft.detail
 
 
-def test_the_probe_connects_with_the_short_timeout_and_treats_any_http_status_as_reachable(monkeypatch):
-    seen = {}
-
-    def fake_get(url, headers, timeout, connect_timeout=None):
-        seen.update(url=url, headers=dict(headers), timeout=timeout, connect=connect_timeout)
-        return 401, b"{}"
-
-    monkeypatch.setattr(tg, "http_get", fake_get)
+def test_the_preflight_probe_treats_any_http_status_as_reachable_and_reads_no_body(fake_http):
+    fake_http.response = FakeResponse(status=401, stall=True)            # a stalled body must not make the probe fail (review of PR 651)
     assert preflight.helper_problem("https://llm.example.org/v1", "openai", 10) is None
-    assert seen["url"] == "https://llm.example.org/v1/models" and seen["connect"] == 10 and "Authorization" not in seen["headers"]
+    conn = fake_http.made[0]
+    assert conn.sent[:2] == ("GET", "/v1/models") and "Authorization" not in conn.sent[3] and conn.timeout == 10
 
-    def fail_get(url, headers, timeout, connect_timeout=None):
-        raise tg.Unreachable("connect to llm.example.org:443 timed out after 10 s")
 
-    monkeypatch.setattr(tg, "http_get", fail_get)
+def test_the_preflight_probe_names_the_cause_when_the_connection_cannot_be_made(fake_http):
+    fake_http.fail_connect = socket.timeout("timed out")
     assert "timed out" in preflight.helper_problem("https://llm.example.org/v1", "openai", 10)
+    fake_http.fail_connect = None
+    fake_http.fail_request = socket.timeout("stalled")
+    assert "after the connection was made" in preflight.helper_problem("https://llm.example.org/v1", "openai", 10)
 
 
 # ---- the preflight wiring ----------------------------------------------------------------------------------------------------------

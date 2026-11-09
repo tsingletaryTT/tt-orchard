@@ -24,16 +24,18 @@ Nothing here opens a chip or uses a lease.
 """
 from __future__ import annotations
 
+import base64
 import dataclasses
 import difflib
-import errno
 import hashlib
 import ipaddress
+import http.client
 import json
 import math
 import os
 import re
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -418,70 +420,96 @@ class Unreachable(OSError):
     was sent, so the call cost nothing. The text names the host and the cause and never holds a header or a key (issue 650)."""
 
 
-# errno values that mean "the connection was never made" when they come back wrapped in a URLError (a proxy path)
-_NO_CONNECTION = {errno.ETIMEDOUT, errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTDOWN}
+def _proxy_for(parts: urllib.parse.SplitResult):
+    """The proxy URL (split) the environment names for this URL's scheme, or None when there is none or the host is excluded."""
+    proxy = urllib.request.getproxies().get(parts.scheme)
+    if not proxy or urllib.request.proxy_bypass(parts.hostname or ""):
+        return None
+    return urllib.parse.urlsplit(proxy if "://" in proxy else "http://" + proxy)
 
 
-def _connect_probe(url: str, connect_timeout: float) -> None:
-    """Open and close a TCP connection to the URL's host with the short `connect_timeout`, so an unreachable endpoint fails in seconds and not in
-    the minutes the operating system takes to give up. With a proxy in the environment the route is the proxy's, which a direct connect cannot
-    test, so the probe is skipped there (the request itself is still limited, see `_as_unreachable`). Raises Unreachable."""
+def _open(url: str, connect_timeout: float | None, read_timeout: float):
+    """(connection, request target, extra headers) for `url`, connected. The connect (and, through a proxy, the proxy's tunnel and the TLS
+    handshake) gets `connect_timeout`; once it is made the socket's timeout is `read_timeout`, the wait for each part of the reply. A failure
+    BEFORE the connection is made raises Unreachable: nothing was sent. Anything after that is not Unreachable: the provider may have the
+    request (issue 650, review of PR 651). The request itself is limited by the same timeouts whether or not a proxy is used."""
     parts = urllib.parse.urlsplit(url)
-    if urllib.request.getproxies().get(parts.scheme):
-        return
     host = parts.hostname or ""
     port = parts.port or (443 if parts.scheme == "https" else 80)
+    wait = connect_timeout if connect_timeout is not None else read_timeout
+    proxy = _proxy_for(parts)
+    extra: dict = {}
+    if proxy is not None:
+        auth = {}
+        if proxy.username:
+            token = base64.b64encode(f"{urllib.parse.unquote(proxy.username)}:{urllib.parse.unquote(proxy.password or '')}".encode()).decode()
+            auth = {"Proxy-Authorization": f"Basic {token}"}
+        phost, pport = proxy.hostname or "", proxy.port or 80
+        if parts.scheme == "https":
+            conn = http.client.HTTPSConnection(phost, pport, timeout=wait, context=ssl.create_default_context())
+            conn.set_tunnel(host, port, headers=auth)             # CONNECT, then TLS to the real host, both inside connect()
+            target = parts.path + (f"?{parts.query}" if parts.query else "")
+        else:
+            conn = http.client.HTTPConnection(phost, pport, timeout=wait)
+            extra, target = auth, url                              # the absolute form, as a proxy expects
+    elif parts.scheme == "https":
+        conn = http.client.HTTPSConnection(host, port, timeout=wait, context=ssl.create_default_context())
+        target = parts.path + (f"?{parts.query}" if parts.query else "")
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=wait)
+        target = parts.path + (f"?{parts.query}" if parts.query else "")
     try:
-        sock = socket.create_connection((host, port), timeout=connect_timeout)
-    except (OSError, ValueError) as exc:
-        cause = "timed out" if isinstance(exc, socket.timeout) else f"{type(exc).__name__}"
-        raise Unreachable(f"cannot connect to {host}:{port}: {cause} after {connect_timeout:g} s") from None
-    sock.close()
+        conn.connect()
+    except (OSError, http.client.HTTPException) as exc:
+        cause = "timed out" if isinstance(exc, socket.timeout) else type(exc).__name__
+        conn.close()
+        raise Unreachable(f"cannot connect to {host}:{port}: {cause} after {wait:g} s") from None
+    if conn.sock is not None:
+        conn.sock.settimeout(read_timeout)
+    return conn, target or "/", extra
 
 
-def _as_unreachable(exc: urllib.error.URLError, url: str) -> Unreachable | None:
-    """The Unreachable a URLError stands for, or None when the connection was made (an HTTPError is a reply, not a URLError of this kind)."""
-    reason = getattr(exc, "reason", None)
-    if isinstance(reason, (socket.timeout, socket.gaierror)) or (isinstance(reason, OSError) and getattr(reason, "errno", None) in _NO_CONNECTION):
-        host = urllib.parse.urlsplit(url).hostname or ""
-        return Unreachable(f"cannot connect to {host}: {type(reason).__name__}")
-    return None
+def _exchange(method: str, url: str, headers: dict, body: bytes | None, read_timeout: float, connect_timeout: float | None,
+              headers_only: bool = False) -> tuple[int, bytes]:
+    conn, target, extra = _open(url, connect_timeout, read_timeout)
+    try:
+        conn.request(method, target, body=body, headers={**headers, **extra})
+        resp = conn.getresponse()
+        return resp.status, (b"" if headers_only else resp.read(MAX_BODY))       # a redirect is returned as it is: it is not followed
+    finally:
+        conn.close()
 
 
 def http_post(url: str, headers: dict, body: bytes, timeout: float, connect_timeout: float | None = None) -> tuple[int, bytes]:
     """POST and return (status, body). A redirect is not followed, so the key cannot be sent to another host. `timeout` is the wait for the
-    reply; `connect_timeout` (when given) is how long the TCP connect may take, tried first. A connection that cannot be made raises
-    Unreachable."""
-    if connect_timeout is not None:
-        _connect_probe(url, connect_timeout)
-    opener = urllib.request.build_opener(_NoRedirect)
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.status, resp.read(MAX_BODY)
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(MAX_BODY)
-    except urllib.error.URLError as exc:
-        down = _as_unreachable(exc, url)
-        if down is not None:
-            raise down from None
-        raise
+    reply; `connect_timeout` (when given) is how long the connection may take to be made, through a proxy as well. A connection that cannot
+    be made raises Unreachable; a failure after it was made raises the underlying error."""
+    return _exchange("POST", url, headers, body, timeout, connect_timeout)
 
 
 def http_get(url: str, headers: dict, timeout: float, connect_timeout: float | None = None) -> tuple[int, bytes]:
-    if connect_timeout is not None:
-        _connect_probe(url, connect_timeout)
-    opener = urllib.request.build_opener(_NoRedirect)
+    return _exchange("GET", url, headers, None, timeout, connect_timeout)
+
+
+def http_status(url: str, headers: dict, timeout: float, connect_timeout: float | None = None) -> int:
+    """GET and return the status line's code as soon as the headers have arrived, without reading the body (a probe for a host that answers)."""
+    return _exchange("GET", url, headers, None, timeout, connect_timeout, headers_only=True)[0]
+
+
+def models_url(endpoint: str, api: str) -> str:
+    base = endpoint[:-3] if api == "anthropic" and endpoint.endswith("/v1") else endpoint
+    return base.rstrip("/") + ("/v1/models" if api == "anthropic" else "/models")
+
+
+def probe_endpoint(endpoint: str, api: str, connect_timeout: float, prober: Callable | None = None) -> str | None:
+    """None when the endpoint answers (any HTTP status: a 401 is a reachable host that wants a key), else the cause. No credentials are sent."""
     try:
-        with opener.open(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
-            return resp.status, resp.read(MAX_BODY)
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(MAX_BODY)
-    except urllib.error.URLError as exc:
-        down = _as_unreachable(exc, url)
-        if down is not None:
-            raise down from None
-        raise
+        (prober or http_status)(models_url(endpoint, api), {"Accept": "application/json"}, connect_timeout, connect_timeout=connect_timeout)
+    except Unreachable as exc:
+        return str(exc)
+    except (OSError, http.client.HTTPException) as exc:
+        return f"{type(exc).__name__} after the connection was made"
+    return None
 
 
 # ---------------------------------------------------------------------------------------------------- the result
@@ -619,7 +647,7 @@ class Telegraph:
     """One configured helper. `directory` is the state directory: it holds the database (the ledger and the answer cache) and
     the reply files (mode 0600). `scope` names the ledger inside the database; the caps count per scope."""
 
-    def __init__(self, config: Config, directory, *, transport: Callable | None = None, environ: dict | None = None,
+    def __init__(self, config: Config, directory, *, transport: Callable | None = None, prober: Callable | None = None, environ: dict | None = None,
                  clock: Callable[[], float] = time.time, hostname: str | None = None, home: str | None = None,
                  scope: str = DEFAULT_SCOPE):
         self.cfg = config
@@ -628,6 +656,7 @@ class Telegraph:
         # The default transport tries the TCP connect for `connect_timeout_s` only (issue 650); a transport passed in keeps its own signature.
         self.transport = transport or (lambda url, headers, body, timeout: http_post(url, headers, body, timeout,
                                                                                     connect_timeout=self.cfg.connect_timeout_s))
+        self.prober = prober                    # (url, headers, timeout, connect_timeout=) -> status; the default reads the status line only
         self._conn_failures = 0                 # connection failures in a row; a request that was connected resets it
         self._tripped_at: float | None = None   # when the breaker opened (or when the last probe failed); None while it is closed
         self.environ = os.environ if environ is None else environ
@@ -641,6 +670,16 @@ class Telegraph:
     def tripped(self) -> bool:
         """True while the breaker is open: enough connection failures in a row that the run has stopped asking."""
         return self._tripped_at is not None
+
+    def probe(self) -> str | None:
+        """Ask whether the endpoint answers (its models route, headers only, no key): None when it does, else the cause. Used when a run starts
+        again in the middle of an outage, so a restart does not forget it (review of PR 651)."""
+        return probe_endpoint(self.cfg.endpoint, self.cfg.api, self.cfg.connect_timeout_s, self.prober)
+
+    def hold_open(self) -> None:
+        """Open the breaker without a request: a restarted run that probed and found the endpoint still down."""
+        self._conn_failures = max(self._conn_failures, self.cfg.unreachable_after)
+        self._tripped_at = self.clock()
 
     def _breaker_refuses(self) -> bool:
         """True when the breaker is open and the probe interval has not passed. After the interval one ask goes out as the probe: the interval
