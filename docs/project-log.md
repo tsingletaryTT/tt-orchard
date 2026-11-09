@@ -4964,3 +4964,60 @@ serves the release with its own config.
 - Not done here: the run's `bundle` input is recorded by the bring-up command in the Track C item C3 change; until that lands nothing fills
   `nearest_bundle_dir` and these rules stay dormant. The Qwen4 bundle does not ship the file yet (its author writes it from the keys its code reads).
   No hardware was used.
+## 2026-11-09, Qwen4-27B drop-in plan and milestone M0: release-day check and watcher (branch `qwen4-drop-m0`)
+Prompt (operator): make a Qwen4-27B (dense) release as close to a drop-in of the weights as possible, stored on Hugging Face as a
+tt-model package with placeholder weights, and fed to tt-orchard on release day; then "is this built in such a way that it would
+kick off the tt-orchard run when the weights drop". Plan: `docs/superpowers/plans/2026-11-09-qwen4-27b-drop-in.md` (approved).
+Operator decisions: 4 and 2 chips; the full-port fallback made runnable early; the existing 20-layer frankenmodel pattern; a
+watcher started by a scheduled Claude task that notifies; with the chips held it notifies and waits; a release the package
+does not cover starts the fallback by itself.
+- Research (checked 2026-11-09): no official Qwen4-27B config, weights or date. The `qwen4_exp` class (transformers 5.19.0) and
+  Qwen3.8-Flash-Next are the only public form of the architecture. Look-alike `Qwen4-27B` repositories appeared under other
+  names, one with a zip file that looked like malware bait, so the check and the watcher accept only the `Qwen` organisation.
+- `orchard/drop_check.py` (`tt-orchard drop-check`): reads config, generation config, tokenizer files, chat template and the
+  weight index (never a weight file, never a token) and returns covered / not-covered / needs-operator / refused with every
+  reason, the route and the bringup command. Qwen4 rules: dense layers only (the shim's layer rule), no n-gram embedding, all
+  required keys (a missing `rope_theta` would silently become 10000), complete indexer keys, widths that split over 2 and 4
+  chips, and the package's capabilities file (`orchard-capabilities.json`, schema 1, documented in the module). No capabilities
+  file means not covered. 17 mutations, all red after four tests were added for survivors (a `..` name, split checks and a
+  boolean count masked by capability rules, the partial-indexer message masked by the count message).
+- `orchard/drop_watch.py` (`tt-orchard drop-watch init|tick|show`): one locked tick per call; states waiting, seen (upload not
+  finished: config, index, every listed shard, and 30 quiet minutes after the last commit), waiting-for-chips, running, ready,
+  blocked, failed, needs-operator. "starting" is written before the launch, so a tick killed in between never starts a second
+  run. 22 mutations, all red after two tests were added (an unknown config key's message, an unreadable weight index).
+- `scripts/reference_venv.py`: builds a second reference interpreter for a new model type beside the current one and never
+  touches an existing directory; 5 mutations, all red.
+- Decision: the dense shim and the type lists in `reference_gate.py`, `ops_inventory.py` and `qwen4_dense.py` stay limited to
+  `qwen4_exp*`, because the shim patches that class's missing dense layer; a future `qwen4` type arrives with its own classes, and
+  `stack_pins` already raises a critical stage 0 hazard when the reference interpreter lacks the class. The hazard scan detects
+  hyper-connections and the indexer by key whatever the type.
+- New fixture `tests/fixtures/model-configs/qwen4-dense-provisional-buildable.json`: the provisional dense config plus the keys
+  it lacks to build (indexer keys from Flash-Next, `rope_parameters` and `rms_norm_eps` from Qwen3.8). The original fixture is
+  unchanged because existing tests assert on it.
+- Runbook `docs/runbooks/qwen4-drop-day.md`, with the draft rules for the outside helper (off on this machine until the operator
+  fills in the `[telegraph]` table).
+- Machine setup (not in the repo): `package_format = "v6"` and `package_namespace` in `config/bringup.toml`; hypothesis and
+  pytest-xdist added to the repository's `.venv` (the README lists them as test tools).
+- The watcher is armed on the QuietBox 2 with a user systemd timer (a tick at :07 and :37, `KillMode=process` so a started
+  bringup outlives the tick; machine setup, not in the repo). A scheduled Claude task, the plan's first choice, cannot run from a
+  session on an SSH host. Tracks A (model code) and C (orchard's weights-only route) run as separate sessions; nothing in this
+  change ran on the chips.
+
+## 2026-11-09: the bundle the operator names is the bundle the run uses (Qwen4 drop-in plan, Track C item C3)
+Prompt (from the session that runs the Qwen4 drop-in plan): keep the chosen bundle through `resolve_base` and `check_base`, refuse a weights repo
+two bundles share, and choose the bundle by chip count.
+- Found on this box: `mando2222/qwen3.8-27b-dflash2-vision-p300x2-q4kv-v6-thin` and iteration 0 of `mando2222/qwen4-27b-dense-v6-thin` both serve
+  `Qwen/Qwen3.8-27B` on four chips. `--base` with either bundle kept only that repository; the base row then named whichever bundle sorted first
+  (the Qwen3.8 one), and stage 2 and 4 drafts either found two bundles for four chips or took any bundle of that repository for two chips.
+- `cli.resolve_base_bundle` returns the bundle a name refers to; `preflight.check_base(base_bundle=...)` uses it (a named bundle that does not
+  serve the base, or was refused as unable to take swapped weights, blocks); the base row's data carries `bundle_dir`, and the bring-up records it
+  as the run's `bundle` input (a resumed run keeps the one it started with). `nearest.bundle_family` is the named bundle and the other v6 bundles
+  with the same weights repository and the same `orchard-capabilities.json` (or, like it, none). `swap_draft.draft` and `draft_stage4` choose by
+  chip count within the family, and a bundle that ships capabilities is never replaced by a container package. `nearest_problem` and the stage 4
+  plan check refuse an agent-written config outside the family; the supervisor passes the run's bundle to both.
+- Without a name, `nearest.ambiguity` blocks the base row when the bundles that serve the base belong to different families or two serve the same
+  chip count, and lists the `--base <bundle>` commands. On this box that means a Qwen3.8 fine-tune now needs `--base` with the Qwen3.8 bundle until
+  the Qwen4 bundle's weights pointer moves to its own test checkpoint. Container packages are a fallback and do not count as rivals.
+- Not changed: issue 559 (a `--base` model id with no installed bundle) is a different problem and stays open.
+- Tests: `tests/test_bundle_identity.py`. 20 mutations; two survived at first (defensive branches of the capabilities digest) and each got a test;
+  all are red now. No hardware was used.
