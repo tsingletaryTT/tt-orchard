@@ -14,6 +14,7 @@ installing one with `tt-model pull`. The decision itself is `preflight.check_bas
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -35,6 +36,61 @@ class Installed(NamedTuple):
     schema: str          # "6" for a thin bundle, "5.1" for a container package
     chips: int
     directory: str = ""  # a bundle's install directory (its run.sh is read from it); empty for a container package
+
+
+CAPABILITIES_FILE = "orchard-capabilities.json"     # docs/bundle-capabilities.md
+CAPABILITIES_MAX_BYTES = 256 * 1024
+
+
+def capabilities_digest(directory: str) -> str | None:
+    """The sha256 of the bundle's orchard-capabilities.json, or None when it ships none (or has no directory). A file that cannot be read
+    (a link, a FIFO, too large) gets a digest of its own that names the bundle, so no other bundle shares it."""
+    if not directory:
+        return None
+    path = Path(directory) / CAPABILITIES_FILE
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return f"unreadable:{directory}"
+    try:
+        return safeio.sha256_file(path, max_bytes=CAPABILITIES_MAX_BYTES)
+    except safeio.SafeReadError:
+        return f"unreadable:{directory}"
+
+
+def bundle_family(chosen: Installed, installed) -> list[Installed]:
+    """The v6 bundles that can stand in for `chosen` on another chip count: those that serve the same weights repo and ship the same
+    orchard-capabilities.json (or, like `chosen`, none), `chosen` included. Two bundles of one family run the same model code for
+    different meshes; a container package is never in a family."""
+    want = capabilities_digest(chosen.directory)
+    out = [chosen]
+    for b in installed:
+        if (b.name != chosen.name and b.schema == "6" and b.directory and b.weights_repo == chosen.weights_repo
+                and capabilities_digest(b.directory) == want):
+            out.append(b)
+    return out
+
+
+def ambiguity(serving) -> str | None:
+    """Why the v6 bundles that serve one weights repo cannot be told apart unless the operator names one, else None: they belong to
+    different families (different orchard-capabilities.json, or one ships it and another does not), or two of them serve the same chip
+    count. Container packages are left out: stages 2 and 4 take one only when no bundle serves the chip count."""
+    v6 = [b for b in serving if b.schema == "6"]
+    families: dict = {}
+    for b in v6:
+        families.setdefault(capabilities_digest(b.directory), []).append(b.name)
+    if len(families) > 1:
+        return ("the installed bundles that serve it run different model code (they ship different orchard-capabilities.json, or only some "
+                "ship one): " + "; ".join(", ".join(sorted(names)) for names in sorted(families.values())))
+    by_chips: dict = {}
+    for b in v6:
+        by_chips.setdefault(b.chips, []).append(b.name)
+    same = sorted((n, sorted(names)) for n, names in by_chips.items() if len(names) > 1)
+    if same:
+        return "; ".join(f"{', '.join(names)} all serve it on {n} chips" for n, names in same)
+    return None
 
 
 def family_query(model_id: str) -> str:

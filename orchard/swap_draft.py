@@ -19,7 +19,7 @@ import os
 import socket
 from pathlib import Path
 
-from orchard import graft_trial, safeio, sampling_choice
+from orchard import graft_trial, nearest, safeio, sampling_choice
 from orchard.bringup_config import slug
 from orchard.nearest import read_installed
 
@@ -35,7 +35,7 @@ def _repo(model_id: str) -> str:
     return str(model_id).split("@", 1)[0]
 
 
-def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=None) -> str | None:
+def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=None, bundle=None) -> str | None:
     """Why an agent-written swap config does not serve stage 0's nearest model, or None. The weights are swapped into a bundle or package of
     the nearest model; a config that names another model serves the wrong architecture (issue 67: a Qwen3.8-27B bundle for a Qwen3-Coder model).
     Repository ids are compared exactly, without any `@revision`. A missing config, a config with no nearest_model_id (prepare_swap.py refuses that itself) or a run with no stage 0 record is no problem here."""
@@ -70,6 +70,25 @@ def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=N
         # the container template reads installed.json and runs tt-model under the config's operator_home, so the registry checked here has to be that one
         return (f"{Path(config_path).name} names operator_home {named_home}, but the run's is {operator_home}; the package registry the test "
                 f"reads has to be the one that was checked")
+    if isinstance(bundle, str) and bundle and tt_model_root is not None:
+        # The run's bundle (its `bundle` input): the config must use that bundle or one of its family, the object stage 0 judged.
+        named, family, boxes_ok, why = _named_bundle(tt_model_root, {"bundle": bundle}, want)
+        if why:
+            return f"{Path(config_path).name}: {why}"
+        if cfg.get("package") and not boxes_ok:
+            return (f"{Path(config_path).name} names the container package {cfg['package']}, and the run's bundle {named.name} ships "
+                    "orchard-capabilities.json: only a bundle of its family runs the code stage 0 judged")
+        bdir = cfg.get("bundle_dir")
+        if isinstance(bdir, str) and bdir:
+            path = Path(bdir) if Path(bdir).is_absolute() else Path(run_dir) / bdir
+            try:
+                real = os.path.realpath(path)
+            except (OSError, ValueError):
+                real = None
+            used = next((b for b in read_installed(tt_model_root) if b.directory and real and os.path.realpath(b.directory) == real), None)
+            if used is None or used.name not in family:
+                return (f"{Path(config_path).name} uses the bundle {used.name if used else path}, which is not {named.name} or a bundle of "
+                        "its family (the same weights repo and the same orchard-capabilities.json); use the run's bundle")
     served, what, unreadable = _served_repo(cfg, run_dir, operator_home)
     if unreadable:
         # A manifest that is there and refused (a link, a FIFO, an oversize file, NaN) or has no weights.repo_id is not an absent one: it could
@@ -130,14 +149,14 @@ def _served_repo(cfg: dict, run_dir, operator_home) -> tuple[str | None, str, st
     return None, "", ""
 
 
-def stage4_nearest_problems(run_dir, stage_dir, *, tt_model_root=None, operator_home=None, counts=None) -> list[str]:
+def stage4_nearest_problems(run_dir, stage_dir, *, tt_model_root=None, operator_home=None, counts=None, bundle=None) -> list[str]:
     """nearest_problem for each configs/<N>/swap_config.json of stage 4, each message led by its chip count. `counts`, when given, are the chip
     counts of the hardware-test plan: a configuration that is not in the plan is never run, so a leftover directory is not judged."""
     out = []
     for path in sorted(Path(stage_dir).glob("configs/*/swap_config.json")):
         if counts is not None and path.parent.name not in {str(c) for c in counts}:
             continue
-        msg = nearest_problem(run_dir, path, tt_model_root=tt_model_root, operator_home=operator_home)
+        msg = nearest_problem(run_dir, path, tt_model_root=tt_model_root, operator_home=operator_home, bundle=bundle)
         if msg:
             out.append(f"the {path.parent.name}-chip configuration: {msg}")
     return out
@@ -171,6 +190,34 @@ def _facts(run_dir: Path, inputs: dict) -> tuple[str | None, str | None, dict, l
         else:
             snapshots[key] = str(value)
     return model, nearest, snapshots, problems
+
+
+def _named_bundle(tt_model_root, inputs: dict, want: str):
+    """(the run's bundle, the names of its family, whether a container package may stand in, a problem). The run's `bundle` input is the
+    directory of the bundle the operator named or the preflight chose (cli.py). Stages 2 and 4 then choose by chip count among that
+    bundle's family only (nearest.bundle_family: the same weights repo and the same orchard-capabilities.json), and a bundle that ships
+    capabilities is never replaced by a container package. (None, None, True, None) when the run has no such input."""
+    d = inputs.get("bundle") if isinstance(inputs, dict) else None
+    if not isinstance(d, str) or not d:
+        return None, None, True, None
+    every = read_installed(tt_model_root)
+    try:
+        real = os.path.realpath(d) if "\0" not in d else None
+    except (OSError, ValueError):
+        real = None
+    named = next((b for b in every if b.directory and real and os.path.realpath(b.directory) == real), None)
+    if named is None:
+        return None, None, False, f"the run's bundle input {d} is not an installed bundle under {tt_model_root}"
+    if named.weights_repo != want:
+        return None, None, False, (f"the run's bundle {named.name} serves {named.weights_repo}, and stage 0's nearest model is {want}; "
+                                   "the weights would be swapped into another model's code")
+    family = {b.name for b in nearest.bundle_family(named, every)}
+    return named, family, nearest.capabilities_digest(named.directory) is None, None
+
+
+def _family_words(named) -> str:
+    return (f"no bundle of {named.name}'s family (the bundles that serve its weights repo and ship the same orchard-capabilities.json) "
+            if named is not None else "")
 
 
 def _container_fits(containers: list[dict], want: str, chips: int) -> list[dict]:
@@ -212,12 +259,15 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
         return None, problems
 
     want = _repo(nearest)
+    named, family, boxes_ok, why = _named_bundle(tt_model_root, inputs, want)
+    if why:
+        return None, [why]
     fits = [b for b in read_installed(tt_model_root)
             if b.weights_repo == want and b.schema == "6" and b.chips == chips
-            and (Path(tt_model_root) / b.name / "run.sh").is_file()]
+            and (Path(tt_model_root) / b.name / "run.sh").is_file() and (family is None or b.name in family)]
     # Eligibility comes before the chip-count choice: a refused 2-chip package must not hide a usable 4-chip one that the larger-count
     # fallback would take (review of PR 442, round 3).
-    installed = installed_containers(operator_home) if operator_home is not None else []
+    installed = installed_containers(operator_home) if operator_home is not None and boxes_ok else []
     fits, installed, record_problem = _eligible(tt_model_root, want, fits, installed)
     boxes = _container_fits(installed, want, chips)
     if record_problem:
@@ -227,6 +277,9 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
     if len(fits) > 1:
         problems.append(f"more than one bundle serves {want} on {chips} chips: "
                         + ", ".join(b.name for b in fits))
+    elif not fits and not boxes and named is not None:
+        problems.append(f"{_family_words(named)}serves {want} on {chips} chips"
+                        + ("" if boxes_ok else f"; {named.name} ships orchard-capabilities.json, so no container package stands in for it"))
     elif not fits and not boxes:
         problems.append(f"no installed v6 bundle under {tt_model_root} serves {want} on {chips} chips"
                         + (" and no installed container package does" if operator_home is not None else ""))
@@ -305,9 +358,12 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
     common = {"run_dir": str(run_dir), "nearest_model_id": want, "base_snapshot": snapshots["base"],
               "new_snapshot": snapshots["model"], "new_model_id": model, "hf_home": str(hf_home),
               "prompt_suite": True, "sampling_probe": True}
+    named, family, boxes_ok, why = _named_bundle(tt_model_root, inputs, want)
+    if why:
+        return {}, None, [why]
     bundles = [b for b in read_installed(tt_model_root) if b.weights_repo == want and b.schema == "6"
-               and (Path(tt_model_root) / b.name / "run.sh").is_file()]
-    every = [c for c in installed_containers(operator_home) if c["repo"] == want]
+               and (Path(tt_model_root) / b.name / "run.sh").is_file() and (family is None or b.name in family)]
+    every = [c for c in installed_containers(operator_home) if c["repo"] == want] if boxes_ok else []
     bundles, containers, record_problem = _eligible(tt_model_root, want, bundles, every)
     refused = {c["name"] for c in every} - {c["name"] for c in containers}       # named in the note when four_chip_package picks one
     if record_problem:
@@ -347,7 +403,7 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
                          + ", ".join(c["name"] for c in cfit) + "); set four_chip_package in bringup.toml to choose")
             continue
         else:
-            notes.append(f"the {n}-chip configuration: no installed bundle or container package serves {want} "
+            notes.append(f"the {n}-chip configuration: {_family_words(named) or 'no installed bundle or container package '}serves {want} "
                          f"on {n} chips")
             if missing is not None:
                 missing.append(n)
