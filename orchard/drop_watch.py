@@ -41,12 +41,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from orchard import drop_check as dc
+from orchard import safeio
 
 STATES = ("waiting", "seen", "check", "needs-operator", "waiting-for-chips", "starting", "running", "ready", "blocked",
           "failed")
 TERMINAL = ("ready", "blocked", "failed")
 CONFIG_NAME, STATE_NAME, EVENTS_NAME, LOCK_NAME = "watch.toml", "state.json", "events.jsonl", ".lock"
 MAX_STATE_BYTES = 4 << 20
+MAX_LISTING_BYTES = 4 << 20       # the Hub's model search
+MAX_GOZER_BYTES = 4 << 20         # `gozer status --json`
 CONFIG_KEYS = ("target", "run_dir", "capabilities", "bundle", "qwen38_bundle", "quiet_minutes", "bringup_args", "command",
                "reference_python", "bundle_dir", "hf_home")
 
@@ -260,8 +263,14 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
                 if other != cfg.target and other not in seen_other and not dc.repo_problem(other):
                     seen_other.append(other)
                     ev("other-release", other)
-            info = hub.info(cfg.target)
-            if info is None:
+            try:
+                info, unreadable = hub.info(cfg.target), None
+            except dc.Unreadable as exc:
+                info, unreadable = None, str(exc)
+            if unreadable is not None:
+                ev("needs-operator", f"the Hub record cannot be read: {unreadable}")
+                state, st["needs"] = "needs-operator", "hub"
+            elif info is None:
                 if state == "seen":
                     ev("release-gone", f"{cfg.target} is no longer visible")
                 state = "waiting"
@@ -378,11 +387,11 @@ class Hub(dc.HubClient):
         if dc.repo_problem(f"{org}/{search}"):
             return []
         try:
-            raw = self._open(f"{self.base}/api/models?author={org}&search={search}&limit=50", 4 << 20)
-            data = json.loads(raw.decode("utf-8")) if raw else []
-        except (OSError, ValueError, dc.Unreadable):
+            raw = self._open(f"{self.base}/api/models?author={org}&search={search}&limit=50", MAX_LISTING_BYTES)
+            data = safeio.parse_json_bytes(raw, max_bytes=MAX_LISTING_BYTES, expect=list) if raw else []
+        except (OSError, ValueError, dc.Unreadable, safeio.SafeReadError):
             return []
-        return [m["id"] for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)] if isinstance(data, list) else []
+        return [m["id"] for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)]
 
 
 class SimHub(dc.DirClient):
@@ -396,8 +405,8 @@ def gozer_chips(run=subprocess.run) -> dict:
     """{"free": every chip FREE, "holders": [...]} from `gozer status --json`. A failure counts as not free."""
     try:
         done = run(["gozer", "status", "--json"], capture_output=True, text=True, timeout=120)
-        chips = json.loads(done.stdout).get("chips")
-    except (OSError, ValueError, subprocess.SubprocessError, AttributeError) as exc:
+        chips = safeio.parse_json_bytes(done.stdout, max_bytes=MAX_GOZER_BYTES, expect=dict).get("chips")
+    except (OSError, ValueError, subprocess.SubprocessError, safeio.SafeReadError) as exc:
         return {"free": False, "holders": [f"gozer status failed ({type(exc).__name__})"]}
     if not isinstance(chips, list) or not chips:
         return {"free": False, "holders": ["gozer status listed no chips"]}

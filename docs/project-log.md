@@ -5072,6 +5072,20 @@ Prompt (operator): do the items unblocked by the merge of PRs 657, 659, 660 and 
   removed; `Qwen/Qwen3-Coder-Next` is being downloaded into `~/.cache/huggingface` so the coder's first boot on release day
   does not download 159 GB with no output.
 
+## 2026-11-09: hostile-input readers for drop-check and the watcher (issue 676)
+
+- `tests/hostile_inputs.py` registers 15 readers for `orchard/drop_check.py` and `orchard/drop_watch.py`: the Hub record, the
+  release's `config.json` and `tokenizer_config.json` through the Hub client, the weight index, a simulated release's
+  `info.json` and `config.json` through `drop_check.run`, the three files `bundle_inputs` reads, the watcher's state and config
+  files, the Hub model search, `gozer status --json`, and the tick with a hostile Hub record or state file. Both modules left
+  `UNREGISTERED_MODULES`.
+- The corpus found five defects, now fixed: the Hub record could return NaN, a lone surrogate key or nesting past 50; the Hub
+  model search and `gozer status` raised `RecursionError` on deep nesting; an oversized Hub record ended the tick in a traceback.
+  Every outside JSON in both modules is now parsed with `safeio.parse_json_bytes`. An unreadable Hub record puts the watcher in
+  needs-operator (the same answer as a record with no commit hash). A NaN or a 400-digit integer in a release's `config.json` now
+  refuses the file with the parser's reason, where it was named by field before; the verdict (not covered) is unchanged.
+- 5 mutations (one per guard), all red in the unit tests; 4 of them also red in the corpus.
+- Still open: #666 (a network error or a partial state file ends in a traceback) and #667 (redirects).
 ## 2026-11-09 (UTC): README and site brought up to date after PR 640 (branch `literature-2026-11-10`)
 Prompt (operator): "we can update our website and readme with latest accomplishments too". This entry is the record the new README section "Since 2026-11-09" and the site's direction section cite. Sources are the pull requests named, the project log entries above, `gh` for the counts (read at 22:29Z), and the run records named below.
 - **Pull requests since PR 640 (merged 2026-11-09 01:20Z):** 642, 644, 648, 649, 651, 652, 655, 656, 657, 658, 659, 660, 661, 674 and 675. Seven of them (655, 656, 657, 659, 660, 661, 674) are by Eric Zietlow (`ezietlowTT`), reviewed and merged on 2026-11-09 between 18:32Z and 22:17Z. The review of 659 found that, with no bundle input, `_with_capabilities` returned the base gate and a capabilities record the stage 0 agent could write (through `nearest_bundle_dir`) set differences aside. The fix is on the branch before the merge: a record that says the file is present or applied is refused when the run has no bundle input (new tests red first, three mutations red).
