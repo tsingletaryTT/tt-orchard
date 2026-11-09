@@ -1,0 +1,428 @@
+{
+  "config": {
+    "architectures": [
+      "Qwen4ExpForCausalLM"
+    ],
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "bos_token_id": 248044,
+    "dtype": "bfloat16",
+    "eos_token_id": 248044,
+    "full_attention_interval": 4,
+    "hc_count": 4,
+    "hc_lowrank": 640,
+    "head_dim": 256,
+    "hidden_act": "silu",
+    "hidden_size": 5120,
+    "indexer_budget": 2048,
+    "indexer_compress_ratio": 4,
+    "indexer_head_dim": 128,
+    "indexer_kv_heads": 1,
+    "indexer_n_heads": 4,
+    "intermediate_size": 17408,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 128,
+    "linear_num_key_heads": 16,
+    "linear_num_value_heads": 48,
+    "linear_value_head_dim": 128,
+    "max_position_embeddings": 262144,
+    "model_type": "qwen4_exp_text",
+    "num_attention_heads": 24,
+    "num_hidden_layers": 20,
+    "num_key_value_heads": 4,
+    "output_gate_type": "silu",
+    "pad_token_id": null,
+    "ple_layer_ids": [],
+    "rms_norm_eps": 1e-06,
+    "rope_parameters": {
+      "mrope_interleaved": true,
+      "mrope_section": [
+        11,
+        11,
+        10
+      ],
+      "partial_rotary_factor": 0.25,
+      "rope_theta": 10000000,
+      "rope_type": "default"
+    },
+    "tie_word_embeddings": false,
+    "vocab_size": 248320
+  },
+  "dtype": "bfloat16",
+  "estimated_bytes": 22496516160,
+  "files": {
+    "chat_template.jinja": {
+      "bytes": 8952,
+      "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+    },
+    "config.json": {
+      "bytes": 1176,
+      "sha256": "6128287023b0977d7e4773eee81eaf30da4680ad5ce38ee5fab9371c7fba2aeb"
+    },
+    "generation_config.json": {
+      "bytes": 77,
+      "sha256": "f7e3271303b1db6a036d659681626cea77aacc2263c3280218146a48b746ae26"
+    },
+    "merges.txt": {
+      "bytes": 3353259,
+      "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+    },
+    "model.safetensors": {
+      "bytes": 22496567488,
+      "sha256": "a92c1355ca223eb27d7589ab048cbe9f68dbd2e1adc8ad90faff378f0c397ade"
+    },
+    "proofs.json": {
+      "bytes": 3052,
+      "sha256": "4698964efd5d3d629bf26c8f33f6e140eb8418fa2ada16bc6b0bd80a806ff7d4"
+    },
+    "reference/teacher-forced.json": {
+      "bytes": 4885,
+      "sha256": "da3a31e8dbb50dcd69c53ed49de2b5c345d4189f7be559469e2ae9840de87a92"
+    },
+    "tokenizer.json": {
+      "bytes": 12809320,
+      "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+    },
+    "tokenizer_config.json": {
+      "bytes": 17928,
+      "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27"
+    },
+    "vocab.json": {
+      "bytes": 6722759,
+      "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+    }
+  },
+  "hc_sigma": 0.0,
+  "identity_initialised": "hyper-connection weights are zero (mix 0.5, injection 1) and hc_norm.weight = 1 + 2 * the base norm weight, so the function equals the base model's; exact in float32, bf16 rounds the stored norm weight",
+  "indexers": "the higa2515 release's q_proj, k_proj, q_norm and k_block_norm (the mapping is unverified past the budget)",
+  "kind": "qwen4-franken",
+  "layer_types": [
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "full_attention"
+  ],
+  "layers": 20,
+  "not_carried": [
+    "visual tower",
+    "mtp head (transformers' Qwen4Exp has none)",
+    "per-layer embedding and n-gram table (ple_layer_ids is empty)"
+  ],
+  "proofs": {
+    "against_base": {
+      "max_abs_diff": 0.25,
+      "prompts": [
+        {
+          "last_top1_equal": true,
+          "max_abs_diff": 0.125,
+          "max_abs_logit": 16.75,
+          "prompt_tokens": 8,
+          "top1_equal": true
+        },
+        {
+          "last_top1_equal": true,
+          "max_abs_diff": 0.1875,
+          "max_abs_logit": 17.375,
+          "prompt_tokens": 16,
+          "top1_equal": true
+        },
+        {
+          "last_top1_equal": true,
+          "max_abs_diff": 0.25,
+          "max_abs_logit": 17.125,
+          "prompt_tokens": 33,
+          "top1_equal": true
+        }
+      ],
+      "tolerance": 0.86875,
+      "tolerance_rule": "0.05 of the largest logit; top-1 may flip on near ties",
+      "top1_equal_all": true
+    },
+    "against_base_all_selected": {
+      "max_abs_diff": 0.25,
+      "prompts": [
+        {
+          "last_top1_equal": true,
+          "max_abs_diff": 0.125,
+          "max_abs_logit": 16.75,
+          "prompt_tokens": 8,
+          "top1_equal": true
+        },
+        {
+          "last_top1_equal": true,
+          "max_abs_diff": 0.1875,
+          "max_abs_logit": 17.375,
+          "prompt_tokens": 16,
+          "top1_equal": true
+        },
+        {
+          "last_top1_equal": true,
+          "max_abs_diff": 0.25,
+          "max_abs_logit": 17.125,
+          "prompt_tokens": 33,
+          "top1_equal": true
+        }
+      ],
+      "tolerance": 0.86875,
+      "tolerance_rule": "0.05 of the largest logit; top-1 may flip on near ties",
+      "top1_equal_all": true
+    },
+    "decode": {
+      "base_ids": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        2415,
+        261,
+        518,
+        477,
+        477,
+        344,
+        19937,
+        220,
+        220,
+        947,
+        82,
+        641,
+        1001,
+        1001,
+        11,
+        220,
+        220,
+        220,
+        220,
+        198,
+        220,
+        220,
+        220,
+        220,
+        220,
+        220,
+        220
+      ],
+      "distinct_base": 14,
+      "distinct_franken": 14,
+      "franken_ids": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        2415,
+        261,
+        518,
+        477,
+        477,
+        344,
+        19937,
+        220,
+        220,
+        947,
+        82,
+        641,
+        1001,
+        1001,
+        11,
+        220,
+        220,
+        220,
+        220,
+        198,
+        220,
+        220,
+        220,
+        220,
+        220,
+        220,
+        220
+      ],
+      "prompt_source": "stage 1 prompt through the chat template",
+      "same_as_base": true
+    },
+    "deterministic": true,
+    "dtype": "bfloat16",
+    "execution_dtypes": {
+      "base": "torch.bfloat16",
+      "franken": "torch.bfloat16"
+    },
+    "hc_sigma": 0.0,
+    "identity_holds": true,
+    "indexer": {
+      "all_selected_budget": 2048,
+      "all_selected_equals_base": true,
+      "configured_budget": 2048,
+      "longest_prompt": 33,
+      "narrow_budget": 8,
+      "narrow_differs": true,
+      "narrow_vs_all_selected_max_abs_diff": 2.171875
+    },
+    "prompt_lengths": [
+      8,
+      16,
+      33
+    ],
+    "teacher_forced": {
+      "agree_fraction": 0.9935,
+      "distinct_top1": 49,
+      "distinct_top1_base": 49,
+      "positions": 155,
+      "same_top1_as_base": false,
+      "source": "fixed passage through the tokenizer"
+    }
+  },
+  "provisional": "built from public readings of an unreleased model; see the design note",
+  "real": "embedding, lm_head, every attention, delta-net and feed-forward tensor of the first K layers (copied from the base, cast to dtype)",
+  "reference_decode": {
+    "degenerate": false,
+    "distinct_ids": 14,
+    "generated_ids": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2415,
+      261,
+      518,
+      477,
+      477,
+      344,
+      19937,
+      220,
+      220,
+      947,
+      82,
+      641,
+      1001,
+      1001,
+      11,
+      220,
+      220,
+      220,
+      220,
+      198,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220
+    ],
+    "prompt_ids": [
+      248045,
+      8678,
+      198,
+      24342,
+      286,
+      4879,
+      369,
+      716,
+      310,
+      830,
+      11553,
+      13,
+      5044,
+      1683,
+      15060,
+      1472,
+      279,
+      3274,
+      11,
+      9307,
+      1328,
+      30800,
+      11,
+      2814,
+      47675,
+      25605,
+      11,
+      321,
+      60445,
+      55404,
+      11,
+      27224,
+      11,
+      321,
+      30246,
+      303,
+      279,
+      1534,
+      4087,
+      13,
+      248046,
+      198,
+      248045,
+      846,
+      198,
+      7734,
+      279,
+      1414,
+      353,
+      3502,
+      821,
+      38815,
+      883,
+      279,
+      10548,
+      26729,
+      13,
+      248046,
+      198,
+      248045,
+      74455,
+      198,
+      248068,
+      198
+    ],
+    "prompt_source": "stage 1 prompt through the chat template",
+    "prompt_tokens": 64,
+    "text": "!!!!!!--erialityityate\u0441\u044f   sps . \u201c \u201c,    \n       "
+  },
+  "seed": 1234,
+  "seeded": null,
+  "sources": {
+    "base_repo_dir": "models--Qwen--Qwen3.8-27B",
+    "base_snapshot": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "indexers": {
+      "repo_dir": "models--higa2515--Qwen3.8-27B-QSA-BF16",
+      "snapshot": "aedae2c5304698f58d30c5ec709ebf5b37339b1d"
+    }
+  },
+  "teacher_forced": {
+    "distinct_top1": 49,
+    "positions": 155,
+    "source": "fixed passage through the tokenizer"
+  },
+  "tensor_counts": {
+    "hc_identity": 122,
+    "hc_norm_derived": 41,
+    "hc_seeded": 0,
+    "indexer_real": 15,
+    "indexer_seeded": 0,
+    "real": 227
+  },
+  "versions": {
+    "python": "3.12.12",
+    "torch": "2.14.1+cpu",
+    "transformers": "5.19.0"
+  }
+}

@@ -76,51 +76,83 @@ The release's norms are zero-centred like the class's, which its `indexer.py` sa
 keys before pooling, and the class does not. The shapes fit, and the mapping is a reading that nothing has verified. It matters only for prompts
 longer than the budget, where a lowered budget (`--set indexer_budget=N`) tests that the indexer path runs and changes the output.
 
-## 5. What the proofs show and what they do not
+## 5. What the checks show and what they do not
 
-`make_franken.py --prove` runs these on the CPU and writes `proofs.json`:
+`make_franken.py` runs these checks. The first two run on every generation, the rest with `--prove`, which writes `proofs.json`.
 
-1. The franken's logits against the same K layers loaded through transformers' real Qwen3.5 class, on three seeded prompts of 8, 16 and 33
-   tokens. In float32 the pass rule is a difference of at most 5e-4 and the same top-1 token at every position. In bf16 the rule is 5% of the
-   largest logit, and top-1 may flip on near ties.
-2. Two runs of the franken give identical logits.
-3. With a perturbation (`--hc-sigma`), the franken differs from the base by more than the tolerance.
-4. A prompt shorter than the indexer budget gives the base's logits. With the budget lowered below the prompt length the logits differ.
+1. **Degenerate-reference guard (every generation).** The stage 1 prompt ("Write the text I send my landlord about the broken boiler.",
+   through the checkpoint's chat template) is greedy-decoded for 32 tokens on the CPU. A decode with fewer than 4 distinct ids exits 3 (the
+   checkpoint stays on disk with `degenerate: true` in its manifest; `--allow-degenerate` turns the exit into a warning). Reason: stage 2
+   compares chip tokens with these 32 reference tokens, and a constant reference passes a port that outputs the same constant.
+   `make_checkpoint.py` has the same bar. `--skip-decode-check` skips it for a generation that cannot run a forward pass.
+2. **Teacher-forced reference (every generation).** `reference/teacher-forced.json` holds the model's top-1 id at each of the 155 positions of a
+   fixed passage, and the five highest logits of the last 8. A greedy decode of a truncated model can be constant while its top-1 answers
+   at 155 positions still vary, so this is the informative part of the reference.
+3. **Equality with the base.** The franken's logits against the same K layers loaded through transformers' real Qwen3.5 class, on three seeded
+   prompts of 8, 16 and 33 tokens. The proof record names the dtype each model ran in. float32 rule: a difference of at most 5e-4 and the same
+   top-1 token everywhere. bf16 rule: 5% of the largest logit, and top-1 may flip on near ties.
+4. **Perturbation.** With `--hc-sigma` the franken must differ from the base by more than the rule allows.
+5. **Indexer.** The identity and perturbation claims are judged on the model with every block selected (a budget of at least the prompt length
+   plus a block), so a small configured budget cannot satisfy either claim through sparse attention. The comparison of the all-selected model
+   with a budget of 8 tokens always runs, and a missing indexer proof counts as a failure.
+6. **Determinism.** Two runs give identical logits.
 
 What a pass means: the hyper-connection and indexer wiring computes the base model's function, and the port target is a model with real
 weights whose correct output is known. A port that gets a hyper-connection or the gate activation wrong fails against it.
 
 What it does not mean: the franken is not a Qwen4. Its weights are the first K layers of a 64-layer model, so its text is not coherent and no
-quality figure can come from it. The agreement proves equality with Qwen3.8 on the same layers. It says nothing about how Qwen4's trained hyper-connection or
-indexer weights behave. The stage 2 text floor (readable free-run text) will not pass on its output, and the supervisor's
-`--full-port-rehearsal` option waives only that field.
+quality figure can come from it. The agreement proves equality with Qwen3.8 on the same layers. It says nothing about how Qwen4's trained
+hyper-connection or indexer weights behave. The stage 2 text floor (readable free-run text) will not pass on its output, and the
+supervisor's `--full-port-rehearsal` option waives only that field.
 
 ## 5a. Results on the real weights (2026-11-08, CPU, no chip)
 
-The records are in `docs/run-logs/evidence/2026-11-08-qwen4-franken/` (`proofs-*.json` and `manifest-*.json`). The base is the Qwen3.8-27B
-snapshot `1d4bf0f2`, the indexers are the higa2515 release snapshot `aedae2c5`, the prompts are seeded token ids of 8, 16 and 33 tokens, and every
-run used the reference interpreter (torch 2.14.1, transformers 5.19.0).
+The records are in `docs/run-logs/evidence/2026-11-08-qwen4-franken/`. The base is the Qwen3.8-27B snapshot `1d4bf0f2`, the indexers are the
+higa2515 release snapshot `aedae2c5`, the proof prompts are seeded token ids of 8, 16 and 33 tokens, and every run used the reference
+interpreter (torch 2.14.1, transformers 5.19.0).
 
-| Checkpoint | Size on disk | Largest logit difference to the base | Top-1 at every position |
-|---|---|---|---|
-| K = 4, float32, identity hyper-connections | 17.2 GB | 0.0 on all three prompts | equal |
-| K = 8, bf16, identity hyper-connections | 12.1 GB | 0.119 (largest logit about 17, bound 0.86) | equal on all three prompts |
-| K = 8, bf16, hyper-connections drawn from N(0, 0.02^2) | 12.1 GB | 5.23 | differs |
+A first version of these proofs loaded the bf16 franken in float32 (the loader mistook transformers' normalised `config.dtype` for "not a
+string"), so the first bf16 figure (0.119) compared a float32 franken with a bf16 base. The loader now reads the dtype from the written config,
+the record names both execution dtypes, and the bf16 figures below are bf16 against bf16.
+
+**How many layers before the stage 1 decode is not degenerate.** Greedy decode of the stage 1 prompt, 32 tokens, franken against the same layers
+loaded through the Qwen3.5 class:
+
+| K layers | Size (bf16) | Distinct ids | First 12 generated ids | Base gives the same ids |
+|---|---|---|---|---|
+| 8 | 12.1 GB | 1 | 220 x 12 (a space) | yes |
+| 12 | 15.6 GB | 2 | 220, 220, 11, 220, 220, 220, 11, 220, 220, 11, 220, 220 | yes |
+| 16 | 19.0 GB | 2 | 220, 220, 220, 220, 220, 11, 11, 220, 220, 11, 220, 220 | yes |
+| 20 | 22.5 GB | 14 | 0, 0, 0, 0, 0, 2415, 261, 518, 477, 477, 344, 19937 | yes |
+
+The base shows the same ids at every K, so the degeneracy comes from truncating the model and the identity hyper-connection path adds nothing.
+K = 8, 12 and 16 fail the guard. K = 20 passes it, with 14 distinct ids and text that is varied and unreadable.
+
+**Equality and perturbation.** Largest logit difference to the base over the three prompts, with every block selected:
+
+| Checkpoint | Largest logit difference | Rule | Top-1 | Holds |
+|---|---|---|---|---|
+| K = 4, float32, identity | 0.0 | 5e-4 and top-1 equal | equal | yes |
+| K = 8, bf16, identity | 0.125 | 0.86 | equal | yes |
+| K = 12, bf16, identity | 0.125 | about 0.87 | equal | yes |
+| K = 16, bf16, identity | 0.125 | about 0.87 | equal | yes |
+| K = 20, bf16, identity | 0.25 | 0.87 | equal | yes |
+| K = 8, bf16, hyper-connections from N(0, 0.02^2) | 5.20 | 0.87 | differs | differs, as intended |
 
 * The float32 difference is exactly zero because every operation on the identity path is a scaling by a power of two or a mean of equal
-  values. The bf16 difference is the rounding of the stored `1 + 2 * w` norm weights and stays below 1% of the largest logit.
-* Two runs of each checkpoint give identical logits.
-* The size estimate made before writing was within 21 kB of the file written, for both sizes.
-* Indexer test: with the budget at 2048 and prompts of up to 33 tokens, the output equals the base's (the K = 8 bf16 run checks this
-  with the real release indexers in place). With the budget lowered to 8 tokens the logits move by 1.08 (K = 8, bf16) and 0.88 (K = 4,
-  float32), so the indexer path runs and changes the output once the prompt is longer than the budget.
-* The perturbed checkpoint is the port target for the non-identity case. A port that treats the hyper-connections as the identity would
-  differ from it by about 5 logits.
+  values. The bf16 differences are the rounding of the stored `1 + 2 * w` norm weights plus bf16 arithmetic, at most 1.5% of the largest logit.
+* Teacher-forced reference over 155 positions: K = 20 has 49 distinct top-1 ids and agrees with the base at 154 of 155 positions (99.35%; the
+  one flip is a bf16 near tie). K = 4 float32 has 5 distinct ids and agrees at all 155. The perturbed K = 8 agrees at 89.0%.
+* The indexer with a budget of 8 tokens moves the logits by 1.11 (K = 8), 2.17 (K = 20) and 0.88 (K = 4, float32) against the same model with
+  every block selected, so the indexer path runs and changes the output once the prompt is longer than the budget.
+* Two runs of each checkpoint give identical logits. The size estimate made before writing was within 21 kB of the file written.
 
-The K = 4 float32 and perturbed checkpoints were deleted after their proofs to save disk. They regenerate in about two minutes each with the
-commands in the manifest: `make_franken.py --out DIR --layers 4 --dtype float32 --indexers RELEASE_SNAPSHOT --max-gb 20 --prove` and
-`make_franken.py --out DIR --layers 8 --hc-sigma 0.02 --indexers RELEASE_SNAPSHOT --prove`.
+**Consequence for a hardware run.** The K = 20 bf16 checkpoint (22.5 GB) is the smallest tested truncation whose stage 1 decode is not degenerate,
+and it is the candidate for the hardware run. Stage 2 still compares only 32 greedy tokens with 14 distinct ids. The 155-position teacher-forced
+reference (`reference/teacher-forced.json`) is the larger test. The supervisor does not read it, so a hardware run has to compare the chip's
+top-1 ids at those positions by hand or through a stage 2 gate change (proposed, not made).
 
+The other checkpoints were deleted after their proofs to save disk. They regenerate with the commands in each manifest.
 
 ## 6. The hardware run
 
@@ -135,5 +167,6 @@ python3 -m orchard.supervisor run --model local/qwen4-franken-k8 --run-dir RUN -
 ```
 
 `BASE_CANDIDATES.json` names `Qwen/Qwen3.8-27B` as the nearest model, in the format of `~/orchard-runs/notes/qwen-like/runs/*/base-candidates.stage0.json`.
-The K = 8 bf16 checkpoint is about 11 GB, which is smaller than the tiny `--width 27b` model's tensor cache. Pass `--input base=` pointing at the
-Qwen3.8-27B snapshot so stage 0 can compare tensor names.
+Use the K = 20 bf16 checkpoint (22.5 GB). A K = 8 checkpoint fails stage 1: its CPU reference is the same space token 32 times, so the
+'matches the card' form check fails and stage 2's token agreement could not tell a wrong port from a right one. Pass `--input base=`
+pointing at the Qwen3.8-27B snapshot so stage 0 can compare tensor names.

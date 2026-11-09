@@ -568,3 +568,19 @@ def test_the_checkpoint_carries_a_teacher_forced_reference_and_the_proofs_compar
     assert p["distinct_top1"] == len(set(ref["top1_ids"]))
     m = json.loads((out / "franken-manifest.json").read_text())
     assert m["teacher_forced"]["positions"] == n and "reference/teacher-forced.json" in m["files"]
+
+
+def test_agreement_is_the_share_of_equal_positions_and_unequal_lengths_never_agree():
+    assert mf.agreement([1, 2, 3, 4], [1, 2, 3, 4]) == (1.0, True)
+    assert mf.agreement([1, 2, 3, 4], [1, 2, 9, 4]) == (0.75, False)
+    assert mf.agreement([1, 2], [1, 2, 3]) == (0.0, False) and mf.agreement([], []) == (0.0, False)
+
+
+def test_a_teacher_forced_passage_that_tokenizes_short_is_refused():
+    class Tok:
+        def __call__(self, text, add_special_tokens=False):
+            return {"input_ids": list(range(10))}
+    with pytest.raises(mf.FrankenRefused, match="fewer than"):
+        mf.teacher_forced_prompt(None, None, 300, Tok())
+    ids, source = mf.teacher_forced_prompt(None, None, 300, None)
+    assert len(ids) >= mf.TEACHER_FORCED_MIN_POSITIONS and "seeded" in source

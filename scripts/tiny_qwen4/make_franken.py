@@ -537,6 +537,14 @@ def teacher_forced_reference(torch, model, ids: list[int]) -> dict:
     return {"top1_ids": top1, "top5_last": last}
 
 
+def agreement(a: list, b: list) -> tuple[float, bool]:
+    """(share of positions where the two top-1 lists agree, whether they agree everywhere). Lists of different length never agree."""
+    if len(a) != len(b) or not a:
+        return 0.0, False
+    same = sum(1 for x, y in zip(a, b) if x == y)
+    return round(same / len(a), 4), same == len(a)
+
+
 def teacher_forced_prompt(transformers, out: Path, vocab: int, tok):
     """Token ids of TEACHER_FORCED_TEXT with the checkpoint's tokenizer, else seeded ids of the same length class."""
     if tok is not None:
@@ -663,10 +671,9 @@ def run_proofs(torch, transformers, qd, out: Path, text: dict, base: dict, cfg: 
     if decode is not None and decode.get("teacher_forced"):
         tfd = decode["teacher_forced"]
         base_tf = teacher_forced_reference(torch, base_model, tfd["prompt_ids"])["top1_ids"]
-        same = sum(1 for a, b in zip(tfd["top1_ids"], base_tf) if a == b)
+        fraction, equal_all = agreement(tfd["top1_ids"], base_tf)
         proofs["teacher_forced"] = {"source": tfd["source"], "positions": tfd["positions"], "distinct_top1": tfd["distinct_top1"],
-                                    "distinct_top1_base": len(set(base_tf)), "agree_fraction": round(same / tfd["positions"], 4),
-                                    "same_top1_as_base": same == tfd["positions"]}
+                                    "distinct_top1_base": len(set(base_tf)), "agree_fraction": fraction, "same_top1_as_base": equal_all}
     del base_model
     configured = compare(torch, first, reference, prompts)
     biggest = max(r["max_abs_logit"] for r in configured["prompts"])
