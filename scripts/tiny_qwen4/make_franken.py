@@ -43,8 +43,17 @@ logit difference to the base on three prompts, the equality of two runs, and the
 ttml, opens a device or uses the network. Weights are read with safetensors (the files are the model's own) and everything else
 is written with safeio.atomic_write.
 
-Exit codes: 0 done; 2 refused before writing (bad option, snapshot, output directory, size); 3 a proof failed; 4 torch,
-transformers or safetensors is not importable.
+What the output directory holds: `config.json` (the `qwen4_exp_text` config, with `layer_types` listing the base's own
+`linear_attention` and `full_attention` entries for the K layers, the form a real Qwen4 config is expected to take; Qwen4Exp maps
+`full_attention` to its `indexed_attention`), `generation_config.json`, `model.safetensors` (one file), the base's tokenizer files,
+`README.md` (a model card whose front matter says `license: apache-2.0`, which stage 0 and stage 7 read; it names the base revision
+and the options and says the checkpoint is not to be uploaded), `franken-manifest.json` (every file with its sha256, the seed and the
+sources) and, with `--prove`, `proofs.json`. The generator's `--seed` goes in the manifest and not in config.json, because `seed` in a
+Qwen4Exp config is the n-gram hash seed. A base whose own card names a license other than Apache-2.0 is refused, since the card written
+here would then be wrong; a base card that names no license is accepted and the written card says so.
+
+Exit codes: 0 done; 2 refused before writing (bad option, snapshot, output directory, size, the base card's license); 3 a proof
+failed; 4 torch, transformers or safetensors is not importable.
 """
 from __future__ import annotations
 
@@ -71,6 +80,7 @@ DEFAULT_MAX_GB = 14.0
 HC_COUNT = 4
 INDEXER_RATIO = 4
 MAX_CONFIG_BYTES = 1 << 20
+MAX_CARD_BYTES = 4 << 20          # the base's README.md is read up to this size (a Qwen card is tens of kilobytes)
 PROMPT_LENGTHS = (8, 16, 33)
 STAGE1_PROMPT = "Write the text I send my landlord about the broken boiler."     # the prompt stage 1 decodes (reference_gate.py PROMPT)
 N_DECODE = 32                     # greedy tokens, as stage 1 decodes
@@ -244,6 +254,9 @@ def franken_config(text: dict, layers: int, *, dtype: str, sets: dict | None = N
         "indexer_head_dim": sets.pop("indexer_head_dim", min(128, text["head_dim"])),
         "indexer_budget": sets.pop("indexer_budget", 2048), "indexer_compress_ratio": INDEXER_RATIO,
         "ple_layer_ids": [],
+        # The base's own entries for the kept layers. A real Qwen4 config is expected to list them (Qwen4Exp maps full_attention to
+        # indexed_attention), and stage 0 compares layer_types as a deciding key.
+        "layer_types": check_layers(text, layers),
     }
     if cfg["indexer_budget"] % INDEXER_RATIO:
         raise FrankenRefused(f"indexer_budget must be a multiple of {INDEXER_RATIO}")
@@ -456,6 +469,99 @@ def write_tokenizer(out: Path, files: dict) -> list[str]:
     for name, data in files.items():
         safeio.atomic_write(out / name, data, mode=0o644)
     return list(files)
+
+
+# ---- the model card ---------------------------------------------------------------------------------------------------------------
+
+CARD_LICENSE = "apache-2.0"
+LICENSE_LINE = re.compile(r"^license:\s*['\"]?([A-Za-z0-9.+-]+)['\"]?\s*$", re.M)
+REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+def card_license(text: str) -> str | None:
+    """The `license:` value of a model card's front matter, lowercased, or None. Read the way stage 7 reads it (orchard/package_card.py
+    read_license), with CRLF line ends accepted."""
+    text = text.replace("\r\n", "\n")
+    if not text.startswith("---\n"):
+        return None
+    m = LICENSE_LINE.search(text[4:].split("\n---", 1)[0])
+    return m.group(1).lower() if m else None
+
+
+def read_base_card_license(snapshot: Path) -> str | None:
+    """The license the base snapshot's README.md names, or None when it has no card or names none. Read before the output directory
+    exists, so a refusal leaves nothing behind. A card that links outside the snapshot, is too large or cannot be read is refused, and so
+    is a card that names a license other than CARD_LICENSE, which the written card states."""
+    if not os.path.lexists(snapshot / "README.md"):
+        return None
+    try:
+        raw = safeio.read_bytes(snap_file(snapshot, "README.md"), max_bytes=MAX_CARD_BYTES)
+    except safeio.SafeReadError as exc:
+        raise FrankenRefused(f"the base snapshot's README.md cannot be read: {getattr(exc, 'reason', exc)}") from None
+    found = card_license(raw.decode("utf-8", errors="replace"))
+    if found is not None and found != CARD_LICENSE:
+        raise FrankenRefused(f"the base model's card names license {found!r}; this script writes an Apache-2.0 card, so it converts only a "
+                             "base whose card names Apache-2.0 or no license")
+    return found
+
+
+def hub_repo_of(snapshot: Path) -> str | None:
+    """`org/name` when `snapshot` sits in a Hugging Face cache (`models--org--name/snapshots/<rev>`), else None."""
+    folder = snapshot.parent.parent.name
+    if snapshot.parent.name != "snapshots" or not folder.startswith("models--") or "--" not in folder[len("models--"):]:
+        return None
+    return folder[len("models--"):].replace("--", "/", 1)
+
+
+def source_line(snapshot: Path) -> str:
+    """How the card names a snapshot: the repository (only from the cache layout, so no local folder name is shown) and the revision
+    (only when the directory is named by a commit)."""
+    repo = hub_repo_of(snapshot)
+    rev = snapshot.name if REVISION.fullmatch(snapshot.name) else None
+    where = f"`{repo}`" if repo else "a local snapshot (not in the Hugging Face cache layout)"
+    return f"{where}, revision " + (f"`{rev}`" if rev else "unknown (the snapshot directory is not named by a commit)")
+
+
+def model_card(cfg: dict, args, snapshot: Path, indexer_dir, base_license: str | None) -> str:
+    """README.md for the output directory. It holds no machine path: repositories and revisions come from the cache layout only."""
+    layers = cfg["num_hidden_layers"]
+    if args.hc_sigma > 0:
+        hc = (f"The hyper-connection weights are perturbed: drawn from N(0, {args.hc_sigma}^2) with the seed, so the model differs from the "
+              "base on purpose. A port has to compute the hyper-connections to match it.")
+    else:
+        hc = (f"The hyper-connection weights are zero and `hc_norm.weight` is 1 + 2 times the base norm weight, so the model computes the "
+              f"same function as the first {layers} layers of the base (exactly in float32; bfloat16 rounds the stored norm weight).")
+    sets = ", ".join(f"`{k}={cfg[k]}`" for k in sorted(parse_sets(args.set))) or "none"
+    lines = [
+        "---", f"license: {CARD_LICENSE}", "---", "",
+        "# Qwen4-shaped test checkpoint (frankenmodel)", "",
+        "This is a test checkpoint written by tt-orchard's `scripts/tiny_qwen4/make_franken.py`. It is not a Qwen4 release and was not "
+        "trained.", "",
+        f"It carries the first {layers} layers of Qwen3.8-27B (the embedding, those layers, the final norm and the output head) in the dense "
+        "`qwen4_exp` layout that transformers' `Qwen4ExpForCausalLM` loads with tt-orchard's dense-layer shim. " + hc, "",
+        "## Source and options", "",
+        f"- Base: {source_line(snapshot)}",
+        f"- Layers: the first {layers} layers, 3 linear-attention layers then 1 full-attention layer (`layer_types` in config.json)",
+        f"- Weights dtype: {cfg['dtype']}",
+        f"- Hyper-connection sigma: {args.hc_sigma}",
+        f"- Seed: {args.seed} (recorded in franken-manifest.json; config.json has no `seed`, which in a Qwen4Exp config is the n-gram "
+        "hash seed)",
+        f"- Settings changed with `--set`: {sets}",
+        "- Indexer tensors: " + (f"from {source_line(Path(indexer_dir))}, mapped by name" if indexer_dir
+                                 else "seeded random projections and zero norm weights"),
+        "", "franken-manifest.json lists every file with its sha256. proofs.json, when present, holds the CPU proofs against the base.", "",
+        "## License", "",
+        "Apache-2.0, the license of the base weights. " + (
+            f"The base model's card names {base_license}." if base_license
+            else "The base model's card names no license, so the license above was not checked against it."),
+    ]
+    if indexer_dir:
+        lines.append("The indexer tensors come from another release, and that release's terms also apply to them. This script does not "
+                     "check them.")
+    lines += ["", "## Do not upload", "",
+              "This checkpoint stays on the machine that built it. Only tt-model bundles are published to Hugging Face; test weights are "
+              "kept locally in the Hugging Face cache layout.", ""]
+    return "\n".join(lines)
 
 
 def make_prompts(vocab: int, seed: int) -> list[list[int]]:
@@ -742,6 +848,7 @@ def make(args) -> int:
     say(f"estimated size {estimate / GB:.1f} GB for {args.layers} layers in {args.dtype}")
     mc.check_size(estimate, args.max_gb, mc.free_bytes(out), where=f" under {out}")
     tokenizer_files = read_tokenizer(snapshot)
+    base_license = read_base_card_license(snapshot)
     meta = build_meta_model(torch, transformers, qd, cfg)
     say("reading the base tensors")
     base = read_base_tensors(snapshot, args.layers)
@@ -752,13 +859,14 @@ def make(args) -> int:
         if tuple(value.shape) != tuple(tensors[key].shape):
             raise FrankenRefused(f"{key}: the class wants {tuple(value.shape)}, the converted tensor is {tuple(tensors[key].shape)}")
     out.mkdir(parents=True, exist_ok=True)
-    write_json(out / "config.json", {**cfg, "seed": args.seed})
+    write_json(out / "config.json", cfg)         # the generator's seed goes in the manifest: `seed` in a Qwen4Exp config is the n-gram hash seed
     write_json(out / "generation_config.json", {"do_sample": False, "eos_token_id": cfg.get("eos_token_id"), "bos_token_id": cfg.get("bos_token_id")})
     from safetensors.torch import save_file
     save_file({k: v.contiguous() for k, v in tensors.items()}, str(out / "model.safetensors"), metadata={"format": "pt"})
     del tensors
     copied = write_tokenizer(out, tokenizer_files)
-    say(f"wrote {out} (tokenizer files: {', '.join(copied) or 'none'})")
+    safeio.atomic_write(out / "README.md", model_card(cfg, args, snapshot, indexer_dir, base_license), mode=0o644)
+    say(f"wrote {out} (tokenizer files: {', '.join(copied) or 'none'}; README.md with license {CARD_LICENSE})")
     if args.skip_decode_check:
         decode = {"not_run": True, "degenerate": False, "reason": "--skip-decode-check"}
         say("warning: the degenerate-reference check was skipped (--skip-decode-check)")
