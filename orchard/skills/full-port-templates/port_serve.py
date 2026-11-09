@@ -272,12 +272,17 @@ def chat_template_text(snapshot: Path):
     return (text, "chat_template.jinja") if text.strip() else (None, None)
 
 
-def thinking_support(snapshot: Path) -> dict:
-    """{"template_thinks", "switch"} read from the chat template's text: it thinks when it opens a `<think>` block, and its switch is the variable
-    `enable_thinking` when the template tests that name. A model without a switch cannot be asked to skip the thinking."""
-    text, _ = chat_template_text(snapshot)
-    text = text or ""
-    return {"template_thinks": "<think>" in text, "switch": "enable_thinking" if "enable_thinking" in text else None}
+def thinking_support(render) -> dict:
+    """{"template_thinks", "switch"} from the ACTIVE generation rendering of a one-turn conversation, not from the template's source text (which also
+    holds comments and branches that only format earlier assistant turns). The template thinks when the generation prompt ends inside an opened
+    `<think>` block (the last `<think>` has no `</think>` after it). Its switch is `enable_thinking` when passing it changes the rendering."""
+    try:
+        base = render([{"role": "user", "content": "x"}])
+        off = render([{"role": "user", "content": "x"}], enable_thinking=False)
+    except Exception:  # noqa: BLE001  a template that cannot render the probe is treated as not thinking
+        return {"template_thinks": False, "switch": None}
+    opens, closes = base.rfind("<think>"), base.rfind("</think>")
+    return {"template_thinks": opens != -1 and opens > closes, "switch": "enable_thinking" if off != base else None}
 
 
 def passkey_plan(support: dict) -> dict:
@@ -294,7 +299,7 @@ def renderer_and_thinking(snapshot: Path):
     """(render, name, support): the chat renderer and the thinking facts of the template that is actually used. When jinja cannot run the template the
     renderer is the plain form, and a template that was not used says nothing about how the prompts were rendered, so the facts are non-thinking."""
     render, name = chat_renderer(snapshot)
-    return render, name, (thinking_support(snapshot) if name != "plain" else {"template_thinks": False, "switch": None})
+    return render, name, (thinking_support(render) if name != "plain" else {"template_thinks": False, "switch": None})
 
 
 def decode_reply(tok, ids) -> tuple[str, str]:
@@ -502,6 +507,7 @@ def main() -> int:
             first, second = post(port, "/v1/chat/completions", body), post(port, "/v1/chat/completions", body)
             runs.append({"length": item["length"], "key": item["key"], "prompt_tokens": first["usage"]["prompt_tokens"], "prompt_chars": len(text),
                          "prompt_sha256": sha_bytes(text.encode()), "answer_text": first["choices"][0]["message"]["content"], "answer_raw": first["choices"][0].get("raw_text", first["choices"][0]["message"]["content"]),
+                         "finish_reason": first["choices"][0].get("finish_reason"), "limit": limit,
                          "ids_first": first["choices"][0]["token_ids"], "ids_second": second["choices"][0]["token_ids"]})
             print(f"passkey length {item['length']}: {first['usage']['prompt_tokens']} prompt tokens", flush=True)
 
@@ -539,7 +545,7 @@ def main() -> int:
                                         "basis": "files in the directory before the worker started; the runtime's own hit counts are not read"}},
               "replay": {"entries": replay},
               "passkey": {"runs": runs, "thinking": {"template_thinks": support["template_thinks"], "switch": support["switch"], "off": plan["off"],
-                                                    "max_tokens": plan["max_tokens"]}},
+                                                    "plan_max_tokens": plan["max_tokens"]}},
               "canary": {"prompt_ids": free["prompt_ids"], "between_prompt_ids": other["prompt"], "first_ids": c_first, "between_ids": c_between,
                          "second_ids": c_second},
               "port_sources": [{"path": str(f.relative_to(RUN_DIR)), "sha256": sha_file(f), "role": "model"} for f in sorted(PORT_DIR.rglob("*.py"))]}

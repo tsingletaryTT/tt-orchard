@@ -229,8 +229,9 @@ def plan_passkeys(corpus_sha: str, max_len: int) -> list[dict]:
 
 
 # What the template recorded about the model's thinking (issue 641). `template_thinks`: the chat template opens a thinking block. `switch`: the
-# name of the template variable that turns it off. `off`: the passkey prompts were rendered with it off. `max_tokens`: the answer limit used.
-NO_THINKING = {"template_thinks": False, "switch": None, "off": False, "max_tokens": 12}
+# name of the template variable that turns it off. `off`: the passkey prompts were rendered with it off. `plan_max_tokens`: the plan's ceiling for the
+# answer limit; each run's own `limit` is the ceiling clamped to the context, and is the allowance that was actually in force.
+NO_THINKING = {"template_thinks": False, "switch": None, "off": False, "plan_max_tokens": 12}
 THINK_CLOSE = "</think>"
 _SWITCH_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,40}")
 
@@ -241,18 +242,29 @@ def thinking_of(section) -> dict:
     got = section.get("thinking") if isinstance(section, dict) else None
     if not (isinstance(got, dict) and isinstance(got.get("template_thinks"), bool) and isinstance(got.get("off"), bool)
             and (got.get("switch") is None or (isinstance(got.get("switch"), str) and _SWITCH_NAME.fullmatch(got["switch"])))
-            and _int(got.get("max_tokens"), 1) and got["max_tokens"] <= 4096):
+            and _int(got.get("plan_max_tokens"), 1) and got["plan_max_tokens"] <= 4096):
         return dict(NO_THINKING)
-    return {"template_thinks": got["template_thinks"], "switch": got["switch"], "off": got["off"], "max_tokens": got["max_tokens"]}
+    return {"template_thinks": got["template_thinks"], "switch": got["switch"], "off": got["off"], "plan_max_tokens": got["plan_max_tokens"]}
 
 
-def passkey_answers(runs, thinking) -> tuple[list[bool], str]:
-    """(answered, status) for the passkey runs, recomputed from the answer texts. A model whose chat template thinks, asked with thinking left on,
-    is read after its closing tag: a key inside the thinking block does not count, and a reply that never closes the block was cut at the answer
-    limit and says nothing about the port. `status` is "answered" (every key found), "not-applicable" (every key not found sits in a reply cut
-    inside the thinking block) or "failed" (a key is missing from a reply that was complete, or from a model that does not think)."""
+def _truncated(r) -> bool:
+    """Evidence that a reply was cut by its answer limit: the server's finish reason is "length", or the reply holds as many tokens as the limit the
+    request carried. A reply that stopped on its own (an end token) before the limit is a complete reply."""
+    if not isinstance(r, dict):
+        return False
+    if r.get("finish_reason") == "length":
+        return True
+    ids, limit = r.get("ids_first"), r.get("limit")
+    return full_port._ids(ids) and _int(limit, 1) and len(ids) >= limit
+
+
+def passkey_run_statuses(runs, thinking) -> list[str]:
+    """One status for each passkey run, recomputed from the record: "answered" (the key is in the clean text, and for a model read after its thinking
+    block also after the closing tag of the raw text), "cut" (a thinking model's reply never closed its block AND was cut by its answer limit: it says
+    nothing about the port) or "failed" (anything else: a complete reply without the key, a reply that stopped on its own inside the thinking
+    block, or a model that does not think)."""
     reads = thinking.get("template_thinks") is True and thinking.get("off") is not True
-    answered, cut = [], []
+    out = []
     for r in runs:
         # The clean text drops special tokens; the raw text keeps ones such as </think>. The key must be in the clean text (an edited answer that lost
         # its key fails), and for a model read after its thinking block it must also be after the closing tag of the raw text. A record without the raw
@@ -262,12 +274,23 @@ def passkey_answers(runs, thinking) -> tuple[list[bool], str]:
         key = r.get("key") if isinstance(r, dict) else None
         closed = THINK_CLOSE in raw
         body = raw.rsplit(THINK_CLOSE, 1)[1] if (reads and closed) else raw
-        ok = isinstance(key, str) and bool(key) and not (reads and not closed) and key in clean and key in body
-        answered.append(ok)
-        cut.append(reads and not closed)
-    if answered and all(answered):
+        if isinstance(key, str) and key and not (reads and not closed) and key in clean and key in body:
+            out.append("answered")
+        elif reads and not closed and _truncated(r):
+            out.append("cut")
+        else:
+            out.append("failed")
+    return out
+
+
+def passkey_answers(runs, thinking) -> tuple[list[bool], str]:
+    """(answered, status) for the passkey runs. `status` is "answered" (every key found), "not-applicable" (every key not found sits in a reply that
+    a thinking model cut inside its thinking block at the answer limit) or "failed"."""
+    got = passkey_run_statuses(runs, thinking)
+    answered = [g == "answered" for g in got]
+    if got and all(answered):
         return answered, "answered"
-    if answered and all(c for a, c in zip(answered, cut) if not a):
+    if got and all(g in ("answered", "cut") for g in got):
         return answered, "not-applicable"
     return answered, "failed"
 
@@ -618,7 +641,8 @@ def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons, r
         reasons.append("result.json must say passkey_status 'not-applicable' when the replies were cut inside the thinking block")
     if want_coherent is False:
         runs_in = (record.get("passkey") or {}).get("runs") if isinstance(record, dict) and isinstance(record.get("passkey"), dict) else None
-        lacking = [r.get("length") for r, ok in zip(runs_in or [], answered or []) if isinstance(r, dict) and not ok]
+        per_run = passkey_run_statuses([r if isinstance(r, dict) else {} for r in runs_in or []], thinking_of(record.get("passkey")))
+        lacking = [r.get("length") for r, st in zip(runs_in or [], per_run) if isinstance(r, dict) and st == "failed"]
         if rehearsal:
             if waived is not None:
                 waived.append("coherent")

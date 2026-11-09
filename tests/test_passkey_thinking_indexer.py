@@ -17,13 +17,16 @@ import pytest
 
 from orchard import full_port, full_port_result, full_port_serve, port_facts
 
-THINKING = {"template_thinks": True, "switch": None, "off": False, "max_tokens": 512}
-SWITCHED_OFF = {"template_thinks": True, "switch": "enable_thinking", "off": True, "max_tokens": 64}
-PLAIN = {"template_thinks": False, "switch": None, "off": False, "max_tokens": 12}
+THINKING = {"template_thinks": True, "switch": None, "off": False, "plan_max_tokens": 512}
+SWITCHED_OFF = {"template_thinks": True, "switch": "enable_thinking", "off": True, "plan_max_tokens": 64}
+PLAIN = {"template_thinks": False, "switch": None, "off": False, "plan_max_tokens": 12}
 
 
-def runs(*answers, key="94554"):
-    return [{"length": 256 * (i + 1), "key": key, "answer_text": a, "prompt_tokens": 256, "ids_first": [1], "ids_second": [1]} for i, a in enumerate(answers)]
+def runs(*answers, key="94554", finish="length"):
+    """Passkey runs. A reply is cut by the answer limit unless `finish` says it stopped: the default is a truncated reply (finish_reason 'length', the
+    reply's token count equal to its limit of 1 here), which is the only evidence that earns the not-applicable status."""
+    return [{"length": 256 * (i + 1), "key": key, "answer_text": a, "prompt_tokens": 256, "ids_first": [1], "ids_second": [1], "finish_reason": finish,
+             "limit": 1 if finish == "length" else 1000} for i, a in enumerate(answers)]
 
 
 def template():
@@ -95,13 +98,42 @@ def test_coherent_must_be_null_when_the_passkey_is_not_applicable_and_a_bool_oth
 
 # ---- 641: the template ---------------------------------------------------------------------------------------------------------
 
-def test_the_template_finds_a_thinking_switch_in_the_chat_template_file(tmp_path):
+def _support(mod, tmp_path, text):
+    (tmp_path / "chat_template.jinja").write_text(text)
+    return mod.renderer_and_thinking(tmp_path)[2]
+
+
+def test_the_template_finds_a_thinking_switch_from_the_generation_rendering(tmp_path):
     mod = template()
-    assert mod.thinking_support(tmp_path) == {"template_thinks": False, "switch": None}
-    (tmp_path / "chat_template.jinja").write_text("{% if enable_thinking is defined and not enable_thinking %}<think>\n\n</think>\n\n{% else %}<think>\n{% endif %}")
-    assert mod.thinking_support(tmp_path) == {"template_thinks": True, "switch": "enable_thinking"}
-    (tmp_path / "chat_template.jinja").write_text("{{ messages[0].content }}<think>\n")
-    assert mod.thinking_support(tmp_path) == {"template_thinks": True, "switch": None}
+    assert mod.renderer_and_thinking(tmp_path)[2] == {"template_thinks": False, "switch": None}
+    assert _support(mod, tmp_path, "{% for m in messages %}{{ m.content }}{% endfor %}{% if enable_thinking is defined and not enable_thinking %}<think>\n\n</think>\n\n"
+                                   "{% else %}<think>\n{% endif %}") == {"template_thinks": True, "switch": "enable_thinking"}
+    assert _support(mod, tmp_path, "{{ messages[0].content }}<think>\n") == {"template_thinks": True, "switch": None}
+
+
+def test_a_think_marker_in_a_jinja_comment_does_not_make_a_model_a_thinking_model(tmp_path):
+    mod = template()
+    assert _support(mod, tmp_path, "{# the model writes <think> blocks and tests enable_thinking #}{% for m in messages %}{{ m.content }}{% endfor %}<assistant>") == {
+        "template_thinks": False, "switch": None}
+
+
+def test_a_think_marker_that_only_formats_history_does_not_make_the_generation_turn_a_thinking_turn(tmp_path):
+    mod = template()
+    text = ("{% for m in messages %}{% if m.role == 'assistant' %}<think>{{ m.reasoning }}</think>{{ m.content }}{% else %}{{ m.content }}{% endif %}{% endfor %}"
+            "<assistant>")
+    assert _support(mod, tmp_path, text) == {"template_thinks": False, "switch": None}
+
+
+def test_a_closed_empty_think_block_in_the_generation_prompt_is_not_a_thinking_turn(tmp_path):
+    mod = template()
+    assert _support(mod, tmp_path, "{{ messages[0].content }}<assistant><think>\n\n</think>\n\n")["template_thinks"] is False
+
+
+def test_the_switch_is_only_reported_when_it_changes_the_rendering(tmp_path):
+    mod = template()
+    text = "{{ messages[0].content }}{% if enable_thinking is defined %}[x]{% endif %}<assistant><think>\n"
+    assert _support(mod, tmp_path, text)["switch"] == "enable_thinking"
+    assert _support(mod, tmp_path, "{# enable_thinking #}{{ messages[0].content }}<assistant><think>\n")["switch"] is None
 
 
 def test_the_renderer_reads_the_chat_template_jinja_file_and_passes_the_switch(tmp_path):
@@ -197,7 +229,7 @@ def _serve(tmp_path, chat_template: str):
 
 def test_a_model_with_a_thinking_switch_is_asked_with_thinking_off_and_the_record_says_so(tmp_path):
     fk, b, record = _serve(tmp_path, "{% for m in messages %}{{ m.content }}{% endfor %}{% if enable_thinking is defined and not enable_thinking %}<think>\n\n</think>\n\n{% else %}<think>\n{% endif %}")
-    assert record["passkey"]["thinking"] == {"template_thinks": True, "switch": "enable_thinking", "off": True, "max_tokens": 64}
+    assert record["passkey"]["thinking"] == {"template_thinks": True, "switch": "enable_thinking", "off": True, "plan_max_tokens": 64}
     assert all(r["answer_text"] for r in record["passkey"]["runs"])
     result, why = fk.derive(b)
     assert result["passkey_status"] == "answered" and result["coherent"] is True, why
@@ -207,7 +239,7 @@ def test_a_model_with_a_thinking_switch_is_asked_with_thinking_off_and_the_recor
 
 def test_a_thinking_model_without_a_switch_gets_the_longer_limit_and_an_unclosed_reply_is_not_applicable(tmp_path):
     fk, b, record = _serve(tmp_path, "{% for m in messages %}{{ m.content }}{% endfor %}<think>\n")
-    assert record["passkey"]["thinking"] == {"template_thinks": True, "switch": None, "off": False, "max_tokens": 512}
+    assert record["passkey"]["thinking"] == {"template_thinks": True, "switch": None, "off": False, "plan_max_tokens": 512}
     result, why = fk.derive(b)
     assert result["coherent"] is None and result["passkey_status"] == "not-applicable", why
     assert result["checks"]["passkey"]["pass"] is True
@@ -323,7 +355,7 @@ def test_a_wrong_answer_after_a_special_closing_tag_is_a_failure_read_from_the_r
     assert full_port_serve.passkey_answers(wrong, THINKING) == ([False], "failed")
     right = [dict(wrong[0], answer_text=" 94554", answer_raw="hmm</think> 94554")]
     assert full_port_serve.passkey_answers(right, THINKING) == ([True], "answered")
-    cut = [dict(wrong[0], answer_text="still thinking", answer_raw="still thinking")]
+    cut = [dict(wrong[0], answer_text="still thinking", answer_raw="still thinking", finish_reason="length", limit=1)]
     assert full_port_serve.passkey_answers(cut, THINKING)[1] == "not-applicable"
     legacy = [{"length": 256, "key": "94554", "answer_text": "x</think>94554", "prompt_tokens": 256, "ids_first": [1], "ids_second": [1]}]
     assert full_port_serve.passkey_answers(legacy, THINKING) == ([True], "answered")          # a record without answer_raw reads answer_text
@@ -355,3 +387,68 @@ def test_an_answer_raw_that_is_not_text_is_a_reason_not_an_error(tmp_path):
     path.write_text(json.dumps(record))
     reasons, _, _ = fk.gate(b)
     assert any("answer_raw" in r for r in reasons)
+
+
+# ---- review of PR 652, round 2 ----------------------------------------------------------------------------------------------------
+
+def test_a_thinking_reply_that_stopped_before_closing_its_block_is_a_failed_answer_not_a_truncated_one():
+    stopped = runs("We need to find the key. I give up", finish="stop")
+    assert full_port_serve.passkey_answers(stopped, THINKING) == ([False], "failed")
+    assert full_port_serve.passkey_answers(runs("We need to find", finish="length"), THINKING)[1] == "not-applicable"
+
+
+def test_the_token_count_reaching_the_limit_is_also_evidence_of_truncation():
+    at_limit = [{"length": 256, "key": "94554", "answer_text": "thinking", "prompt_tokens": 256, "ids_first": [1, 2, 3], "ids_second": [1, 2, 3],
+                 "finish_reason": "stop", "limit": 3}]
+    assert full_port_serve.passkey_answers(at_limit, THINKING)[1] == "not-applicable"
+    below = [dict(at_limit[0], limit=4)]
+    assert full_port_serve.passkey_answers(below, THINKING)[1] == "failed"
+    no_evidence = [{k: v for k, v in at_limit[0].items() if k not in ("finish_reason", "limit")}]
+    assert full_port_serve.passkey_answers(no_evidence, THINKING)[1] == "failed"
+
+
+def test_the_record_names_the_plan_ceiling_and_each_run_records_its_finish_reason_and_limit(tmp_path):
+    fk, b, record = _serve(tmp_path, "{% for m in messages %}{{ m.content }}{% endfor %}<think>\n")
+    assert record["passkey"]["thinking"]["plan_max_tokens"] == 512 and "max_tokens" not in record["passkey"]["thinking"]
+    for r in record["passkey"]["runs"]:
+        assert r["finish_reason"] in ("stop", "length") and isinstance(r["limit"], int) and 1 <= r["limit"] <= 512
+
+
+def test_a_stopped_thinking_reply_fails_the_gate_end_to_end(tmp_path):
+    fk, b, record = _serve(tmp_path, "{% for m in messages %}{{ m.content }}{% endfor %}<think>\n")
+    path = b["stage"] / full_port_serve.RECORD_FILE
+    for r in record["passkey"]["runs"]:
+        r["finish_reason"], r["limit"], r["ids_first"] = "stop", 10 ** 6, r["ids_first"][:2]
+        r["ids_second"] = r["ids_first"]
+    path.write_text(json.dumps(record))
+    assert fk.derive(b)[0] is not None
+    reasons, _, _ = fk.gate(b)
+    assert any("holds no key" in r for r in reasons), reasons
+
+
+def test_the_diagnostic_lists_only_the_runs_that_failed_on_their_own():
+    mixed = runs("done</think>no idea", "still thinking")                    # one closed and wrong, one cut
+    answered, status = full_port_serve.passkey_answers(mixed, THINKING)
+    assert status == "failed"
+    reasons = []
+    full_port_serve._result_reasons({"serves": True, "coherent": False, "passkey_answered": answered, "passkey_lengths": [256, 512], "passkey_status": "failed"},
+                                    None, None, (answered, True, status), False, None, reasons, {"passkey": {"runs": mixed, "thinking": THINKING}})
+    text = " ".join(reasons)
+    assert "[256]" in text and "512" not in text, text
+
+
+def test_the_run_statuses_are_answered_cut_or_failed():
+    got = full_port_serve.passkey_run_statuses(runs("ok</think>94554", "thinking...", "x</think>no"), THINKING)
+    assert got == ["answered", "cut", "failed"]
+
+
+def test_the_servers_length_finish_reason_alone_is_evidence_of_truncation():
+    run = [{"length": 256, "key": "94554", "answer_text": "thinking", "prompt_tokens": 256, "ids_first": [1, 2], "ids_second": [1, 2], "finish_reason": "length", "limit": 1000}]
+    assert full_port_serve.passkey_answers(run, THINKING)[1] == "not-applicable"
+
+
+@pytest.mark.parametrize("ceiling", [0, -1, 4097, "512", True, None, 1.5])
+def test_a_plan_ceiling_that_is_not_a_whole_number_from_1_to_4096_reads_as_no_thinking(ceiling):
+    section = {"thinking": {"template_thinks": True, "switch": None, "off": False, "plan_max_tokens": ceiling}, "runs": []}
+    assert full_port_serve.thinking_of(section) == full_port_serve.NO_THINKING
+    assert full_port_serve.thinking_of({"thinking": {"template_thinks": True, "switch": None, "off": False, "max_tokens": 512}, "runs": []}) == full_port_serve.NO_THINKING
