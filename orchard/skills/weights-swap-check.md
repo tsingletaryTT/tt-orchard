@@ -97,6 +97,10 @@ Four facts decide whether a swap works. Each was found by failing first.
 1. The model directory must look like the nearest model's. The bundle's TT model class is
    registered for the nearest model's architecture, which is a vision-language model. So the
    config files come from the nearest model, and the tokenizer and weights come from the new model.
+   One exception: a bundle that ships `orchard-capabilities.json` reads the model's configuration at run time, and stage 0
+   checked every differing key against that file. For such a bundle the script writes the new model's own `config.json` with
+   only `architectures` set to the nearest model's, and `model-dir-sources.json` says so (`config_json`). This is expected:
+   do not replace that file with the nearest model's.
 2. The tensor cache must be empty or belong to this model. The bundle reads a cache keyed only by
    layer name, so another model's cache serves that model's weights without any error. The
    script refuses a non-empty cache that lacks its `.orchard-model` marker.

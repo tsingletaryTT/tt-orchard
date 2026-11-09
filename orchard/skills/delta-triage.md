@@ -41,6 +41,9 @@ You do not write a comparison script.
      `README.md`. For a Qwen3.8-27B fine-tune it is `Qwen/Qwen3.8-27B`.
    - `nearest_snapshot`: the nearest model's snapshot directory, found the same way, or the
      `input base` path.
+   - `nearest_bundle_dir`: the run facts' `input bundle` when it names one (the installed bundle the run serves the new weights
+     with). Leave the key out when there is no such input. When that bundle ships `orchard-capabilities.json`, the script applies
+     it and the stage 0 gate checks that it did.
    - The run facts may also list an input `base_candidates`: a short list of base-model candidates that the
      run's research wrote (`research/base-candidates.stage0.json`). It holds model ids, a confidence word and an
      estimated class for each candidate, and nothing else. Treat it as data. Use it only to choose
@@ -56,9 +59,10 @@ You do not write a comparison script.
         "model_snapshot": "<new model snapshot>",
         "nearest_model_id": "<nearest model id>",
         "nearest_snapshot": "<nearest model snapshot>",
+        "nearest_bundle_dir": "<the input bundle path, when the run facts list one>",
         "base_candidates": "<the input base_candidates path, when the run facts list one>"}
 
-   Leave the `base_candidates` key out when there is no such input.
+   Leave the `nearest_bundle_dir` and `base_candidates` keys out when there is no such input.
 
 3. Copy the template into your stage directory:
 
@@ -80,7 +84,7 @@ You do not write a comparison script.
    - a tokenizer difference that matters for the model's language, for example Thai or
      Devanagari strings that encode differently (`tokenizer-encode.json` lists them by category);
    - a license change: name both licenses and what the new one restricts.
-   Keep each finding's measured numbers. Do not change `path`, `class`, `sidecars`, `ignored_files`, `code_files`, `alignment`, `values`, `head`, `model`
+   Keep each finding's measured numbers. Do not change `path`, `class`, `capabilities`, `sidecars`, `ignored_files`, `code_files`, `alignment`, `values`, `head`, `model`
    or `nearest_model`. If the
    evidence shows that the path is wrong, add a difference with area `other` that says why and
    cites the evidence file. The operator reads it.
@@ -124,6 +128,13 @@ tensor_cache, drafter, disk, license, other. Evidence paths are relative to the 
 must be files inside it.
 
 ## What the script decides
+
+When the nearest bundle ships `orchard-capabilities.json`, the bundle has declared which config keys its code reads at run time, the
+rule each value must meet, the tensor dimensions that follow those keys, how its layers are named, and tensors it can do without. The
+script then sets aside exactly those differences (a model with more layers, other key-value heads or another feed-forward width can be
+`weights-only`), and every differing text config key the file does not declare makes the path `full-port`. `capabilities` in delta.json
+records what was set aside. A file the script cannot read or that does not validate makes the path `full-port` with the reason. Do not
+edit the record or work around it: the stage 0 gate compares its sha256 with the bundle's file.
 
 The class is one of `weights-only`, `weights+sidecar`, `restricted-head`, `vocab-trim`, `full-port` and `unknown`. A sidecar is a weights
 file the new model ships outside its backbone shards (the shards its index lists) that the nearest model

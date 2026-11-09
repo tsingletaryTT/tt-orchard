@@ -4883,3 +4883,28 @@ Prompt (operator): "make sure we've updated all our literature (site, readme, et
 - **In progress and not claimed as done:** The Qwen4 frankenmodel generator and its CPU proofs are done (PR 639, open): the first K layers of real Qwen3.8-27B weights in the `qwen4_exp_text` skeleton with identity-initialised hyper-connections. With K=4 in float32 the logits equal the base exactly (maximum difference 0.0 on three prompts). With K=8 in bf16 the maximum difference is 0.119 and the top-1 token is equal. A seeded perturbation of the hyper-connections changes the logits by 5.23 and the top-1 token differs. An indexer budget of 2,048 equals the base, and a budget of 8 moves the logits by about 1. The checkpoint does not carry the visual tower, the MTP head, per-layer embeddings or the n-gram table, and the truncated weights give incoherent text, so the result shows equivalence only and says nothing about quality. Generator and CPU proofs done, chip run pending. <!-- UPDATE WHEN THE CHIP RUN ENDS -->
 - **Limits that stay:** single runs; agreement over 32 tokens on one to four prompts; the coder alone has not written a passing port; full-port models are packaged by hand; served speeds are low and depend on host load; nothing has run on another machine; the four-chip boot check of the Olmo adapter as republished passed (9 checks, 12.34 tok/s warm; record in PR 642, open), and the served-rate range across runs and boot checks is 2.2 to 12.3 tok/s under host load.
 - **Issue 61** (the full-port stages have never run on a real model) is out of date.
+
+## 2026-11-09: bundle capabilities in stage 0 and the release's own config in stage 2 (Qwen4 drop-in plan, Track C items C1 and C2)
+Prompt (from the session that runs the Qwen4 drop-in plan): implement Track C items C1 to C6. This entry covers C1 and C2. The goal is that on release
+day stage 0 classes Qwen4-27B `weights-only` against the Qwen4 thin bundle (whose development weights are a 20-layer test checkpoint) and stage 2
+serves the release with its own config.
+- A bundle may ship `orchard-capabilities.json` (`docs/bundle-capabilities.md`): the text config keys its code reads at run time with a rule per key,
+  the tensor dimensions that follow those keys (expressions of config keys), how its layers are named, and tensors it can do without. The stage 0
+  template reads it when `triage_config.json` names `nearest_bundle_dir` (new, optional; the skill fills it from the run's `bundle` input) and sets
+  aside exactly the declared differences: a declared key within its rule, a shape difference along declared dimensions where both models' sizes
+  follow the expression, tensors at layer indices only one model has when the layer count is declared (same tensor at a layer of the same type, same
+  dtype, equal or explained shape), and declared optional tensors. With the file, every other differing text config key is a full-port reason too,
+  because stage 2 then serves the release's own config. A file that is a link, a FIFO, larger than 256 KiB, not strict JSON or not valid by the
+  schema makes the path full-port with the reason. `delta.json` records `capabilities` (directory, sha256, applied, problems, what was set aside,
+  features). Without the key or the file, triage is unchanged.
+- The stage 0 gate (`orchard/bundle_capabilities.py`, through the supervisor) fails when the run's `bundle` input ships the file and delta.json
+  does not record it with the file's current sha256 and directory, or records a file that was not applied while the path is weights-only.
+- Stage 2 (`prepare_swap.py`): for a bundle that ships the file, `model-dir/config.json` is the new model's own config with only `architectures`
+  replaced by the served base config's (`base_config/` in the current form, the nearest snapshot's in the older form). `model-dir-sources.json`
+  gains `config_json`. Stage 7 already packages stage 2's real config files as `base_config/`, so the package serves the same file; the card now
+  says whose `config.json` it is. `prepare_model_dir.py` needed no code change.
+- Tests: `tests/test_delta_triage_capabilities.py`, `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`. 38 mutations
+  over the new guards; two survived at first (the layer-type match and the dtype check on extra layers) and each got a test; all 38 are red now.
+- Not done here: the run's `bundle` input is recorded by the bring-up command in the Track C item C3 change; until that lands nothing fills
+  `nearest_bundle_dir` and these rules stay dormant. The Qwen4 bundle does not ship the file yet (its author writes it from the keys its code reads).
+  No hardware was used.

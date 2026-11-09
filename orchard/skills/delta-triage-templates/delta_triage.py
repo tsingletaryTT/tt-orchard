@@ -10,10 +10,18 @@ reads `triage_config.json` from its own directory:
      "model_id": "<the run's model, <repo>@<revision>>",
      "model_snapshot": "<the new model's Hugging Face snapshot directory>",
      "nearest_model_id": "<the nearest supported model, <repo>@<revision>>",
-     "nearest_snapshot": "<the nearest model's snapshot directory>"}
+     "nearest_snapshot": "<the nearest model's snapshot directory>",
+     "nearest_bundle_dir": "<optional: the nearest model's installed bundle directory>"}
 
 An id without `@<revision>` gets one from its snapshot directory's name, when that directory sits
 in a `snapshots/` folder (the Hugging Face cache layout).
+
+When `nearest_bundle_dir` names a bundle that ships `orchard-capabilities.json`, the path rule below
+sets aside the differences that file declares and only those, and every other differing text config
+key becomes a full-port reason (see "the nearest bundle's capabilities" above decide_path, and
+docs/bundle-capabilities.md). delta.json then carries a `capabilities` record: the bundle directory,
+the file's sha256, whether it was applied, any problem with it, what it set aside, and its features.
+Without the key, or with a bundle that has no such file, the rule is the one below.
 
 It measures, and writes each measurement under `evidence/` next to itself:
 
@@ -85,6 +93,7 @@ run_dir. The script writes only inside its own directory and opens no network co
 from __future__ import annotations
 
 import collections
+import errno
 import hashlib
 import json
 import math
@@ -118,7 +127,8 @@ EVIDENCE_FILES = (
 )
 CONFIG_KEYS = ("run_dir", "model_id", "model_snapshot", "nearest_model_id", "nearest_snapshot")
 REPORT_MAX_BYTES = 2 * 1024 * 1024        # the research report is read only up to this size
-OPTIONAL_KEYS = ("base_candidates",)      # read when present: the research report (research/base-candidates.json)
+OPTIONAL_KEYS = ("base_candidates", "nearest_bundle_dir")      # read when present: the research report (research/base-candidates.json),
+                                                             # and the installed bundle of the nearest model (its orchard-capabilities.json)
 
 # The text config values that decide whether the nearest model's code can run the new weights.
 DECISIVE = ("num_hidden_layers", "hidden_size", "num_attention_heads", "num_key_value_heads",
@@ -292,6 +302,10 @@ def load_config() -> dict:
     for key in ("run_dir", "model_snapshot", "nearest_snapshot"):
         if not Path(cfg[key]).is_dir():
             fail(f"triage_config.json {key} is not a directory: {cfg[key]}")
+    if "nearest_bundle_dir" in cfg:
+        bundle = cfg["nearest_bundle_dir"]
+        if not isinstance(bundle, str) or not bundle.strip() or "\0" in bundle or not Path(bundle).is_dir():
+            fail(f"triage_config.json nearest_bundle_dir must name the nearest model's installed bundle directory, got {bundle!r}")
     run_dir = os.path.realpath(cfg["run_dir"])
     if os.path.commonpath([run_dir, str(HERE_DIR)]) != run_dir:
         fail(f"this script's directory {HERE_DIR} is not inside run_dir {run_dir}; copy it into "
@@ -3148,22 +3162,514 @@ def detect_vocab_trim(c: dict, t: dict, sc: dict, model_dir: Path, base_dir: Pat
     return out
 
 
-def decide_path(c: dict, t: dict) -> list[str]:
-    """The reasons the path is full-port. An empty list means weights-only."""
+# ---- the nearest bundle's capabilities (orchard-capabilities.json) -------------------------------------------------------------
+# A bundle whose model code reads the model's configuration at run time can say which differences it handles. The file sits in the
+# bundle's directory, and `nearest_bundle_dir` in triage_config.json names that directory. Its schema (docs/bundle-capabilities.md):
+#
+#   {"schema": 1,
+#    "config_keys": {"<text config key>": <rule>, ...},          the keys the code reads, and the rule each new value must meet
+#    "shapes": [{"tensor": "<regex>", "dims": {"<dim>": "<expr>"}}],   tensor dimensions that follow config keys
+#    "layers": {"pattern": "<regex with (?P<layer>\d+)>", "count_key": "num_hidden_layers", "types_key": "layer_types"},
+#    "optional_tensors": [{"tensor": "<regex>", "feature": "<name>", "shape": ["<expr>", ...]}],
+#    "features": {...},                                           recorded in delta.json, not judged here
+#    "note": "<text>"}
+#
+# A rule is {"type": "int"|"number"|"string"|"bool"|"list"|"object"|"any"} with optional "one_of", "min", "max", "multiple_of",
+# "items" (a rule, for a list), "length" (a whole number or a config key, for a list), "keys" ({sub-key: rule}, for an object),
+# "other_keys" ("any" lets an object hold keys "keys" does not name) and "absent_ok" (the new model may lack the key). An expression
+# is config keys and whole numbers joined by * and +, evaluated on that model's text config (head_dim falls back as `effective` does).
+#
+# With the file, decide_path sets aside: a differing text config key the file declares whose new value meets its rule; a shape
+# difference of a tensor a "shapes" entry matches, along declared dimensions only, when each model's size equals the expression on its
+# own config; a tensor at a layer index only one model has, when the layer count is a declared key that differs and the other model has
+# the same tensor at a layer of the same type with the same dtype and an equal shape (or one a "shapes" entry explains); and a tensor an
+# "optional_tensors" entry matches. Every other difference stays a reason, and so does every differing text config key the file does not
+# declare (bookkeeping keys and derivable defaults aside): the bundle then serves the new model's own config.json (prepare_swap.py), so a
+# key its code does not handle must not get through. A file that cannot be read or does not validate is a reason of its own. Without
+# `nearest_bundle_dir`, or with a bundle that has no file, nothing here runs.
+CAPABILITIES_FILE = "orchard-capabilities.json"
+CAPABILITIES_MAX_BYTES = 256 * 1024       # choice: a capabilities file is a few kilobytes
+CAP_TOP_KEYS = ("schema", "config_keys", "shapes", "layers", "optional_tensors", "features", "note")
+CAP_RULE_TYPES = ("int", "number", "string", "bool", "list", "object", "any")
+CAP_RULE_KEYS = ("type", "one_of", "min", "max", "multiple_of", "items", "length", "keys", "other_keys", "absent_ok")
+CAP_MAX_ENTRIES = 500                     # choice: config keys, shape entries or optional tensors in one file
+CAP_MAX_REGEX = 500                       # choice: the longest tensor pattern accepted
+CAP_MAX_EXPR = 200                        # choice: the longest dimension expression accepted
+CAP_MAX_FACTOR = 10 ** 12                 # a config value larger than this does not take part in a dimension expression
+CAP_MAX_DIM = 10 ** 15                    # an expression whose value passes this gives nothing
+CAP_RULE_DEPTH = 8
+CAP_EXAMPLES = 20                         # set-aside tensors listed by name in delta.json; the count covers all of them
+CAP_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CAP_NUMBER = re.compile(r"[1-9][0-9]{0,6}")
+
+
+def read_capabilities(bundle_dir: str) -> tuple[dict, object]:
+    """(the record for delta.json, the parsed JSON or None). The file is opened without following a link in its last part and without
+    blocking, must be a regular file of at most CAPABILITIES_MAX_BYTES, and is parsed strictly (no repeated key, no NaN). A file that is
+    absent gives present false and no problem; anything else that goes wrong is a named problem."""
+    rec = {"bundle_dir": bundle_dir, "file": CAPABILITIES_FILE, "present": False, "applied": False, "sha256": None, "problems": []}
+    path = os.path.join(bundle_dir, CAPABILITIES_FILE)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return rec, None
+    except OSError as exc:
+        rec["present"] = True
+        rec["problems"].append(f"{CAPABILITIES_FILE} is a link; the bundle must ship the file itself" if exc.errno == errno.ELOOP
+                               else f"{CAPABILITIES_FILE} cannot be opened ({type(exc).__name__})")
+        return rec, None
+    rec["present"] = True
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            rec["problems"].append(f"{CAPABILITIES_FILE} is not a regular file")
+            return rec, None
+        chunks, total = [], 0
+        while total <= CAPABILITIES_MAX_BYTES:
+            chunk = os.read(fd, CAPABILITIES_MAX_BYTES + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        raw = b"".join(chunks)
+    except OSError as exc:
+        rec["problems"].append(f"{CAPABILITIES_FILE} cannot be read ({type(exc).__name__})")
+        return rec, None
+    finally:
+        os.close(fd)
+    if len(raw) > CAPABILITIES_MAX_BYTES:
+        rec["problems"].append(f"{CAPABILITIES_FILE} is larger than {CAPABILITIES_MAX_BYTES} bytes")
+        return rec, None
+    rec["sha256"] = hashlib.sha256(raw).hexdigest()
+    try:
+        return rec, audio_loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        rec["problems"].append(f"{CAPABILITIES_FILE} is not strict JSON: {str(exc)[:200]}")
+        return rec, None
+
+
+def _cap_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _cap_expr(expr, where: str, problems: list) -> str | None:
+    """The expression when it is config keys and whole numbers joined by * and +, else None and a problem."""
+    ok = isinstance(expr, str) and 0 < len(expr) <= CAP_MAX_EXPR and all(
+        f and (CAP_IDENT.fullmatch(f) or CAP_NUMBER.fullmatch(f)) for term in expr.split("+") for f in term.split("*"))
+    if not ok:
+        problems.append(f"{where}: {short([expr], 1)[:80]!r} is not an expression of config keys and whole numbers joined by * and +")
+        return None
+    return expr
+
+
+def _cap_regex(text, where: str, problems: list):
+    if not isinstance(text, str) or not text or len(text) > CAP_MAX_REGEX:
+        problems.append(f"{where}: the tensor pattern must be a regular expression of 1 to {CAP_MAX_REGEX} characters")
+        return None
+    try:
+        return re.compile(text)
+    except re.error as exc:
+        problems.append(f"{where}: {text[:80]!r} is not a regular expression ({exc})")
+        return None
+
+
+def _cap_rule(rule, where: str, problems: list, depth: int = 0) -> dict | None:
+    """A checked copy of one rule, or None with problems."""
+    if depth > CAP_RULE_DEPTH:
+        problems.append(f"{where}: rules nest more than {CAP_RULE_DEPTH} levels")
+        return None
+    if not isinstance(rule, dict):
+        problems.append(f"{where}: a rule must be an object with a type")
+        return None
+    before = len(problems)
+    unknown = sorted(k for k in rule if k not in CAP_RULE_KEYS)
+    if unknown:
+        problems.append(f"{where}: unknown rule keys {unknown}")
+    kind = rule.get("type")
+    if kind not in CAP_RULE_TYPES:
+        problems.append(f"{where}: type must be one of {list(CAP_RULE_TYPES)}, not {kind!r}")
+    out = {"type": kind, "absent_ok": rule.get("absent_ok", False)}
+    if not isinstance(out["absent_ok"], bool):
+        problems.append(f"{where}: absent_ok must be true or false")
+    if "one_of" in rule:
+        if not isinstance(rule["one_of"], list) or not rule["one_of"]:
+            problems.append(f"{where}: one_of must be a non-empty list")
+        else:
+            out["one_of"] = rule["one_of"]
+    for key in ("min", "max"):
+        if key in rule:
+            if not _cap_number(rule[key]) or kind not in ("int", "number"):
+                problems.append(f"{where}: {key} must be a number, on an int or number rule")
+            else:
+                out[key] = rule[key]
+    if "multiple_of" in rule:
+        m = rule["multiple_of"]
+        if not (isinstance(m, int) and not isinstance(m, bool) and m > 0) or kind != "int":
+            problems.append(f"{where}: multiple_of must be a whole number above 0, on an int rule")
+        else:
+            out["multiple_of"] = m
+    if "items" in rule:
+        if kind != "list":
+            problems.append(f"{where}: items belongs to a list rule")
+        else:
+            out["items"] = _cap_rule(rule["items"], f"{where}.items", problems, depth + 1)
+    if "length" in rule:
+        n = rule["length"]
+        if kind != "list" or not ((isinstance(n, int) and not isinstance(n, bool) and n >= 0) or (isinstance(n, str) and CAP_IDENT.fullmatch(n))):
+            problems.append(f"{where}: length must be a whole number of 0 or more or a config key, on a list rule")
+        else:
+            out["length"] = n
+    if "keys" in rule:
+        if kind != "object" or not isinstance(rule["keys"], dict):
+            problems.append(f"{where}: keys must be an object of rules, on an object rule")
+        else:
+            out["keys"] = {}
+            for sk, sr in rule["keys"].items():
+                got = _cap_rule(sr, f"{where}.keys.{sk}", problems, depth + 1)
+                if got is None and not any(p.startswith(f"{where}.keys.{sk}") for p in problems):
+                    problems.append(f"{where}.keys.{sk}: not a rule")
+                out["keys"][sk] = got
+    if "other_keys" in rule:
+        if kind != "object" or rule["other_keys"] not in ("any", "none"):
+            problems.append(f"{where}: other_keys must be \"any\" or \"none\", on an object rule")
+        else:
+            out["other_keys"] = rule["other_keys"]
+    return out if len(problems) == before else None
+
+
+def validate_capabilities(data) -> tuple[dict | None, list[str]]:
+    """(the checked capabilities, problems). Any problem means the file is not used."""
+    problems: list[str] = []
+    if not isinstance(data, dict):
+        return None, [f"{CAPABILITIES_FILE} must be a JSON object"]
+    unknown = sorted(k for k in data if k not in CAP_TOP_KEYS)
+    if unknown:
+        problems.append(f"unknown top-level keys {unknown}; the schema has {list(CAP_TOP_KEYS)}")
+    if data.get("schema") != 1 or isinstance(data.get("schema"), bool):
+        problems.append(f"schema must be 1, not {data.get('schema')!r}")
+    out = {"config_keys": {}, "shapes": [], "layers": None, "optional": [], "features": {}}
+    keys = data.get("config_keys", {})
+    if not isinstance(keys, dict) or len(keys) > CAP_MAX_ENTRIES:
+        problems.append(f"config_keys must be an object of at most {CAP_MAX_ENTRIES} rules")
+    else:
+        for k, rule in keys.items():
+            got = _cap_rule(rule, f"config_keys.{k}", problems)
+            if got is not None:
+                out["config_keys"][k] = got
+    shapes = data.get("shapes", [])
+    if not isinstance(shapes, list) or len(shapes) > CAP_MAX_ENTRIES:
+        problems.append(f"shapes must be a list of at most {CAP_MAX_ENTRIES} entries")
+    else:
+        for i, s in enumerate(shapes):
+            where = f"shapes[{i}]"
+            if not isinstance(s, dict) or set(s) - {"tensor", "dims", "note"}:
+                problems.append(f"{where}: an entry is an object with tensor, dims and an optional note")
+                continue
+            regex = _cap_regex(s.get("tensor"), where, problems)
+            dims = s.get("dims")
+            if not isinstance(dims, dict) or not dims:
+                problems.append(f"{where}: dims must be a non-empty object of dimension index to expression")
+                continue
+            checked = {}
+            for d, expr in dims.items():
+                if not (isinstance(d, str) and d.isdigit() and len(d) <= 2):
+                    problems.append(f"{where}: {d!r} is not a dimension index (0, 1, ...)")
+                    continue
+                if _cap_expr(expr, f"{where}.dims.{d}", problems) is not None:
+                    checked[int(d)] = expr
+            if regex is not None and len(checked) == len(dims):
+                out["shapes"].append({"tensor": s["tensor"], "regex": regex, "dims": checked})
+    layers = data.get("layers")
+    if layers is not None:
+        if not isinstance(layers, dict) or set(layers) - {"pattern", "count_key", "types_key", "note"}:
+            problems.append("layers must be an object with pattern, count_key, an optional types_key and an optional note")
+        else:
+            regex = _cap_regex(layers.get("pattern"), "layers.pattern", problems)
+            if regex is not None and "layer" not in regex.groupindex:
+                problems.append("layers.pattern needs a named group (?P<layer>\\d+) for the layer index")
+                regex = None
+            count = layers.get("count_key")
+            if not (isinstance(count, str) and CAP_IDENT.fullmatch(count)):
+                problems.append("layers.count_key must name the config key that holds the layer count")
+                count = None
+            types = layers.get("types_key")
+            if types is not None and not (isinstance(types, str) and CAP_IDENT.fullmatch(types)):
+                problems.append("layers.types_key must name a config key")
+                types = None
+            if regex is not None and count is not None:
+                out["layers"] = {"pattern": layers["pattern"], "regex": regex, "count_key": count, "types_key": types}
+    optional = data.get("optional_tensors", [])
+    if not isinstance(optional, list) or len(optional) > CAP_MAX_ENTRIES:
+        problems.append(f"optional_tensors must be a list of at most {CAP_MAX_ENTRIES} entries")
+    else:
+        for i, o in enumerate(optional):
+            where = f"optional_tensors[{i}]"
+            if not isinstance(o, dict) or set(o) - {"tensor", "feature", "shape", "note"}:
+                problems.append(f"{where}: an entry is an object with tensor, feature, an optional shape and an optional note")
+                continue
+            regex = _cap_regex(o.get("tensor"), where, problems)
+            feature = o.get("feature")
+            if not (isinstance(feature, str) and feature.strip()):
+                problems.append(f"{where}: feature must name the optional feature the tensor belongs to")
+                continue
+            shape = o.get("shape")
+            if shape is not None and (not isinstance(shape, list) or not all(_cap_expr(e, f"{where}.shape", problems) for e in shape)):
+                if not isinstance(shape, list):
+                    problems.append(f"{where}: shape must be a list of expressions")
+                continue
+            if regex is not None:
+                out["optional"].append({"tensor": o["tensor"], "regex": regex, "feature": feature.strip(), "shape": shape})
+    features = data.get("features", {})
+    if not isinstance(features, dict):
+        problems.append("features must be an object")
+    else:
+        out["features"] = features
+    if "note" in data and not isinstance(data["note"], str):
+        problems.append("note must be text")
+    return (None if problems else out), problems
+
+
+def dim_value(expr: str, cfg) -> int | None:
+    """The expression's value on one model's text config, or None when a key is missing, is not a whole number, or is too large."""
+    total = 0
+    for term in expr.split("+"):
+        product = 1
+        for f in term.split("*"):
+            v = int(f) if CAP_NUMBER.fullmatch(f) else effective(cfg, f) if isinstance(cfg, dict) else ABSENT
+            if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= CAP_MAX_FACTOR:
+                return None
+            product *= v
+            if product > CAP_MAX_DIM:
+                return None
+        total += product
+        if total > CAP_MAX_DIM:
+            return None
+    return total
+
+
+def _same_value(a, b) -> bool:
+    """JSON equality that keeps true apart from 1."""
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def rule_problem(rule: dict, value, new_cfg) -> str | None:
+    """None when `value` (the new model's) meets the rule, else what is wrong, as the end of a sentence."""
+    if value == ABSENT:
+        return None if rule.get("absent_ok") else "is absent, and the rule does not allow that"
+    kind = rule["type"]
+    if kind == "int" and (not isinstance(value, int) or isinstance(value, bool)):
+        return f"is {fmt(value)}, not a whole number"
+    if kind == "number" and not _cap_number(value):
+        return f"is {fmt(value)}, not a number"
+    if kind == "string" and not isinstance(value, str):
+        return f"is {fmt(value)}, not text"
+    if kind == "bool" and not isinstance(value, bool):
+        return f"is {fmt(value)}, not true or false"
+    if kind == "list" and not isinstance(value, list):
+        return f"is {fmt(value)}, not a list"
+    if kind == "object" and not isinstance(value, dict):
+        return f"is {fmt(value)}, not an object"
+    if "one_of" in rule and not any(_same_value(value, x) for x in rule["one_of"]):
+        return f"is {fmt(value)}, not one of {fmt(rule['one_of'])}"
+    if "min" in rule and value < rule["min"]:
+        return f"is {fmt(value)}, below the minimum {fmt(rule['min'])}"
+    if "max" in rule and value > rule["max"]:
+        return f"is {fmt(value)}, above the maximum {fmt(rule['max'])}"
+    if "multiple_of" in rule and value % rule["multiple_of"]:
+        return f"is {fmt(value)}, not a multiple of {rule['multiple_of']}"
+    if kind == "list":
+        if "length" in rule:
+            want = rule["length"] if isinstance(rule["length"], int) else effective(new_cfg, rule["length"])
+            if not isinstance(want, int) or isinstance(want, bool) or len(value) != want:
+                return f"has {len(value)} entries, and the rule wants {fmt(want)}" + (f" ({rule['length']})" if isinstance(rule["length"], str) else "")
+        if rule.get("items") is not None:
+            for i, item in enumerate(value):
+                p = rule_problem(rule["items"], item, new_cfg)
+                if p:
+                    return f"has entry {i} that {p}"
+    if kind == "object":
+        for sk, sr in (rule.get("keys") or {}).items():
+            p = rule_problem(sr, value.get(sk, ABSENT), new_cfg)
+            if p:
+                return f"has {sk} that {p}"
+        if rule.get("keys") is not None and rule.get("other_keys") != "any":
+            extra = sorted(k for k in value if k not in rule["keys"])
+            if extra:
+                return f"has keys the rule does not name: {short(extra, 4)}"
+    return None
+
+
+def _shape_explained(name: str, mshape, bshape, caps: dict, mcfg, bcfg) -> str | None:
+    """None when a "shapes" entry explains the difference between the two shapes of tensor `name`, else why not (a clause)."""
+    if not isinstance(mshape, list) or not isinstance(bshape, list) or len(mshape) != len(bshape):
+        return "its rank differs, which no declaration covers"
+    differing = [i for i in range(len(mshape)) if mshape[i] != bshape[i]]
+    entries = [s for s in caps["shapes"] if s["regex"].fullmatch(name)]
+    if not entries:
+        return "no shapes entry of the nearest bundle's capabilities names this tensor"
+    why = None
+    for s in entries:
+        missing = [i for i in differing if i not in s["dims"]]
+        if missing:
+            why = f"dimension {missing[0]} differs and the shapes entry {s['tensor']!r} does not declare it"
+            continue
+        bad = [i for i in differing if dim_value(s["dims"][i], mcfg) != mshape[i] or dim_value(s["dims"][i], bcfg) != bshape[i]]
+        if bad:
+            i = bad[0]
+            why = (f"dimension {i} is {mshape[i]} and {bshape[i]}, but {s['dims'][i]} gives {dim_value(s['dims'][i], mcfg)} and "
+                   f"{dim_value(s['dims'][i], bcfg)} on the two configs")
+            continue
+        return None
+    return why
+
+
+def _layer_analogue(name: str, own_n: dict, other_n: dict, caps: dict, own_cfg, other_cfg) -> str | None:
+    """The other model's tensor that stands in for `name` at a layer index only the own model has, or None. The index must be at or past
+    the other model's layer count and below the own model's, and the analogue must sit at a layer of the same type (when both configs list
+    their layer types)."""
+    lay = caps["layers"]
+    m = lay["regex"].fullmatch(name)
+    if not m or m.group("layer") is None:
+        return None
+    i = int(m.group("layer"))
+    own_count, other_count = effective(own_cfg, lay["count_key"]), effective(other_cfg, lay["count_key"])
+    if not all(isinstance(x, int) and not isinstance(x, bool) for x in (own_count, other_count)) or not other_count <= i < own_count:
+        return None
+    own_types = effective(own_cfg, lay["types_key"]) if lay["types_key"] else ABSENT
+    other_types = effective(other_cfg, lay["types_key"]) if lay["types_key"] else ABSENT
+    typed = (isinstance(own_types, list) and len(own_types) == own_count and isinstance(other_types, list) and len(other_types) == other_count)
+    for j in range(other_count):
+        if typed and other_types[j] != own_types[i]:
+            continue
+        cand = name[:m.start("layer")] + str(j) + name[m.end("layer"):]
+        if cand in other_n:
+            return cand
+    return None
+
+
+def review_capabilities(caps: dict, c: dict, t: dict, mcfg, bcfg, mtensors: dict, btensors: dict) -> dict:
+    """What the capabilities set aside and what they refuse, for decide_path. `mtensors` and `btensors` are read_tensors' maps."""
+    out = {"config_ok": set(), "config_reasons": {}, "other_key_reasons": [], "shape_ok": set(), "shape_why": {},
+           "only_m_ok": set(), "only_b_ok": set(),
+           "exempted": {"config_keys": [], "shapes": [], "shapes_count": 0, "layer_tensors": {"count": 0, "examples": []},
+                        "optional_tensors": {"count": 0, "features": {}, "examples": []}}}
+    ex = out["exempted"]
+    declared = caps["config_keys"]
+    derivable = {x["key"] for x in c.get("derivable_keys_ignored") or []}
+    keys = [(k, True) for k in c.get("decisive_keys_differing") or []]
+    keys += [(k, False) for k in c.get("text_config_diffs") or {} if k not in DECISIVE and k not in BOOKKEEPING and k not in derivable]
+    for k, decisive in keys:
+        if decisive:
+            mv, bv = c["text_key_values"][k]["model"], c["text_key_values"][k]["base"]
+        else:
+            mv, bv = c["text_config_diffs"][k]["model"], c["text_config_diffs"][k]["base"]
+        if k not in declared:
+            reason = (f"text config {k} differs: {fmt(mv)} vs {fmt(bv)}, and the nearest bundle's {CAPABILITIES_FILE} does not declare it")
+        else:
+            p = rule_problem(declared[k], mv, mcfg)
+            if p is None:
+                out["config_ok"].add(k)
+                ex["config_keys"].append({"key": k, "model": fmt(mv)[:200], "base": fmt(bv)[:200]})
+                continue
+            reason = f"text config {k} differs: {fmt(mv)} vs {fmt(bv)}; the nearest bundle's {CAPABILITIES_FILE} declares it, but the new value {p}"
+        if decisive:
+            out["config_reasons"][k] = reason
+        else:
+            out["other_key_reasons"].append(reason)
+    p = _pair_names(mtensors, btensors)
+    mn, bn = p["mn"], p["bn"]
+    for x in t["shape_diffs_normalized"]:
+        why = _shape_explained(x["name"], x["model"], x["base"], caps, mcfg, bcfg)
+        if why is None:
+            out["shape_ok"].add(x["name"])
+            ex["shapes_count"] += 1
+            if len(ex["shapes"]) < 200:
+                ex["shapes"].append({"tensor": x["name"], "model": x["model"], "base": x["base"]})
+        else:
+            out["shape_why"][x["name"]] = why
+    layers_ok = caps["layers"] is not None and caps["layers"]["count_key"] in out["config_ok"]
+    ns = t["normalized_name_sets"]
+    for side, names, own_n, other_n, own_cfg, other_cfg, okset in (
+            ("model", ns["unexplained_only_in_model"], mn, bn, mcfg, bcfg, out["only_m_ok"]),
+            ("base", ns["unexplained_only_in_base"], bn, mn, bcfg, mcfg, out["only_b_ok"])):
+        for name in names:
+            opt = next((o for o in caps["optional"] if o["regex"].fullmatch(name)), None)
+            if opt is not None:
+                info = own_n.get(name) or {}
+                if side == "model" and opt["shape"] is not None and info.get("shape") != [dim_value(e, own_cfg) for e in opt["shape"]]:
+                    continue
+                okset.add(name)
+                oc = ex["optional_tensors"]
+                oc["count"] += 1
+                oc["features"][opt["feature"]] = oc["features"].get(opt["feature"], 0) + 1
+                if len(oc["examples"]) < CAP_EXAMPLES:
+                    oc["examples"].append({"tensor": name, "only_in": side, "feature": opt["feature"]})
+                continue
+            if not layers_ok:
+                continue
+            cand = _layer_analogue(name, own_n, other_n, caps, own_cfg, other_cfg)
+            if cand is None:
+                continue
+            a, b = own_n.get(name) or {}, other_n.get(cand) or {}
+            if a.get("dtype") != b.get("dtype"):
+                continue
+            if a.get("shape") != b.get("shape"):
+                ms, bs, mc, bc = ((a.get("shape"), b.get("shape"), own_cfg, other_cfg) if side == "model"
+                                  else (b.get("shape"), a.get("shape"), other_cfg, own_cfg))
+                if _shape_explained(cand, ms, bs, caps, mc, bc) is not None:
+                    continue
+            okset.add(name)
+            lt = ex["layer_tensors"]
+            lt["count"] += 1
+            if len(lt["examples"]) < CAP_EXAMPLES:
+                lt["examples"].append({"tensor": name, "only_in": side, "analogue": cand})
+    return out
+
+
+def capabilities_finding(rec: dict) -> str:
+    """One sentence on what the nearest bundle's capabilities set aside, for the differences list."""
+    ex = rec.get("exempted") or {}
+    keys = [x["key"] for x in ex.get("config_keys") or []]
+    parts = []
+    if keys:
+        parts.append(f"text config keys {short(keys, 8)}")
+    if ex.get("shapes_count"):
+        parts.append(f"{ex['shapes_count']} tensor shape differences along declared dimensions")
+    if (ex.get("layer_tensors") or {}).get("count"):
+        parts.append(f"{ex['layer_tensors']['count']} tensors at layer indices only one model has")
+    if (ex.get("optional_tensors") or {}).get("count"):
+        feats = ", ".join(f"{k} ({v})" for k, v in sorted(ex["optional_tensors"]["features"].items()))
+        parts.append(f"{ex['optional_tensors']['count']} optional tensors ({feats})")
+    what = "; ".join(parts) if parts else "nothing (the two models do not differ in anything it declares)"
+    return (f"The nearest bundle ships {CAPABILITIES_FILE} (sha256 {str(rec.get('sha256'))[:12]}). It set aside: {what}. Every other "
+            "difference is judged as without the file, and every other differing text config key is a full-port reason.")
+
+
+def decide_path(c: dict, t: dict, caps: dict | None = None) -> list[str]:
+    """The reasons the path is full-port. An empty list means weights-only. `caps` is review_capabilities' answer for a nearest
+    bundle that declares capabilities, else None (the rule is then the one without the file)."""
     reasons = []
     if c.get("errors") and "text_key_values" not in c:
         reasons.append("the configs could not be compared: " + "; ".join(c["errors"]))
     else:
         for k in c["decisive_keys_differing"]:
+            if caps is not None:
+                if k not in caps["config_ok"]:
+                    reasons.append(caps["config_reasons"][k])
+                continue
             v = c["text_key_values"][k]
             reasons.append(f"text config {k} differs: {fmt(v['model'])} vs {fmt(v['base'])}")
+        if caps is not None:
+            reasons += caps["other_key_reasons"]
     if t["errors"]:
         reasons.append("some safetensors headers could not be read: " + "; ".join(t["errors"]))
     ns = t["normalized_name_sets"]
     if ns["common"] == 0:
         reasons.append("the two models share no tensor name, even after the prefix is normalized")
     for x in t["shape_diffs_normalized"]:
-        reasons.append(f"tensor {x['name']} has shape {x['model']} in the new model and {x['base']} in the nearest model")
+        if caps is not None and x["name"] in caps["shape_ok"]:
+            continue
+        why = f" ({caps['shape_why'][x['name']]})" if caps is not None and x["name"] in caps["shape_why"] else ""
+        reasons.append(f"tensor {x['name']} has shape {x['model']} in the new model and {x['base']} in the nearest model{why}")
     for x in t["dtype_diffs_normalized"]:
         if x.get("tolerated"):
             continue
@@ -3172,6 +3678,8 @@ def decide_path(c: dict, t: dict) -> list[str]:
         extra = ns[f"unexplained_only_in_{side}"]
         if side == "base" and ((t.get("head") or {}).get("restricted") or (t.get("head") or {}).get("not_used")):
             extra = [k for k in extra if not HEAD_NAME.search(k)]      # the readout rows stand in for lm_head, or the model has no head to use (issue 380)
+        if caps is not None:
+            extra = [k for k in extra if k not in caps["only_m_ok" if side == "model" else "only_b_ok"]]
         if extra:
             reasons.append(f"{len(extra)} text tensors exist only in {who}: {short(extra, 5)}")
     return reasons
@@ -4433,7 +4941,20 @@ def main() -> int:
         write_json("readout-facts.json", head["readout"])
     write_json("head-compare.json", head)
     say(f"wrote evidence/head-compare.json (restricted head: {head['restricted']}; {head['note']})")
-    reasons = decide_path({**c}, {**t, "head": head}) + sc["problems"]
+    caps_rec, caps_review, caps_reasons = None, None, []
+    if isinstance(cfg.get("nearest_bundle_dir"), str):
+        caps_rec, raw_caps = read_capabilities(cfg["nearest_bundle_dir"])
+        if caps_rec["present"] and not caps_rec["problems"]:
+            checked, problems = validate_capabilities(raw_caps)
+            caps_rec["problems"] += problems
+            if checked is not None and "text_key_values" in c:
+                mcfg, bcfg = read_json(model_dir / "config.json")[0], read_json(base_dir / "config.json")[0]
+                caps_review = review_capabilities(checked, c, t, mcfg, bcfg, model_tensors, base_tensors)
+                caps_rec.update(applied=True, schema=1, exempted=caps_review["exempted"], features=checked["features"])
+        if caps_rec["problems"]:
+            caps_reasons.append(f"the nearest bundle's {CAPABILITIES_FILE} cannot be used: " + "; ".join(caps_rec["problems"][:5]))
+        say(f"nearest bundle capabilities: {'applied' if caps_rec['applied'] else 'none' if not caps_rec['present'] else 'refused'}")
+    reasons = decide_path({**c}, {**t, "head": head}, caps_review) + sc["problems"] + caps_reasons
     vt = detect_vocab_trim(c, {**t, "head": head}, sc, model_dir, base_dir, raw_pair_map(model_tensors, base_tensors))
     if vt["trimmed"]:
         write_json("vocab-compare.json", vt)
@@ -4459,6 +4980,7 @@ def main() -> int:
         **({"vocab_trim": vt} if cls == "vocab-trim" else {}),
         "mtp": {"nearest_tensors": t["mtp_tensors"]["base"], "new_tensors": t["mtp_tensors"]["model"]},
         **({"graft_candidate": graft} if graft else {}),
+        **({"capabilities": caps_rec} if caps_rec is not None else {}),
         "draft": ("written by delta_triage.py from the evidence files; the agent reviews each finding "
                   "and adds hazards it can justify"),
         "differences": [
@@ -4489,6 +5011,16 @@ def main() -> int:
                                              "not exercise it. Its output must be checked on the host against "
                                              "the CPU reference, with the exact file hash recorded.")})
     delta["hazards"].extend(tolerated_dtype_hazards(t, ev))
+    if caps_rec is not None and caps_rec["applied"]:
+        delta["differences"].append({"area": "other", "finding": capabilities_finding(caps_rec),
+                                     "evidence": [ev("config-compare.json"), ev("tensor-compare.json")]})
+        delta["hazards"].append({"area": "other", "evidence": [ev("config-compare.json"), ev("tensor-compare.json")],
+                                 "finding": (f"The path rests on the nearest bundle's {CAPABILITIES_FILE} (sha256 {caps_rec['sha256'][:12]}): the "
+                                             "bundle says its model code reads the declared config keys at run time and handles the declared "
+                                             "shape and layer differences. Stage 0 checked the configs and the tensor headers against those "
+                                             "declarations and nothing more. Stage 2 serves the new model's own config.json with only "
+                                             "`architectures` set to the nearest model's, and its check against the CPU reference on chips is "
+                                             "what shows the code handles them.")})
     if head.get("not_used"):
         delta["hazards"].append({"area": "other", "evidence": [ev("head-compare.json")],
                                  "finding": ("The new model has no lm_head tensor and its architecture is not one that reads a vocabulary head "
