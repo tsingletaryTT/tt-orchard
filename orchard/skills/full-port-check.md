@@ -66,7 +66,7 @@ The check calls it only when the agreement ends below the gate's bar, after the 
 It never changes the record, the exit code or the gate. The check saves the arrays to `stages/2/evidence/layer-port.npz` and prints one
 `PORT_CHECK_LAYERS <sha256> <count>` line that the supervisor's capture of the output keeps. `python3 stages/2/stage_tools.py layer-diff` compares
 that file with the CPU reference layer by layer (in the reference interpreter) and names the first layer whose relative error is over a threshold
-(default 0.05). The same tool file also has `last-check`, `facts` and `show`; the task text lists them. `last-check` ends with a `next:` line (the one command to run) and shows the check from before the current step; it does not run the check again.
+(default 0.05). The same tool file also has `gate-check`, `last-check`, `facts` and `show`; the task text lists them. `gate-check` runs the board check's device-ops test on your port in seconds with no board: run it before you reply, because a port with no `ttnn.linear` or `ttnn.matmul` call fails the board check. `last-check` ends with a `next:` line (the one command to run) and shows the check from before the current step; it does not run the check again.
 
 If `load` writes a converted copy of the weights to disk (a cache under the cache root that the first boot fills), say so in
 `stages/2/port/converted_cache.json`: `{"writes_converted_cache": true, "cache_dir": "<where>"}`. The supervisor reads it before the hardware

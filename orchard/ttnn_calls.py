@@ -175,4 +175,25 @@ def layer_floor(config) -> tuple[int, int | None]:
     if isinstance(kinds, list) and 0 < len(kinds) <= LAYER_COUNT_MAX:
         return len(kinds), len(kinds)
     return 1, None
+# The static scan of a port directory is bounded (the port directory is the coder's): at most this many source files and this many bytes
+# read. A scan that stops at a bound before it found a matmul-family call fails the check and says so.
+STATIC_FILES_MAX = 400
+STATIC_BYTES_MAX = 16 << 20
+
+# What the device-ops failure tells the coder to do. The instruction to run each projection with ttnn.linear or ttnn.matmul comes first, then the
+# upload form, then the facts. In the stage 2 runs of the cp4 audition the Coder-Next arms uploaded every weight and then computed on the host:
+# the upload was the first thing the old message told them to do and the projection call was the second (issue 677).
+WHAT_TO_DO = ("Run each projection in prefill and decode_step with ttnn.linear or ttnn.matmul on ttnn tensors. Upload each weight once in "
+              "load() with ttnn.from_torch(w, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh_device) (or ttnn.as_tensor) and keep "
+              "the ttnn tensor. stages/2/cheat_sheet.md lists the call forms, Linear and matmul first. A host torch port with `import ttnn` "
+              "computes on the CPU, so the run does not show the chip works, and it does not count. An import, a comment, a string and code "
+              "that is not reached make no calls.")
+
+
+def device_ops_reason(names) -> str:
+    """The text of the device-ops failure for a port whose reachable ttnn calls are `names` ({dotted name: count}): what failed, what to do,
+    then the calls found."""
+    listed = ", ".join(f"{k} x{v}" for k, v in sorted(names.items())[:8]) or "none"
+    return ("device-ops: no source file under stages/2/port/ makes a reachable ttnn matmul-family call (ttnn.matmul, ttnn.linear and the like). "
+            + WHAT_TO_DO + f" ttnn calls found: {listed}.")
 # --- end shared: ttnn_calls

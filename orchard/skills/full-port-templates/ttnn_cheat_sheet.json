@@ -8,6 +8,109 @@
  "intro": "Each signature was checked against the tt-metal tree the coder image is built from. Arguments not listed here do not exist. `python3 stages/2/stage_tools.py cheat NAME` prints one entry.",
  "sections": [
   {
+   "title": "Linear and matmul",
+   "entries": [
+    {
+     "name": "ttnn.linear",
+     "kind": "op",
+     "signature": "ttnn.linear(input_tensor_a, input_tensor_b, *, bias=None, transpose_a=False, transpose_b=False, memory_config=None, dtype=None, program_config=None, activation=None, compute_kernel_config=None, core_grid=None)",
+     "usage": "y = ttnn.linear(x, w, bias=b, dtype=ttnn.bfloat16, compute_kernel_config=ck, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+     "notes": "x @ w (+ bias). The torch Linear weight is [out, in]: transpose it once at load (w_torch.T) or pass transpose_b=True. With no program_config the op picks one; start there.",
+     "seen_in": "models/tt_transformers/tt/mlp.py:194",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.matmul",
+     "kind": "op",
+     "signature": "ttnn.matmul(input_tensor_a, input_tensor_b, *, transpose_a=False, transpose_b=False, memory_config=None, dtype=None, program_config=None, activation=None, compute_kernel_config=None, core_grid=None)",
+     "usage": "scores = ttnn.matmul(q, k_t, compute_kernel_config=ck)",
+     "notes": "Same as linear without bias. Batched matmul broadcasts the leading dims; both inputs must be TILE_LAYOUT.",
+     "seen_in": "models/tt_transformers/tt/mixtral_mlp.py:135",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.MatmulMultiCoreReuseMultiCastProgramConfig",
+     "kind": "symbol",
+     "signature": "ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(compute_with_storage_grid_size, in0_block_w, out_subblock_h, out_subblock_w, per_core_M, per_core_N, transpose_mcast, fused_activation, fuse_batch)",
+     "usage": "pc = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(compute_with_storage_grid_size=(8, 8), in0_block_w=1, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=56, transpose_mcast=False, fused_activation=None, fuse_batch=False)",
+     "notes": "Program config for a large matmul (prefill, interleaved). per_core_M and per_core_N count tiles per core; out_subblock_h * out_subblock_w <= 4. Skip it in a first port.",
+     "seen_in": "models/tt_transformers/tt/model_config.py:1002",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig",
+     "kind": "symbol",
+     "signature": "ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size, in0_block_w, out_subblock_h, out_subblock_w, per_core_M, per_core_N, fuse_batch, fused_activation, mcast_in0)",
+     "usage": "pc = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 8), in0_block_w=2, out_subblock_h=1, out_subblock_w=4, per_core_M=1, per_core_N=8, fuse_batch=True, fused_activation=None, mcast_in0=True)",
+     "notes": "Program config for decode, where M is one tile row (batch up to 32).",
+     "seen_in": "models/tt_transformers/tt/model_config.py:2078",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.WormholeComputeKernelConfig",
+     "kind": "symbol",
+     "signature": "ttnn.WormholeComputeKernelConfig(math_fidelity, math_approx_mode, fp32_dest_acc_en, packer_l1_acc)",
+     "usage": "ck = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)",
+     "notes": "Precision of a matmul or norm. HiFi4 with fp32 accumulation is the safe choice while matching the CPU reference; lower fidelity comes after the check passes. Blackhole uses the same class.",
+     "seen_in": "models/tt_transformers/tt/model_config.py",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "RMS norm and softmax",
+   "entries": [
+    {
+     "name": "ttnn.rms_norm",
+     "kind": "op",
+     "signature": "ttnn.rms_norm(input_tensor, *, epsilon=1e-12, weight=None, bias=None, residual_input_tensor=None, memory_config=None, program_config=None, compute_kernel_config=None)",
+     "usage": "y = ttnn.rms_norm(x, epsilon=1e-6, weight=w_norm)",
+     "notes": "Set epsilon from the config; the default 1e-12 is rarely right. A ROW_MAJOR weight needs last dim 32 ([1, 1, hidden/32, 32]); a TILE weight needs the input's last dim. If the reference adds 1 to the weight, add it at load. The keywords are epsilon and weight.",
+     "seen_in": "models/tt_transformers/tt/distributed_norm.py; tt-metal tests for rms_norm",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.softmax",
+     "kind": "op",
+     "signature": "ttnn.softmax(input_tensor, dim=-1, *, memory_config=None, compute_kernel_config=None, numeric_stable=False)",
+     "usage": "p = ttnn.softmax(scores, dim=-1, numeric_stable=True)",
+     "notes": "Use numeric_stable=True for attention scores built by hand.",
+     "seen_in": "models/tt_transformers/tt/mixtral_moe.py:121",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Embedding",
+   "entries": [
+    {
+     "name": "ttnn.embedding",
+     "kind": "op",
+     "signature": "ttnn.embedding(input_tensor, weight, *, padding_idx=None, layout=None, embeddings_type=None, dtype=None, memory_config=None)",
+     "usage": "x = ttnn.embedding(ids, self.weights, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
+     "notes": "ids are uint32 ROW_MAJOR; the weight is the [vocab, hidden] table in ROW_MAJOR. The keyword is `weight`; `weights` is an error. Without layout=TILE_LAYOUT the output is row major.",
+     "seen_in": "models/tt_transformers/tt/embedding.py:70",
+     "in": [
+      "tt_metal"
+     ]
+    }
+   ]
+  },
+  {
    "title": "Tensors, layout and dtype",
    "entries": [
     {
@@ -149,109 +252,6 @@
      "usage": "ids = ttnn.from_torch(ids_t, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=mesh_device)",
      "notes": "Layout for token ids. Pair it with ttnn.uint32.",
      "seen_in": "models/tt_transformers/tt/embedding.py:35",
-     "in": [
-      "tt_metal"
-     ]
-    }
-   ]
-  },
-  {
-   "title": "Embedding",
-   "entries": [
-    {
-     "name": "ttnn.embedding",
-     "kind": "op",
-     "signature": "ttnn.embedding(input_tensor, weight, *, padding_idx=None, layout=None, embeddings_type=None, dtype=None, memory_config=None)",
-     "usage": "x = ttnn.embedding(ids, self.weights, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
-     "notes": "ids are uint32 ROW_MAJOR; the weight is the [vocab, hidden] table in ROW_MAJOR. The keyword is `weight`; `weights` is an error. Without layout=TILE_LAYOUT the output is row major.",
-     "seen_in": "models/tt_transformers/tt/embedding.py:70",
-     "in": [
-      "tt_metal"
-     ]
-    }
-   ]
-  },
-  {
-   "title": "Linear and matmul",
-   "entries": [
-    {
-     "name": "ttnn.linear",
-     "kind": "op",
-     "signature": "ttnn.linear(input_tensor_a, input_tensor_b, *, bias=None, transpose_a=False, transpose_b=False, memory_config=None, dtype=None, program_config=None, activation=None, compute_kernel_config=None, core_grid=None)",
-     "usage": "y = ttnn.linear(x, w, bias=b, dtype=ttnn.bfloat16, compute_kernel_config=ck, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
-     "notes": "x @ w (+ bias). The torch Linear weight is [out, in]: transpose it once at load (w_torch.T) or pass transpose_b=True. With no program_config the op picks one; start there.",
-     "seen_in": "models/tt_transformers/tt/mlp.py:194",
-     "in": [
-      "tt_metal"
-     ]
-    },
-    {
-     "name": "ttnn.matmul",
-     "kind": "op",
-     "signature": "ttnn.matmul(input_tensor_a, input_tensor_b, *, transpose_a=False, transpose_b=False, memory_config=None, dtype=None, program_config=None, activation=None, compute_kernel_config=None, core_grid=None)",
-     "usage": "scores = ttnn.matmul(q, k_t, compute_kernel_config=ck)",
-     "notes": "Same as linear without bias. Batched matmul broadcasts the leading dims; both inputs must be TILE_LAYOUT.",
-     "seen_in": "models/tt_transformers/tt/mixtral_mlp.py:135",
-     "in": [
-      "tt_metal"
-     ]
-    },
-    {
-     "name": "ttnn.MatmulMultiCoreReuseMultiCastProgramConfig",
-     "kind": "symbol",
-     "signature": "ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(compute_with_storage_grid_size, in0_block_w, out_subblock_h, out_subblock_w, per_core_M, per_core_N, transpose_mcast, fused_activation, fuse_batch)",
-     "usage": "pc = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(compute_with_storage_grid_size=(8, 8), in0_block_w=1, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=56, transpose_mcast=False, fused_activation=None, fuse_batch=False)",
-     "notes": "Program config for a large matmul (prefill, interleaved). per_core_M and per_core_N count tiles per core; out_subblock_h * out_subblock_w <= 4. Skip it in a first port.",
-     "seen_in": "models/tt_transformers/tt/model_config.py:1002",
-     "in": [
-      "tt_metal"
-     ]
-    },
-    {
-     "name": "ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig",
-     "kind": "symbol",
-     "signature": "ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size, in0_block_w, out_subblock_h, out_subblock_w, per_core_M, per_core_N, fuse_batch, fused_activation, mcast_in0)",
-     "usage": "pc = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 8), in0_block_w=2, out_subblock_h=1, out_subblock_w=4, per_core_M=1, per_core_N=8, fuse_batch=True, fused_activation=None, mcast_in0=True)",
-     "notes": "Program config for decode, where M is one tile row (batch up to 32).",
-     "seen_in": "models/tt_transformers/tt/model_config.py:2078",
-     "in": [
-      "tt_metal"
-     ]
-    },
-    {
-     "name": "ttnn.WormholeComputeKernelConfig",
-     "kind": "symbol",
-     "signature": "ttnn.WormholeComputeKernelConfig(math_fidelity, math_approx_mode, fp32_dest_acc_en, packer_l1_acc)",
-     "usage": "ck = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)",
-     "notes": "Precision of a matmul or norm. HiFi4 with fp32 accumulation is the safe choice while matching the CPU reference; lower fidelity comes after the check passes. Blackhole uses the same class.",
-     "seen_in": "models/tt_transformers/tt/model_config.py",
-     "in": [
-      "tt_metal"
-     ]
-    }
-   ]
-  },
-  {
-   "title": "RMS norm and softmax",
-   "entries": [
-    {
-     "name": "ttnn.rms_norm",
-     "kind": "op",
-     "signature": "ttnn.rms_norm(input_tensor, *, epsilon=1e-12, weight=None, bias=None, residual_input_tensor=None, memory_config=None, program_config=None, compute_kernel_config=None)",
-     "usage": "y = ttnn.rms_norm(x, epsilon=1e-6, weight=w_norm)",
-     "notes": "Set epsilon from the config; the default 1e-12 is rarely right. A ROW_MAJOR weight needs last dim 32 ([1, 1, hidden/32, 32]); a TILE weight needs the input's last dim. If the reference adds 1 to the weight, add it at load. The keywords are epsilon and weight.",
-     "seen_in": "models/tt_transformers/tt/distributed_norm.py; tt-metal tests for rms_norm",
-     "in": [
-      "tt_metal"
-     ]
-    },
-    {
-     "name": "ttnn.softmax",
-     "kind": "op",
-     "signature": "ttnn.softmax(input_tensor, dim=-1, *, memory_config=None, compute_kernel_config=None, numeric_stable=False)",
-     "usage": "p = ttnn.softmax(scores, dim=-1, numeric_stable=True)",
-     "notes": "Use numeric_stable=True for attention scores built by hand.",
-     "seen_in": "models/tt_transformers/tt/mixtral_moe.py:121",
      "in": [
       "tt_metal"
      ]
