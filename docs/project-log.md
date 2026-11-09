@@ -4928,6 +4928,23 @@ the Qwen4 bundle on the weights-only route; its text is not readable, so every g
   `tests/test_token_check_numbers.py` does not have. Both reads now use `getattr`; that set then passed (2,347 passed, 2 skipped), and the four
   mutations on those lines were run again and are red.
 
+## 2026-11-09: the drafter is switched off by the kind of drafter the bundle uses (Qwen4 drop-in plan, Track C item C6)
+Prompt (from the session that runs the Qwen4 drop-in plan): decide drafter-off from the drafter the bundle uses (DFlash2 needs Qwen3.8 hidden
+states), and strip `TT_AUXILIARY_WEIGHTS` when it is off.
+- Read in the installed bundle's code: `QWEN36_DRAFTER="dflash2"` is the DFlash block-diffusion drafter, a separate checkpoint (`DFLASH_WEIGHTS`,
+  `incoai/Qwen3.8-27B-DFlash2`) whose config names the target layers it reads (`target_layer_ids` 5, 19, 33, 47, 61 of 64); "mtp" is the model's own
+  MTP head; an empty value turns speculation off. The bundle's launcher downloads every comma-separated entry of `TT_AUXILIARY_WEIGHTS` before vLLM
+  starts, and the Qwen bundles name the drafter's repo there.
+- `prepare_swap.py`: with a DFlash drafter, the drafter is switched off when the new model's text config differs from the nearest model's in
+  model_type (a `_text` suffix aside), the widths, the layer count or the layer types (a key only one config states is not compared), or when
+  either config cannot be read, whatever `mtp.*` tensors the new model has. Before, a Qwen4 release with an MTP head would have kept the Qwen3.8
+  drafter on. With the drafter off for any reason, the drafter's repo (the one `DFLASH_WEIGHTS` names, at any revision) leaves the run script's
+  `TT_AUXILIARY_WEIGHTS`; other entries stay.
+- `orchard/package.py`: a package served with the drafter off carries no `TT_AUXILIARY_WEIGHTS` (the card names every repo in the package
+  environment as the drafter), and the package check refuses one left in the environment or exported by run.sh.
+- Tests: `tests/test_drafter_by_kind.py`. 15 mutations; one survived (working head_dim out of the widths). Qwen3.8 states head_dim 256 while
+  hidden_size / num_attention_heads is 213, so that derivation was wrong for this family: it was removed and a test says so. A second survivor
+  (reading the first drafter line instead of the last) got a test. All guards are red now. No hardware was used.
 ## 2026-11-09: bundle capabilities in stage 0 and the release's own config in stage 2 (Qwen4 drop-in plan, Track C items C1 and C2)
 Prompt (from the session that runs the Qwen4 drop-in plan): implement Track C items C1 to C6. This entry covers C1 and C2. The goal is that on release
 day stage 0 classes Qwen4-27B `weights-only` against the Qwen4 thin bundle (whose development weights are a 20-layer test checkpoint) and stage 2

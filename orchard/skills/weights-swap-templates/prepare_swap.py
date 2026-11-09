@@ -69,7 +69,17 @@ The weights-swap-check skill copies this file into the stage directory and runs 
      removes `"sample_on_device_mode"` from the command's single `--additional-config`, because plain
      decoding on a 1x2 mesh refuses on-device sampling ("Unset sample_on_device_mode for host sampling");
      the host samples instead.
-   - `"drafter": "off"` in swap_config.json does the same two edits whatever the model's tensors say. A
+   - when the bundle's drafter is a DFlash drafter (its last `export QWEN36_DRAFTER=` line says "dflash2"), the drafter is switched
+     off in the same way whatever mtp.* tensors the new model has, if the new model's text config differs from the nearest model's
+     in model_type (a "_text" suffix aside), hidden_size, num_hidden_layers, num_attention_heads, num_key_value_heads, head_dim,
+     intermediate_size, vocab_size or layer_types, or if either config cannot be read. A
+     DFlash drafter is a separate checkpoint (DFLASH_WEIGHTS) that reads the hidden states of the model it was trained on, the
+     nearest model, at fixed layers; a key only one config states is not compared. A drafter of kind "mtp" uses the model's own MTP
+     head, and only the mtp.* rule above applies to it.
+   - with the drafter off for any reason, the drafter's repo (the one `export DFLASH_WEIGHTS=` names, at any revision) is removed
+     from the single `export TT_AUXILIARY_WEIGHTS=` list, which the bundle's launcher downloads before vLLM starts; other entries
+     stay and a line left empty is removed. Without a DFLASH_WEIGHTS line the list is left alone and the script says so.
+   - `"drafter": "off"` in swap_config.json does the same edits whatever the model's tensors say. A
      suite control (orchard/suite_control.py) uses it so that the nearest model is served the way a run
      without `mtp.*` tensors is served. Any other value is refused, and so is the key with `graft_mtp`.
 
@@ -500,6 +510,48 @@ def has_mtp_tensors(new: Path) -> bool | None:
     return any(MTP_NAME.search(k) for k in names)
 
 
+# A DFlash drafter (QWEN36_DRAFTER="dflash2") is a separate checkpoint (DFLASH_WEIGHTS) that reads the target model's hidden states at fixed
+# layers; it was trained on the nearest model. These text config values decide whether the new model's hidden states are of that kind.
+DRAFTER_TARGET_KEYS = ("model_type", "hidden_size", "num_hidden_layers", "num_attention_heads", "num_key_value_heads", "head_dim",
+                       "intermediate_size", "vocab_size", "layer_types")
+DRAFTER_LINE = re.compile(r"^[ \t]*export[ \t]+QWEN36_DRAFTER=(.*)$", re.MULTILINE)
+
+
+def bundle_drafter(text: str) -> str | None:
+    """The drafter the bundle's run.sh turns on: the value of its last `export QWEN36_DRAFTER=` line, unquoted ("" is off), or None when
+    it has no such line."""
+    found = [m.group(1).strip().strip("\"'") for m in DRAFTER_LINE.finditer(text)]
+    return found[-1] if found else None
+
+
+def _text_config(path: Path):
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))  # hardening: ok a snapshot config, read as vocab_facts reads it (a stand-alone template)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    inner = cfg.get("text_config")
+    return {**cfg, **inner} if isinstance(inner, dict) else cfg
+
+
+def _target_value(cfg: dict, key: str):
+    v = cfg.get(key)
+    if key == "model_type" and isinstance(v, str) and v.endswith("_text"):
+        return v[:-len("_text")]                 # qwen3_5 and qwen3_5_text are the same text model
+    return v
+
+
+def drafter_target_differences(base: Path, new: Path) -> list[str] | None:
+    """The DRAFTER_TARGET_KEYS whose values differ between the new model's text config and the nearest model's, or None when either
+    config cannot be read (then the drafter cannot be shown to fit). A key only one config states is not compared."""
+    a, b = _text_config(new / "config.json"), _text_config(base / "config.json")
+    if a is None or b is None:
+        return None
+    return [k for k in DRAFTER_TARGET_KEYS
+            if _target_value(a, k) is not None and _target_value(b, k) is not None and _target_value(a, k) != _target_value(b, k)]
+
+
 def read_shard_header(path: Path) -> tuple[dict, int] | None:
     """(the safetensors header, the file offset where tensor data starts), or None when it cannot be read."""
     try:
@@ -678,6 +730,35 @@ def drop_device_sampling(text: str, bundle: Path) -> tuple[str, str]:
             "moves to the host; on-device sampling is certified only on 1x4, 1x8 and 1x1 meshes)")
 
 
+AUX_LINE = re.compile(r"^([ \t]*)export[ \t]+TT_AUXILIARY_WEIGHTS=(.*)$", re.MULTILINE)
+DFLASH_LINE = re.compile(r"^[ \t]*export[ \t]+DFLASH_WEIGHTS=(.*)$", re.MULTILINE)
+
+
+def drop_drafter_weights(text: str, bundle: Path) -> tuple[str, str]:
+    """With the drafter off, remove the drafter's repo from `export TT_AUXILIARY_WEIGHTS=` (a comma-separated list the bundle's launcher
+    downloads before vLLM starts). The drafter's repo is the one `export DFLASH_WEIGHTS=` names, at any revision; other entries stay, and a
+    line left empty is removed. Returns (new text, a note). More than one TT_AUXILIARY_WEIGHTS line exits 2."""
+    aux = list(AUX_LINE.finditer(text))
+    if not aux:
+        return text, "TT_AUXILIARY_WEIGHTS was absent; nothing to remove"
+    if len(aux) > 1:
+        fail(f"expected at most one export TT_AUXILIARY_WEIGHTS= line in {bundle / 'run.sh'}, found {len(aux)}")
+    drafters = {m.group(1).strip().strip("\"'").split("@", 1)[0] for m in DFLASH_LINE.finditer(text)} - {""}
+    if not drafters:
+        return text, ("TT_AUXILIARY_WEIGHTS was left as it is: run.sh has no export DFLASH_WEIGHTS= line, so the drafter's entry cannot be "
+                      "told apart")
+    m = aux[0]
+    items = [x.strip() for x in m.group(2).strip().strip("\"'").split(",") if x.strip()]
+    keep = [x for x in items if x.split("@", 1)[0] not in drafters]
+    gone = [x for x in items if x not in keep]
+    if not gone:
+        return text, "TT_AUXILIARY_WEIGHTS names no drafter repo; left as it is"
+    new_line = f'{m.group(1)}export TT_AUXILIARY_WEIGHTS="{",".join(keep)}"' if keep else ""
+    end = m.end() + (1 if not keep and text[m.end():m.end() + 1] == "\n" else 0)
+    return (text[:m.start()] + new_line + text[end:],
+            f"removed the drafter's {', '.join(gone)} from TT_AUXILIARY_WEIGHTS (the drafter is off, so it is not downloaded)")
+
+
 # The two forms of bundle run.sh. See the module docstring.
 OLDER_FORM, CURRENT_FORM = "older", "current"
 HERE_MODEL = r'"?\$(?:\{HERE\}|HERE)/model-dir"?'                         # "$HERE/model-dir", "${HERE}/model-dir", $HERE/model-dir
@@ -766,6 +847,8 @@ def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
                      "export QWEN36_DRAFTER=... was absent; nothing to clear")
         text, note = drop_device_sampling(text, bundle)
         notes.append(note)
+        text, note = drop_drafter_weights(text, bundle)
+        notes.append(note)
     for flag in ("--revision", "--tokenizer-revision"):
         # The leading space keeps " --revision" from matching inside "--tokenizer-revision".
         text, n = re.subn(r" " + flag + r'\s+"?[0-9a-f]{40}"?(?=\s|$)', "", text)
@@ -813,13 +896,23 @@ def main() -> int:
         if vocab["trimmed"]:
             no_drafter_why = (f"the new model's vocabulary ({vocab['model']}) differs from the nearest model's ({vocab['base']}), "
                               "and the speculative drafter works on the nearest model's token ids")
+        kind = bundle_drafter(src_run.read_text(encoding="utf-8"))  # hardening: ok the bundle's run.sh, which this script reads to edit
+        target_off = False
+        if kind is not None and kind.startswith("dflash") and not graft and not no_drafter_why:
+            differ = drafter_target_differences(base, new)
+            if differ is None or differ:
+                target_off = True
+                no_drafter_why = ("the bundle's DFlash2 drafter reads the hidden states of the model it was trained on (the nearest model's), and "
+                                  + ("the two configs cannot be compared" if differ is None else
+                                     f"the new model's {', '.join(differ)} differ from the nearest model's")
+                                  + ", so it is switched off whatever mtp.* tensors the new model has")
         forced_off = cfg.get("drafter") == "off"
         if forced_off and not no_drafter_why:
             no_drafter_why = ("swap_config.json says drafter off: this directory serves the way a model without mtp.* "
                               "tensors is served, so a control can be compared with such a run")
         text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle,
                                       cfg["nearest_model_id"], model_dir,
-                                      drafter_off=((mtp is False or bool(vocab["trimmed"]) or forced_off) and not graft),
+                                      drafter_off=((mtp is False or bool(vocab["trimmed"]) or forced_off or target_off) and not graft),
                                       explicit_drafter_off=bool(vocab["trimmed"]) or forced_off,
                                       form=form, **({"drafter_reason": no_drafter_why} if no_drafter_why else {}))
         if form == CURRENT_FORM and (bundle / "graft.json").is_file() and not graft:

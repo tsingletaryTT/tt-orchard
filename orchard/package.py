@@ -117,7 +117,11 @@ def splice_extra_args(text: str, extra: str) -> str:
 
 
 ADDITIONAL = re.compile(r"--additional-config\s+'([^']*)'")
-DRAFTER_ENV = re.compile(r"^(DFLASH_WEIGHTS|QWEN36_DFLASH_\w+)$")
+# The drafter's own settings. TT_AUXILIARY_WEIGHTS is here too: the bundles that set it name the drafter's repo there (the launcher downloads
+# every entry before vLLM starts), and the card names every repo in a package's environment as the drafter (aux_repos), so a package served
+# with the drafter off carries none of it.
+DRAFTER_ENV = re.compile(r"^(DFLASH_WEIGHTS|QWEN36_DFLASH_\w+|TT_AUXILIARY_WEIGHTS)$")
+AUX_EXPORT = re.compile(r"^\s*export\s+TT_AUXILIARY_WEIGHTS=(.*)$")
 
 
 def drop_device_sampling(extra: str) -> str:
@@ -145,8 +149,9 @@ def drop_device_sampling(extra: str) -> str:
 
 def serving_env(env: dict, *, drafter_off: bool) -> dict:
     """The manifest environment package-thin is given. With the drafter off, QWEN36_DRAFTER is empty
-    and the drafter's own settings (its repo, tensor-parallel size, block sizes) are not passed, so the
-    package names no drafter repo and downloads none."""
+    and the drafter's own settings (its repo, tensor-parallel size, block sizes, and TT_AUXILIARY_WEIGHTS, which
+    names the drafter's repo for the launcher to download) are not passed, so the package names no drafter repo and
+    downloads none."""
     if not drafter_off:
         return dict(env)
     out = {k: v for k, v in env.items() if not DRAFTER_ENV.match(k)}
@@ -179,9 +184,15 @@ def serving_problems(run_sh: str, env: dict, *, drafter_off: bool, host_sampling
             problems.append(f"the manifest sets QWEN36_DRAFTER={env['QWEN36_DRAFTER']!r}; stage 2 "
                             "served with the drafter off")
         left = sorted(k for k in env if DRAFTER_ENV.match(k)) + \
-            (["DFLASH_WEIGHTS in run.sh"] if "DFLASH_WEIGHTS" in run_sh else [])
+            (["DFLASH_WEIGHTS in run.sh"] if "DFLASH_WEIGHTS" in run_sh else []) + \
+            (["TT_AUXILIARY_WEIGHTS in run.sh"] if any((m := AUX_EXPORT.match(ln)) and m.group(1).strip().strip("\"'")
+                                                       for ln in run_sh.splitlines()) else [])
         if left:
             problems.append(f"the drafter's settings are still in the package: {left}")
+        repos = aux_repos(env, nearest_model="")
+        if repos:
+            problems.append(f"the package's environment names {', '.join(repos)} with the drafter off, and the card would name it as the "
+                            "drafter")
     if host_sampling and "sample_on_device_mode" in run_sh:
         problems.append("run.sh sets sample_on_device_mode; stage 2 served with host sampling")
     on = _drafter_on(run_sh, env)

@@ -1,0 +1,3 @@
+target = "0.9.143"
+summary = "A DFlash2 drafter is switched off when the new model's architecture differs from the nearest model's, whatever mtp.* tensors it has, and a drafter that is off no longer leaves its repo in TT_AUXILIARY_WEIGHTS of the stage 2 run script or the stage 7 package."
+pr = 661
