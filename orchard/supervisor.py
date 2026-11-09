@@ -167,7 +167,8 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             open_stage_dir, marker_state, package_format, package_options, resolve_endpoint, SUPERVISOR_MARKER,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, FULL_PORT_STAGE_4, SKIP_3_FULL_PORT, SKIP_4_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
-                            recorded_by_supervisor, run_model_kind, scoring_routed)
+                            recorded_by_supervisor, run_model_kind, scoring_routed,
+                            WEIGHTS_ONLY_REHEARSAL_GATES, rehearsal_options_problem, weights_only_rehearsal)
 from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, op_cheats, phone_a_friend, port_construction, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import repair_help            # the outside helper inside the port repair rounds (issue 427, run11)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
@@ -230,6 +231,8 @@ STAGE_3_SEED_ENTRIES = 1000               # the scan stops after this many entri
 STAGE_3_SEED_DEPTH = 8                    # and at this many directory levels below the port directory
 REHEARSAL_WORDS_WAIVED = "full-port rehearsal: word count waived"      # issue 568: the ledger decision written when the word count of the free-run text was waived
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
+# The ledger decision written when a weights-only gate (stage 2, 4 or 7) passed with a measured `coherent` of false (`--weights-only-rehearsal`).
+WEIGHTS_REHEARSAL_WAIVED = "weights-only rehearsal: coherence waived"
 FULL_PORT_UNBUILT = ()      # the stages of a full port that are not built yet: empty, because stages 3 to 6 all exist (issues 326, 454, 329). A non-empty
                             # tuple makes a full-port run pause before stage 5 once (unattended: end blocked), as the first slices did; tests set it
 FULL_PORT_STAGES_UNBUILT = ("stage 4 of the full-port route passed or was skipped; stages 5 and 6 for a full-port model are not built yet "
@@ -896,7 +899,7 @@ class Supervisor:
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
-                 full_port_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
+                 full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
                     port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
                     abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
@@ -936,6 +939,9 @@ class Supervisor:
         # `--full-port-rehearsal` (issue 357): the model is a rehearsal with random weights, so stage 2's `coherent` field is waived. Recorded
         # in run_start only; the gate reads the ledger's answer, never this request.
         self.full_port_rehearsal = full_port_rehearsal
+        # `--weights-only-rehearsal`: the weights-only route's model gives unreadable text on purpose (the perturbed Qwen4 frankenmodel), so a
+        # measured `coherent` of false is waived in stages 2, 4 and 7. Recorded in run_start only; the gates get the ledger's answer.
+        self.weights_only_rehearsal = weights_only_rehearsal
         # Whether the model's purpose needs sampling: "auto" reads it from stage 0's files, the others are the operator's word (orchard/sampling_choice.py).
         self.sampling = sampling
         # An abort is terminal unless the operator asks for this (`--resume-aborted`): then an operator's or a signal's abort is
@@ -1291,6 +1297,7 @@ class Supervisor:
                                **({"repair_help": False} if not self.repair_help else {}),
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
+                               **({"weights_only_rehearsal": True} if self.weights_only_rehearsal else {}),
                                **({"helper_drives": self.helper_drives} if self.helper_drives is not None else {}),
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
@@ -2384,6 +2391,10 @@ class Supervisor:
         if spec.draft == "full_port_entries":
             # Both are the supervisor's own: the run's --required-chips and the rehearsal flag from the ledger. The coder can write neither.
             return functools.partial(spec.gate, required=self.required_chips, **({"rehearsal": True} if full_port_rehearsal(self.ledger.read()) else {}))
+        if getattr(spec, "gate", None) in WEIGHTS_ONLY_REHEARSAL_GATES and weights_only_rehearsal(self.ledger.read()):
+            # The weights-only rehearsal (run_start's `weights_only_rehearsal`): the coder cannot write it. Stage 4 keeps its required counts.
+            return functools.partial(spec.gate, rehearsal=True,
+                                     **({"required": self.required_chips} if spec.number == 4 and self.required_chips else {}))
         if spec.number == 4 and self.required_chips:
             return functools.partial(spec.gate, required=self.required_chips)
         if spec.number == 0:
@@ -3395,6 +3406,10 @@ class Supervisor:
                                         f"and the character floor and every other stage {spec.number} check still applied")
         if spec.draft == "full_port_entries":
             gate = full_port_stage4.vouch(self, spec, stage_dir, gate, waived_decision=REHEARSAL_WAIVED, words_decision=REHEARSAL_WORDS_WAIVED)       # the plan, the markers and the results are the supervisor's (the ledger holds them)
+        if getattr(spec, "gate", None) in WEIGHTS_ONLY_REHEARSAL_GATES and gate.ok and "coherent" in gate.waived:      # the gate's own read: no file is opened again
+            self.ledger.append("decision", spec.number, decision=WEIGHTS_REHEARSAL_WAIVED, field="coherent", by="--weights-only-rehearsal",
+                               note=f"the model is a weights-only rehearsal whose text is not readable; the measured coherent false was waived "
+                                    f"and every other stage {spec.number} check still applied")
         self._note_unverified(spec.number, gate)
         return gate
 
@@ -6136,6 +6151,11 @@ def parse(argv=None):
                    help="for a rehearsal model with random weights (scripts/tiny_qwen4): stage 2 of a full port waives its `coherent` field and "
                         "no other check, and the ledger says so. Needs --full-port, is given when the run starts, and is recorded in run_start; "
                         "a resume keeps it and cannot add it")
+    r.add_argument("--weights-only-rehearsal", action="store_true",
+                   help="for a rehearsal model on the weights-only route whose text is not readable on purpose (the perturbed Qwen4 frankenmodel "
+                        "of scripts/tiny_qwen4/make_franken.py): a measured `coherent` of false is waived in stage 2's swap check, each stage 4 "
+                        "configuration and stage 7's boot check, and no other check, and the ledger says so each time. Given when the run starts "
+                        "and recorded in run_start; a resume keeps it and cannot add it. With --full-port it needs --full-port-rehearsal too")
     r.add_argument("--resume-aborted", action="store_true",
                    help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
@@ -6281,8 +6301,19 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     if rehearsal_req and progress.started and not full_port_rehearsal(entries):
         raise ValueError("--full-port-rehearsal waives a stage 2 check, so it can be given only when the run starts. This run started without "
                          "it. Move this run's directory aside and start a new run with the flag")
+    weights_rehearsal_req = bool(getattr(args, "weights_only_rehearsal", False))
+    if weights_rehearsal_req and progress.started and not weights_only_rehearsal(entries):
+        raise ValueError("--weights-only-rehearsal waives a check in stages 2, 4 and 7, so it can be given only when the run starts. This run "
+                         "started without it. Move this run's directory aside and start a new run with the flag")
+    # The options as the run will hold them: what the ledger recorded, and what this command adds (only --full-port can be added later).
+    why = rehearsal_options_problem(full_port=full_port_enabled(entries) or bool(getattr(args, "full_port", False)),
+                                    full_port_rehearsal=full_port_rehearsal(entries) or rehearsal_req,
+                                    weights_only_rehearsal=weights_only_rehearsal(entries) or weights_rehearsal_req)
+    if why:
+        raise ValueError(why)
     if progress.started:
         rehearsal_req = False                   # a resumed run keeps what run_start holds
+        weights_rehearsal_req = False
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
         graft_on = False                        # a run that opted out of the graft trial stays opted out
@@ -6377,7 +6408,8 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
                       sampling=sampling_mode, port_repair_rounds=repair_rounds, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
-                      full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req, stack_pins=stack_pins,
+                      full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
+                      weights_only_rehearsal=weights_rehearsal_req, stack_pins=stack_pins,
                       kind_override=getattr(args, "model_kind", None),
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,

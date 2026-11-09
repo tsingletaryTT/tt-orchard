@@ -35,7 +35,7 @@ Write `result.json` in your stage directory:
                   "stages/2/evidence/sidecar-parity.json"]}
 
 You do not type these numbers. A script writes them into `stages/2/evidence/sidecar-check.json`, and you
-copy its `result_draft`. The gate needs `serves` true, `coherent` true, `n_tokens` of at least 16,
+copy its `result_draft` (with `coherent` as the draft has it: a run started with `--weights-only-rehearsal` accepts false). The gate needs `serves` true, `coherent` true, `n_tokens` of at least 16,
 `top1_agreement` of at least 0.85, a positive `server_ready_s`, and a `sidecar_parity` object: measured,
 its wiring check passed, enough questions, hidden-state correlation and top-option agreement above the
 bars, and a probability difference below the bar. It must also name the exact head file and code file
