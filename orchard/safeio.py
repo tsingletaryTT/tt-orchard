@@ -931,22 +931,35 @@ def cache_roots(directory) -> list:
     roots = [base]
     parent = os.path.dirname(base)
     if os.path.basename(parent) == "snapshots":
-        blobs = os.path.join(os.path.dirname(parent), "blobs")
+        model_dir = os.path.dirname(parent)
+        blobs = os.path.join(model_dir, "blobs")
         if os.path.isdir(blobs) and not os.path.islink(blobs):
             roots.append(os.path.realpath(blobs))
+        # Current huggingface_hub keeps the model's blobs/<hash> as a link into a store shared by the whole hub, `<hub>/blobs/<xx>/<hash>`
+        # (issue 643). That store is a root only for a snapshot at `<hub>/models--*/snapshots/<rev>`, and only when `<hub>/blobs` is a real
+        # directory and not a link; resolved_inside then also requires the final target to be a regular file.
+        if os.path.basename(model_dir).startswith("models--"):
+            store = os.path.join(os.path.dirname(model_dir), "blobs")
+            if os.path.isdir(store) and not os.path.islink(store):
+                roots.append(os.path.realpath(store))
     return roots
 
 
 def resolved_inside(path, directory) -> str | None:
-    """`resolved(path)` when the result lies inside the snapshot `directory` or its cache's `blobs` directory (see cache_roots), else None.
+    """`resolved(path)` when the result lies inside the snapshot `directory`, its cache's `blobs` directory or the hub-wide blob store (see cache_roots), else None.
     A plain file of the snapshot resolves to itself and passes; a Hugging Face snapshot link into blobs/ passes; a link to anywhere else
     comes back as None, so the caller names the file and refuses it (issue 494). The check is on the resolved real path; the caller still
     opens the result through the guarded reader, which refuses a device or a pipe."""
     target = resolved(path)
     if not target:
         return None
-    for root in cache_roots(directory):
+    roots = cache_roots(directory)
+    for i, root in enumerate(roots):
         if target == root or target.startswith(root + os.sep):
+            # Outside the snapshot itself (the first root) the target must be a regular file: a pipe or a device in a blobs directory is not
+            # a weights file, and the cache's stores are reached only to read one.
+            if i > 0 and not os.path.isfile(target):
+                return None
             return target
     return None
 
