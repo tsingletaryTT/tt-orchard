@@ -54,6 +54,26 @@ def test_the_template_copy_of_the_shared_block_carries_the_message():
     assert "def device_ops_reason" in template and "WHAT_TO_DO" in template
 
 
+def test_the_template_copy_equals_the_shared_module_byte_for_byte():
+    """The port check template is copied to each run and cannot import orchard, so its device-ops text and function are a copy of
+    orchard/ttnn_calls.py. A change to one without the other would make the supervisor's message (from the module) and the board check's
+    (from the template) differ. The copy must match exactly (review of PR 687)."""
+    import ast
+    mod_src = (ROOT / "orchard" / "ttnn_calls.py").read_text()
+    tpl_src = (TEMPLATES / "port_check.py").read_text()
+
+    def pieces(src):
+        tree = ast.parse(src)
+        const = next(n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "WHAT_TO_DO" for t in n.targets))
+        func = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "device_ops_reason")
+        return ast.literal_eval(const.value), ast.get_source_segment(src, func)
+
+    mod_text, mod_func = pieces(mod_src)
+    tpl_text, tpl_func = pieces(tpl_src)
+    assert tpl_text == mod_text == ttnn_calls.WHAT_TO_DO
+    assert tpl_func == mod_func
+
+
 # ---- port_check.py --static ----------------------------------------------------------------------------------------------------
 
 def stage(tmp_path: Path, port_text: str | None, *, tools: bool = False) -> Path:
