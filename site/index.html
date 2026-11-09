@@ -428,6 +428,9 @@
       <li>Stage 0 sorts the model. For a weights-only fine-tune, a sidecar model or a vocabulary trim the run goes through stages 0, 1, 2, 4 and 8 with no new code. Stages 3, 5 and 6 are skipped by design, and stage 7 packages when asked.</li>
       <li>Serving checks at 1, 2 and 4 chips, with a park and restore of the coder when a test needs its board.</li>
       <li>Retries for stops that clear on their own, and a stop with a stated reason for the rest.</li>
+      <li>A down outside helper no longer stops a run: after two failed connections the run goes on without help and probes again every five minutes. On 2026-11-09 the helper's network went away and this was the case that prompted it.</li>
+      <li>Stage 1 loads a model that ships its own code, after removing credential-like environment variables, going offline and writing the hash of every Python file to an audit file. It is an audit trail and not a sandbox.</li>
+      <li>A release-day check for a new Qwen release (<code>tt-orchard drop-check</code>, with a watcher, <code>drop-watch</code>) says which route a bring-up takes from the release's config and the bundle's declared capabilities, before any weight file is read. It has been run on a Qwen4-shaped test checkpoint and on fakes. No Qwen4 release exists yet.</li>
       <li>A review bundle and, on request, a package with its card, checked against its files.</li>
     </ul></div>
     <div class="card"><h3>Needs a person or new code</h3><ul>
@@ -443,6 +446,8 @@
     <li>MiniCPM3-4B and Granite-4.0-H-1B were driven by hand and did not go through the supervisor. MiniCPM3 has no batched prefill on two chips.</li>
     <li>A full-port model is packaged by hand, because stage 7 builds a package only on the weights-only path. Served speeds for Olmo-Hybrid-7B ran from 2.2 to 12.3 tok/s with the host's load, and its bundle takes one request at a time.</li>
     <li>Stable Audio 3 has its text encoder on the host, and nobody listened to the clips. Agreement is measured against a CPU reference on a single prompt or a small set.</li>
+    <li>Qwen3.8-27B-QSA passed stages 0 to 4 on four chips and its serving matched the reference on 80 of 80 corpus positions, then stopped at stage 5 because a thinking model's passkey replies were cut at the answer limit (fixed in PR 652). The port does not use the sparse-attention indexer tensors, and every agreement prompt is shorter than the indexer's 2,048-token budget, so the indexer was not shown working (issue 638).</li>
+    <li>The coder alone has not written a passing full-port stage 2 port. An audition of another Qwen3.8-27B bundle as the coder against Qwen3-Coder-Next is under way (issue 510); no results are claimed here.</li>
     <li>The automatic graft trial has not run on hardware. The 4-chip fabric timeout seen in three runs was cleared by a reset each time, and its cause was never isolated.</li>
     <li>Speeds are medians on a shared host. The Granite, MiniCPM3, Qwen3.5-35B-A3B and ACE-Step packages are published; their numbers are in their cards.</li>
   </ul>
