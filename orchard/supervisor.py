@@ -2458,10 +2458,10 @@ class Supervisor:
     def _with_capabilities(self, base):
         """Stage 0's gate plus the bundle capabilities check (orchard/bundle_capabilities.py): when the run's `bundle` input ships
         orchard-capabilities.json, delta.json must record that stage 0 applied it, with the file's current sha256. The bundle directory is
-        the supervisor's own input; the file is read here, never taken from the stage directory."""
+        the supervisor's own input; the file is read here, never taken from the stage directory. With no bundle input the check still runs: a
+        delta.json that says capabilities were found or applied is refused, because the agent writes the config that names the folder."""
         bundle = self.inputs.get(bundle_capabilities.INPUT)
-        if not isinstance(bundle, str) or not bundle:
-            return base
+        bundle = bundle if isinstance(bundle, str) and bundle else None
 
         def gate(stage_dir, run_dir):
             result = base(stage_dir, run_dir)

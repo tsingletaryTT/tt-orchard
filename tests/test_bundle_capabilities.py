@@ -43,6 +43,17 @@ def test_no_bundle_input_checks_nothing(tmp_path):
     assert bc.stage0_problems(delta(), "") == []
 
 
+def test_no_bundle_input_but_an_applied_record_fails(tmp_path):
+    # The stage 0 agent writes triage_config.json, so it can point nearest_bundle_dir at a folder it wrote and get `applied` true. A run
+    # with no bundle input has no file the supervisor vouches for, so a present or applied record must not pass (PR 659 review).
+    d = bundle(tmp_path)
+    for bad in (record(d), {**record(d), "applied": False}, {**record(d), "present": False, "applied": True}):
+        got = bc.stage0_problems(delta(capabilities=bad), None)
+        assert got and bc.FILE in got[0], bad
+        assert bc.stage0_problems(delta(capabilities=bad), "") == got
+    assert bc.stage0_problems(delta(capabilities={**record(d), "present": False, "applied": False}), None) == []     # a recorded 'none'
+
+
 def test_a_bundle_without_the_file_and_a_delta_without_a_record_pass(tmp_path):
     d = bundle(tmp_path, None)
     assert bc.stage0_problems(delta(), str(d)) == []
@@ -164,7 +175,11 @@ def test_gate_reasons_reads_delta_json_safely(tmp_path):
     assert any("delta.json" in r for r in bc.gate_reasons(stage, str(d)))           # refused by the safe reader
     (stage / "delta.json").write_text(json.dumps(delta(capabilities=record(d))))
     assert bc.gate_reasons(stage, str(d)) == []
+    assert any(bc.FILE in x for x in bc.gate_reasons(stage, None))          # no bundle input: the same record is refused (PR 659 review)
+    (stage / "delta.json").write_text(json.dumps(delta()))
     assert bc.gate_reasons(stage, None) == []
+    (stage / "delta.json").write_text('{"path": NaN}')
+    assert bc.gate_reasons(stage, None) == []          # no bundle input and an unreadable delta.json: stage 0's own gate judges that file
 
 
 # ---- the supervisor's stage 0 gate ---------------------------------------------------------------------------------------------
@@ -197,6 +212,32 @@ def test_the_supervisor_adds_the_check_to_stage_0s_gate_only_when_the_run_names_
         args = parse(argv(tmp_path, r.tiers, r.chip_server.endpoint) + ["--input", f"bundle={d}"])
         with Ledger(r.run_dir / "ledger.jsonl") as led:
             sup = build(args, led, adapter=r.adapter_cls(r.m, owner_pid=100), coder=r.coder_cls(r.m), home=r.home, containers=r.containers)
+            assert sup._with_capabilities(ok)(stage, r.run_dir).ok
+    finally:
+        r.close()
+
+
+def test_the_supervisor_refuses_an_applied_record_when_the_run_has_no_bundle_input(tmp_path):
+    from test_supervisor import Rig
+    from orchard.ledger import Ledger
+    from orchard.stages import STAGES, GateResult
+    from orchard.supervisor import build, parse
+    from run_fakes import argv
+    d = bundle(tmp_path)
+    r = Rig(tmp_path)
+    try:
+        stage = r.run_dir / "stages" / "0"
+        stage.mkdir(parents=True)
+        (stage / "delta.json").write_text(json.dumps(delta(capabilities=record(d))))
+        ok = lambda s, rd: GateResult(True)          # noqa: E731
+        spec0 = next(s for s in STAGES if s.number == 0)
+        args = parse(argv(tmp_path, r.tiers, r.chip_server.endpoint))
+        with Ledger(r.run_dir / "ledger.jsonl") as led:
+            sup = build(args, led, adapter=r.adapter_cls(r.m, owner_pid=100), coder=r.coder_cls(r.m), home=r.home, containers=r.containers)
+            got = sup._with_capabilities(ok)(stage, r.run_dir)
+            assert not got.ok and any(bc.FILE in x for x in got.reasons), got.reasons
+            assert any(bc.FILE in x for x in sup._gate(spec0)(stage, r.run_dir).reasons)       # the gate stage 0 really uses carries it
+            (stage / "delta.json").write_text(json.dumps(delta()))
             assert sup._with_capabilities(ok)(stage, r.run_dir).ok
     finally:
         r.close()

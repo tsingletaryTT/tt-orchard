@@ -67,8 +67,16 @@ def _same_dir(a: str, b: str) -> bool:
 
 
 def stage0_problems(delta, bundle_dir) -> list[str]:
-    """Why delta.json does not show that stage 0 applied the run's bundle capabilities, or [] when it does or none apply."""
+    """Why delta.json does not show that stage 0 applied the run's bundle capabilities, or [] when it does or none apply.
+
+    With no bundle input the supervisor has no file to vouch for, and the stage 0 agent writes triage_config.json, so it could name a folder it
+    wrote as `nearest_bundle_dir` and get a record that sets differences aside. A record that says the file is present or applied is then a
+    reason (PR 659 review); a record that says none was found is fine."""
     if not isinstance(bundle_dir, str) or not bundle_dir:
+        rec = delta.get("capabilities") if isinstance(delta, dict) else None
+        if isinstance(rec, dict) and (rec.get("present") is True or rec.get("applied") is True):
+            return [f"delta.json records that the nearest bundle's {FILE} was found or applied, but this run has no bundle input, so nothing "
+                    "vouches for that file; start the run with the bundle as an input (--base) or leave the record out"]
         return []
     try:
         is_dir = "\0" not in bundle_dir and os.path.isdir(bundle_dir)
@@ -106,10 +114,10 @@ def stage0_problems(delta, bundle_dir) -> list[str]:
 
 def gate_reasons(stage_dir, bundle_dir) -> list[str]:
     """stage0_problems for the delta.json in `stage_dir`, read with the safe reader. A delta.json that cannot be read is one reason."""
-    if not isinstance(bundle_dir, str) or not bundle_dir:
-        return []
+    named = isinstance(bundle_dir, str) and bool(bundle_dir)
     try:
         delta = safeio.read_json(Path(stage_dir) / "delta.json", max_bytes=DELTA_MAX_BYTES, expect=dict)
     except safeio.SafeReadError as exc:
-        return [f"delta.json cannot be read to check the bundle's {FILE}: {exc.reason}"]
+        # With no bundle input, stage 0's own gate judges an unreadable delta.json; adding a reason here would only repeat it.
+        return [f"delta.json cannot be read to check the bundle's {FILE}: {exc.reason}"] if named else []
     return stage0_problems(delta, bundle_dir)
