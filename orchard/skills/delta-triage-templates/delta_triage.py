@@ -3256,7 +3256,13 @@ def read_capabilities(bundle_dir: str) -> tuple[dict, object]:
 
 
 def _cap_number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    """A JSON number that is not a boolean and is finite. An integer of any size counts (math.isfinite would raise on one of more than
+    about 308 digits, issue 461); a float is finite when v - v is 0 (infinity and NaN give NaN)."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return True
+    return isinstance(v, float) and v - v == 0.0
 
 
 def _cap_expr(expr, where: str, problems: list) -> str | None:

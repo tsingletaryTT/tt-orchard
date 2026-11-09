@@ -4930,9 +4930,11 @@ serves the release with its own config.
   gains `config_json`. Stage 7 already packages stage 2's real config files as `base_config/`, so the package serves the same file; the card now
   says whose `config.json` it is. `prepare_model_dir.py` needed no code change.
 - Tests: `tests/test_delta_triage_capabilities.py` (it also checks that the release-day check's example file validates here),
-  `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`; both readers are in `tests/hostile_fs.py`. 62 mutations over the
+  `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`; both readers are in `tests/hostile_fs.py`. 64 mutations over the
   new guards; three survived at first (the layer-type match, the dtype check on extra layers, and a failing dotted rule keeping its parent key out
-  of the set-aside record) and each got a test; all are red now.
+  of the set-aside record) and each got a test; all are red now. The full suite found one more: the number check called `math.isfinite`,
+  which raises on an integer of more than about 308 digits (issue 461), and a release config is read with plain `json.loads`; integers now
+  never reach it, and a test with a 400-digit value covers it.
 - Not done here: the run's `bundle` input is recorded by the bring-up command in the Track C item C3 change; until that lands nothing fills
   `nearest_bundle_dir` and these rules stay dormant. The Qwen4 bundle does not ship the file yet (its author writes it from the keys its code reads).
   No hardware was used.

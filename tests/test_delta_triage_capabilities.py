@@ -208,6 +208,11 @@ def test_each_field_the_release_day_check_requires_is_required(missing):
     ({"min": 1}, None, False),
     ({"one_of": [2, 4], "max": 2}, 4, False),
     ({"min": 1}, T.ABSENT, False),
+    ({"min": 1}, 10 ** 400, True),
+    ({"max": 8}, 10 ** 400, False),
+    ({"multiple_of": 32}, 10 ** 400, True),
+    ({"min": 1}, float("inf"), False),
+    ({"min": 1}, float("nan"), False),
 ])
 def test_rule_table(rule, value, ok):
     checked, problems = T.validate_capabilities(caps(keys={"k": rule}))
@@ -680,3 +685,12 @@ def test_a_bundle_input_of_the_wrong_type_exits_2(tmp_path, value):
     r, _ = run(st)
     assert r.returncode == 2
     assert "nearest_bundle_dir" in r.stderr
+
+
+def test_a_huge_integer_in_the_new_config_is_judged_and_never_crashes():
+    """math.isfinite raises OverflowError on an integer of more than about 308 digits (issue 461); a release config is read with plain
+    json.loads, so such a value can reach the rules."""
+    reasons, _ = judge(cfg(rope_theta=10 ** 400), cfg())
+    assert reasons == []                                               # rope_theta {"min": 1} holds
+    reasons, _ = judge(cfg(num_key_value_heads=10 ** 400), cfg())
+    assert any("num_key_value_heads" in r for r in reasons)
