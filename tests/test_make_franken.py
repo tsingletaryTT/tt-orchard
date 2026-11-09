@@ -548,3 +548,23 @@ def test_skipping_the_decode_check_is_recorded_not_silent(base_snapshot, tmp_pat
     assert run(base_snapshot, out) == 0
     rec = _decode_record(out)
     assert rec["not_run"] is True and rec["reason"] == "--skip-decode-check"
+
+
+# ---- teacher-forced reference: many positions whose answers vary even when the greedy decode does not ---------------------------------
+
+def test_the_teacher_forced_passage_is_long_enough_and_fixed():
+    assert len(mf.TEACHER_FORCED_TEXT.split()) >= 80 and mf.TEACHER_FORCED_MIN_POSITIONS >= 64
+
+
+@needs_real_forward
+def test_the_checkpoint_carries_a_teacher_forced_reference_and_the_proofs_compare_it_with_the_base(base_snapshot, tmp_path):
+    out = tmp_path / "tf"
+    assert run(base_snapshot, out, "--prove", "--allow-degenerate") == 0
+    ref = json.loads((out / "reference" / "teacher-forced.json").read_text())
+    n = len(ref["prompt_ids"])
+    assert n >= mf.TEACHER_FORCED_MIN_POSITIONS and len(ref["top1_ids"]) == n and len(ref["top5_last"]) == mf.TEACHER_FORCED_TOP5_POSITIONS
+    p = proofs_of(out)["teacher_forced"]
+    assert p["positions"] == n and p["same_top1_as_base"] is True and p["agree_fraction"] == 1.0
+    assert p["distinct_top1"] == len(set(ref["top1_ids"]))
+    m = json.loads((out / "franken-manifest.json").read_text())
+    assert m["teacher_forced"]["positions"] == n and "reference/teacher-forced.json" in m["files"]

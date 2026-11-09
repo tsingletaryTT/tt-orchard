@@ -75,6 +75,15 @@ PROMPT_LENGTHS = (8, 16, 33)
 STAGE1_PROMPT = "Write the text I send my landlord about the broken boiler."     # the prompt stage 1 decodes (reference_gate.py PROMPT)
 N_DECODE = 32                     # greedy tokens, as stage 1 decodes
 MIN_DISTINCT_IDS = 4              # a reference whose 32 tokens have fewer distinct ids is degenerate (make_checkpoint.py uses the same bar)
+TEACHER_FORCED_MIN_POSITIONS = 64      # a reference must give the port at least this many positions to agree on
+TEACHER_FORCED_TOP5_POSITIONS = 8      # the last positions also record their five highest logits
+TEACHER_FORCED_TEXT = (
+    "The boiler in my flat stopped working on Tuesday morning, and there has been no hot water or heating since then. I rang the repair line "
+    "twice and was told that an engineer would call back within two days, but nobody has come. The radiators are cold, the pressure gauge "
+    "reads zero, and a small red light is blinking on the front panel. Please could you confirm when the engineer will visit, and whether "
+    "the cost of an electric heater and a few nights away will be covered under the tenancy agreement? I have attached photographs of the "
+    "panel and the gauge, and I am happy to be at home on any weekday afternoon. Thank you for your help with this, and I look forward "
+    "to hearing from you soon. Kind regards, and apologies for the long message.")
 PROOF_FLOAT32_ABS_TOL = 5e-4      # float32: equal to this absolute logit difference and with every top-1 token equal
 PROOF_BF16_REL_TOL = 0.05         # bf16: the stored norm weights are rounded, so equal only to this share of the largest logit (top-1 may flip on near ties)
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "chat_template.jinja")
@@ -479,7 +488,9 @@ def write_manifest(out: Path, cfg: dict, args, snapshot: Path, indexer_dir, prov
         "not_carried": ["visual tower", "mtp head (transformers' Qwen4Exp has none)", "per-layer embedding and n-gram table (ple_layer_ids is empty)"],
         "tensor_counts": prov, "estimated_bytes": estimate, "config": cfg,
         "versions": {"python": platform.python_version(), "torch": args.versions["torch"], "transformers": args.versions["transformers"]},
-        "files": inventory(out), "proofs": proofs, "reference_decode": decode,
+        "files": inventory(out), "proofs": proofs, "reference_decode": ({k: v for k, v in decode.items() if k != "teacher_forced"} if decode else decode),
+        "teacher_forced": ({k: v for k, v in decode["teacher_forced"].items() if k not in ("top1_ids", "prompt_ids")}
+                           if decode and decode.get("teacher_forced") else None),
     }
     write_json(out / "franken-manifest.json", manifest)
     return manifest
@@ -513,14 +524,50 @@ def greedy_ids(torch, model, ids, n: int = N_DECODE) -> list[int]:
     return new
 
 
+def teacher_forced_reference(torch, model, ids: list[int]) -> dict:
+    """The model's top-1 id at every position of a fixed passage (teacher-forced), and the five highest logits of the last positions. Unlike
+    a greedy decode this gives the port many positions whose answers vary even when the model's own continuation does not."""
+    with torch.no_grad():
+        logits = model(torch.tensor([ids]), use_cache=False).logits[0].float()
+    top1 = [int(i) for i in logits.argmax(-1)]
+    last = []
+    for pos in range(len(ids) - TEACHER_FORCED_TOP5_POSITIONS, len(ids)):
+        vals, idx = torch.topk(logits[pos], 5)
+        last.append({"position": pos, "ids": [int(i) for i in idx], "logits": [round(float(v), 4) for v in vals]})
+    return {"top1_ids": top1, "top5_last": last}
+
+
+def teacher_forced_prompt(transformers, out: Path, vocab: int, tok):
+    """Token ids of TEACHER_FORCED_TEXT with the checkpoint's tokenizer, else seeded ids of the same length class."""
+    if tok is not None:
+        ids = tok(TEACHER_FORCED_TEXT, add_special_tokens=False)["input_ids"]
+        source = "fixed passage through the tokenizer"
+    else:
+        import random
+        rng = random.Random(11)
+        low = 1000 if vocab > 2000 else 4
+        ids = [rng.randrange(low, min(vocab, low + 5000)) for _ in range(TEACHER_FORCED_MIN_POSITIONS + 16)]
+        source = "seeded ids (no usable tokenizer)"
+    if len(ids) < TEACHER_FORCED_MIN_POSITIONS:
+        raise FrankenRefused(f"the teacher-forced passage has {len(ids)} tokens, fewer than {TEACHER_FORCED_MIN_POSITIONS}")
+    return ids, source
+
+
 def reference_decode(torch, transformers, qd, out: Path, cfg: dict) -> dict:
     """Greedy-decode the stage 1 prompt on the CPU with the written checkpoint and say how many distinct ids came out."""
     ids, source, tok = stage1_prompt(transformers, out, cfg["vocab_size"])
     model = load_franken(torch, transformers, qd, out)
     new = greedy_ids(torch, model, ids)
+    tf_ids, tf_source = teacher_forced_prompt(transformers, out, cfg["vocab_size"], tok)
+    tf = teacher_forced_reference(torch, model, tf_ids)
     del model
+    ref_dir = out / "reference"
+    ref_dir.mkdir(exist_ok=True)
+    write_json(ref_dir / "teacher-forced.json", {"source": tf_source, "prompt_ids": tf_ids, **tf})
     return {"prompt_source": source, "prompt_tokens": len(ids), "prompt_ids": ids, "generated_ids": new, "distinct_ids": len(set(new)),
-            "degenerate": is_degenerate(new), "text": (tok.decode(new)[:200] if tok is not None else None)}
+            "degenerate": is_degenerate(new), "text": (tok.decode(new)[:200] if tok is not None else None),
+            "teacher_forced": {"source": tf_source, "positions": len(tf_ids), "distinct_top1": len(set(tf["top1_ids"])),
+                               "top1_ids": tf["top1_ids"], "prompt_ids": tf_ids}}
 
 
 # ---- the proofs -------------------------------------------------------------------------------------------------------------------
@@ -613,6 +660,13 @@ def run_proofs(torch, transformers, qd, out: Path, text: dict, base: dict, cfg: 
         proofs["decode"] = {"prompt_source": decode["prompt_source"], "franken_ids": decode["generated_ids"], "base_ids": base_ids,
                             "same_as_base": decode["generated_ids"] == base_ids, "distinct_franken": decode["distinct_ids"],
                             "distinct_base": len(set(base_ids))}
+    if decode is not None and decode.get("teacher_forced"):
+        tfd = decode["teacher_forced"]
+        base_tf = teacher_forced_reference(torch, base_model, tfd["prompt_ids"])["top1_ids"]
+        same = sum(1 for a, b in zip(tfd["top1_ids"], base_tf) if a == b)
+        proofs["teacher_forced"] = {"source": tfd["source"], "positions": tfd["positions"], "distinct_top1": tfd["distinct_top1"],
+                                    "distinct_top1_base": len(set(base_tf)), "agree_fraction": round(same / tfd["positions"], 4),
+                                    "same_top1_as_base": same == tfd["positions"]}
     del base_model
     configured = compare(torch, first, reference, prompts)
     biggest = max(r["max_abs_logit"] for r in configured["prompts"])
