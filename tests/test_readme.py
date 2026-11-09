@@ -128,6 +128,11 @@ def other_repo_flags() -> set[str]:
     from orchard import caches, suite_control
     flags |= _option_strings(caches.parser())
     flags |= _option_strings(suite_control._parser())      # its options come after a REMAINDER in the tt-orchard parser
+    from orchard import drop_watch                           # the same: `drop-watch ACTION ...` passes its options on
+    for action in drop_watch.parser()._actions:
+        for sub in getattr(action, "choices", None) or {}:
+            if hasattr(action.choices[sub], "_actions"):
+                flags |= _option_strings(action.choices[sub])
     return flags
 
 

@@ -4945,3 +4945,96 @@ states), and strip `TT_AUXILIARY_WEIGHTS` when it is off.
 - Tests: `tests/test_drafter_by_kind.py`. 15 mutations; one survived (working head_dim out of the widths). Qwen3.8 states head_dim 256 while
   hidden_size / num_attention_heads is 213, so that derivation was wrong for this family: it was removed and a test says so. A second survivor
   (reading the first drafter line instead of the last) got a test. All guards are red now. No hardware was used.
+## 2026-11-09: bundle capabilities in stage 0 and the release's own config in stage 2 (Qwen4 drop-in plan, Track C items C1 and C2)
+Prompt (from the session that runs the Qwen4 drop-in plan): implement Track C items C1 to C6. This entry covers C1 and C2. The goal is that on release
+day stage 0 classes Qwen4-27B `weights-only` against the Qwen4 thin bundle (whose development weights are a 20-layer test checkpoint) and stage 2
+serves the release with its own config.
+- A bundle may ship `orchard-capabilities.json` (`docs/bundle-capabilities.md`). Schema 1 is the one the release-day check (`orchard/drop_check.py`,
+  the main Qwen4 session's M0 branch) reads: `model_types`, `architectures`, `keys` with `equals`/`one_of`/`multiple_of`/`min`/`max` rules, `features`.
+  Stage 0 adds top-level fields beside them that the release-day check ignores: `ignored_keys`, `optional_keys`, `layers` (layer naming, count and
+  types), `shapes` (tensor dimensions that follow config keys, as expressions) and `optional_tensors`. A key in `keys` may be a dotted path
+  (`rope_parameters.rope_theta`). The first version of this change used its own rule syntax; it was changed to the shared one at the main
+  session's request before the PR was opened. The stage 0
+  template reads it when `triage_config.json` names `nearest_bundle_dir` (new, optional; the skill fills it from the run's `bundle` input) and sets
+  aside exactly the declared differences (every rule must also hold for keys that do not differ, and the model type and architectures must be
+  listed, as the release-day check requires): a declared key within its rule, a shape difference along declared dimensions where both models' sizes
+  follow the expression, tensors at layer indices only one model has when the layer count is declared (same tensor at a layer of the same type, same
+  dtype, equal or explained shape), and declared optional tensors. With the file, every other differing text config key is a full-port reason too,
+  because stage 2 then serves the release's own config. A file that is a link, a FIFO, larger than 256 KiB, not strict JSON or not valid by the
+  schema makes the path full-port with the reason. `delta.json` records `capabilities` (directory, sha256, applied, problems, what was set aside,
+  features). Without the key or the file, triage is unchanged.
+- One evaluator for both checks: `orchard.bundle_capabilities.config_reasons(capabilities, release_config, dev_config=None)` runs the
+  template's `capability_config_reasons`, the config side decide_path uses, on plain dicts. The main Qwen4 session asked for it so the
+  release-day check never says covered where stage 0 says full-port; a test holds the two equal on a set of config pairs.
+- The stage 0 gate (`orchard/bundle_capabilities.py`, through the supervisor) fails when the run's `bundle` input ships the file and delta.json
+  does not record it with the file's current sha256 and directory, or records a file that was not applied while the path is weights-only.
+- Stage 2 (`prepare_swap.py`): for a bundle that ships the file, `model-dir/config.json` is the new model's own config with only `architectures`
+  replaced by the served base config's (`base_config/` in the current form, the nearest snapshot's in the older form). `model-dir-sources.json`
+  gains `config_json`. Stage 7 already packages stage 2's real config files as `base_config/`, so the package serves the same file; the card now
+  says whose `config.json` it is. `prepare_model_dir.py` needed no code change.
+- Tests: `tests/test_delta_triage_capabilities.py` (it also checks that the release-day check's example file validates here),
+  `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`; both readers are in `tests/hostile_fs.py`. 64 mutations over the
+  new guards; three survived at first (the layer-type match, the dtype check on extra layers, and a failing dotted rule keeping its parent key out
+  of the set-aside record) and each got a test; all are red now. The full suite found one more: the number check called `math.isfinite`,
+  which raises on an integer of more than about 308 digits (issue 461), and a release config is read with plain `json.loads`; integers now
+  never reach it, and a test with a 400-digit value covers it.
+- Not done here: the run's `bundle` input is recorded by the bring-up command in the Track C item C3 change; until that lands nothing fills
+  `nearest_bundle_dir` and these rules stay dormant. The Qwen4 bundle does not ship the file yet (its author writes it from the keys its code reads).
+  No hardware was used.
+## 2026-11-09, Qwen4-27B drop-in plan and milestone M0: release-day check and watcher (branch `qwen4-drop-m0`)
+Prompt (operator): make a Qwen4-27B (dense) release as close to a drop-in of the weights as possible, stored on Hugging Face as a
+tt-model package with placeholder weights, and fed to tt-orchard on release day; then "is this built in such a way that it would
+kick off the tt-orchard run when the weights drop". Plan: `docs/superpowers/plans/2026-11-09-qwen4-27b-drop-in.md` (approved).
+Operator decisions: 4 and 2 chips; the full-port fallback made runnable early; the existing 20-layer frankenmodel pattern; a
+watcher started by a scheduled Claude task that notifies; with the chips held it notifies and waits; a release the package
+does not cover starts the fallback by itself.
+- Research (checked 2026-11-09): no official Qwen4-27B config, weights or date. The `qwen4_exp` class (transformers 5.19.0) and
+  Qwen3.8-Flash-Next are the only public form of the architecture. Look-alike `Qwen4-27B` repositories appeared under other
+  names, one with a zip file that looked like malware bait, so the check and the watcher accept only the `Qwen` organisation.
+- `orchard/drop_check.py` (`tt-orchard drop-check`): reads config, generation config, tokenizer files, chat template and the
+  weight index (never a weight file, never a token) and returns covered / not-covered / needs-operator / refused with every
+  reason, the route and the bringup command. Qwen4 rules: dense layers only (the shim's layer rule), no n-gram embedding, all
+  required keys (a missing `rope_theta` would silently become 10000), complete indexer keys, widths that split over 2 and 4
+  chips, and the package's capabilities file (`orchard-capabilities.json`, schema 1, documented in the module). No capabilities
+  file means not covered. 17 mutations, all red after four tests were added for survivors (a `..` name, split checks and a
+  boolean count masked by capability rules, the partial-indexer message masked by the count message).
+- `orchard/drop_watch.py` (`tt-orchard drop-watch init|tick|show`): one locked tick per call; states waiting, seen (upload not
+  finished: config, index, every listed shard, and 30 quiet minutes after the last commit), waiting-for-chips, running, ready,
+  blocked, failed, needs-operator. "starting" is written before the launch, so a tick killed in between never starts a second
+  run. 22 mutations, all red after two tests were added (an unknown config key's message, an unreadable weight index).
+- `scripts/reference_venv.py`: builds a second reference interpreter for a new model type beside the current one and never
+  touches an existing directory; 5 mutations, all red.
+- Decision: the dense shim and the type lists in `reference_gate.py`, `ops_inventory.py` and `qwen4_dense.py` stay limited to
+  `qwen4_exp*`, because the shim patches that class's missing dense layer; a future `qwen4` type arrives with its own classes, and
+  `stack_pins` already raises a critical stage 0 hazard when the reference interpreter lacks the class. The hazard scan detects
+  hyper-connections and the indexer by key whatever the type.
+- New fixture `tests/fixtures/model-configs/qwen4-dense-provisional-buildable.json`: the provisional dense config plus the keys
+  it lacks to build (indexer keys from Flash-Next, `rope_parameters` and `rms_norm_eps` from Qwen3.8). The original fixture is
+  unchanged because existing tests assert on it.
+- Runbook `docs/runbooks/qwen4-drop-day.md`, with the draft rules for the outside helper (off on this machine until the operator
+  fills in the `[telegraph]` table).
+- Machine setup (not in the repo): `package_format = "v6"` and `package_namespace` in `config/bringup.toml`; hypothesis and
+  pytest-xdist added to the repository's `.venv` (the README lists them as test tools).
+- The watcher is armed on the QuietBox 2 with a user systemd timer (a tick at :07 and :37, `KillMode=process` so a started
+  bringup outlives the tick; machine setup, not in the repo). A scheduled Claude task, the plan's first choice, cannot run from a
+  session on an SSH host. Tracks A (model code) and C (orchard's weights-only route) run as separate sessions; nothing in this
+  change ran on the chips.
+
+## 2026-11-09: the bundle the operator names is the bundle the run uses (Qwen4 drop-in plan, Track C item C3)
+Prompt (from the session that runs the Qwen4 drop-in plan): keep the chosen bundle through `resolve_base` and `check_base`, refuse a weights repo
+two bundles share, and choose the bundle by chip count.
+- Found on this box: `mando2222/qwen3.8-27b-dflash2-vision-p300x2-q4kv-v6-thin` and iteration 0 of `mando2222/qwen4-27b-dense-v6-thin` both serve
+  `Qwen/Qwen3.8-27B` on four chips. `--base` with either bundle kept only that repository; the base row then named whichever bundle sorted first
+  (the Qwen3.8 one), and stage 2 and 4 drafts either found two bundles for four chips or took any bundle of that repository for two chips.
+- `cli.resolve_base_bundle` returns the bundle a name refers to; `preflight.check_base(base_bundle=...)` uses it (a named bundle that does not
+  serve the base, or was refused as unable to take swapped weights, blocks); the base row's data carries `bundle_dir`, and the bring-up records it
+  as the run's `bundle` input (a resumed run keeps the one it started with). `nearest.bundle_family` is the named bundle and the other v6 bundles
+  with the same weights repository and the same `orchard-capabilities.json` (or, like it, none). `swap_draft.draft` and `draft_stage4` choose by
+  chip count within the family, and a bundle that ships capabilities is never replaced by a container package. `nearest_problem` and the stage 4
+  plan check refuse an agent-written config outside the family; the supervisor passes the run's bundle to both.
+- Without a name, `nearest.ambiguity` blocks the base row when the bundles that serve the base belong to different families or two serve the same
+  chip count, and lists the `--base <bundle>` commands. On this box that means a Qwen3.8 fine-tune now needs `--base` with the Qwen3.8 bundle until
+  the Qwen4 bundle's weights pointer moves to its own test checkpoint. Container packages are a fallback and do not count as rivals.
+- Not changed: issue 559 (a `--base` model id with no installed bundle) is a different problem and stays open.
+- Tests: `tests/test_bundle_identity.py`. 20 mutations; two survived at first (defensive branches of the capabilities digest) and each got a test;
+  all are red now. No hardware was used.

@@ -834,7 +834,7 @@ its reason; a `warn` is information.
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
 | bus | a chip the configuration needs is not on the PCIe bus, is not awake (`power_state` other than D0, for example D3cold, the state both chips of one board fell into on 2026-10-22), has no readable serial (gozer refuses every lease while one cannot be read), has no driver or no `/dev/tenstorrent/N` node, finds `/dev/tenstorrent` itself missing or unlistable, or is listed by gozer but missing from the bus. The configuration needs the coder's chips plus a test board, or the whole box when the coder holds four chips (a lab run needs only the coder's chips here). Extra device nodes, a power state the kernel does not report, a gozer that lists fewer chips than the bus shows and a board listing fewer chips than another are warnings. The row reads files only (sysfs and `/dev/tenstorrent`): no lease, no device open, no reset. A board that has left the bus needs a power cycle or reboot. After the run starts, a failed test, coder boot or benchmark phase gets the same check on the chips it holds (section 5.5a) | `hardware-unhealthy` |
 | boards | the tools that list the boards disagree with the configuration. `gozer topology` lists fewer chips than the configuration needs (two chips make a board), or `tt-smi -s` cannot see a chip gozer lists. The message says that a board is missing and names the board serial and the PCI addresses of its chips when a tool can still name them. A board that one tool lists and another does not, or a `gozer status` that lacks a topology board, is a warning. The row reads `gozer topology` and `gozer status`. It runs `tt-smi -s` only when `ORCHARD_TT_SMI` names the binary, because `tt-smi -s` opens every device on the box. It never resets or leases (`orchard/boards_seen.py`) | `hardware-unhealthy` |
-| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. An installed package that cannot serve swapped weights does not count as serving the base: a container package that `orchard/data/weights_source.json` records as hard-coding its model repository, and a v6 bundle whose `run.sh` the stage 2 swap cannot rewrite (a dry run of prepare_swap.py's own edit). When every package that serves the base is refused, the row blocks with each reason and says the way out is a patched generator (a new package, or a bundle). A container package with no probe on record (`unprobed`) still passes and the warning says so; `docs/weights-source.md` says how to probe one. An audio model needs no bundle (see "Audio models in the preflight" below). A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
+| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. An installed package that cannot serve swapped weights does not count as serving the base: a container package that `orchard/data/weights_source.json` records as hard-coding its model repository, and a v6 bundle whose `run.sh` the stage 2 swap cannot rewrite (a dry run of prepare_swap.py's own edit). When every package that serves the base is refused, the row blocks with each reason and says the way out is a patched generator (a new package, or a bundle). A container package with no probe on record (`unprobed`) still passes and the warning says so; `docs/weights-source.md` says how to probe one. An audio model needs no bundle (see "Audio models in the preflight" below). When `--base` names a bundle, the run uses that bundle: the preflight keeps it, the run records its directory as the `bundle` input (stage 0 reads its `orchard-capabilities.json` there, `docs/bundle-capabilities.md`), and stages 2 and 4 choose by chip count only among its family, the v6 bundles that serve the same weights repository and ship the same capabilities file (or, like it, none). When no bundle is named and the installed bundles that serve the base belong to different families, or two of them serve the same chip count, the row blocks and lists the `--base <bundle>` commands. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | sfpi | the box's SFPI compiler (`dpkg-query -W sfpi`) is older than the version the chosen bundle pins in its ttnn wheel (`ttnn/tt_metal/sfpi-version`). Kernel compiles then fail with `'vLut8si' is not a member of 'sfpi'` (7.67.0 against a pin of 7.73.0, 2026-10-13). tt-orchard does not install system packages; the row names the release to install. A version it cannot read is a warning | `hardware-unhealthy` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 | demo-env | a stock-runtime run (or any run with `demo_python` set) when `demo_python` fails `tt-orchard demo-env --check`: numpy 2 or newer, `cv2` or `datasets` that do not import, no `ttnn` or `ttml` distribution, a missing interpreter, or a venv directory the command refuses. The detail names each failed rule and the exact `tt-orchard demo-env --venv-dir ... --tt-metal-dir ...` command. A venv built for another tag of the host tree than the tree is at, a missing record, no `demo_python` at all, or a `demo_python` that is not `<venv>/bin/python` is a warning. Nothing is imported on a chip. A lab run has no row | `config-invalid` |
@@ -928,6 +928,50 @@ earlier attempt. `--dry-run` does the same lookups as a real run (unless `--offl
 keeps no cache and writes no report file. A real run writes its cache to `<run dir>/research/cache/` while the
 preflight runs, so a run that the preflight then blocks can leave that directory behind. It writes no report and
 starts nothing.
+
+#### Release day: `tt-orchard drop-check`
+
+`tt-orchard drop-check Qwen/Qwen4-27B` says which route a bring-up of a new Qwen release takes, from the release's
+config alone. It reads `config.json`, `generation_config.json`, the tokenizer files, the chat template and the weight
+index, and no weight file. It sends no Hugging Face token, and it refuses any organisation other than `Qwen` before it
+makes a request (look-alike repositories under other names appeared on 2026-11-09).
+
+| Verdict | Route | Meaning |
+|---|---|---|
+| `covered` | `qwen3.8-bundle` | The release has Qwen3.8-27B's architecture and widths; `bringup --base` the Qwen3.8 bundle serves it as a weights swap. |
+| `covered` or `covered-with-notes` | `qwen4-package` | The Qwen4 package's capabilities file covers every value the config sets. Notes name what is served differently, for example a QSA indexer served with `max_model_len` 2048. |
+| `not-covered` | `full-port` | Each reason is named: experts, an n-gram embedding, a missing or malformed key, a width that does not split over 2 and 4 chips, a value outside a capability rule, or no capabilities file yet. |
+| `needs-operator` | | The release needs a reference interpreter whose transformers has its architecture class. |
+| `refused` | | The repository id or revision is not acceptable; nothing was read. |
+
+The exit code is 0 for covered, 2 refused, 3 not covered, 4 needs the operator and 5 not found. Flags: `--revision`
+(a 40-character commit; default the current one), `--capabilities` (the package's `orchard-capabilities.json`),
+`--bundle` and `--qwen38-bundle` (the bundles the printed `bringup` command names), `--reference-python` (the
+interpreter asked for a new architecture class; default `reference_python` from `bringup.toml`), `--from-dir` (read a
+release laid out in a directory, `info.json` plus the files, for tests and rehearsals), `--json` and `--out`.
+
+#### Release day without anyone at the keyboard: `tt-orchard drop-watch`
+
+`drop-watch` starts the bring-up of a release when it appears. `tt-orchard drop-watch init --watch-dir DIR --target
+Qwen/Qwen4-27B --run-dir RUN` writes `DIR/watch.toml` (options: `--capabilities` the Qwen4 package's capabilities file,
+`--bringup-arg` an extra bringup argument, repeatable, `--quiet-minutes` how long the last commit must be quiet, default
+30, and `--reference-python`). A scheduler runs `tt-orchard drop-watch tick --watch-dir DIR --json` every 30 minutes.
+Each tick does at most one step and records it in `DIR/state.json`:
+
+| State | Meaning |
+|---|---|
+| `waiting` | The target repository does not exist yet, or is private or gated. |
+| `seen` | It exists, but the upload is not finished: `config.json`, the weight index or a shard it lists is missing, or the last commit is younger than the quiet time. |
+| `waiting-for-chips` | `drop-check` ran and fixed the route. gozer shows a chip held, so nothing starts. The watcher never stops a process that holds a chip. |
+| `running` | Every chip was free, so `tt-orchard bringup <target> --run-dir RUN` was started, once. |
+| `ready`, `blocked`, `failed` | The run ended. Nothing more happens. |
+| `needs-operator` | The check needs a reference interpreter, or the state cannot be trusted (a corrupt state file, or a tick that died after "starting" and before it recorded the process). Nothing starts until you fix the cause and edit or remove `state.json`. |
+
+A covered release starts `bringup --base` the Qwen4 package (or the Qwen3.8 bundle); a release that is not covered starts
+the full-port fallback. Each step is appended to `DIR/events.jsonl`; `tick --json` prints the events of that tick for the
+notifier. `drop-watch show --watch-dir DIR` prints the state. `tick --hub-dir RELEASE` reads a release laid out in a
+directory, for rehearsals. A lock file keeps two ticks apart. The watcher never publishes or pushes anything and never
+sends a Hugging Face token.
 
 ### 4.1 Before you start
 
