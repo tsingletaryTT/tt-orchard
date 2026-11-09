@@ -365,9 +365,11 @@ def test_a_two_hop_hub_cache_link_into_the_hub_wide_store_is_read(base_snapshot,
         os.symlink(str(store / f.name), blobs / f.name)
     monkeypatch.setattr(mf, "HF_HUB", hub)
     assert mf.snap_file(snap, "config.json").samefile(store / "config.json")
+    # PR 644 made the same layout acceptable in safeio itself (the snapshot sits at <hub>/models--*/snapshots/<rev> and <hub>/blobs is a real
+    # directory), so pointing HF_HUB somewhere else no longer changes the answer. The hostile cases (a linked hub store, a target outside, a
+    # pipe) are covered by tests/test_hub_wide_blob_store.py.
     monkeypatch.setattr(mf, "HF_HUB", tmp_path / "some-other-hub")
-    with pytest.raises(mf.FrankenRefused, match="links outside"):
-        mf.snap_file(snap, "config.json")
+    assert mf.snap_file(snap, "config.json").samefile(store / "config.json")
 
 
 # ---- review of PR 639 -------------------------------------------------------------------------------------------------------------
