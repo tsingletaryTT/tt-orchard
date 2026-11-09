@@ -89,7 +89,8 @@ LAST = {"err": ""}
 
 def run(base, out, *extra, layers=4, dtype="float32"):
     """The script in the reference interpreter (torch 2.14): the indexer's int32 scatter needs a torch newer than the test runner's."""
-    r = subprocess.run([PY, str(SCRIPT), "--out", str(out), "--base-snapshot", str(base), "--layers", str(layers), "--dtype", dtype,
+    interpreter = PY if "--prove" in extra else sys.executable      # only a forward pass needs the newer torch
+    r = subprocess.run([interpreter, str(SCRIPT), "--out", str(out), "--base-snapshot", str(base), "--layers", str(layers), "--dtype", dtype,
                         "--max-gb", "1", *extra], capture_output=True, text=True)
     LAST["err"] = r.stderr
     return r.returncode
@@ -166,7 +167,7 @@ def test_a_short_prompt_ignores_the_indexer_and_a_small_budget_does_not(base_sna
     out = tmp_path / "idx"
     assert run(base_snapshot, out, "--prove", "--set", "indexer_budget=64") == 0
     idx = proofs_of(out)["indexer"]
-    assert idx["wide_equals_base"] is True and idx["narrow_differs"] is True and idx["narrow_vs_wide_max_abs_diff"] > 5e-5
+    assert idx["all_selected_equals_base"] is True and idx["narrow_differs"] is True and idx["narrow_vs_all_selected_max_abs_diff"] > 5e-5
 
 
 def test_the_real_indexer_tensors_are_mapped_by_name(base_snapshot, tmp_path):
@@ -364,3 +365,110 @@ def test_a_two_hop_hub_cache_link_into_the_hub_wide_store_is_read(base_snapshot,
     monkeypatch.setattr(mf, "HF_HUB", tmp_path / "some-other-hub")
     with pytest.raises(mf.FrankenRefused, match="links outside"):
         mf.snap_file(snap, "config.json")
+
+
+# ---- review of PR 639 -------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dtype,want", [("bfloat16", "bfloat16"), ("float32", "float32")])
+def test_the_proof_loader_keeps_the_checkpoints_dtype(base_snapshot, tmp_path, dtype, want):
+    """transformers turns config.dtype into a torch dtype, and the loader once treated that as 'not a string' and used float32, so the
+    bf16 proofs ran the franken in float32 against a bf16 base."""
+    out = tmp_path / dtype
+    assert run(base_snapshot, out, dtype=dtype) == 0
+    qd = mf.helpers()[1]
+    model = mf.load_franken(torch, transformers, qd, out)
+    assert {p.dtype for p in model.parameters()} == {getattr(torch, want)}
+
+
+def test_the_proof_record_names_the_dtypes_both_models_ran_in():
+    rec = mf.execution_dtypes(torch, type("M", (), {"parameters": lambda self: iter([torch.zeros(1, dtype=torch.bfloat16)])})(),
+                              type("M", (), {"parameters": lambda self: iter([torch.zeros(1, dtype=torch.float32)])})())
+    assert rec == {"franken": "torch.bfloat16", "base": "torch.float32"}
+
+
+def test_a_proof_that_was_not_run_or_that_failed_is_not_a_pass():
+    ok = {"deterministic": True, "identity_holds": True, "indexer": {"narrow_differs": True, "all_selected_equals_base": True}}
+    assert mf.proofs_pass(ok) is True
+    assert mf.proofs_pass({**ok, "indexer": {}}) is False                                  # an omitted indexer proof is a failure
+    assert mf.proofs_pass({**ok, "indexer": {"narrow_differs": False}}) is False
+    assert mf.proofs_pass({**ok, "indexer": {"all_selected_equals_base": True}}) is False   # the narrow-budget comparison is missing
+    assert mf.proofs_pass({**ok, "indexer": {"all_selected_equals_base": True, "narrow_differs": False}}) is False
+    assert mf.proofs_pass({"deterministic": True, "perturbed_differs": True, "indexer": {}}) is False
+    assert mf.proofs_pass({**ok, "deterministic": False}) is False
+    assert mf.proofs_pass({"deterministic": True, "perturbed_differs": True, "indexer": ok["indexer"]}) is True
+    assert mf.proofs_pass({"deterministic": True, "perturbed_differs": False, "indexer": ok["indexer"]}) is False
+    assert mf.proofs_pass({"deterministic": True, "indexer": ok["indexer"]}) is False       # neither the identity nor the perturbation claim was made
+
+
+@needs_real_forward
+def test_a_perturbed_run_does_not_claim_the_all_selected_model_equals_the_base(base_snapshot, tmp_path):
+    out = tmp_path / "pertflag"
+    assert run(base_snapshot, out, "--prove", "--hc-sigma", "0.05") == 0
+    idx = proofs_of(out)["indexer"]
+    assert idx["all_selected_equals_base"] is False and idx["narrow_differs"] is True
+
+
+@needs_real_forward
+def test_a_small_budget_still_gets_an_indexer_proof_and_the_identity_is_judged_with_every_block_selected(base_snapshot, tmp_path):
+    """With indexer_budget=8 the configured model is sparse and differs from the base on purpose. The identity claim and the perturbation
+    claim are judged on the model with every block selected, and the wide/narrow comparison always runs."""
+    out = tmp_path / "small"
+    assert run(base_snapshot, out, "--prove", "--set", "indexer_budget=8") == 0
+    p = proofs_of(out)
+    assert p["identity_holds"] is True and p["indexer"]["narrow_differs"] is True and p["indexer"]["all_selected_equals_base"] is True
+    assert p["against_base"]["max_abs_diff"] > 5e-5            # the configured sparse model really differs, and that is reported
+    out2 = tmp_path / "small-pert"
+    assert run(base_snapshot, out2, "--prove", "--set", "indexer_budget=8", "--hc-sigma", "0.001") == 0
+    assert proofs_of(out2)["perturbed_differs"] in (True, False)       # judged on the all-selected model, not on the sparse attention
+
+
+@pytest.mark.parametrize("edit,why", [
+    ({"hidden_size": "5120"}, "hidden_size"), ({"linear_key_head_dim": -1}, "linear_key_head_dim"),
+    ({"linear_conv_kernel_dim": 0}, "linear_conv_kernel_dim"), ({"num_key_value_heads": True}, "num_key_value_heads"),
+    ({"rope_parameters": [1, 2]}, "rope_parameters"), ({"linear_num_value_heads": None}, "linear_num_value_heads"),
+])
+def test_a_malformed_base_config_is_refused_not_a_traceback(tmp_path, capsys, edit, why):
+    snap = tmp_path / "bad" / "snapshots" / ("a1" * 20)
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps({"model_type": "qwen3_5", "text_config": {**TEXT, **edit}}))
+    assert mf.main(["--out", str(tmp_path / "o"), "--base-snapshot", str(snap), "--layers", "4"]) == 2
+    assert why in capsys.readouterr().err and not (tmp_path / "o").exists()
+
+
+@pytest.mark.parametrize("payload", ["not json", "[1, 2]", '{"weight_map": [1]}', '{"weight_map": {"a": 3}}', '{"other": {}}', "{}"])
+def test_a_bad_weight_index_is_refused_not_a_traceback(base_snapshot, tmp_path, capsys, payload):
+    import shutil
+    snap = tmp_path / "idx" / "snapshots" / ("b1" * 20)
+    shutil.copytree(base_snapshot, snap)
+    (snap / "model.safetensors.index.json").write_text(payload)
+    assert mf.main(["--out", str(tmp_path / "o"), "--base-snapshot", str(snap), "--layers", "4", "--max-gb", "1"]) == 2
+    assert "index" in capsys.readouterr().err and not (tmp_path / "o").exists()
+
+
+@pytest.mark.parametrize("sigma", ["nan", "inf", "-inf", "1.5"])
+def test_a_hc_sigma_that_is_not_in_zero_to_one_is_refused(base_snapshot, tmp_path, capsys, sigma):
+    code = mf.main(["--out", str(tmp_path / "o"), "--base-snapshot", str(base_snapshot), "--layers", "4", "--max-gb", "1", f"--hc-sigma={sigma}"])
+    assert code == 2 and "hc-sigma" in capsys.readouterr().err and not (tmp_path / "o").exists()
+
+
+def test_a_refused_tokenizer_file_leaves_no_output_directory(base_snapshot, tmp_path):
+    import os
+    snap, blobs = _linked_copy(base_snapshot, tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "tokenizer.json").write_text("{}")
+    (snap / "tokenizer.json").unlink()
+    os.symlink(str(elsewhere / "tokenizer.json"), snap / "tokenizer.json")
+    out = tmp_path / "tokrefuse"
+    assert run(snap, out) == 2 and not out.exists() and "links outside" in LAST["err"]
+
+
+def test_a_needed_tensor_with_a_non_string_shard_name_is_refused_not_a_traceback(base_snapshot, tmp_path, capsys):
+    import shutil
+    snap = tmp_path / "idx2" / "snapshots" / ("c1" * 20)
+    shutil.copytree(base_snapshot, snap)
+    table = json.loads((snap / "model.safetensors.index.json").read_text())
+    table["weight_map"]["model.language_model.embed_tokens.weight"] = 3
+    (snap / "model.safetensors.index.json").write_text(json.dumps(table))
+    assert mf.main(["--out", str(tmp_path / "o"), "--base-snapshot", str(snap), "--layers", "4", "--max-gb", "1"]) == 2
+    assert "weight index" in capsys.readouterr().err and not (tmp_path / "o").exists()

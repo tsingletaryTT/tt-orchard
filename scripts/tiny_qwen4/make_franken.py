@@ -75,6 +75,8 @@ PROMPT_LENGTHS = (8, 16, 33)
 PROOF_FLOAT32_ABS_TOL = 5e-4      # float32: equal to this absolute logit difference and with every top-1 token equal
 PROOF_BF16_REL_TOL = 0.05         # bf16: the stored norm weights are rounded, so equal only to this share of the largest logit (top-1 may flip on near ties)
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "chat_template.jinja")
+REQUIRED_DIMENSIONS = ("hidden_size", "num_attention_heads", "num_key_value_heads", "head_dim", "intermediate_size", "vocab_size", "num_hidden_layers",
+                       "linear_num_key_heads", "linear_num_value_heads", "linear_key_head_dim", "linear_value_head_dim", "linear_conv_kernel_dim")
 GATE_NAMES = {"swish": "silu", "silu": "silu", "sigmoid": "sigmoid"}
 IDENTITY_NOTE = ("hyper-connection weights are zero (mix 0.5, injection 1) and hc_norm.weight = 1 + 2 * the base norm weight, so the "
                  "function equals the base model's; exact in float32, bf16 rounds the stored norm weight")
@@ -163,9 +165,11 @@ def read_base_text_config(snapshot: Path) -> dict:
                 "linear_value_head_dim", "linear_conv_kernel_dim", "rope_parameters"):
         if key not in text:
             raise FrankenRefused(f"the base config has no `{key}`")
-    for key in ("hidden_size", "intermediate_size", "vocab_size", "head_dim", "num_attention_heads", "num_hidden_layers"):
+    for key in REQUIRED_DIMENSIONS:
         if not safeio_whole(text[key]):
             raise FrankenRefused(f"the base config's `{key}` is not a positive whole number")
+    if not isinstance(text["rope_parameters"], dict):
+        raise FrankenRefused("the base config's `rope_parameters` is not a mapping")
     return text
 
 
@@ -249,10 +253,23 @@ def base_keys(layers: int) -> list[str]:
     return keys, re.compile(rf"model\.language_model\.layers\.(\d+)\.(.+)")
 
 
+def read_index(snapshot: Path) -> dict:
+    """The base's `weight_map` ({tensor name: shard file name}), read once through one guard: a link outside the cache, invalid JSON, a
+    non-object, a `weight_map` that is not a non-empty mapping of strings to strings are all the same refusal (exit 2)."""
+    try:
+        raw = safeio.read_json(snap_file(snapshot, "model.safetensors.index.json"), max_bytes=1 << 26)
+    except safeio.SafeReadError as exc:
+        raise FrankenRefused(f"the weight index of {snapshot.name} cannot be read: {getattr(exc, 'reason', exc)}") from None
+    table = raw.get("weight_map") if isinstance(raw, dict) else None
+    if not isinstance(table, dict) or not table or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in table.items()):
+        raise FrankenRefused("the weight index has no `weight_map` of tensor names to shard file names")
+    return table
+
+
 def read_base_tensors(snapshot: Path, layers: int) -> dict:
     """{base name: tensor} for every tensor of the first `layers` layers, the embedding, the final norm and the head."""
     from safetensors import safe_open
-    index = safeio.read_json(snap_file(snapshot, "model.safetensors.index.json"), max_bytes=1 << 26)["weight_map"]
+    index = read_index(snapshot)
     fixed, layer_re = base_keys(layers)
     want = list(fixed)
     for name in index:
@@ -380,7 +397,7 @@ def estimate_bytes(torch, base: dict | None, cfg: dict, layer_types: list[str], 
         total += sum(t.numel() for n, t in base.items() if not n.endswith("layernorm.weight") and n != "model.language_model.norm.weight")
     else:
         from safetensors import safe_open
-        index = safeio.read_json(snap_file(snapshot, "model.safetensors.index.json"), max_bytes=1 << 26)["weight_map"]
+        index = read_index(snapshot)
         fixed, layer_re = base_keys(layers)
         names = [n for n in index if n in fixed or ((m := layer_re.fullmatch(n)) and int(m.group(1)) < layers)]
         shards: dict[str, list[str]] = {}
@@ -413,13 +430,20 @@ def write_json(path: Path, data) -> None:
     safeio.atomic_write(path, json.dumps(data, indent=2, sort_keys=True) + "\n", mode=0o644)
 
 
-def copy_tokenizer(snapshot: Path, out: Path) -> list[str]:
-    copied = []
+def read_tokenizer(snapshot: Path) -> dict:
+    """{file name: bytes} of the tokenizer files the snapshot has, resolved and read before the output directory exists, so a refused link
+    leaves nothing behind."""
+    files = {}
     for name in TOKENIZER_FILES:
         if (snapshot / name).exists():
-            safeio.atomic_write(out / name, safeio.read_bytes(snap_file(snapshot, name), max_bytes=1 << 28), mode=0o644)
-            copied.append(name)
-    return copied
+            files[name] = safeio.read_bytes(snap_file(snapshot, name), max_bytes=1 << 28)
+    return files
+
+
+def write_tokenizer(out: Path, files: dict) -> list[str]:
+    for name, data in files.items():
+        safeio.atomic_write(out / name, data, mode=0o644)
+    return list(files)
 
 
 def make_prompts(vocab: int, seed: int) -> list[list[int]]:
@@ -459,12 +483,23 @@ def write_manifest(out: Path, cfg: dict, args, snapshot: Path, indexer_dir, prov
 
 # ---- the proofs -------------------------------------------------------------------------------------------------------------------
 
-def load_franken(torch, transformers, qd, out: Path):
-    config = qd.prepare_config(transformers, safeio.read_json(out / "config.json", max_bytes=MAX_CONFIG_BYTES))
+def load_franken(torch, transformers, qd, out: Path, budget: int | None = None):
+    """The franken as written, in the dtype it was written in. transformers turns `config.dtype` into a torch dtype, so the dtype is
+    taken from the raw config file. `budget` replaces `indexer_budget` for the indexer proofs."""
+    raw = safeio.read_json(out / "config.json", max_bytes=MAX_CONFIG_BYTES)
+    if budget is not None:
+        raw = dict(raw, indexer_budget=budget)
+    dtype = getattr(torch, raw["dtype"])
+    config = qd.prepare_config(transformers, raw)
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForCausalLM
     with qd.dense_layers():
-        model = Qwen4ExpForCausalLM.from_pretrained(str(out), config=config, dtype=getattr(torch, config.dtype if isinstance(config.dtype, str) else "float32"))
+        model = Qwen4ExpForCausalLM.from_pretrained(str(out), config=config, dtype=dtype)
     return model.eval()
+
+
+def execution_dtypes(torch, franken, base) -> dict:
+    """The dtype each model really runs in, for the proof record."""
+    return {"franken": str(next(franken.parameters()).dtype), "base": str(next(base.parameters()).dtype)}
 
 
 def load_base_model(torch, transformers, text: dict, base: dict, cfg: dict):
@@ -503,44 +538,78 @@ def compare(torch, a, b, prompts) -> dict:
     return {"prompts": rows, "max_abs_diff": max(r["max_abs_diff"] for r in rows), "top1_equal_all": all(r["top1_equal"] for r in rows)}
 
 
+def within(result: dict, dtype: str) -> bool:
+    """Whether a comparison with the base is inside the rule for `dtype` (see PROOF_FLOAT32_ABS_TOL and PROOF_BF16_REL_TOL)."""
+    biggest = max(r["max_abs_logit"] for r in result["prompts"])
+    if dtype == "float32":
+        return result["max_abs_diff"] <= PROOF_FLOAT32_ABS_TOL and result["top1_equal_all"]
+    return result["max_abs_diff"] <= PROOF_BF16_REL_TOL * biggest
+
+
+def all_selected_budget(longest: int) -> int:
+    """A budget at which the indexer keeps every block of a prompt of `longest` tokens (the blocks that fit plus the partial tail)."""
+    blocks = -(-longest // INDEXER_RATIO) + 1
+    return (blocks + 1) * INDEXER_RATIO
+
+
 def run_proofs(torch, transformers, qd, out: Path, text: dict, base: dict, cfg: dict, hc_sigma: float) -> dict:
+    """Four proofs. The identity and perturbation claims are judged on the model with every block selected, so that a small configured
+    budget (sparse attention) cannot stand in for the claim. The wide/narrow indexer comparison always runs."""
     prompts = make_prompts(cfg["vocab_size"], 7)
+    longest = max(len(p) for p in prompts)
+    dtype = cfg["dtype"]
     franken = load_franken(torch, transformers, qd, out)
     first = logits_of(torch, franken, prompts)
     second = logits_of(torch, franken, prompts)
-    proofs = {"prompt_lengths": [len(p) for p in prompts], "dtype": cfg["dtype"], "hc_sigma": hc_sigma,
-              "deterministic": all(bool(torch.equal(x, y)) for x, y in zip(first, second))}
     base_model = load_base_model(torch, transformers, text, base, cfg)
+    proofs = {"prompt_lengths": [len(p) for p in prompts], "dtype": dtype, "hc_sigma": hc_sigma,
+              "execution_dtypes": execution_dtypes(torch, franken, base_model),
+              "deterministic": all(bool(torch.equal(x, y)) for x, y in zip(first, second))}
     reference = logits_of(torch, base_model, prompts)
     del base_model
-    result = compare(torch, first, reference, prompts)
-    proofs["against_base"] = result
-    biggest = max(r["max_abs_logit"] for r in result["prompts"])
-    tol = PROOF_FLOAT32_ABS_TOL if cfg["dtype"] == "float32" else PROOF_BF16_REL_TOL * biggest
-    proofs["against_base"]["tolerance"] = tol
-    proofs["against_base"]["tolerance_rule"] = ("absolute, and every top-1 equal" if cfg["dtype"] == "float32"
-                                                else f"{PROOF_BF16_REL_TOL} of the largest logit; top-1 may flip on near ties")
-    if hc_sigma == 0:
-        proofs["identity_holds"] = result["max_abs_diff"] <= tol and (result["top1_equal_all"] or cfg["dtype"] != "float32")
+    configured = compare(torch, first, reference, prompts)
+    biggest = max(r["max_abs_logit"] for r in configured["prompts"])
+    configured["tolerance"] = PROOF_FLOAT32_ABS_TOL if dtype == "float32" else PROOF_BF16_REL_TOL * biggest
+    configured["tolerance_rule"] = ("absolute, and every top-1 equal" if dtype == "float32"
+                                    else f"{PROOF_BF16_REL_TOL} of the largest logit; top-1 may flip on near ties")
+    proofs["against_base"] = configured                       # the franken as configured (its own indexer budget)
+    every = all_selected_budget(longest)
+    if cfg["indexer_budget"] >= every:
+        all_logits, all_budget = first, cfg["indexer_budget"]
     else:
-        proofs["perturbed_differs"] = result["max_abs_diff"] > tol
-    # the indexer: shorter than the budget selects everything, a budget below the prompt length does not
-    budget = cfg["indexer_budget"]
-    longest = max(len(p) for p in prompts)
-    proofs["indexer"] = {"budget": budget, "longest_prompt": longest}
-    if budget >= longest + INDEXER_RATIO:
-        small = dict(cfg, indexer_budget=INDEXER_RATIO * 2)
-        qd_cfg = qd.prepare_config(transformers, small)
-        from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForCausalLM
-        with qd.dense_layers():
-            narrow = Qwen4ExpForCausalLM.from_pretrained(str(out), config=qd_cfg, dtype=getattr(torch, cfg["dtype"])).eval()
-        narrow_logits = logits_of(torch, narrow, prompts)
-        cmp_narrow = compare(torch, first, narrow_logits, prompts)
-        proofs["indexer"]["narrow_budget"] = INDEXER_RATIO * 2
-        proofs["indexer"]["narrow_vs_wide_max_abs_diff"] = cmp_narrow["max_abs_diff"]
-        proofs["indexer"]["narrow_differs"] = cmp_narrow["max_abs_diff"] > tol
-        proofs["indexer"]["wide_equals_base"] = (hc_sigma != 0) or proofs["identity_holds"]
+        del franken
+        sparse = load_franken(torch, transformers, qd, out, budget=every)
+        all_logits, all_budget = logits_of(torch, sparse, prompts), every
+        del sparse
+    selected = compare(torch, all_logits, reference, prompts)
+    selected["tolerance"], selected["tolerance_rule"] = configured["tolerance"], configured["tolerance_rule"]
+    proofs["against_base_all_selected"] = selected
+    equal = within(selected, dtype)
+    if hc_sigma == 0:
+        proofs["identity_holds"] = equal
+    else:
+        proofs["perturbed_differs"] = not equal
+    narrow = INDEXER_RATIO * 2
+    narrow_model = load_franken(torch, transformers, qd, out, budget=narrow)
+    narrow_logits = logits_of(torch, narrow_model, prompts)
+    del narrow_model
+    versus = compare(torch, all_logits, narrow_logits, prompts)
+    proofs["indexer"] = {"configured_budget": cfg["indexer_budget"], "all_selected_budget": all_budget, "longest_prompt": longest,
+                         "narrow_budget": narrow, "narrow_vs_all_selected_max_abs_diff": versus["max_abs_diff"],
+                         "narrow_differs": versus["max_abs_diff"] > PROOF_FLOAT32_ABS_TOL, "all_selected_equals_base": equal}
     return proofs
+
+
+def proofs_pass(proofs: dict) -> bool:
+    """True only when every proof was run and held. A proof that is missing is a failure."""
+    indexer = proofs.get("indexer") or {}
+    if proofs.get("deterministic") is not True or indexer.get("narrow_differs") is not True:
+        return False
+    if "identity_holds" in proofs:
+        return proofs["identity_holds"] is True and indexer.get("all_selected_equals_base") is True
+    if "perturbed_differs" in proofs:
+        return proofs["perturbed_differs"] is True
+    return False
 
 
 # ---- command line -----------------------------------------------------------------------------------------------------------------
@@ -556,14 +625,15 @@ def make(args) -> int:
     layer_types = check_layers(text, args.layers)
     if args.dtype not in ("bfloat16", "float32"):
         raise FrankenRefused("--dtype is bfloat16 or float32")
-    if args.hc_sigma < 0 or args.hc_sigma > 1:
-        raise FrankenRefused("--hc-sigma is between 0 and 1")
+    if not (0.0 <= args.hc_sigma <= 1.0):          # also refuses nan, which compares false with everything
+        raise FrankenRefused("--hc-sigma must be a number between 0 and 1")
     cfg = franken_config(text, args.layers, dtype=args.dtype, sets=parse_sets(args.set))
     out = mc.check_output_dir(Path(args.out))
     indexer_dir = Path(args.indexers) if args.indexers else None
     estimate = estimate_bytes(torch, None, cfg, layer_types, snapshot, args.layers)
     say(f"estimated size {estimate / GB:.1f} GB for {args.layers} layers in {args.dtype}")
     mc.check_size(estimate, args.max_gb, mc.free_bytes(out), where=f" under {out}")
+    tokenizer_files = read_tokenizer(snapshot)
     meta = build_meta_model(torch, transformers, qd, cfg)
     say("reading the base tensors")
     base = read_base_tensors(snapshot, args.layers)
@@ -579,7 +649,7 @@ def make(args) -> int:
     from safetensors.torch import save_file
     save_file({k: v.contiguous() for k, v in tensors.items()}, str(out / "model.safetensors"), metadata={"format": "pt"})
     del tensors
-    copied = copy_tokenizer(snapshot, out)
+    copied = write_tokenizer(out, tokenizer_files)
     say(f"wrote {out} (tokenizer files: {', '.join(copied) or 'none'})")
     proofs = None
     if args.prove:
@@ -588,8 +658,7 @@ def make(args) -> int:
         write_json(out / "proofs.json", proofs)
     write_manifest(out, cfg, args, snapshot, indexer_dir, prov, layer_types, estimate, proofs)
     if proofs is not None:
-        ok = proofs["deterministic"] and (proofs.get("identity_holds", True)) and (proofs.get("perturbed_differs", True)) \
-            and proofs["indexer"].get("narrow_differs", True)
+        ok = proofs_pass(proofs)
         if not ok:
             print(json.dumps(proofs, indent=2), file=sys.stderr)
             return 3
