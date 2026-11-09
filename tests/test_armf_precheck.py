@@ -247,6 +247,10 @@ def test_the_pre_check_runs_only_for_the_stage_2_port_check_command(tmp_path):
             other = {"command": "python3 -P -s stages/2/graft_trial.py", "deadline_s": 60}          # another test of the stage (the graft trial)
             assert sup._device_ops_precheck(spec2, stage_dir, other) is False
             assert sup._device_ops_precheck(spec3, stage_dir, {"command": "python3 -P -s stages/3/port_check.py", "deadline_s": 60}) is False
+            from orchard.stages import STAGES
+            weights_only_2 = next(x for x in STAGES if x.number == 2)
+            assert weights_only_2.draft != "full_port"                    # a weights-only stage 2 has no port: its tests are never held back here
+            assert sup._device_ops_precheck(weights_only_2, stage_dir, {"command": "python3 -P -s stages/2/port_check.py", "deadline_s": 60}) is False
             assert not (stage_dir / "evidence").exists() and not (stage_dir / "test-result.json").exists()
     finally:
         r.close()
