@@ -4883,3 +4883,21 @@ Prompt (operator): "make sure we've updated all our literature (site, readme, et
 - **In progress and not claimed as done:** The Qwen4 frankenmodel generator and its CPU proofs are done (PR 639, open): the first K layers of real Qwen3.8-27B weights in the `qwen4_exp_text` skeleton with identity-initialised hyper-connections. With K=4 in float32 the logits equal the base exactly (maximum difference 0.0 on three prompts). With K=8 in bf16 the maximum difference is 0.119 and the top-1 token is equal. A seeded perturbation of the hyper-connections changes the logits by 5.23 and the top-1 token differs. An indexer budget of 2,048 equals the base, and a budget of 8 moves the logits by about 1. The checkpoint does not carry the visual tower, the MTP head, per-layer embeddings or the n-gram table, and the truncated weights give incoherent text, so the result shows equivalence only and says nothing about quality. Generator and CPU proofs done, chip run pending. <!-- UPDATE WHEN THE CHIP RUN ENDS -->
 - **Limits that stay:** single runs; agreement over 32 tokens on one to four prompts; the coder alone has not written a passing port; full-port models are packaged by hand; served speeds are low and depend on host load; nothing has run on another machine; the four-chip boot check of the Olmo adapter as republished passed (9 checks, 12.34 tok/s warm; record in PR 642, open), and the served-rate range across runs and boot checks is 2.2 to 12.3 tok/s under host load.
 - **Issue 61** (the full-port stages have never run on a real model) is out of date.
+
+## 2026-11-09: the franken's config and model card (Qwen4 drop-in plan, Track C item C4; branch `c4-franken-config-readme`)
+Prompt (operator plan for the Qwen4-27B drop-in, through the controller session): Track C item C4, "write `layer_types`, drop the extra
+`seed` key, add a README with the Apache-2.0 license (stage 7 needs one)", coordinated with issue 646.
+- `scripts/tiny_qwen4/make_franken.py` writes `layer_types` into config.json: one entry per kept layer, the base's own `linear_attention`
+  and `full_attention` names. A real Qwen4 config is expected to carry that key (transformers' Qwen4Exp maps `full_attention` to its
+  `indexed_attention`), and stage 0 compares `layer_types` as a deciding key.
+- config.json loses `seed`. In a Qwen4Exp config `seed` is the n-gram hash seed (transformers 5.19.0, default 1234), a different setting from
+  the generator's `--seed`. The generator's seed stays in franken-manifest.json, where it already was.
+- The output gets README.md with `license: apache-2.0` in its front matter, read by stage 0 (`license_side`) and stage 7 (`read_license`).
+  It names the base repository and revision from the Hugging Face cache layout only (no local folder name), the options, the indexer
+  source, and that the checkpoint is not to be uploaded. The base snapshot's own card is read first, through the same link check as the
+  other snapshot files and with a 4 MiB cap: a base card that names another license is refused before anything is written, and a base
+  card with no license is accepted and the written card says the license was not checked against it.
+- Not done: sharded output with an index (left out to keep the change small), and the four items of issue 646 (a comment on the issue
+  says so).
+- Tests: `tests/test_make_franken.py` (new tests for the config keys, the card, its license, the refusals and the cache-layout naming).
+  Mutation table in the pull request.

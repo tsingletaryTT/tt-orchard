@@ -199,6 +199,9 @@ def test_the_real_indexer_tensors_are_mapped_by_name(base_snapshot, tmp_path):
         assert torch.allclose(made.get_tensor("model.layers.7.self_attn.indexer.q_layernorm.weight"), tensors[stem + "q_norm"])
     manifest = json.loads((out / "franken-manifest.json").read_text())
     assert manifest["tensor_counts"]["indexer_real"] == 6
+    card = (out / "README.md").read_text(encoding="utf-8")
+    assert "from `higa2515/Qwen3.8-27B-QSA-BF16`, revision `" + "b" * 40 + "`" in card
+    assert "that release's terms also apply to them" in card
 
 
 def test_an_indexer_file_with_the_wrong_shape_is_refused(base_snapshot, tmp_path, capsys):
@@ -586,3 +589,189 @@ def test_a_teacher_forced_passage_that_tokenizes_short_is_refused():
         mf.teacher_forced_prompt(None, None, 300, Tok())
     ids, source = mf.teacher_forced_prompt(None, None, 300, None)
     assert len(ids) >= mf.TEACHER_FORCED_MIN_POSITIONS and "seeded" in source
+
+
+# ---- what the config says, and the model card (Track C, item C4) -----------------------------------------------------------------
+
+# Keys the franken's config.json may carry that the Qwen4Exp text config does not declare: `intermediate_size` is the dense feed-forward
+# width the dense shim reads, and `full_attention_interval` is a key of the Qwen3.8 config that the class reads when no layer_types is given.
+EXTRA_CONFIG_KEYS = {"intermediate_size", "full_attention_interval"}
+
+
+def _config_keys_the_class_declares() -> set:
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+    keys = set()
+    for cls in Qwen4ExpTextConfig.__mro__:
+        keys |= set(getattr(cls, "__annotations__", {}))
+    return keys
+
+
+@pytest.mark.parametrize("layers", [4, 8])
+def test_the_config_lists_one_layer_type_per_layer_in_the_base_schedule(base_snapshot, tmp_path, layers):
+    """A real Qwen4 config is expected to carry layer_types (the class maps its full_attention entries to indexed_attention), and stage 0
+    compares layer_types as a deciding key, so the franken writes the base's own entries for the layers it keeps."""
+    out = tmp_path / f"types{layers}"
+    assert run(base_snapshot, out, layers=layers) == 0
+    cfg = json.loads((out / "config.json").read_text())
+    assert cfg["layer_types"] == (["linear_attention"] * 3 + ["full_attention"]) * (layers // 4)
+    assert len(cfg["layer_types"]) == cfg["num_hidden_layers"] == layers
+    m = json.loads((out / "franken-manifest.json").read_text())
+    assert m["config"]["layer_types"] == cfg["layer_types"] == m["layer_types"]
+
+
+def test_the_written_layer_types_load_as_the_classes_indexed_attention_layers(base_snapshot, tmp_path):
+    out = tmp_path / "typesload"
+    assert run(base_snapshot, out) == 0
+    qd = mf.helpers()[1]
+    config = qd.prepare_config(transformers, json.loads((out / "config.json").read_text()))
+    assert config.layer_types == ["linear_attention"] * 3 + ["indexed_attention"]
+
+
+def test_the_config_has_no_seed_key_and_the_manifest_keeps_the_seed(base_snapshot, tmp_path):
+    """`seed` in a Qwen4Exp config is the n-gram hash seed, a different setting from the generator's seed. The generator's seed is
+    recorded in the manifest."""
+    out = tmp_path / "seed"
+    assert run(base_snapshot, out, "--seed", "99", "--hc-sigma", "0.01") == 0
+    cfg = json.loads((out / "config.json").read_text())
+    assert "seed" not in cfg
+    assert json.loads((out / "franken-manifest.json").read_text())["seed"] == 99
+
+
+def test_every_config_key_is_one_the_class_declares_or_a_named_extra(base_snapshot, tmp_path):
+    out = tmp_path / "keys"
+    assert run(base_snapshot, out) == 0
+    cfg = json.loads((out / "config.json").read_text())
+    assert set(cfg) - _config_keys_the_class_declares() - EXTRA_CONFIG_KEYS == set()
+    assert "seed" not in cfg
+
+
+def _card(out):
+    return (out / "README.md").read_text(encoding="utf-8")
+
+
+def test_the_output_has_a_model_card_whose_license_stage_0_and_stage_7_read_as_apache(base_snapshot, tmp_path):
+    from orchard.package_card import read_license
+    out = tmp_path / "card"
+    assert run(base_snapshot, out) == 0
+    assert read_license(out) == "apache-2.0"
+    triage = importlib.util.spec_from_file_location("delta_triage_for_card",
+                                                    REPO / "orchard" / "skills" / "delta-triage-templates" / "delta_triage.py")
+    dt = importlib.util.module_from_spec(triage)
+    triage.loader.exec_module(dt)
+    side = dt.license_side(out)
+    assert side["license"] == "apache-2.0" and side["source"] == "model card front matter"
+
+
+def test_the_card_names_the_base_revision_and_the_options_and_says_not_to_upload(base_snapshot, tmp_path):
+    snap, _ = _linked_copy(base_snapshot, tmp_path)
+    out = tmp_path / "cardopts"
+    assert run(snap, out, "--seed", "77", "--hc-sigma", "0.02", "--set", "indexer_budget=64", layers=8, dtype="bfloat16") == 0
+    card = _card(out)
+    for want in ("9" * 40, "Qwen/Qwen3.8-27B", "first 8 layers", "bfloat16", "0.02", "77", "indexer_budget=64", "perturbed",
+                 "not a Qwen4 release", "Do not upload", "tt-model bundles"):
+        assert want in card, want
+
+
+def test_an_identity_checkpoint_says_it_computes_the_bases_function(base_snapshot, tmp_path):
+    out = tmp_path / "cardid"
+    assert run(base_snapshot, out) == 0
+    card = _card(out)
+    assert "same function as the first 4 layers" in card and "perturbed" not in card
+
+
+def test_the_card_holds_no_machine_path(base_snapshot, tmp_path):
+    out = tmp_path / "cardpaths"
+    assert run(base_snapshot, out) == 0
+    card = _card(out)
+    assert str(tmp_path) not in card and str(base_snapshot) not in card and "/home/" not in card and "/tmp" not in card
+
+
+@pytest.mark.parametrize("where", [("someone",), ("models--someone--x", "elsewhere")])
+def test_a_base_outside_the_cache_layout_is_named_only_by_its_revision(base_snapshot, tmp_path, where):
+    """A plain directory gives no repository name to show, and the folder above it may be a user's name. A `models--` folder counts only
+    with a `snapshots` folder between it and the revision."""
+    import shutil
+    plain = tmp_path.joinpath(*where) / ("c" * 40)
+    shutil.copytree(base_snapshot, plain)
+    out = tmp_path / "cardplain"
+    assert run(plain, out) == 0
+    card = _card(out)
+    assert "c" * 40 in card and "someone" not in card and "not in the Hugging Face cache layout" in card
+    assert card.count("Hugging Face cache layout") >= 1 and "the indexer tensors come from another release" not in card.lower()
+    assert card.count("`") % 2 == 0
+
+
+def test_a_base_directory_not_named_by_a_commit_gives_no_revision(base_snapshot, tmp_path):
+    import shutil
+    plain = tmp_path / "models--Qwen--Qwen3.8-27B" / "snapshots" / "main-copy"
+    shutil.copytree(base_snapshot, plain)
+    out = tmp_path / "cardnorev"
+    assert run(plain, out) == 0
+    card = _card(out)
+    assert "main-copy" not in card and "the snapshot directory is not named by a commit" in card
+
+
+def test_the_manifest_lists_the_card_with_its_hash(base_snapshot, tmp_path):
+    import hashlib
+    out = tmp_path / "cardman"
+    assert run(base_snapshot, out) == 0
+    m = json.loads((out / "franken-manifest.json").read_text())
+    assert m["files"]["README.md"]["sha256"] == hashlib.sha256((out / "README.md").read_bytes()).hexdigest()
+
+
+def _base_with_card(base_snapshot, tmp_path, text):
+    import shutil
+    snap = tmp_path / "carded" / "models--Qwen--Qwen3.8-27B" / "snapshots" / ("b" * 40)
+    shutil.copytree(base_snapshot, snap)
+    (snap / "README.md").write_text(text, encoding="utf-8")
+    return snap
+
+
+def test_a_base_card_that_names_apache_is_said_so(base_snapshot, tmp_path):
+    snap = _base_with_card(base_snapshot, tmp_path, "---\nlicense: apache-2.0\n---\n# Qwen3.8-27B\n")
+    out = tmp_path / "apachebase"
+    assert run(snap, out) == 0
+    assert "The base model's card names apache-2.0" in _card(out)
+
+
+def test_a_base_without_a_card_license_is_said_so(base_snapshot, tmp_path):
+    out = tmp_path / "nolicense"
+    assert run(base_snapshot, out) == 0
+    assert "names no license, so the license above was not checked against it" in _card(out)
+
+
+@pytest.mark.parametrize("license_line", ["license: cc-by-nc-4.0", "license: other\nlicense_name: qwen-research"])
+def test_a_base_whose_card_names_another_license_is_refused_and_writes_nothing(base_snapshot, tmp_path, license_line):
+    snap = _base_with_card(base_snapshot, tmp_path, f"---\n{license_line}\n---\n# A base\n")
+    out = tmp_path / "otherlicense"
+    assert run(snap, out) == 2 and not out.exists() and "Apache-2.0" in LAST["err"]
+
+
+def test_a_base_card_that_links_outside_the_cache_is_refused_and_writes_nothing(base_snapshot, tmp_path):
+    import os
+    snap, _ = _linked_copy(base_snapshot, tmp_path)
+    elsewhere = tmp_path / "elsewhere-card"
+    elsewhere.mkdir()
+    (elsewhere / "README.md").write_text("---\nlicense: apache-2.0\n---\n")
+    os.symlink(str(elsewhere / "README.md"), snap / "README.md")
+    out = tmp_path / "cardlink"
+    assert run(snap, out) == 2 and not out.exists() and "links outside" in LAST["err"]
+
+
+def test_an_oversized_base_card_is_refused_not_a_traceback(base_snapshot, tmp_path):
+    snap = _base_with_card(base_snapshot, tmp_path, "---\nlicense: apache-2.0\n---\n" + "x" * (mf.MAX_CARD_BYTES + 1))
+    out = tmp_path / "bigcard"
+    assert run(snap, out) == 2 and not out.exists() and "README.md" in LAST["err"] and "Traceback" not in LAST["err"]
+
+
+@pytest.mark.parametrize("text, want", [
+    ("---\nlicense: apache-2.0\n---\n", "apache-2.0"),
+    ("---\nlicense: 'Apache-2.0'\n---\n", "apache-2.0"),
+    ("---\r\nlicense: apache-2.0\r\n---\r\n", "apache-2.0"),
+    ("---\ntags: [a]\n---\nlicense: mit\n", None),
+    ("license: mit\n", None),
+    ("", None),
+    ("---\nlicense:\n---\n", None),
+])
+def test_the_base_card_license_is_read_from_the_front_matter_only(text, want):
+    assert mf.card_license(text) == want
