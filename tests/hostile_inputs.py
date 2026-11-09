@@ -1261,6 +1261,8 @@ assert all(name in BY_NAME for readers in KNOWN_DEFECTS.values() for name in rea
 
 # Modules that parse JSON and have no reader in READERS yet: the backlog. tests/test_hostile_readers.py keeps this list exact.
 UNREGISTERED_MODULES = (
+    'drop_check.py',             # json.loads of the Hub listing and its own state file; registered readers are tracked in issues 666 and 667 (PR 657)
+    'drop_watch.py',             # json.loads of the Hub listing and its state file; registered readers are tracked in issues 666 and 667 (PR 657)
     'port_construction.py',      # json.loads of one stdout line from the reference interpreter, not a file; tests/test_port_construction.py feeds it hostile lines
     'long_sweep.py',
     'full_port_quality.py',      # json.loads(json.dumps(...)) compares two of its own values, no outside file
