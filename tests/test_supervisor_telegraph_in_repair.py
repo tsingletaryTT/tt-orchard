@@ -361,3 +361,47 @@ def test_a_reply_with_no_usable_code_is_reported_as_not_helped_even_when_the_cod
     assert stage_ends(rig) == ["pass"]
     verdicts = decs(rig, rh.PROGRESS)
     assert verdicts and all(v["helped"] is False and v["outcome"].startswith("unusable reply") and why in v["outcome"] for v in verdicts), verdicts
+
+
+# ---- issue 650: an unreachable helper -----------------------------------------------------------------------------------------------
+
+class _Down:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, url, headers, body, timeout):
+        self.calls += 1
+        raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
+
+
+def _down_helper(monkeypatch, tmp_path, **kw):
+    down = _Down()
+    cfg = tg.load(table(models=["helper-model"], prices={"helper-model": [3.0, 15.0]}, max_calls_per_problem=8, max_calls=20, unreachable_after=1, **kw),
+                  base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=down, environ={"TG_KEY": KEY}, clock=lambda: 1000.0, hostname="node9", home="/home/someone")
+    monkeypatch.setattr(sv, "_telegraph_from", lambda *a, **k: tel)
+    return tel, down
+
+
+def test_an_unattended_run_whose_helper_cannot_be_reached_ends_blocked_with_the_helper_unreachable_code(rig, monkeypatch, tmp_path):
+    rig.args.unattended = True
+    tel, down = _down_helper(monkeypatch, tmp_path)
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    assert rig.run() == sv.EXIT_BLOCKED
+    block = [d for d in rig.decisions() if d.get("decision") == "blocked"]
+    assert len(block) == 1 and block[0]["code"] == "helper-unreachable" and "unreachable" in block[0]["reason"]
+    assert len(decs(rig, "helper unreachable, not asking")) == 1 and down.calls == 1
+    # The block comes from the repair round that made the first ask, in the first attempt: the stage never ended or escalated first (a hook
+    # missing from this call site would let the attempt end and block at the next attempt's start instead).
+    assert rig.ends(2) == [] and len(decs(rig, rh.ASKED)) == 1
+
+
+def test_with_the_action_set_to_continue_the_run_goes_on_without_the_helper_and_asks_no_more(rig, monkeypatch, tmp_path):
+    rig.args.unattended = True
+    tel, down = _down_helper(monkeypatch, tmp_path, unreachable_action="continue")
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    rig.run()
+    assert not [d for d in rig.decisions() if d.get("decision") == "blocked" and d.get("code") == "helper-unreachable"]
+    assert len(decs(rig, "helper unreachable, not asking")) == 1 and down.calls == 1      # the breaker kept every later ask off the wire

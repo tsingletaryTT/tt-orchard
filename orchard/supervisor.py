@@ -985,6 +985,26 @@ class Supervisor:
 
     # ---- small helpers ----------------------------------------------------------------------
 
+    def _helper_unreachable(self, n, answer) -> None:
+        """After a helper ask: when the endpoint cannot be reached and the breaker is open (orchard/telegraph.py), say so once in the ledger
+        and, in an unattended run configured to block, stop with the `helper-unreachable` code instead of repairing without help while
+        hardware time goes by (issue 650). An attended run gets the notice and goes on: the operator is watching. A helper that answered, or
+        failed any other way, changes nothing here."""
+        tele = getattr(self, "telegraph", None)
+        if tele is None or not getattr(answer, "unreachable", False) or not tele.tripped:
+            return
+        from orchard import blocked as blocked_mod            # imported here: blocked.py reads the stage tables this module defines
+        reason = (f"{blocked_mod.HELPER_UNREACHABLE_MARK}: {tele._conn_failures} connection attempts failed in a row "
+                  f"(connect timeout {tele.cfg.connect_timeout_s} s). The run is not asking again until the endpoint answers a probe")
+        if not getattr(self, "_helper_down_noted", False):
+            self._helper_down_noted = True
+            self.ledger.append("decision", n, decision="helper unreachable, not asking", failures=tele._conn_failures,
+                               connect_timeout_s=tele.cfg.connect_timeout_s, action=tele.cfg.unreachable_action, probe_s=tele.cfg.unreachable_probe_s)
+            self.ledger.append("notice", n, what="the helper endpoint is unreachable",
+                               detail=f"{tele._conn_failures} connection attempts failed; the run stops asking for help until a probe succeeds")
+        if self.unattended and tele.cfg.unreachable_action == "block":
+            self._block(n, reason)
+
     def _block(self, stage, reason: str, **evidence):
         self.ledger.append("notice", stage, blocked=True, reason=reason, evidence=evidence)
         raise Blocked(reason, **evidence)
@@ -3785,6 +3805,7 @@ class Supervisor:
                   "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached)}
         if not answer.ok:
             self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, reason=str(answer.reason)[:300], **record)
+            self._helper_unreachable(n, answer)
             return None
         draft = phone_a_friend.extract_draft(answer.text)
         if draft is None:
@@ -4104,6 +4125,7 @@ class Supervisor:
                   "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached)}
         if not answer.ok:
             self.ledger.append("decision", n, decision=repair_help.ANSWERED, reason=str(answer.reason)[:300], **record)
+            self._helper_unreachable(n, answer)
             return "", False, True
         reply = phone_a_friend.extract_draft(answer.text)
         if reply is None:

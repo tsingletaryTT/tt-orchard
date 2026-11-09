@@ -251,3 +251,24 @@ def test_the_ledger_counts_one_call_in_this_run_and_the_limits_are_not_exceeded(
     rig.run()
     state = paf.attempt_state(rig.entries(), 2)
     assert len(wire.requests) == state["asked_in_stage"] == 1 and state["asked_in_stage"] <= paf.PER_STAGE
+
+
+# ---- issue 650: an unreachable helper at an attempt start ---------------------------------------------------------------------------
+
+def test_an_unattended_run_whose_helper_cannot_be_reached_at_an_attempt_start_ends_blocked_with_the_helper_unreachable_code(rig, monkeypatch, tmp_path):
+    """The attempt-start ask is the other call site of the helper: attempt 1 fails, the next attempt asks, the endpoint cannot be reached."""
+    rig.args.unattended = True
+
+    class Down:
+        calls = 0
+
+        def __call__(self, url, headers, body, timeout):
+            Down.calls += 1
+            raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
+
+    wire_helper(rig, monkeypatch, tmp_path, wire=Down(), after_failures=1, unreachable_after=1)
+    coder(rig)
+    rig.run()
+    block = [d for d in rig.decisions() if d.get("decision") == "blocked"]
+    assert len(block) == 1 and block[0]["code"] == "helper-unreachable"
+    assert Down.calls == 1 and len([d for d in rig.decisions() if d.get("decision") == "helper unreachable, not asking"]) == 1

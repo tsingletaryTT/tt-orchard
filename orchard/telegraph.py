@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+import errno
 import hashlib
 import ipaddress
 import json
@@ -55,7 +56,9 @@ LEDGER_ERRORS = (LedgerUnavailable, LedgerRefused)     # every way the ledger ca
 REQUEST_FRAMING_TOKENS = 32      # added to the request size for the provider's message framing
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
-        "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd", "dir"}
+        "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd", "dir",
+        "connect_timeout_s", "unreachable_after", "unreachable_action", "required", "unreachable_probe_s"}
+UNREACHABLE_ACTIONS = ("block", "continue")
 UNPRICED_BODY = ("tools", "tool_choice", "web_search_options", "plugins")
 RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream", "stream_options", "n", "best_of")
 APIS = ("openai", "anthropic")
@@ -92,6 +95,11 @@ class Config:
     max_tokens_per_problem: int | None = None
     max_cost_per_problem_usd: float | None = None
     dir: Path | None = None                             # where the ledger, cache and reply files live (None: the default)
+    connect_timeout_s: int = 10                         # the TCP connect gets this long, apart from timeout_s (the wait for the reply); issue 650
+    unreachable_after: int = 2                          # this many connection failures in a row open the breaker: the run stops asking
+    unreachable_action: str = "block"                   # when the breaker opens in an unattended run: "block" (code helper-unreachable) or "continue"
+    required: bool = False                              # the preflight row blocks (not warns) when the endpoint cannot be reached
+    unreachable_probe_s: int = 300                      # an open breaker lets one ask through after this long, to see whether the endpoint is back
 
 
 def _int(table: dict, key: str, default: int, lowest: int) -> int:
@@ -286,8 +294,15 @@ def load(table: dict | None, *, base: Path) -> Config:
         directory = _dir(directory, base) if directory else None
     except (RuntimeError, ValueError) as exc:                    # "~user" with no such user, or a NUL character
         raise ConfigError(f"telegraph.dir cannot be used ({_shown(table.get('dir'))}): {exc}") from exc
+    action = table.get("unreachable_action", "block")
+    if action not in UNREACHABLE_ACTIONS:
+        raise ConfigError(f"telegraph.unreachable_action must be one of {', '.join(UNREACHABLE_ACTIONS)}")
+    required = table.get("required", False)
+    if not isinstance(required, bool):
+        raise ConfigError("telegraph.required must be true or false")
     return Config(
-        dir=directory,
+        dir=directory, connect_timeout_s=_int(table, "connect_timeout_s", 10, 1), unreachable_after=_int(table, "unreachable_after", 2, 1),
+        unreachable_action=action, required=required, unreachable_probe_s=_int(table, "unreachable_probe_s", 300, 1),
         enabled=True, endpoint=endpoint.rstrip("/"), models=tuple(models), api=api, key_env=key_env or None,
         key_file=key_file or None, after_failures=_int(table, "after_failures", 2, 1),
         max_calls=_int(table, "max_calls", 5, 0), max_total_tokens=_int(table, "max_total_tokens", 40000, 0),
@@ -398,8 +413,47 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def http_post(url: str, headers: dict, body: bytes, timeout: float) -> tuple[int, bytes]:
-    """POST and return (status, body). A redirect is not followed, so the key cannot be sent to another host."""
+class Unreachable(OSError):
+    """The endpoint could not be connected to: the connect timed out, was refused, the name did not resolve or the network has no route. Nothing
+    was sent, so the call cost nothing. The text names the host and the cause and never holds a header or a key (issue 650)."""
+
+
+# errno values that mean "the connection was never made" when they come back wrapped in a URLError (a proxy path)
+_NO_CONNECTION = {errno.ETIMEDOUT, errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTDOWN}
+
+
+def _connect_probe(url: str, connect_timeout: float) -> None:
+    """Open and close a TCP connection to the URL's host with the short `connect_timeout`, so an unreachable endpoint fails in seconds and not in
+    the minutes the operating system takes to give up. With a proxy in the environment the route is the proxy's, which a direct connect cannot
+    test, so the probe is skipped there (the request itself is still limited, see `_as_unreachable`). Raises Unreachable."""
+    parts = urllib.parse.urlsplit(url)
+    if urllib.request.getproxies().get(parts.scheme):
+        return
+    host = parts.hostname or ""
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        sock = socket.create_connection((host, port), timeout=connect_timeout)
+    except (OSError, ValueError) as exc:
+        cause = "timed out" if isinstance(exc, socket.timeout) else f"{type(exc).__name__}"
+        raise Unreachable(f"cannot connect to {host}:{port}: {cause} after {connect_timeout:g} s") from None
+    sock.close()
+
+
+def _as_unreachable(exc: urllib.error.URLError, url: str) -> Unreachable | None:
+    """The Unreachable a URLError stands for, or None when the connection was made (an HTTPError is a reply, not a URLError of this kind)."""
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, (socket.timeout, socket.gaierror)) or (isinstance(reason, OSError) and getattr(reason, "errno", None) in _NO_CONNECTION):
+        host = urllib.parse.urlsplit(url).hostname or ""
+        return Unreachable(f"cannot connect to {host}: {type(reason).__name__}")
+    return None
+
+
+def http_post(url: str, headers: dict, body: bytes, timeout: float, connect_timeout: float | None = None) -> tuple[int, bytes]:
+    """POST and return (status, body). A redirect is not followed, so the key cannot be sent to another host. `timeout` is the wait for the
+    reply; `connect_timeout` (when given) is how long the TCP connect may take, tried first. A connection that cannot be made raises
+    Unreachable."""
+    if connect_timeout is not None:
+        _connect_probe(url, connect_timeout)
     opener = urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
@@ -407,15 +461,27 @@ def http_post(url: str, headers: dict, body: bytes, timeout: float) -> tuple[int
             return resp.status, resp.read(MAX_BODY)
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(MAX_BODY)
+    except urllib.error.URLError as exc:
+        down = _as_unreachable(exc, url)
+        if down is not None:
+            raise down from None
+        raise
 
 
-def http_get(url: str, headers: dict, timeout: float) -> tuple[int, bytes]:
+def http_get(url: str, headers: dict, timeout: float, connect_timeout: float | None = None) -> tuple[int, bytes]:
+    if connect_timeout is not None:
+        _connect_probe(url, connect_timeout)
     opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
             return resp.status, resp.read(MAX_BODY)
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(MAX_BODY)
+    except urllib.error.URLError as exc:
+        down = _as_unreachable(exc, url)
+        if down is not None:
+            raise down from None
+        raise
 
 
 # ---------------------------------------------------------------------------------------------------- the result
@@ -432,6 +498,7 @@ class Answer:
     latency_s: float = 0.0
     cost_usd: float | None = None
     cached: bool = False
+    unreachable: bool = False          # the endpoint could not be connected to (or the breaker is open); nothing was sent
 
     def as_hint(self) -> str:
         """The reply, marked as advice from another model, for a place a local model reads it."""
@@ -558,13 +625,33 @@ class Telegraph:
         self.cfg = config
         self.scope = scope
         self.dir = Path(directory)
-        self.transport = transport or http_post
+        # The default transport tries the TCP connect for `connect_timeout_s` only (issue 650); a transport passed in keeps its own signature.
+        self.transport = transport or (lambda url, headers, body, timeout: http_post(url, headers, body, timeout,
+                                                                                    connect_timeout=self.cfg.connect_timeout_s))
+        self._conn_failures = 0                 # connection failures in a row; a request that was connected resets it
+        self._tripped_at: float | None = None   # when the breaker opened (or when the last probe failed); None while it is closed
         self.environ = os.environ if environ is None else environ
         self.clock = clock
         self.hostname = socket.gethostname() if hostname is None else hostname
         self.home = str(Path.home()) if home is None else home
 
     # ------------------------------------------------------------------------------------------- policy
+
+    @property
+    def tripped(self) -> bool:
+        """True while the breaker is open: enough connection failures in a row that the run has stopped asking."""
+        return self._tripped_at is not None
+
+    def _breaker_refuses(self) -> bool:
+        """True when the breaker is open and the probe interval has not passed. After the interval one ask goes out as the probe: the interval
+        restarts at once, so a probe that fails keeps the breaker open for another interval and an ask that is racing it is refused."""
+        if self._tripped_at is None:
+            return False
+        now = self.clock()
+        if now - self._tripped_at >= self.cfg.unreachable_probe_s:
+            self._tripped_at = now
+            return False
+        return True
 
     def should_ask(self, consecutive_failures: int) -> bool:
         """True when it is enabled and the caller has failed at least `after_failures` times in a row."""
@@ -593,6 +680,10 @@ class Telegraph:
         Always returns an Answer; `ok` False carries a reason and the harness goes on without help."""
         if not self.cfg.enabled:
             return Answer(False, reason="telegraph is not enabled")
+        if self._breaker_refuses():
+            return Answer(False, unreachable=True,
+                          reason=(f"the helper endpoint is unreachable ({self._conn_failures} connection attempts failed in a row): not asking "
+                                  f"again for {self.cfg.unreachable_probe_s} s, then one try"))
         key, key_problem = self._key()
         secrets = self._secrets(key)
         clean = lambda t: redact(str(t), hostname=self.hostname, home=self.home, secrets=secrets)   # noqa: E731
@@ -782,14 +873,21 @@ class Telegraph:
         t0 = self.clock()
         text, usage, error = "", None, ""
         usage_known = False                      # a timeout or a server error may still have been processed and billed
+        unreachable = False
         try:
             status, raw = self.transport(url, headers, json.dumps(body).encode(), self.cfg.timeout_s)
+            self._conn_failures, self._tripped_at = 0, None             # the endpoint was reached: the breaker closes
             if status != 200:
                 error = f"HTTP {status}: " + raw.decode("utf-8", "replace")
                 usage_known = 400 <= status < 500 and status != 408    # refused before any processing
             else:
                 text, usage, error = self._parse(raw)
                 usage_known = usage is not None
+        except Unreachable as exc:
+            error, unreachable, usage_known = f"{type(exc).__name__}: {exc}", True, True     # nothing was sent: it cost nothing, and that is known
+            self._conn_failures += 1
+            if self._conn_failures >= self.cfg.unreachable_after:
+                self._tripped_at = self.clock()
         except Exception as exc:                                    # noqa: BLE001 - nothing may reach the harness
             error = f"{type(exc).__name__}: {exc}"
         t1 = self.clock()
@@ -804,9 +902,10 @@ class Telegraph:
             else:
                 cost = 0.0 if usage_known else None          # refused before processing: free. Otherwise the cost is unknown
             self._append(store, {**rec, "outcome": "error", "reason": reason, "tokens_in": tin, "tokens_out": tout,
-                                 "cost_usd": cost, "usage_known": usage_known or usage is not None})
+                                 "cost_usd": cost, "usage_known": usage_known or usage is not None,
+                                 **({"unreachable": True} if unreachable else {})})
             return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0,
-                          tokens_in=tin, tokens_out=tout, cost_usd=cost)
+                          tokens_in=tin, tokens_out=tout, cost_usd=cost, unreachable=unreachable)
         text = clean(text)
         estimated = usage is None
         tin = usage[0] if usage else (len(prompt) + len(SYSTEM)) // 3

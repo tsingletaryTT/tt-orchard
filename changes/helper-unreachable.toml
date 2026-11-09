@@ -1,0 +1,3 @@
+target = "0.9.142"
+summary = "An unreachable helper endpoint fails fast (a separate connect timeout), opens a per-run breaker that stops the asking, blocks an unattended run with the helper-unreachable code and gets a preflight row (issue 650)."
+pr = 651
