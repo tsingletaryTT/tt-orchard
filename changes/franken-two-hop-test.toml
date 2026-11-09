@@ -1,0 +1,3 @@
+target = "0.9.141"
+summary = "The franken generator test for a two-hop hub cache link matches the hub-wide store rule that PR 644 put in safeio."
+pr = 649
