@@ -288,6 +288,27 @@ def layer_floor(config) -> tuple[int, int | None]:
     if isinstance(kinds, list) and 0 < len(kinds) <= LAYER_COUNT_MAX:
         return len(kinds), len(kinds)
     return 1, None
+# The static scan of a port directory is bounded (the port directory is the coder's): at most this many source files and this many bytes
+# read. A scan that stops at a bound before it found a matmul-family call fails the check and says so.
+STATIC_FILES_MAX = 400
+STATIC_BYTES_MAX = 16 << 20
+
+# What the device-ops failure tells the coder to do. The instruction to run each projection with ttnn.linear or ttnn.matmul comes first, then the
+# upload form, then the facts. In the stage 2 runs of the cp4 audition the Coder-Next arms uploaded every weight and then computed on the host:
+# the upload was the first thing the old message told them to do and the projection call was the second (issue 677).
+WHAT_TO_DO = ("Run each projection in prefill and decode_step with ttnn.linear or ttnn.matmul on ttnn tensors. Upload each weight once in "
+              "load() with ttnn.from_torch(w, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh_device) (or ttnn.as_tensor) and keep "
+              "the ttnn tensor. stages/2/cheat_sheet.md lists the call forms, Linear and matmul first. A host torch port with `import ttnn` "
+              "computes on the CPU, so the run does not show the chip works, and it does not count. An import, a comment, a string and code "
+              "that is not reached make no calls.")
+
+
+def device_ops_reason(names) -> str:
+    """The text of the device-ops failure for a port whose reachable ttnn calls are `names` ({dotted name: count}): what failed, what to do,
+    then the calls found."""
+    listed = ", ".join(f"{k} x{v}" for k, v in sorted(names.items())[:8]) or "none"
+    return ("device-ops: no source file under stages/2/port/ makes a reachable ttnn matmul-family call (ttnn.matmul, ttnn.linear and the like). "
+            + WHAT_TO_DO + f" ttnn calls found: {listed}.")
 # --- end shared: ttnn_calls
 
 
@@ -798,29 +819,59 @@ class DeviceOps:
         return ", ".join(f"{k} x{v}" for k, v in top) if top else "none"
 
     def what_to_do(self) -> str:
-        return ("Move the computation onto the device: in load(), upload each weight with ttnn.from_torch(w, dtype=ttnn.bfloat16, "
-                "layout=ttnn.TILE_LAYOUT, device=mesh_device) (or ttnn.as_tensor) and keep the ttnn tensor; in prefill and decode_step, run each "
-                "projection with ttnn.linear or ttnn.matmul on those tensors. stages/2/cheat_sheet.md lists the call forms. A host torch port with "
-                "`import ttnn` computes on the CPU, so the run does not show the chip works, and it does not count. An import, a comment, a "
-                "string and code that is not reached make no calls.")
+        return WHAT_TO_DO          # the shared text (orchard/ttnn_calls.py): the projection instruction first, then the upload form
 
-    def check_static(self) -> None:
-        """Before the device is touched: some file under the port directory must have a reachable matmul-family ttnn call."""
-        names, errors = collections.Counter(), 0
-        for f in sorted(PORT_DIR.rglob("*.py")):
-            if not f.is_file() or f.is_symlink():
-                continue
-            with open(f, "rb") as fh:             # hardening: ok regular file under the port directory (links are refused first), bounded read
-                text = fh.read(SOURCE_MAX + 1).decode("utf-8", "replace")
-            found = static_calls(text)
-            errors += found["error"] is not None
-            names.update(found["calls"])
+    @staticmethod
+    def scan_sources():
+        """(calls, errors, stopped) for the port directory: the reachable ttnn calls of every regular source file under it, the files that do not
+        parse as (relative path, line, source line, message), and the bound the scan stopped at, or None. Bounded in files and in bytes
+        (STATIC_FILES_MAX, STATIC_BYTES_MAX, SOURCE_MAX per file); a link is never followed."""
+        names, errors, files, total, stopped = collections.Counter(), [], 0, 0, None
+        for root, dirs, fnames in os.walk(PORT_DIR):
+            dirs.sort()
+            for name in sorted(fnames):
+                f = Path(root) / name
+                if not name.endswith(".py") or f.is_symlink() or not f.is_file():
+                    continue
+                if files >= STATIC_FILES_MAX:
+                    stopped = f"{STATIC_FILES_MAX} files"
+                elif total >= STATIC_BYTES_MAX:
+                    stopped = f"{STATIC_BYTES_MAX} bytes"
+                if stopped:
+                    return names, errors, stopped
+                with open(f, "rb") as fh:             # hardening: ok regular file under the port directory (links are refused first), bounded read
+                    text = fh.read(SOURCE_MAX + 1).decode("utf-8", "replace")
+                files, total = files + 1, total + len(text)
+                found = static_calls(text)
+                if found["error"] is not None:
+                    try:
+                        compile(text, name, "exec", flags=ast.PyCF_ONLY_AST)
+                        exc = None
+                    except (SyntaxError, ValueError, RecursionError, MemoryError) as e:
+                        exc = e
+                    line = getattr(exc, "lineno", None)
+                    errors.append((str(f.relative_to(PORT_DIR)), line if type(line) is int else 0, " ".join(str(getattr(exc, "text", "") or "").split())[:100],
+                                   (getattr(exc, "msg", None) or type(exc).__name__)[:100]))
+                names.update(found["calls"])
+        return names, errors, stopped
+
+    def check_static(self, strict: bool = False) -> None:
+        """Before the device is touched: some file under the port directory must have a reachable matmul-family ttnn call. With `strict` (the
+        `--static` mode, which has no worker to import the port) a file that does not parse fails here, with its line, in the form a failed
+        request has."""
+        names, errors, stopped = self.scan_sources()
         self.static_matmul = sum(v for k, v in names.items() if is_matmul(k) and is_compute(k))
-        if self.static_matmul or errors:          # a file that does not parse is reported by the worker's import, which names the line
+        if self.static_matmul:
             return
-        listed = ", ".join(f"{k} x{v}" for k, v in sorted(names.items())[:8]) or "none"
-        raise PortFailed(f"{DEVICE_OPS_FAILURE}: no source file under stages/2/port/ makes a reachable ttnn matmul-family call (ttnn.matmul, "
-                         f"ttnn.linear and the like). ttnn calls found: {listed}. " + self.what_to_do(), op=DEVICE_OPS_FAILURE)
+        if strict and errors:
+            path, line, text, msg = errors[0]
+            raise PortFailed(f"the port failed at 'load': \"[{path}:{line}: {text}] SyntaxError: {msg}\"", op="load")
+        if errors:          # a file that does not parse is reported by the worker's import, which names the line
+            return
+        reason = device_ops_reason(names)
+        if stopped:
+            reason += f" The scan stopped at its limit of {stopped}, before it found a call: keep the port in fewer and smaller files."
+        raise PortFailed(reason, op=DEVICE_OPS_FAILURE)
 
     def check_weights(self, scan) -> None:
         """After load: the weights the port holds must be mostly ttnn tensors. A scan that finds no tensor at all is recorded as such and the
@@ -962,6 +1013,27 @@ def refuse_links() -> None:
                 raise PortFailed(f"{os.path.relpath(os.path.join(root, name), RUN_DIR)} is a link: files under stages/2/port/ must be regular files")
 
 
+def static_main(flags) -> int:
+    """`port_check.py --static [--fresh]`: only the static device-ops analysis of the port, with no chip, no worker and no config. The
+    supervisor runs it before it leases a board (with `--fresh`, which clears a stale record as a real run does) and the coder runs it as
+    `stage_tools.py gate-check` (without `--fresh`: that must not erase the record `last-check` reads)."""
+    if any(f != "--fresh" for f in flags):
+        print("usage: port_check.py --static [--fresh]")
+        return 2
+    if not (PORT_DIR / f"{PORT_MODULE}.py").is_file():
+        raise PortFailed(f"stages/2/port/{PORT_MODULE}.py does not exist: the port module is the file the coder writes")
+    refuse_links()
+    if "--fresh" in flags:
+        for stale in (RECORD, LAYER_FILE, LAYER_FILE.with_name(LAYER_FILE.name + ".tmp")):
+            if stale.exists() or stale.is_symlink():
+                stale.unlink()
+    device_ops = DeviceOps(0, None)
+    device_ops.check_static(strict=True)
+    print(f"static device-ops check passed: {device_ops.static_matmul} reachable matmul-family call(s) in the port. No board was used, so this "
+          "does not show the port runs on the chip.", flush=True)
+    return 0
+
+
 def main() -> int:
     config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     model_dir = config["model_snapshot"]
@@ -1050,7 +1122,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--worker":
         sys.exit(worker(int(sys.argv[2]), int(sys.argv[3])))
     try:
-        sys.exit(main())
+        sys.exit(static_main(sys.argv[2:]) if sys.argv[1:2] == ["--static"] else main())
     except PortFailed as exc:
         print(f"FAILED: {exc}", flush=True)
         print("PORT_CHECK_FAILURE " + json.dumps({"kind": exc.kind, "op": exc.op}), flush=True)      # after the text: the supervisor reads this line

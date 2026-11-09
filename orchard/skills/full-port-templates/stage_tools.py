@@ -4,6 +4,7 @@
 port_check.py) and the task text names it. Run it from anywhere:
 
     python3 stages/2/stage_tools.py last-check            which check failed, where, the numbers and the evidence file
+    python3 stages/2/stage_tools.py gate-check            the gate's device-ops check on the port, in seconds and with no board (issue 561)
     python3 stages/2/stage_tools.py layer-diff            the port against the CPU reference layer by layer: the first layer that diverges
     python3 stages/2/stage_tools.py facts [KEY]           one value of port_facts.json, by dotted path (config.hc_count); --find TEXT searches
     python3 stages/2/stage_tools.py show FILE --lines A:B a range of a file in the run directory, with line numbers
@@ -1172,7 +1173,35 @@ def edit_cmd(stage: Path, argv: list):
 
 
 
+GATE_CHECK_TIMEOUT_S = 60
+GATE_CHECK_ENV = ("PATH", "LANG", "LC_ALL", "TZ")
+
+
+def gate_check(stage: Path):
+    """(exit code, lines) for `gate-check`: the port check template's own static device-ops analysis (`port_check.py --static`), which opens no
+    device and starts no worker, so it takes seconds and needs no lease. It prints what the gate prints for the same port, without the
+    structured line the supervisor reads. It does not erase the check's record (`last-check` keeps reading it). The coder runs it before it ends
+    its step: a port with no ttnn.linear or ttnn.matmul call fails the board check, which comes after a park and a reset of the coder's server."""
+    template = stage / "port_check.py"
+    if not template.is_file() or template.is_symlink():
+        return 2, ["port_check.py is not a regular file in this stage directory, so the check cannot run."]
+    env = {k: os.environ[k] for k in GATE_CHECK_ENV if k in os.environ}
+    try:
+        done = subprocess.run([sys.executable, "-P", "-s", str(template), "--static"], capture_output=True, text=True, env=env,
+                              cwd=str(stage), timeout=GATE_CHECK_TIMEOUT_S, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return 2, [f"the static check took longer than {GATE_CHECK_TIMEOUT_S} s and was stopped."]
+    except OSError as exc:
+        return 2, [f"the static check could not start ({type(exc).__name__})."]
+    out = [clean(ln, 4000) for ln in done.stdout.splitlines() if ln.strip() and not ln.startswith("PORT_CHECK_FAILURE ")]
+    out = [ln[len("FAILED: "):] if ln.startswith("FAILED: ") else ln for ln in out]
+    if done.returncode in (0, 2) and out:
+        return done.returncode, out[:12]
+    return 2, ["the static check ended without a result (exit " + str(done.returncode) + ")."]
+
+
 COMMANDS = {"last-check": "which check failed, where, the numbers and the evidence file",
+            "gate-check": "the gate's device-ops check on the port, run now with no board: a port with no ttnn.linear or ttnn.matmul call fails it",
             "layer-diff": "the port against the CPU reference layer by layer: the first layer whose relative error is over --threshold",
             "facts": "one value of port_facts.json by dotted path, or --find TEXT",
             "show": "a range of a file in the run directory with line numbers: show FILE --lines A:B",
@@ -1190,6 +1219,10 @@ def main(argv=None) -> int:
     if argv[0] == "last-check":
         print("\n".join(last_check(HERE)))
         return 0
+    if argv[0] == "gate-check":
+        code, lines = gate_check(HERE)
+        print("\n".join(lines))
+        return code
     if argv[0] == "layer-diff":
         return layer_diff(HERE, argv[1:])
     code, lines = {"facts": facts_cmd, "show": show_cmd, "cheat": cheat_cmd, "edit": edit_cmd}[argv[0]](HERE, argv[1:])

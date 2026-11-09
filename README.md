@@ -135,7 +135,7 @@ entry for 2026-11-08 has the list). Each item says which record holds its number
 - **The coder's start has a watchdog.** A boot whose log stops growing, or that passes its deadline, is stopped with a long grace, the chips are reset
   through the lease, and the log tail goes to the ledger with credentials removed (PRs 580 and 599). The wide test runs again once after a fabric
   handshake timeout (PRs 542 and 619).
-- **Tools for the coder.** `last-check`, `layer-diff`, `facts`, `show`, `cheat` and `edit` stage tools, verified TTNN and TT-Lang cheat sheets and
+- **Tools for the coder.** `last-check`, `gate-check` (the board check's device-ops test on the port, run in seconds with no board; the supervisor runs the same analysis before it leases a board or parks the coder, so a port with no `ttnn.linear` or `ttnn.matmul` call is refused without a park), `layer-diff`, `facts`, `show`, `cheat` and `edit` stage tools, verified TTNN and TT-Lang cheat sheets and
   the effective-construction facts (PRs 506, 528, 529, 543, 564, 611, 627 and 601 for the sheet verifier).
 - **Packaging a full-port model is manual.** Stage 7 builds a package only on the weights-only path. Three models were packaged by hand with
   `tt-orchard can` and published on 2026-11-08 (table rows 10, 12 and 14). `tt-model publish` rewrites the card on the Hub, so the card never

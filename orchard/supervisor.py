@@ -881,6 +881,8 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
 
 
 # Run 20: the coder wrote a file and called `last-check` 23 times, each time reading the old failure and believing the fix had not worked.
+PRECHECK_DEADLINE_S = 60.0          # the static device-ops analysis opens no device: a minute is far more than it needs
+PRECHECK_OUTPUT_MAX = 64 * 1024
 CHECK_RUNS_NOTE = ("The check runs again only when you reply with no tool call. A write does not run it, and `last-check` keeps showing this "
                     "failure until then. Start with `python3 stages/{n}/stage_tools.py last-check`: its `next:` line is the command to run.")
 
@@ -4954,6 +4956,8 @@ class Supervisor:
         ends however it ends (a result, a timeout, an interrupt, an error) and before the coder is restored or the lease released: the
         trial uses it to stop the servers its helpers started, which a kill of the test's own session does not reach."""
         n = spec.number
+        if self._device_ops_precheck(spec, stage_dir, test):
+            return
         if self.lab is not None:
             return self._lab_hardware_phase(spec, stage_dir, test, after_test=after_test)
         boards = self._phase_boards(spec, stage_dir)
@@ -5435,15 +5439,59 @@ class Supervisor:
         known.update(audit)
         _put(path, json.dumps(known, indent=2, sort_keys=True))
 
+    def _note_port_at_test(self, n: int, stage_dir: Path) -> None:
+        """The port directory as the test is about to run it, written by the supervisor before anything runs: a best-port snapshot is kept
+        only when it holds exactly these files, so an edit made while the supervisor was stopped, or after the test, is never recorded as
+        the port a check ran on (review of PR 497, round 4)."""
+        if self._helper_drive_on():
+            self.ledger.append("decision", n, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage_dir / port_repair.PORT_DIR))
+
+    def _device_ops_precheck(self, spec, stage_dir: Path, test: dict) -> bool:
+        """Stage 2 of a full port: the port check's static device-ops analysis, run before the supervisor takes a board or parks the coder
+        (issues 677 and 561). A port that makes no reachable ttnn.linear or ttnn.matmul call, or does not parse, fails the board check, which
+        comes after a lease, a park and a reset of the coder's server (arms C and D of the cp4 audition: ten board checks, all of this kind).
+
+        The analysis is the template's own (`port_check.py --static --fresh`, a run of the same file the board check runs, with no device and no
+        worker), so the verdict and its text are the gate's. Returns True when it failed: the failure is left as the attempt's test result in the
+        form a failed board test leaves (test-result.json with exit code 2 and the output file with the template's FAILED line), a ledger decision
+        names it, and nothing else runs. Returns False when it passed, was refused, or gave no verdict: the hardware phase goes on as before."""
+        n = spec.number
+        if n != 2 or spec.draft != "full_port" or self.lab is not None or test.get("command") != full_port.command(2):
+            return False
+        out_path = stage_dir / "evidence" / "hw-test-output.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        t0 = self.clock()
+        with _open_fresh(out_path) as out:
+            try:
+                code, timed_out = spawn_checked(test["command"] + " --static --fresh", self.run_dir, agent_env(self.run_dir, extra=self.extra_env),
+                                                PRECHECK_DEADLINE_S, out)
+            except Denied as exc:
+                code, timed_out = None, False
+                out.write(f"refused: {exc}\n".encode("utf-8"))
+        if code == 0 and not timed_out:
+            return False
+        if code != 2 or timed_out:
+            self.ledger.append("decision", n, decision="device-ops pre-check gave no verdict", returncode=code, timed_out=bool(timed_out),
+                               note="the board check runs as it would have")
+            return False
+        try:
+            text = safeio.read_bytes(out_path, max_bytes=PRECHECK_OUTPUT_MAX).decode("utf-8", "replace")
+        except (safeio.SafeReadError, OSError):
+            text = ""
+        self._note_port_at_test(n, stage_dir)
+        self.ledger.append("decision", n, decision="device-ops pre-check failed before the board", message=port_repair.failed_line(text, 700),
+                           note="no lease was taken and the coder was not parked; this is the attempt's test result")
+        result = {"command": test["command"], "returncode": 2, "timed_out": False, "seconds": round(self.clock() - t0, 3), "chips": [],
+                  "output": self._moved_aside_record(out_path)}
+        self._publish_test_result(spec, stage_dir, result)
+        return True
+
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
                   output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,
                   extra: Lease | None = None, boards: int | None = None, final: bool = True) -> dict:
         n = spec.number
-        if n == 2 and record == "test-result.json" and self._helper_drive_on():
-            # The port directory as the test is about to run it, written by the supervisor before anything runs: a best-port snapshot is kept
-            # only when it holds exactly these files, so an edit made while the supervisor was stopped, or after the test, is never recorded as
-            # the port a check ran on (review of PR 497, round 4).
-            self.ledger.append("decision", n, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage_dir / port_repair.PORT_DIR))
+        if n == 2 and record == "test-result.json":
+            self._note_port_at_test(n, stage_dir)
         k = (boards or spec.boards) * CHIPS_PER_BOARD       # a wider test (issue 60) holds more chips than the stage's own
         deadline = min(float(test["deadline_s"]), spec.budget_s)
         out_path = stage_dir / output
