@@ -147,7 +147,12 @@ def asks_in_stage(entries: list[dict], n: int) -> int:
     """The helper's asks in stage `n` so far: the attempt-start asks and the repair-round asks together."""
     names = (paf.ASKED, ASKED)
     count = sum(1 for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) in names)
-    return count - len(_withdrawn_asks(entries, n))
+    return count - len(_withdrawn_asks(entries, n) | _unreached_asks(entries, n))
+
+
+def _unreached_asks(entries: list[dict], n: int) -> set[int]:
+    """The asks of stage `n`, attempt-start and repair, whose answer says the endpoint could not be reached (`paf.unreached_asks`)."""
+    return paf.unreached_asks(entries, n, ((paf.ASKED, paf.ANSWERED), (ASKED, ANSWERED)))
 
 
 def _withdrawn_asks(entries: list[dict], n: int) -> set[int]:
@@ -175,7 +180,7 @@ def _withdrawn_asks(entries: list[dict], n: int) -> set[int]:
 def asked_in_round(entries: list[dict], n: int, k: int) -> bool:
     """True when a repair ask for round `k` was already written in the current attempt."""
     floor = _last_start(entries, n)
-    withdrawn = _withdrawn_asks(entries, n)
+    withdrawn = _withdrawn_asks(entries, n) | _unreached_asks(entries, n)
     return any(e.get("stage") == n and e.get("event") == "decision" and _decision(e) == ASKED and e["seq"] > floor
                and _data(e).get("round") == k and e["seq"] not in withdrawn for e in entries)
 

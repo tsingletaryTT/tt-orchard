@@ -3841,6 +3841,9 @@ class Supervisor:
         from orchard import telegraph as tg
         room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
         self._helper_gate(n)             # a restart in the middle of an outage probes first and does not spend an ask (issue 650)
+        if self.telegraph.refusing():    # the breaker is open and its probe interval has not passed: nothing is asked or written, the stage goes on
+            self._friend_refused(n, "the helper endpoint is unreachable and the next probe is not due yet")
+            return None
         # The helper cuts the middle out of a request over its `max_prompt_chars`; the entry says so, so a cap set for short advice is seen.
         self.ledger.append("decision", n, decision=phone_a_friend.ASKED, k=k, why=why, problem=phone_a_friend.problem_id(self.run_dir), inputs=sent,
                            prompt_chars=len(task) + len(failure), max_prompt_chars=self.telegraph.cfg.max_prompt_chars,
@@ -3852,7 +3855,8 @@ class Supervisor:
                                reason=f"the helper raised {exc.__class__.__name__}")
             return None
         record = {"ok": bool(answer.ok), "call_id": answer.call_id, "model": answer.model, "tokens_in": answer.tokens_in,
-                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached)}
+                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached),
+                  "unreachable": bool(getattr(answer, "unreachable", False))}
         if not answer.ok:
             self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, reason=str(answer.reason)[:300], **record)
             self._helper_unreachable(n, answer)
@@ -4161,6 +4165,9 @@ class Supervisor:
             self._repair_help_refused(n, k, f"the request is {len(task) + len(fail)} characters, more than the {room} the helper's prompt cap leaves room for")
             return "", False, False
         self._helper_gate(n, round=k)    # a restart in the middle of an outage probes first and does not spend an ask (issue 650)
+        if self.telegraph.refusing():    # the breaker is open and its probe interval has not passed: nothing is asked or written, the round goes on
+            self._repair_help_refused(n, k, "the helper endpoint is unreachable and the next probe is not due yet")
+            return "", False, False
         total = repair_help.asks_in_stage(entries, n) + 1
         sent_sha = hashlib.sha256(port_bytes).hexdigest()
         problem = phone_a_friend.problem_id(self.run_dir)
@@ -4174,7 +4181,8 @@ class Supervisor:
             self.ledger.append("decision", n, decision=repair_help.ANSWERED, ok=False, call_id="", reason=f"the helper raised {exc.__class__.__name__}")
             return "", False, True
         record = {"ok": bool(answer.ok), "call_id": answer.call_id, "model": answer.model, "tokens_in": answer.tokens_in,
-                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached)}
+                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached),
+                  "unreachable": bool(getattr(answer, "unreachable", False))}
         if not answer.ok:
             self.ledger.append("decision", n, decision=repair_help.ANSWERED, reason=str(answer.reason)[:300], **record)
             self._helper_unreachable(n, answer, round=k)

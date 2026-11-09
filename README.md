@@ -2554,6 +2554,12 @@ breaker lets one ask through every `unreachable_probe_s` seconds, and a reply cl
 Setting `unreachable_action = "block"` is an opt-in: an unattended run then stops with the block code `helper-unreachable`, which
 `bringup --auto-retries` retries like the other recoverable ones. An attended run always gets the notice and goes on.
 
+An ask that could not connect is not counted against the attempt or stage ask limits (its answer is recorded with `unreachable`), and while
+the breaker is open and its probe interval has not passed, a due ask is left unwritten. An outage therefore cannot use up the quota, and the
+first ask after the probe interval goes out. A proxy URL's own scheme decides the proxy leg: `https://` proxies get TLS to the proxy (port 443
+unless named) for an http endpoint, and an https endpoint behind an https proxy, or any proxy scheme other than http and https, is refused
+before anything is sent. The message names the proxy's host only, never its credentials.
+
 A restart does not forget the outage. The ledger holds it until a `helper reachable again` decision follows, so the first helper ask of a new
 process probes the models route first (status line only, no key, the short timeout). While the probe fails, the new process opens its breaker
 without spending a call cap and goes on without help (with `block`, it stops again with the same code). With `block`, when the stop came at

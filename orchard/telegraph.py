@@ -444,13 +444,23 @@ def _open(url: str, connect_timeout: float | None, read_timeout: float):
         if proxy.username:
             token = base64.b64encode(f"{urllib.parse.unquote(proxy.username)}:{urllib.parse.unquote(proxy.password or '')}".encode()).decode()
             auth = {"Proxy-Authorization": f"Basic {token}"}
-        phost, pport = proxy.hostname or "", proxy.port or 80
+        # The proxy's own scheme decides how the proxy leg is made, apart from the endpoint's scheme: credentials for an https proxy must
+        # not go out in plaintext. TLS to an https proxy is supported for an http endpoint (absolute-form request); an https endpoint behind
+        # an https proxy would need TLS inside TLS, which http.client cannot do, and any other proxy scheme is not supported. Both are refused
+        # here, before a connection is made or a credential is sent, and the message names only the proxy's host (review of PR 651).
+        tls_proxy = proxy.scheme == "https"
+        phost, pport = proxy.hostname or "", proxy.port or (443 if tls_proxy else 80)
+        if proxy.scheme not in ("http", "https"):
+            raise Unreachable(f"the proxy {phost} uses a scheme that is not supported ({proxy.scheme}); nothing was sent")
+        if tls_proxy and parts.scheme == "https":
+            raise Unreachable(f"the proxy {phost} is an https proxy for an https endpoint, which is not supported; nothing was sent")
         if parts.scheme == "https":
             conn = http.client.HTTPSConnection(phost, pport, timeout=wait, context=ssl.create_default_context())
-            conn.set_tunnel(host, port, headers=auth)             # CONNECT, then TLS to the real host, both inside connect()
+            conn.set_tunnel(host, port, headers=auth)             # CONNECT over a plain leg to the proxy, then TLS to the real host inside connect()
             target = parts.path + (f"?{parts.query}" if parts.query else "")
         else:
-            conn = http.client.HTTPConnection(phost, pport, timeout=wait)
+            conn = (http.client.HTTPSConnection(phost, pport, timeout=wait, context=ssl.create_default_context()) if tls_proxy
+                    else http.client.HTTPConnection(phost, pport, timeout=wait))
             extra, target = auth, url                              # the absolute form, as a proxy expects
     elif parts.scheme == "https":
         conn = http.client.HTTPSConnection(host, port, timeout=wait, context=ssl.create_default_context())
@@ -680,6 +690,11 @@ class Telegraph:
         """Open the breaker without a request: a restarted run that probed and found the endpoint still down."""
         self._conn_failures = max(self._conn_failures, self.cfg.unreachable_after)
         self._tripped_at = self.clock()
+
+    def refusing(self) -> bool:
+        """True while the breaker is open and the probe interval has not passed, so an ask now would be refused without a request. It changes
+        nothing: callers use it to leave an ask unwritten (an ask the breaker would only refuse is not an ask) until the interval has passed."""
+        return self._tripped_at is not None and self.clock() - self._tripped_at < self.cfg.unreachable_probe_s
 
     def _breaker_refuses(self) -> bool:
         """True when the breaker is open and the probe interval has not passed. After the interval one ask goes out as the probe: the interval

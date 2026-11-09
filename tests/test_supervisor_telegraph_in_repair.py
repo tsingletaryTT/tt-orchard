@@ -439,13 +439,43 @@ def _fresh_helper(monkeypatch, tmp_path, state, **kw):
             raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
         return 200
 
+    def clock():
+        state["now"] = state.get("now", 1000.0) + state.get("tick", 0.0)
+        return state["now"]
+
     def factory(*a, **k):
         cfg = tg.load(table(models=["helper-model"], prices={"helper-model": [3.0, 15.0]}, max_calls_per_problem=8, max_calls=20,
                             unreachable_after=1, **kw), base=tmp_path)
-        return tg.Telegraph(cfg, tmp_path / "tg", transport=transport, prober=prober, environ={"TG_KEY": KEY}, clock=lambda: 1000.0,
+        return tg.Telegraph(cfg, tmp_path / "tg", transport=transport, prober=prober, environ={"TG_KEY": KEY}, clock=clock,
                             hostname="node9", home="/home/someone")
 
     monkeypatch.setattr(sv, "_telegraph_from", factory)
+
+
+def test_refused_asks_during_an_outage_do_not_use_up_the_quota_and_the_first_ask_after_the_endpoint_returns_goes_through(rig, monkeypatch, tmp_path):
+    """Review of PR 651: the default action continues, and every refused ask used to be recorded as asked, so ten rounds in an outage spent the
+    six-ask stage limit and the helper could not come back."""
+    rig.args.unattended = True
+    rig.args.port_repair_rounds = 10
+    state = {"up": False}
+    _fresh_helper(monkeypatch, tmp_path, state)                              # the default action: continue; the clock stands still
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN + f"\n# change {i}\n"} for i in range(10)])
+    rig.run(pid=100)
+    rounds = [d for d in rig.decisions() if d.get("decision") == port_repair.DECISION]
+    assert len(rounds) >= 7                                                  # the rounds went on without the helper
+    assert state["calls"] == 1                                               # one real attempt; the breaker kept every other ask off the wire
+    assert len(decs(rig, rh.ASKED)) == 1                                     # and no ask was written for a refusal the breaker made by itself
+    assert "helper-unreachable" not in _block_codes(rig)
+    entries = rig.entries()
+    assert rh.asks_in_stage(entries, 2) == 0                                 # nothing the helper never saw is counted
+    assert not [d for d in rig.decisions() if "already asked" in str(d.get("reason", ""))]
+    # The endpoint returns and the probe interval passes: the next ask goes through.
+    state["up"] = True
+    state["now"] = state.get("now", 1000.0) + 10_000
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run(pid=101)
+    assert state["calls"] >= 2 and len(decs(rig, rh.ANSWERED)) >= 2
 
 
 def _block_codes(rig):

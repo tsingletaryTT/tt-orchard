@@ -97,10 +97,15 @@ class FakeConnection:
         self.closed = True
 
 
+class FakeTLSConnection(FakeConnection):
+    """The stand-in for http.client.HTTPSConnection: the same record, marked as a TLS connection to its host."""
+    tls = True
+
+
 @pytest.fixture
 def fake_http(monkeypatch):
     FakeConnection.made, FakeConnection.fail_connect, FakeConnection.fail_request, FakeConnection.response = [], None, None, None
-    monkeypatch.setattr(tg.http.client, "HTTPSConnection", FakeConnection)
+    monkeypatch.setattr(tg.http.client, "HTTPSConnection", FakeTLSConnection)
     monkeypatch.setattr(tg.http.client, "HTTPConnection", FakeConnection)
     monkeypatch.setattr(tg.urllib.request, "getproxies", lambda: {})
     return FakeConnection
@@ -156,6 +161,43 @@ def test_a_plain_http_proxy_gets_the_absolute_url_and_the_short_connect_timeout(
     tg.http_post("http://10.1.2.3:8000/v1/chat/completions", {}, b"{}", 900, connect_timeout=10)
     conn = fake_http.made[0]
     assert (conn.host, conn.port, conn.timeout) == ("proxy.example.org", 3128, 10) and conn.sent[1] == "http://10.1.2.3:8000/v1/chat/completions"
+
+
+def proxies(monkeypatch, **by_scheme):
+    monkeypatch.setattr(tg.urllib.request, "getproxies", lambda: by_scheme)
+    monkeypatch.setattr(tg.urllib.request, "proxy_bypass", lambda host: False)
+
+
+def test_an_https_proxy_url_gets_tls_to_the_proxy_and_its_default_port_for_an_http_endpoint(fake_http, monkeypatch):
+    """Review of PR 651: the connection type came from the endpoint's scheme, so credentials for an https proxy went out in plaintext."""
+    proxies(monkeypatch, http="https://user:secret@proxy.example.org")
+    tg.http_post("http://10.1.2.3:8000/v1/chat/completions", {}, b"{}", 900, connect_timeout=10)
+    conn = fake_http.made[0]
+    assert getattr(conn, "tls", False) is True and (conn.host, conn.port) == ("proxy.example.org", 443)
+    assert conn.sent[3]["Proxy-Authorization"].startswith("Basic ") and conn.sent[1] == "http://10.1.2.3:8000/v1/chat/completions"
+
+
+def test_an_http_proxy_url_is_plain_to_the_proxy_with_port_80_by_default(fake_http, monkeypatch):
+    proxies(monkeypatch, http="http://user:secret@proxy.example.org")
+    tg.http_post("http://10.1.2.3:8000/v1/chat/completions", {}, b"{}", 900, connect_timeout=10)
+    conn = fake_http.made[0]
+    assert getattr(conn, "tls", False) is False and (conn.host, conn.port) == ("proxy.example.org", 80)
+
+
+def test_an_https_endpoint_behind_an_https_proxy_is_refused_before_anything_is_sent(fake_http, monkeypatch):
+    """TLS inside TLS is not supported by http.client: nothing is sent, so no credential leaves, and the error holds no credential."""
+    proxies(monkeypatch, https="https://user:secret@proxy.example.org:443")
+    with pytest.raises(tg.Unreachable) as err:
+        tg.http_post("https://llm.example.org/v1/chat/completions", {"Authorization": "Bearer k"}, b"{}", 900, connect_timeout=10)
+    assert "secret" not in str(err.value) and "user" not in str(err.value) and not any(c.sent for c in fake_http.made)
+    assert not any(c.tunnel for c in fake_http.made)
+
+
+def test_an_unsupported_proxy_scheme_is_refused_before_anything_is_sent(fake_http, monkeypatch):
+    proxies(monkeypatch, http="socks5://user:secret@proxy.example.org:1080")
+    with pytest.raises(tg.Unreachable) as err:
+        tg.http_post("http://10.1.2.3:8000/v1/chat/completions", {}, b"{}", 900, connect_timeout=10)
+    assert "secret" not in str(err.value) and not fake_http.made
 
 
 def test_a_failure_to_connect_through_a_proxy_is_unreachable(fake_http, monkeypatch):
