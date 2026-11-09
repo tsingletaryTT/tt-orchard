@@ -2998,6 +2998,7 @@ Each of these happened on the development machine. Details are in the
 | [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
 | [`docs/canning.md`](docs/canning.md), [`docs/can-cards.md`](docs/can-cards.md), [`config/can.*.toml`](config/), [`pkgsrc/`](pkgsrc/) | Packaging a brought-up model as a thin bundle by hand: the spec, the ASGI adapter, the card and the commands (used for Olmo-Hybrid-7B, MiniCPM3-4B and the other cans) |
 | [`scripts/can_cad/`](scripts/can_cad/), [`scripts/olmo_hybrid/`](scripts/olmo_hybrid/) | The scripts behind the Berkelium two-chip package and the Olmo-Hybrid-7B can: benchmark clients, the CadQuery checker, card generators |
+| [`docs/qwen4-faux.md`](docs/qwen4-faux.md), [`examples/qwen4_faux_quickstart.py`](examples/qwen4_faux_quickstart.py) | The Qwen4-shaped test checkpoints (tiny random-weight and franken): the layer, its equations, the config keys, the tensor map, what is verified and what is assumed, and a CPU quick start |
 | [`docs/releases.md`](docs/releases.md), [`changes/`](changes/) | How the version number is computed from change fragments, and how a release is cut |
 | [`CLAUDE.md`](CLAUDE.md) | The decisions and standing rules |
 | [`docs/project-log.md`](docs/project-log.md) | The dated project log: what was done, found and left open |
