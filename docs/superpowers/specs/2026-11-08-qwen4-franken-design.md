@@ -154,6 +154,23 @@ top-1 ids at those positions by hand or through a stage 2 gate change (proposed,
 
 The other checkpoints were deleted after their proofs to save disk. They regenerate with the commands in each manifest.
 
+## 5b. What the output directory says about itself (2026-11-09, Track C item C4)
+
+The franken is also the weights pointer of the Qwen4 v6 thin package during development, and its perturbed variant stands in for the
+release in the drop-in rehearsal. Stage 0 compares its config with the release's, and stage 7 needs a license from its model card. So:
+
+- `config.json` lists `layer_types`, one entry per kept layer, with the base's own `linear_attention` and `full_attention` names. A real
+  Qwen4 config is expected to carry the same key (transformers' Qwen4Exp maps `full_attention` to its `indexed_attention`), and stage 0
+  compares `layer_types` as a deciding key.
+- `config.json` has no `seed`. In a Qwen4Exp config `seed` is the n-gram hash seed, which is a different setting from the generator's
+  `--seed`. The generator's seed is in `franken-manifest.json`.
+- `README.md` is a model card with `license: apache-2.0` in its front matter, which stage 0 (`license_side`) and stage 7
+  (`read_license`) read. It names the base repository and revision (from the Hugging Face cache layout only, so no local folder name
+  appears), the options, and that the checkpoint is not to be uploaded. A base whose own card names another license is refused before
+  anything is written. A base card with no license is accepted, and the written card says the license was not checked against it.
+
+The weights stay in one `model.safetensors` file. Sharded output with an index was left out of this change.
+
 ## 6. The hardware run
 
 Not run. A later run uses the supervisor driver pattern of the qwen-like runs, with a local model path, `--full-port` and
