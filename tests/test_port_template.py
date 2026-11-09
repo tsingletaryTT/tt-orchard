@@ -450,12 +450,28 @@ def test_a_construction_without_classes_is_refused_or_empty(bad):
         assert pt.Construction(bad).resolve("model") == (None, {})
 
 
-@pytest.mark.parametrize("tensors", [None, [{"name": "a..b", "dtype": "BF16", "shape": [1]}], [{"name": "x.weight", "dtype": "bf16", "shape": [1]}],
-                                     [{"name": "x.weight", "dtype": "BF16", "shape": [-1]}], [{"name": "x.weight", "dtype": "BF16", "shape": [10 ** 20]}],
-                                     [{"name": "x.weight", "dtype": "BF16", "shape": "1"}], [{"name": 5, "dtype": "BF16", "shape": [1]}]])
-def test_a_bad_tensor_record_is_refused(tensors):
+@pytest.mark.parametrize("field,value", [("name", "a..b"), ("name", 5), ("name", "x" * 201), ("dtype", "bf16"), ("dtype", None), ("dtype", []),
+                                         ("shape", [-1]), ("shape", [10 ** 20]), ("shape", "1"), ("shape", None), ("shape", [1.5]), ("shape", [True]),
+                                         ("shape", [1] * 9)])
+def test_a_bad_tensor_record_is_refused_by_the_field_that_is_wrong(field, value):
+    """One corrupted record in an otherwise valid header list: the refusal must come from the record check and name the field, so a later
+    guard (no layer number, no embedding) is not what makes the test pass."""
+    headers = headers_of(std_weights())
+    headers[3] = {**headers[3], field: value}
+    with pytest.raises(pt.PlanError, match=field):
+        pt.plan(config=STD_CONFIG, construction=std_construction(), tensors=headers)
     with pytest.raises(pt.PlanError):
-        pt.plan(config=STD_CONFIG, construction=std_construction(), tensors=tensors)
+        pt.plan(config=STD_CONFIG, construction=std_construction(), tensors=None)
+
+
+def test_the_mesh_read_back_keeps_one_copy(monkeypatch, tmp_path):
+    """On a mesh every uploaded tensor is replicated; the composer joins one copy per chip along dim 0 and the port keeps the first."""
+    weights = std_weights()
+    text, _ = std_generate(weights=weights)
+    mod = import_port(monkeypatch, text, tmp_path)
+    model = mod.load(str(write_checkpoint(tmp_path, weights)), fake.MeshDevice(3))
+    t = model["dev"]["model.norm.weight"]
+    assert t.replicated and mod._to_host(model, t).shape == (1, 1, 1, 32)
 
 
 def test_a_checkpoint_without_numbered_layers_or_without_an_embedding_is_refused():
