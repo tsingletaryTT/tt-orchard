@@ -42,7 +42,8 @@ The gate checks, for every entry with `pass` true: the supervisor's record
 has `serves` true, `coherent` true, `n_tokens` of at least 16, `top1_agreement` of at least 0.85
 and a positive `server_ready_s`; and its evidence includes
 `stages/4/configs/<chips>/evidence/swap-check.json`, whose `result_draft` has the same
-`top1_agreement`. A configuration whose test never ran cannot pass.
+`top1_agreement`. A configuration whose test never ran cannot pass. In a run the operator started with
+`--weights-only-rehearsal` the gate accepts `coherent` false, so copy `coherent` as the draft has it, also when it is false.
 
 ## How to work
 
