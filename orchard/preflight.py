@@ -866,7 +866,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
                installed: list, search: Callable | None, report: dict | None = None,
                accept_inferred: bool = False, stock: Callable | None = None, audio: str | None = None,
                base_hub_info: Callable | None = None, audio_paths=None, text_runtime_ok: bool = True,
-               weights_records: dict | None = None) -> Check:
+               weights_records: dict | None = None, base_bundle: str | None = None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
@@ -877,7 +877,10 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     text from audio_facts.audio_evidence when the model counts as audio; the base row then needs no bundle (_audio_base),
     and `base_hub_info(base)` returns the base's `(HubInfo | None, error)`. An installed package that cannot serve swapped weights
     (a container package recorded as hard-coding its repository, a bundle whose run.sh the swap cannot rewrite; issue 73,
-    orchard/weights_source.py) does not count as serving the base. `weights_records` replaces the shipped record, for tests."""
+    orchard/weights_source.py) does not count as serving the base. `weights_records` replaces the shipped record, for tests.
+    `base_bundle` is the bundle --base named (cli.resolve_base_bundle): it is the bundle the run uses, and `data["bundle_dir"]` records
+    its directory for the run's `bundle` input. Without a name, installed bundles that serve the base and belong to different families
+    (nearest.ambiguity), or two that serve the same chip count, block until the operator names one."""
     from orchard import nearest, weights_source
     if (found := _text_runtime_check(model_id, base_override, allowed=text_runtime_ok)) is not None:
         return found
@@ -910,21 +913,38 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     unoffered = weights_source.unoffered_names(installed, recs, refused_names)
     if serving and inferred and report["selected"].get("confidence") != "stated" and not accept_inferred:
         return _confirm_inferred(base, serving, report, unoffered)
+    if base_bundle:
+        named = next((b for b in serving if b.name == base_bundle), None)
+        if named is None:
+            why = next((r for pkg, r in refused if pkg.name == base_bundle), None)
+            return Check("base", BLOCK, f"--base named the bundle {base_bundle}, and it " + (f"cannot be used: {why}" if why else
+                         f"is not an installed package that serves {base}") + ". Name another bundle", "nearest-model-missing",
+                         data={"base": base, "snapshot": None, "bundle": None, "bundle_dir": None, "needs_fetch": False, "report": report,
+                               "candidates": [{"name": b.name, "installed": True} for b in serving], "refused": refused_data})
+        serving = [named] + [b for b in serving if b is not named]
+    elif serving and (why := nearest.ambiguity(serving)):
+        return Check("base", BLOCK, f"base {base}: {why}. Name the bundle this run should use with --base <bundle>", "nearest-model-missing",
+                     data={"base": base, "snapshot": None, "bundle": None, "bundle_dir": None, "needs_fetch": False, "report": report,
+                           "candidates": sorted(({"name": b.name, "installed": True} for b in serving if b.schema == "6"),
+                                                key=lambda c: c["name"]), "refused": refused_data})
     if serving:
         snap = local_snapshot(base)
-        data = {"base": base, "snapshot": snap, "bundle": serving[0].name, "needs_fetch": snap is None,
+        chosen = serving[0] if base_bundle else next((b for b in serving if b.schema == "6"), serving[0])
+        data = {"base": base, "snapshot": snap, "bundle": chosen.name, "needs_fetch": snap is None,
+                "bundle_dir": (chosen.directory or None) if chosen.schema == "6" else None, "bundle_named": bool(base_bundle),
                 "candidates": [], "report": report, "refused": refused_data}
         where = "its snapshot is local" if snap else "its snapshot will be downloaded"
         note = _class_note(report, base)
+        named_note = " (named by --base)" if base_bundle else ""
         if inferred:
             return Check("base", WARN, f"base {base}: {_selection_basis(report)}; the card names none. Bundle "
-                         f"{serving[0].name} is installed; {where}{note}. Pass --base to choose another", data=data)
+                         f"{chosen.name} is installed; {where}{note}. Pass --base to choose another", data=data)
         if not any(b.schema == "6" for b in serving):
-            return Check("base", WARN, f"base {base}: {serving[0].name} is installed, but it is a "
-                         f"{serving[0].schema} container package. Stages 2 and 4 serve the new weights through a container package's "
+            return Check("base", WARN, f"base {base}: {chosen.name} is installed, but it is a "
+                         f"{chosen.schema} container package. Stages 2 and 4 serve the new weights through a container package's "
                          "default profile, and only when exactly one installed package serves the base on the chip count of the "
-                         f"stage; {where}{note}. {weights_source.status_note(serving[0], recs)}", data=data)
-        return Check("base", OK, f"base {base}: bundle {serving[0].name} is installed; {where}{note}", data=data)
+                         f"stage; {where}{note}. {weights_source.status_note(chosen, recs)}", data=data)
+        return Check("base", OK, f"base {base}: bundle {chosen.name}{named_note} is installed; {where}{note}", data=data)
     if (stock_row := _stock_check(report, stock, model_id, hub, local_snapshot)) is not None:
         return stock_row
     family = nearest.family_query(base)
@@ -1257,7 +1277,7 @@ def cache_root_for(cfg) -> Path:
 def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
                   resuming: bool = False, base_override: str | None = None,
                   accept_inferred_base: bool = False, progress: Callable[[str], None] | None = None,
-                  stock_recorded: str | None = None, no_fetch: bool = False) -> list[Check]:
+                  stock_recorded: str | None = None, no_fetch: bool = False, base_bundle: str | None = None) -> list[Check]:
     """`progress(text)` is told what is about to run (the hub lookup, the research, the machine checks), so a
     terminal is not silent while the research reads weight headers for a minute or two. With `no_fetch` nothing is downloaded: the
     disk row counts no download and the base row says a missing snapshot is not fetched (issue 409)."""
@@ -1312,7 +1332,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                 report = s.research(model_id, hub, base_override, inst)
             except Exception as exc:                  # a failed research call leaves the earlier checks in force
                 report, failed = None, type(exc).__name__
-        found = check_base(model_id=model_id, hub=hub, base_override=base_override,
+        found = check_base(model_id=model_id, hub=hub, base_override=base_override, base_bundle=base_bundle,
                            local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report,
                            accept_inferred=accept_inferred_base,
                            # the parameters directory is in this box's tt-metal tree; a lab runs its tests on another box

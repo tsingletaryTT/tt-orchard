@@ -4883,3 +4883,22 @@ Prompt (operator): "make sure we've updated all our literature (site, readme, et
 - **In progress and not claimed as done:** The Qwen4 frankenmodel generator and its CPU proofs are done (PR 639, open): the first K layers of real Qwen3.8-27B weights in the `qwen4_exp_text` skeleton with identity-initialised hyper-connections. With K=4 in float32 the logits equal the base exactly (maximum difference 0.0 on three prompts). With K=8 in bf16 the maximum difference is 0.119 and the top-1 token is equal. A seeded perturbation of the hyper-connections changes the logits by 5.23 and the top-1 token differs. An indexer budget of 2,048 equals the base, and a budget of 8 moves the logits by about 1. The checkpoint does not carry the visual tower, the MTP head, per-layer embeddings or the n-gram table, and the truncated weights give incoherent text, so the result shows equivalence only and says nothing about quality. Generator and CPU proofs done, chip run pending. <!-- UPDATE WHEN THE CHIP RUN ENDS -->
 - **Limits that stay:** single runs; agreement over 32 tokens on one to four prompts; the coder alone has not written a passing port; full-port models are packaged by hand; served speeds are low and depend on host load; nothing has run on another machine; the four-chip boot check of the Olmo adapter as republished passed (9 checks, 12.34 tok/s warm; record in PR 642, open), and the served-rate range across runs and boot checks is 2.2 to 12.3 tok/s under host load.
 - **Issue 61** (the full-port stages have never run on a real model) is out of date.
+
+## 2026-11-09: the bundle the operator names is the bundle the run uses (Qwen4 drop-in plan, Track C item C3)
+Prompt (from the session that runs the Qwen4 drop-in plan): keep the chosen bundle through `resolve_base` and `check_base`, refuse a weights repo
+two bundles share, and choose the bundle by chip count.
+- Found on this box: `mando2222/qwen3.8-27b-dflash2-vision-p300x2-q4kv-v6-thin` and iteration 0 of `mando2222/qwen4-27b-dense-v6-thin` both serve
+  `Qwen/Qwen3.8-27B` on four chips. `--base` with either bundle kept only that repository; the base row then named whichever bundle sorted first
+  (the Qwen3.8 one), and stage 2 and 4 drafts either found two bundles for four chips or took any bundle of that repository for two chips.
+- `cli.resolve_base_bundle` returns the bundle a name refers to; `preflight.check_base(base_bundle=...)` uses it (a named bundle that does not
+  serve the base, or was refused as unable to take swapped weights, blocks); the base row's data carries `bundle_dir`, and the bring-up records it
+  as the run's `bundle` input (a resumed run keeps the one it started with). `nearest.bundle_family` is the named bundle and the other v6 bundles
+  with the same weights repository and the same `orchard-capabilities.json` (or, like it, none). `swap_draft.draft` and `draft_stage4` choose by
+  chip count within the family, and a bundle that ships capabilities is never replaced by a container package. `nearest_problem` and the stage 4
+  plan check refuse an agent-written config outside the family; the supervisor passes the run's bundle to both.
+- Without a name, `nearest.ambiguity` blocks the base row when the bundles that serve the base belong to different families or two serve the same
+  chip count, and lists the `--base <bundle>` commands. On this box that means a Qwen3.8 fine-tune now needs `--base` with the Qwen3.8 bundle until
+  the Qwen4 bundle's weights pointer moves to its own test checkpoint. Container packages are a fallback and do not count as rivals.
+- Not changed: issue 559 (a `--base` model id with no installed bundle) is a different problem and stays open.
+- Tests: `tests/test_bundle_identity.py`. 20 mutations; two survived at first (defensive branches of the capabilities digest) and each got a test;
+  all are red now. No hardware was used.
