@@ -227,6 +227,13 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import caches as _caches
     sub.add_parser("caches", parents=[common, _caches.parser(add_help=False)],
                    help="list the tensor caches (here and on the lab) and prune the ones no run uses")
+    from orchard import drop_check as _drop_check
+    sub.add_parser("drop-check", parents=[common, _drop_check.parser(add_help=False)],
+                   help="say which bring-up route a new Qwen release takes, from its config alone (read-only)")
+    dwp = sub.add_parser("drop-watch", parents=[common],
+                         help="watch for a release and start its bring-up when the chips are free (`drop-watch tick --help`)")
+    dwp.add_argument("action", choices=["init", "tick", "show"])
+    dwp.add_argument("rest", nargs=argparse.REMAINDER, help="--watch-dir DIR and the other options")
     from orchard import kept_coder as _kept
     sub.add_parser("coder", parents=[common, _kept.parser(add_help=False)],
                    help="show or stop the coder a lab run kept up ([coder] keep_up)")
@@ -1196,6 +1203,18 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _coder_speed(args, env, home, out)
     if args.cmd == "ui":
         return _ui(args, env, home, out)
+    if args.cmd == "drop-check":
+        from orchard import drop_check
+        if not args.reference_python:
+            try:
+                rp = config()[0].reference_python
+                args.reference_python = str(rp) if rp else None
+            except Exception:  # noqa: BLE001  (no bringup.toml: the class probe reports "not checked")
+                args.reference_python = None
+        return drop_check.report(args, out)
+    if args.cmd == "drop-watch":
+        from orchard import drop_watch
+        return drop_watch.run_args(drop_watch.parser().parse_args([args.action, *args.rest]), out)
     if args.cmd == "caches":
         from orchard import caches
         try:

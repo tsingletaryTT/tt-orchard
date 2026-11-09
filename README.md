@@ -929,6 +929,50 @@ keeps no cache and writes no report file. A real run writes its cache to `<run d
 preflight runs, so a run that the preflight then blocks can leave that directory behind. It writes no report and
 starts nothing.
 
+#### Release day: `tt-orchard drop-check`
+
+`tt-orchard drop-check Qwen/Qwen4-27B` says which route a bring-up of a new Qwen release takes, from the release's
+config alone. It reads `config.json`, `generation_config.json`, the tokenizer files, the chat template and the weight
+index, and no weight file. It sends no Hugging Face token, and it refuses any organisation other than `Qwen` before it
+makes a request (look-alike repositories under other names appeared on 2026-11-09).
+
+| Verdict | Route | Meaning |
+|---|---|---|
+| `covered` | `qwen3.8-bundle` | The release has Qwen3.8-27B's architecture and widths; `bringup --base` the Qwen3.8 bundle serves it as a weights swap. |
+| `covered` or `covered-with-notes` | `qwen4-package` | The Qwen4 package's capabilities file covers every value the config sets. Notes name what is served differently, for example a QSA indexer served with `max_model_len` 2048. |
+| `not-covered` | `full-port` | Each reason is named: experts, an n-gram embedding, a missing or malformed key, a width that does not split over 2 and 4 chips, a value outside a capability rule, or no capabilities file yet. |
+| `needs-operator` | | The release needs a reference interpreter whose transformers has its architecture class. |
+| `refused` | | The repository id or revision is not acceptable; nothing was read. |
+
+The exit code is 0 for covered, 2 refused, 3 not covered, 4 needs the operator and 5 not found. Flags: `--revision`
+(a 40-character commit; default the current one), `--capabilities` (the package's `orchard-capabilities.json`),
+`--bundle` and `--qwen38-bundle` (the bundles the printed `bringup` command names), `--reference-python` (the
+interpreter asked for a new architecture class; default `reference_python` from `bringup.toml`), `--from-dir` (read a
+release laid out in a directory, `info.json` plus the files, for tests and rehearsals), `--json` and `--out`.
+
+#### Release day without anyone at the keyboard: `tt-orchard drop-watch`
+
+`drop-watch` starts the bring-up of a release when it appears. `tt-orchard drop-watch init --watch-dir DIR --target
+Qwen/Qwen4-27B --run-dir RUN` writes `DIR/watch.toml` (options: `--capabilities` the Qwen4 package's capabilities file,
+`--bringup-arg` an extra bringup argument, repeatable, `--quiet-minutes` how long the last commit must be quiet, default
+30, and `--reference-python`). A scheduler runs `tt-orchard drop-watch tick --watch-dir DIR --json` every 30 minutes.
+Each tick does at most one step and records it in `DIR/state.json`:
+
+| State | Meaning |
+|---|---|
+| `waiting` | The target repository does not exist yet, or is private or gated. |
+| `seen` | It exists, but the upload is not finished: `config.json`, the weight index or a shard it lists is missing, or the last commit is younger than the quiet time. |
+| `waiting-for-chips` | `drop-check` ran and fixed the route. gozer shows a chip held, so nothing starts. The watcher never stops a process that holds a chip. |
+| `running` | Every chip was free, so `tt-orchard bringup <target> --run-dir RUN` was started, once. |
+| `ready`, `blocked`, `failed` | The run ended. Nothing more happens. |
+| `needs-operator` | The check needs a reference interpreter, or the state cannot be trusted (a corrupt state file, or a tick that died after "starting" and before it recorded the process). Nothing starts until you fix the cause and edit or remove `state.json`. |
+
+A covered release starts `bringup --base` the Qwen4 package (or the Qwen3.8 bundle); a release that is not covered starts
+the full-port fallback. Each step is appended to `DIR/events.jsonl`; `tick --json` prints the events of that tick for the
+notifier. `drop-watch show --watch-dir DIR` prints the state. `tick --hub-dir RELEASE` reads a release laid out in a
+directory, for rehearsals. A lock file keeps two ticks apart. The watcher never publishes or pushes anything and never
+sends a Hugging Face token.
+
 ### 4.1 Before you start
 
 - `gozer status` shows every chip `FREE` and no other lease.
