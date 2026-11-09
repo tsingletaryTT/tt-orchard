@@ -231,7 +231,7 @@ def test_the_pre_check_runs_only_for_the_stage_2_port_check_command(tmp_path):
     from test_supervisor_full_port import with_snapshot
     from test_supervisor import Rig
     from orchard.ledger import Ledger
-    from orchard.stages import STAGES
+    from orchard.stages import FULL_PORT_STAGE_2, FULL_PORT_STAGE_3
     from orchard.supervisor import build
     r = Rig(tmp_path)
     try:
@@ -240,8 +240,8 @@ def test_the_pre_check_runs_only_for_the_stage_2_port_check_command(tmp_path):
         stage_dir = r.run_dir / "stages" / "2"
         (stage_dir / "port").mkdir(parents=True)
         (stage_dir / "port" / "port_model.py").write_text(HOST_ONLY)          # a port the pre-check would refuse
-        spec2 = next(s for s in STAGES if s.number == 2)
-        spec3 = next(s for s in STAGES if s.number == 3)
+        spec2, spec3 = FULL_PORT_STAGE_2, FULL_PORT_STAGE_3
+        assert spec2.draft == "full_port" and spec2.number == 2          # the spec the pre-check is for: only the command (or the stage) keeps it out
         with Ledger(r.run_dir / "ledger.jsonl") as led:
             sup = build(r.args, led, adapter=r.adapter_cls(r.m, owner_pid=100), coder=r.coder_cls(r.m), home=r.home, containers=r.containers)
             other = {"command": "python3 -P -s stages/2/graft_trial.py", "deadline_s": 60}          # another test of the stage (the graft trial)
