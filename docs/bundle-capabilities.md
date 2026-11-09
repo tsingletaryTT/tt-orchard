@@ -21,6 +21,12 @@ those.
   when the bundle ships the file. Without it, stage 2 serves the nearest model's config as before. Stage 7 packages the config
   stage 2 served (`base_config/config.json`), so the package serves the same file.
 
+- The release-day check (`tt-orchard drop-check`, `orchard/drop_check.py`) judges a release's config with
+  `orchard.bundle_capabilities.config_reasons(capabilities, release_config, dev_config)`, which runs the stage 0 template's own code
+  (`capability_config_reasons`). It takes plain dicts, needs no run directory, and returns named reasons (none when the file covers the
+  config). Without `dev_config` it checks the rules, `model_types` and `architectures`; with the config of the bundle's own weights it
+  also requires every differing key to be covered, as stage 0 does. The tensor rules need the safetensors headers and are left to stage 0.
+
 A bundle without the file behaves as before in every stage.
 
 ## The file

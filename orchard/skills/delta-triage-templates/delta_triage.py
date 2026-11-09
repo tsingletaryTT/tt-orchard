@@ -3542,12 +3542,43 @@ def _layer_analogue(name: str, own_n: dict, other_n: dict, caps: dict, own_cfg, 
     return None
 
 
+def _new_review() -> dict:
+    return {"config_ok": set(), "config_reasons": {}, "other_key_reasons": [], "shape_ok": set(), "shape_why": {},
+            "only_m_ok": set(), "only_b_ok": set(),
+            "exempted": {"config_keys": [], "shapes": [], "shapes_count": 0, "layer_tensors": {"count": 0, "examples": []},
+                         "optional_tensors": {"count": 0, "features": {}, "examples": []}}}
+
+
+def capability_config_reasons(data, release_cfg, dev_cfg=None) -> list[str]:
+    """The config side of the capabilities rule, on plain dicts: the parsed orchard-capabilities.json, the new model's (the release's)
+    config.json, and the config.json of the bundle's own weights, or None. Returns named reasons, [] when the file covers the config.
+    Without `dev_cfg` only the rules, model_types and architectures are checked; with it, every differing text config key must be
+    covered too. decide_path uses the same code (review_capabilities), and the release-day check calls this through
+    orchard/bundle_capabilities.config_reasons, so the two cannot disagree on a config. The tensor rules need safetensors headers and are
+    not part of it. Needs no run directory and reads no file."""
+    caps, problems = validate_capabilities(data)
+    if caps is None:
+        return [f"the bundle's {CAPABILITIES_FILE} cannot be used: " + "; ".join(problems[:5])]
+    if not isinstance(release_cfg, dict):
+        return ["the new model's config.json is not a JSON object"]
+    if dev_cfg is not None and not isinstance(dev_cfg, dict):
+        return ["the config.json of the bundle's own weights is not a JSON object"]
+    c = compare_config_dicts(release_cfg, dev_cfg, [], "new model", "bundle weights") if dev_cfg is not None else {}
+    out = _new_review()
+    _review_config(caps, c, release_cfg, out)
+    return list(out["config_reasons"].values()) + out["other_key_reasons"]
+
+
 def review_capabilities(caps: dict, c: dict, t: dict, mcfg, bcfg, mtensors: dict, btensors: dict) -> dict:
     """What the capabilities set aside and what they refuse, for decide_path. `mtensors` and `btensors` are read_tensors' maps."""
-    out = {"config_ok": set(), "config_reasons": {}, "other_key_reasons": [], "shape_ok": set(), "shape_why": {},
-           "only_m_ok": set(), "only_b_ok": set(),
-           "exempted": {"config_keys": [], "shapes": [], "shapes_count": 0, "layer_tensors": {"count": 0, "examples": []},
-                        "optional_tensors": {"count": 0, "features": {}, "examples": []}}}
+    out = _new_review()
+    _review_config(caps, c, mcfg, out)
+    _review_tensors(caps, t, mcfg, bcfg, mtensors, btensors, out)
+    return out
+
+
+def _review_config(caps: dict, c: dict, mcfg, out: dict) -> None:
+    """The config side of review_capabilities: fills config_ok, config_reasons, other_key_reasons and exempted.config_keys."""
     ex = out["exempted"]
     # Every rule holds where the new model has the key, as the release-day check applies them, whether or not the key differs.
     failing = {}
@@ -3586,6 +3617,11 @@ def review_capabilities(caps: dict, c: dict, t: dict, mcfg, bcfg, mtensors: dict
         else:
             out["other_key_reasons"].append(reason)
     out["other_key_reasons"] += [failing[path] for path in sorted(failing) if path not in used]
+
+
+def _review_tensors(caps: dict, t: dict, mcfg, bcfg, mtensors: dict, btensors: dict, out: dict) -> None:
+    """The tensor side of review_capabilities: shapes, layer indices only one model has, and optional tensors."""
+    ex = out["exempted"]
     p = _pair_names(mtensors, btensors)
     mn, bn = p["mn"], p["bn"]
     for x in t["shape_diffs_normalized"]:
@@ -3633,7 +3669,6 @@ def review_capabilities(caps: dict, c: dict, t: dict, mcfg, bcfg, mtensors: dict
             lt["count"] += 1
             if len(lt["examples"]) < CAP_EXAMPLES:
                 lt["examples"].append({"tensor": name, "only_in": side, "analogue": cand})
-    return out
 
 
 def capabilities_finding(rec: dict) -> str:

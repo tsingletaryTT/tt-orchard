@@ -200,3 +200,67 @@ def test_the_supervisor_adds_the_check_to_stage_0s_gate_only_when_the_run_names_
             assert sup._with_capabilities(ok)(stage, r.run_dir).ok
     finally:
         r.close()
+
+
+# ---- the evaluator the release-day check calls ---------------------------------------------------------------------------------
+
+def _caps_example() -> dict:
+    sys_path_tests()
+    from test_delta_triage_capabilities import DROP_CHECK_EXAMPLE
+    return json.loads(json.dumps(DROP_CHECK_EXAMPLE))
+
+
+def sys_path_tests():
+    import sys
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+
+
+QWEN4_CFG = {"model_type": "qwen4_exp_text", "architectures": ["Qwen4ExpForCausalLM"], "hidden_size": 5120, "num_attention_heads": 24,
+             "head_dim": 256, "num_key_value_heads": 4, "intermediate_size": 17408, "linear_num_key_heads": 16, "linear_num_value_heads": 48,
+             "linear_key_head_dim": 128, "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "vocab_size": 248320, "hc_count": 4,
+             "hc_lowrank": 640, "output_gate_type": "silu", "hidden_act": "silu", "num_hidden_layers": 20}
+
+
+def test_config_reasons_is_empty_for_a_covered_release_and_names_each_problem_otherwise():
+    caps = _caps_example()
+    assert bc.config_reasons(caps, QWEN4_CFG) == []
+    got = bc.config_reasons(caps, {**QWEN4_CFG, "num_key_value_heads": 3, "architectures": ["Qwen4ForCausalLM"]})
+    assert any("num_key_value_heads" in r for r in got) and any("Qwen4ForCausalLM" in r for r in got)
+    assert any("model_type" in r for r in bc.config_reasons(caps, {**QWEN4_CFG, "model_type": "qwen4_text"}))
+
+
+def test_config_reasons_with_the_bundles_own_config_needs_every_difference_covered():
+    caps = _caps_example()
+    release = {**QWEN4_CFG, "num_hidden_layers": 64}
+    assert bc.config_reasons(caps, release) == []                                        # no dev config: rules only
+    got = bc.config_reasons(caps, release, QWEN4_CFG)
+    assert any("num_hidden_layers" in r and "does not declare" in r for r in got), got
+    caps["keys"]["num_hidden_layers"] = {"min": 4}
+    assert bc.config_reasons(caps, release, QWEN4_CFG) == []
+
+
+@pytest.mark.parametrize("caps, release, dev, words", [
+    ({"schema": 2}, QWEN4_CFG, None, "cannot be used"),
+    (None, QWEN4_CFG, None, "cannot be used"),
+    ("default", [], None, "not a JSON object"),
+    ("default", QWEN4_CFG, "x", "not a JSON object"),
+])
+def test_config_reasons_names_inputs_it_cannot_use(caps, release, dev, words):
+    got = bc.config_reasons(_caps_example() if caps == "default" else caps, release, dev)
+    assert len(got) == 1 and words in got[0], got
+
+
+def test_config_reasons_says_what_decide_path_says_about_the_config():
+    """The release-day check and stage 0 must not disagree: for each pair the config side of decide_path equals config_reasons."""
+    sys_path_tests()
+    import test_delta_triage_capabilities as tc
+    pairs = [(tc.cfg(), tc.cfg()), (tc.cfg(num_key_value_heads=4), tc.cfg()), (tc.cfg(rms_norm_eps=1e-5), tc.cfg()),
+             (tc.cfg(layers=6), tc.cfg(layers=2)), (tc.cfg(model_type="qwen4_text"), tc.cfg()),
+             (tc.cfg(rope_parameters={"rope_theta": 0.5}), tc.cfg(rope_parameters={"rope_theta": 1.0})),
+             (tc.cfg(architectures=["Other"]), tc.cfg())]
+    for m, b in pairs:
+        reasons, _ = tc.judge(m, b)
+        config_side = [r for r in reasons if r.startswith(("text config", "the new model's architecture"))]
+        assert config_side == bc.config_reasons(tc.caps(), m, b), (m, b)

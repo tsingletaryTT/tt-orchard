@@ -10,6 +10,8 @@ record must name that directory and the file's current sha256, and a file that w
 A bundle without the file needs no record. Nothing here reads the file's content beyond its hash."""
 from __future__ import annotations
 
+import functools
+import importlib.util
 import os
 from pathlib import Path
 
@@ -19,6 +21,25 @@ FILE = "orchard-capabilities.json"
 MAX_BYTES = 256 * 1024           # the triage template's CAPABILITIES_MAX_BYTES; a test keeps the two equal
 INPUT = "bundle"                 # the run input that names the bundle's directory (the bring-up command records it)
 DELTA_MAX_BYTES = 16 * 1024 * 1024
+TEMPLATE = Path(__file__).resolve().parent / "skills" / "delta-triage-templates" / "delta_triage.py"
+
+
+@functools.lru_cache(maxsize=1)
+def _template():
+    """The shipped stage 0 template, loaded by path (it is a script that stage 0 copies, not a package module). Loading it runs no check."""
+    spec = importlib.util.spec_from_file_location("orchard_delta_triage_template", TEMPLATE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def config_reasons(capabilities, release_config, dev_config=None) -> list[str]:
+    """Why a bundle's capabilities do not cover a release's config, [] when they do. `capabilities` is the parsed
+    orchard-capabilities.json, `release_config` the release's config.json, `dev_config` the config.json of the bundle's own weights or
+    None (then every differing key is not checked, only the rules, model_types and architectures). This is the stage 0 template's own
+    code (capability_config_reasons), the code decide_path uses, so the release-day check (orchard/drop_check.py) and stage 0 judge a
+    config the same way. Needs no run directory and reads no file but the template."""
+    return _template().capability_config_reasons(capabilities, release_config, dev_config)
 
 
 def file_state(bundle_dir) -> tuple[str | None, str | None]:

@@ -4902,6 +4902,9 @@ serves the release with its own config.
   because stage 2 then serves the release's own config. A file that is a link, a FIFO, larger than 256 KiB, not strict JSON or not valid by the
   schema makes the path full-port with the reason. `delta.json` records `capabilities` (directory, sha256, applied, problems, what was set aside,
   features). Without the key or the file, triage is unchanged.
+- One evaluator for both checks: `orchard.bundle_capabilities.config_reasons(capabilities, release_config, dev_config=None)` runs the
+  template's `capability_config_reasons`, the config side decide_path uses, on plain dicts. The main Qwen4 session asked for it so the
+  release-day check never says covered where stage 0 says full-port; a test holds the two equal on a set of config pairs.
 - The stage 0 gate (`orchard/bundle_capabilities.py`, through the supervisor) fails when the run's `bundle` input ships the file and delta.json
   does not record it with the file's current sha256 and directory, or records a file that was not applied while the path is weights-only.
 - Stage 2 (`prepare_swap.py`): for a bundle that ships the file, `model-dir/config.json` is the new model's own config with only `architectures`
@@ -4909,7 +4912,7 @@ serves the release with its own config.
   gains `config_json`. Stage 7 already packages stage 2's real config files as `base_config/`, so the package serves the same file; the card now
   says whose `config.json` it is. `prepare_model_dir.py` needed no code change.
 - Tests: `tests/test_delta_triage_capabilities.py` (it also checks that the release-day check's example file validates here),
-  `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`; both readers are in `tests/hostile_fs.py`. 57 mutations over the
+  `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`; both readers are in `tests/hostile_fs.py`. 62 mutations over the
   new guards; three survived at first (the layer-type match, the dtype check on extra layers, and a failing dotted rule keeping its parent key out
   of the set-aside record) and each got a test; all are red now.
 - Not done here: the run's `bundle` input is recorded by the bring-up command in the Track C item C3 change; until that lands nothing fills
