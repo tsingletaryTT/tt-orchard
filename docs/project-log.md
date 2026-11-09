@@ -4927,6 +4927,43 @@ the Qwen4 bundle on the weights-only route; its text is not readable, so every g
   A run of the 54 test files that touch the changed code found one regression: the supervisor read `spec.gate`, which the stand-in spec of
   `tests/test_token_check_numbers.py` does not have. Both reads now use `getattr`; that set then passed (2,347 passed, 2 skipped), and the four
   mutations on those lines were run again and are red.
+
+## 2026-11-09: bundle capabilities in stage 0 and the release's own config in stage 2 (Qwen4 drop-in plan, Track C items C1 and C2)
+Prompt (from the session that runs the Qwen4 drop-in plan): implement Track C items C1 to C6. This entry covers C1 and C2. The goal is that on release
+day stage 0 classes Qwen4-27B `weights-only` against the Qwen4 thin bundle (whose development weights are a 20-layer test checkpoint) and stage 2
+serves the release with its own config.
+- A bundle may ship `orchard-capabilities.json` (`docs/bundle-capabilities.md`). Schema 1 is the one the release-day check (`orchard/drop_check.py`,
+  the main Qwen4 session's M0 branch) reads: `model_types`, `architectures`, `keys` with `equals`/`one_of`/`multiple_of`/`min`/`max` rules, `features`.
+  Stage 0 adds top-level fields beside them that the release-day check ignores: `ignored_keys`, `optional_keys`, `layers` (layer naming, count and
+  types), `shapes` (tensor dimensions that follow config keys, as expressions) and `optional_tensors`. A key in `keys` may be a dotted path
+  (`rope_parameters.rope_theta`). The first version of this change used its own rule syntax; it was changed to the shared one at the main
+  session's request before the PR was opened. The stage 0
+  template reads it when `triage_config.json` names `nearest_bundle_dir` (new, optional; the skill fills it from the run's `bundle` input) and sets
+  aside exactly the declared differences (every rule must also hold for keys that do not differ, and the model type and architectures must be
+  listed, as the release-day check requires): a declared key within its rule, a shape difference along declared dimensions where both models' sizes
+  follow the expression, tensors at layer indices only one model has when the layer count is declared (same tensor at a layer of the same type, same
+  dtype, equal or explained shape), and declared optional tensors. With the file, every other differing text config key is a full-port reason too,
+  because stage 2 then serves the release's own config. A file that is a link, a FIFO, larger than 256 KiB, not strict JSON or not valid by the
+  schema makes the path full-port with the reason. `delta.json` records `capabilities` (directory, sha256, applied, problems, what was set aside,
+  features). Without the key or the file, triage is unchanged.
+- One evaluator for both checks: `orchard.bundle_capabilities.config_reasons(capabilities, release_config, dev_config=None)` runs the
+  template's `capability_config_reasons`, the config side decide_path uses, on plain dicts. The main Qwen4 session asked for it so the
+  release-day check never says covered where stage 0 says full-port; a test holds the two equal on a set of config pairs.
+- The stage 0 gate (`orchard/bundle_capabilities.py`, through the supervisor) fails when the run's `bundle` input ships the file and delta.json
+  does not record it with the file's current sha256 and directory, or records a file that was not applied while the path is weights-only.
+- Stage 2 (`prepare_swap.py`): for a bundle that ships the file, `model-dir/config.json` is the new model's own config with only `architectures`
+  replaced by the served base config's (`base_config/` in the current form, the nearest snapshot's in the older form). `model-dir-sources.json`
+  gains `config_json`. Stage 7 already packages stage 2's real config files as `base_config/`, so the package serves the same file; the card now
+  says whose `config.json` it is. `prepare_model_dir.py` needed no code change.
+- Tests: `tests/test_delta_triage_capabilities.py` (it also checks that the release-day check's example file validates here),
+  `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`; both readers are in `tests/hostile_fs.py`. 64 mutations over the
+  new guards; three survived at first (the layer-type match, the dtype check on extra layers, and a failing dotted rule keeping its parent key out
+  of the set-aside record) and each got a test; all are red now. The full suite found one more: the number check called `math.isfinite`,
+  which raises on an integer of more than about 308 digits (issue 461), and a release config is read with plain `json.loads`; integers now
+  never reach it, and a test with a 400-digit value covers it.
+- Not done here: the run's `bundle` input is recorded by the bring-up command in the Track C item C3 change; until that lands nothing fills
+  `nearest_bundle_dir` and these rules stay dormant. The Qwen4 bundle does not ship the file yet (its author writes it from the keys its code reads).
+  No hardware was used.
 ## 2026-11-09, Qwen4-27B drop-in plan and milestone M0: release-day check and watcher (branch `qwen4-drop-m0`)
 Prompt (operator): make a Qwen4-27B (dense) release as close to a drop-in of the weights as possible, stored on Hugging Face as a
 tt-model package with placeholder weights, and fed to tt-orchard on release day; then "is this built in such a way that it would

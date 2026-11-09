@@ -129,7 +129,7 @@ from urllib.parse import urlparse
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, collect_survivors, probe_model, spawn_checked
 from orchard import audio_reference_env, audio_runtime, bus, floor_report, nearest, port_cache, safeio, served_chat, stage0_scan
-from orchard import full_port_result, runaway, text_runtime
+from orchard import bundle_capabilities, full_port_result, runaway, text_runtime
 from orchard import stack_pins as stack_pins_mod
 from orchard.audio_facts import serving_of
 from orchard.blocked import ALL_ONES_MARK, BOOT_ABORT_MARKS, LOG_LINES_MARK, block_code, last_pause
@@ -2398,7 +2398,7 @@ class Supervisor:
         if spec.number == 4 and self.required_chips:
             return functools.partial(spec.gate, required=self.required_chips)
         if spec.number == 0:
-            return self._with_stack_pins(spec.gate)
+            return self._with_capabilities(self._with_stack_pins(spec.gate))
         if spec.skill == "full-port-mesh":
             # The chip count is the supervisor's own (the run's --required-chips), and so is the rehearsal flag (from the ledger): the coder can
             # write neither.
@@ -2450,6 +2450,22 @@ class Supervisor:
         def gate(stage_dir, run_dir):
             result = base(stage_dir, run_dir)
             extra = stack_pins_mod.gate_reasons(stage_dir, self._stack_pins_sha(stage_dir))
+            if not extra:
+                return result
+            return dataclasses.replace(result, ok=False, reasons=tuple(result.reasons) + tuple(extra))
+        return gate
+
+    def _with_capabilities(self, base):
+        """Stage 0's gate plus the bundle capabilities check (orchard/bundle_capabilities.py): when the run's `bundle` input ships
+        orchard-capabilities.json, delta.json must record that stage 0 applied it, with the file's current sha256. The bundle directory is
+        the supervisor's own input; the file is read here, never taken from the stage directory. With no bundle input the check still runs: a
+        delta.json that says capabilities were found or applied is refused, because the agent writes the config that names the folder."""
+        bundle = self.inputs.get(bundle_capabilities.INPUT)
+        bundle = bundle if isinstance(bundle, str) and bundle else None
+
+        def gate(stage_dir, run_dir):
+            result = base(stage_dir, run_dir)
+            extra = bundle_capabilities.gate_reasons(stage_dir, bundle)
             if not extra:
                 return result
             return dataclasses.replace(result, ok=False, reasons=tuple(result.reasons) + tuple(extra))

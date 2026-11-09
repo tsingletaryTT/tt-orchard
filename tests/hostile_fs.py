@@ -403,6 +403,35 @@ def _r_compare_sidecars(env):
     return classify_sidecars(got["sidecars"] + got["ignored_files"], expect_listed="extra.gguf" if env["case"] == "sidecar_link" else None)
 
 
+def _r_triage_capabilities(env):
+    """The stage 0 template's reader of a bundle's orchard-capabilities.json, pointed at data.json. A named problem is a refusal."""
+    import importlib.util
+    from orchard import safeio
+    path = REPO / "orchard" / "skills" / "delta-triage-templates" / "delta_triage.py"
+    spec = importlib.util.spec_from_file_location("delta_triage_caps_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.CAPABILITIES_FILE = env["file"].name
+    rec, data = mod.read_capabilities(str(env["file"].parent))
+    if rec["problems"] or data is None:
+        raise safeio.ReadFailed("; ".join(rec["problems"]) or "absent")
+    return _json_label(data)
+
+
+def _r_bundle_capabilities(env):
+    """The stage 0 gate's hash of a bundle's orchard-capabilities.json (orchard/bundle_capabilities.py), pointed at data.json."""
+    import hashlib
+    from orchard import bundle_capabilities as bc, safeio
+    old, bc.FILE = bc.FILE, env["file"].name
+    try:
+        sha, problem = bc.file_state(env["file"].parent)
+    finally:
+        bc.FILE = old
+    if problem or sha is None:
+        raise safeio.ReadFailed(problem or "absent")
+    return {hashlib.sha256(OK_BYTES).hexdigest(): "original", hashlib.sha256(DECOY_BYTES).hexdigest(): "decoy"}.get(sha, "other")
+
+
 PATH_READERS: list[PathReader] = [
     PathReader("safeio.read_bytes(anchor=pin)", "pinned_read", _pinned(_r_read_bytes_anchor)),
     PathReader("safeio.read_beneath", "pinned_read", _pinned(_r_read_beneath)),
@@ -419,6 +448,8 @@ PATH_READERS: list[PathReader] = [
     PathReader("cache_lock.entry_lock", "lock_open", _r_cache_lock, claims_pin=False),
     PathReader("residency.read_headers", "cache_headers", _r_residency_headers, claims_pin=False),
     PathReader("delta_triage.compare_sidecars", "sidecar_scan", _r_compare_sidecars, claims_pin=False),
+    PathReader("delta_triage.read_capabilities", "path_read", _r_triage_capabilities, claims_pin=False),
+    PathReader("bundle_capabilities.file_state", "path_read", _r_bundle_capabilities, claims_pin=False),
 ]
 
 # Deliberately unsafe readers: each makes one of the review mistakes, so the harness is seen to fail (a check that has never been seen

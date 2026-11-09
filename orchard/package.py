@@ -230,6 +230,17 @@ def stage_2_vocab(run_dir) -> tuple[int, int] | None:
     return m, b
 
 
+def stage_2_own_config(run_dir) -> bool:
+    """Did stage 2 serve the new model's own config.json (model-dir-sources.json's `config_json`, written by prepare_swap.py for a bundle
+    that ships orchard-capabilities.json)? Stage 7 packages that file as base_config/config.json, and the card says whose it is."""
+    try:
+        rec = safeio.read_json(safeio.resolved(Path(run_dir) / "stages/2/model-dir-sources.json"), max_bytes=MAX_RECORD_BYTES)
+    except safeio.SafeReadError:
+        return False
+    cj = rec.get("config_json") if isinstance(rec, dict) else None
+    return isinstance(cj, dict) and cj.get("source") == "model"
+
+
 def _stage_2_grafted(run: Path) -> bool:
     """Did stage 2's swap graft the nearest model's mtp.* tensors? (model-dir-sources.json's mtp_graft record)"""
     try:
@@ -730,6 +741,7 @@ class RunFacts:
     graft_decision: str | None = None   # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
     vocab: tuple[int, int] | None = None   # (the model's vocabulary size, the nearest model's) for a vocabulary trim
     sampling_decision: dict | None = None  # stage 2's sampling decision (orchard/sampling_choice.py), None when it made none
+    own_config: bool = False         # base_config/config.json is the new model's own, with only architectures set to the nearest model's
 
 
 def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> RunFacts:
@@ -783,7 +795,7 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
     md = run / "stages/2/model-dir"
     base = tuple(md / n for n in BASE_CONFIG_FILES if (md / n).is_file() and not (md / n).is_symlink())
     if md / "config.json" not in base:
-        raise PackageError(f"{md}/config.json (the nearest model's config) is missing")
+        raise PackageError(f"{md}/config.json (the config stage 2 served) is missing")
     configs = _json(run / "stages/4/result.json", "stage 4's result").get("configs") or []
     passing = frozenset(c["chips"] for c in configs if isinstance(c, dict) and c.get("pass") is True
                         and isinstance(c.get("chips"), int) and not isinstance(c.get("chips"), bool))
@@ -797,7 +809,8 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
     facts = RunFacts(run, model_id, revision, nearest_model, snap,
                      Path(cfg.get("hf_home") or ""), source, base, passing, license_id,
                      drafter_off, host_sampling, tuple(delta.get("sidecars") or ()), reported, reported_source,
-                     Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run), vocab=stage_2_vocab(run))
+                     Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run), vocab=stage_2_vocab(run),
+                     own_config=stage_2_own_config(run))
     decision = read_decision(run / "stages/2")
     decided = decision is not None and decision["choice"] == "graft"
     # A drafter-off sampling decision supersedes what stage 2's own build suggests: the sampling trial builds its variant without the graft, so
@@ -1416,7 +1429,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         numbers=numbers, not_measured=tuple(not_measured), acceptance_measured=acceptance_measured, acceptance_from=acceptance_from,
         drafter_off=facts.drafter_off, host_sampling=facts.host_sampling,
         sidecars=tuple(s["file"] for s in facts.sidecars),
-        base_files=tuple(sorted(f.name for f in facts.base_config)),
+        base_files=tuple(sorted(f.name for f in facts.base_config)), own_config=facts.own_config,
         sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
         reported=facts.reported, reported_source=facts.reported_source,
         graft=facts.graft, graft_decision=facts.graft_decision, use=use, vocab=facts.vocab, sampling=sampling,
