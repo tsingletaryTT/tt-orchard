@@ -1,0 +1,3 @@
+target = "0.9.141"
+summary = "The stage 0 gate accepts sidecars on a full-port class when each carries size, sha256 and tensor names, and the stage 2 port facts name weights files the shard index does not."
+pr = 648
