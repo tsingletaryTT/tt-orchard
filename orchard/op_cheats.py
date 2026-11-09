@@ -22,6 +22,9 @@ How an entry is verified (`verify`):
   `simulator only` needs a name or argument the `hardware` root lacks, and the entry lists it in `hardware_absent`; and
   `hardware signature only` says the signature is in the hardware package and no compile was shown.
 - A mistake may carry `checks`: each check says an argument a coder would guess is absent from a root (or present, for a correction).
+- `reported` is a separate, optional list of pitfalls another project wrote down (symptom, fix, source, and a `reproduced` flag that is true only
+  when it was seen on our pin). `verify` makes no claim about them, and `render` prints them under their own heading with a label per item, so a
+  coder can tell them from the mistakes our own runs showed.
 
 The reader of a tree and of the sheet uses orchard/safeio.py. The tree is outside input: it is walked by descriptor and never followed through
 a link, and each file read has a byte cap.
@@ -39,6 +42,7 @@ SCHEMA = "orchard-cheat-sheet/1"
 SHEET_MAX_BYTES = 400_000
 FILE_MAX_BYTES = 4_000_000                 # one source file of a tree (the largest nanobind file is well under this)
 MAX_ENTRIES = 200
+MAX_REPORTED = 20                          # reported pitfalls a sheet may carry (what another project saw and wrote down; our runs have not shown them)
 MAX_FIELD = 600                            # characters in a signature, usage line or note
 SKIP_DIRS = frozenset({"__pycache__", "_mlir_libs", "dialects", "extras", "third-party", "build", "tests", "test", ".git", "sim", "sim_stats"})   # the installed package ships its own simulator under sim/: it must not count as the compiled surface
 STATUSES = ("compiles on hardware", "hardware signature only", "simulator only")
@@ -134,6 +138,7 @@ def shape_problems(sheet) -> list[str]:
                     problems.append(f"{where}: a simulator-only entry lists what the hardware package lacks in `hardware_absent`")
     if count > MAX_ENTRIES:
         problems.append(f"more than {MAX_ENTRIES} entries")
+    problems += _reported_problems(sheet.get("reported", []))
     mistakes = sheet.get("mistakes", [])
     if not isinstance(mistakes, list):
         return problems + ["mistakes must be a list"]
@@ -150,6 +155,26 @@ def shape_problems(sheet) -> list[str]:
         for c in checks:
             if not isinstance(c, dict) or not _check_is_well_typed(c, roots):
                 problems.append(f"mistake {i}: each check names a root, a name and absent_args, present_args or absent")
+    return problems
+
+
+def _reported_problems(reported) -> list[str]:
+    """What is wrong with a sheet's `reported` list: pitfalls another project saw and wrote down, kept apart from `mistakes` (failures seen in our own
+    runs). Each item has a `symptom`, a `fix` and a `source` (non-empty text) and a `reproduced` flag that is exactly true or false: true only when
+    the pitfall was seen on our pin. The flag decides the label the coder reads, so a string or a number in its place is refused."""
+    if not isinstance(reported, list):
+        return ["reported must be a list"]
+    problems: list[str] = []
+    if len(reported) > MAX_REPORTED:
+        problems.append(f"more than {MAX_REPORTED} reported entries")
+    for i, item in enumerate(reported):
+        if not isinstance(item, dict):
+            problems.append(f"reported {i} must be an object")
+            continue
+        for key in ("symptom", "fix", "source"):
+            _text(item.get(key), f"reported {i} {key}", problems)
+        if not isinstance(item.get("reproduced"), bool):
+            problems.append(f"reported {i}: reproduced must be true or false")
     return problems
 
 
@@ -560,6 +585,14 @@ def render(sheet: dict) -> str:
         lines += ["", "## Mistakes seen in runs", ""]
         for m in sheet["mistakes"]:
             lines.append(f"- {m['symptom']} Fix: {m['fix']} ({m['seen_in']})")
+    reported = sheet.get("reported") or []
+    if reported:
+        # The heading says "not reproduced" only when no item was reproduced; each line carries its own label either way.
+        unreproduced = not any(r["reproduced"] for r in reported)
+        lines += ["", "## Reported by another project" + (" (not reproduced on our pin)" if unreproduced else ""), ""]
+        for r in reported:
+            label = "reproduced on our pin" if r["reproduced"] else "not reproduced on our pin"
+            lines.append(f"- {r['symptom']} Fix: {r['fix']} (reported by {r['source']}; {label})")
     return "\n".join(lines) + "\n"
 
 

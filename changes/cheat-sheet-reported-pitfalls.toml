@@ -1,0 +1,3 @@
+target = "0.9.144"
+summary = "The TTNN cheat sheet gains a separate, labelled section of five pitfalls that Kohaku-TT reported (none reproduced on our pin), and the sheet format accepts a validated optional reported list."
+kind = "feature"

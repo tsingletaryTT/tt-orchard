@@ -510,3 +510,122 @@ def test_issue_534_a_simulator_only_claim_is_refused_when_the_hardware_index_is_
     e = {"name": "ttl.ghost", "status": "simulator only", "in": ["sim"], "signature": "ttl.ghost(x)", "hardware_absent": ["ghost"]}
     problems = oc._status_problems(e, {"hardware": idx["tt_metal"]})
     assert any("incomplete" in p for p in problems), problems
+
+
+# ---- reported pitfalls: what another project saw, kept apart from what our own runs saw (Kohaku-TT follow-up) -----------------------------
+
+REPORTED_HEADING = "## Reported by another project (not reproduced on our pin)"
+
+
+def reported(**kw):
+    base = {"symptom": "A matmul gives wrong numbers when K is 10.", "fix": "Pad K to a multiple of 32 and compare with torch.",
+            "source": "another project's issue list", "reproduced": False}
+    base.update(kw)
+    return base
+
+
+def sheet_with_reported(*items, **kw):
+    sheet = sheet_of(GOOD, **kw)
+    sheet["reported"] = list(items)
+    return sheet
+
+
+def test_a_sheet_with_well_formed_reported_entries_has_no_shape_problem():
+    assert oc.shape_problems(sheet_with_reported(reported(), reported(reproduced=True))) == []
+
+
+@pytest.mark.parametrize("bad", [None, {}, "x", 5])
+def test_reported_must_be_a_list(bad):
+    sheet = sheet_of(GOOD)
+    sheet["reported"] = bad
+    assert any("reported must be a list" in p for p in oc.shape_problems(sheet))
+
+
+@pytest.mark.parametrize("field", ["symptom", "fix", "source"])
+@pytest.mark.parametrize("bad", [None, [], {}, 5, "", "  ", "a\0b", "x" * 601])
+def test_a_bad_reported_text_field_is_a_problem_and_never_an_exception(field, bad):
+    assert any(f"reported 0 {field}" in p for p in oc.shape_problems(sheet_with_reported(reported(**{field: bad}))))
+
+
+@pytest.mark.parametrize("bad", [None, "false", "False", 0, 1, [], {}, "no"])
+def test_reproduced_must_be_a_real_bool(bad):
+    assert any("reported 0: reproduced must be true or false" in p for p in oc.shape_problems(sheet_with_reported(reported(reproduced=bad))))
+
+
+def test_a_missing_reproduced_flag_is_a_problem():
+    item = reported()
+    del item["reproduced"]
+    assert any("reproduced must be true or false" in p for p in oc.shape_problems(sheet_with_reported(item)))
+
+
+def test_a_reported_entry_that_is_not_an_object_is_a_problem():
+    assert any("reported 1 must be an object" in p for p in oc.shape_problems(sheet_with_reported(reported(), "text")))
+
+
+def test_too_many_reported_entries_are_refused():
+    items = [reported(symptom=f"s{i}") for i in range(oc.MAX_REPORTED + 1)]
+    assert any("more than" in p and "reported" in p for p in oc.shape_problems(sheet_with_reported(*items)))
+    assert oc.shape_problems(sheet_with_reported(*items[:oc.MAX_REPORTED])) == []
+
+
+def test_reported_entries_render_in_their_own_section_after_the_mistakes_with_the_label():
+    mistake = {"symptom": "our own failure.", "fix": "our fix.", "seen_in": "run 1"}
+    text = oc.render(sheet_with_reported(reported(), mistakes=[mistake]))
+    assert REPORTED_HEADING in text
+    assert text.index("## Mistakes seen in runs") < text.index(REPORTED_HEADING)
+    after = text.split(REPORTED_HEADING, 1)[1]
+    assert "A matmul gives wrong numbers when K is 10." in after and "Pad K to a multiple of 32" in after
+    assert "not reproduced on our pin" in after and "another project's issue list" in after
+    assert "A matmul gives wrong numbers" not in text.split(REPORTED_HEADING, 1)[0]      # never mixed into the mistakes seen in our runs
+
+
+def test_the_label_follows_the_reproduced_flag_and_the_heading_does_not_overclaim():
+    text = oc.render(sheet_with_reported(reported(reproduced=True)))
+    assert REPORTED_HEADING not in text and "## Reported by another project" in text
+    assert "reproduced on our pin" in text and "not reproduced on our pin" not in text
+    mixed = oc.render(sheet_with_reported(reported(), reported(symptom="Second symptom.", reproduced=True)))
+    assert REPORTED_HEADING not in mixed
+    line_no = next(ln for ln in mixed.splitlines() if "A matmul gives wrong numbers" in ln)
+    line_yes = next(ln for ln in mixed.splitlines() if "Second symptom." in ln)
+    assert "not reproduced on our pin" in line_no and "not reproduced" not in line_yes and "reproduced on our pin" in line_yes
+
+
+def test_a_sheet_without_reported_entries_renders_as_before():
+    plain = oc.render(sheet_of(GOOD))
+    assert "Reported by another project" not in plain
+    empty = sheet_of(GOOD)
+    empty["reported"] = []
+    assert oc.render(empty) == plain
+
+
+def test_verify_makes_no_claim_about_reported_entries(index):
+    assert oc.verify(sheet_with_reported(reported(symptom="ttnn.nowhere does not exist.")), index) == []
+
+
+KOHAKU_NEEDLES = {
+    "inner dimension": ("K is not a multiple of 32", "padding"),
+    "embedding": ("ttnn.embedding", "row-major"),
+    "bias": ("bias", "rank"),
+    "ragged key tile": ("not a multiple of 32", "key"),
+    "pairs": ("(batch, head) pairs", "mix"),
+}
+
+
+def test_the_ttnn_sheet_lists_the_five_reported_pitfalls_each_unreproduced_and_sourced():
+    sheet = oc.load_sheet(oc.TTNN_SHEET)
+    items = sheet["reported"]
+    assert len(items) == 5
+    blob = [(" ".join([it["symptom"], it["fix"]])) for it in items]
+    for topic, needles in KOHAKU_NEEDLES.items():
+        assert sum(all(n in b for n in needles) for b in blob) >= 1, topic
+    for it in items:
+        assert it["reproduced"] is False, it["symptom"]
+        assert "Kohaku-TT" in it["source"] and "ttnn-issues" in it["source"], it["source"]
+        assert len(it["fix"]) > 60 and "our pin" in it["fix"], it["fix"]
+    assert not any(it["symptom"] in " ".join(m["symptom"] for m in sheet["mistakes"]) for it in items)    # kept out of the mistakes seen in our runs
+
+
+def test_the_rendered_ttnn_sheet_carries_the_labelled_section_and_stays_in_budget():
+    text = oc.render(oc.load_sheet(oc.TTNN_SHEET))
+    assert REPORTED_HEADING in text and len(text.splitlines()) < oc.RENDER_LINE_BUDGET
+    assert text.count("not reproduced on our pin") >= 6          # the heading and one label per entry
