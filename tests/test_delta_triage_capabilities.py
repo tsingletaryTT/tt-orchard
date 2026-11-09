@@ -72,24 +72,25 @@ def tmap(ts: dict) -> dict:
 
 
 def caps(**change) -> dict:
-    """The capabilities a Qwen4-capable bundle would declare for this toy model."""
-    c = {"schema": 1,
-         "config_keys": {
-             "num_hidden_layers": {"type": "int", "min": 1},
-             "layer_types": {"type": "list", "items": {"type": "string", "one_of": ["linear_attention", "full_attention"]},
-                             "length": "num_hidden_layers"},
-             "num_key_value_heads": {"type": "int", "one_of": [1, 2]},
-             "intermediate_size": {"type": "int", "multiple_of": 8},
-             "rope_theta": {"type": "number", "min": 1},
+    """The capabilities a Qwen4-capable bundle would declare for this toy model, in the release-day check's schema."""
+    c = {"schema": 1, "bundle": "mando2222/qwen4-27b-dense-v6-thin",
+         "model_types": ["qwen4_exp", "qwen4_exp_text"], "architectures": ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"],
+         "keys": {
+             "num_hidden_layers": {"min": 1},
+             "num_key_value_heads": {"one_of": [1, 2]},
+             "intermediate_size": {"multiple_of": 8},
+             "rope_theta": {"min": 1},
+             "hidden_size": {"equals": H},
          },
+         "features": {"indexer": "exact-up-to-2051", "mtp": "ignored", "vision": "off"},
+         "layers": {"pattern": LAYER, "count_key": "num_hidden_layers", "types_key": "layer_types",
+                    "type_values": ["linear_attention", "full_attention"]},
          "shapes": [
              {"tensor": r"^model\.layers\.\d+\.mlp\.up_proj\.weight$", "dims": {"0": "intermediate_size"}},
              {"tensor": r"^model\.layers\.\d+\.mlp\.down_proj\.weight$", "dims": {"1": "intermediate_size"}},
              {"tensor": r"^model\.layers\.\d+\.self_attn\.k_proj\.weight$", "dims": {"0": "num_key_value_heads*head_dim"}},
          ],
-         "layers": {"pattern": LAYER, "count_key": "num_hidden_layers", "types_key": "layer_types"},
-         "optional_tensors": [{"tensor": r"^model\.layers\.\d+\.self_attn\.indexer\..+$", "feature": "qsa_indexer"}],
-         "features": {"drafter": "off", "mtp": False}}
+         "optional_tensors": [{"tensor": r"^model\.layers\.\d+\.self_attn\.indexer\..+$", "feature": "qsa_indexer"}]}
     c.update(change)
     return c
 
@@ -115,21 +116,49 @@ def judge(mcfg, bcfg, mt=None, bt=None, capabilities="default"):
 def test_the_example_capabilities_are_valid():
     checked, problems = T.validate_capabilities(caps())
     assert problems == []
-    assert set(checked["config_keys"]) >= {"num_hidden_layers", "layer_types"}
+    assert set(checked["keys"]) >= {"num_hidden_layers", "num_key_value_heads"}
+
+
+# The release-day check's example file (orchard/drop_check.py EXAMPLE_CAPABILITIES on the main session's branch, 2026-11-09): stage 0
+# must accept the same file.
+DROP_CHECK_EXAMPLE = {
+    "schema": 1, "bundle": "mando2222/qwen4-27b-dense-v6-thin", "model_types": ["qwen4_exp", "qwen4_exp_text"],
+    "architectures": ["Qwen4ExpForConditionalGeneration", "Qwen4ExpForCausalLM"],
+    "keys": {"hidden_size": {"equals": 5120}, "num_attention_heads": {"equals": 24}, "head_dim": {"equals": 256},
+             "num_key_value_heads": {"one_of": [2, 4]}, "intermediate_size": {"multiple_of": 128},
+             "linear_num_key_heads": {"equals": 16}, "linear_num_value_heads": {"equals": 48},
+             "linear_key_head_dim": {"equals": 128}, "linear_value_head_dim": {"equals": 128},
+             "linear_conv_kernel_dim": {"equals": 4}, "vocab_size": {"equals": 248320}, "hc_count": {"equals": 4},
+             "hc_lowrank": {"one_of": [320, 640]}, "output_gate_type": {"one_of": ["silu", "sigmoid"]},
+             "hidden_act": {"equals": "silu"}},
+    "features": {"indexer": "exact-up-to-2051", "mtp": "ignored", "vision": "off"},
+}
+
+
+def test_the_release_day_checks_example_file_is_valid_here_too():
+    checked, problems = T.validate_capabilities(DROP_CHECK_EXAMPLE)
+    assert problems == [] and checked["keys"]["num_key_value_heads"] == {"one_of": [2, 4]}
 
 
 @pytest.mark.parametrize("change, words", [
     ({"schema": 2}, "schema"),
     ({"extra": 1}, "extra"),
-    ({"config_keys": []}, "config_keys"),
-    ({"config_keys": {"x": {"type": "float"}}}, "type"),
-    ({"config_keys": {"x": {"type": "int", "bogus": 1}}}, "bogus"),
-    ({"config_keys": {"x": {"type": "int", "multiple_of": 0}}}, "multiple_of"),
-    ({"config_keys": {"x": {"type": "int", "min": True}}}, "min"),
-    ({"config_keys": {"x": {"type": "list", "items": {"type": "nope"}}}}, "type"),
-    ({"config_keys": {"x": {"type": "list", "length": -1}}}, "length"),
-    ({"config_keys": {"x": {"type": "object", "keys": {"y": 3}}}}, "keys"),
-    ({"config_keys": {"x": "int"}}, "x"),
+    ({"keys": []}, "keys"),
+    ({"keys": {"x": {"type": "int"}}}, "keys.x"),
+    ({"keys": {"x": {}}}, "keys.x"),
+    ({"keys": {"x": "int"}}, "keys.x"),
+    ({"keys": {"x": {"one_of": 3}}}, "one_of"),
+    ({"keys": {"x": {"multiple_of": 0}}}, "multiple_of"),
+    ({"keys": {"x": {"min": True}}}, "min"),
+    ({"keys": {"x": {"max": "8"}}}, "max"),
+    ({"keys": {"a b": {"min": 1}}}, "dotted"),
+    ({"model_types": []}, "model_types"),
+    ({"architectures": "Qwen4ExpForCausalLM"}, "architectures"),
+    ({"ignored_keys": "dtype"}, "ignored_keys"),
+    ({"optional_keys": ["a b"]}, "optional_keys"),
+    ({"features": {"indexer": "sometimes"}}, "indexer"),
+    ({"features": []}, "features"),
+    ({"bundle": "no-slash"}, "bundle"),
     ({"shapes": [{"tensor": "(", "dims": {"0": "a"}}]}, "regular expression"),
     ({"shapes": [{"tensor": "a", "dims": {"x": "a"}}]}, "dimension"),
     ({"shapes": [{"tensor": "a", "dims": {"0": "a-b"}}]}, "expression"),
@@ -138,8 +167,8 @@ def test_the_example_capabilities_are_valid():
     ({"shapes": {"tensor": "a"}}, "shapes"),
     ({"layers": {"pattern": r"^model\.layers\.(\d+)\.(.+)$", "count_key": "num_hidden_layers"}}, "layer"),
     ({"layers": {"pattern": LAYER}}, "count_key"),
+    ({"layers": {"pattern": LAYER, "count_key": "num_hidden_layers", "type_values": ["full_attention"]}}, "type_values"),
     ({"optional_tensors": [{"tensor": "a"}]}, "feature"),
-    ({"features": []}, "features"),
 ])
 def test_a_malformed_file_is_refused_with_a_named_problem(change, words):
     _, problems = T.validate_capabilities(caps(**change))
@@ -151,49 +180,48 @@ def test_a_file_that_is_not_an_object_is_refused():
     assert T.validate_capabilities(None)[1]
 
 
+@pytest.mark.parametrize("missing", ["model_types", "architectures", "keys", "schema"])
+def test_each_field_the_release_day_check_requires_is_required(missing):
+    data = caps()
+    del data[missing]
+    assert T.validate_capabilities(data)[1]
+
+
 # ---- the rules -----------------------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("rule, value, ok", [
-    ({"type": "int"}, 3, True),
-    ({"type": "int"}, True, False),
-    ({"type": "int"}, 3.0, False),
-    ({"type": "int", "one_of": [2, 4]}, 4, True),
-    ({"type": "int", "one_of": [2, 4]}, 3, False),
-    ({"type": "int", "multiple_of": 32}, 17408, True),
-    ({"type": "int", "multiple_of": 32}, 17400, False),
-    ({"type": "int", "min": 1, "max": 8}, 0, False),
-    ({"type": "int", "min": 1, "max": 8}, 9, False),
-    ({"type": "number", "min": 1}, 1e7, True),
-    ({"type": "number"}, False, False),
-    ({"type": "string", "one_of": ["silu", "sigmoid"]}, "sigmoid", True),
-    ({"type": "string", "one_of": ["silu", "sigmoid"]}, "swish", False),
-    ({"type": "bool"}, False, True),
-    ({"type": "bool"}, 0, False),
-    ({"type": "any"}, {"a": [1]}, True),
-    ({"type": "list", "items": {"type": "int"}}, [1, 2], True),
-    ({"type": "list", "items": {"type": "int"}}, [1, "2"], False),
-    ({"type": "list", "length": 2}, [1], False),
-    ({"type": "object", "keys": {"rope_theta": {"type": "number"}}}, {"rope_theta": 1.0}, True),
-    ({"type": "object", "keys": {"rope_theta": {"type": "number"}}}, {"rope_theta": 1.0, "other": 1}, False),
-    ({"type": "object", "keys": {"rope_theta": {"type": "number"}}, "other_keys": "any"}, {"rope_theta": 1.0, "other": 1}, True),
-    ({"type": "object", "keys": {"rope_theta": {"type": "number"}}}, {}, False),
-    ({"type": "object", "keys": {"rope_theta": {"type": "number", "absent_ok": True}}}, {}, True),
-    ({"type": "int"}, T.ABSENT, False),
-    ({"type": "int", "absent_ok": True}, T.ABSENT, True),
-    ({"type": "any"}, T.ABSENT, False),
+    ({"equals": 4}, 4, True),
+    ({"equals": 4}, 5, False),
+    ({"equals": 1}, True, False),
+    ({"equals": "silu"}, "silu", True),
+    ({"one_of": [2, 4]}, 4, True),
+    ({"one_of": [2, 4]}, 3, False),
+    ({"one_of": ["silu", "sigmoid"]}, "swish", False),
+    ({"multiple_of": 32}, 17408, True),
+    ({"multiple_of": 32}, 17400, False),
+    ({"multiple_of": 32}, "17408", False),
+    ({"min": 1, "max": 8}, 0, False),
+    ({"min": 1, "max": 8}, 9, False),
+    ({"min": 1, "max": 8}, 8, True),
+    ({"min": 1}, 1e7, True),
+    ({"min": 1}, False, False),
+    ({"min": 1}, None, False),
+    ({"one_of": [2, 4], "max": 2}, 4, False),
+    ({"min": 1}, T.ABSENT, False),
 ])
 def test_rule_table(rule, value, ok):
-    checked, problems = T.validate_capabilities(caps(config_keys={"k": rule}))
+    checked, problems = T.validate_capabilities(caps(keys={"k": rule}))
     assert problems == [], problems
-    got = T.rule_problem(checked["config_keys"]["k"], value, cfg(layers=2, k=value))
+    got = T.rule_problem(checked["keys"]["k"], value)
     assert (got is None) is ok, got
 
 
-def test_a_list_length_follows_the_named_key_of_the_new_model():
-    checked, _ = T.validate_capabilities(caps())
-    rule = checked["config_keys"]["layer_types"]
-    assert T.rule_problem(rule, ["full_attention"] * 3, cfg(layers=3)) is None
-    assert T.rule_problem(rule, ["full_attention"] * 3, cfg(layers=4)) is not None
+def test_key_value_reads_dotted_paths_and_nested_configs():
+    nested = {"text_config": {"rope_parameters": {"rope_theta": 5.0}, "hidden_size": 8}, "model_type": "qwen4_exp"}
+    assert T.key_value(nested, "rope_parameters.rope_theta") == 5.0
+    assert T.key_value(nested, "rope_parameters.missing") == T.ABSENT
+    assert T.key_value(nested, "hidden_size.x") == T.ABSENT
+    assert T.key_value(nested, "model_type") == "qwen4_exp"
 
 
 @pytest.mark.parametrize("expr, value", [("hidden_size", H), ("hc_count*hidden_size", 4 * H), ("2*num_attention_heads*head_dim", 2 * HEADS * D),
@@ -235,7 +263,7 @@ def test_a_declared_decisive_key_within_its_rule_and_the_shapes_that_follow_it_a
 
 def test_an_undeclared_decisive_key_stays_full_port():
     data = caps()
-    del data["config_keys"]["num_key_value_heads"]
+    del data["keys"]["num_key_value_heads"]
     reasons, _ = judge(cfg(num_key_value_heads=2), cfg(), capabilities=data)
     assert any("num_key_value_heads" in r and "does not declare" in r for r in reasons), reasons
 
@@ -265,6 +293,79 @@ def test_a_bookkeeping_or_derivable_key_needs_no_declaration():
     m = cfg(transformers_version="5.19.0", _name_or_path="x")
     reasons, _ = judge(m, cfg())
     assert reasons == []
+
+
+def test_a_rule_holds_for_a_key_that_does_not_differ_too():
+    """The release-day check applies each rule to the release's value whether or not it differs; stage 0 does the same, so the two
+    cannot disagree about a release the bundle's own weights would also break."""
+    data = caps(keys={**caps()["keys"], "hidden_size": {"equals": 2 * H}})
+    reasons, _ = judge(cfg(), cfg(), capabilities=data)
+    assert any("hidden_size" in r and "outside the rule" in r for r in reasons), reasons
+
+
+def test_a_model_type_outside_model_types_stays_full_port():
+    reasons, _ = judge(cfg(model_type="qwen4_text"), cfg())
+    assert any("model_type" in r for r in reasons), reasons
+    reasons, review = judge(cfg(model_type="qwen4_text"), cfg(), capabilities=caps(model_types=["qwen4_exp_text", "qwen4_text"]))
+    assert reasons == [] and "model_type" in {x["key"] for x in review["exempted"]["config_keys"]}
+
+
+def test_a_model_type_is_checked_even_when_both_models_share_it():
+    reasons, _ = judge(cfg(), cfg(), capabilities=caps(model_types=["qwen4"]))
+    assert any("model_type" in r for r in reasons), reasons
+
+
+def test_an_architecture_the_bundle_does_not_register_stays_full_port():
+    reasons, _ = judge(cfg(architectures=["Qwen4ForCausalLM"]), cfg())
+    assert any("Qwen4ForCausalLM" in r for r in reasons), reasons
+
+
+def test_a_dotted_key_declares_one_value_inside_an_object():
+    m, b = cfg(rope_parameters={"rope_theta": 5e6, "rope_type": "default"}), cfg(rope_parameters={"rope_theta": 1e7, "rope_type": "default"})
+    reasons, _ = judge(m, b)
+    assert any("rope_parameters" in r for r in reasons), reasons                 # not declared
+    data = caps(keys={**caps()["keys"], "rope_parameters.rope_theta": {"min": 1}})
+    reasons, review = judge(m, b, capabilities=data)
+    assert reasons == [] and "rope_parameters" in {x["key"] for x in review["exempted"]["config_keys"]}
+    m2 = cfg(rope_parameters={"rope_theta": 5e6, "rope_type": "yarn"})
+    reasons, _ = judge(m2, b, capabilities=data)
+    assert any("rope_parameters.rope_type" in r for r in reasons), reasons          # another sub-key differs, not declared
+    m3 = cfg(rope_parameters={"rope_theta": 0.5, "rope_type": "default"})
+    reasons, review = judge(m3, b, capabilities=data)
+    assert any("rope_parameters.rope_theta" in r and "minimum" in r for r in reasons), reasons
+    assert "rope_parameters" not in {x["key"] for x in review["exempted"]["config_keys"]}       # not recorded as set aside
+    assert sum("rope_parameters.rope_theta" in r for r in reasons) == 1                          # and named once
+
+
+def test_ignored_keys_accept_any_value_and_absence():
+    data = caps(ignored_keys=["initializer_range"])
+    assert judge(cfg(initializer_range=0.5), cfg(initializer_range=0.02), capabilities=data)[0] == []
+    b = cfg(initializer_range=0.02)
+    m = cfg()
+    assert judge(m, b, capabilities=data)[0] == []
+    assert judge(m, b)[0]                                                          # not ignored: a difference
+
+
+def test_a_declared_key_the_new_model_lacks_needs_optional_keys():
+    b, m = cfg(full_attention_interval=4), cfg()
+    data = caps(keys={**caps()["keys"], "full_attention_interval": {"min": 1}})
+    reasons, _ = judge(m, b, capabilities=data)
+    assert any("full_attention_interval" in r and "optional_keys" in r for r in reasons), reasons
+    assert judge(m, b, capabilities={**data, "optional_keys": ["full_attention_interval"]})[0] == []
+
+
+def test_layer_types_outside_type_values_stay_full_port():
+    m = cfg(layers=2, layer_types=["linear_attention", "indexed_attention"])
+    mt = tensors(cfg(layers=2))
+    reasons, _ = judge(m, cfg(layers=2), mt=mt)
+    assert any("layer_types" in r and "type_values" in r for r in reasons), reasons
+
+
+def test_layer_types_of_the_wrong_length_stay_full_port():
+    m = cfg(layers=4)
+    m["layer_types"] = m["layer_types"][:3]
+    reasons, _ = judge(m, cfg(layers=2), mt=tensors(cfg(layers=4)))
+    assert any("layer_types" in r for r in reasons), reasons
 
 
 def test_a_shape_difference_along_an_undeclared_dimension_stays_full_port():
@@ -363,7 +464,7 @@ def test_fewer_layers_than_the_nearest_model_are_set_aside_too():
 
 def test_extra_layers_are_not_set_aside_when_the_count_is_not_declared():
     data = caps()
-    del data["config_keys"]["num_hidden_layers"]
+    del data["keys"]["num_hidden_layers"]
     reasons, _ = judge(cfg(layers=4), cfg(layers=2), capabilities=data)
     assert any("num_hidden_layers" in r for r in reasons)
     assert any("only in the new model" in r for r in reasons), reasons
@@ -504,7 +605,7 @@ def test_end_to_end_a_declared_release_is_weights_only_and_the_record_names_the_
     assert rec["sha256"] == hashlib.sha256((bundle_dir / "orchard-capabilities.json").read_bytes()).hexdigest()
     assert rec["bundle_dir"] == str(bundle_dir)
     assert {x["key"] for x in rec["exempted"]["config_keys"]} == {"num_hidden_layers", "layer_types", "num_key_value_heads"}
-    assert rec["features"] == {"drafter": "off", "mtp": False}
+    assert rec["features"] == {"indexer": "exact-up-to-2051", "mtp": "ignored", "vision": "off"}
     areas = [x for x in d["differences"] if x["area"] == "other" and "orchard-capabilities.json" in x["finding"]]
     assert areas, d["differences"]
     assert any("orchard-capabilities.json" in h["finding"] for h in d["hazards"])

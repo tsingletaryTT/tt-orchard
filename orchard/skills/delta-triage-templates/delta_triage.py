@@ -3163,43 +3163,51 @@ def detect_vocab_trim(c: dict, t: dict, sc: dict, model_dir: Path, base_dir: Pat
 
 
 # ---- the nearest bundle's capabilities (orchard-capabilities.json) -------------------------------------------------------------
-# A bundle whose model code reads the model's configuration at run time can say which differences it handles. The file sits in the
-# bundle's directory, and `nearest_bundle_dir` in triage_config.json names that directory. Its schema (docs/bundle-capabilities.md):
+# A bundle whose model code reads the model's configuration at run time can say which configurations it serves. The file sits in the
+# bundle's directory, and `nearest_bundle_dir` in triage_config.json names that directory. Schema 1 is the one the release-day check
+# (orchard/drop_check.py) reads, with fields beside it that only stage 0 uses (docs/bundle-capabilities.md):
 #
-#   {"schema": 1,
-#    "config_keys": {"<text config key>": <rule>, ...},          the keys the code reads, and the rule each new value must meet
-#    "shapes": [{"tensor": "<regex>", "dims": {"<dim>": "<expr>"}}],   tensor dimensions that follow config keys
-#    "layers": {"pattern": "<regex with (?P<layer>\d+)>", "count_key": "num_hidden_layers", "types_key": "layer_types"},
+#   {"schema": 1, "bundle": "<org>/<name>", "model_types": [...], "architectures": [...],
+#    "keys": {"<text config key>": {"equals": v} | {"one_of": [...]} | {"multiple_of": n} | {"min": n, "max": n}, ...},
+#    "features": {"indexer": "off" | "exact-up-to-2051" | "full", ...},
+#    -- read by stage 0 only:
+#    "ignored_keys": [...],        text config keys the code does not read: any value, or none, is accepted
+#    "optional_keys": [...],       keys the new model may leave out (a declared rule still applies when it has the key)
+#    "layers": {"pattern": "<regex with (?P<layer>\d+)>", "count_key": "num_hidden_layers", "types_key": "layer_types",
+#               "type_values": [...]},
+#    "shapes": [{"tensor": "<regex>", "dims": {"<dim>": "<expr>"}}],
 #    "optional_tensors": [{"tensor": "<regex>", "feature": "<name>", "shape": ["<expr>", ...]}],
-#    "features": {...},                                           recorded in delta.json, not judged here
 #    "note": "<text>"}
 #
-# A rule is {"type": "int"|"number"|"string"|"bool"|"list"|"object"|"any"} with optional "one_of", "min", "max", "multiple_of",
-# "items" (a rule, for a list), "length" (a whole number or a config key, for a list), "keys" ({sub-key: rule}, for an object),
-# "other_keys" ("any" lets an object hold keys "keys" does not name) and "absent_ok" (the new model may lack the key). An expression
-# is config keys and whole numbers joined by * and +, evaluated on that model's text config (head_dim falls back as `effective` does).
+# A rule holds one or more of equals, one_of, multiple_of, min and max, and every one it holds must be met. A key in `keys` may be a
+# dotted path into an object value ("rope_parameters.rope_theta"). An expression is config keys and whole numbers joined by * and +,
+# evaluated on that model's text config (head_dim falls back as `effective` does).
 #
-# With the file, decide_path sets aside: a differing text config key the file declares whose new value meets its rule; a shape
-# difference of a tensor a "shapes" entry matches, along declared dimensions only, when each model's size equals the expression on its
-# own config; a tensor at a layer index only one model has, when the layer count is a declared key that differs and the other model has
-# the same tensor at a layer of the same type with the same dtype and an equal shape (or one a "shapes" entry explains); and a tensor an
-# "optional_tensors" entry matches. Every other difference stays a reason, and so does every differing text config key the file does not
-# declare (bookkeeping keys and derivable defaults aside): the bundle then serves the new model's own config.json (prepare_swap.py), so a
-# key its code does not handle must not get through. A file that cannot be read or does not validate is a reason of its own. Without
-# `nearest_bundle_dir`, or with a bundle that has no file, nothing here runs.
+# With the file: every rule in `keys` must hold for the new model when it has the key; its text model_type must be one of `model_types`
+# and each of its architectures one of `architectures`. Then decide_path sets aside a differing text config key that `keys` declares (or
+# whose differing sub-keys it declares), that `ignored_keys` names, that `optional_keys` names when the new model lacks it, the
+# `layers.types_key` list when its length is the new layer count and its entries are among `type_values`, and `model_type` within
+# `model_types`; a shape difference of a tensor a "shapes" entry matches, along declared dimensions only, when each model's size equals
+# the expression on its own config; a tensor at a layer index only one model has, when the layer count is a declared key that differs
+# and the other model has the same tensor at a layer of the same type with the same dtype and an equal shape (or one a "shapes" entry
+# explains); and a tensor an "optional_tensors" entry matches. Every other difference stays a reason, and so does every differing text
+# config key the file does not cover (bookkeeping keys and derivable defaults aside): the bundle then serves the new model's own
+# config.json (prepare_swap.py), so a key its code does not handle must not get through. A file that cannot be read or does not validate
+# is a reason of its own. Without `nearest_bundle_dir`, or with a bundle that has no file, nothing here runs.
 CAPABILITIES_FILE = "orchard-capabilities.json"
 CAPABILITIES_MAX_BYTES = 256 * 1024       # choice: a capabilities file is a few kilobytes
-CAP_TOP_KEYS = ("schema", "config_keys", "shapes", "layers", "optional_tensors", "features", "note")
-CAP_RULE_TYPES = ("int", "number", "string", "bool", "list", "object", "any")
-CAP_RULE_KEYS = ("type", "one_of", "min", "max", "multiple_of", "items", "length", "keys", "other_keys", "absent_ok")
-CAP_MAX_ENTRIES = 500                     # choice: config keys, shape entries or optional tensors in one file
+CAP_TOP_KEYS = ("schema", "bundle", "model_types", "architectures", "keys", "features", "ignored_keys", "optional_keys", "layers", "shapes",
+                "optional_tensors", "note")
+CAP_RULE_NAMES = ("equals", "one_of", "multiple_of", "min", "max")      # orchard/drop_check.py RULE_NAMES
+CAP_INDEXER_FEATURES = ("off", "exact-up-to-2051", "full")              # orchard/drop_check.py INDEXER_FEATURES
+CAP_MAX_ENTRIES = 500                     # choice: keys, shape entries or optional tensors in one file
 CAP_MAX_REGEX = 500                       # choice: the longest tensor pattern accepted
 CAP_MAX_EXPR = 200                        # choice: the longest dimension expression accepted
 CAP_MAX_FACTOR = 10 ** 12                 # a config value larger than this does not take part in a dimension expression
 CAP_MAX_DIM = 10 ** 15                    # an expression whose value passes this gives nothing
-CAP_RULE_DEPTH = 8
 CAP_EXAMPLES = 20                         # set-aside tensors listed by name in delta.json; the count covers all of them
 CAP_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CAP_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 CAP_NUMBER = re.compile(r"[1-9][0-9]{0,6}")
 
 
@@ -3272,72 +3280,36 @@ def _cap_regex(text, where: str, problems: list):
         return None
 
 
-def _cap_rule(rule, where: str, problems: list, depth: int = 0) -> dict | None:
-    """A checked copy of one rule, or None with problems."""
-    if depth > CAP_RULE_DEPTH:
-        problems.append(f"{where}: rules nest more than {CAP_RULE_DEPTH} levels")
-        return None
-    if not isinstance(rule, dict):
-        problems.append(f"{where}: a rule must be an object with a type")
-        return None
-    before = len(problems)
-    unknown = sorted(k for k in rule if k not in CAP_RULE_KEYS)
-    if unknown:
-        problems.append(f"{where}: unknown rule keys {unknown}")
-    kind = rule.get("type")
-    if kind not in CAP_RULE_TYPES:
-        problems.append(f"{where}: type must be one of {list(CAP_RULE_TYPES)}, not {kind!r}")
-    out = {"type": kind, "absent_ok": rule.get("absent_ok", False)}
-    if not isinstance(out["absent_ok"], bool):
-        problems.append(f"{where}: absent_ok must be true or false")
-    if "one_of" in rule:
-        if not isinstance(rule["one_of"], list) or not rule["one_of"]:
-            problems.append(f"{where}: one_of must be a non-empty list")
-        else:
-            out["one_of"] = rule["one_of"]
-    for key in ("min", "max"):
-        if key in rule:
-            if not _cap_number(rule[key]) or kind not in ("int", "number"):
-                problems.append(f"{where}: {key} must be a number, on an int or number rule")
-            else:
-                out[key] = rule[key]
-    if "multiple_of" in rule:
-        m = rule["multiple_of"]
-        if not (isinstance(m, int) and not isinstance(m, bool) and m > 0) or kind != "int":
-            problems.append(f"{where}: multiple_of must be a whole number above 0, on an int rule")
-        else:
-            out["multiple_of"] = m
-    if "items" in rule:
-        if kind != "list":
-            problems.append(f"{where}: items belongs to a list rule")
-        else:
-            out["items"] = _cap_rule(rule["items"], f"{where}.items", problems, depth + 1)
-    if "length" in rule:
-        n = rule["length"]
-        if kind != "list" or not ((isinstance(n, int) and not isinstance(n, bool) and n >= 0) or (isinstance(n, str) and CAP_IDENT.fullmatch(n))):
-            problems.append(f"{where}: length must be a whole number of 0 or more or a config key, on a list rule")
-        else:
-            out["length"] = n
-    if "keys" in rule:
-        if kind != "object" or not isinstance(rule["keys"], dict):
-            problems.append(f"{where}: keys must be an object of rules, on an object rule")
-        else:
-            out["keys"] = {}
-            for sk, sr in rule["keys"].items():
-                got = _cap_rule(sr, f"{where}.keys.{sk}", problems, depth + 1)
-                if got is None and not any(p.startswith(f"{where}.keys.{sk}") for p in problems):
-                    problems.append(f"{where}.keys.{sk}: not a rule")
-                out["keys"][sk] = got
-    if "other_keys" in rule:
-        if kind != "object" or rule["other_keys"] not in ("any", "none"):
-            problems.append(f"{where}: other_keys must be \"any\" or \"none\", on an object rule")
-        else:
-            out["other_keys"] = rule["other_keys"]
-    return out if len(problems) == before else None
+def _cap_rule_problems(key: str, rule) -> list[str]:
+    """What is wrong with one rule of `keys`, by the release-day check's own test (orchard/drop_check.py _capabilities_problems)."""
+    if not isinstance(rule, dict) or not rule or set(rule) - set(CAP_RULE_NAMES):
+        return [f"keys.{key}: a rule must be an object with one or more of {', '.join(CAP_RULE_NAMES)}"]
+    out = []
+    if "one_of" in rule and not isinstance(rule["one_of"], list):
+        out.append(f"keys.{key}: one_of must be a list")
+    for n in ("multiple_of", "min", "max"):
+        if n in rule and not _cap_number(rule[n]):
+            out.append(f"keys.{key}: {n} must be a number")
+    if "multiple_of" in rule and _cap_number(rule["multiple_of"]) and rule["multiple_of"] <= 0:
+        out.append(f"keys.{key}: multiple_of must be above 0")
+    return out
+
+
+def _cap_names(data: dict, field: str, problems: list, *, required: bool, paths: bool = False) -> list[str]:
+    v = data.get(field)
+    if v is None and not required:
+        return []
+    pattern = CAP_PATH if paths else re.compile(r".+", re.DOTALL)
+    if (not isinstance(v, list) or (required and not v) or len(v) > CAP_MAX_ENTRIES
+            or not all(isinstance(x, str) and pattern.fullmatch(x) for x in v)):
+        problems.append(f"{field} must be a{' non-empty' if required else ''} list of {'config keys' if paths else 'names'}")
+        return []
+    return list(v)
 
 
 def validate_capabilities(data) -> tuple[dict | None, list[str]]:
-    """(the checked capabilities, problems). Any problem means the file is not used."""
+    """(the checked capabilities, problems). Any problem means the file is not used. A file the release-day check calls malformed is
+    refused here too; the fields only stage 0 reads are checked as strictly, and an unknown top-level field is refused."""
     problems: list[str] = []
     if not isinstance(data, dict):
         return None, [f"{CAPABILITIES_FILE} must be a JSON object"]
@@ -3346,15 +3318,24 @@ def validate_capabilities(data) -> tuple[dict | None, list[str]]:
         problems.append(f"unknown top-level keys {unknown}; the schema has {list(CAP_TOP_KEYS)}")
     if data.get("schema") != 1 or isinstance(data.get("schema"), bool):
         problems.append(f"schema must be 1, not {data.get('schema')!r}")
-    out = {"config_keys": {}, "shapes": [], "layers": None, "optional": [], "features": {}}
-    keys = data.get("config_keys", {})
+    if "bundle" in data and not (isinstance(data["bundle"], str) and data["bundle"].count("/") == 1):
+        problems.append("bundle must be the bundle's <org>/<name>")
+    out = {"model_types": _cap_names(data, "model_types", problems, required=True),
+           "architectures": _cap_names(data, "architectures", problems, required=True),
+           "ignored_keys": set(_cap_names(data, "ignored_keys", problems, required=False, paths=True)),
+           "optional_keys": set(_cap_names(data, "optional_keys", problems, required=False, paths=True)),
+           "keys": {}, "shapes": [], "layers": None, "optional": [], "features": {}}
+    keys = data.get("keys")
     if not isinstance(keys, dict) or len(keys) > CAP_MAX_ENTRIES:
-        problems.append(f"config_keys must be an object of at most {CAP_MAX_ENTRIES} rules")
+        problems.append(f"keys must be an object of at most {CAP_MAX_ENTRIES} rules")
     else:
         for k, rule in keys.items():
-            got = _cap_rule(rule, f"config_keys.{k}", problems)
-            if got is not None:
-                out["config_keys"][k] = got
+            got = _cap_rule_problems(k, rule)
+            if not CAP_PATH.fullmatch(k):
+                got.append(f"keys: {k[:80]!r} is not a config key or a dotted path of keys")
+            problems += got
+            if not got:
+                out["keys"][k] = rule
     shapes = data.get("shapes", [])
     if not isinstance(shapes, list) or len(shapes) > CAP_MAX_ENTRIES:
         problems.append(f"shapes must be a list of at most {CAP_MAX_ENTRIES} entries")
@@ -3380,8 +3361,8 @@ def validate_capabilities(data) -> tuple[dict | None, list[str]]:
                 out["shapes"].append({"tensor": s["tensor"], "regex": regex, "dims": checked})
     layers = data.get("layers")
     if layers is not None:
-        if not isinstance(layers, dict) or set(layers) - {"pattern", "count_key", "types_key", "note"}:
-            problems.append("layers must be an object with pattern, count_key, an optional types_key and an optional note")
+        if not isinstance(layers, dict) or set(layers) - {"pattern", "count_key", "types_key", "type_values", "note"}:
+            problems.append("layers must be an object with pattern, count_key, and optional types_key, type_values and note")
         else:
             regex = _cap_regex(layers.get("pattern"), "layers.pattern", problems)
             if regex is not None and "layer" not in regex.groupindex:
@@ -3395,8 +3376,13 @@ def validate_capabilities(data) -> tuple[dict | None, list[str]]:
             if types is not None and not (isinstance(types, str) and CAP_IDENT.fullmatch(types)):
                 problems.append("layers.types_key must name a config key")
                 types = None
+            values = layers.get("type_values")
+            if values is not None and (types is None or not isinstance(values, list) or not values
+                                       or not all(isinstance(x, str) for x in values)):
+                problems.append("layers.type_values must be a non-empty list of layer type names, with a types_key")
+                values = None
             if regex is not None and count is not None:
-                out["layers"] = {"pattern": layers["pattern"], "regex": regex, "count_key": count, "types_key": types}
+                out["layers"] = {"pattern": layers["pattern"], "regex": regex, "count_key": count, "types_key": types, "type_values": values}
     optional = data.get("optional_tensors", [])
     if not isinstance(optional, list) or len(optional) > CAP_MAX_ENTRIES:
         problems.append(f"optional_tensors must be a list of at most {CAP_MAX_ENTRIES} entries")
@@ -3419,8 +3405,8 @@ def validate_capabilities(data) -> tuple[dict | None, list[str]]:
             if regex is not None:
                 out["optional"].append({"tensor": o["tensor"], "regex": regex, "feature": feature.strip(), "shape": shape})
     features = data.get("features", {})
-    if not isinstance(features, dict):
-        problems.append("features must be an object")
+    if not isinstance(features, dict) or features.get("indexer", "off") not in CAP_INDEXER_FEATURES:
+        problems.append(f"features must be an object, and features.indexer one of {', '.join(CAP_INDEXER_FEATURES)}")
     else:
         out["features"] = features
     if "note" in data and not isinstance(data["note"], str):
@@ -3451,51 +3437,61 @@ def _same_value(a, b) -> bool:
     return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
 
-def rule_problem(rule: dict, value, new_cfg) -> str | None:
-    """None when `value` (the new model's) meets the rule, else what is wrong, as the end of a sentence."""
+def rule_problem(rule: dict, value) -> str | None:
+    """None when `value` (the new model's) meets every part of the rule, else what is wrong, as the end of a sentence. Equality keeps
+    true apart from 1 (the release-day check uses Python equality, which does not)."""
     if value == ABSENT:
-        return None if rule.get("absent_ok") else "is absent, and the rule does not allow that"
-    kind = rule["type"]
-    if kind == "int" and (not isinstance(value, int) or isinstance(value, bool)):
-        return f"is {fmt(value)}, not a whole number"
-    if kind == "number" and not _cap_number(value):
-        return f"is {fmt(value)}, not a number"
-    if kind == "string" and not isinstance(value, str):
-        return f"is {fmt(value)}, not text"
-    if kind == "bool" and not isinstance(value, bool):
-        return f"is {fmt(value)}, not true or false"
-    if kind == "list" and not isinstance(value, list):
-        return f"is {fmt(value)}, not a list"
-    if kind == "object" and not isinstance(value, dict):
-        return f"is {fmt(value)}, not an object"
+        return "is absent"
+    if "equals" in rule and not _same_value(value, rule["equals"]):
+        return f"is {fmt(value)}, and the bundle serves {fmt(rule['equals'])}"
     if "one_of" in rule and not any(_same_value(value, x) for x in rule["one_of"]):
         return f"is {fmt(value)}, not one of {fmt(rule['one_of'])}"
+    for n, words in (("multiple_of", "a multiple of"), ("min", "at least"), ("max", "at most")):
+        if n in rule and not _cap_number(value):
+            return f"is {fmt(value)}, and the bundle needs a number ({words} {fmt(rule[n])})"
+    if "multiple_of" in rule and value % rule["multiple_of"]:
+        return f"is {fmt(value)}, not a multiple of {fmt(rule['multiple_of'])}"
     if "min" in rule and value < rule["min"]:
         return f"is {fmt(value)}, below the minimum {fmt(rule['min'])}"
     if "max" in rule and value > rule["max"]:
         return f"is {fmt(value)}, above the maximum {fmt(rule['max'])}"
-    if "multiple_of" in rule and value % rule["multiple_of"]:
-        return f"is {fmt(value)}, not a multiple of {rule['multiple_of']}"
-    if kind == "list":
-        if "length" in rule:
-            want = rule["length"] if isinstance(rule["length"], int) else effective(new_cfg, rule["length"])
-            if not isinstance(want, int) or isinstance(want, bool) or len(value) != want:
-                return f"has {len(value)} entries, and the rule wants {fmt(want)}" + (f" ({rule['length']})" if isinstance(rule["length"], str) else "")
-        if rule.get("items") is not None:
-            for i, item in enumerate(value):
-                p = rule_problem(rule["items"], item, new_cfg)
-                if p:
-                    return f"has entry {i} that {p}"
-    if kind == "object":
-        for sk, sr in (rule.get("keys") or {}).items():
-            p = rule_problem(sr, value.get(sk, ABSENT), new_cfg)
-            if p:
-                return f"has {sk} that {p}"
-        if rule.get("keys") is not None and rule.get("other_keys") != "any":
-            extra = sorted(k for k in value if k not in rule["keys"])
-            if extra:
-                return f"has keys the rule does not name: {short(extra, 4)}"
     return None
+
+
+def key_value(cfg, path: str):
+    """A text config value by key or dotted path (`rope_parameters.rope_theta`), ABSENT when any part is missing."""
+    head, _, rest = path.partition(".")
+    v = effective(cfg, head) if isinstance(cfg, dict) else ABSENT
+    for part in rest.split(".") if rest else ():
+        v = v.get(part, ABSENT) if isinstance(v, dict) else ABSENT
+    return v
+
+
+def _key_covered(caps: dict, path: str, mv, bv, new_cfg) -> str | None:
+    """None when the file covers a difference of `path` (new value `mv`, nearest value `bv`), else why not. A declared rule's own test
+    comes before this (review_capabilities)."""
+    if path in caps["ignored_keys"]:
+        return None
+    if mv == ABSENT:
+        return None if path in caps["optional_keys"] else "the new model lacks it, and optional_keys does not name it"
+    if path in caps["keys"]:
+        return None
+    lay = caps["layers"]
+    if lay is not None and path == lay["types_key"]:
+        count = effective(new_cfg, lay["count_key"])
+        if not isinstance(mv, list) or not isinstance(count, int) or isinstance(count, bool) or len(mv) != count:
+            return f"it is not a list of {fmt(count)} entries ({lay['count_key']})"
+        bad = [x for x in mv if not isinstance(x, str) or (lay["type_values"] is not None and x not in lay["type_values"])]
+        return f"it has entries outside layers.type_values: {short(sorted(set(map(str, bad))), 4)}" if bad else None
+    if path == "model_type" and isinstance(mv, str) and mv in caps["model_types"]:
+        return None
+    if isinstance(mv, dict) and isinstance(bv, dict):
+        for sub in sorted(set(mv) | set(bv)):
+            a, b = mv.get(sub, ABSENT), bv.get(sub, ABSENT)
+            if not _same_value(a, b) and (why := _key_covered(caps, f"{path}.{sub}", a, b, new_cfg)) is not None:
+                return f"{path}.{sub} differs and {why}"
+        return None
+    return f"the nearest bundle's {CAPABILITIES_FILE} does not declare it"
 
 
 def _shape_explained(name: str, mshape, bshape, caps: dict, mcfg, bcfg) -> str | None:
@@ -3553,28 +3549,43 @@ def review_capabilities(caps: dict, c: dict, t: dict, mcfg, bcfg, mtensors: dict
            "exempted": {"config_keys": [], "shapes": [], "shapes_count": 0, "layer_tensors": {"count": 0, "examples": []},
                         "optional_tensors": {"count": 0, "features": {}, "examples": []}}}
     ex = out["exempted"]
-    declared = caps["config_keys"]
+    # Every rule holds where the new model has the key, as the release-day check applies them, whether or not the key differs.
+    failing = {}
+    for path, rule in caps["keys"].items():
+        mv = key_value(mcfg, path)
+        if mv != ABSENT and (why := rule_problem(rule, mv)) is not None:
+            failing[path] = (f"text config {path} {why}, outside the rule the nearest bundle's {CAPABILITIES_FILE} declares")
+    mtype = mcfg.get("model_type") if isinstance(mcfg, dict) and isinstance(mcfg.get("model_type"), str) else text_part(mcfg or {}).get("model_type")
+    if mtype not in caps["model_types"]:
+        out["other_key_reasons"].append(f"text config model_type is {fmt(mtype)}, not one of the nearest bundle's model_types "
+                                        f"{fmt(caps['model_types'])}")
+    archs = mcfg.get("architectures") if isinstance(mcfg, dict) else None
+    for a in archs if isinstance(archs, list) else []:
+        if a not in caps["architectures"]:
+            out["other_key_reasons"].append(f"the new model's architecture {fmt(a)} is not one the nearest bundle registers "
+                                            f"({fmt(caps['architectures'])})")
     derivable = {x["key"] for x in c.get("derivable_keys_ignored") or []}
     keys = [(k, True) for k in c.get("decisive_keys_differing") or []]
     keys += [(k, False) for k in c.get("text_config_diffs") or {} if k not in DECISIVE and k not in BOOKKEEPING and k not in derivable]
+    used = set()
     for k, decisive in keys:
         if decisive:
             mv, bv = c["text_key_values"][k]["model"], c["text_key_values"][k]["base"]
         else:
             mv, bv = c["text_config_diffs"][k]["model"], c["text_config_diffs"][k]["base"]
-        if k not in declared:
-            reason = (f"text config {k} differs: {fmt(mv)} vs {fmt(bv)}, and the nearest bundle's {CAPABILITIES_FILE} does not declare it")
-        else:
-            p = rule_problem(declared[k], mv, mcfg)
-            if p is None:
-                out["config_ok"].add(k)
-                ex["config_keys"].append({"key": k, "model": fmt(mv)[:200], "base": fmt(bv)[:200]})
-                continue
-            reason = f"text config {k} differs: {fmt(mv)} vs {fmt(bv)}; the nearest bundle's {CAPABILITIES_FILE} declares it, but the new value {p}"
+        broken = sorted(path for path in failing if path == k or path.startswith(k + "."))
+        why = _key_covered(caps, k, mv, bv, mcfg)
+        if not broken and why is None:
+            out["config_ok"].add(k)
+            ex["config_keys"].append({"key": k, "model": fmt(mv)[:200], "base": fmt(bv)[:200]})
+            continue
+        used.update(broken)
+        reason = failing[broken[0]] if broken else f"text config {k} differs: {fmt(mv)} vs {fmt(bv)}, and {why}"
         if decisive:
             out["config_reasons"][k] = reason
         else:
             out["other_key_reasons"].append(reason)
+    out["other_key_reasons"] += [failing[path] for path in sorted(failing) if path not in used]
     p = _pair_names(mtensors, btensors)
     mn, bn = p["mn"], p["bn"]
     for x in t["shape_diffs_normalized"]:

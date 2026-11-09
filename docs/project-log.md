@@ -4888,10 +4888,15 @@ Prompt (operator): "make sure we've updated all our literature (site, readme, et
 Prompt (from the session that runs the Qwen4 drop-in plan): implement Track C items C1 to C6. This entry covers C1 and C2. The goal is that on release
 day stage 0 classes Qwen4-27B `weights-only` against the Qwen4 thin bundle (whose development weights are a 20-layer test checkpoint) and stage 2
 serves the release with its own config.
-- A bundle may ship `orchard-capabilities.json` (`docs/bundle-capabilities.md`): the text config keys its code reads at run time with a rule per key,
-  the tensor dimensions that follow those keys (expressions of config keys), how its layers are named, and tensors it can do without. The stage 0
+- A bundle may ship `orchard-capabilities.json` (`docs/bundle-capabilities.md`). Schema 1 is the one the release-day check (`orchard/drop_check.py`,
+  the main Qwen4 session's M0 branch) reads: `model_types`, `architectures`, `keys` with `equals`/`one_of`/`multiple_of`/`min`/`max` rules, `features`.
+  Stage 0 adds top-level fields beside them that the release-day check ignores: `ignored_keys`, `optional_keys`, `layers` (layer naming, count and
+  types), `shapes` (tensor dimensions that follow config keys, as expressions) and `optional_tensors`. A key in `keys` may be a dotted path
+  (`rope_parameters.rope_theta`). The first version of this change used its own rule syntax; it was changed to the shared one at the main
+  session's request before the PR was opened. The stage 0
   template reads it when `triage_config.json` names `nearest_bundle_dir` (new, optional; the skill fills it from the run's `bundle` input) and sets
-  aside exactly the declared differences: a declared key within its rule, a shape difference along declared dimensions where both models' sizes
+  aside exactly the declared differences (every rule must also hold for keys that do not differ, and the model type and architectures must be
+  listed, as the release-day check requires): a declared key within its rule, a shape difference along declared dimensions where both models' sizes
   follow the expression, tensors at layer indices only one model has when the layer count is declared (same tensor at a layer of the same type, same
   dtype, equal or explained shape), and declared optional tensors. With the file, every other differing text config key is a full-port reason too,
   because stage 2 then serves the release's own config. A file that is a link, a FIFO, larger than 256 KiB, not strict JSON or not valid by the
@@ -4903,8 +4908,10 @@ serves the release with its own config.
   replaced by the served base config's (`base_config/` in the current form, the nearest snapshot's in the older form). `model-dir-sources.json`
   gains `config_json`. Stage 7 already packages stage 2's real config files as `base_config/`, so the package serves the same file; the card now
   says whose `config.json` it is. `prepare_model_dir.py` needed no code change.
-- Tests: `tests/test_delta_triage_capabilities.py`, `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`. 38 mutations
-  over the new guards; two survived at first (the layer-type match and the dtype check on extra layers) and each got a test; all 38 are red now.
+- Tests: `tests/test_delta_triage_capabilities.py` (it also checks that the release-day check's example file validates here),
+  `tests/test_bundle_capabilities.py`, `tests/test_prepare_swap_own_config.py`; both readers are in `tests/hostile_fs.py`. 57 mutations over the
+  new guards; three survived at first (the layer-type match, the dtype check on extra layers, and a failing dotted rule keeping its parent key out
+  of the set-aside record) and each got a test; all are red now.
 - Not done here: the run's `bundle` input is recorded by the bring-up command in the Track C item C3 change; until that lands nothing fills
   `nearest_bundle_dir` and these rules stay dormant. The Qwen4 bundle does not ship the file yet (its author writes it from the keys its code reads).
   No hardware was used.
