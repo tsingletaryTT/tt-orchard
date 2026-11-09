@@ -1,0 +1,612 @@
+{
+ "schema": 1,
+ "note": "stage 0 ops inventory of the tiny Qwen4 rehearsal model, cut to the fields the port generator reads (op, status, modules)",
+ "ops": [
+  {
+   "op": "aten.slice.Tensor",
+   "status": "mapped",
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.ple",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.select.int",
+   "status": "composable",
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.linear_attn",
+    "model.rotary_emb"
+   ]
+  },
+  {
+   "op": "aten.clone.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.mul.Tensor",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0"
+   ]
+  },
+  {
+   "op": "aten.unsqueeze.default",
+   "status": "mapped",
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.0",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.ple"
+   ]
+  },
+  {
+   "op": "aten.add.Tensor",
+   "status": "mapped",
+   "modules": [
+    "model",
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0"
+   ]
+  },
+  {
+   "op": "aten.copy_.default",
+   "status": "verified",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn",
+    "model.rotary_emb"
+   ]
+  },
+  {
+   "op": "aten.sum.dim_IntList",
+   "status": "candidate",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten._assert_tensor_metadata.default",
+   "status": "ignored",
+   "modules": [
+    "model",
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm"
+   ]
+  },
+  {
+   "op": "aten.to.dtype",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.reshape.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.norm_key",
+    "model.layers.1.ple.norm_query"
+   ]
+  },
+  {
+   "op": "aten.linear.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.input_mix_weight_down",
+    "model.layers.0.attn_hyper_connection.input_mix_weight_up",
+    "model.layers.0.attn_hyper_connection.block_inject_weight",
+    "model.layers.0.linear_attn.in_proj_qkv",
+    "model.layers.0.linear_attn.in_proj_z"
+   ]
+  },
+  {
+   "op": "aten.transpose.int",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.matmul.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.flatten.using_ints",
+   "status": "candidate",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.ple.norm_key"
+   ]
+  },
+  {
+   "op": "aten.mean.dim",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.0.mlp_hyper_connection"
+   ]
+  },
+  {
+   "op": "aten.rsqrt.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.norm_key"
+   ]
+  },
+  {
+   "op": "aten.sigmoid.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.linear_attn",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection",
+    "model.layers.1.ple"
+   ]
+  },
+  {
+   "op": "aten.exp.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.unflatten.int",
+   "status": "composable",
+   "modules": [
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.mlp_hyper_connection",
+    "model.layers.1.ple",
+    "model.layers.1.attn_hyper_connection",
+    "model.layers.1.mlp_hyper_connection"
+   ]
+  },
+  {
+   "op": "aten.pad.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.sub.Tensor",
+   "status": "mapped",
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.div.Tensor",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.mlp_hyper_connection",
+    "model.layers.1.ple",
+    "model.layers.1.attn_hyper_connection",
+    "model.layers.1.mlp_hyper_connection"
+   ]
+  },
+  {
+   "op": "aten.pow.Tensor_Scalar",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.linear_attn.norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.norm_key",
+    "model.layers.1.ple.norm_query"
+   ]
+  },
+  {
+   "op": "aten.silu.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.attn_hyper_connection",
+    "model.layers.0.linear_attn",
+    "model.layers.0.mlp_hyper_connection",
+    "model.layers.0.mlp.act_fn",
+    "model.layers.1.ple"
+   ]
+  },
+  {
+   "op": "aten.type_as.default",
+   "status": "verified",
+   "modules": [
+    "model.layers.0.attn_hyper_connection.hc_norm",
+    "model.layers.0.mlp_hyper_connection.hc_norm",
+    "model.layers.1.ple.norm_key",
+    "model.layers.1.ple.norm_query",
+    "model.layers.1.ple.norm_conv"
+   ]
+  },
+  {
+   "op": "aten.arange.default",
+   "status": "mapped",
+   "modules": [
+    "model",
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.cat.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.1.ple.ple_embedding",
+    "model.rotary_emb"
+   ]
+  },
+  {
+   "op": "aten.expand.default",
+   "status": "mapped",
+   "modules": [
+    "model",
+    "model.layers.1.ple.ple_embedding",
+    "model.rotary_emb"
+   ]
+  },
+  {
+   "op": "aten.new_full.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.view.default",
+   "status": "mapped",
+   "modules": [
+    "model",
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.__and__.Tensor",
+   "status": "verified",
+   "modules": [
+    "model",
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.ge.Scalar",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.neg.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.repeat_interleave.self_int",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.bitwise_xor.Tensor",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.clamp_min.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding",
+    "model.layers.1.ple"
+   ]
+  },
+  {
+   "op": "aten.conv1d.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.ple.conv1d",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.cumsum.default",
+   "status": "mapped",
+   "modules": [
+    "model",
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.to.dtype_layout",
+   "status": "verified",
+   "modules": [
+    "model",
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.cummax.default",
+   "status": "host",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.embedding.default",
+   "status": "mapped",
+   "modules": [
+    "model.embed_tokens",
+    "model.layers.1.ple.ple_embedding.ngram_embedding"
+   ]
+  },
+  {
+   "op": "aten.eq.Scalar",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.eye.default",
+   "status": "host",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.gather.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.index.Tensor",
+   "status": "verified",
+   "modules": [
+    "model"
+   ]
+  },
+  {
+   "op": "aten.masked_fill.Scalar",
+   "status": "verified",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.ones.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.remainder.Tensor",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.softplus.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.split_with_sizes.default",
+   "status": "verified",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.squeeze.dim",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.tril.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.triu.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.where.ScalarOther",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.where.self",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple.ple_embedding"
+   ]
+  },
+  {
+   "op": "aten.zeros.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.zeros_like.default",
+   "status": "mapped",
+   "modules": [
+    "model.layers.0.linear_attn",
+    "model.layers.1.linear_attn"
+   ]
+  },
+  {
+   "op": "aten.abs.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple"
+   ]
+  },
+  {
+   "op": "aten.alias.default",
+   "status": "ignored",
+   "modules": []
+  },
+  {
+   "op": "aten.cos.default",
+   "status": "mapped",
+   "modules": [
+    "model.rotary_emb"
+   ]
+  },
+  {
+   "op": "aten.diff.default",
+   "status": "host",
+   "modules": [
+    "model"
+   ]
+  },
+  {
+   "op": "aten.eq.Tensor",
+   "status": "mapped",
+   "modules": [
+    "model"
+   ]
+  },
+  {
+   "op": "aten.le.Tensor",
+   "status": "mapped",
+   "modules": [
+    "model"
+   ]
+  },
+  {
+   "op": "aten.ne.Scalar",
+   "status": "mapped",
+   "modules": [
+    "model"
+   ]
+  },
+  {
+   "op": "aten.new_ones.default",
+   "status": "verified",
+   "modules": [
+    "model"
+   ]
+  },
+  {
+   "op": "aten.repeat.default",
+   "status": "candidate",
+   "modules": [
+    "model"
+   ]
+  },
+  {
+   "op": "aten.sign.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple"
+   ]
+  },
+  {
+   "op": "aten.sin.default",
+   "status": "mapped",
+   "modules": [
+    "model.rotary_emb"
+   ]
+  },
+  {
+   "op": "aten.sqrt.default",
+   "status": "candidate",
+   "modules": [
+    "model.layers.1.ple"
+   ]
+  },
+  {
+   "op": "aten.to.device",
+   "status": "verified",
+   "modules": [
+    "model.rotary_emb"
+   ]
+  }
+ ]
+}

@@ -432,8 +432,17 @@ def _r_bundle_capabilities(env):
     return {hashlib.sha256(OK_BYTES).hexdigest(): "original", hashlib.sha256(DECOY_BYTES).hexdigest(): "decoy"}.get(sha, "other")
 
 
+def _r_port_sources(env):
+    """The port generator's walk of a port directory (orchard/port_template.py port_sources, behind check_port), pointed at the tree's
+    .json files so the verdict comes from what it listed and read."""
+    from orchard import port_template
+    seen = port_template.port_sources(env["root"], suffix=".json")
+    return classify_scan([tuple(rel.split("/")) for rel in seen])
+
+
 PATH_READERS: list[PathReader] = [
     PathReader("safeio.read_bytes(anchor=pin)", "pinned_read", _pinned(_r_read_bytes_anchor)),
+    PathReader("port_template.port_sources", "scan", _r_port_sources, claims_pin=False),
     PathReader("safeio.read_beneath", "pinned_read", _pinned(_r_read_beneath)),
     PathReader("Pin.read_json", "pinned_read", _pinned(_r_read_json_pin)),
     PathReader("safeio.sha256_file(anchor=pin)", "pinned_read", _pinned(_r_sha256_anchor)),
