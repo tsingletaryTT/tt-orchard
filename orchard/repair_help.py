@@ -146,14 +146,43 @@ def _last_start(entries: list[dict], n: int) -> int:
 def asks_in_stage(entries: list[dict], n: int) -> int:
     """The helper's asks in stage `n` so far: the attempt-start asks and the repair-round asks together."""
     names = (paf.ASKED, ASKED)
-    return sum(1 for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) in names)
+    count = sum(1 for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) in names)
+    return count - len(_withdrawn_asks(entries, n) | _unreached_asks(entries, n))
+
+
+def _unreached_asks(entries: list[dict], n: int) -> set[int]:
+    """The asks of stage `n`, attempt-start and repair, whose answer says the endpoint could not be reached (`paf.unreached_asks`)."""
+    return paf.unreached_asks(entries, n, ((paf.ASKED, paf.ANSWERED), (ASKED, ANSWERED)))
+
+
+def _withdrawn_asks(entries: list[dict], n: int) -> set[int]:
+    """The sequence numbers of repair asks that never reached the helper: a round whose ask found the endpoint unreachable is written as
+    withdrawn (`port_repair.WITHDRAWN`) right after its ask, and the round is taken again on resume. Such an ask spent no call, so it does not
+    count against the stage's asks and does not make the retaken round look already asked (issue 650, review of PR 651)."""
+    open_ask: dict = {}
+    failed: set[int] = set()
+    last = None
+    out: set[int] = set()
+    for e in entries:
+        if e.get("stage") != n or e.get("event") != "decision":
+            continue
+        d = _decision(e)
+        if d == ASKED:
+            last = e["seq"]
+            open_ask[_data(e).get("round")] = last
+        elif d == ANSWERED and _data(e).get("ok") is False and last is not None:
+            failed.add(last)                         # the answer to the latest ask was a failure
+        elif d == port_repair.WITHDRAWN and open_ask.get(_data(e).get("round")) in failed:
+            out.add(open_ask.pop(_data(e).get("round")))     # only an ask that failed is taken back, never an earlier round's answered one
+    return out
 
 
 def asked_in_round(entries: list[dict], n: int, k: int) -> bool:
     """True when a repair ask for round `k` was already written in the current attempt."""
     floor = _last_start(entries, n)
+    withdrawn = _withdrawn_asks(entries, n) | _unreached_asks(entries, n)
     return any(e.get("stage") == n and e.get("event") == "decision" and _decision(e) == ASKED and e["seq"] > floor
-               and _data(e).get("round") == k for e in entries)
+               and _data(e).get("round") == k and e["seq"] not in withdrawn for e in entries)
 
 
 def due(entries: list[dict], n: int, k: int, total: int = TOTAL_PER_STAGE) -> tuple[bool, str]:

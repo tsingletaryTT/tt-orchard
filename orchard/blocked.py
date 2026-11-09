@@ -26,13 +26,13 @@ from orchard.stages import STAGES
 from orchard.status import classify_pause, stage_rows
 
 REASONS = ("needs-new-model-code", "model-does-not-fit", "full-port-stages-unbuilt", "restricted-head", "scoring-route", "audio-path-unbuilt", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
-           "hardware-unhealthy", "coder-unusable", "package-missing", "stack-stale", "blocked", "unclassified")
+           "hardware-unhealthy", "coder-unusable", "package-missing", "stack-stale", "helper-unreachable", "blocked", "unclassified")
 
 # Blocks that `tt-orchard bringup` retries by itself (orchard/cli.py). A retry resumes from the ledger with a fresh
 # coder context. These three can clear on their own: a coder that did not come up, a chip or lease that settled after a
 # release, an agent that looped. A missing model, a full disk, a rule and a failed stage after escalation do not clear
 # by repeating the command, so they wait for a person.
-AUTO_RETRY = ("coder-unusable", "hardware-unhealthy", "agent-stuck")
+AUTO_RETRY = ("coder-unusable", "hardware-unhealthy", "agent-stuck", "helper-unreachable")
 
 # A hardware-unhealthy block whose text starts a chip-off-the-bus finding (orchard/bus.py `diagnose`) is not retried: the
 # board needs a power cycle or a reboot, and a retry 60 s later runs against the same board.
@@ -46,6 +46,11 @@ ALL_ONES_MARK = "all-ones"
 # The fixed start of the block text for a coder boot that was abandoned (issues 487 and 578). The classifier reads these before anything else,
 # because the text that follows holds container log lines, which can contain any word (`disk`, `chip`) the other rows look for.
 BOOT_ABORT_MARKS = ("the coder boot stalled", "the coder container exited", "the coder boot passed its deadline")
+
+
+# The fixed start of the block text for a helper (telegraph) endpoint that cannot be connected to (issue 650). The classifier reads it before any
+# other word, because the text that follows names a host and a cause. A retry starts a new supervisor, whose first ask is a fresh probe.
+HELPER_UNREACHABLE_MARK = "the helper endpoint is unreachable"
 
 
 # The fixed start of the container log lines in a coder boot abort's block text (issue 585). Everything after it is log text from the
@@ -71,6 +76,7 @@ def retryable(code: str, reason: str = "") -> bool:
 
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
 _BLOCKED_WORDS = (
+    ("helper-unreachable", (HELPER_UNREACHABLE_MARK,)),       # first: its text names a host and a cause that can hold any other row's words
     ("hardware-unhealthy", (ALL_ONES_MARK,)),                # first: the chips do not answer, whatever else the text says
     ("hardware-unhealthy", (OFF_BUS_MARK.lower(),)),         # a chip that left the bus outranks a container refusal or a boot abort found in the same text
     ("coder-unusable", BOOT_ABORT_MARKS),                    # next: the text holds container log lines

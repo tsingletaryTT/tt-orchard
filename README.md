@@ -2529,6 +2529,11 @@ max_calls_per_problem = 3                    # one problem (the id passed to ask
 # max_cost_per_problem_usd = 0.50            # and at most this much money (needs prices; the next call's worst case counts)
 # max_cost_usd = 2.0                         # needs prices for the models it may call
 # prices = { "cheap-model" = [0.25, 1.25], "strong-model" = [5.0, 25.0] }   # dollars per million tokens, input and output
+connect_timeout_s = 10                       # the TCP connect gets this long, apart from timeout_s (the wait for the reply)
+unreachable_after = 2                        # this many connection failures in a row stop the run from asking (the breaker opens)
+unreachable_action = "continue"              # the run goes on without help and keeps probing; "block" stops an unattended run (code helper-unreachable)
+unreachable_probe_s = 300                    # an open breaker lets one ask through after this long, to see whether the endpoint is back
+required = false                             # true: the preflight row blocks the start when the endpoint cannot be reached (false: it warns)
 ```
 
 The key is read when a call is made and is never written to a prompt, ledger, cache, reply file or error. A `key_file` inside the
@@ -2537,6 +2542,32 @@ checkout is refused. Requests hold only the task and the failure, with home path
 was reported as not helping. Before a request is sent, its worst-case cost is reserved in the ledger in one database transaction (the check and the reservation together), so two processes cannot spend the same allowance and a process that dies mid-request still counts. A request whose usage is unknown (a timeout, a server error, an answer with no usage) counts at that worst case. If the ledger cannot be written, no outside call is made. Keep the problem id the same across rounds of one problem, so the per-problem caps see the whole spend. On ops where a stronger
 model does not help (earlier runs on `linear_scan` spent $0.83 on one model without a fix), these caps stop the spending. A reply's `<think>` block is removed before it is stored, and an answer cut off inside its reasoning is a failed call (its tokens still
 count against the caps and it is not cached); `extra_body` is how to turn thinking off for a model that thinks by default. The reply is advice from another model and is shown marked as untrusted text; nothing runs it.
+
+**An unreachable endpoint (issue 650).** On 2026-11-09 the network behind the helper's endpoint went away. Each call then waited about seven
+minutes for the TCP connect to give up, the run kept asking, and hardware time went on repair rounds with no help. Now the connection to the
+endpoint (or to the proxy, when one is configured) gets `connect_timeout_s` (10 s), and the reply gets `timeout_s` once the connection is made.
+Only a failure to connect is an `Unreachable` answer, and only that one is recorded as costing nothing. A timeout after the request began to
+go out keeps its cost unknown, because the provider may have billed it. After `unreachable_after` connect failures in a row the breaker opens:
+the run makes no more requests and writes one ledger decision (`helper unreachable, not asking`) and one notice. By default
+(`unreachable_action = "continue"`) the run then goes on without help. A helper that is down never stops a run. The run keeps probing: an open
+breaker lets one ask through every `unreachable_probe_s` seconds, and a reply closes it, so help resumes by itself when the endpoint returns.
+Setting `unreachable_action = "block"` is an opt-in: an unattended run then stops with the block code `helper-unreachable`, which
+`bringup --auto-retries` retries like the other recoverable ones. An attended run always gets the notice and goes on.
+
+An ask that could not connect is not counted against the attempt or stage ask limits (its answer is recorded with `unreachable`), and while
+the breaker is open and its probe interval has not passed, a due ask is left unwritten. An outage therefore cannot use up the quota, and the
+first ask after the probe interval goes out. A proxy URL's own scheme decides the proxy leg: `https://` proxies get TLS to the proxy (port 443
+unless named) for an http endpoint, and an https endpoint behind an https proxy, or any proxy scheme other than http and https, is refused
+before anything is sent. The message names the proxy's host only, never its credentials.
+
+A restart does not forget the outage. The ledger holds it until a `helper reachable again` decision follows, so the first helper ask of a new
+process probes the models route first (status line only, no key, the short timeout). While the probe fails, the new process opens its breaker
+without spending a call cap and goes on without help (with `block`, it stops again with the same code). With `block`, when the stop came at
+the start of a repair round, the round is written as withdrawn (`port repair round interrupted`): the resume takes that round again and asks in it, and the failed ask does not count
+against the stage's asks.
+
+A preflight row (`helper`) makes the same status-line probe and says whether the endpoint answers. It only warns unless `required = true`, which blocks the start.
+A server that answers its status line and then stalls does not fail the row. Error text never holds the key or a header.
 
 Every call, refusal and cache hit is one record in the ledger (model, tokens, seconds, cost when a price is known, outcome). The ledger
 and the answer cache are in one SQLite database, `project.db`, in the telegraph state directory (see "The ledger database" below); before

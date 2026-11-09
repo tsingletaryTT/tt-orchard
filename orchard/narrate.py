@@ -729,6 +729,13 @@ UNBLOCK = {
         "Update the named part (the reason gives the command where one applies), then start a new run so the comparison is made again. Running "
         "the command again on this run holds the same findings as advisories and goes on with the stale stack, so do that only when you accept it. "
         "`bringup` does not retry this block by itself."],
+    "helper-unreachable": [
+        "The outside helper (the [telegraph] endpoint) could not be connected to, several times in a row, and this run's config says "
+        "`unreachable_action = \"block\"`, so it stopped here instead of repairing without help while hardware time went by.",
+        "Check the route to the endpoint (a VPN, the office network, `curl -sS -m 10 <endpoint>/models`). When it answers, run "
+        "`tt-orchard bringup <MODEL>` again: the run resumes from the ledger and its first ask is a fresh probe. `bringup --auto-retries` "
+        "tries that by itself a few times, a minute apart.",
+        "To go on without the helper (the default), remove that line or set `unreachable_action = \"continue\"` in the [telegraph] table."],
     "package-missing": [
         "A chip count that stage 4 requires has no installed bundle or container package for the nearest model. Repeating the command "
         "does not change that, so `bringup` does not retry it.",

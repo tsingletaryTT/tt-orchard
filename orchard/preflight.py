@@ -509,6 +509,27 @@ def cpu_standin_problem(endpoint: str, model: str, timeout: float = CPU_PROBE_TI
     return None
 
 
+def check_helper(problem: str | None, endpoint: str, required: bool) -> Check:
+    """The outside helper (telegraph, off unless the config enables it) has to be reachable for a bring-up that depends on it. When it is not, a
+    run that is allowed to go on without it warns, and a run whose config says `required = true` does not start (issue 650: the helper's
+    network went away mid-run and hardware time went on coder-only repair rounds)."""
+    if problem is None:
+        return Check("helper", OK, f"the helper endpoint answers: {endpoint}")
+    if required:
+        return Check("helper", BLOCK, f"the helper endpoint {endpoint} cannot be reached: {problem}. The config says the helper is required; "
+                     "restore the route to it (a VPN or the office network) and start again", "helper-unreachable")
+    return Check("helper", WARN, f"the helper endpoint {endpoint} cannot be reached: {problem}. The run can start and goes on without help "
+                 "from it, and probes again later so help resumes when the route is back")
+
+
+def helper_problem(endpoint: str, api: str, connect_timeout: float) -> str | None:
+    """Try the helper's models route with the short connect timeout and no credentials, reading the status line only: any HTTP status means the
+    host answers (a 401 is a reachable endpoint that wants a key), and a body that stalls cannot block the start. None when it answers, else
+    the cause."""
+    from orchard import telegraph as tg
+    return tg.probe_endpoint(endpoint, api, connect_timeout)
+
+
 def check_reference(python: Path | None, problem: str | None) -> Check:
     """The interpreter stage 1 runs the CPU reference with. Without one the agent looks for an interpreter
     itself, which is how an earlier run ended up installing packages into the machine's shared venv."""
@@ -1031,6 +1052,7 @@ class Signals:
     lab_status: Callable | None = None          # () -> (answered, text of the lab's `gozer status`, error)
     research: Callable | None = None            # (model_id, hub, base_override, installed) -> report dict
     cpu_standin: Callable | None = None         # (endpoint, model) -> why the CPU tier does not answer, or None
+    helper_probe: Callable | None = None        # (endpoint, api, connect_timeout) -> why the helper endpoint cannot be reached, or None
     sfpi: Callable | None = None                # (bundle name) -> (installed SFPI version, version the bundle pins)
     lab_sfpi: Callable | None = None            # () -> the lab's installed SFPI version, or None (lab mode)
     skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
@@ -1359,6 +1381,12 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             guarded("cpu", "coder-unusable", cpu)
         except Exception:
             pass
+    # The outside helper, when the config turns it on (issue 650): a short connect-and-GET, so a route that is down shows here and not hours in.
+    tele_cfg = getattr(cfg, "telegraph", None)
+    if tele_cfg is not None and getattr(tele_cfg, "enabled", False) and s.helper_probe is not None:
+        guarded("helper", "helper-unreachable",
+                lambda: check_helper(s.helper_probe(tele_cfg.endpoint, tele_cfg.api, tele_cfg.connect_timeout_s), tele_cfg.endpoint,
+                                     bool(tele_cfg.required)))
     # The coder's own boot (issue 417): its base model has to be in the cache the container mounts, and no container of the same name may
     # be left over. A text-runtime run and a lab run's kept coder start no coder here.
     if not text_route and not _kept_on_port(cfg):
@@ -1689,7 +1717,7 @@ def default_signals(cfg, research_options=None) -> Signals:
         return [(ln.split()[0], ln.split()[1] if len(ln.split()) > 1 else "") for ln in done.stdout.splitlines() if ln.split()]
 
     return Signals(
-        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus, boards=boards_sources,
+        cpu_standin=cpu_standin_problem, helper_probe=helper_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus, boards=boards_sources,
         updates_hint=updates_hint,
         installed_bundles=lambda: nearest.read_all_installed(models_root(), cfg.operator_home or supervisor.operator_home()),
         search_bundles=nearest.search,

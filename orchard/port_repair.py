@@ -37,6 +37,7 @@ MAX_ROUNDS = 10                             # the largest value the option takes
 DECISION = "port repair round"              # the ledger decision written BEFORE a round's repair step starts; `round` and `of` say which
 TESTED = "port repair tested"              # the ledger decision after each hardware test: `sources` is the digest of the port directory it ran against
 RERUN = "port repair rerun started"         # the ledger decision written just BEFORE a round's hardware rerun: `round`, and `record`, the seal of the failed test's record
+WITHDRAWN = "port repair round interrupted"   # the ledger decision that takes a round's count back: the run stopped before its repair step ran (the helper's endpoint was unreachable, issue 650); `round` says which
 STOPPED = "port repair rounds ended"        # the ledger decision that says why the rounds stopped (spent, unchanged, off)
 FAILURE_TOKEN = "PORT_CHECK_FAILURE "       # starts the structured line the template prints after `FAILED: <text>` (it starts with the template's MARK)
 OUTPUT = "evidence/hw-test-output.txt"      # the supervisor's capture of the test's output, relative to the stage directory
@@ -124,6 +125,8 @@ def rounds_used(entries: list[dict], n: int) -> int:
             used = 0
         elif e.get("event") == "decision" and data.get("decision") == DECISION:
             used += 1
+        elif e.get("event") == "decision" and data.get("decision") == WITHDRAWN:
+            used = max(0, used - 1)                    # the round was counted and never ran: a resume takes it again (review of PR 651)
     return used
 
 

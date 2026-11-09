@@ -95,6 +95,27 @@ def test_six_asks_in_the_stage_count_the_attempt_start_asks_and_the_round_asks_t
     assert ok is False and "6" in why
 
 
+def test_an_ask_that_found_the_endpoint_unreachable_and_was_withdrawn_neither_counts_nor_blocks_the_retaken_round():
+    entries = rounds("load") + [decision(5, rh.ASKED, round=1), decision(6, rh.ANSWERED, ok=False),
+                                decision(7, port_repair.WITHDRAWN, round=1)]
+    assert rh.asks_in_stage(entries, 2) == 0
+    assert rh.due(entries, 2, 1)[0] is True                       # the resume asks in round 1 again
+
+
+def test_a_withdrawn_round_does_not_take_back_an_ask_that_was_answered():
+    entries = rounds("load") + [decision(5, rh.ASKED, round=1), decision(6, rh.ANSWERED, ok=True, call_id="c1"),
+                                decision(7, port_repair.WITHDRAWN, round=1)]
+    assert rh.asks_in_stage(entries, 2) == 1 and rh.due(entries, 2, 1)[0] is False
+
+
+def test_repair_asks_that_never_reached_the_helper_do_not_count_and_do_not_make_the_round_look_asked():
+    entries = rounds("load")
+    for i in range(10):
+        entries += [decision(10 + 2 * i, rh.ASKED, round=1), decision(11 + 2 * i, rh.ANSWERED, ok=False, unreachable=True, call_id="")]
+    entries += [decision(50, paf.ASKED), decision(51, paf.ANSWERED, ok=False, unreachable=True, call_id="")]
+    assert rh.asks_in_stage(entries, 2) == 0 and rh.due(entries, 2, 1)[0] is True
+
+
 def test_another_stage_does_not_count():
     entries = [decision(i, rh.ASKED, stage=3, round=i) for i in range(1, 9)]
     assert rh.asks_in_stage(entries, 2) == 0

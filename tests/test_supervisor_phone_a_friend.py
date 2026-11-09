@@ -251,3 +251,57 @@ def test_the_ledger_counts_one_call_in_this_run_and_the_limits_are_not_exceeded(
     rig.run()
     state = paf.attempt_state(rig.entries(), 2)
     assert len(wire.requests) == state["asked_in_stage"] == 1 and state["asked_in_stage"] <= paf.PER_STAGE
+
+
+# ---- issue 650: an unreachable helper at an attempt start ---------------------------------------------------------------------------
+
+def test_an_unattended_run_whose_helper_cannot_be_reached_at_an_attempt_start_ends_blocked_with_the_helper_unreachable_code(rig, monkeypatch, tmp_path):
+    """The attempt-start ask is the other call site of the helper: attempt 1 fails, the next attempt asks, the endpoint cannot be reached."""
+    rig.args.unattended = True
+
+    class Down:
+        calls = 0
+
+        def __call__(self, url, headers, body, timeout):
+            Down.calls += 1
+            raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
+
+    wire_helper(rig, monkeypatch, tmp_path, wire=Down(), after_failures=1, unreachable_after=1, unreachable_action="block")
+    coder(rig)
+    rig.run()
+    block = [d for d in rig.decisions() if d.get("decision") == "blocked"]
+    assert len(block) == 1 and block[0]["code"] == "helper-unreachable"
+    assert Down.calls == 1 and len([d for d in rig.decisions() if d.get("decision") == "helper unreachable, not asking"]) == 1
+
+
+def test_with_the_breaker_open_an_attempt_start_writes_no_ask_and_sends_nothing_and_the_run_is_not_blocked(rig, monkeypatch, tmp_path):
+    """Review of PR 651: the default action continues, and an ask the breaker would only refuse must not be recorded as an ask (it would use up
+    the stage's quota during an outage). The probe interval has not passed (the clock stands still), so the due ask is left unwritten."""
+    rig.args.unattended = True
+    wire = Wire(helper_reply())
+    tel, _ = wire_helper(rig, monkeypatch, tmp_path, wire=wire, after_failures=1)
+    tel.hold_open()
+    coder(rig, uses_the_draft=False)
+    rig.run()
+    assert not [d for d in rig.decisions() if d.get("decision") == paf.ASKED] and not wire.requests
+    assert [d for d in rig.decisions() if d.get("decision") == paf.NOT_ASKED and "not due yet" in d.get("reason", "")]
+    assert "helper-unreachable" not in [d.get("code") for d in rig.decisions() if d.get("decision") == "blocked"]
+
+
+def test_an_attempt_start_ask_that_could_not_connect_is_not_counted_and_the_default_run_goes_on(rig, monkeypatch, tmp_path):
+    rig.args.unattended = True
+
+    class Down:
+        calls = 0
+
+        def __call__(self, url, headers, body, timeout):
+            Down.calls += 1
+            raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
+
+    wire_helper(rig, monkeypatch, tmp_path, wire=Down(), after_failures=1, unreachable_after=1)          # the default action: continue
+    coder(rig, uses_the_draft=False)
+    rig.run()
+    asks = [d for d in rig.decisions() if d.get("decision") == paf.ASKED]
+    assert len(asks) == 1 and Down.calls == 1
+    assert paf.attempt_state(rig.entries(), 2)["asked_in_stage"] == 0                                    # the ask never reached the helper
+    assert "helper-unreachable" not in [d.get("code") for d in rig.decisions() if d.get("decision") == "blocked"]

@@ -985,6 +985,75 @@ class Supervisor:
 
     # ---- small helpers ----------------------------------------------------------------------
 
+    def _helper_outage_open(self) -> bool:
+        """Does this run's ledger say the helper endpoint was unreachable and has not said it is reachable again? A restart reads it, so an
+        outage is not forgotten when the process (and its breaker) is new (issue 650, review of PR 651)."""
+        state = False
+        for e in self.ledger.read():
+            data = e.get("data") or {}
+            if e.get("event") == "decision":
+                if data.get("decision") == "helper unreachable, not asking":
+                    state = True
+                elif data.get("decision") == "helper reachable again":
+                    state = False
+        return state
+
+    def _helper_block_text(self, failures: int) -> str:
+        from orchard import blocked as blocked_mod            # imported here: blocked.py reads the stage tables this module defines
+        return (f"{blocked_mod.HELPER_UNREACHABLE_MARK}: {failures} connection attempts failed in a row "
+                f"(connect timeout {self.telegraph.cfg.connect_timeout_s} s). The run is not asking again until the endpoint answers a probe")
+
+    def _helper_gate(self, n, round=None) -> None:
+        """Before the first helper ask of a process: when the ledger says an outage began and was not cleared, probe the endpoint (the models
+        route, headers only). If it answers, say so in the ledger and go on; if it does not, the breaker is opened without spending an ask (or
+        a call cap), and an unattended run configured to block stops with the `helper-unreachable` code again. A restart therefore cannot
+        continue without help through the same outage (issue 650, review of PR 651)."""
+        tele = getattr(self, "telegraph", None)
+        if tele is None or getattr(self, "_helper_gate_done", False):
+            return
+        self._helper_gate_done = True
+        if not self._helper_outage_open():
+            return
+        problem = tele.probe()
+        if problem is None:
+            self.ledger.append("decision", n, decision="helper reachable again", why="the probe at the start of this process was answered")
+            self._helper_down_noted = False
+            return
+        tele.hold_open()
+        self._helper_down_noted = True                      # the ledger already holds the decision from before the restart
+        if self.unattended and tele.cfg.unreachable_action == "block":
+            if round is not None:
+                self.ledger.append("decision", n, decision=port_repair.WITHDRAWN, round=round, why="the helper endpoint is still unreachable")
+            self._block(n, self._helper_block_text(tele._conn_failures))
+
+    def _helper_reached(self, n, answer) -> None:
+        """After a helper ask that went out and was answered (or refused by the provider): the endpoint is reachable, so an outage the ledger
+        holds is over."""
+        if getattr(self, "_helper_down_noted", False) and getattr(answer, "call_id", "") and not getattr(answer, "unreachable", False):
+            self._helper_down_noted = False
+            self.ledger.append("decision", n, decision="helper reachable again", why="a request was answered")
+
+    def _helper_unreachable(self, n, answer, round=None) -> None:
+        """After a helper ask: when the endpoint cannot be reached and the breaker is open (orchard/telegraph.py), say so once in the ledger
+        and, in an unattended run configured to block, stop with the `helper-unreachable` code instead of repairing without help while
+        hardware time goes by (issue 650). An attended run gets the notice and goes on: the operator is watching. A helper that answered, or
+        failed any other way, changes nothing here. When the ask was made at the start of repair round `round`, the round is withdrawn from the
+        count before the block, so a resume takes the same round again and does not advance past it."""
+        tele = getattr(self, "telegraph", None)
+        if tele is None or not getattr(answer, "unreachable", False) or not tele.tripped:
+            return
+        reason = self._helper_block_text(tele._conn_failures)
+        if not getattr(self, "_helper_down_noted", False):
+            self._helper_down_noted = True
+            self.ledger.append("decision", n, decision="helper unreachable, not asking", failures=tele._conn_failures,
+                               connect_timeout_s=tele.cfg.connect_timeout_s, action=tele.cfg.unreachable_action, probe_s=tele.cfg.unreachable_probe_s)
+            self.ledger.append("notice", n, what="the helper endpoint is unreachable",
+                               detail=f"{tele._conn_failures} connection attempts failed; the run stops asking for help until a probe succeeds")
+        if self.unattended and tele.cfg.unreachable_action == "block":
+            if round is not None:
+                self.ledger.append("decision", n, decision=port_repair.WITHDRAWN, round=round, why="the helper endpoint was unreachable")
+            self._block(n, reason)
+
     def _block(self, stage, reason: str, **evidence):
         self.ledger.append("notice", stage, blocked=True, reason=reason, evidence=evidence)
         raise Blocked(reason, **evidence)
@@ -3771,6 +3840,10 @@ class Supervisor:
             return None
         from orchard import telegraph as tg
         room = self.telegraph.cfg.max_prompt_chars - len(tg.SYSTEM)
+        self._helper_gate(n)             # a restart in the middle of an outage probes first and does not spend an ask (issue 650)
+        if self.telegraph.refusing():    # the breaker is open and its probe interval has not passed: nothing is asked or written, the stage goes on
+            self._friend_refused(n, "the helper endpoint is unreachable and the next probe is not due yet")
+            return None
         # The helper cuts the middle out of a request over its `max_prompt_chars`; the entry says so, so a cap set for short advice is seen.
         self.ledger.append("decision", n, decision=phone_a_friend.ASKED, k=k, why=why, problem=phone_a_friend.problem_id(self.run_dir), inputs=sent,
                            prompt_chars=len(task) + len(failure), max_prompt_chars=self.telegraph.cfg.max_prompt_chars,
@@ -3782,10 +3855,13 @@ class Supervisor:
                                reason=f"the helper raised {exc.__class__.__name__}")
             return None
         record = {"ok": bool(answer.ok), "call_id": answer.call_id, "model": answer.model, "tokens_in": answer.tokens_in,
-                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached)}
+                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached),
+                  "unreachable": bool(getattr(answer, "unreachable", False))}
         if not answer.ok:
             self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, reason=str(answer.reason)[:300], **record)
+            self._helper_unreachable(n, answer)
             return None
+        self._helper_reached(n, answer)
         draft = phone_a_friend.extract_draft(answer.text)
         if draft is None:
             self.ledger.append("decision", n, decision=phone_a_friend.ANSWERED, **record)
@@ -4088,6 +4164,10 @@ class Supervisor:
             # reading of it: the request is not sent (review of PR 496).
             self._repair_help_refused(n, k, f"the request is {len(task) + len(fail)} characters, more than the {room} the helper's prompt cap leaves room for")
             return "", False, False
+        self._helper_gate(n, round=k)    # a restart in the middle of an outage probes first and does not spend an ask (issue 650)
+        if self.telegraph.refusing():    # the breaker is open and its probe interval has not passed: nothing is asked or written, the round goes on
+            self._repair_help_refused(n, k, "the helper endpoint is unreachable and the next probe is not due yet")
+            return "", False, False
         total = repair_help.asks_in_stage(entries, n) + 1
         sent_sha = hashlib.sha256(port_bytes).hexdigest()
         problem = phone_a_friend.problem_id(self.run_dir)
@@ -4101,10 +4181,13 @@ class Supervisor:
             self.ledger.append("decision", n, decision=repair_help.ANSWERED, ok=False, call_id="", reason=f"the helper raised {exc.__class__.__name__}")
             return "", False, True
         record = {"ok": bool(answer.ok), "call_id": answer.call_id, "model": answer.model, "tokens_in": answer.tokens_in,
-                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached)}
+                  "tokens_out": answer.tokens_out, "cost_usd": answer.cost_usd, "cached": bool(answer.cached),
+                  "unreachable": bool(getattr(answer, "unreachable", False))}
         if not answer.ok:
             self.ledger.append("decision", n, decision=repair_help.ANSWERED, reason=str(answer.reason)[:300], **record)
+            self._helper_unreachable(n, answer, round=k)
             return "", False, True
+        self._helper_reached(n, answer)
         reply = phone_a_friend.extract_draft(answer.text)
         if reply is None:
             self.ledger.append("decision", n, decision=repair_help.ANSWERED, **record)

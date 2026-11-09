@@ -30,6 +30,21 @@ def test_not_due_before_any_attempt_has_failed():
     assert not ok and "no attempt" in why
 
 
+def test_asks_that_never_reached_the_helper_do_not_count_toward_the_attempt_or_stage_limits():
+    """Review of PR 651: with an unreachable endpoint every ask was recorded as asked, and the six-ask limit ended any chance of recovery."""
+    entries = [entry(1, "stage_start", escalated=False), entry(2, "stage_end", result="fail"), entry(3, "stage_start", escalated=True)]
+    for i in range(10):
+        entries += [decision(10 + 2 * i, paf.ASKED, k=i + 1), decision(11 + 2 * i, paf.ANSWERED, ok=False, unreachable=True, call_id="")]
+    state = paf.attempt_state(entries, 2)
+    assert state["asked_in_stage"] == 0 and state["asked_in_attempt"] == 0 and paf.due(state)[0] is True
+
+
+def test_an_ask_the_provider_refused_still_counts():
+    entries = [entry(1, "stage_start", escalated=False), entry(2, "stage_end", result="fail"), entry(3, "stage_start", escalated=True),
+               decision(10, paf.ASKED, k=1), decision(11, paf.ANSWERED, ok=False, unreachable=False, call_id="")]
+    assert paf.attempt_state(entries, 2)["asked_in_stage"] == 1
+
+
 def test_due_after_a_failed_attempt_and_the_reason_says_a_watchdog_ended_it():
     entries = [entry(1, "stage_start", escalated=False), entry(2, "escalate", **WATCHDOG_ESCALATE),
                entry(3, "stage_end", result="escalate", reasons=["x"]), entry(4, "stage_start", escalated=True)]

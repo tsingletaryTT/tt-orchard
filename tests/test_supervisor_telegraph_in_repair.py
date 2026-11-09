@@ -361,3 +361,180 @@ def test_a_reply_with_no_usable_code_is_reported_as_not_helped_even_when_the_cod
     assert stage_ends(rig) == ["pass"]
     verdicts = decs(rig, rh.PROGRESS)
     assert verdicts and all(v["helped"] is False and v["outcome"].startswith("unusable reply") and why in v["outcome"] for v in verdicts), verdicts
+
+
+# ---- issue 650: an unreachable helper -----------------------------------------------------------------------------------------------
+
+class _Down:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, url, headers, body, timeout):
+        self.calls += 1
+        raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
+
+
+def _down_helper(monkeypatch, tmp_path, **kw):
+    down = _Down()
+    cfg = tg.load(table(models=["helper-model"], prices={"helper-model": [3.0, 15.0]}, max_calls_per_problem=8, max_calls=20, unreachable_after=1, **kw),
+                  base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=down, environ={"TG_KEY": KEY}, clock=lambda: 1000.0, hostname="node9", home="/home/someone")
+    monkeypatch.setattr(sv, "_telegraph_from", lambda *a, **k: tel)
+    return tel, down
+
+
+def test_an_unattended_run_whose_helper_cannot_be_reached_ends_blocked_with_the_helper_unreachable_code(rig, monkeypatch, tmp_path):
+    rig.args.unattended = True
+    tel, down = _down_helper(monkeypatch, tmp_path, unreachable_action="block")
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    assert rig.run() == sv.EXIT_BLOCKED
+    block = [d for d in rig.decisions() if d.get("decision") == "blocked"]
+    assert len(block) == 1 and block[0]["code"] == "helper-unreachable" and "unreachable" in block[0]["reason"]
+    assert len(decs(rig, "helper unreachable, not asking")) == 1 and down.calls == 1
+    # The block comes from the repair round that made the first ask, in the first attempt: the stage never ended or escalated first (a hook
+    # missing from this call site would let the attempt end and block at the next attempt's start instead).
+    assert rig.ends(2) == [] and len(decs(rig, rh.ASKED)) == 1
+
+
+def test_by_default_an_unattended_run_goes_on_without_the_helper_and_asks_no_more(rig, monkeypatch, tmp_path):
+    rig.args.unattended = True
+    tel, down = _down_helper(monkeypatch, tmp_path)
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    rig.run()
+    assert not [d for d in rig.decisions() if d.get("decision") == "blocked" and d.get("code") == "helper-unreachable"]
+    assert len(decs(rig, "helper unreachable, not asking")) == 1 and down.calls == 1      # the breaker kept every later ask off the wire
+    assert "helper-unreachable" not in _block_codes(rig)                                  # a helper that is down never stops the run (operator, 2026-11-09)
+
+
+def test_a_restart_in_an_outage_with_the_default_action_probes_first_then_goes_on_without_spending_the_call_caps(rig, monkeypatch, tmp_path):
+    rig.args.unattended = True
+    state = {"up": False}
+    _fresh_helper(monkeypatch, tmp_path, state)                              # the default action: continue
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    rig.run(pid=100)
+    assert state["calls"] == 1 and len(decs(rig, "helper unreachable, not asking")) == 1
+    rig.run(pid=101)
+    assert "helper-unreachable" not in _block_codes(rig)
+    assert state["calls"] == 1 and state["probes"] >= 1                      # the restart probed, and no request went out while it was down
+
+
+def _fresh_helper(monkeypatch, tmp_path, state, **kw):
+    """A helper whose transport and probe follow `state` (state['up'] switches the endpoint on), and a NEW Telegraph (a new breaker) for every
+    supervisor process, as a restart makes one."""
+    state.setdefault("calls", 0)
+    state.setdefault("probes", 0)
+
+    def transport(url, headers, body, timeout):
+        state["calls"] += 1
+        if not state["up"]:
+            raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
+        return 200, json.dumps(openai_reply(f"Here is the corrected port.\n```python\n{HONEST}\n```\n", 1200, 400)).encode()
+
+    def prober(url, headers, timeout, connect_timeout=None):
+        state["probes"] += 1
+        if not state["up"]:
+            raise tg.Unreachable("cannot connect to llm.example.org:443: timed out after 10 s")
+        return 200
+
+    def clock():
+        state["now"] = state.get("now", 1000.0) + state.get("tick", 0.0)
+        return state["now"]
+
+    def factory(*a, **k):
+        cfg = tg.load(table(models=["helper-model"], prices={"helper-model": [3.0, 15.0]}, max_calls_per_problem=8, max_calls=20,
+                            unreachable_after=1, **kw), base=tmp_path)
+        return tg.Telegraph(cfg, tmp_path / "tg", transport=transport, prober=prober, environ={"TG_KEY": KEY}, clock=clock,
+                            hostname="node9", home="/home/someone")
+
+    monkeypatch.setattr(sv, "_telegraph_from", factory)
+
+
+def test_refused_asks_during_an_outage_do_not_use_up_the_quota_and_the_first_ask_after_the_endpoint_returns_goes_through(rig, monkeypatch, tmp_path):
+    """Review of PR 651: the default action continues, and every refused ask used to be recorded as asked, so ten rounds in an outage spent the
+    six-ask stage limit and the helper could not come back."""
+    rig.args.unattended = True
+    rig.args.port_repair_rounds = 10
+    state = {"up": False}
+    _fresh_helper(monkeypatch, tmp_path, state)                              # the default action: continue; the clock stands still
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN + f"\n# change {i}\n"} for i in range(10)])
+    rig.run(pid=100)
+    rounds = [d for d in rig.decisions() if d.get("decision") == port_repair.DECISION]
+    assert len(rounds) >= 7                                                  # the rounds went on without the helper
+    assert state["calls"] == 1                                               # one real attempt; the breaker kept every other ask off the wire
+    assert len(decs(rig, rh.ASKED)) == 1                                     # and no ask was written for a refusal the breaker made by itself
+    assert "helper-unreachable" not in _block_codes(rig)
+    entries = rig.entries()
+    assert rh.asks_in_stage(entries, 2) == 0                                 # nothing the helper never saw is counted
+    assert not [d for d in rig.decisions() if "already asked" in str(d.get("reason", ""))]
+    # The endpoint returns and the probe interval passes: the next ask goes through.
+    state["up"] = True
+    state["now"] = state.get("now", 1000.0) + 10_000
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run(pid=101)
+    assert state["calls"] >= 2 and len(decs(rig, rh.ANSWERED)) >= 2
+
+
+def _block_codes(rig):
+    return [d.get("code") for d in rig.decisions() if d.get("decision") == "blocked"]
+
+
+def test_a_restart_in_the_middle_of_an_outage_probes_first_blocks_again_without_asking_and_goes_on_when_the_endpoint_is_back(rig, monkeypatch, tmp_path):
+    """Review of PR 651: the breaker is new in a new process, so a restart must not forget the outage and spend its caps without help."""
+    rig.args.unattended = True
+    state = {"up": False}
+    _fresh_helper(monkeypatch, tmp_path, state, unreachable_action="block")
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    assert rig.run(pid=100) == sv.EXIT_BLOCKED
+    assert _block_codes(rig) == ["helper-unreachable"] and state["calls"] == 1
+    # The second process: the ledger holds the outage, the probe fails, no ask goes out, the run blocks with the same code.
+    assert rig.run(pid=101) == sv.EXIT_BLOCKED
+    assert _block_codes(rig) == ["helper-unreachable", "helper-unreachable"] and state["calls"] == 1 and state["probes"] == 1
+    assert len(decs(rig, "helper unreachable, not asking")) == 1               # the outage is one event, not one per restart
+    # The third process: the endpoint is back, the probe is answered, and the run asks.
+    state["up"] = True
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run(pid=102)
+    assert len(decs(rig, "helper reachable again")) == 1 and state["calls"] >= 2
+    assert _block_codes(rig)[:2] == ["helper-unreachable"] * 2 and "helper-unreachable" not in _block_codes(rig)[2:]     # later blocks, if any, are the stage's own
+
+
+def test_a_round_interrupted_by_the_outage_is_taken_again_after_the_restart_and_not_skipped(rig, monkeypatch, tmp_path):
+    """Review of PR 651: the round's decision is written before its ask; a block at the ask must not make the resume advance to the next round
+    (or end the stage when it was the last allowed round)."""
+    rig.args.unattended = True
+    rig.args.port_repair_rounds = 1                                         # the only round: skipping it would end the repair rounds as spent
+    state = {"up": False}
+    _fresh_helper(monkeypatch, tmp_path, state, unreachable_action="block")
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    assert rig.run(pid=100) == sv.EXIT_BLOCKED
+    assert port_repair.rounds_used(rig.entries(), 2) == 0                   # the interrupted round is taken back
+    state["up"] = True
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    rig.run(pid=101)
+    rounds = [d for d in rig.decisions() if d.get("decision") == port_repair.DECISION]
+    assert [d["round"] for d in rounds][:2] == [1, 1] and {d["round"] for d in rounds} == {1}   # round 1 again, never a round 2
+    assert not [d for d in rig.decisions() if d.get("decision") == port_repair.STOPPED and d.get("reason") == "spent"]
+    assert [d for d in rig.decisions() if d.get("decision") == port_repair.WITHDRAWN][0]["round"] == 1
+    assert len(decs(rig, rh.ANSWERED)) >= 1 and state["calls"] >= 2
+
+
+def test_the_retaken_round_asks_the_helper_again_and_a_restart_in_a_continuing_outage_blocks_at_that_ask(rig, monkeypatch, tmp_path):
+    """Review of PR 651: the interrupted round's ask is withdrawn, so the resume is due to ask in that round (it must not see the round as
+    already asked and go on without help), and the probe at that ask finds the outage still open."""
+    rig.args.unattended = True
+    rig.args.port_repair_rounds = 1
+    state = {"up": False}
+    _fresh_helper(monkeypatch, tmp_path, state, unreachable_action="block")
+    make(rig, over={(2, "prepare"): {**PREPARE, PORT: BROKEN}})
+    repairs(rig, [{PORT: BROKEN}])
+    assert rig.run(pid=100) == sv.EXIT_BLOCKED
+    assert rig.run(pid=101) == sv.EXIT_BLOCKED                              # still down: the second process blocks too
+    assert _block_codes(rig) == ["helper-unreachable"] * 2 and state["calls"] == 1 and state["probes"] == 1
+    assert not decs(rig, rh.NOT_ASKED)                                       # the round was due to ask: it never went on without the helper
+    assert [d["round"] for d in rig.decisions() if d.get("decision") == port_repair.WITHDRAWN] == [1, 1]

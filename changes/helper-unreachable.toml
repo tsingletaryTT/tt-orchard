@@ -1,0 +1,3 @@
+target = "0.9.142"
+summary = "An unreachable helper endpoint fails fast (a separate connect timeout) and opens a breaker; the run goes on without help and keeps probing. unreachable_action = \"block\" is an opt-in that stops an unattended run with helper-unreachable. A preflight row warns (issue 650)."
+pr = 651

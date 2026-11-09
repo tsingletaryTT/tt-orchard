@@ -96,6 +96,25 @@ def _decision(entry: dict) -> str | None:
     return d if isinstance(d, str) else None
 
 
+def unreached_asks(entries: list[dict], n: int, pairs) -> set[int]:
+    """The sequence numbers of asks in stage `n` that never reached the helper: the answer that follows the ask says `unreachable` (the
+    connection could not be made, so nothing was sent and nothing was spent). `pairs` are (ask name, answer name) decision names. Such an ask
+    does not count against the attempt or stage limits, so an outage cannot use up the quota and the helper can be asked again when the endpoint
+    returns (issue 650, review of PR 651)."""
+    answer_of = {a: k for k, a in pairs}
+    last: dict = {}
+    out: set[int] = set()
+    for e in entries:
+        if e.get("stage") != n or e.get("event") != "decision":
+            continue
+        name = _decision(e)
+        if name in dict(pairs):
+            last[name] = e["seq"]
+        elif name in answer_of and _data(e).get("unreachable") is True and answer_of[name] in last:
+            out.add(last[answer_of[name]])
+    return out
+
+
 def attempt_state(entries: list[dict], n: int) -> dict:
     """What the ledger says about stage `n` for the question "is the helper due": the failed attempts, whether the latest one ended in a
     watchdog escalation, and how many calls the stage and the current attempt have had.
@@ -122,7 +141,8 @@ def attempt_state(entries: list[dict], n: int) -> dict:
             if (e.get("stage") == n and e.get("event") in ("escalate", "pause") and floor < e["seq"] < end["seq"]
                     and "findings" in _data(e) and _data(e).get("by") != "stage machine"):
                 watchdog_ended = True
-    asked = [e for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == ASKED]
+    void = unreached_asks(entries, n, ((ASKED, ANSWERED),))
+    asked = [e for e in entries if e.get("stage") == n and e.get("event") == "decision" and _decision(e) == ASKED and e["seq"] not in void]
     return {"failed": len(failed_ends), "watchdog_ended": watchdog_ended, "asked_in_stage": len(asked),
             "asked_in_attempt": sum(1 for e in asked if e["seq"] > last_start), "last_start": last_start}
 
