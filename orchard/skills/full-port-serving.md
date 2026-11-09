@@ -47,6 +47,13 @@ the file to be the same, and it recomputes the replay's top-1 agreement with the
 - **Canary.** The corpus prompt asked, a different prompt asked, then the first prompt again. The ids of the two asks must be the same and must be the
   first ids of the accepted port's free run.
 
+**A model that thinks (issue 641).** The template reads the chat template's text. When it has an `enable_thinking` switch the passkey prompts are
+rendered with thinking off and the answer limit is 64 tokens. When it opens a `<think>` block and has no switch, thinking stays on, the limit is 512
+tokens and the answer is read after the closing `</think>` tag; a key inside the thinking block does not count. A reply that never closes the block was
+cut at the limit and says nothing about the port: the record then reads `passkey_status` "not-applicable", `coherent` is null, and the gate does not
+fail the stage for it. A model that does not think, or a request made with thinking off, still fails when a complete answer holds no key. The record's
+`passkey.thinking` section says which of these ran.
+
 ## The rehearsal option
 
 `--full-port-rehearsal` waives the field `coherent` and nothing else. In this stage `coherent` means that the passkey was answered at every length. A

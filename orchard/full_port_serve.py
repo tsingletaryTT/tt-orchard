@@ -228,6 +228,46 @@ def plan_passkeys(corpus_sha: str, max_len: int) -> list[dict]:
     return out
 
 
+# What the template recorded about the model's thinking (issue 641). `template_thinks`: the chat template opens a thinking block. `switch`: the
+# name of the template variable that turns it off. `off`: the passkey prompts were rendered with it off. `max_tokens`: the answer limit used.
+NO_THINKING = {"template_thinks": False, "switch": None, "off": False, "max_tokens": 12}
+THINK_CLOSE = "</think>"
+_SWITCH_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,40}")
+
+
+def thinking_of(section) -> dict:
+    """The thinking facts of the record's passkey section, or NO_THINKING when the section lacks them or they are not of the right types (a record
+    from before issue 641, or a damaged one, is read as a model that does not think, so a missing key still fails)."""
+    got = section.get("thinking") if isinstance(section, dict) else None
+    if not (isinstance(got, dict) and isinstance(got.get("template_thinks"), bool) and isinstance(got.get("off"), bool)
+            and (got.get("switch") is None or (isinstance(got.get("switch"), str) and _SWITCH_NAME.fullmatch(got["switch"])))
+            and _int(got.get("max_tokens"), 1) and got["max_tokens"] <= 4096):
+        return dict(NO_THINKING)
+    return {"template_thinks": got["template_thinks"], "switch": got["switch"], "off": got["off"], "max_tokens": got["max_tokens"]}
+
+
+def passkey_answers(runs, thinking) -> tuple[list[bool], str]:
+    """(answered, status) for the passkey runs, recomputed from the answer texts. A model whose chat template thinks, asked with thinking left on,
+    is read after its closing tag: a key inside the thinking block does not count, and a reply that never closes the block was cut at the answer
+    limit and says nothing about the port. `status` is "answered" (every key found), "not-applicable" (every key not found sits in a reply cut
+    inside the thinking block) or "failed" (a key is missing from a reply that was complete, or from a model that does not think)."""
+    reads = thinking.get("template_thinks") is True and thinking.get("off") is not True
+    answered, cut = [], []
+    for r in runs:
+        text = r["answer_text"] if isinstance(r, dict) and isinstance(r.get("answer_text"), str) else ""
+        key = r.get("key") if isinstance(r, dict) else None
+        closed = THINK_CLOSE in text
+        body = text.rsplit(THINK_CLOSE, 1)[1] if (reads and closed) else text
+        ok = isinstance(key, str) and bool(key) and not (reads and not closed) and key in body
+        answered.append(ok)
+        cut.append(reads and not closed)
+    if answered and all(answered):
+        return answered, "answered"
+    if answered and all(c for a, c in zip(answered, cut) if not a):
+        return answered, "not-applicable"
+    return answered, "failed"
+
+
 def max_len_of(snapshot) -> int:
     """The server's context limit: `max_position_embeddings` from the snapshot's config.json (or its text_config), else DEFAULT_MAX_LEN."""
     try:
@@ -489,9 +529,10 @@ def _replay_reasons(record, corpus, reasons) -> dict | None:
     return {"positions": total, "matched": matched, "agreement": agreement, "reference_positions": ref_total}
 
 
-def _passkey_reasons(record, corpus_sha256, stage_dir, reasons) -> tuple[list[bool], bool] | None:
+def _passkey_reasons(record, corpus_sha256, stage_dir, reasons) -> tuple[list[bool], bool, str] | None:
     """The passkey runs: the keys are the planned ones, each prompt was measured by the server, each ran twice with the same ids. Returns, for
-    each run, whether the answer holds the key (recomputed from the answer text), and whether every run gave the same ids twice."""
+    each run, whether the answer holds the key (recomputed from the answer text, read after the thinking block for a model that thinks), whether
+    every run gave the same ids twice, and the status `passkey_answers` gives."""
     section = record.get("passkey")
     runs = section.get("runs") if isinstance(section, dict) else None
     if not isinstance(runs, list) or len(runs) < PASSKEY_LENGTHS_MIN:
@@ -507,14 +548,12 @@ def _passkey_reasons(record, corpus_sha256, stage_dir, reasons) -> tuple[list[bo
         planned = plan_passkeys(corpus_sha256, cfg["max_len"])
         if cfg.get("passkeys") != planned:
             reasons.append(f"{CONFIG_NAME} passkeys are not the ones the corpus's hash and the context limit give")
-    answered: list[bool] = []
     lengths = []
     same_twice = True
     for i, r in enumerate(runs):
         if not (isinstance(r, dict) and _int(r.get("length"), 1) and isinstance(r.get("key"), str) and isinstance(r.get("answer_text"), str)
                 and full_port._ids(r.get("ids_first")) and full_port._ids(r.get("ids_second")) and _int(r.get("prompt_tokens"), 1)):
             reasons.append(f"passkey.runs[{i}] needs length, key, answer_text, prompt_tokens, ids_first and ids_second")
-            answered.append(False)
             same_twice = False
             continue
         lengths.append(r["length"])
@@ -525,7 +564,7 @@ def _passkey_reasons(record, corpus_sha256, stage_dir, reasons) -> tuple[list[bo
         if not r["ids_first"] or r["ids_first"] != r["ids_second"]:
             same_twice = False
             reasons.append(f"passkey.runs[{i}] (length {r['length']}): the same prompt gave different ids the second time, or none")
-        answered.append(bool(r["key"]) and r["key"] in r["answer_text"])
+    answered, status = passkey_answers([r if isinstance(r, dict) else {} for r in runs], thinking_of(section))
     if len(set(lengths)) < PASSKEY_LENGTHS_MIN:
         reasons.append(f"passkey.runs must cover at least {PASSKEY_LENGTHS_MIN} different lengths")
     # Two planned lengths are two lengths only when the server measured two different prompts. With a small context the filler comes out the
@@ -536,7 +575,7 @@ def _passkey_reasons(record, corpus_sha256, stage_dir, reasons) -> tuple[list[bo
                        f"at least {PASSKEY_LENGTHS_MIN} different measured prompt lengths are needed")
     if planned is not None and sorted(lengths) != sorted(p["length"] for p in planned):
         reasons.append("passkey.runs do not cover the planned lengths")
-    return answered, same_twice
+    return answered, same_twice, status
 
 
 def _canary_reasons(record, corpus, reasons) -> None:
@@ -561,16 +600,25 @@ def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons, r
     """result.json is the supervisor's copy of the record: each field is recomputed here."""
     if result.get("serves") is not True:
         reasons.append(f"serves must be true (the server reached its readiness line after the corpus replay), got {result.get('serves')!r}")
-    answered, same_twice = passkey if passkey is not None else (None, False)
-    want_coherent = bool(answered) and all(answered)
+    answered, same_twice, status = passkey if passkey is not None else (None, False, None)
+    # `coherent` is true when every key was found, null when the passkey could not be judged (a thinking model's replies were all cut inside the
+    # thinking block: issue 641) and false otherwise.
+    want_coherent = None if status == "not-applicable" else (bool(answered) and all(answered))
     if result.get("coherent") is not want_coherent:
         reasons.append(f"result.json coherent {result.get('coherent')!r} differs from the {want_coherent!r} the gate recomputed from the passkey answers")
-    if not want_coherent:
+    if status is not None and result.get("passkey_status") not in (None, status):
+        reasons.append(f"result.json passkey_status {result.get('passkey_status')!r} differs from the {status!r} the gate recomputed")
+    if status == "not-applicable" and result.get("passkey_status") != status:
+        reasons.append("result.json must say passkey_status 'not-applicable' when the replies were cut inside the thinking block")
+    if want_coherent is False:
+        runs_in = (record.get("passkey") or {}).get("runs") if isinstance(record, dict) and isinstance(record.get("passkey"), dict) else None
+        lacking = [r.get("length") for r, ok in zip(runs_in or [], answered or []) if isinstance(r, dict) and not ok]
         if rehearsal:
             if waived is not None:
                 waived.append("coherent")
         else:
-            reasons.append("coherent must be true (the passkey was answered at every length): a server that cannot find a key in its own context is not serving the model")
+            reasons.append(f"coherent must be true (the passkey was answered at every length): at length(s) {lacking or 'unknown'} the answer is complete and "
+                           "holds no key, so the server did not find a key in its own context")
     if isinstance(boot, dict):
         for key in ("load_s", "ready_s"):
             if result.get(key) != boot.get(key):
@@ -609,9 +657,10 @@ def _result_reasons(result, boot, replay, passkey, rehearsal, waived, reasons, r
         if checks["corpus"].get("pass") is not (replay["matched"] == replay["positions"]):
             reasons.append("result.json checks.corpus.pass differs from whether every position matched")
     if isinstance(checks, dict) and isinstance(checks.get("passkey"), dict) and answered is not None:
-        want = bool(answered) and (all(answered) or rehearsal) and same_twice
+        want = bool(answered) and (all(answered) or status == "not-applicable" or rehearsal) and same_twice
         if checks["passkey"].get("pass") is not want:
-            reasons.append("result.json checks.passkey.pass differs from the answers (true when every key was answered, or under the rehearsal option)")
+            reasons.append("result.json checks.passkey.pass differs from the answers (true when every key was answered, when the replies were cut "
+                           "inside a thinking block, or under the rehearsal option)")
     if result.get("derived_by") != "supervisor":
         reasons.append("result.json is not the supervisor's derived file (derived_by)")
 
@@ -677,7 +726,7 @@ def derive(stage_dir, run_dir, *, rehearsal: bool = False) -> tuple[dict | None,
             raise ValueError("the teacher-forced reference is empty")  # agreement() divides by its length (review of PR 490, round 6)
         agreement = full_port.agreement(tf["reference_ids"], entries[tf["id"]]) if len(entries[tf["id"]]) == len(tf["reference_ids"]) else 0.0
         runs = passkey["runs"]
-        answered = [isinstance(r["key"], str) and bool(r["key"]) and r["key"] in r["answer_text"] for r in runs]
+        answered, status = passkey_answers(runs, thinking_of(passkey))
         deterministic = all(r["ids_first"] == r["ids_second"] and r["ids_first"] for r in runs)
         free = next(e for e in expected.values() if e["kind"] == "free-run")["expected_ids"]
         canary_ok = canary["first_ids"] == canary["second_ids"] and canary["first_ids"] == free[:len(canary["first_ids"])] and bool(canary["first_ids"])
@@ -689,12 +738,13 @@ def derive(stage_dir, run_dir, *, rehearsal: bool = False) -> tuple[dict | None,
         return None, "the record or the corpus does not have the shape the template writes"
     base = [os.path.relpath(stage_dir / RECORD_FILE, run_dir), os.path.relpath(stage_dir / OUTPUT_FILE, run_dir), os.path.relpath(stage_dir / CORPUS_NAME, run_dir)]
     all_answered = bool(answered) and all(answered)
-    return ({"serves": True, "coherent": all_answered, "load_s": boot.get("load_s"), "ready_s": boot.get("ready_s"), "ready_line": boot.get("ready_line"),
+    coherent = None if status == "not-applicable" else all_answered
+    return ({"serves": True, "coherent": coherent, "passkey_status": status, "load_s": boot.get("load_s"), "ready_s": boot.get("ready_s"), "ready_line": boot.get("ready_line"),
              "kernel_cache_warm": cache.get("warm"), "corpus_positions": total, "corpus_matched": matched, "corpus_reference_agreement": agreement,
              "passkey_lengths": lengths, "passkey_answered": answered,
              "checks": {"boots": {"pass": True, "seconds": boot.get("ready_s"), "evidence": base},
                         "corpus": {"pass": matched == total, "positions": total, "matched": matched, "evidence": base},
-                        "passkey": {"pass": bool(answered) and (all_answered or rehearsal) and deterministic, "lengths": lengths,
+                        "passkey": {"pass": bool(answered) and (all_answered or status == "not-applicable" or rehearsal) and deterministic, "lengths": lengths,
                                     "answered": answered, "evidence": base},
                         "canary": {"pass": canary_ok, "evidence": base}},
              "evidence": base, "derived_by": "supervisor", "limits": LIMITS,

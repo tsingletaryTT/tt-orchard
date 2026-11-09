@@ -274,6 +274,12 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
         if got < TOP1_MIN and not (_num(top1) and top1 < TOP1_MIN):
             reasons.append(f"top1_agreement recomputed from the record is {got:.4f}, below the minimum of {TOP1_MIN}")
 
+    # ---- a sparse attention the check did or did not exercise (issue 638) ----
+    if stage == 2 and entry is None and _ids(chip_ids) and chip_ids:
+        facts, prompt_n = _facts_of(stage_dir), _prompt_tokens(run_dir)
+        if facts is not None and prompt_n is not None:
+            reasons.extend(indexer_reasons(result, facts, prompt_tokens=prompt_n, generated=len(chip_ids)))
+
     # ---- prefill starts a request afresh (issue 363) ----
     # The TT vLLM plugin gives a freed decode slot to a new request and expects prefill to initialise that request's state. The check
     # calls prefill on the same prompt twice, so the two first ids must be equal. A port that keeps state across prefills would be
@@ -361,6 +367,72 @@ def _template_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: lis
     free = record.get("free_run_ids")
     if not _ids(free) or not free:
         reasons.append(f"{RECORD_FILE} free_run_ids must be a non-empty list of whole numbers")
+
+
+def sparse_budget(facts) -> tuple[int, str] | None:
+    """(the number of tokens beyond which a sparse attention selects, its name) from the port facts' `sparse_attention`, or None."""
+    sparse = facts.get("sparse_attention") if isinstance(facts, dict) else None
+    if not isinstance(sparse, dict):
+        return None
+    key = {"qsa-indexer": "budget", "sliding-window": "window"}.get(sparse.get("kind"))
+    value = sparse.get(key) if key else None
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 10 ** 9:
+        return value, sparse["kind"]
+    return None
+
+
+def indexer_record(facts, *, prompt_tokens: int, generated: int) -> dict:
+    """{"indexer_exercised", "indexer_basis"} for the stage 2 result, or {} when the facts carry no sparse attention (issue 638). The check
+    exercises the sparse part only when its longest context (the prompt and the tokens generated after it) is longer than the budget; a shorter
+    context selects every key, and a port that ignores the sparse part is then indistinguishable from one that has it."""
+    found = sparse_budget(facts)
+    if found is None:
+        return {}
+    budget, kind = found
+    context = prompt_tokens + generated
+    name = "indexer" if kind == "qsa-indexer" else "sliding window"
+    if context > budget:
+        return {"indexer_exercised": True, "indexer_basis": f"the check's longest context was {context} tokens, above the {name} budget of {budget}"}
+    return {"indexer_exercised": False,
+            "indexer_basis": (f"{name} not exercised: the check's longest context was {context} tokens, not above the budget of {budget}, so the {name} "
+                              "selects every key and a port that ignores it agrees with the reference")}
+
+
+def indexer_reasons(result: dict, facts, *, prompt_tokens: int, generated: int) -> list[str]:
+    """Reasons when a stage 2 result's `indexer_exercised` and `indexer_basis` differ from what the port facts and the record give. Facts without a
+    sparse attention give none (a run from before issue 638 has neither the field nor the facts)."""
+    want = indexer_record(facts, prompt_tokens=prompt_tokens, generated=generated)
+    if not want:
+        return []
+    out = []
+    if result.get("indexer_exercised") is not want["indexer_exercised"]:
+        out.append(f"result.json indexer_exercised must be {want['indexer_exercised']!r} (the check's longest context was "
+                   f"{prompt_tokens + generated} tokens against the budget in the port facts), got {result.get('indexer_exercised')!r}")
+    if result.get("indexer_basis") != want["indexer_basis"]:
+        out.append("result.json indexer_basis differs from the one the gate recomputed from the port facts and the record")
+    return out
+
+
+def _prompt_tokens(run_dir, reasons=None) -> int | None:
+    """The number of ids in the stage 1 prompt file, or None."""
+    f = _inside(run_dir, PROMPT_FILE)
+    if f is None:
+        return None
+    try:
+        ids = safeio.read_json(f, max_bytes=JSON_MAX, expect=dict).get("prompt_ids")
+    except safeio.SafeReadError:
+        return None
+    return len(ids) if _ids(ids) else None
+
+
+def _facts_of(stage_dir) -> dict | None:
+    """The port facts file of a stage 2 directory, or None when it is missing or unreadable. The file lives in the agent's directory, so a missing
+    file removes only this note; it never makes a check pass that would otherwise fail."""
+    try:
+        data = safeio.read_json(Path(stage_dir) / "port_facts.json", max_bytes=JSON_MAX, expect=dict)
+    except safeio.SafeReadError:
+        return None
+    return data
 
 
 def _reference_ids(record: dict, run_dir: Path, reasons: list) -> list | None:

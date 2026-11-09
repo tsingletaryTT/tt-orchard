@@ -472,6 +472,9 @@ def build(snapshot, *, reference_source=None, reference_lookup=None, excerpts=No
     if nested is not None:
         facts.update({"text_config": text, "text_config_left_out": sorted(text_left), "text_config_left_out_more": text_more,
                       "text_config_keys_not_listed": text_unlisted})
+    sparse = sparse_attention(config, nested)
+    if sparse is not None:
+        facts["sparse_attention"] = sparse
     pointer = _excerpts_field(excerpts)
     if pointer is not None:
         facts["reference_excerpts"] = pointer
@@ -484,8 +487,35 @@ def build(snapshot, *, reference_source=None, reference_lookup=None, excerpts=No
                   "reading": ("Tensor lines are one per name pattern ({i} stands for a number in the name) with dtype, shape, how many "
                               "tensors and, when the name has a number, which numbers. Layer ids in the config may be counted from 0 or "
                               "from 1: see index_fields. layer_flag_fields hold one 0 or 1 per layer, not layer ids. A config key that is "
-                              "not a plain identifier of at most 80 characters is counted (`*_keys_not_listed`) and never copied.")})
+                              "not a plain identifier of at most 80 characters is counted (`*_keys_not_listed`) and never copied. When `sparse_attention` is "
+                              "present the model selects keys beyond its budget or window; a port that ignores it agrees with the reference only on "
+                              "contexts shorter than that, and the stage 2 result says whether the check went beyond it.")})
     return _fit(facts)
+
+
+SPARSE_MAX = 10 ** 9
+
+
+def _plain_count(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and 0 < x <= SPARSE_MAX
+
+
+def sparse_attention(config, text_config) -> dict | None:
+    """The sparse-attention facts a port must reproduce beyond a short context (issue 638), or None. A query-sparse indexer (a top-level `qsa`
+    table with a `budget`: the number of keys an attention step may read) gives {"kind": "qsa-indexer", "budget", "block_size", "source"}; a
+    sliding window (`sliding_window` in the text config or the top level, with `use_sliding_window` not false) gives {"kind": "sliding-window",
+    "window", "source"}. Only whole numbers from 1 to a billion are copied; any other value gives no field, and no text from the config is copied."""
+    qsa = config.get("qsa") if isinstance(config, dict) else None
+    if isinstance(qsa, dict) and _plain_count(qsa.get("budget")):
+        out = {"kind": "qsa-indexer", "budget": qsa["budget"]}
+        if _plain_count(qsa.get("block_size")):
+            out["block_size"] = qsa["block_size"]
+        out["source"] = "config.qsa"
+        return out
+    for where, doc in (("text_config", text_config), ("config", config)):
+        if isinstance(doc, dict) and _plain_count(doc.get("sliding_window")) and doc.get("use_sliding_window") is not False:
+            return {"kind": "sliding-window", "window": doc["sliding_window"], "source": f"{where}.sliding_window"}
+    return None
 
 
 def _fit(facts: dict) -> dict:
