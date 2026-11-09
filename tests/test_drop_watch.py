@@ -230,6 +230,47 @@ def test_a_corrupt_state_file_starts_nothing(tmp_path):
     assert res["state"] == "needs-operator" and w.launched == []
 
 
+class OversizeRecordHub(FakeHub):
+    def info(self, repo, revision=None):
+        raise dc.TooLarge("the Hub record is larger than 8388608 bytes")
+
+
+def test_an_unreadable_hub_record_waits_for_the_operator(tmp_path):
+    w = World(tmp_path, hub=OversizeRecordHub())
+    res = w.tick()
+    assert res["state"] == "needs-operator" and w.launched == []
+    assert any("Hub record cannot be read" in e["text"] for e in res["events"] if e["kind"] == "needs-operator")
+
+
+class ListingOpener:
+    def __init__(self, body):
+        self.body = body
+
+    def __call__(self, req, timeout=None):
+        import io
+
+        class R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        return R(self.body)
+
+
+@pytest.mark.parametrize("body", [b"[" * 100_000, b'[{"id": "\\ud800"}]', b'[{"id": "Qwen/x"}, NaN]'],
+                         ids=["nested-100000", "lone-surrogate", "nan"])
+def test_a_hub_listing_that_is_not_strict_json_lists_nothing(body):
+    assert dw.Hub(opener=ListingOpener(body)).list_models("Qwen", "Qwen4-27B") == []
+
+
+@pytest.mark.parametrize("stdout", ["[" * 100_000, '{"chips": [{"state": "HELD", "who": "\\ud800"}]}'], ids=["nested-100000", "lone-surrogate"])
+def test_gozer_status_that_is_not_strict_json_is_not_free(stdout):
+    import subprocess
+    got = dw.gozer_chips(run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=""))
+    assert got["free"] is False and all("\ud800" not in h for h in got["holders"])
+
+
 def test_a_held_lock_skips_the_tick(tmp_path):
     w = World(tmp_path)
     with dw.locked(w.watch_dir) as got:

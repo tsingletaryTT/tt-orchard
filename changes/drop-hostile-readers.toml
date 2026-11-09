@@ -1,0 +1,3 @@
+target = "0.9.146"
+summary = "drop-check and drop-watch parse every outside JSON with safeio.parse_json_bytes and have 15 hostile-input readers in tests/hostile_inputs.py; an unreadable Hub record puts the watcher in needs-operator (issue 676)."
+kind = "fix"
