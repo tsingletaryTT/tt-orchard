@@ -1,10 +1,11 @@
 {
  "schema": 1,
- "note": "stage 0 ops inventory of the tiny Qwen4 rehearsal model, cut to the fields the port generator reads (op, status, modules)",
+ "note": "stage 0 ops inventory of the tiny Qwen4 rehearsal model, cut to the fields the port generator and the stub prompts read (op, status, ttnn, modules)",
  "ops": [
   {
    "op": "aten.slice.Tensor",
    "status": "mapped",
+   "ttnn": "slice",
    "modules": [
     "model",
     "model.layers.0.linear_attn",
@@ -16,6 +17,7 @@
   {
    "op": "aten.select.int",
    "status": "composable",
+   "ttnn": null,
    "modules": [
     "model",
     "model.layers.0.linear_attn",
@@ -27,6 +29,7 @@
   {
    "op": "aten.clone.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -35,6 +38,7 @@
   {
    "op": "aten.mul.Tensor",
    "status": "mapped",
+   "ttnn": "multiply",
    "modules": [
     "model.layers.0.attn_hyper_connection.hc_norm",
     "model.layers.0.attn_hyper_connection",
@@ -46,6 +50,7 @@
   {
    "op": "aten.unsqueeze.default",
    "status": "mapped",
+   "ttnn": "unsqueeze",
    "modules": [
     "model",
     "model.layers.0.linear_attn",
@@ -57,6 +62,7 @@
   {
    "op": "aten.add.Tensor",
    "status": "mapped",
+   "ttnn": "add",
    "modules": [
     "model",
     "model.layers.0.attn_hyper_connection.hc_norm",
@@ -68,6 +74,7 @@
   {
    "op": "aten.copy_.default",
    "status": "verified",
+   "ttnn": "copy",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn",
@@ -77,6 +84,7 @@
   {
    "op": "aten.sum.dim_IntList",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.ple",
@@ -86,6 +94,7 @@
   {
    "op": "aten._assert_tensor_metadata.default",
    "status": "ignored",
+   "ttnn": null,
    "modules": [
     "model",
     "model.layers.0.attn_hyper_connection.hc_norm",
@@ -97,6 +106,7 @@
   {
    "op": "aten.to.dtype",
    "status": "mapped",
+   "ttnn": "typecast",
    "modules": [
     "model.layers.0.attn_hyper_connection.hc_norm",
     "model.layers.0.linear_attn",
@@ -108,6 +118,7 @@
   {
    "op": "aten.reshape.default",
    "status": "mapped",
+   "ttnn": "reshape",
    "modules": [
     "model.layers.0.attn_hyper_connection.hc_norm",
     "model.layers.0.linear_attn",
@@ -119,6 +130,7 @@
   {
    "op": "aten.linear.default",
    "status": "mapped",
+   "ttnn": "linear",
    "modules": [
     "model.layers.0.attn_hyper_connection.input_mix_weight_down",
     "model.layers.0.attn_hyper_connection.input_mix_weight_up",
@@ -130,6 +142,7 @@
   {
    "op": "aten.transpose.int",
    "status": "mapped",
+   "ttnn": "transpose",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.ple",
@@ -139,6 +152,7 @@
   {
    "op": "aten.matmul.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -147,6 +161,7 @@
   {
    "op": "aten.flatten.using_ints",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.0.attn_hyper_connection.hc_norm",
     "model.layers.0",
@@ -158,6 +173,7 @@
   {
    "op": "aten.mean.dim",
    "status": "mapped",
+   "ttnn": "mean",
    "modules": [
     "model.layers.0.attn_hyper_connection.hc_norm",
     "model.layers.0.attn_hyper_connection",
@@ -169,6 +185,7 @@
   {
    "op": "aten.rsqrt.default",
    "status": "mapped",
+   "ttnn": "rsqrt",
    "modules": [
     "model.layers.0.attn_hyper_connection.hc_norm",
     "model.layers.0.linear_attn",
@@ -180,6 +197,7 @@
   {
    "op": "aten.sigmoid.default",
    "status": "mapped",
+   "ttnn": "sigmoid",
    "modules": [
     "model.layers.0.attn_hyper_connection",
     "model.layers.0.linear_attn",
@@ -191,6 +209,7 @@
   {
    "op": "aten.exp.default",
    "status": "mapped",
+   "ttnn": "exp",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -199,6 +218,7 @@
   {
    "op": "aten.unflatten.int",
    "status": "composable",
+   "ttnn": null,
    "modules": [
     "model.layers.0.attn_hyper_connection",
     "model.layers.0.mlp_hyper_connection",
@@ -210,6 +230,7 @@
   {
    "op": "aten.pad.default",
    "status": "mapped",
+   "ttnn": "pad",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.ple",
@@ -219,6 +240,7 @@
   {
    "op": "aten.sub.Tensor",
    "status": "mapped",
+   "ttnn": "subtract",
    "modules": [
     "model",
     "model.layers.0.linear_attn",
@@ -229,6 +251,7 @@
   {
    "op": "aten.div.Tensor",
    "status": "mapped",
+   "ttnn": "divide",
    "modules": [
     "model.layers.0.attn_hyper_connection",
     "model.layers.0.mlp_hyper_connection",
@@ -240,6 +263,7 @@
   {
    "op": "aten.pow.Tensor_Scalar",
    "status": "mapped",
+   "ttnn": "pow",
    "modules": [
     "model.layers.0.attn_hyper_connection.hc_norm",
     "model.layers.0.linear_attn.norm",
@@ -251,6 +275,7 @@
   {
    "op": "aten.silu.default",
    "status": "mapped",
+   "ttnn": "silu",
    "modules": [
     "model.layers.0.attn_hyper_connection",
     "model.layers.0.linear_attn",
@@ -262,6 +287,7 @@
   {
    "op": "aten.type_as.default",
    "status": "verified",
+   "ttnn": "typecast",
    "modules": [
     "model.layers.0.attn_hyper_connection.hc_norm",
     "model.layers.0.mlp_hyper_connection.hc_norm",
@@ -273,6 +299,7 @@
   {
    "op": "aten.arange.default",
    "status": "mapped",
+   "ttnn": "arange",
    "modules": [
     "model",
     "model.layers.1.ple.ple_embedding"
@@ -281,6 +308,7 @@
   {
    "op": "aten.cat.default",
    "status": "mapped",
+   "ttnn": "concat",
    "modules": [
     "model.layers.1.ple.ple_embedding",
     "model.rotary_emb"
@@ -289,6 +317,7 @@
   {
    "op": "aten.expand.default",
    "status": "mapped",
+   "ttnn": "expand",
    "modules": [
     "model",
     "model.layers.1.ple.ple_embedding",
@@ -298,6 +327,7 @@
   {
    "op": "aten.new_full.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -305,6 +335,7 @@
   {
    "op": "aten.view.default",
    "status": "mapped",
+   "ttnn": "reshape",
    "modules": [
     "model",
     "model.layers.1.ple.ple_embedding"
@@ -313,6 +344,7 @@
   {
    "op": "aten.__and__.Tensor",
    "status": "verified",
+   "ttnn": "bitwise_and",
    "modules": [
     "model",
     "model.layers.1.ple.ple_embedding"
@@ -321,6 +353,7 @@
   {
    "op": "aten.ge.Scalar",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -328,6 +361,7 @@
   {
    "op": "aten.neg.default",
    "status": "mapped",
+   "ttnn": "neg",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -336,6 +370,7 @@
   {
    "op": "aten.repeat_interleave.self_int",
    "status": "mapped",
+   "ttnn": "repeat_interleave",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -344,6 +379,7 @@
   {
    "op": "aten.bitwise_xor.Tensor",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -351,6 +387,7 @@
   {
    "op": "aten.clamp_min.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding",
     "model.layers.1.ple"
@@ -359,6 +396,7 @@
   {
    "op": "aten.conv1d.default",
    "status": "mapped",
+   "ttnn": "conv1d",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.ple.conv1d",
@@ -368,6 +406,7 @@
   {
    "op": "aten.cumsum.default",
    "status": "mapped",
+   "ttnn": "cumsum",
    "modules": [
     "model",
     "model.layers.0.linear_attn",
@@ -377,6 +416,7 @@
   {
    "op": "aten.to.dtype_layout",
    "status": "verified",
+   "ttnn": "typecast",
    "modules": [
     "model",
     "model.layers.1.ple.ple_embedding"
@@ -385,6 +425,7 @@
   {
    "op": "aten.cummax.default",
    "status": "host",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -392,6 +433,7 @@
   {
    "op": "aten.embedding.default",
    "status": "mapped",
+   "ttnn": "embedding",
    "modules": [
     "model.embed_tokens",
     "model.layers.1.ple.ple_embedding.ngram_embedding"
@@ -400,6 +442,7 @@
   {
    "op": "aten.eq.Scalar",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -407,6 +450,7 @@
   {
    "op": "aten.eye.default",
    "status": "host",
+   "ttnn": null,
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -415,6 +459,7 @@
   {
    "op": "aten.gather.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -422,6 +467,7 @@
   {
    "op": "aten.index.Tensor",
    "status": "verified",
+   "ttnn": "embedding",
    "modules": [
     "model"
    ]
@@ -429,6 +475,7 @@
   {
    "op": "aten.masked_fill.Scalar",
    "status": "verified",
+   "ttnn": "where",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -437,6 +484,7 @@
   {
    "op": "aten.ones.default",
    "status": "mapped",
+   "ttnn": "ones",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -445,6 +493,7 @@
   {
    "op": "aten.remainder.Tensor",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -452,6 +501,7 @@
   {
    "op": "aten.softplus.default",
    "status": "mapped",
+   "ttnn": "softplus",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -460,6 +510,7 @@
   {
    "op": "aten.split_with_sizes.default",
    "status": "verified",
+   "ttnn": "split",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -468,6 +519,7 @@
   {
    "op": "aten.squeeze.dim",
    "status": "mapped",
+   "ttnn": "squeeze",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -476,6 +528,7 @@
   {
    "op": "aten.tril.default",
    "status": "mapped",
+   "ttnn": "tril",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -484,6 +537,7 @@
   {
    "op": "aten.triu.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -492,6 +546,7 @@
   {
    "op": "aten.where.ScalarOther",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -499,6 +554,7 @@
   {
    "op": "aten.where.self",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple.ple_embedding"
    ]
@@ -506,6 +562,7 @@
   {
    "op": "aten.zeros.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -514,6 +571,7 @@
   {
    "op": "aten.zeros_like.default",
    "status": "mapped",
+   "ttnn": "zeros_like",
    "modules": [
     "model.layers.0.linear_attn",
     "model.layers.1.linear_attn"
@@ -522,6 +580,7 @@
   {
    "op": "aten.abs.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple"
    ]
@@ -529,11 +588,13 @@
   {
    "op": "aten.alias.default",
    "status": "ignored",
+   "ttnn": null,
    "modules": []
   },
   {
    "op": "aten.cos.default",
    "status": "mapped",
+   "ttnn": "cos",
    "modules": [
     "model.rotary_emb"
    ]
@@ -541,6 +602,7 @@
   {
    "op": "aten.diff.default",
    "status": "host",
+   "ttnn": null,
    "modules": [
     "model"
    ]
@@ -548,6 +610,7 @@
   {
    "op": "aten.eq.Tensor",
    "status": "mapped",
+   "ttnn": "eq",
    "modules": [
     "model"
    ]
@@ -555,6 +618,7 @@
   {
    "op": "aten.le.Tensor",
    "status": "mapped",
+   "ttnn": "le",
    "modules": [
     "model"
    ]
@@ -562,6 +626,7 @@
   {
    "op": "aten.ne.Scalar",
    "status": "mapped",
+   "ttnn": "ne",
    "modules": [
     "model"
    ]
@@ -569,6 +634,7 @@
   {
    "op": "aten.new_ones.default",
    "status": "verified",
+   "ttnn": "ones",
    "modules": [
     "model"
    ]
@@ -576,6 +642,7 @@
   {
    "op": "aten.repeat.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model"
    ]
@@ -583,6 +650,7 @@
   {
    "op": "aten.sign.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple"
    ]
@@ -590,6 +658,7 @@
   {
    "op": "aten.sin.default",
    "status": "mapped",
+   "ttnn": "sin",
    "modules": [
     "model.rotary_emb"
    ]
@@ -597,6 +666,7 @@
   {
    "op": "aten.sqrt.default",
    "status": "candidate",
+   "ttnn": null,
    "modules": [
     "model.layers.1.ple"
    ]
@@ -604,6 +674,7 @@
   {
    "op": "aten.to.device",
    "status": "verified",
+   "ttnn": "to_device",
    "modules": [
     "model.rotary_emb"
    ]
