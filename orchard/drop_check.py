@@ -17,7 +17,7 @@ Verdicts and routes:
                                 malformed key, a width that does not split over 2 and 4 chips, a value outside a capability rule,
                                 or no capabilities file yet). Each reason is named.
   needs-operator                the release needs a reference interpreter whose transformers has its architecture class
-                                (scripts/reference_venv.sh builds one); the operator sets reference_python and runs it again.
+                                (scripts/reference_venv.py builds one); the operator sets reference_python and runs it again.
   refused                       the repository id or revision is not acceptable; nothing was read.
 
 The capabilities file (schema 1), shipped with the Qwen4 package:
@@ -34,12 +34,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+from orchard import bundle_capabilities, safeio
 from orchard.safeio import is_finite_number
 
 ALLOWED_ORGS = ("Qwen",)
@@ -98,8 +100,10 @@ EXAMPLE_CAPABILITIES = {
              "hidden_act": {"equals": "silu"}},
     "features": {"indexer": "exact-up-to-2051", "mtp": "ignored", "vision": "off"},
 }
-RULE_NAMES = ("equals", "one_of", "multiple_of", "min", "max")
 INDEXER_FEATURES = ("off", "exact-up-to-2051", "full")
+NO_CAPABILITIES = ("the Qwen4 package declares no capabilities (no orchard-capabilities.json), so the drop-in route is not "
+                   "ready")
+UNUSABLE_FILE = "the bundle's orchard-capabilities.json cannot be used"   # the start of config_reasons' reason for a broken file
 
 
 class Unreadable(RuntimeError):
@@ -170,72 +174,6 @@ def _parse_json(raw, name: str, reasons: list):
     return value
 
 
-def _capabilities_problems(caps) -> list[str]:
-    if caps is None:
-        return ["the Qwen4 package declares no capabilities (no orchard-capabilities.json), so the drop-in route is not ready"]
-    if not isinstance(caps, dict):
-        return [f"the capabilities file is malformed: a JSON object is needed, got {type(caps).__name__}"]
-    out = []
-    if caps.get("schema") != 1:
-        out.append(f"the capabilities file has schema {_show(caps.get('schema'))}; this check reads schema 1")
-    for field in ("model_types", "architectures"):
-        v = caps.get(field)
-        if not isinstance(v, list) or not v or not all(isinstance(x, str) for x in v):
-            out.append(f"the capabilities file is malformed: {field} must be a non-empty list of strings")
-    keys = caps.get("keys")
-    if not isinstance(keys, dict):
-        out.append("the capabilities file is malformed: keys must be an object")
-    else:
-        for k, rule in keys.items():
-            if not isinstance(rule, dict) or not rule or set(rule) - set(RULE_NAMES):
-                out.append(f"the capabilities file is malformed: the rule for {k!r} must be an object with {', '.join(RULE_NAMES)}")
-                continue
-            if "one_of" in rule and not isinstance(rule["one_of"], list):
-                out.append(f"the capabilities file is malformed: one_of for {k!r} must be a list")
-            for n in ("multiple_of", "min", "max"):
-                if n in rule and not _number(rule[n]):
-                    out.append(f"the capabilities file is malformed: {n} for {k!r} must be a number")
-            if "multiple_of" in rule and _number(rule["multiple_of"]) and rule["multiple_of"] <= 0:
-                out.append(f"the capabilities file is malformed: multiple_of for {k!r} must be positive")
-    feats = caps.get("features", {})
-    if not isinstance(feats, dict) or feats.get("indexer", "off") not in INDEXER_FEATURES:
-        out.append(f"the capabilities file is malformed: features.indexer must be one of {', '.join(INDEXER_FEATURES)}")
-    return out
-
-
-def _json_eq(a, b) -> bool:
-    """Equality of JSON values: true is not 1 and false is not 0 (stage 0's capability reader compares the same way)."""
-    if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(_json_eq(x, y) for x, y in zip(a, b))
-    if isinstance(a, dict) and isinstance(b, dict):
-        return a.keys() == b.keys() and all(_json_eq(a[k], b[k]) for k in a)
-    return type(a) in (int, float) and type(b) in (int, float) and a == b or type(a) is type(b) and a == b
-
-
-def _lookup(tc: dict, key: str):
-    """(found, value) for `key` in the text config; a dotted key ("rope_parameters.rope_theta") walks nested objects."""
-    node = tc
-    for part in key.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return False, None
-        node = node[part]
-    return True, node
-
-
-def _rule_problem(key: str, value, rule: dict) -> str | None:
-    if "equals" in rule and not _json_eq(value, rule["equals"]):
-        return f"{key} is {_show(value)}; the package serves {_show(rule['equals'])}"
-    if "one_of" in rule and not any(_json_eq(value, v) for v in rule["one_of"]):
-        return f"{key} is {_show(value)}; the package serves one of {_show(rule['one_of'])}"
-    if "multiple_of" in rule and (not _number(value) or value % rule["multiple_of"]):
-        return f"{key} is {_show(value)}; the package needs a multiple of {rule['multiple_of']}"
-    if "min" in rule and (not _number(value) or value < rule["min"]):
-        return f"{key} is {_show(value)}; the package needs at least {rule['min']}"
-    if "max" in rule and (not _number(value) or value > rule["max"]):
-        return f"{key} is {_show(value)}; the package needs at most {rule['max']}"
-    return None
-
-
 def _moe_layers(tc: dict, n_layers: int | None, reasons: list) -> list[int]:
     """Layers with a routed-expert block, by the dense rule of qwen4_dense.py (Intel's vLLM patch)."""
     experts = tc.get("num_experts", 0)
@@ -299,10 +237,14 @@ def _tokenizer_notes(files: dict) -> list[str]:
     return notes
 
 
-def classify(repo, revision, files: dict, *, capabilities=None, class_probe=None, qwen4_bundle: str = QWEN4_BUNDLE,
-             qwen38_bundle: str = QWEN38_BUNDLE) -> dict:
+def classify(repo, revision, files: dict, *, capabilities=None, dev_config=None, class_probe=None,
+             qwen4_bundle: str = QWEN4_BUNDLE, qwen38_bundle: str = QWEN38_BUNDLE) -> dict:
     """The verdict for `repo` at `revision` from its metadata `files` ({name: bytes}). Pure: no I/O apart from `class_probe`,
     a callable (list of class names) -> {name: bool} that asks the reference interpreter, or None when no interpreter is named.
+    `capabilities` is the Qwen4 package's parsed orchard-capabilities.json (None: the package has none) and `dev_config` the
+    config.json of the package's own weights (None: not found). The config side of the capability check is stage 0's own code,
+    orchard.bundle_capabilities.config_reasons, so the two cannot disagree about a config; tensor rules need the weight headers
+    and are applied only at stage 0.
     """
     out = {"repo": repo if isinstance(repo, str) else None, "revision": revision if isinstance(revision, str) else None,
            "verdict": None, "route": None, "reasons": [], "notes": [], "facts": {}, "command": []}
@@ -365,26 +307,22 @@ def classify(repo, revision, files: dict, *, capabilities=None, class_probe=None
                 if tc.get("indexer_kv_heads") not in (1, None):
                     reasons.append(f"indexer_kv_heads is {_show(tc.get('indexer_kv_heads'))}; the QSA indexer has 1")
             reasons += _split_problems(tc, {k: v for k, v in counts.items() if v})
-            cap_problems = _capabilities_problems(capabilities)
-            reasons += cap_problems
-            if not cap_problems:
-                if mtype not in capabilities["model_types"]:
-                    reasons.append(f"model_type {mtype!r} is not one the package serves ({', '.join(capabilities['model_types'])})")
-                for a in arch:
-                    if a not in capabilities["architectures"]:
-                        reasons.append(f"architecture {a!r} is not one the package registers")
-                for k, rule in capabilities["keys"].items():
-                    found, value = _lookup(tc, k)
-                    if found:
-                        p = _rule_problem(k, value, rule)
-                        if p:
-                            reasons.append(p)
-                feature = capabilities.get("features", {}).get("indexer", "off")
-                if indexer and feature == "off":
-                    reasons.append("the release has a QSA indexer and the package does not serve one")
-                elif indexer and feature == "exact-up-to-2051":
-                    notes.append("the release has a QSA indexer; the package serves it with max_model_len 2048, where the "
-                                 "indexer selects every block and attention is exact")
+            if capabilities is None:
+                reasons.append(NO_CAPABILITIES)
+            else:
+                cap_reasons = bundle_capabilities.config_reasons(capabilities, cfg, dev_config)
+                reasons += cap_reasons
+                if not any(r.startswith(UNUSABLE_FILE) for r in cap_reasons) and isinstance(capabilities, dict):
+                    feats = capabilities.get("features")
+                    feature = feats.get("indexer", "off") if isinstance(feats, dict) else "off"
+                    if indexer and feature == "off":
+                        reasons.append("the release has a QSA indexer and the package does not serve one")
+                    elif indexer and feature == "exact-up-to-2051":
+                        notes.append("the release has a QSA indexer; the package serves it with max_model_len 2048, where the "
+                                     "indexer selects every block and attention is exact")
+                if dev_config is None:
+                    notes.append("the package's own weights config was not found, so config keys that differ from it were "
+                                 "not checked here; stage 0 checks them")
             mtp = tc.get("mtp_num_hidden_layers") or (cfg.get("mtp") if isinstance(cfg.get("mtp"), dict) else None)
             if mtp:
                 notes.append("the release has an MTP head; it is served without speculative decoding")
@@ -393,7 +331,7 @@ def classify(repo, revision, files: dict, *, capabilities=None, class_probe=None
                 missing = [a for a in arch if not (isinstance(probe, dict) and probe.get(a) is True)]
                 if missing:
                     operator.append(f"the reference interpreter's transformers has no {', '.join(missing)} (or was not "
-                                    "checked); build one with scripts/reference_venv.sh '<transformers spec>' and set "
+                                    "checked); build one with scripts/reference_venv.py '<transformers spec>' and set "
                                     "reference_python in config/bringup.toml")
         else:
             reasons.append(f"model_type {mtype!r} is neither Qwen3.8's ({', '.join(QWEN35_TYPES)}) nor Qwen4's "
@@ -463,7 +401,6 @@ class DirClient:
         self.path = Path(path)
 
     def info(self, repo: str, revision: str | None = None) -> dict | None:
-        from orchard import safeio
         try:
             value = safeio.read_json(self.path / "info.json", max_bytes=8 << 20)
         except (OSError, ValueError, safeio.SafeReadError):
@@ -471,9 +408,6 @@ class DirClient:
         return value if isinstance(value, dict) else None
 
     def get(self, repo: str, revision: str, name: str, *, max_bytes: int) -> bytes | None:
-        import os
-
-        from orchard import safeio
         if _file_problem(name):
             raise ValueError(_file_problem(name))
         path = self.path / name
@@ -485,6 +419,56 @@ class DirClient:
             raise TooLarge(f"{name} is larger than {max_bytes} bytes") from exc
         except (OSError, ValueError, safeio.SafeReadError) as exc:
             raise Unreadable(f"{name} cannot be read safely ({type(exc).__name__})") from exc
+
+
+MANIFEST = "tt_kernel_manifest.json"
+
+
+def default_hf_home() -> Path:
+    return Path(os.environ["HF_HOME"]) if os.environ.get("HF_HOME") else Path.home() / ".cache" / "huggingface"
+
+
+def bundle_inputs(bundle_dir, hf_home) -> tuple[object, dict | None, list[str]]:
+    """(capabilities, dev_config, notes) from an installed Qwen4 package: its orchard-capabilities.json (None when it ships none,
+    a string naming the problem when the file cannot be read, which config_reasons then refuses), and the config.json of the
+    weights its manifest names, from the Hugging Face cache at `hf_home` (None, with a note, when it is not there)."""
+    notes: list[str] = []
+    b = Path(bundle_dir)
+    caps = None
+    cap_path = b / bundle_capabilities.FILE
+    if os.path.lexists(cap_path):
+        try:
+            caps = safeio.read_json(cap_path, max_bytes=bundle_capabilities.MAX_BYTES)
+        except (OSError, ValueError, safeio.SafeReadError) as exc:
+            caps = f"unreadable ({type(exc).__name__})"
+    try:
+        man = safeio.read_json(b / MANIFEST, max_bytes=1 << 20)
+    except (OSError, ValueError, safeio.SafeReadError) as exc:
+        notes.append(f"the package's {MANIFEST} cannot be read ({type(exc).__name__}), so its own weights config was not found")
+        return caps, None, notes
+    w = man.get("weights") if isinstance(man, dict) else None
+    repo, rev = (w.get("repo_id"), w.get("revision")) if isinstance(w, dict) else (None, None)
+    if not isinstance(repo, str) or not REPO_RE.fullmatch(repo) or ".." in repo or revision_problem(rev):
+        notes.append(f"the package's {MANIFEST} names no weights repository at a 40-character revision, so its own weights "
+                     "config was not found")
+        return caps, None, notes
+    org, name = repo.split("/", 1)
+    snap = Path(hf_home) / "hub" / f"models--{org}--{name}" / "snapshots" / rev
+    path = snap / "config.json"
+    if not os.path.lexists(path):
+        notes.append(f"the package's weights {repo}@{rev[:12]} are not in the Hugging Face cache at {hf_home}, so their config "
+                     "was not found")
+        return caps, None, notes
+    target = safeio.resolved_inside(path, snap)
+    if target is None:
+        notes.append(f"the config.json of {repo}@{rev[:12]} links outside its cache, so it was not read")
+        return caps, None, notes
+    try:
+        dev = safeio.read_json(target, max_bytes=1 << 20)
+    except (OSError, ValueError, safeio.SafeReadError) as exc:
+        notes.append(f"the config.json of {repo}@{rev[:12]} cannot be read ({type(exc).__name__})")
+        return caps, None, notes
+    return caps, dev, notes
 
 
 def fetch_metadata(client, repo: str, revision: str) -> tuple[dict, list[str]]:
@@ -530,7 +514,11 @@ def parser(add_help: bool = True) -> argparse.ArgumentParser:
                                 description="say which bring-up route a new Qwen release takes, from its config alone")
     p.add_argument("repo", help="the release, org/name (organisation must be one of: " + ", ".join(ALLOWED_ORGS) + ")")
     p.add_argument("--revision", help="a 40-character commit (default: the repository's current one)")
-    p.add_argument("--capabilities", help="the Qwen4 package's orchard-capabilities.json")
+    p.add_argument("--capabilities", help="the Qwen4 package's orchard-capabilities.json (default: the one in --bundle-dir)")
+    p.add_argument("--bundle-dir", help="the installed Qwen4 package's directory: its capabilities file and, through its manifest "
+                                        "and --hf-home, the config of its own weights")
+    p.add_argument("--hf-home", help="the Hugging Face cache that holds the package's weights (default $HF_HOME or ~/.cache/huggingface)")
+    p.add_argument("--dev-config", help="the config.json of the package's own weights (default: found through --bundle-dir)")
     p.add_argument("--bundle", default=QWEN4_BUNDLE, help=f"the Qwen4 package (default {QWEN4_BUNDLE})")
     p.add_argument("--qwen38-bundle", default=QWEN38_BUNDLE, help="the Qwen3.8 bundle for a same-architecture release")
     p.add_argument("--reference-python", help="the reference interpreter to ask for a new architecture class")
@@ -553,16 +541,23 @@ def run(args) -> tuple[dict, int]:
                  "reasons": ["the repository does not exist, is private or gated, or the Hub did not answer"], "notes": [],
                  "facts": {}, "command": []}, EXIT_NOT_FOUND)
     revision = args.revision or info.get("sha")
-    caps = None
+    caps, dev, extra_notes = None, None, []
+    if args.bundle_dir:
+        caps, dev, extra_notes = bundle_inputs(args.bundle_dir, args.hf_home or default_hf_home())
     if args.capabilities:
-        from orchard import safeio
         try:
-            caps = safeio.read_json(args.capabilities, max_bytes=1 << 20)
+            caps = safeio.read_json(args.capabilities, max_bytes=bundle_capabilities.MAX_BYTES)
         except (OSError, ValueError, safeio.SafeReadError) as exc:
             caps = f"unreadable ({type(exc).__name__})"
+    if args.dev_config:
+        try:
+            dev = safeio.read_json(args.dev_config, max_bytes=1 << 20)
+        except (OSError, ValueError, safeio.SafeReadError) as exc:
+            dev, extra_notes = None, extra_notes + [f"--dev-config cannot be read ({type(exc).__name__})"]
     files, problems = fetch_metadata(client, args.repo, revision) if not revision_problem(revision) else ({}, [])
-    res = classify(args.repo, revision, files, capabilities=caps, class_probe=class_probe_for(args.reference_python),
-                   qwen4_bundle=args.bundle, qwen38_bundle=args.qwen38_bundle)
+    res = classify(args.repo, revision, files, capabilities=caps, dev_config=dev,
+                   class_probe=class_probe_for(args.reference_python), qwen4_bundle=args.bundle, qwen38_bundle=args.qwen38_bundle)
+    res["notes"] = extra_notes + res["notes"]
     if problems:
         res["reasons"] = problems + res["reasons"]
         if res["verdict"] in ("covered", "covered-with-notes"):
@@ -586,7 +581,6 @@ def report(args, out=None) -> int:
     res, code = run(args)
     print(json.dumps(res, indent=1) if args.json else render(res), file=out or sys.stdout)
     if args.out:
-        from orchard import safeio
         safeio.atomic_write(args.out, json.dumps(res, indent=1) + "\n")
     return code
 

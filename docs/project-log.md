@@ -5046,3 +5046,22 @@ two bundles share, and choose the bundle by chip count.
 - Not changed: issue 559 (a `--base` model id with no installed bundle) is a different problem and stays open.
 - Tests: `tests/test_bundle_identity.py`. 20 mutations; two survived at first (defensive branches of the capabilities digest) and each got a test;
   all are red now. No hardware was used.
+
+## 2026-11-09, drop-check uses stage 0's capability reader (branch `drop-check-config-reasons`)
+Prompt (operator): do the items unblocked by the merge of PRs 657, 659, 660 and 661.
+- `orchard/drop_check.py` no longer applies capability rules itself: `classify` calls
+  `orchard.bundle_capabilities.config_reasons(capabilities, release_config, dev_config)`, the code stage 0's `decide_path` uses
+  (PR 659), so the release-day check and stage 0 cannot disagree about a release's config. That includes stage 0's rule that
+  every config key that differs from the package's own weights must be declared: a 64-layer release against the 20-layer
+  franken is not covered until the package's file declares `num_hidden_layers` and its `layers` block. drop-check keeps the
+  checks stage 0 has no counterpart for (organisation allowlist, required keys, experts, n-gram embedding, indexer keys,
+  2- and 4-chip splits, notes, the reference-interpreter probe). Tensor rules need the weight headers and stay at stage 0.
+- `bundle_inputs(bundle_dir, hf_home)` reads the installed package's `orchard-capabilities.json` and, through its manifest's
+  weights repository and revision, the `config.json` of its own weights from the Hugging Face cache; a snapshot link is
+  followed only into that model's cache (`safeio.resolved_inside`). New flags `--bundle-dir`, `--hf-home`, `--dev-config`;
+  `tt-orchard drop-check` fills the first two from `bringup.toml`. The watcher gained `bundle_dir` and `hf_home`.
+- The needs-operator message named `scripts/reference_venv.sh`; the script is `scripts/reference_venv.py`.
+- 7 mutations, all red after the manifest test gained a revision with `..` and required its message.
+- Machine (not in the repo): the watcher's systemd service now runs `tt-orchard` from the main checkout; the M0 worktree is
+  removed; `Qwen/Qwen3-Coder-Next` is being downloaded into `~/.cache/huggingface` so the coder's first boot on release day
+  does not download 159 GB with no output.

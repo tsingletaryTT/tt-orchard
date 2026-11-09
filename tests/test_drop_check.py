@@ -212,7 +212,7 @@ def test_new_model_type_needs_a_reference_interpreter_with_the_class():
     c["architectures"].append("Qwen4ForConditionalGeneration")
     missing = verdict(cfg, capabilities=c, class_probe=lambda classes: {k: False for k in classes})
     assert missing["verdict"] == "needs-operator"
-    assert any("reference_venv.sh" in r for r in missing["reasons"])
+    assert any("scripts/reference_venv.py" in r for r in missing["reasons"])
     present = verdict(cfg, capabilities=c, class_probe=lambda classes: {k: True for k in classes})
     assert present["route"] == "qwen4-package"
 
@@ -401,7 +401,7 @@ def test_rules_compare_json_values(key, rule, value):
     c = bare_caps()
     c["keys"][key] = rule
     out = verdict(cfg, capabilities=c)
-    assert any(r.startswith(f"{key} is ") and "the package serves" in r for r in out["reasons"]), out["reasons"]
+    assert any(f"text config {key} is " in r and "outside the rule" in r for r in out["reasons"]), out["reasons"]
 
 
 @pytest.mark.parametrize("value", [10 ** 400, -(10 ** 400)])
@@ -413,3 +413,123 @@ def test_a_huge_integer_is_a_named_reason_not_a_crash(value):
     c["keys"]["hc_lowrank"] = {"min": 1, "max": 4096}
     out = verdict(cfg, capabilities=c)
     assert out["verdict"] == "not-covered" and any(r.startswith("hc_lowrank is ") for r in out["reasons"])
+
+
+# ---- stage 0's capability reader decides the config side (orchard/bundle_capabilities.config_reasons, PR 659) ----------
+
+def test_the_config_rules_are_stage_0s(monkeypatch):
+    """drop-check takes the config verdict from the same function stage 0 uses, with the bundle's own weights config."""
+    seen = {}
+
+    def fake(capabilities, release_config, dev_config=None):
+        seen.update(caps=capabilities, dev=dev_config)
+        return ["text config sentinel_key is 1, the reason stage 0 gives"]
+    monkeypatch.setattr(dc.bundle_capabilities, "config_reasons", fake)
+    dev = {"model_type": "qwen4_exp"}
+    out = verdict(qwen4_dense(), capabilities=caps(), dev_config=dev)
+    assert out["verdict"] == "not-covered" and "text config sentinel_key is 1, the reason stage 0 gives" in out["reasons"]
+    assert seen["dev"] is dev and seen["caps"]["schema"] == 1
+
+
+def dev_of(cfg, layers=20):
+    d = json.loads(json.dumps(cfg))
+    d["text_config"]["num_hidden_layers"] = layers
+    d["text_config"]["layer_types"] = d["text_config"]["layer_types"][:layers]
+    return d
+
+
+def test_an_undeclared_difference_from_the_dev_weights_is_not_covered():
+    cfg = qwen4_dense()
+    out = verdict(cfg, capabilities=caps(), dev_config=dev_of(cfg))
+    assert out["verdict"] == "not-covered"
+    assert any("num_hidden_layers differs: 64 vs 20" in r for r in out["reasons"]), out["reasons"]
+
+
+def test_a_declared_layer_count_is_covered():
+    cfg = qwen4_dense()
+    c = caps()
+    c["keys"]["num_hidden_layers"] = {"min": 4, "max": 128}
+    c["layers"] = {"pattern": r"^model\.layers\.(?P<layer>\d+)\.", "count_key": "num_hidden_layers", "types_key": "layer_types",
+                   "type_values": ["linear_attention", "full_attention", "indexed_attention"]}
+    out = verdict(cfg, capabilities=c, dev_config=dev_of(cfg))
+    assert out["route"] == "qwen4-package", out["reasons"]
+
+
+def test_without_the_dev_config_the_differences_are_left_to_stage_0():
+    out = verdict(qwen4_dense(), capabilities=caps(), dev_config=None)
+    assert out["route"] == "qwen4-package"
+    assert any("not checked here" in n for n in out["notes"]), out["notes"]
+
+
+def lay_out_bundle(tmp_path, caps_obj=None, rev=REV, with_snapshot=True, dev=None):
+    bundle = tmp_path / "models" / "mando2222" / "qwen4-27b-dense-v6-thin"
+    bundle.mkdir(parents=True)
+    if caps_obj is not None:
+        (bundle / "orchard-capabilities.json").write_text(json.dumps(caps_obj))
+    (bundle / "tt_kernel_manifest.json").write_text(json.dumps({"schema_version": "6", "weights": {
+        "repo_id": "mando2222/qwen4-27b-franken-k20", "revision": rev}}))
+    hf = tmp_path / "hf"
+    if with_snapshot:
+        snap = hf / "hub" / "models--mando2222--qwen4-27b-franken-k20" / "snapshots" / rev
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text(json.dumps(dev or {"model_type": "qwen4_exp"}))
+    return bundle, hf
+
+
+def test_bundle_inputs_reads_the_file_and_the_dev_snapshot(tmp_path):
+    cfg = qwen4_dense()
+    bundle, hf = lay_out_bundle(tmp_path, caps_obj=caps(), dev=dev_of(cfg))
+    got_caps, dev, notes = dc.bundle_inputs(bundle, hf)
+    assert got_caps["schema"] == 1 and dev["text_config"]["num_hidden_layers"] == 20 and notes == []
+
+
+def test_bundle_inputs_without_a_file_or_a_snapshot(tmp_path):
+    bundle, hf = lay_out_bundle(tmp_path, caps_obj=None, with_snapshot=False)
+    got_caps, dev, notes = dc.bundle_inputs(bundle, hf)
+    assert got_caps is None and dev is None
+    assert any("mando2222/qwen4-27b-franken-k20" in n for n in notes)
+
+
+@pytest.mark.parametrize("manifest", ["{bad", "[]", json.dumps({"weights": {"repo_id": "../x", "revision": REV}}),
+                                      json.dumps({"weights": {"repo_id": "a/b", "revision": "main"}}),
+                                      json.dumps({"weights": {"repo_id": "mando2222/qwen4-27b-franken-k20", "revision": "../../.."}})])
+def test_bundle_inputs_with_a_bad_manifest_finds_no_dev_config(tmp_path, manifest):
+    bundle, hf = lay_out_bundle(tmp_path, caps_obj=caps())
+    (bundle / "tt_kernel_manifest.json").write_text(manifest)
+    got_caps, dev, notes = dc.bundle_inputs(bundle, hf)
+    assert got_caps["schema"] == 1 and dev is None
+    assert any("cannot be read" in n or "names no weights repository at a 40-character revision" in n for n in notes), notes
+
+
+def test_cli_reads_the_bundle_directory(tmp_path, capsys):
+    cfg = qwen4_dense()
+    d = write_release(tmp_path, cfg)
+    bundle, hf = lay_out_bundle(tmp_path, caps_obj=caps(), dev=dev_of(cfg))
+    code = dc.main(["Qwen/Qwen4-27B", "--from-dir", str(d), "--bundle-dir", str(bundle), "--hf-home", str(hf), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == dc.EXIT_NOT_COVERED and any("num_hidden_layers differs" in r for r in out["reasons"])
+
+
+def test_bundle_inputs_follows_a_cache_link_into_blobs(tmp_path):
+    """A Hugging Face snapshot holds config.json as a link into the model's blobs/ directory; that link is read."""
+    cfg = qwen4_dense()
+    bundle, hf = lay_out_bundle(tmp_path, caps_obj=caps(), with_snapshot=False)
+    model = hf / "hub" / "models--mando2222--qwen4-27b-franken-k20"
+    (model / "blobs").mkdir(parents=True)
+    (model / "blobs" / "abc123").write_text(json.dumps(dev_of(cfg)))
+    snap = model / "snapshots" / REV
+    snap.mkdir(parents=True)
+    (snap / "config.json").symlink_to("../../blobs/abc123")
+    _, dev, notes = dc.bundle_inputs(bundle, hf)
+    assert dev["text_config"]["num_hidden_layers"] == 20 and notes == []
+
+
+def test_bundle_inputs_refuses_a_link_out_of_the_cache(tmp_path):
+    bundle, hf = lay_out_bundle(tmp_path, caps_obj=caps(), with_snapshot=False)
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text(json.dumps({"model_type": "qwen4_exp"}))
+    snap = hf / "hub" / "models--mando2222--qwen4-27b-franken-k20" / "snapshots" / REV
+    snap.mkdir(parents=True)
+    (snap / "config.json").symlink_to(outside)
+    _, dev, notes = dc.bundle_inputs(bundle, hf)
+    assert dev is None and any("outside" in n for n in notes)
