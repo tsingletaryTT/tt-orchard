@@ -69,7 +69,7 @@ def test_the_class_and_the_path_must_agree(tmp_path):
 
 
 def test_only_the_two_sidecar_classes_may_carry_sidecars(tmp_path):
-    bad = {**evidence_free(RESTRICTED), "class": "full-port"}
+    bad = {**evidence_free(RESTRICTED), "class": "weights-only", "path": "weights-only"}       # a full port may list sidecars (issue 647)
     assert any("cannot have sidecars" in r for r in gate_delta(write_stage(tmp_path, bad), tmp_path).reasons)
 
 

@@ -53,6 +53,8 @@ MAX_KEY_CHARS = 80                # a config key, a class name or a field name l
 MAX_LEFT_NAMES = 100              # names listed in a `*_left_out` list; the rest are counted
 MAX_INDEX_FIELDS = 24             # id-list fields described in `index_fields`; the rest are counted
 MAX_SHARDS_LISTED = 8
+MAX_EXTRA_FILES = 4               # weights files the index does not name that are described one by one (issue 647); the rest are counted
+MAX_EXTRA_PREFIXES = 6            # first name components listed for one such file
 MAX_SCHEDULE = 4096
 MAX_NAME_CHARS = 200              # a tensor name longer than this is counted and not listed: the header reader bounds names only by the header's size
 MAX_NUMBER_DIGITS = 6             # a numeric name component of more digits is no layer or expert number and stays in the pattern as it is
@@ -324,9 +326,36 @@ def _groups(tensors) -> tuple:
     return out, too_long
 
 
+def _extra_files(snapshot: Path, headers) -> tuple:
+    """(one dict per weights file the shard index does not name, the number of such files not described). The index lists the backbone's
+    shards; a second file beside it (a model's loop, hyper-connection or n-gram tensors, for example) holds weights the port needs and would
+    otherwise be easy to miss (issue 647). Each dict gives the file name, its tensor count and the first name components of its tensors. Empty
+    when there is no index or it cannot be read: with no index every file is a shard."""
+    try:
+        path = safeio.resolved_inside(snapshot / residency.INDEX_FILE, snapshot)
+        index = safeio.read_json(path, max_bytes=residency.MAX_HEADER_BYTES, expect=dict) if path else None
+    except (safeio.SafeReadError, OSError, ValueError):
+        return [], 0
+    weight_map = index.get("weight_map") if isinstance(index, dict) else None
+    if not isinstance(weight_map, dict):
+        return [], 0
+    named = {v for v in weight_map.values() if isinstance(v, str)}
+    by_file: dict = {}
+    for t in headers.tensors:
+        if t.file not in named:
+            entry = by_file.setdefault(t.file, [0, {}])
+            entry[0] += 1
+            if len(t.name) <= MAX_NAME_CHARS:
+                entry[1].setdefault(t.name.split(".")[0], None)
+    out = [{"file": f[:MAX_NAME_CHARS], "tensors": n, "prefixes": sorted(p[:MAX_KEY_CHARS] for p in prefixes)[:MAX_EXTRA_PREFIXES]}
+           for f, (n, prefixes) in sorted(by_file.items())]
+    return out[:MAX_EXTRA_FILES], max(0, len(out) - MAX_EXTRA_FILES)
+
+
 def _weights(snapshot: Path, headers) -> dict:
     files = sorted({t.file for t in headers.tensors})
     index = os.path.lexists(snapshot / residency.INDEX_FILE)
+    extra, extra_more = _extra_files(snapshot, headers)
     dtypes: dict = {}
     for t in headers.tensors:
         dtypes[t.dtype] = dtypes.get(t.dtype, 0) + 1
@@ -338,9 +367,12 @@ def _weights(snapshot: Path, headers) -> dict:
                 "header (safetensors.safe_open(path, 'pt').keys()).")
     else:
         note = f"There is no {residency.INDEX_FILE}; the tensors are spread over {len(files)} files, all listed below."
+    if extra or extra_more:
+        note += (" Weights files the index does not name: " + ", ".join(e["file"] for e in extra) + (f" and {extra_more} more" if extra_more else "")
+                 + ". They hold weights the port needs; see extra_files for their tensor counts and name prefixes.")
     return {"layout": "sharded" if index or len(files) > 1 else "single file", "index_file": index, "file_count": len(files),
             "files": files[:MAX_SHARDS_LISTED], "tensor_count": len(headers.tensors), "dtypes": dtypes,
-            "bytes": headers.checkpoint_bytes, "note": note}
+            "bytes": headers.checkpoint_bytes, "extra_files": extra, "extra_files_more": extra_more, "note": note}
 
 
 def read_config(snapshot) -> dict:

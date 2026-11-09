@@ -346,8 +346,20 @@ def _class_reasons(d: dict) -> list[str]:
             reasons.append(f"ignored_files[{i}] ({item['file']}) is not a converted copy: only {' and '.join(IGNORED_WEIGHT_SUFFIXES)} files may be ignored")
     if d.get("class") in SIDECAR_CLASSES and not sidecars:
         reasons.append(f"class {d['class']} needs at least one entry in sidecars")
-    if "class" in d and d["class"] not in SIDECAR_CLASSES and sidecars:
-        reasons.append(f"class {d['class']!r} cannot have sidecars; only {' and '.join(SIDECAR_CLASSES)} do")
+    if d.get("class") == "full-port":
+        # A full port may list sidecars (issue 647): a second weights file outside the shard index holds weights the port needs, so the listing is
+        # information. Each entry must carry the evidence of a measured file: a size, a sha256 (checked above) and the tensor names. An entry the
+        # scan refused already has its own reason above.
+        for i, item in enumerate(sidecars):
+            if not isinstance(item, dict) or not _text(item.get("file")) or item.get("refused"):
+                continue
+            size, names = item.get("size"), item.get("tensor_names")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                reasons.append(f"sidecars[{i}] ({item['file']}) needs a size in bytes, a whole number of zero or more, as a full-port sidecar")
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                reasons.append(f"sidecars[{i}] ({item['file']}) needs tensor_names, a list of text, as a full-port sidecar")
+    elif "class" in d and d["class"] not in SIDECAR_CLASSES and sidecars:
+        reasons.append(f"class {d['class']!r} cannot have sidecars; only {' and '.join(SIDECAR_CLASSES)} and full-port do")
     if d.get("class") == "restricted-head":
         head = d.get("head")
         if not isinstance(head, dict) or head.get("restricted") is not True:
