@@ -1,0 +1,164 @@
+{
+  "against_base": {
+    "max_abs_diff": 5.203125,
+    "prompts": [
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 4.078125,
+        "max_abs_logit": 17.375,
+        "prompt_tokens": 8,
+        "top1_equal": false
+      },
+      {
+        "last_top1_equal": false,
+        "max_abs_diff": 3.65625,
+        "max_abs_logit": 16.75,
+        "prompt_tokens": 16,
+        "top1_equal": false
+      },
+      {
+        "last_top1_equal": false,
+        "max_abs_diff": 5.203125,
+        "max_abs_logit": 16.5,
+        "prompt_tokens": 33,
+        "top1_equal": false
+      }
+    ],
+    "tolerance": 0.86875,
+    "tolerance_rule": "0.05 of the largest logit; top-1 may flip on near ties",
+    "top1_equal_all": false
+  },
+  "against_base_all_selected": {
+    "max_abs_diff": 5.203125,
+    "prompts": [
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 4.078125,
+        "max_abs_logit": 17.375,
+        "prompt_tokens": 8,
+        "top1_equal": false
+      },
+      {
+        "last_top1_equal": false,
+        "max_abs_diff": 3.65625,
+        "max_abs_logit": 16.75,
+        "prompt_tokens": 16,
+        "top1_equal": false
+      },
+      {
+        "last_top1_equal": false,
+        "max_abs_diff": 5.203125,
+        "max_abs_logit": 16.5,
+        "prompt_tokens": 33,
+        "top1_equal": false
+      }
+    ],
+    "tolerance": 0.86875,
+    "tolerance_rule": "0.05 of the largest logit; top-1 may flip on near ties",
+    "top1_equal_all": false
+  },
+  "decode": {
+    "base_ids": [
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220
+    ],
+    "distinct_base": 1,
+    "distinct_franken": 2,
+    "franken_ids": [
+      220,
+      13,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220
+    ],
+    "prompt_source": "stage 1 prompt through the chat template",
+    "same_as_base": false
+  },
+  "deterministic": true,
+  "dtype": "bfloat16",
+  "execution_dtypes": {
+    "base": "torch.bfloat16",
+    "franken": "torch.bfloat16"
+  },
+  "hc_sigma": 0.02,
+  "indexer": {
+    "all_selected_budget": 2048,
+    "all_selected_equals_base": false,
+    "configured_budget": 2048,
+    "longest_prompt": 33,
+    "narrow_budget": 8,
+    "narrow_differs": true,
+    "narrow_vs_all_selected_max_abs_diff": 1.25
+  },
+  "perturbed_differs": true,
+  "prompt_lengths": [
+    8,
+    16,
+    33
+  ],
+  "teacher_forced": {
+    "agree_fraction": 0.8903,
+    "distinct_top1": 11,
+    "distinct_top1_base": 10,
+    "positions": 155,
+    "same_top1_as_base": false,
+    "source": "fixed passage through the tokenizer"
+  }
+}

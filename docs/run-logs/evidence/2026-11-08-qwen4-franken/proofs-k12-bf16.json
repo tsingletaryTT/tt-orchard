@@ -1,0 +1,156 @@
+{
+  "against_base": {
+    "max_abs_diff": 0.125,
+    "prompts": [
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.0703125,
+        "max_abs_logit": 18.0,
+        "prompt_tokens": 8,
+        "top1_equal": true
+      },
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.125,
+        "max_abs_logit": 17.125,
+        "prompt_tokens": 16,
+        "top1_equal": true
+      },
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.125,
+        "max_abs_logit": 17.125,
+        "prompt_tokens": 33,
+        "top1_equal": true
+      }
+    ],
+    "tolerance": 0.9,
+    "tolerance_rule": "0.05 of the largest logit; top-1 may flip on near ties",
+    "top1_equal_all": true
+  },
+  "against_base_all_selected": {
+    "max_abs_diff": 0.125,
+    "prompts": [
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.0703125,
+        "max_abs_logit": 18.0,
+        "prompt_tokens": 8,
+        "top1_equal": true
+      },
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.125,
+        "max_abs_logit": 17.125,
+        "prompt_tokens": 16,
+        "top1_equal": true
+      },
+      {
+        "last_top1_equal": true,
+        "max_abs_diff": 0.125,
+        "max_abs_logit": 17.125,
+        "prompt_tokens": 33,
+        "top1_equal": true
+      }
+    ],
+    "tolerance": 0.9,
+    "tolerance_rule": "0.05 of the largest logit; top-1 may flip on near ties",
+    "top1_equal_all": true
+  },
+  "decode": {
+    "base_ids": [
+      220,
+      220,
+      11,
+      220,
+      220,
+      220,
+      11,
+      220,
+      220,
+      11,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220
+    ],
+    "distinct_base": 2,
+    "distinct_franken": 2,
+    "franken_ids": [
+      220,
+      220,
+      11,
+      220,
+      220,
+      220,
+      11,
+      220,
+      220,
+      11,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220,
+      220
+    ],
+    "prompt_source": "stage 1 prompt through the chat template",
+    "same_as_base": true
+  },
+  "deterministic": true,
+  "dtype": "bfloat16",
+  "execution_dtypes": {
+    "base": "torch.bfloat16",
+    "franken": "torch.bfloat16"
+  },
+  "hc_sigma": 0.0,
+  "identity_holds": true,
+  "indexer": {
+    "all_selected_budget": 2048,
+    "all_selected_equals_base": true,
+    "configured_budget": 2048,
+    "longest_prompt": 33,
+    "narrow_budget": 8,
+    "narrow_differs": true,
+    "narrow_vs_all_selected_max_abs_diff": 0.99755859375
+  },
+  "prompt_lengths": [
+    8,
+    16,
+    33
+  ]
+}
