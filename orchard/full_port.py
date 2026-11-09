@@ -369,32 +369,44 @@ def _template_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: lis
         reasons.append(f"{RECORD_FILE} free_run_ids must be a non-empty list of whole numbers")
 
 
-def sparse_budget(facts) -> tuple[int, str] | None:
-    """(the number of tokens beyond which a sparse attention selects, its name) from the port facts' `sparse_attention`, or None."""
+def sparse_budget(facts) -> tuple[int, str, int] | None:
+    """(the length beyond which a sparse attention selects, its kind, the extra the rule adds) from the port facts' `sparse_attention`, or None
+    for anything that is not a known kind with a plain positive number. For a query-sparse indexer the number is `budget` and the extra is the
+    block size (it keeps the current block beyond the budget, so it selects only once the evaluated length exceeds budget + block size); for a
+    sliding window it is `window` and the extra is 0. A `kind` that is not a string (a readable facts file may hold a list or an object) is
+    unknown, not an error."""
     sparse = facts.get("sparse_attention") if isinstance(facts, dict) else None
     if not isinstance(sparse, dict):
         return None
-    key = {"qsa-indexer": "budget", "sliding-window": "window"}.get(sparse.get("kind"))
+    kind = sparse.get("kind")
+    if not isinstance(kind, str):
+        return None
+    key = {"qsa-indexer": "budget", "sliding-window": "window"}.get(kind)
     value = sparse.get(key) if key else None
-    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 10 ** 9:
-        return value, sparse["kind"]
-    return None
+    if not (isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 10 ** 9):
+        return None
+    block = sparse.get("block_size") if kind == "qsa-indexer" else 0
+    block = block if isinstance(block, int) and not isinstance(block, bool) and 0 <= block <= 10 ** 9 else 0
+    return value, kind, block
 
 
 def indexer_record(facts, *, prompt_tokens: int, generated: int) -> dict:
-    """{"indexer_exercised", "indexer_basis"} for the stage 2 result, or {} when the facts carry no sparse attention (issue 638). The check
-    exercises the sparse part only when its longest context (the prompt and the tokens generated after it) is longer than the budget; a shorter
-    context selects every key, and a port that ignores the sparse part is then indistinguishable from one that has it."""
+    """{"indexer_exercised", "indexer_basis"} for the stage 2 result, or {} when the facts carry no usable sparse attention (issue 638). The
+    check feeds the prompt and every generated token but the last, so its longest forward pass evaluates prompt + generated - 1 inputs. The sparse
+    part is exercised only when that length exceeds the budget plus the block (a query-sparse indexer) or the window; at or below it every key is
+    selected, and a port that ignores the sparse part is indistinguishable from one that has it."""
     found = sparse_budget(facts)
     if found is None:
         return {}
-    budget, kind = found
-    context = prompt_tokens + generated
+    limit, kind, block = found
+    evaluated = prompt_tokens + generated - 1
     name = "indexer" if kind == "qsa-indexer" else "sliding window"
-    if context > budget:
-        return {"indexer_exercised": True, "indexer_basis": f"the check's longest context was {context} tokens, above the {name} budget of {budget}"}
+    rule = f"the budget of {limit} plus the block of {block}" if (kind == "qsa-indexer" and block) else f"the {'budget' if kind == 'qsa-indexer' else 'window'} of {limit}"
+    beyond = limit + block
+    if evaluated > beyond:
+        return {"indexer_exercised": True, "indexer_basis": f"the check's longest forward pass evaluated {evaluated} inputs, above {rule}"}
     return {"indexer_exercised": False,
-            "indexer_basis": (f"{name} not exercised: the check's longest context was {context} tokens, not above the budget of {budget}, so the {name} "
+            "indexer_basis": (f"{name} not exercised: the check's longest forward pass evaluated {evaluated} inputs, not above {rule}, so the {name} "
                               "selects every key and a port that ignores it agrees with the reference")}
 
 

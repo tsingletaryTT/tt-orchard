@@ -208,8 +208,8 @@ def make_handler(engine: Engine):
             except Exception as exc:  # noqa: BLE001  a failure in the port must reach the client and the log
                 sys.stderr.write(f"serve: generation failed: {type(exc).__name__}\n")
                 return self._json(500, {"error": {"message": f"generation failed: {type(exc).__name__}"}})
-            text = engine.tok.decode(ids, skip_special_tokens=True)
-            choice = {"index": 0, "finish_reason": finish, "token_ids": ids}
+            text, raw_text = decode_reply(engine.tok, ids)
+            choice = {"index": 0, "finish_reason": finish, "token_ids": ids, "raw_text": raw_text}
             if path == "/v1/chat/completions":
                 choice["message"] = {"role": "assistant", "content": text}
             else:
@@ -288,6 +288,29 @@ def passkey_plan(support: dict) -> dict:
     if support.get("template_thinks"):
         return {"off": False, "kwargs": {}, "max_tokens": THINK_ANSWER_TOKENS}
     return {"off": False, "kwargs": {}, "max_tokens": PLAIN_ANSWER_TOKENS}
+
+
+def renderer_and_thinking(snapshot: Path):
+    """(render, name, support): the chat renderer and the thinking facts of the template that is actually used. When jinja cannot run the template the
+    renderer is the plain form, and a template that was not used says nothing about how the prompts were rendered, so the facts are non-thinking."""
+    render, name = chat_renderer(snapshot)
+    return render, name, (thinking_support(snapshot) if name != "plain" else {"template_thinks": False, "switch": None})
+
+
+def decode_reply(tok, ids) -> tuple[str, str]:
+    """(clean text, raw text) of generated ids: the clean text drops special tokens, the raw text keeps them, so a closing think tag the tokenizer
+    registers as special is still there for the gate to read."""
+    return tok.decode(ids, skip_special_tokens=True), tok.decode(ids, skip_special_tokens=False)
+
+
+def answer_limit(tok, render, text: str, kwargs: dict, *, plan_max: int, max_len: int) -> int:
+    """The answer limit for a passkey request: the plan's, clamped so the rendered prompt (measured after the chat template with the same switches the
+    request carries) and the answer fit the context. The server checks the rendered count, so the filler's requested length is not the measure."""
+    n = len(tok.encode(render([{"role": "user", "content": text}], **kwargs), add_special_tokens=False).ids)
+    room = max_len - n - 1
+    if room < 1:
+        raise ServeFailed(f"the rendered passkey prompt is {n} tokens and the context is {max_len}: no room for an answer")
+    return min(plan_max, room)
 
 
 def chat_renderer(snapshot: Path):
@@ -418,7 +441,7 @@ def main() -> int:
     snapshot = Path(config["model_snapshot"])
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(str(snapshot / "tokenizer.json"))
-    render, chat_template = chat_renderer(snapshot)
+    render, chat_template, support = renderer_and_thinking(snapshot)
     cache_dir, cache_before = kernel_cache()
     RECORD.parent.mkdir(parents=True, exist_ok=True)
     if RECORD.exists() or RECORD.is_symlink():
@@ -469,17 +492,16 @@ def main() -> int:
 
         # The passkey runs: the same prompt twice through the chat endpoint.
         runs = []
-        support = thinking_support(snapshot)
         plan = passkey_plan(support)
         for item in config["passkeys"]:
             text = passkey_prompt(tok, item["length"], item["key"])
-            room = max(1, int(config["max_len"]) - item["length"] - 1)       # the answer limit never runs the context out
-            body = {"messages": [{"role": "user", "content": text}], "max_tokens": min(plan["max_tokens"], room)}
+            limit = answer_limit(tok, render, text, plan["kwargs"], plan_max=plan["max_tokens"], max_len=int(config["max_len"]))
+            body = {"messages": [{"role": "user", "content": text}], "max_tokens": limit}
             if plan["kwargs"]:
                 body["chat_template_kwargs"] = plan["kwargs"]
             first, second = post(port, "/v1/chat/completions", body), post(port, "/v1/chat/completions", body)
             runs.append({"length": item["length"], "key": item["key"], "prompt_tokens": first["usage"]["prompt_tokens"], "prompt_chars": len(text),
-                         "prompt_sha256": sha_bytes(text.encode()), "answer_text": first["choices"][0]["message"]["content"],
+                         "prompt_sha256": sha_bytes(text.encode()), "answer_text": first["choices"][0]["message"]["content"], "answer_raw": first["choices"][0].get("raw_text", first["choices"][0]["message"]["content"]),
                          "ids_first": first["choices"][0]["token_ids"], "ids_second": second["choices"][0]["token_ids"]})
             print(f"passkey length {item['length']}: {first['usage']['prompt_tokens']} prompt tokens", flush=True)
 

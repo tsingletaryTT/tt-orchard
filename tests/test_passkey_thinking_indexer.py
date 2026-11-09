@@ -137,18 +137,42 @@ def test_a_budget_that_is_not_a_plain_positive_number_gives_no_field(bad):
     assert port_facts.sparse_attention({"qsa": bad}, {}) is None
 
 
-def test_the_indexer_is_exercised_only_when_the_context_exceeds_the_budget():
-    facts = {"sparse_attention": {"kind": "qsa-indexer", "budget": 2048, "block_size": 4, "source": "config.qsa"}}
-    short = full_port_result.indexer_record(facts, prompt_tokens=64, generated=32)
-    assert short["indexer_exercised"] is False and "not exercised" in short["indexer_basis"] and "2048" in short["indexer_basis"]
-    long = full_port_result.indexer_record(facts, prompt_tokens=4200, generated=32)
-    assert long["indexer_exercised"] is True and "4232" in long["indexer_basis"]
+def _qsa(budget=2048, block=4):
+    return {"sparse_attention": {"kind": "qsa-indexer", "budget": budget, "block_size": block, "source": "config.qsa"}}
+
+
+def test_the_indexer_is_exercised_only_when_the_evaluated_input_exceeds_the_budget_plus_the_block():
+    """The check feeds the prompt and every generated token but the last, so it evaluates prompt + generated - 1 inputs. QSA keeps the current
+    block beyond its budget, so it selects only once the evaluated length exceeds budget + block size (2052 here)."""
+    facts = _qsa()
+    for prompt, generated, want in ((2017, 32, False),      # 2048 evaluated: the budget exactly
+                                    (2021, 32, False),      # 2052 evaluated: budget plus block, still every key
+                                    (2022, 32, True),       # 2053 evaluated: one above
+                                    (64, 32, False), (4200, 32, True)):
+        got = full_port_result.indexer_record(facts, prompt_tokens=prompt, generated=generated)
+        assert got["indexer_exercised"] is want, (prompt, generated, got)
+        assert str(prompt + generated - 1) in got["indexer_basis"]
+    assert "not exercised" in full_port_result.indexer_record(facts, prompt_tokens=64, generated=32)["indexer_basis"]
     assert full_port_result.indexer_record({}, prompt_tokens=64, generated=32) == {}
     assert full_port_result.indexer_record({"sparse_attention": {"kind": "qsa-indexer", "budget": "x"}}, prompt_tokens=64, generated=32) == {}
 
 
+def test_a_sliding_window_is_exercised_when_the_evaluated_input_exceeds_the_window():
+    facts = {"sparse_attention": {"kind": "sliding-window", "window": 512, "source": "text_config.sliding_window"}}
+    assert full_port_result.indexer_record(facts, prompt_tokens=480, generated=33)["indexer_exercised"] is False      # 512 evaluated
+    assert full_port_result.indexer_record(facts, prompt_tokens=481, generated=33)["indexer_exercised"] is True       # 513
+
+
+@pytest.mark.parametrize("kind", [["qsa-indexer"], {"a": 1}, 7, None, True, ""])
+def test_a_kind_that_is_not_a_known_string_gives_no_record_and_raises_nothing(kind):
+    facts = {"sparse_attention": {"kind": kind, "budget": 2048, "window": 512}}
+    assert full_port.sparse_budget(facts) is None
+    assert full_port_result.indexer_record(facts, prompt_tokens=64, generated=32) == {}
+    assert full_port.indexer_reasons({}, facts, prompt_tokens=64, generated=32) == []
+
+
 def test_the_gate_recomputes_the_indexer_field_and_refuses_a_false_claim():
-    facts = {"sparse_attention": {"kind": "qsa-indexer", "budget": 2048, "block_size": 4, "source": "config.qsa"}}
+    facts = _qsa()
     ok = full_port.indexer_reasons({"indexer_exercised": False, "indexer_basis": full_port_result.indexer_record(facts, prompt_tokens=64, generated=32)["indexer_basis"]},
                                    facts, prompt_tokens=64, generated=32)
     assert ok == []
@@ -268,3 +292,66 @@ def test_a_passkey_status_that_differs_from_the_recomputed_one_is_refused():
     full_port_serve._result_reasons({"serves": True, "coherent": True, "passkey_answered": [True], "passkey_lengths": [256], "passkey_status": "not-applicable"},
                                     None, None, ([True], True, "answered"), False, None, reasons, {"passkey": {"runs": runs("94554")}})
     assert any("passkey_status" in r for r in reasons), reasons
+
+
+# ---- review of PR 652 ----------------------------------------------------------------------------------------------------------
+
+def test_a_template_that_falls_back_to_the_plain_renderer_gives_non_thinking_facts(tmp_path):
+    """A chat template with <think> and no switch that jinja cannot render is not used: the prompt is the plain form. Reading the replies as a
+    thinking model's would turn a wrong plain-rendered reply into 'not applicable'."""
+    mod = template()
+    (tmp_path / "chat_template.jinja").write_text("{{ raise_exception('no') }}<think>\n")
+    render, name, support = mod.renderer_and_thinking(tmp_path)
+    assert name == "plain" and support == {"template_thinks": False, "switch": None}
+    (tmp_path / "chat_template.jinja").write_text("{% for m in messages %}{{ m.content }}{% endfor %}<think>\n")
+    render, name, support = mod.renderer_and_thinking(tmp_path)
+    assert name == "chat_template.jinja" and support == {"template_thinks": True, "switch": None}
+
+
+def test_the_reply_is_decoded_a_second_time_with_special_tokens_kept():
+    mod = template()
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    tok = Tokenizer(models.WordLevel({"[UNK]": 0, "the": 1, "key": 2, "</think>": 3, "94554": 4}, unk_token="[UNK]"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    tok.add_special_tokens(["</think>"])
+    clean, raw = mod.decode_reply(tok, [1, 3, 4])
+    assert "</think>" not in clean and "</think>" in raw and "94554" in raw
+
+
+def test_a_wrong_answer_after_a_special_closing_tag_is_a_failure_read_from_the_raw_text():
+    wrong = [{"length": 256, "key": "94554", "answer_text": " no idea", "answer_raw": "hmm</think> no idea", "prompt_tokens": 256, "ids_first": [1], "ids_second": [1]}]
+    assert full_port_serve.passkey_answers(wrong, THINKING) == ([False], "failed")
+    right = [dict(wrong[0], answer_text=" 94554", answer_raw="hmm</think> 94554")]
+    assert full_port_serve.passkey_answers(right, THINKING) == ([True], "answered")
+    cut = [dict(wrong[0], answer_text="still thinking", answer_raw="still thinking")]
+    assert full_port_serve.passkey_answers(cut, THINKING)[1] == "not-applicable"
+    legacy = [{"length": 256, "key": "94554", "answer_text": "x</think>94554", "prompt_tokens": 256, "ids_first": [1], "ids_second": [1]}]
+    assert full_port_serve.passkey_answers(legacy, THINKING) == ([True], "answered")          # a record without answer_raw reads answer_text
+
+
+def test_the_answer_limit_is_clamped_against_the_rendered_prompt_not_the_requested_filler():
+    mod = template()
+
+    class Tok:
+        def encode(self, text, add_special_tokens=False):
+            class E:
+                ids = list(range(len(text)))
+            return E()
+    render = lambda messages, **kw: "<m>" * 10 + messages[0]["content"]          # 30 marker characters count as tokens in this fake
+    assert mod.answer_limit(Tok(), render, "x" * 60, {}, plan_max=512, max_len=100) == 9           # 90 prompt tokens, room 100 - 90 - 1
+    assert mod.answer_limit(Tok(), render, "x" * 60, {}, plan_max=4, max_len=100) == 4
+    with pytest.raises(mod.ServeFailed, match="context"):
+        mod.answer_limit(Tok(), render, "x" * 80, {}, plan_max=512, max_len=100)
+
+
+def test_an_answer_raw_that_is_not_text_is_a_reason_not_an_error(tmp_path):
+    import port_serve_fakes as fk
+    b = fk.build(tmp_path)
+    assert fk.run_serve(b).returncode == 0
+    assert fk.derive(b)[0] is not None
+    path = b["stage"] / full_port_serve.RECORD_FILE
+    record = json.loads(path.read_text())
+    record["passkey"]["runs"][0]["answer_raw"] = ["x"]
+    path.write_text(json.dumps(record))
+    reasons, _, _ = fk.gate(b)
+    assert any("answer_raw" in r for r in reasons)

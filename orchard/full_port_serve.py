@@ -254,11 +254,15 @@ def passkey_answers(runs, thinking) -> tuple[list[bool], str]:
     reads = thinking.get("template_thinks") is True and thinking.get("off") is not True
     answered, cut = [], []
     for r in runs:
-        text = r["answer_text"] if isinstance(r, dict) and isinstance(r.get("answer_text"), str) else ""
+        # The clean text drops special tokens; the raw text keeps ones such as </think>. The key must be in the clean text (an edited answer that lost
+        # its key fails), and for a model read after its thinking block it must also be after the closing tag of the raw text. A record without the raw
+        # text reads the clean text for both.
+        clean = r["answer_text"] if isinstance(r, dict) and isinstance(r.get("answer_text"), str) else ""
+        raw = r.get("answer_raw") if isinstance(r, dict) and isinstance(r.get("answer_raw"), str) else clean
         key = r.get("key") if isinstance(r, dict) else None
-        closed = THINK_CLOSE in text
-        body = text.rsplit(THINK_CLOSE, 1)[1] if (reads and closed) else text
-        ok = isinstance(key, str) and bool(key) and not (reads and not closed) and key in body
+        closed = THINK_CLOSE in raw
+        body = raw.rsplit(THINK_CLOSE, 1)[1] if (reads and closed) else raw
+        ok = isinstance(key, str) and bool(key) and not (reads and not closed) and key in clean and key in body
         answered.append(ok)
         cut.append(reads and not closed)
     if answered and all(answered):
@@ -556,6 +560,8 @@ def _passkey_reasons(record, corpus_sha256, stage_dir, reasons) -> tuple[list[bo
             reasons.append(f"passkey.runs[{i}] needs length, key, answer_text, prompt_tokens, ids_first and ids_second")
             same_twice = False
             continue
+        if "answer_raw" in r and not isinstance(r["answer_raw"], str):
+            reasons.append(f"passkey.runs[{i}] answer_raw must be text when it is present")
         lengths.append(r["length"])
         if planned is not None and not any(p["length"] == r["length"] and p["key"] == r["key"] for p in planned):
             reasons.append(f"passkey.runs[{i}] length {r['length']} and key are not in the plan")
