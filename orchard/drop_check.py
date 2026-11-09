@@ -202,10 +202,29 @@ def _capabilities_problems(caps) -> list[str]:
     return out
 
 
+def _json_eq(a, b) -> bool:
+    """Equality of JSON values: true is not 1 and false is not 0 (stage 0's capability reader compares the same way)."""
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_json_eq(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_json_eq(a[k], b[k]) for k in a)
+    return type(a) in (int, float) and type(b) in (int, float) and a == b or type(a) is type(b) and a == b
+
+
+def _lookup(tc: dict, key: str):
+    """(found, value) for `key` in the text config; a dotted key ("rope_parameters.rope_theta") walks nested objects."""
+    node = tc
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False, None
+        node = node[part]
+    return True, node
+
+
 def _rule_problem(key: str, value, rule: dict) -> str | None:
-    if "equals" in rule and value != rule["equals"]:
+    if "equals" in rule and not _json_eq(value, rule["equals"]):
         return f"{key} is {_show(value)}; the package serves {_show(rule['equals'])}"
-    if "one_of" in rule and value not in rule["one_of"]:
+    if "one_of" in rule and not any(_json_eq(value, v) for v in rule["one_of"]):
         return f"{key} is {_show(value)}; the package serves one of {_show(rule['one_of'])}"
     if "multiple_of" in rule and (not _number(value) or value % rule["multiple_of"]):
         return f"{key} is {_show(value)}; the package needs a multiple of {rule['multiple_of']}"
@@ -354,8 +373,9 @@ def classify(repo, revision, files: dict, *, capabilities=None, class_probe=None
                     if a not in capabilities["architectures"]:
                         reasons.append(f"architecture {a!r} is not one the package registers")
                 for k, rule in capabilities["keys"].items():
-                    if k in tc:
-                        p = _rule_problem(k, tc[k], rule)
+                    found, value = _lookup(tc, k)
+                    if found:
+                        p = _rule_problem(k, value, rule)
                         if p:
                             reasons.append(p)
                 feature = capabilities.get("features", {}).get("indexer", "off")

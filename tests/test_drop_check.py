@@ -377,3 +377,28 @@ def test_tt_orchard_cli_runs_drop_check_without_a_config(tmp_path):
                     env={"HOME": str(tmp_path / "none")}, stdout=buf)
     assert code == dc.EXIT_COVERED
     assert json.loads(buf.getvalue())["route"] == "qwen3.8-bundle"
+
+
+# ---- rule semantics shared with stage 0's capability reader (track C1) ----------------------------------------------
+
+def test_a_dotted_key_reaches_a_nested_value():
+    cfg = qwen4_dense()
+    c = caps()
+    c["keys"]["rope_parameters.rope_theta"] = {"equals": 10000000}
+    assert verdict(cfg, capabilities=c)["route"] == "qwen4-package"
+    cfg["text_config"]["rope_parameters"]["rope_theta"] = 5000000
+    out = verdict(cfg, capabilities=c)
+    assert out["verdict"] == "not-covered" and any("rope_parameters.rope_theta" in r for r in out["reasons"])
+
+
+@pytest.mark.parametrize("key,rule,value", [("tie_word_embeddings", {"equals": False}, 0),
+                                            ("hc_count", {"one_of": [1, 4]}, True),
+                                            ("hc_count", {"equals": True}, 1)])
+def test_rules_compare_json_values(key, rule, value):
+    """true is not 1 and false is not 0, as in JSON (stage 0 compares the same way)."""
+    cfg = qwen4_dense()
+    cfg["text_config"][key] = value
+    c = bare_caps()
+    c["keys"][key] = rule
+    out = verdict(cfg, capabilities=c)
+    assert any(r.startswith(f"{key} is ") and "the package serves" in r for r in out["reasons"]), out["reasons"]
