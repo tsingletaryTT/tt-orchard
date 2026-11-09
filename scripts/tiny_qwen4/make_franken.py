@@ -72,6 +72,9 @@ HC_COUNT = 4
 INDEXER_RATIO = 4
 MAX_CONFIG_BYTES = 1 << 20
 PROMPT_LENGTHS = (8, 16, 33)
+STAGE1_PROMPT = "Write the text I send my landlord about the broken boiler."     # the prompt stage 1 decodes (reference_gate.py PROMPT)
+N_DECODE = 32                     # greedy tokens, as stage 1 decodes
+MIN_DISTINCT_IDS = 4              # a reference whose 32 tokens have fewer distinct ids is degenerate (make_checkpoint.py uses the same bar)
 PROOF_FLOAT32_ABS_TOL = 5e-4      # float32: equal to this absolute logit difference and with every top-1 token equal
 PROOF_BF16_REL_TOL = 0.05         # bf16: the stored norm weights are rounded, so equal only to this share of the largest logit (top-1 may flip on near ties)
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "chat_template.jinja")
@@ -461,7 +464,8 @@ def inventory(out: Path) -> dict:
     return files
 
 
-def write_manifest(out: Path, cfg: dict, args, snapshot: Path, indexer_dir, prov: dict, layer_types: list[str], estimate: int, proofs=None) -> dict:
+def write_manifest(out: Path, cfg: dict, args, snapshot: Path, indexer_dir, prov: dict, layer_types: list[str], estimate: int, proofs=None,
+                   decode=None) -> dict:
     manifest = {
         "kind": "qwen4-franken", "provisional": "built from public readings of an unreleased model; see the design note",
         "layers": cfg["num_hidden_layers"], "layer_types": layer_types, "seed": args.seed, "dtype": cfg["dtype"], "hc_sigma": args.hc_sigma,
@@ -475,10 +479,48 @@ def write_manifest(out: Path, cfg: dict, args, snapshot: Path, indexer_dir, prov
         "not_carried": ["visual tower", "mtp head (transformers' Qwen4Exp has none)", "per-layer embedding and n-gram table (ple_layer_ids is empty)"],
         "tensor_counts": prov, "estimated_bytes": estimate, "config": cfg,
         "versions": {"python": platform.python_version(), "torch": args.versions["torch"], "transformers": args.versions["transformers"]},
-        "files": inventory(out), "proofs": proofs,
+        "files": inventory(out), "proofs": proofs, "reference_decode": decode,
     }
     write_json(out / "franken-manifest.json", manifest)
     return manifest
+
+
+# ---- the degenerate-reference guard -----------------------------------------------------------------------------------------------
+
+def is_degenerate(ids) -> bool:
+    return len(set(ids)) < MIN_DISTINCT_IDS
+
+
+def stage1_prompt(transformers, out: Path, vocab: int):
+    """(prompt ids, how they were made, tokenizer or None): the stage 1 prompt through the checkpoint's own chat template when the
+    tokenizer loads, else a seeded id prompt (a test base has no tokenizer)."""
+    try:
+        tok = transformers.AutoTokenizer.from_pretrained(str(out))
+        text = tok.apply_chat_template([{"role": "user", "content": STAGE1_PROMPT}], tokenize=False, add_generation_prompt=True)
+        return tok(text, add_special_tokens=False)["input_ids"], "stage 1 prompt through the chat template", tok
+    except Exception:  # noqa: BLE001 - no usable tokenizer or template: fall back and say so
+        return make_prompts(vocab, 7)[1], "seeded ids (no usable tokenizer or chat template)", None
+
+
+def greedy_ids(torch, model, ids, n: int = N_DECODE) -> list[int]:
+    seq = list(ids)
+    new = []
+    with torch.no_grad():
+        for _ in range(n):
+            token = int(model(torch.tensor([seq]), use_cache=False).logits[0, -1].argmax())
+            new.append(token)
+            seq.append(token)
+    return new
+
+
+def reference_decode(torch, transformers, qd, out: Path, cfg: dict) -> dict:
+    """Greedy-decode the stage 1 prompt on the CPU with the written checkpoint and say how many distinct ids came out."""
+    ids, source, tok = stage1_prompt(transformers, out, cfg["vocab_size"])
+    model = load_franken(torch, transformers, qd, out)
+    new = greedy_ids(torch, model, ids)
+    del model
+    return {"prompt_source": source, "prompt_tokens": len(ids), "prompt_ids": ids, "generated_ids": new, "distinct_ids": len(set(new)),
+            "degenerate": is_degenerate(new), "text": (tok.decode(new)[:200] if tok is not None else None)}
 
 
 # ---- the proofs -------------------------------------------------------------------------------------------------------------------
@@ -552,7 +594,7 @@ def all_selected_budget(longest: int) -> int:
     return (blocks + 1) * INDEXER_RATIO
 
 
-def run_proofs(torch, transformers, qd, out: Path, text: dict, base: dict, cfg: dict, hc_sigma: float) -> dict:
+def run_proofs(torch, transformers, qd, out: Path, text: dict, base: dict, cfg: dict, hc_sigma: float, decode: dict | None = None) -> dict:
     """Four proofs. The identity and perturbation claims are judged on the model with every block selected, so that a small configured
     budget (sparse attention) cannot stand in for the claim. The wide/narrow indexer comparison always runs."""
     prompts = make_prompts(cfg["vocab_size"], 7)
@@ -566,6 +608,11 @@ def run_proofs(torch, transformers, qd, out: Path, text: dict, base: dict, cfg: 
               "execution_dtypes": execution_dtypes(torch, franken, base_model),
               "deterministic": all(bool(torch.equal(x, y)) for x, y in zip(first, second))}
     reference = logits_of(torch, base_model, prompts)
+    if decode is not None:
+        base_ids = greedy_ids(torch, base_model, decode["prompt_ids"])
+        proofs["decode"] = {"prompt_source": decode["prompt_source"], "franken_ids": decode["generated_ids"], "base_ids": base_ids,
+                            "same_as_base": decode["generated_ids"] == base_ids, "distinct_franken": decode["distinct_ids"],
+                            "distinct_base": len(set(base_ids))}
     del base_model
     configured = compare(torch, first, reference, prompts)
     biggest = max(r["max_abs_logit"] for r in configured["prompts"])
@@ -651,12 +698,26 @@ def make(args) -> int:
     del tensors
     copied = write_tokenizer(out, tokenizer_files)
     say(f"wrote {out} (tokenizer files: {', '.join(copied) or 'none'})")
+    if args.skip_decode_check:
+        decode = {"not_run": True, "degenerate": False, "reason": "--skip-decode-check"}
+        say("warning: the degenerate-reference check was skipped (--skip-decode-check)")
+    else:
+        say("decoding the stage 1 prompt on the CPU")
+        decode = reference_decode(torch, transformers, qd, out, cfg)
+        say(f"{decode['distinct_ids']} distinct ids in {N_DECODE} greedy tokens; first 12: {decode['generated_ids'][:12]}")
     proofs = None
     if args.prove:
         say("running the proofs on the CPU")
-        proofs = run_proofs(torch, transformers, qd, out, text, base, cfg, args.hc_sigma)
+        proofs = run_proofs(torch, transformers, qd, out, text, base, cfg, args.hc_sigma, None if decode.get("not_run") else decode)
         write_json(out / "proofs.json", proofs)
-    write_manifest(out, cfg, args, snapshot, indexer_dir, prov, layer_types, estimate, proofs)
+    write_manifest(out, cfg, args, snapshot, indexer_dir, prov, layer_types, estimate, proofs, decode)
+    if decode["degenerate"]:
+        message = (f"the reference decode has {decode['distinct_ids']} distinct ids in {N_DECODE} tokens (fewer than {MIN_DISTINCT_IDS}): "
+                   "the stage 1 text is empty or constant and a port that outputs the same constant would pass the token agreement")
+        if not args.allow_degenerate:
+            print(f"make_franken: {message}; the checkpoint is written and flagged in its manifest", file=sys.stderr)
+            return 3
+        say(f"warning: {message} (--allow-degenerate)")
     if proofs is not None:
         ok = proofs_pass(proofs)
         if not ok:
@@ -678,6 +739,8 @@ def main(argv=None) -> int:
     ap.add_argument("--set", action="append", default=[])
     ap.add_argument("--max-gb", type=float, default=DEFAULT_MAX_GB)
     ap.add_argument("--prove", action="store_true")
+    ap.add_argument("--skip-decode-check", action="store_true", help="do not decode the stage 1 prompt (generation only; needs no forward pass)")
+    ap.add_argument("--allow-degenerate", action="store_true", help="exit 0 although the reference decode has fewer than 4 distinct ids")
     args = ap.parse_args(argv)
     try:
         return make(args)

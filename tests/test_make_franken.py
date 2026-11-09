@@ -87,9 +87,12 @@ needs_real_forward = pytest.mark.skipif(PY is None, reason=(
 LAST = {"err": ""}
 
 
-def run(base, out, *extra, layers=4, dtype="float32"):
-    """The script in the reference interpreter (torch 2.14): the indexer's int32 scatter needs a torch newer than the test runner's."""
-    interpreter = PY if "--prove" in extra else sys.executable      # only a forward pass needs the newer torch
+def run(base, out, *extra, layers=4, dtype="float32", decode=False):
+    """The script. A forward pass (the proofs, the reference decode) runs in the reference interpreter (torch 2.14), because the indexer's
+    int32 scatter needs a torch newer than the test runner's; generation alone runs in the current interpreter with the decode skipped."""
+    forward = "--prove" in extra or decode
+    interpreter = PY if forward else sys.executable
+    extra = extra if forward else (*extra, "--skip-decode-check")
     r = subprocess.run([interpreter, str(SCRIPT), "--out", str(out), "--base-snapshot", str(base), "--layers", str(layers), "--dtype", dtype,
                         "--max-gb", "1", *extra], capture_output=True, text=True)
     LAST["err"] = r.stderr
@@ -472,3 +475,76 @@ def test_a_needed_tensor_with_a_non_string_shard_name_is_refused_not_a_traceback
     (snap / "model.safetensors.index.json").write_text(json.dumps(table))
     assert mf.main(["--out", str(tmp_path / "o"), "--base-snapshot", str(snap), "--layers", "4", "--max-gb", "1"]) == 2
     assert "weight index" in capsys.readouterr().err and not (tmp_path / "o").exists()
+
+
+# ---- the degenerate-reference guard (coordinator finding on the first hardware attempt) --------------------------------------------
+
+def _decode_record(out):
+    return json.loads((out / "franken-manifest.json").read_text())["reference_decode"]
+
+
+@needs_real_forward
+def test_the_manifest_records_a_stage_1_style_greedy_decode(base_snapshot, tmp_path):
+    out = tmp_path / "dec"
+    code = run(base_snapshot, out, "--allow-degenerate", decode=True)
+    assert code == 0
+    rec = _decode_record(out)
+    assert len(rec["generated_ids"]) == 32 and rec["distinct_ids"] == len(set(rec["generated_ids"]))
+    assert rec["prompt_source"].startswith("seeded ids") and rec["degenerate"] == (rec["distinct_ids"] < 4)
+
+
+def _constant_output_base(base_snapshot, tmp_path):
+    """The base with an lm_head whose largest row wins whatever the input: every greedy token is the same."""
+    import shutil
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    snap = tmp_path / "const" / "snapshots" / ("d1" * 20)
+    shutil.copytree(base_snapshot, snap)
+    shard = snap / "model-00001-of-00001.safetensors"
+    with safe_open(str(shard), framework="pt") as f:
+        tensors = {k: f.get_tensor(k) for k in f.keys()}
+    head = tensors["lm_head.weight"].float()
+    head[:] = 0
+    head[7] = 1.0
+    tensors["lm_head.weight"] = head.bfloat16()
+    tensors["model.language_model.embed_tokens.weight"] = torch.ones_like(tensors["model.language_model.embed_tokens.weight"])
+    save_file(tensors, str(shard), metadata={"format": "pt"})
+    return snap
+
+
+@needs_real_forward
+def test_a_checkpoint_whose_reference_decode_is_constant_is_refused_with_exit_3(base_snapshot, tmp_path):
+    snap = _constant_output_base(base_snapshot, tmp_path)
+    out = tmp_path / "degenerate"
+    assert run(snap, out, decode=True) == 3
+    assert "distinct" in LAST["err"]
+    rec = _decode_record(out)
+    assert rec["degenerate"] is True and rec["distinct_ids"] < 4        # the checkpoint and its manifest stay, flagged
+
+
+@needs_real_forward
+def test_allow_degenerate_turns_the_refusal_into_a_recorded_warning(base_snapshot, tmp_path):
+    snap = _constant_output_base(base_snapshot, tmp_path)
+    out = tmp_path / "allowed"
+    assert run(snap, out, "--allow-degenerate", decode=True) == 0
+    assert _decode_record(out)["degenerate"] is True
+
+
+def test_the_distinct_id_rule_is_four():
+    assert mf.MIN_DISTINCT_IDS == 4
+    assert mf.is_degenerate([5] * 32) and mf.is_degenerate([1, 2, 3] * 11) and not mf.is_degenerate([1, 2, 3, 4] * 8)
+
+
+@needs_real_forward
+def test_the_proofs_compare_the_decode_with_the_bases(base_snapshot, tmp_path):
+    out = tmp_path / "decproof"
+    assert run(base_snapshot, out, "--prove", "--allow-degenerate") == 0
+    d = proofs_of(out)["decode"]
+    assert d["franken_ids"] == d["base_ids"] and d["same_as_base"] is True and len(d["base_ids"]) == 32
+
+
+def test_skipping_the_decode_check_is_recorded_not_silent(base_snapshot, tmp_path):
+    out = tmp_path / "skipped"
+    assert run(base_snapshot, out) == 0
+    rec = _decode_record(out)
+    assert rec["not_run"] is True and rec["reason"] == "--skip-decode-check"
