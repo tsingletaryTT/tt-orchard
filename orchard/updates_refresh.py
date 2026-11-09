@@ -22,6 +22,7 @@ anyway: the page asks `GET /api/updates` again when the run has ended.
 from __future__ import annotations
 
 import os
+import pathlib
 import signal
 import subprocess
 import sys
@@ -29,6 +30,9 @@ import threading
 import time
 
 ARGV = [sys.executable, "-m", "orchard.cli", "updates", "--refresh"]
+# `orchard` is not installed in the venv: `python -m orchard.cli` imports it from the working directory, so the child starts in the directory
+# that holds the package, whatever directory the web server was started in (found in the review of PR 683).
+CWD = str(pathlib.Path(__file__).resolve().parent.parent)
 TIMEOUT_S = 240.0
 MIN_INTERVAL_S = 60.0
 # What an agent shell gets (orchard/agent.py ENV_ALLOW, held equal or smaller by a test), plus HOME and XDG_CACHE_HOME for the cache file
@@ -78,7 +82,7 @@ class RefreshJob:
         outcome, code = "ok", None
         try:
             proc = self._popen(list(ARGV), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               env=self._child_env(), start_new_session=True)
+                               env=self._child_env(), cwd=CWD, start_new_session=True)
         except (OSError, ValueError, subprocess.SubprocessError):
             outcome = "could-not-start"
         else:

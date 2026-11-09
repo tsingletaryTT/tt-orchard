@@ -86,6 +86,28 @@ def test_the_argument_list_is_fixed_and_no_shell_is_used():
     assert kw["start_new_session"] is True
 
 
+def test_the_command_runs_from_the_directory_that_holds_the_orchard_package():
+    # `orchard` is not installed in the venv: `python -m orchard.cli` imports it from the working directory, so the child must start there
+    # whatever directory the web server was started in (found in the review of PR 683).
+    import pathlib
+    p = Popen()
+    job = make_job(p)
+    job.start()
+    wait_done(job)
+    cwd = p.calls[0][1].get("cwd")
+    assert cwd and (pathlib.Path(cwd) / "orchard" / "updates_refresh.py").is_file()
+
+
+def test_the_command_really_imports_orchard_from_that_directory(tmp_path):
+    import os, pathlib, subprocess as sp
+    cwd = ur.CWD
+    env = {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
+    r = sp.run([sys.executable, "-c", "import orchard.cli"], cwd=cwd, env=env, capture_output=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-300:]
+    r2 = sp.run([sys.executable, "-c", "import orchard.cli"], cwd=str(tmp_path), env=env, capture_output=True, timeout=60)
+    assert r2.returncode != 0          # from another directory it does not import: the reason for cwd
+
+
 def test_nothing_the_caller_sends_reaches_the_command():
     import inspect
     assert list(inspect.signature(ur.RefreshJob.start).parameters) == ["self"]       # start() takes no argument at all
