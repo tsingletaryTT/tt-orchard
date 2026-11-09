@@ -4927,3 +4927,22 @@ the Qwen4 bundle on the weights-only route; its text is not readable, so every g
   A run of the 54 test files that touch the changed code found one regression: the supervisor read `spec.gate`, which the stand-in spec of
   `tests/test_token_check_numbers.py` does not have. Both reads now use `getattr`; that set then passed (2,347 passed, 2 skipped), and the four
   mutations on those lines were run again and are red.
+
+## 2026-11-09: the bundle the operator names is the bundle the run uses (Qwen4 drop-in plan, Track C item C3)
+Prompt (from the session that runs the Qwen4 drop-in plan): keep the chosen bundle through `resolve_base` and `check_base`, refuse a weights repo
+two bundles share, and choose the bundle by chip count.
+- Found on this box: `mando2222/qwen3.8-27b-dflash2-vision-p300x2-q4kv-v6-thin` and iteration 0 of `mando2222/qwen4-27b-dense-v6-thin` both serve
+  `Qwen/Qwen3.8-27B` on four chips. `--base` with either bundle kept only that repository; the base row then named whichever bundle sorted first
+  (the Qwen3.8 one), and stage 2 and 4 drafts either found two bundles for four chips or took any bundle of that repository for two chips.
+- `cli.resolve_base_bundle` returns the bundle a name refers to; `preflight.check_base(base_bundle=...)` uses it (a named bundle that does not
+  serve the base, or was refused as unable to take swapped weights, blocks); the base row's data carries `bundle_dir`, and the bring-up records it
+  as the run's `bundle` input (a resumed run keeps the one it started with). `nearest.bundle_family` is the named bundle and the other v6 bundles
+  with the same weights repository and the same `orchard-capabilities.json` (or, like it, none). `swap_draft.draft` and `draft_stage4` choose by
+  chip count within the family, and a bundle that ships capabilities is never replaced by a container package. `nearest_problem` and the stage 4
+  plan check refuse an agent-written config outside the family; the supervisor passes the run's bundle to both.
+- Without a name, `nearest.ambiguity` blocks the base row when the bundles that serve the base belong to different families or two serve the same
+  chip count, and lists the `--base <bundle>` commands. On this box that means a Qwen3.8 fine-tune now needs `--base` with the Qwen3.8 bundle until
+  the Qwen4 bundle's weights pointer moves to its own test checkpoint. Container packages are a fallback and do not count as rivals.
+- Not changed: issue 559 (a `--base` model id with no installed bundle) is a different problem and stays open.
+- Tests: `tests/test_bundle_identity.py`. 20 mutations; two survived at first (defensive branches of the capabilities digest) and each got a test;
+  all are red now. No hardware was used.
