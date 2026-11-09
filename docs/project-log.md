@@ -5046,3 +5046,10 @@ two bundles share, and choose the bundle by chip count.
 - Not changed: issue 559 (a `--base` model id with no installed bundle) is a different problem and stays open.
 - Tests: `tests/test_bundle_identity.py`. 20 mutations; two survived at first (defensive branches of the capabilities digest) and each got a test;
   all are red now. No hardware was used.
+
+## 2026-11-09 (UTC): the hostile-readers registry test failed on main after PR 657
+Prompt (operator): keep going; the full suite on main after Eric's four PRs showed one failure, `tests/test_hostile_readers.py::test_the_registry_covers_these_modules_and_the_rest_are_listed`, and it fails alone on a clean checkout of main.
+- Finding: `drop_check.py` and `drop_watch.py` (PR 657) parse JSON and were neither registered as hostile-input readers nor named in `UNREGISTERED_MODULES`. PR 657's review ran `test_hostile_fs_readers` and not this file, so the gap was not seen before the merge. The suite on main otherwise passed: 28,082 passed, 74 skipped, 1 xfailed.
+- Change: both modules are named in `UNREGISTERED_MODULES` (the backlog list the test describes), each with a comment pointing at issue 676, which tracks registering their readers. Registering real readers is the follow-up.
+- Check: the two hostile-reader test files pass (4,226); removing one entry turns the registry test red.
+- Review lesson: a review of a PR that adds a module that parses JSON runs `tests/test_hostile_readers.py` as well.
