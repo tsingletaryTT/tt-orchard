@@ -38,7 +38,7 @@ RULES = ("You write one function of a TTNN port of a transformer decoder for a T
          "_linear helper (a ttnn.linear call on a weight uploaded at load); do not compute a projection in torch. Glue that has no ttnn "
          "entry in the sheet (a recurrence, an index computation) may run in torch on the host: read a tensor back with _to_host and "
          "upload the result with _upload. Use only the ttnn calls listed; an argument that is not listed does not exist. Take every "
-         "setting (activation, eps, group size, head counts) from the construction lines, not from a class default. Answer with one "
+         "setting (activation, eps, group size, head counts) from the construction lines; a class default may differ from the resolved value. Answer with one "
          "```python code block that defines the function with the same name and arguments, plus any import it needs, and nothing else. "
          "Do not leave the `# AGENT:` marker in it.")
 
@@ -163,7 +163,7 @@ def helpers_text(port_text: str) -> str:
 
 
 def stub_request(port_text: str, stub, *, sheet: dict, excerpts: str | None, construction_text: str | None = None, inventory=None) -> dict:
-    """The one chat request for `stub` (a port_template.Stub, or a dict with function, cls and path): {"system", "user", "function", "args"}.
+    """The chat request for `stub` (a port_template.Stub, or a dict with function, cls and path): {"system", "user", "function", "args"}.
     The user text puts the shared parts first and the stub last."""
     function = stub["function"] if isinstance(stub, dict) else stub.function
     cls = stub["cls"] if isinstance(stub, dict) else stub.cls
@@ -202,7 +202,7 @@ def repair_request(port_text: str, function: str, *, last_check: str, layer_diff
 
 
 def extract_code(reply: str) -> str:
-    """The one code block of a reply (a fenced block, or the whole reply when it has no fence and parses as Python)."""
+    """The code block of a reply (a fenced block, or the whole reply when it has no fence and parses as Python)."""
     if not isinstance(reply, str) or len(reply) > REPLY_MAX_CHARS:
         raise SpliceError("the reply is not a string of bounded size")
     blocks = _FENCE.findall(reply)

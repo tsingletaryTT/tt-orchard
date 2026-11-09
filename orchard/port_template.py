@@ -366,7 +366,7 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     if extra:
         prelude_reason = (f"{text_cls or 'the text model'} has children the generated flow does not know: "
                           + ", ".join(f"{k} ({v})" for k, v in sorted(extra.items())))
-    if text_path in flagged:          # an op labelled candidate or host in the text model's own forward (between the blocks), not in a child
+    if text_path in flagged:          # an op labelled candidate or host in the text model's own forward, between the blocks; a flag under a child goes to that child's block
         flag = f"stage 0 labelled {flagged[text_path]} in {text_path} itself"
         prelude_reason = (prelude_reason + "; " if prelude_reason else "") + flag
     epilogue = sorted((k, v) for k, v in extra.items())
@@ -831,7 +831,7 @@ def _dotted(node) -> str | None:
 # ---- reading the inputs from files ----------------------------------------------------------------------------------------------------------
 
 def read_construction(path) -> dict:
-    """The construction JSON from a file that holds either the object itself or the one line effective_construction.py prints (MARK and the object)."""
+    """The construction JSON from a file that holds either the object itself or the line effective_construction.py prints (MARK and the object)."""
     text = safeio.read_bytes(path, max_bytes=INPUT_MAX).decode("utf-8", "replace")
     line = next((ln for ln in text.split("\n") if ln.startswith("ORCHARD_EFFECTIVE_CONSTRUCTION ")), text)
     if line.startswith("ORCHARD_EFFECTIVE_CONSTRUCTION "):
