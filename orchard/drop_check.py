@@ -58,6 +58,8 @@ EXIT_FOR = {"covered": EXIT_COVERED, "covered-with-notes": EXIT_COVERED, "refuse
 # The files read, with the most bytes each may have. Only config.json is required.
 METADATA_FILES = {"config.json": 1 << 20, "generation_config.json": 1 << 20, "tokenizer_config.json": 8 << 20,
                   "chat_template.jinja": 1 << 20, "tokenizer.json": 64 << 20, "model.safetensors.index.json": 16 << 20}
+MAX_METADATA_BYTES = max(METADATA_FILES.values())
+MAX_INFO_BYTES = 8 << 20          # the Hub's API record of a repository
 
 REPO_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_-]{0,38})/([A-Za-z0-9][A-Za-z0-9._-]{0,95})")
 REV_RE = re.compile(r"[0-9a-f]{40}")
@@ -163,15 +165,16 @@ def _number(v) -> bool:
 
 
 def _parse_json(raw, name: str, reasons: list):
+    """The JSON value of a release file, parsed strictly (no NaN or Infinity, no repeated key, no lone surrogate, bounded nesting:
+    safeio.parse_json_bytes), or _BAD with the reason appended."""
     if not isinstance(raw, (bytes, bytearray)):
         reasons.append(f"{name} is missing")
         return _BAD
     try:
-        value = json.loads(bytes(raw).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        reasons.append(f"{name} is not valid JSON ({type(exc).__name__})")
+        return safeio.parse_json_bytes(bytes(raw), max_bytes=MAX_METADATA_BYTES)
+    except safeio.SafeReadError as exc:
+        reasons.append(f"{name} is not valid JSON ({type(exc).__name__}: {exc})")   # safeio's messages hold none of the input
         return _BAD
-    return value
 
 
 def _moe_layers(tc: dict, n_layers: int | None, reasons: list) -> list[int]:
@@ -378,14 +381,13 @@ class HubClient:
         if p:
             raise ValueError(p)
         path = f"/api/models/{repo}" + (f"/revision/{revision}" if revision else "") + "?blobs=true"
-        raw = self._open(self.base + path, 8 << 20)
+        raw = self._open(self.base + path, MAX_INFO_BYTES)
         if raw is None:
             return None
         try:
-            value = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError, RecursionError):
+            return safeio.parse_json_bytes(raw, max_bytes=MAX_INFO_BYTES, expect=dict)
+        except safeio.SafeReadError:
             return None
-        return value if isinstance(value, dict) else None
 
     def get(self, repo: str, revision: str, name: str, *, max_bytes: int) -> bytes | None:
         p = repo_problem(repo) or revision_problem(revision) or _file_problem(name)
@@ -402,7 +404,7 @@ class DirClient:
 
     def info(self, repo: str, revision: str | None = None) -> dict | None:
         try:
-            value = safeio.read_json(self.path / "info.json", max_bytes=8 << 20)
+            value = safeio.read_json(self.path / "info.json", max_bytes=MAX_INFO_BYTES)
         except (OSError, ValueError, safeio.SafeReadError):
             return None
         return value if isinstance(value, dict) else None

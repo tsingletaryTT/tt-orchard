@@ -974,6 +974,8 @@ def _types():
 (_LedgerCorrupt, _PackageError, _SuiteError, _FetchError, _LedgerUnavailable, _CorpusError, _LedgerRefused, _SafeReadError,
  _MigrationRefused) = _types()
 from orchard.audio_package import AudioPackageError as _AudioPackageError  # noqa: E402
+from orchard.drop_check import Unreadable as _DropUnreadable  # noqa: E402
+from orchard.drop_watch import StateCorrupt as _DropStateCorrupt  # noqa: E402
 from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
 from orchard.stack_pins import StackPinsError as _StackPinsError  # noqa: E402
 from orchard.port_facts import PortFactsError as _PortFactsError  # noqa: E402
@@ -1060,6 +1062,212 @@ def _profile_summarise_dir(base: Path):
     from orchard import profile_summary
     (base / "out").mkdir(exist_ok=True)
     return profile_summary.summarise_dir(base, base / "out", top_n=5, perf_report=str(base / "no-such-tt-perf-report"), report_timeout_s=5.0)
+
+
+# ----- the release-day check and its watcher (orchard/drop_check.py, orchard/drop_watch.py; issue 676)
+
+_DROP_REPO = "Qwen/Qwen4-27B"
+_DROP_REV = "0123456789abcdef0123456789abcdef01234567"
+_DROP_WEIGHTS = "mando2222/qwen4-27b-franken-k20"
+
+
+def _drop_config() -> bytes:
+    import json
+    cfg = json.loads((REPO / "tests/fixtures/model-configs/qwen4-dense-provisional-buildable.json").read_text(encoding="utf-8"))
+    cfg.pop("_source", None)
+    return json.dumps(cfg).encode()
+
+
+class _DropResponse:
+    def __init__(self, body: bytes):
+        import io
+        self._body = io.BytesIO(body)
+
+    def read(self, n=-1):
+        return self._body.read(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _drop_opener(routes: dict):
+    """urlopen for drop_check.HubClient: the body of the first route whose suffix ends the URL, else a 404."""
+    def opener(req, timeout=None):
+        import urllib.error
+        for suffix, body in routes.items():
+            if req.full_url.endswith(suffix):
+                return _DropResponse(body)
+        raise urllib.error.HTTPError(req.full_url, 404, "not found", {}, None)
+    return opener
+
+
+def _drop_caps() -> dict:
+    import copy
+    from orchard import drop_check
+    return copy.deepcopy(drop_check.EXAMPLE_CAPABILITIES)
+
+
+def _drop_not_covered(result) -> str | None:
+    return None if isinstance(result, dict) and result.get("verdict") == "not-covered" else f"verdict {result.get('verdict')!r} for a hostile config"
+
+
+def _drop_check_hub_info(payload: bytes):
+    from orchard import drop_check
+    return drop_check.HubClient(opener=_drop_opener({"?blobs=true": payload})).info(_DROP_REPO)
+
+
+def _drop_check_hub_file(name: str, payload: bytes):
+    """fetch_metadata then classify, as `drop-check` does against the Hub, with `payload` served as `name` and the rest valid."""
+    from orchard import drop_check
+    routes = {f"/resolve/{_DROP_REV}/config.json": _drop_config()}
+    routes[f"/resolve/{_DROP_REV}/{name}"] = payload
+    files, problems = drop_check.fetch_metadata(drop_check.HubClient(opener=_drop_opener(routes)), _DROP_REPO, _DROP_REV)
+    res = drop_check.classify(_DROP_REPO, _DROP_REV, files, capabilities=_drop_caps())
+    res["reasons"] = problems + res["reasons"]
+    return res
+
+
+def _drop_check_hub_config(payload: bytes):
+    return _drop_check_hub_file("config.json", payload)
+
+
+def _drop_check_hub_tokenizer_config(payload: bytes):
+    return _drop_check_hub_file("tokenizer_config.json", payload)
+
+
+def _drop_check_index_shards(payload: bytes):
+    from orchard import drop_check
+    return drop_check.index_shards(payload)
+
+
+def _drop_release_setup(base: Path):
+    """A complete simulated release in base/release (the layout `drop-check --from-dir` reads)."""
+    import json
+    rel = base / "release"
+    rel.mkdir(exist_ok=True)
+    files = {"config.json": _drop_config(),
+             "model.safetensors.index.json": json.dumps({"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}).encode()}
+    files["info.json"] = json.dumps({"id": _DROP_REPO, "sha": _DROP_REV, "lastModified": "2026-11-01T00:00:00.000Z",
+                                     "siblings": [{"rfilename": n, "size": len(b)} for n, b in files.items()]}).encode()
+    for name, data in files.items():
+        (rel / name).write_bytes(data)
+
+
+def _drop_release_setup_without(name: str):
+    def setup(base: Path):
+        _drop_release_setup(base)
+        (base / "release" / name).unlink()
+    return setup
+
+
+def _drop_check_run_release(base: Path):
+    from orchard import drop_check
+    args = drop_check.parser().parse_args([_DROP_REPO, "--from-dir", str(base / "release")])
+    res, code = drop_check.run(args)
+    return {"result": res, "exit": code}
+
+
+def _drop_run_not_covered(out) -> str | None:
+    res = out.get("result") if isinstance(out, dict) else None
+    ok = isinstance(res, dict) and res.get("verdict") in ("not-covered", "not-found", "refused")   # refused: a record with no commit hash
+    return None if ok else f"verdict {res!r:.200} for a hostile release"
+
+
+def _drop_bundle_setup(base: Path):
+    """An installed package in base/bundle whose manifest names weights cached under base/hf."""
+    import json
+    snap = base / "hf" / "hub" / ("models--" + _DROP_WEIGHTS.replace("/", "--")) / "snapshots" / _DROP_REV
+    snap.mkdir(parents=True, exist_ok=True)
+    (base / "bundle").mkdir(exist_ok=True)
+    for path, data in ((base / "bundle" / "orchard-capabilities.json", json.dumps(_drop_caps()).encode()),
+                       (base / "bundle" / "tt_kernel_manifest.json",
+                        json.dumps({"weights": {"repo_id": _DROP_WEIGHTS, "revision": _DROP_REV}}).encode()),
+                       (snap / "config.json", _drop_config())):
+        path.write_bytes(data)
+
+
+def _drop_bundle_setup_for(rel: str):
+    def setup(base: Path):
+        _drop_bundle_setup(base)
+        (base / rel).unlink()
+    return setup
+
+
+_DROP_SNAP_CONFIG = f"hf/hub/models--{_DROP_WEIGHTS.replace('/', '--')}/snapshots/{_DROP_REV}/config.json"
+
+
+def _drop_check_bundle_inputs(base: Path):
+    from orchard import drop_check
+    return drop_check.bundle_inputs(base / "bundle", base / "hf")
+
+
+def _drop_watch_load_state(base: Path):
+    from orchard import drop_watch
+    return drop_watch.load_state(base)
+
+
+def _drop_watch_load_config(base: Path):
+    from orchard import drop_watch
+    return drop_watch.load_config(base)
+
+
+def _drop_watch_list_models(payload: bytes):
+    from orchard import drop_watch
+    return drop_watch.Hub(opener=_drop_opener({"limit=50": payload})).list_models("Qwen", "Qwen4-27B")
+
+
+def _drop_watch_gozer_chips(payload: bytes):
+    import subprocess
+    from orchard import drop_watch
+
+    def run(argv, **kw):
+        return subprocess.CompletedProcess(argv, 0, stdout=payload.decode("utf-8", "surrogateescape"), stderr="")
+    return drop_watch.gozer_chips(run=run)
+
+
+class _DropWatchWorld:
+    """Fakes for the watcher's tick: every chip free, and a launcher that records what it would start."""
+
+    def __init__(self):
+        self.launched = []
+
+    def chips(self):
+        return {"free": True, "holders": []}
+
+    def launch(self, argv, log_path):
+        self.launched.append(argv)
+        return {"pid": 4242, "start_time": "1"}
+
+
+def _drop_watch_tick(watch_dir: Path, hub):
+    from orchard import drop_watch
+    world = _DropWatchWorld()
+    if not (watch_dir / drop_watch.CONFIG_NAME).exists():
+        drop_watch.write_config(watch_dir, drop_watch.Config(target=_DROP_REPO, run_dir=str(watch_dir / "run")))
+    res = drop_watch.tick(watch_dir, hub=hub, chips=world.chips, launch=world.launch,
+                          run_status=lambda run_dir: {"state": "running"}, alive=lambda pid, st: False,
+                          now=lambda: 1_800_000_000.0)
+    return {"tick": res, "launched": world.launched}
+
+
+def _drop_watch_tick_hub_record(payload: bytes):
+    import tempfile
+    from orchard import drop_watch
+    hub = drop_watch.Hub(opener=_drop_opener({"?blobs=true": payload}))
+    with tempfile.TemporaryDirectory(prefix="hostile-watch-") as d:
+        return _drop_watch_tick(Path(d), hub)
+
+
+def _drop_watch_tick_state(base: Path):
+    from orchard import drop_watch
+    return _drop_watch_tick(base, drop_watch.SimHub(base / "no-release"))
+
+
+def _drop_watch_started_nothing(out) -> str | None:
+    return f"a hostile input started {out['launched']}" if isinstance(out, dict) and out.get("launched") else None
 
 
 READERS: list[Reader] = [
@@ -1169,6 +1377,27 @@ READERS: list[Reader] = [
     Reader("research.http.Fetcher.json", _http_fetcher_json, feed="bytes", documented=(_FetchError,)),
     Reader("weights_source.load_records", _weights_source_load_records, documented=(ValueError,)),
     Reader("weights_source._read_run_sh", _weights_source_read_run_sh, rel="run.sh"),
+    Reader("drop_check.HubClient.info", _drop_check_hub_info, feed="bytes", documented=(_DropUnreadable,),
+           check=lambda r: None if r is None or isinstance(r, dict) else f"returned {type(r).__name__}"),
+    Reader("drop_check.classify (hostile config.json from the Hub)", _drop_check_hub_config, feed="bytes", check=_drop_not_covered),
+    Reader("drop_check.classify (hostile tokenizer_config.json from the Hub)", _drop_check_hub_tokenizer_config, feed="bytes"),
+    Reader("drop_check.index_shards", _drop_check_index_shards, feed="bytes"),
+    Reader("drop_check.run (hostile release info.json)", _drop_check_run_release, rel="release/info.json",
+           setup=_drop_release_setup_without("info.json"), check=_drop_run_not_covered),
+    Reader("drop_check.run (hostile release config.json)", _drop_check_run_release, rel="release/config.json",
+           setup=_drop_release_setup_without("config.json"), check=_drop_run_not_covered),
+    Reader("drop_check.bundle_inputs (hostile capabilities file)", _drop_check_bundle_inputs, rel="bundle/orchard-capabilities.json",
+           setup=_drop_bundle_setup_for("bundle/orchard-capabilities.json")),
+    Reader("drop_check.bundle_inputs (hostile manifest)", _drop_check_bundle_inputs, rel="bundle/tt_kernel_manifest.json",
+           setup=_drop_bundle_setup_for("bundle/tt_kernel_manifest.json")),
+    Reader("drop_check.bundle_inputs (hostile weights config)", _drop_check_bundle_inputs, rel=_DROP_SNAP_CONFIG,
+           setup=_drop_bundle_setup_for(_DROP_SNAP_CONFIG)),
+    Reader("drop_watch.load_state", _drop_watch_load_state, rel="state.json", documented=(_DropStateCorrupt,)),
+    Reader("drop_watch.load_config", _drop_watch_load_config, rel="watch.toml", documented=(ValueError,)),
+    Reader("drop_watch.Hub.list_models", _drop_watch_list_models, feed="bytes"),
+    Reader("drop_watch.gozer_chips", _drop_watch_gozer_chips, feed="bytes"),
+    Reader("drop_watch.tick (hostile Hub record)", _drop_watch_tick_hub_record, feed="bytes", check=_drop_watch_started_nothing),
+    Reader("drop_watch.tick (hostile state file)", _drop_watch_tick_state, rel="state.json", check=_drop_watch_started_nothing),
 ]
 
 BY_NAME = {r.name: r for r in READERS}
@@ -1261,8 +1490,6 @@ assert all(name in BY_NAME for readers in KNOWN_DEFECTS.values() for name in rea
 
 # Modules that parse JSON and have no reader in READERS yet: the backlog. tests/test_hostile_readers.py keeps this list exact.
 UNREGISTERED_MODULES = (
-    'drop_check.py',             # json.loads of the Hub listing and its own state file; registering a reader is issue 676 (PR 657)
-    'drop_watch.py',             # json.loads of the Hub listing and its state file; registering a reader is issue 676 (PR 657)
     'port_construction.py',      # json.loads of one stdout line from the reference interpreter, not a file; tests/test_port_construction.py feeds it hostile lines
     'long_sweep.py',
     'full_port_quality.py',      # json.loads(json.dumps(...)) compares two of its own values, no outside file

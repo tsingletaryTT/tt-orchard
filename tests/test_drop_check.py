@@ -235,7 +235,7 @@ def test_unknown_model_type_is_full_port():
 
 # ---- hostile and malformed input ------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("value", [None, [], {}, "5120", "", "x\x00", True, -1, 0, 10 ** 20, 1.5, float("nan")])
+@pytest.mark.parametrize("value", [None, [], {}, "5120", "", "x\x00", True, -1, 0, 10 ** 20, 1.5])
 @pytest.mark.parametrize("field", ["hidden_size", "num_hidden_layers", "num_key_value_heads", "intermediate_size",
                                    "hc_count", "hc_lowrank"])
 def test_bad_field_values_give_a_named_reason(field, value):
@@ -331,6 +331,26 @@ def test_hub_client_refuses_bad_ids_before_any_request():
     assert op.requests == []
 
 
+@pytest.mark.parametrize("body", [b'{"sha": NaN}', b'{"\\udc00": 1}', b'{"a": ' * 70 + b'1' + b'}' * 70, b'{"a": 1, "a": 2}'],
+                         ids=["nan", "lone-surrogate-key", "nested-70", "repeated-key"])
+def test_a_hub_record_that_is_not_strict_json_is_refused(body):
+    """NaN, a lone surrogate, deep nesting and a repeated key are refused with the record (issue 676)."""
+    hub = dc.HubClient(opener=FakeOpener({"?blobs=true": body}))
+    assert hub.info("Qwen/Qwen4-27B") is None
+
+
+def test_a_config_with_nan_is_not_valid_json():
+    raw = json.dumps(qwen4_dense())[:-1].encode() + b', "extra": NaN}'
+    out = dc.classify("Qwen/Qwen4-27B", REV, {"config.json": raw}, capabilities=caps())
+    assert out["verdict"] == "not-covered" and any("config.json is not valid JSON" in r for r in out["reasons"])
+
+
+def test_a_chat_template_with_a_lone_surrogate_gives_no_template_note():
+    files = files_for(qwen4_dense(), **{"tokenizer_config.json": b'{"chat_template": "\\ud800"}'})
+    out = dc.classify("Qwen/Qwen4-27B", REV, files, capabilities=caps())
+    assert not any("chat template" in n for n in out["notes"])
+
+
 # ---- command line ---------------------------------------------------------------------------------------------------
 
 def write_release(tmp_path, cfg, sha=REV):
@@ -404,15 +424,18 @@ def test_rules_compare_json_values(key, rule, value):
     assert any(f"text config {key} is " in r and "outside the rule" in r for r in out["reasons"]), out["reasons"]
 
 
-@pytest.mark.parametrize("value", [10 ** 400, -(10 ** 400)])
-def test_a_huge_integer_is_a_named_reason_not_a_crash(value):
-    """math.isfinite(10**400) raises OverflowError; a config value that large must still give a named reason."""
+@pytest.mark.parametrize("value,why", [(float("nan"), "NaN is not allowed"), (10 ** 400, "too many digits"),
+                                       (-(10 ** 400), "too many digits")], ids=["nan", "huge", "minus-huge"])
+def test_a_nan_or_a_huge_integer_makes_the_config_unreadable(value, why):
+    """The release's config.json is parsed strictly (safeio.parse_json_bytes): a NaN or an integer of hundreds of digits refuses the
+    file, and the reason says why. (Before strict parsing, math.isfinite(10**400) in a rule check raised OverflowError.)"""
     cfg = qwen4_dense()
     cfg["text_config"]["hc_lowrank"] = value
     c = bare_caps()
     c["keys"]["hc_lowrank"] = {"min": 1, "max": 4096}
     out = verdict(cfg, capabilities=c)
-    assert out["verdict"] == "not-covered" and any(r.startswith("hc_lowrank is ") for r in out["reasons"])
+    assert out["verdict"] == "not-covered"
+    assert any(r.startswith("config.json is not valid JSON") and why in r for r in out["reasons"]), out["reasons"]
 
 
 # ---- stage 0's capability reader decides the config side (orchard/bundle_capabilities.config_reasons, PR 659) ----------

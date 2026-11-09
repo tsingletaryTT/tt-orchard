@@ -1,4 +1,4 @@
 target = "0.9.145"
-summary = "drop-check takes the config side of the capabilities check from stage 0's own code (bundle_capabilities.config_reasons) and reads the installed package's capabilities file and its own weights config, so the release-day check and stage 0 cannot disagree about a release's config."
+summary = "drop-check uses stage 0's config rules (bundle_capabilities.config_reasons) with the installed package's capabilities file and weights config; drop-check and drop-watch parse outside JSON strictly and have hostile-input readers (issue 676)."
 kind = "feature"
 pr = 674
