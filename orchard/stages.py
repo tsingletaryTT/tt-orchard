@@ -325,6 +325,8 @@ def _class_reasons(d: dict) -> list[str]:
     for i, item in enumerate(sidecars):
         if not isinstance(item, dict) or not _text(item.get("file")):
             reasons.append(f"sidecars[{i}] needs a file")
+        elif item.get("refused"):
+            reasons.append(f"sidecars[{i}] ({item['file']}) was refused by the stage 0 scan, so it has no sha256: {str(item['refused'])[:200]}")
         elif not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
             reasons.append(f"sidecars[{i}] ({item['file']}) needs a sha256 of 64 hex digits")
     ignored = d.get("ignored_files", [])
@@ -334,6 +336,8 @@ def _class_reasons(d: dict) -> list[str]:
     for i, item in enumerate(ignored):
         if not isinstance(item, dict) or not _text(item.get("file")):
             reasons.append(f"ignored_files[{i}] needs a file")
+        elif item.get("refused"):
+            reasons.append(f"ignored_files[{i}] ({item['file']}) was refused by the stage 0 scan, so it has no size: {str(item['refused'])[:200]}")
         elif isinstance(item.get("size"), bool) or not isinstance(item.get("size"), int) or item["size"] < 0:
             reasons.append(f"ignored_files[{i}] ({item['file']}) needs a size in bytes, a whole number of zero or more")
         elif not _text(item.get("reason")):

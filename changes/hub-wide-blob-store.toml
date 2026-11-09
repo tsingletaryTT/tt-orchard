@@ -1,0 +1,3 @@
+target = "0.9.140"
+summary = "The hub-wide blob store is an allowed link root for the sidecar scan, residency and the GGUF reader (regression from PR 622), and the stage 0 gate says when a sidecar was refused."
+pr = 644

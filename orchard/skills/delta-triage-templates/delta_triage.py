@@ -1058,7 +1058,10 @@ def _link_target_inside(path: Path, model_dir: Path) -> bool:
         target = Path(os.path.realpath(path))
     except (OSError, ValueError):
         return False
-    return any(target == root or root in target.parents for root in _link_roots(model_dir))
+    for i, root in enumerate(_link_roots(model_dir)):
+        if target == root or root in target.parents:
+            return i == 0 or target.is_file()        # outside the snapshot only a regular file counts (issue 643)
+    return False
 
 
 def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) -> dict:
@@ -1079,7 +1082,7 @@ def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) 
         if refused:
             note = "a link to a place outside the snapshot and its cache's blobs directory; its target was not measured or read"
             if p.name.endswith(IGNORED_SUFFIXES):
-                ignored.append({"file": p.name, "size": None, "reason": IGNORED_REASON + " (" + note + ")"})
+                ignored.append({"file": p.name, "size": None, "reason": IGNORED_REASON + " (" + note + ")", "refused": note})
             else:
                 problems.append(f"sidecar {p.name} is {note}")
                 sidecars.append({"file": p.name, "size": None, "sha256": None, "num_tensors": None, "dtypes": [], "tensor_names": [],
@@ -1760,6 +1763,13 @@ def _link_roots(model_dir) -> tuple:
         # PR 622). Only a real directory gives the second root, as in orchard/residency.
         if blobs.is_dir() and not blobs.is_symlink():
             roots.append(blobs.resolve())
+        # The hub-wide blob store (issue 643): `<hub>/blobs`, reached through the model's blobs/<hash> link, only for `<hub>/models--*/snapshots/<rev>`
+        # and only when `<hub>/blobs` is a real directory and not a link. The same rule as orchard/safeio.cache_roots.
+        model_dir = snap.parent.parent
+        if model_dir.name.startswith("models--"):
+            store = model_dir.parent / "blobs"
+            if store.is_dir() and not store.is_symlink():
+                roots.append(store.resolve())
     return tuple(roots)
 
 
