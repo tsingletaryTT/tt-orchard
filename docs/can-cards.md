@@ -180,3 +180,15 @@ so a reviewer asks these questions of each row in `Expected performance`. The ri
 When the evidence does not support a claim, the review finding says which piece is missing (for example "the baseline ran cold; rerun it warm"). It does not state a number the reviewer did not measure.
 
 To turn the cheap checks on, set `card_profile = "catalog-measured"` in the can spec. `config/can.qwen35.toml` uses `catalog`; its card already states all three conditions.
+
+### Four more questions found on 2026-11-08
+
+Copilot's reviews of the MiniCPM3-4B, Berkelium and Olmo-Hybrid-7B cards (PRs 628, 629 and 633) each found a row that said more than its record
+showed. The same four mistakes can recur, so a reviewer asks them of each row. None of them is checked by the gate today.
+
+| Question | What went wrong |
+| --- | --- |
+| Was a cold-cache claim measured cold? | The boot check sends a short chat request before it measures decode, so its rate is a warm-kernel sample even when the install started with an empty cache. The cold start is its own row (ready time, one-time weight conversion). |
+| Does the agreement row carry the conditions of the section it sits in? | Agreement rows sat under a "trace on" heading, but the command behind them (`run_chip.py agree`) never enables a trace. The served bundle does trace. Label an untraced result as untraced. |
+| Is a time to first token the time to the first token? | The prefill rows recorded the whole request time. Leave out TTFT until the server's `first_token_s` is captured. |
+| Does an explanation match the records it cites? | The near-tie explanation on the Olmo card is written only when the records show the same two tokens in the same order and the reference's own generation taking the second one. Otherwise the card says the difference is not explained. |

@@ -29,7 +29,7 @@ Bring up a model for a QuietBox 2, on a QuietBox 2, with only the compute the Qu
 - **No remote model service.** The agents that write and run the tests are open-source models served on
   the same machine. One p300 board serves the coder (Qwen3-Coder-Next). The CPU serves a fallback
   (`qwen3-coder:30b` through ollama). The other board stays free for the new model's hardware tests.
-  Nothing calls out to a hosted model.
+  Only the opt-in outside helper (section 5.9g, off by default) calls a hosted model, and the results below that used it say so.
 - **One box, shared fairly.** Every chip is leased through [tt-gozer](https://github.com/tsingletaryTT/tt-gozer).
   The supervisor never touches a chip it does not hold, and it never clears another agent's lease.
 - **A model tells you what it needs.** Each model is sorted into a class: weights only, weights plus a
@@ -38,7 +38,7 @@ Bring up a model for a QuietBox 2, on a QuietBox 2, with only the compute the Qu
 - **It can be left alone.** Every step, decision and evidence file goes into an append-only ledger. A run
   can be paused, resumed, and recovered after a crash. When it cannot go on, it stops as `blocked`,
   says why, and releases the hardware.
-- **A person publishes.** The harness never publishes, pushes or uploads anything.
+- **A person publishes.** The harness never publishes, pushes or uploads anything. The packages published on 2026-11-08 were published by a person running the publish commands, with the operator's yes for each model.
 
 ### How the tool got here
 
@@ -60,22 +60,56 @@ stage 0 sorts a model by its headers into the classes above, and the project log
 | 7 | `Qwen3-Coder-Next` fused package (the coder) | No supervisor change; a role-fit test and a corrected throughput check | Decode median 79.3 tok/s over 28 samples, against 38.5 recorded for the earlier package | [run log](docs/run-logs/2026-10-28-coder-fused-decode.md) |
 | 8 | `stabilityai/stable-audio-3-small-music`, `small-sfx`, `medium` | An audio path: chip transformer, audio stages, a resident runtime with benchmark rules, a decoder on the chip | 10 s clip in 0.82 s with `small-music` (CPU 3.9 to 8.0 s); 3.8 s with `medium` (CPU 38.0 s); nobody listened to the clips | [chip runs](docs/run-logs/2026-10-28-stable-audio-chip-first-runs.md), [decoder](docs/run-logs/2026-10-29-overnight-stable-audio-decoder.md) |
 | 9 | `ibm-granite/granite-4.0-h-1b` (Mamba-2 hybrid) | Kernels written by the local coder, a pinned tt-lang pair, a traced decode step | 37.5 tok/s composed and 39.3 with the coder's kernels once traced; slower than composed before that | [port](docs/run-logs/2026-10-28-granite-mamba2-real-port.md), [traced](docs/run-logs/2026-10-29-granite-repeat-trace.md) |
-| 10 | `openbmb/MiniCPM3-4B` (multi-latent attention) | A port script set on an existing attention op, no new kernel; two small harness changes | 33.7 tok/s in bfloat16 on one chip; 16 of 16 teacher-forced tokens match the CPU | [run log](docs/run-logs/2026-10-29-overnight-minicpm3-4b.md) |
+| 10 | `openbmb/MiniCPM3-4B` (multi-latent attention) | A port script set on an existing attention op, no new kernel; two small harness changes | 33.7 tok/s in bfloat16 on one chip; 16 of 16 teacher-forced tokens match the CPU. Packaged by hand and published on 2026-11-08 as a thin bundle (`episod/minicpm3-4b-blackhole`): decode 33.5 tok/s median over 12 runs at a 2,048-token context, with prefill at 30 to 33 tok/s because the prompt goes through the decode step | [run log](docs/run-logs/2026-10-29-overnight-minicpm3-4b.md), [can and benchmark](docs/run-logs/2026-11-08-minicpm3-can-catalog.md) |
 | 11 | `Qwen/Qwen3.5-35B-A3B` | A 35-line loader patch for the Coder-Next bundle's code, chosen by `fusion-candidates` | 126.8 tok/s median on two dies, 29.6 percent of the estimated floor; first 8 tokens equal to the CPU | [run log](docs/run-logs/2026-10-29-fusion-port.md) |
+| 12 | `allenai/Olmo-Hybrid-7B` (gated-delta-net hybrid, no existing port) | The full-port path with the outside helper writing the stage 2 repair rounds (one repair fixed a `rope_theta` that the config leaves unset); stage 0 had to call a model with no shared tensor names a full port (PR 595); packaged by hand with `tt-orchard can`, because stage 7 skips full-port runs | Stages 0 to 6 and 8 passed (stage 7 skipped). Stage 2 top-1 agreement 1.0 over 32 tokens. Helper spend $8.60 over 7 calls. Served decode 7.3 tok/s median (2.2 to 12.3 depending on host load) and 13.9 tok/s in the stage 6 harness, on four chips, one request at a time. Published 2026-11-08 as `episod/olmo-hybrid-7b-blackhole`; the four-chip boot check of the adapter as republished after review passed (9 checks, 12.34 tok/s warm; record in PR 642, open) | [can and benchmark](docs/run-logs/2026-11-08-olmo-hybrid-7b-can.md) |
+| 13 | A tiny Qwen4-shaped rehearsal model (random weights, four layers, `scripts/tiny_qwen4/make_checkpoint.py`) | Rehearses the full-port path before real Qwen4 weights exist: stage tools, verified cheat sheets, the load and ttnn-call gates, helper-driven repair rounds | Run 23 (with the helper) passed stages 0 to 6 and 8 in about 69 minutes of ledger time; stage 3 escalated once; the coherence and word-count checks are waived by the rehearsal flag because the weights are random; top-1 agreement 1.0 over 32 tokens. Runs 18, 20 and 24, where the coder wrote the ports alone, did not pass stage 2 | [first run](docs/run-logs/2026-11-03-tiny-qwen4-rehearsal-first-run.md), [2026-11-08 project log entry](docs/project-log.md) |
+| 14 | `Mhaquehaque/berkelium-qwen3-32b-cadquery-v1-merged` (a LoRA merged into Qwen3-32B, for CadQuery) | A weights-only run that passed stage 2 on four chips and stopped at stage 4 because the base bundle has no two-chip profile; the two-chip package profile was built by hand | Two-chip package published 2026-11-08 as `episod/berkelium-qwen3-32b-cadquery-p300`: decode 14.4 tok/s median on one board; 21 of 24 sample replies make a valid CadQuery solid in a sandboxed check (8 prompts, 3 repeats each, so too few to call an evaluation) | [package log](docs/run-logs/2026-11-08-berkelium-2chip-package.md) |
 
-Models 8 to 11 were driven by hand with the harness's tools. The supervisor's stages were not used on them. Packages for some
-of them are in progress and are not described here until their numbers are in the repository.
+Models 8 to 11 were driven by hand with the harness's tools. The supervisor's stages were not used on them. Rows 12 and 13 went through the
+supervisor's full-port stages. Row 14 went through stage 2 of the weights-only path.
 
 Stopped on purpose: `perplexity-ai/pplx-decider-v1.2` is a `restricted-head` model, so the run stops after stage 0 and a
 person can ask for the parity report (14 of 14 answers agree on the chips). `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB` stopped at the
 preflight (no installed bundle serves its base). `Plurato123/OctLLM` needs CUDA decoders. A container-package run of
 `huihui-ai/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated` is not valid evidence: the package downloads its own hard-coded repository from the
 Hub and serves that base model, so the harness now runs such a container with the Hub switched off and fails the test (issue 60 stays open).
-No model that needs new model code has gone through the harness's `full-port` stages (3, 5 and 6) unattended. Issue 61 tracks a first pilot.
+Models that need new code have gone through the `full-port` stages with the outside helper (rows 12 and 13). A person started and restarted those runs, so none of them was unattended.
 
 The early runs were not hands-off. They blocked, and each cause was a bug in tt-orchard, fixed before the same command was run again.
 The later ones needed a person for disk space and for a restart after a power event, and each of those is now a preflight check or a
 block message. The harness has never run end to end with nobody touching the machine.
+
+### Since 2026-11-07
+
+What landed on `main` on 2026-11-07 and 2026-11-08 (pull requests 575 to 633, each reviewed by Copilot before it merged; the project log
+entry for 2026-11-08 has the list). Each item says which record holds its numbers.
+
+- **The full-port path has run.** Run 23 of the tiny Qwen4 rehearsal and the Olmo-Hybrid-7B run went through stages 0 to 6 and 8 with the outside
+  helper writing the stage 2 repair rounds (table rows 12 and 13). The coder alone (Qwen3-Coder-Next) has not written a passing port: runs 18, 20
+  and 24 failed stage 2. What the helper's passing port did that the coder's ports did not is in the decoder idioms file the coder now reads
+  (PR 575).
+- **Stage 1 loads a model that ships its own code.** When transformers refuses without `trust_remote_code`, the reference gate removes environment
+  variables whose names look like secrets, turns the Hub and transformers offline, moves HOME to an empty directory, writes the sha256 of every `.py`
+  file to `evidence/remote-code-audit.json`, and loads again (PRs 597, 607, 608). This is not a sandbox. The code runs with the user's file
+  permissions and can use the network. Spark-X2.6-4B-Loop-mHC showed the case: the load worked and then failed inside the model's own code under
+  transformers 5.19.
+- **Stage 0 and the load gate.** A model that shares no tensor name with its nearest model, and differs in the text config, is a full port (PR 595).
+  The stage 2 load gate names the eight largest host-held weight tensors with their paths (PRs 582 and 598).
+- **The coder's start has a watchdog.** A boot whose log stops growing, or that passes its deadline, is stopped with a long grace, the chips are reset
+  through the lease, and the log tail goes to the ledger with credentials removed (PRs 580 and 599). The wide test runs again once after a fabric
+  handshake timeout (PRs 542 and 619).
+- **Tools for the coder.** `last-check`, `layer-diff`, `facts`, `show`, `cheat` and `edit` stage tools, verified TTNN and TT-Lang cheat sheets and
+  the effective-construction facts (PRs 506, 528, 529, 543, 564, 611, 627 and 601 for the sheet verifier).
+- **Packaging a full-port model is manual.** Stage 7 builds a package only on the weights-only path. Three models were packaged by hand with
+  `tt-orchard can` and published on 2026-11-08 (table rows 10, 12 and 14). `tt-model publish` rewrites the card on the Hub, so the card never
+  matches a `SHA256SUMS` made from the staged bundle: upload `SHA256SUMS` last and check the catalog tag after every card upload
+  ([docs/canning.md](docs/canning.md)).
+- **Counts.** The full parallel run on 2026-11-08 passed 27,022 tests (see Tests below for how it was measured).
+
+The Qwen3.8-27B-QSA bring-up ended blocked at stage 5 (stage-failed after escalation, 2026-11-08 23:40Z). Stages 0 to 4 passed on four chips. Stage 5 serving matched the reference on all 80 corpus positions. The passkey check failed at both lengths (256 and 8,192 tokens) because a thinking model's reply was cut at the answer limit before a key appeared (issue 641). Separately, QSA was not shown working: the stage 2 port does not use the `_qsa_indexer` tensors and every agreement prompt is shorter than the 2,048-token budget, so the indexer was not exercised (issue 638).
+
+In progress and not claimed as done: the Qwen4 frankenmodel generator and its CPU proofs are done (PR 639, open): the first K layers of real Qwen3.8-27B weights in the `qwen4_exp_text` skeleton with identity-initialised hyper-connections. With K=4 in float32 the logits equal the base exactly (maximum difference 0.0 on three prompts). With K=8 in bf16 the maximum difference is 0.119 and the top-1 token is equal. A seeded perturbation of the hyper-connections changes the logits by 5.23 and the top-1 token differs. An indexer budget of 2,048 equals the base, and a budget of 8 moves the logits by about 1. The checkpoint does not carry the visual tower, the MTP head, per-layer embeddings or the n-gram table, and the truncated weights give incoherent text, so the result shows equivalence only and says nothing about quality. Generator and CPU proofs done, chip run pending. <!-- UPDATE WHEN THE CHIP RUN ENDS -->
 
 ### Since 2026-10-27
 
@@ -195,11 +229,12 @@ to `Qwen/Qwen3-Coder-Next`. Stop the old coder first; the two packages use diffe
 
 ## 1. Status
 
-tt-orchard is early. It has brought up eight models through the harness, all on one machine: a Tenstorrent QuietBox 2 with two p300c
-boards (four Blackhole chips). Seven are Qwen3.8-27B-family models and one is a Qwen3-Coder-30B-A3B fine-tune. Four more, which need new
-code, were brought up by hand with the harness's tools. The table under [How the tool got here](#how-the-tool-got-here) lists them in
-the order of what each one taught. Nothing has been run on any other machine, and no model that needs new model code has gone through
-the supervisor's full-port stages.
+tt-orchard is early. It has brought up eight models through the harness's weights-only routes, all on one machine: a Tenstorrent QuietBox 2 with
+two p300c boards (four Blackhole chips). Seven are Qwen3.8-27B-family models and one is a Qwen3-Coder-30B-A3B fine-tune. Four more, which need new
+code, were brought up by hand with the harness's tools. Since 2026-11-03 the supervisor's full-port path has run: a rehearsal model with random
+weights and Olmo-Hybrid-7B went through stages 0 to 6 and 8 with an outside helper writing the stage 2 repair rounds. The coder alone has not yet
+written a passing port. The table under [How the tool got here](#how-the-tool-got-here) lists the models in the order of what each one taught.
+Nothing has been run on any other machine.
 
 What is shown, and by what:
 
@@ -208,6 +243,15 @@ What is shown, and by what:
   and 6 are skipped on that path by design.
 - **A package a run produced can be pulled and booted from the Hub.** Six published packages were checked from a clean install
   (Hemmingway-1, openthai, RAG-Gate-27B, AREX-2, Clef and bytkim). The Clef and bytkim checks (2026-10-26, 2 chips, no token, empty caches) were ready after 2,540 s and 3,181 s and answered a short question correctly (issue 24).
+- **A model that needs new code reaches `ready for operator review` with the helper.** Olmo-Hybrid-7B (a gated-delta-net hybrid with no existing port)
+  passed stages 0 to 6 and 8: stage 2 top-1 agreement 1.0 over 32 tokens, an acceptance corpus matched at 80 of 80 positions through the served port, and a
+  passkey answered at 256 and 8,192 tokens. It then served from a published thin bundle. These are single runs. A person started and restarted the
+  run, the helper wrote the repairs, the served decode rate ran from 2.2 to 12.3 tok/s depending on host load, and the bundle accepts one request at a
+  time. The four-chip boot check of the adapter as republished after review passed (9 checks, 12.34 tok/s warm; the record is in PR 642, which is open) ([run log](docs/run-logs/2026-11-08-olmo-hybrid-7b-can.md)).
+- **The coder alone has not written a passing port.** Qwen3-Coder-Next failed stage 2 in runs 18, 20 and 24 of the tiny Qwen4 rehearsal. The
+  helper-written ports passed the hardware test in runs 21 and 23 (run 21's stage 2 still failed on a word-count check that PR 569 now waives for rehearsals)
+  and failed in run 22 at its call limit. The stage tools were already available in run 20, where the coder did not use `edit` or `layer-diff`, and the
+  decoder idioms file (PR 575) merged before run 24's recorded failure. No controlled comparison of the coder alone with and without them has been run.
 - **The fidelity evidence is still thin.** Each configuration is compared with the CPU reference on 32 tokens of one prompt, and since
   2026-10-23 on eight fixed prompts that are read for failure shapes. The prompt suite has run on real chips without a control, so its
   bars are choices and not measurements (issue 15). Full benchmarks exist for bytkim only (HumanEval, MBPP, GSM8K, IFEval and BFCL against its base, with the
@@ -216,7 +260,7 @@ What is shown, and by what:
   a reset does not always clear (issue 26), a board that dropped off the bus (issue 25) and an agent that loops when the harness drafts nothing (issue 68).
 - **The container path (a v5.1 package as the nearest model) has not yet shown a swapped model served.** The one real run used `raahemnabeel/qwen3-coder-30b-a3b`, whose generator downloads its own hard-coded repository, so the test measured the base model. The 4-chip container tests of the Qwen3.8-27B runs did not fetch anything (their isolated Hugging Face directory stayed empty), so those results stand. The harness now runs a test container with the Hub switched off and fails a test that fetched a model (issue 60 stays open).
 
-The suite has 7,177 passing tests and 3 skipped (measured with `python3 -m pytest -q`).
+The suite has about 27,000 passing tests: 27,022 passed, 123 skipped and 4 expected failures in the full parallel run of 2026-11-08 on the head of PR 633 (`python3 -m pytest tests -n 3`). One load-dependent test failed in that run and passed alone.
 
 ### Stages
 
@@ -225,15 +269,15 @@ The suite has 7,177 passing tests and 3 skipped (measured with `python3 -m pytes
 | 0 | Intake and delta triage against the nearest supported model | A template script (`delta_triage.py`) measures from safetensors headers and drafts `delta.json`; the agent reviews it. Ran on every model in the table above except Hemmingway-1 (whose run used the earlier open-ended skill, with the agent writing its own comparison scripts) and decided the class each time: `weights-only` (most), `weights+sidecar` (Clef), `vocab-trim` (CJK-Trim) and `restricted-head` (pplx-decider). The vocabulary check takes about 8 seconds on a 27B model. A classification bench ran it on 42 models without downloading weights and matched the majority of three blind model labelers on 39 of 40 |
 | 1 | Environment and CPU reference | A template script (`reference_gate.py`) loads the model on CPU, runs four checks and drafts `reference.json`. The gate compares the agent's file with the script's own evidence, so a reference whose weights did not load fails. Passed on the runs since Hemmingway-1 (which used the earlier open-ended skill), in 4 to 11 minutes |
 | 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed for every weights-only, sidecar and vocab-trim model: the chips agreed with the CPU reference on 29 to 32 of 32 tokens (and, on runs since 2026-10-23, the eight-prompt suite found nothing blocking). For a model whose nearest model has only a container package, it serves through the container on the package's own chip count (4 chips in the one real run) |
-| 3 | Full model | Skipped by design on the weights-only path. Never run on the full-port path |
+| 3 | Full model | Skipped by design on the weights-only path. On the full-port path the supervisor runs the whole model on four chips against the stage 1 reference: passed for run 23 of the tiny Qwen4 rehearsal (after one escalation) and for Olmo-Hybrid-7B |
 | 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | Passed on 2 and 4 chips (1 chip optional) for Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim. The 4-chip test has hit fabric timeouts that a reset does not always clear; the order of the two boards' resets is one cause (issue 26). Did not pass for a container-only package with no 2-chip configuration (issue 68) |
-| 5 | Serving integration | Skipped by design on the weights-only path, because stage 4's tests boot each configuration and compare the output with the CPU reference. On the full-port path with `--full-port` (issue 329) the supervisor boots the port that passed stage 2 or 3 behind its own chat server (`orchard/skills/full-port-templates/port_serve.py`, skill `full-port-serving`, no agent step), replays an acceptance corpus recorded from the stage 1 reference and the accepted port-check record, refuses the server when any position differs, then asks a passkey question at two or more lengths and a canary. `--full-port-rehearsal` waives its `coherent` field (the passkey was answered) and nothing else. Built with fakes and a fake `ttnn`; not run on a chip |
-| 6 | Qualitative check and benchmark | Skipped on the weights-only path. The full benchmark that exists (bytkim) was run by hand with `orchard.bench_session` and is described in `docs/run-logs`. Never run on the full-port path |
-| 7 | Package and container build | Supervisor code, opt-in with `--package-format v6`, or run on a finished run with `tt-orchard package`. Staged and boot-checked packages for Hemmingway-1, openthai, Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim, with a gate that checks the card against the package's files (drafter state, borrowed generation config, grafted head, reported scores kept apart from measured ones). A v5.1 container package is refused at start |
+| 5 | Serving integration | Skipped by design on the weights-only path, because stage 4's tests boot each configuration and compare the output with the CPU reference. On the full-port path with `--full-port` (issue 329) the supervisor boots the port that passed stage 2 or 3 behind its own chat server (`orchard/skills/full-port-templates/port_serve.py`, skill `full-port-serving`, no agent step), replays an acceptance corpus recorded from the stage 1 reference and the accepted port-check record, refuses the server when any position differs, then asks a passkey question at two or more lengths and a canary. `--full-port-rehearsal` waives its `coherent` field (the passkey was answered) and nothing else. Passed on four chips for run 23 of the tiny Qwen4 rehearsal and for Olmo-Hybrid-7B (acceptance corpus matched at every position, passkey answered at 256 and 8,192 tokens) |
+| 6 | Qualitative check and benchmark | Skipped on the weights-only path. The full benchmark that exists (bytkim) was run by hand with `orchard.bench_session` and is described in `docs/run-logs`. On the full-port path the supervisor measures quality against the reference and a benchmark: passed for run 23 and for Olmo-Hybrid-7B (13.9 tok/s decode at batch size one in the harness, 10 percent of the estimated floor; one prompt, one length) |
+| 7 | Package and container build | Supervisor code, opt-in with `--package-format v6`, or run on a finished run with `tt-orchard package`. Staged and boot-checked packages for Hemmingway-1, openthai, Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim, with a gate that checks the card against the package's files (drafter state, borrowed generation config, grafted head, reported scores kept apart from measured ones). A v5.1 container package is refused at start. A full-port run skips this stage; Olmo-Hybrid-7B was packaged by hand with `tt-orchard can`, as were the two-chip Berkelium package and the MiniCPM3 bundle |
 | 8 | Operator bundle | A template script (`build_bundle.py`) builds `RESULTS.md`, `RISKS.md`, `card.md`, the packages and the publish commands as text from the run's files, and the supervisor runs the stage's gate on the result (scrub, hazards, files). Every run in the table that reached the end passed it. Nothing is published by the harness |
 
-The full-port path (a model that needs new model code) has never run. When stage 0 chooses it, the
-supervisor pauses before stage 2 for the operator.
+The full-port path (a model that needs new model code) has run for two models since 2026-11-03 (table rows 12 and 13). When stage 0 chooses it, the
+supervisor pauses before stage 2 for the operator unless the run was started with `--full-port` and the class is `full-port`. A class `unknown` still stops for a person.
 
 **What the coder starts stage 2 of a full port from (issue 427).** Before the prepare step the supervisor writes
 `stages/2/port_facts.json` from the checkpoint and copies a port skeleton to `stages/2/port/port_model.py`, and the prepare task
@@ -290,7 +334,7 @@ against 0.47 for a runtime that applied a causal mask).
 | Watchdog | `orchard/watchdog.py`, `orchard/transcripts.py` | Built and tested. Fired on a real agent during the run. The near-duplicate command check (command shapes, 4 turns) was added after the second-model run and has not fired on a real agent yet |
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
-| Stage skills | `orchard/skills/` | The skills for stages 0, 1, 2, 4, 7 and 8 and the template scripts they copy have run on real runs. `serving-check` (stage 5) has never run, because stage 5 is skipped on the weights-only path. Stage 8 and stage 7 are supervisor code that runs `operator-bundle-templates/build_bundle.py` and `package.py` |
+| Stage skills | `orchard/skills/` | The skills for stages 0, 1, 2, 4, 7 and 8 and the template scripts they copy have run on real runs. `serving-check` (stage 5) has never run, because stage 5 is skipped on the weights-only path. The full-port stage 5 uses `full-port-serving`, which has run on two models. Stage 8 and stage 7 are supervisor code that runs `operator-bundle-templates/build_bundle.py` and `package.py` |
 | Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_cmd.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. `tt-orchard package` and `package-card` run the same steps on a finished run and record them in its ledger. `tt-orchard reported` (`orchard/reported_cmd.py`) accepts the author-reported scores that stage 0 drafts from the model card. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
@@ -314,8 +358,9 @@ against 0.47 for a runtime that applied a causal mask).
 
 ### Tests
 
-The suite has 7,177 passing tests and 3 skipped tests (measured with `python3 -m pytest -q`, about 15 minutes). It needs no hardware and
-no network. The three skipped tests are opt-in: one replays local agent transcripts (`ORCHARD_REPLAY=1`), one asks the real Hugging Face hub and GitHub
+The suite has about 27,000 passing tests: 27,022 passed, 123 skipped and 4 expected failures in the full parallel run of 2026-11-08 on the head of PR 633
+(`python3 -m pytest tests -n 3`, about 20 minutes on a busy host; one load-dependent test failed in that run and passed alone). It needs no hardware and
+no network. Some skipped tests are opt-in, for example: one replays local agent transcripts (`ORCHARD_REPLAY=1`), one asks the real Hugging Face hub and GitHub
 (`ORCHARD_LIVE_RESEARCH=1`), and the browser tests of the web page run only where the `playwright` package and Chrome are present (issue 31).
 
 ### Development notes
@@ -2828,6 +2873,8 @@ Each of these happened on the development machine. Details are in the
 | [`docs/run-logs/2026-10-hemmingway-1.md`](docs/run-logs/2026-10-hemmingway-1.md) | The log of the first real run |
 | [`docs/analysis/qwen3-5-122b-analysis.md`](docs/analysis/qwen3-5-122b-analysis.md) | Analysis: Using Qwen3.5-122B-A10B with tt-orchard |
 | [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
+| [`docs/canning.md`](docs/canning.md), [`docs/can-cards.md`](docs/can-cards.md), [`config/can.*.toml`](config/), [`pkgsrc/`](pkgsrc/) | Packaging a brought-up model as a thin bundle by hand: the spec, the ASGI adapter, the card and the commands (used for Olmo-Hybrid-7B, MiniCPM3-4B and the other cans) |
+| [`scripts/can_cad/`](scripts/can_cad/), [`scripts/olmo_hybrid/`](scripts/olmo_hybrid/) | The scripts behind the Berkelium two-chip package and the Olmo-Hybrid-7B can: benchmark clients, the CadQuery checker, card generators |
 | [`docs/releases.md`](docs/releases.md), [`changes/`](changes/) | How the version number is computed from change fragments, and how a release is cut |
 | [`CLAUDE.md`](CLAUDE.md) | The decisions and standing rules |
 | [`docs/project-log.md`](docs/project-log.md) | The dated project log: what was done, found and left open |

@@ -107,6 +107,32 @@ Points that were easy to get wrong:
 
 It does not publish. `can commands` prints text; the supervisor and the stage agents never run it. It does not make `tt-model serve ORG/NAME` work before the bundle is on the Hub, because tt-model installs a v6 bundle only from the Hub. The boot check serves the bundle's own `run.sh`, which is what `tt-model serve` runs after the install.
 
+## Full-port models are canned by hand
+
+Stage 7 builds a package only on the weights-only path (`--package-format v6`). A full-port run skips it, and its operator bundle lists the package as not built. A model that went through the full-port stages is
+therefore packaged after the run with the commands on this page. Olmo-Hybrid-7B was the first (`config/can.olmo-hybrid-7b.toml`, adapter `pkgsrc/server/olmo_asgi.py`, the port from stage 3 copied as
+`pkgsrc/runtime/olmo_hybrid_port.py`, card written by `scripts/olmo_hybrid/make_card.py` from the benchmark and divergence records under `docs/run-logs/evidence/olmo-hybrid-7b/`).
+What the first one taught, each item recorded in `docs/run-logs/2026-11-08-olmo-hybrid-7b-can.md`:
+
+- The port needs all four chips (a 1x4 mesh), so the boot check and the benchmark each take a four-chip lease from gozer. Queue for it; while four chips are leased, no other job on the box can use a board.
+- The server takes one request at a time and answers a second one with 503. The adapter validates request fields and refuses what it cannot honour with a 400, holds back text that could begin a stop string, bounds stop strings (256 characters, four of them), watches for a client that left and keeps the model open until the inference thread finishes.
+- The served decode rate depends on host load because the port does part of its work on the host (7.3 tok/s median, 2.2 to 12.3 across runs and boot checks). The card states the load and shows the stage 6 harness figure (13.9 tok/s) as a separate row. The spec's decode floor is a liveness check, set low on purpose.
+- `tt-model serve` listens on port 20000 whatever the bundle's own default says. A check that waits on the bundle's port holds its lease until it times out.
+
+The same page's other cans were written for models that did not come from a full-port run. The Berkelium CadQuery model has a different shape: a container (v5.1) package that reuses its base bundle's image and adds a two-chip profile (`scripts/can_cad/`, `docs/run-logs/2026-11-08-berkelium-2chip-package.md`).
+
+## Publishing a can, and what `tt-model publish` does to the card
+
+A person runs the publish commands; the supervisor never does. These steps apply every time:
+
+1. Upload the staged bundle to the Hub (`hf upload`; add `--private` first and serve from the private repository if you want a check before it is public).
+2. Run `tt-model publish`. It rewrites the card's front matter on the Hub (it adds the `tt-model-catalog` tag and reorders tags), so the README on the Hub no longer matches the hash in the `SHA256SUMS` you staged.
+3. Regenerate `SHA256SUMS` from the files as published (a fresh download), upload it last, and verify a second fresh download against it.
+4. After any later card upload, run `tt-model publish` again and check that the `tt-model-catalog` tag is still on the card. A card upload drops it.
+5. A later card upload changes `README.md`, and `tt-model publish` can change it again. Repeat step 3 after the final publish of every later card update: regenerate `SHA256SUMS` from a fresh download, upload it last, and verify a second fresh download. The Olmo republish record (`docs/run-logs/2026-11-08-olmo-hybrid-7b-can.md`) follows this order.
+
+The card must carry its own limits. For a model whose rate varies with host load, state the load and the range. State which agreement checks ran traced and which did not, and leave out a figure that the records measure differently than the heading says (a time to first token that is the whole request, for example).
+
 ## Moving a vllm can to a new vLLM release (issue 507)
 
 A kind `vllm` can has two things that name a vLLM release: `vllm_version` in the spec (it goes to package-thin's `--vllm-version` and selects the boot check's `quirks` notes) and the plugin wheel, which `scripts/qwen35/build_wheels.py` cuts from a container image. The spec's version must describe the wheel. `scripts/qwen35/build_wheels.py` records the vLLM release of its default image as `IMAGE_VLLM_VERSION`, and `tests/test_can_vllm_pin_matches_wheel_image.py` fails when it differs from `vllm_version` in `config/can.qwen35.toml`.
