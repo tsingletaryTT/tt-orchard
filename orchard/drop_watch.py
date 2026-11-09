@@ -48,7 +48,7 @@ TERMINAL = ("ready", "blocked", "failed")
 CONFIG_NAME, STATE_NAME, EVENTS_NAME, LOCK_NAME = "watch.toml", "state.json", "events.jsonl", ".lock"
 MAX_STATE_BYTES = 4 << 20
 CONFIG_KEYS = ("target", "run_dir", "capabilities", "bundle", "qwen38_bundle", "quiet_minutes", "bringup_args", "command",
-               "reference_python")
+               "reference_python", "bundle_dir", "hf_home")
 
 
 @dataclasses.dataclass
@@ -62,6 +62,8 @@ class Config:
     bringup_args: list = dataclasses.field(default_factory=list)
     command: list = dataclasses.field(default_factory=lambda: ["tt-orchard"])
     reference_python: str | None = None
+    bundle_dir: str | None = None       # the installed Qwen4 package: its capabilities file and its own weights config
+    hf_home: str | None = None          # the Hugging Face cache that holds those weights (default $HF_HOME or ~/.cache/huggingface)
 
 
 def _validate(c: Config) -> Config:
@@ -72,7 +74,7 @@ def _validate(c: Config) -> Config:
         v = getattr(c, name)
         if not isinstance(v, str) or not v or "\0" in v:
             raise ValueError(f"{name} must be a non-empty path")
-    for name in ("capabilities", "reference_python"):
+    for name in ("capabilities", "reference_python", "bundle_dir", "hf_home"):
         v = getattr(c, name)
         if v is not None and (not isinstance(v, str) or not v or "\0" in v):
             raise ValueError(f"{name} must be a path")
@@ -280,7 +282,9 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
 
         if state == "check" or (state == "needs-operator" and st.get("needs") == "check"):
             rev = st["revision"]
-            caps = None
+            caps, dev, extra_notes = None, None, []
+            if cfg.bundle_dir:
+                caps, dev, extra_notes = dc.bundle_inputs(cfg.bundle_dir, cfg.hf_home or dc.default_hf_home())
             if cfg.capabilities:
                 from orchard import safeio
                 try:
@@ -289,8 +293,9 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
                     caps = f"unreadable ({type(exc).__name__})"
             files, problems = dc.fetch_metadata(hub, cfg.target, rev)
             probe = class_probe if class_probe is not None else dc.class_probe_for(cfg.reference_python)
-            res = dc.classify(cfg.target, rev, files, capabilities=caps, class_probe=probe, qwen4_bundle=cfg.bundle,
-                              qwen38_bundle=cfg.qwen38_bundle)
+            res = dc.classify(cfg.target, rev, files, capabilities=caps, dev_config=dev, class_probe=probe,
+                              qwen4_bundle=cfg.bundle, qwen38_bundle=cfg.qwen38_bundle)
+            res["notes"] = extra_notes + res["notes"]
             if problems:
                 res["reasons"] = problems + res["reasons"]
                 if res["verdict"] in ("covered", "covered-with-notes"):
@@ -448,6 +453,8 @@ def parser(add_help: bool = True) -> argparse.ArgumentParser:
     i.add_argument("--bringup-arg", action="append", default=[], help="an extra bringup argument (repeatable)")
     i.add_argument("--quiet-minutes", type=int, default=30, help="how long the last commit must be quiet (default 30)")
     i.add_argument("--reference-python", help="the reference interpreter drop-check asks about a new architecture class")
+    i.add_argument("--bundle-dir", help="the installed Qwen4 package's directory (its capabilities file and its weights config)")
+    i.add_argument("--hf-home", help="the Hugging Face cache that holds the package's weights")
     t = sub.add_parser("tick", help="do one step and record it")
     t.add_argument("--watch-dir", required=True)
     t.add_argument("--json", action="store_true", help="print this tick's state and events as JSON")
@@ -462,7 +469,8 @@ def run_args(args, out=None) -> int:
     if args.action == "init":
         write_config(args.watch_dir, Config(target=args.target, run_dir=args.run_dir, capabilities=args.capabilities,
                                             bringup_args=list(args.bringup_arg), quiet_minutes=args.quiet_minutes,
-                                            reference_python=args.reference_python))
+                                            reference_python=args.reference_python, bundle_dir=args.bundle_dir,
+                                            hf_home=args.hf_home))
         print(f"wrote {Path(args.watch_dir) / CONFIG_NAME}", file=out)
         return 0
     if args.action == "show":

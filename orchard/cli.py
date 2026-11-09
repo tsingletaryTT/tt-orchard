@@ -1205,12 +1205,20 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _ui(args, env, home, out)
     if args.cmd == "drop-check":
         from orchard import drop_check
-        if not args.reference_python:
-            try:
-                rp = config()[0].reference_python
-                args.reference_python = str(rp) if rp else None
-            except Exception:  # noqa: BLE001  (no bringup.toml: the class probe reports "not checked")
-                args.reference_python = None
+        try:
+            cfg_ = config()[0]
+        except Exception:  # noqa: BLE001  (no bringup.toml: the class probe reports "not checked" and no bundle is looked up)
+            cfg_ = None
+        if cfg_ is not None:
+            if not args.reference_python and cfg_.reference_python:
+                args.reference_python = str(cfg_.reference_python)
+            if not args.hf_home:
+                args.hf_home = str(preflight.hf_home_for(cfg_))
+            if not args.bundle_dir:
+                models = Path(cfg_.package_models_root) if cfg_.package_models_root else \
+                    Path(cfg_.operator_home or home) / ".cache" / "tt-model" / "models"
+                if (models / args.bundle).is_dir():
+                    args.bundle_dir = str(models / args.bundle)
         return drop_check.report(args, out)
     if args.cmd == "drop-watch":
         from orchard import drop_watch

@@ -944,8 +944,14 @@ makes a request (look-alike repositories under other names appeared on 2026-11-0
 | `needs-operator` | | The release needs a reference interpreter whose transformers has its architecture class. |
 | `refused` | | The repository id or revision is not acceptable; nothing was read. |
 
-The exit code is 0 for covered, 2 refused, 3 not covered, 4 needs the operator and 5 not found. Flags: `--revision`
-(a 40-character commit; default the current one), `--capabilities` (the package's `orchard-capabilities.json`),
+The config side of the capabilities check is stage 0's own code (`orchard.bundle_capabilities.config_reasons`,
+`docs/bundle-capabilities.md`), so `drop-check` and stage 0 judge a release's config the same way, including stage 0's rule
+that every config key that differs from the package's own weights must be declared. Tensor rules need the weight headers and
+are applied only at stage 0. The exit code is 0 for covered, 2 refused, 3 not covered, 4 needs the operator and 5 not found.
+Flags: `--revision` (a 40-character commit; default the current one), `--bundle-dir` (the installed package's directory; by
+default the package `--bundle` names under tt-model's models directory), `--hf-home` (the Hugging Face cache that holds the
+package's own weights; default from `bringup.toml`), `--capabilities` and `--dev-config` (the capabilities file and the
+package's weights config, when they are not to be found through `--bundle-dir`),
 `--bundle` and `--qwen38-bundle` (the bundles the printed `bringup` command names), `--reference-python` (the
 interpreter asked for a new architecture class; default `reference_python` from `bringup.toml`), `--from-dir` (read a
 release laid out in a directory, `info.json` plus the files, for tests and rehearsals), `--json` and `--out`.
@@ -955,7 +961,7 @@ release laid out in a directory, `info.json` plus the files, for tests and rehea
 `drop-watch` starts the bring-up of a release when it appears. `tt-orchard drop-watch init --watch-dir DIR --target
 Qwen/Qwen4-27B --run-dir RUN` writes `DIR/watch.toml` (options: `--capabilities` the Qwen4 package's capabilities file,
 `--bringup-arg` an extra bringup argument, repeatable, `--quiet-minutes` how long the last commit must be quiet, default
-30, and `--reference-python`). A scheduler runs `tt-orchard drop-watch tick --watch-dir DIR --json` every 30 minutes.
+30, `--reference-python`, and `--bundle-dir` and `--hf-home` with the meaning they have for `drop-check`). A scheduler runs `tt-orchard drop-watch tick --watch-dir DIR --json` every 30 minutes.
 Each tick does at most one step and records it in `DIR/state.json`:
 
 | State | Meaning |
