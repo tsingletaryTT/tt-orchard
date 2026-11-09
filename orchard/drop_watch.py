@@ -402,7 +402,7 @@ def gozer_chips(run=subprocess.run) -> dict:
 
 def _start_time(pid: int) -> str | None:
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
+        stat = Path(f"/proc/{int(pid)}/stat").read_text()   # hardening: ok a kernel record of an integer pid; /proc files report size 0, so safeio's size checks do not apply
         return stat.rsplit(")", 1)[1].split()[19]
     except (OSError, IndexError):
         return None

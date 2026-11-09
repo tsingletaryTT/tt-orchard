@@ -55,6 +55,7 @@ HUGE_SPARSE = 1 << 30                       # a sparse file of 1 GiB: it costs n
 REFUSAL_NAMES = frozenset({
     "SafeReadError", "ReadFailed", "PathRefused", "NotRegular", "TooLarge", "ChangedWhileReading", "NotText", "NotJson", "WrongType",
     "BadValue", "BadHeader", "IncompleteScan", "ResidencyError", "LedgerLocked", "LedgerLockRefused", "LedgerCorrupt",
+    "Unreadable",                                    # orchard/drop_check.py: a release file that cannot be read safely
 })
 
 
@@ -338,6 +339,11 @@ def _r_read_json_path(env):
     return _json_label(safeio.read_json(env["file"], max_bytes=1 << 20))
 
 
+def _r_drop_check_dir_client(env):
+    from orchard import drop_check
+    return _label(drop_check.DirClient(env["file"].parent).get("Qwen/x", "0" * 40, env["file"].name, max_bytes=1 << 20))
+
+
 def _r_atomic_write_path(env):
     from orchard import safeio
     safeio.atomic_write(env["root"] / "sub" / "data.json", b"new")
@@ -407,6 +413,7 @@ PATH_READERS: list[PathReader] = [
     PathReader("safeio.write_beneath", "pinned_write", _pinned(_r_write_beneath)),
     PathReader("safeio.read_bytes(path)", "path_read", _r_read_bytes_path, claims_pin=False),
     PathReader("safeio.read_json(path)", "path_read", _r_read_json_path, claims_pin=False),
+    PathReader("drop_check.DirClient.get", "path_read", _r_drop_check_dir_client, claims_pin=False),
     PathReader("safeio.atomic_write(path)", "path_write", _r_atomic_write_path, claims_pin=False),
     PathReader("ledger.Ledger lock file", "lock_open", _r_ledger_lock, claims_pin=False),
     PathReader("cache_lock.entry_lock", "lock_open", _r_cache_lock, claims_pin=False),
