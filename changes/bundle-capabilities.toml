@@ -1,2 +1,3 @@
 target = "0.9.143"
 summary = "A bundle can ship orchard-capabilities.json: stage 0 sets aside exactly the differences it declares, the stage 0 gate checks the file was applied, and stage 2 and the stage 7 package serve the new model's own config.json with only architectures aliased."
+pr = 659
