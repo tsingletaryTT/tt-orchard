@@ -25,7 +25,10 @@ What it can change, and nothing else:
 - a control word for a run (`supervisor.Control`): pause and abort while a supervisor is alive, resume
   while it is paused. A word the run cannot act on is refused, so no stale word waits for a later run;
 - a detached `tt-orchard bringup` for a new model, only when the preflight has no block, or for a run
-  that ended blocked or stopped (a retry, which the supervisor records as `resume by=retry`).
+  that ended blocked or stopped (a retry, which the supervisor records as `resume by=retry`);
+- the Updates panel's refresh button: `tt-orchard updates --refresh`, a process that queries public
+  repositories and the Hugging Face Hub (orchard/updates_refresh.py: fixed argument list, scrubbed
+  environment, timeout, one run at a time, a minimum interval; refused with --lan).
 There is no publish, upload, push, reset, lease or delete action, and there will not be one here.
 
 Requests from other web pages are refused: on loopback every request must name a loopback host (a page that
@@ -68,7 +71,7 @@ from orchard import __version__, bringup_config, caches, lexicon, machine_checks
 from orchard import telegraph as _telegraph
 from orchard import telegraph_view
 from orchard import cans_view
-from orchard import updates_view
+from orchard import updates_refresh, updates_view
 from orchard import virtualspend as _virtualspend
 from orchard import virtualspend_view
 from orchard.preflight import _lab_status
@@ -175,6 +178,10 @@ class Conflict(WebError):
 
 class Unavailable(WebError):
     code = HTTPStatus.SERVICE_UNAVAILABLE
+
+
+class TooManyRequests(WebError):
+    code = HTTPStatus.TOO_MANY_REQUESTS
 
 
 def spawn_detached(argv, *, log_path, cwd) -> int:
@@ -399,6 +406,7 @@ class WebApp:
         self._lab_status = lab_status
         self._lab_cache: tuple[float, dict] | None = None
         self.checks = checks or machine_checks.ChecksJob()
+        self.updates_refresh = updates_refresh.RefreshJob()        # the Updates panel's button (issue 231); one job for the page
         self.settings_dir = Path(settings_dir) if settings_dir else CHECKOUT / "config"
         self.cpu_models = cpu_models
         self.is_installed = is_installed or TtModelList()
@@ -532,6 +540,22 @@ class WebApp:
         """The Models view's updates table: the rows `tt-orchard updates` cached. Read only: no network call, no process, no write, no
         path in the answer (orchard/updates_view.py)."""
         return updates_view.build(redact=self.redact, clock=self.clock)
+
+    def updates_refresh_state(self) -> dict:
+        """What the refresh button needs: whether it is available (not while the UI listens on the network) and the job's state, in the
+        job's closed vocabulary (no path, no environment, no output)."""
+        return {"available": not self.lan, **self.updates_refresh.state()}
+
+    def start_updates_refresh(self) -> dict:
+        """The POST of the refresh button. The body is ignored: the command is fixed (orchard/updates_refresh.py)."""
+        if self.lan:
+            raise Forbidden("the refresh button is off while this UI listens on the network (--lan); run `tt-orchard updates --refresh` in a terminal")
+        result = self.updates_refresh.start()
+        if result == "already-running":
+            raise Conflict("a refresh is already running")
+        if result == "too-soon":
+            raise TooManyRequests(f"wait {self.updates_refresh.state()['retry_in_s']} s before checking again")
+        return self.updates_refresh_state()
 
     def _lab_group(self) -> dict:
         """The lab's chips from its `gozer status` (over ssh), asked at most every LAB_TTL_S seconds."""
@@ -1234,6 +1258,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.cans())
         if segs == ["api", "updates"]:
             return self._json(200, app.updates())
+        if segs == ["api", "updates", "refresh"]:
+            return self._json(200, app.updates_refresh_state())
         if segs == ["api", "virtual-spend"]:
             return self._json(200, app.virtual_spend(q.get("run")))
         if segs == ["api", "health"]:
@@ -1281,6 +1307,8 @@ class Handler(BaseHTTPRequestHandler):
                                                      body.get("research")))
         if segs == ["api", "settings"]:
             return self._json(200, app.save_settings(body.get("layout"), body.get("cpu_model"), body.get("mode")))
+        if segs == ["api", "updates", "refresh"]:
+            return self._json(200, app.start_updates_refresh())
         if segs == ["api", "checks"]:
             if not app.checks.start(app.cfg, config_path=app.config_path):
                 raise Conflict("a check is already running")

@@ -2887,8 +2887,12 @@ whose versions equal the new combination. Otherwise it says `unverified` and poi
 written by a person or a verification run after a real run, never by `updates`. Preflight prints one informational line when the
 cache shows something behind or a candidate; it reads the cache only and never blocks.
 
-The Models view of `tt-orchard ui` shows the same rows under "Updates", read from the cache file (`GET /api/updates`). The page makes no
-request and runs nothing; it shows `tt-orchard updates --refresh` as text to run in a terminal.
+The Models view of `tt-orchard ui` shows the same rows under "Updates", read from the cache file (`GET /api/updates`). Showing the rows reads the
+file and runs nothing. A "Check now" button next to them runs `tt-orchard updates --refresh` on the machine that serves the page, which makes
+network requests to public repositories on GitHub and to the Hugging Face Hub (the button's tooltip says so). The button is a POST that needs the
+page's token and origin; it runs a fixed command with a scrubbed environment, a timeout of 4 minutes, one run at a time and at most one start a
+minute; it shows only `ok`, `failed` with the exit code, `timed-out` or `could-not-start`, never the command's output; and it is off while the UI
+listens on the network (`--lan`), where the text is the way to check (`tt-orchard updates --refresh` in a terminal).
 
 To check once a day, run `tt-orchard updates --print-timer`. It prints a systemd user service and timer and a cron line as text and installs nothing.
 The scheduled command is `updates --refresh --fail-when-unknown --json`: it needs the network and no lease, and it exits 3 when every row is unknown,
