@@ -4902,6 +4902,32 @@ Prompt (operator plan for the Qwen4-27B drop-in, through the controller session)
 - Tests: `tests/test_make_franken.py` (new tests for the config keys, the card, its license, the refusals and the cache-layout naming).
   Mutation table in the pull request.
 
+## 2026-11-09: `--weights-only-rehearsal` (Qwen4 drop-in plan, Track C item C5)
+Prompt (main session, from the approved Qwen4 drop-in plan): a weights-only rehearsal option like `--full-port-rehearsal` that waives only
+`coherent` on the swap gate, recorded in `run_start`. The M4 rehearsal serves the Qwen4 frankenmodel with perturbed hyper-connection weights through
+the Qwen4 bundle on the weights-only route; its text is not readable, so every gate that judges the free-run text fails it today.
+- Gates: three weights-only gates judge `coherent`. Each takes a `rehearsal` keyword and waives a `coherent` that is exactly `false`: stage 2
+  (`gate_weights_swap` and `gate_weights_swap_sidecar`, through `_swap_reasons`), each passing stage 4 configuration (`gate_mesh_swap`) and the
+  stage 7 boot check (`gate_package`). A missing or malformed `coherent` still fails, and so does every other field (top-1 agreement, token
+  count, ready time, the 32-token recompute, the prompt suite, the sidecar parity, the package checks). The gate result lists `coherent` in
+  `waived`. All three are needed for M4 to end `ready` with a stage 7 package. Stage 8's verdict text still says the output is not readable, and
+  the graft trial and the sampling trial still refuse an incoherent variant (both are choices, so neither blocks the run).
+- Supervisor: the run_start entry records `weights_only_rehearsal: true`; `stages.weights_only_rehearsal(entries)` reads only that, so a
+  decision, an evidence entry or a field in result.json turns nothing on. `_gate` gives the keyword to the four gates in
+  `WEIGHTS_ONLY_REHEARSAL_GATES` (stage 4 keeps its required counts). A gate that passed with the waiver leaves the decision
+  `weights-only rehearsal: coherence waived` (field, the flag, a note). A resume keeps the option and cannot add it.
+- Options: `--weights-only-rehearsal` with `--full-port` and without `--full-port-rehearsal` is refused by `tt-orchard bringup` and by the
+  supervisor (also when `--full-port` comes on a resume), because a run that stage 0 classes full-port would then block on readable text in the
+  full-port stages. With all three options a rehearsal model goes on whichever route stage 0 measures. The skills `weights-swap-check`,
+  `weights-swap-configs` and `weights-sidecar-check` tell the finish step to copy `coherent` as the draft has it.
+- Tests: `tests/test_weights_only_rehearsal.py` (the gates, the ledger answer, the option rule, the supervisor's gate choice and decision, and
+  whole runs on the fake two-board machine: with the option the incoherent run reaches ready with decisions at stages 2 and 4, without it the
+  same run blocks at stage 2), plus rows in `tests/test_cli.py` and `tests/test_bringup_config.py`. 22 mutations, all red.
+- The first full-suite run stopped at its 3,500 s timeout at 98% on a host with a load average near 100, so it printed no list of failures.
+  A run of the 54 test files that touch the changed code found one regression: the supervisor read `spec.gate`, which the stand-in spec of
+  `tests/test_token_check_numbers.py` does not have. Both reads now use `getattr`; that set then passed (2,347 passed, 2 skipped), and the four
+  mutations on those lines were run again and are red.
+
 ## 2026-11-09: the drafter is switched off by the kind of drafter the bundle uses (Qwen4 drop-in plan, Track C item C6)
 Prompt (from the session that runs the Qwen4 drop-in plan): decide drafter-off from the drafter the bundle uses (DFlash2 needs Qwen3.8 hidden
 states), and strip `TT_AUXILIARY_WEIGHTS` when it is off.

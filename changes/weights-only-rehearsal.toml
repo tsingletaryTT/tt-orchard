@@ -1,0 +1,4 @@
+target = "0.9.143"
+summary = "--weights-only-rehearsal: a rehearsal model whose text is not readable passes stages 2, 4 and 7 with a measured coherent false waived, recorded in run_start and in a ledger decision per stage."
+kind = "feature"
+pr = 656
