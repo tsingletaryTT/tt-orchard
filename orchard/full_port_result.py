@@ -69,6 +69,10 @@ def readable(text) -> tuple[bool, str]:
     return True, facts
 
 
+sparse_budget = full_port.sparse_budget          # the helpers live in full_port so the gate can use them without importing this module
+indexer_record = full_port.indexer_record
+
+
 def derive(stage_dir, run_dir, *, rehearsal: bool = False) -> tuple[dict | None, str]:
     """(result, why): the content of `result.json` for a stage 2 directory whose hardware test passed and whose record is complete,
     or (None, why not). The numbers are the record's; `top1_agreement` is recomputed from its ids exactly as the gate does. `rehearsal` is
@@ -98,7 +102,9 @@ def derive(stage_dir, run_dir, *, rehearsal: bool = False) -> tuple[dict | None,
     if not ok:
         basis = f"not passed ({basis}); this is a rehearsal model with random weights and the gate waives coherent"
     evidence = [os.path.relpath(stage_dir / full_port.RECORD_FILE, run_dir), os.path.relpath(stage_dir / "evidence" / "hw-test-output.txt", run_dir)]
-    return ({"runs": True, "load_s": load, "coherent": ok, "free_run_text": text,
+    facts, prompt_n = full_port._facts_of(stage_dir), full_port._prompt_tokens(run_dir)
+    sparse = full_port.indexer_record(facts, prompt_tokens=prompt_n, generated=len(chip)) if (facts is not None and prompt_n is not None) else {}
+    return ({**sparse, "runs": True, "load_s": load, "coherent": ok, "free_run_text": text,
              "top1_agreement": full_port.agreement(ref, chip), "n_tokens": len(chip), "evidence": evidence,
              "derived_by": DERIVED_BY,
              "coherent_basis": f"supervisor floor (form only: printable text, words, repetition): {basis}"}, "derived")

@@ -1,0 +1,3 @@
+target = "0.9.142"
+summary = "Stage 5 reads a thinking model's passkey answer after its thinking block (or turns thinking off) and calls a cut reply not applicable; stage 2 records whether a sparse-attention budget was exercised (issues 641 and 638)."
+pr = 652

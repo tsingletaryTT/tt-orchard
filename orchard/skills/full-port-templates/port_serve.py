@@ -30,6 +30,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -54,6 +55,10 @@ CLOSE_WAIT_S = 60.0           # how long to wait for a running completion before
 FILLER = "The grass is green. The sky is blue. The sun is warm. Here we go again. "
 NEEDLE = "The pass key is {key}. Remember it. "
 QUESTION = "What is the pass key? The pass key is"
+PLAIN_ANSWER_TOKENS = 12      # the passkey answer limit for a model whose chat template does not think
+OFF_ANSWER_TOKENS = 64        # with thinking switched off through the template's own switch
+THINK_ANSWER_TOKENS = 512     # no switch: the reply is read after the closing think tag, so it needs room for the thinking before it (issue 641)
+SWITCH_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,40}")
 CACHE_ENTRY_CAP = 2_000_000                               # the cache directory walk stops counting here
 
 
@@ -179,7 +184,11 @@ def make_handler(engine: Engine):
                     messages = req.get("messages")
                     if not isinstance(messages, list) or not messages or not all(isinstance(m, dict) and isinstance(m.get("content"), str) for m in messages):
                         raise ValueError("messages must be a non-empty list of {role, content} with string content")
-                    prompt = engine.tok.encode(engine.render(messages), add_special_tokens=False).ids
+                    kwargs = req.get("chat_template_kwargs", {})
+                    if not (isinstance(kwargs, dict) and len(kwargs) <= 4 and all(isinstance(k, str) and SWITCH_NAME.fullmatch(k) and type(v) is bool
+                                                                              for k, v in kwargs.items())):
+                        raise ValueError("chat_template_kwargs must be an object of at most four boolean switches")
+                    prompt = engine.tok.encode(engine.render(messages, **kwargs), add_special_tokens=False).ids
                 else:
                     p = req.get("prompt")
                     if isinstance(p, str) and p:
@@ -199,8 +208,8 @@ def make_handler(engine: Engine):
             except Exception as exc:  # noqa: BLE001  a failure in the port must reach the client and the log
                 sys.stderr.write(f"serve: generation failed: {type(exc).__name__}\n")
                 return self._json(500, {"error": {"message": f"generation failed: {type(exc).__name__}"}})
-            text = engine.tok.decode(ids, skip_special_tokens=True)
-            choice = {"index": 0, "finish_reason": finish, "token_ids": ids}
+            text, raw_text = decode_reply(engine.tok, ids)
+            choice = {"index": 0, "finish_reason": finish, "token_ids": ids, "raw_text": raw_text}
             if path == "/v1/chat/completions":
                 choice["message"] = {"role": "assistant", "content": text}
             else:
@@ -249,10 +258,71 @@ def read_json(path):
     return data if isinstance(data, dict) else {}
 
 
-def chat_renderer(snapshot: Path):
-    """(render, name): `render(messages)` gives the prompt text. The snapshot's own template when jinja2 can run it, else plain lines."""
+def chat_template_text(snapshot: Path):
+    """(template text, where it came from): `chat_template` in tokenizer_config.json, else the file chat_template.jinja beside it (newer Hugging Face
+    snapshots keep it there), else (None, None)."""
     cfg = read_json(snapshot / "tokenizer_config.json")
     template = cfg.get("chat_template")
+    if isinstance(template, str) and template:
+        return template, "tokenizer_config"
+    try:
+        text = (snapshot / "chat_template.jinja").read_text(encoding="utf-8")  # hardening: ok a regular file of the model snapshot the supervisor chose, read once before the server starts
+    except (OSError, ValueError):
+        return None, None
+    return (text, "chat_template.jinja") if text.strip() else (None, None)
+
+
+def thinking_support(render) -> dict:
+    """{"template_thinks", "switch"} from the ACTIVE generation rendering of a one-turn conversation, not from the template's source text (which also
+    holds comments and branches that only format earlier assistant turns). The template thinks when the generation prompt ends inside an opened
+    `<think>` block (the last `<think>` has no `</think>` after it). Its switch is `enable_thinking` when passing it changes the rendering."""
+    try:
+        base = render([{"role": "user", "content": "x"}])
+        off = render([{"role": "user", "content": "x"}], enable_thinking=False)
+    except Exception:  # noqa: BLE001  a template that cannot render the probe is treated as not thinking
+        return {"template_thinks": False, "switch": None}
+    opens, closes = base.rfind("<think>"), base.rfind("</think>")
+    return {"template_thinks": opens != -1 and opens > closes, "switch": "enable_thinking" if off != base else None}
+
+
+def passkey_plan(support: dict) -> dict:
+    """How the passkey questions are asked for a model with these thinking facts: thinking off through the switch (a short answer limit), or left on
+    and read after the closing tag (a longer limit), or as before for a model that does not think."""
+    if support.get("template_thinks") and support.get("switch"):
+        return {"off": True, "kwargs": {support["switch"]: False}, "max_tokens": OFF_ANSWER_TOKENS}
+    if support.get("template_thinks"):
+        return {"off": False, "kwargs": {}, "max_tokens": THINK_ANSWER_TOKENS}
+    return {"off": False, "kwargs": {}, "max_tokens": PLAIN_ANSWER_TOKENS}
+
+
+def renderer_and_thinking(snapshot: Path):
+    """(render, name, support): the chat renderer and the thinking facts of the template that is actually used. When jinja cannot run the template the
+    renderer is the plain form, and a template that was not used says nothing about how the prompts were rendered, so the facts are non-thinking."""
+    render, name = chat_renderer(snapshot)
+    return render, name, (thinking_support(render) if name != "plain" else {"template_thinks": False, "switch": None})
+
+
+def decode_reply(tok, ids) -> tuple[str, str]:
+    """(clean text, raw text) of generated ids: the clean text drops special tokens, the raw text keeps them, so a closing think tag the tokenizer
+    registers as special is still there for the gate to read."""
+    return tok.decode(ids, skip_special_tokens=True), tok.decode(ids, skip_special_tokens=False)
+
+
+def answer_limit(tok, render, text: str, kwargs: dict, *, plan_max: int, max_len: int) -> int:
+    """The answer limit for a passkey request: the plan's, clamped so the rendered prompt (measured after the chat template with the same switches the
+    request carries) and the answer fit the context. The server checks the rendered count, so the filler's requested length is not the measure."""
+    n = len(tok.encode(render([{"role": "user", "content": text}], **kwargs), add_special_tokens=False).ids)
+    room = max_len - n - 1
+    if room < 1:
+        raise ServeFailed(f"the rendered passkey prompt is {n} tokens and the context is {max_len}: no room for an answer")
+    return min(plan_max, room)
+
+
+def chat_renderer(snapshot: Path):
+    """(render, name): `render(messages, **extra)` gives the prompt text; `extra` are template variables such as `enable_thinking`. The snapshot's
+    own template when jinja2 can run it, else plain lines."""
+    template, origin = chat_template_text(snapshot)
+    cfg = read_json(snapshot / "tokenizer_config.json")
     if isinstance(template, str) and template:
         try:
             from jinja2.sandbox import ImmutableSandboxedEnvironment
@@ -263,13 +333,13 @@ def chat_renderer(snapshot: Path):
             tpl = env.from_string(template)
             tokens = {k: (v.get("content") if isinstance(v, dict) else v) for k, v in cfg.items() if k.endswith("_token")}
 
-            def render(messages):
-                return tpl.render(messages=messages, add_generation_prompt=True, raise_exception=raise_exception, **tokens)
+            def render(messages, **extra):
+                return tpl.render(messages=messages, add_generation_prompt=True, raise_exception=raise_exception, **tokens, **extra)
             render([{"role": "user", "content": "x"}])            # a template that cannot render a plain turn is not used
-            return render, "tokenizer_config"
+            return render, origin
         except Exception:  # noqa: BLE001  any template or jinja2 problem means the plain form
             pass
-    return (lambda messages: "".join(f"{m.get('role', 'user')}: {m['content']}\n" for m in messages) + "assistant:"), "plain"
+    return (lambda messages, **extra: "".join(f"{m.get('role', 'user')}: {m['content']}\n" for m in messages) + "assistant:"), "plain"
 
 
 def stop_ids(snapshot: Path) -> list:
@@ -376,7 +446,7 @@ def main() -> int:
     snapshot = Path(config["model_snapshot"])
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(str(snapshot / "tokenizer.json"))
-    render, chat_template = chat_renderer(snapshot)
+    render, chat_template, support = renderer_and_thinking(snapshot)
     cache_dir, cache_before = kernel_cache()
     RECORD.parent.mkdir(parents=True, exist_ok=True)
     if RECORD.exists() or RECORD.is_symlink():
@@ -427,12 +497,17 @@ def main() -> int:
 
         # The passkey runs: the same prompt twice through the chat endpoint.
         runs = []
+        plan = passkey_plan(support)
         for item in config["passkeys"]:
             text = passkey_prompt(tok, item["length"], item["key"])
-            body = {"messages": [{"role": "user", "content": text}], "max_tokens": 12}
+            limit = answer_limit(tok, render, text, plan["kwargs"], plan_max=plan["max_tokens"], max_len=int(config["max_len"]))
+            body = {"messages": [{"role": "user", "content": text}], "max_tokens": limit}
+            if plan["kwargs"]:
+                body["chat_template_kwargs"] = plan["kwargs"]
             first, second = post(port, "/v1/chat/completions", body), post(port, "/v1/chat/completions", body)
             runs.append({"length": item["length"], "key": item["key"], "prompt_tokens": first["usage"]["prompt_tokens"], "prompt_chars": len(text),
-                         "prompt_sha256": sha_bytes(text.encode()), "answer_text": first["choices"][0]["message"]["content"],
+                         "prompt_sha256": sha_bytes(text.encode()), "answer_text": first["choices"][0]["message"]["content"], "answer_raw": first["choices"][0].get("raw_text", first["choices"][0]["message"]["content"]),
+                         "finish_reason": first["choices"][0].get("finish_reason"), "limit": limit,
                          "ids_first": first["choices"][0]["token_ids"], "ids_second": second["choices"][0]["token_ids"]})
             print(f"passkey length {item['length']}: {first['usage']['prompt_tokens']} prompt tokens", flush=True)
 
@@ -469,7 +544,8 @@ def main() -> int:
                        "kernel_cache": {"dir": cache_dir, "entries_before": cache_before, "entries_after": cache_after, "warm": cache_before > 0,
                                         "basis": "files in the directory before the worker started; the runtime's own hit counts are not read"}},
               "replay": {"entries": replay},
-              "passkey": {"runs": runs},
+              "passkey": {"runs": runs, "thinking": {"template_thinks": support["template_thinks"], "switch": support["switch"], "off": plan["off"],
+                                                    "plan_max_tokens": plan["max_tokens"]}},
               "canary": {"prompt_ids": free["prompt_ids"], "between_prompt_ids": other["prompt"], "first_ids": c_first, "between_ids": c_between,
                          "second_ids": c_second},
               "port_sources": [{"path": str(f.relative_to(RUN_DIR)), "sha256": sha_file(f), "role": "model"} for f in sorted(PORT_DIR.rglob("*.py"))]}
