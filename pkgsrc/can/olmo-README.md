@@ -65,7 +65,7 @@ Measured through the server's own `run.sh` on a mesh of four Blackhole p300c chi
 A second measurement run, with an empty kernel cache at the start, gave a served decode median of 9.68 tok/s (min 7.963, max 11.467, 15 runs); the host load average was 5.9, 8.2, 8.0 before it and 7.8, 9.3, 9.0 after it. The two runs ran at different times with other jobs on the host, so the difference between their medians should not be read as an effect of the kernel cache.
 With an empty kernel cache the server took 40 s to become ready, and the first request (8 tokens) took 6.74 s.
 
-In 4 boot checks of this bundle run before this card was written (one 64-token request each, host load not recorded) the served decode rate was 2.2, 5.5, 7.6, 9.3 tok/s. Taken together, the served decode rate of this package has been anywhere from 2.2 to 11.5 tok/s across the benchmark runs above and these boot checks, depending on what else the host was doing.
+In 7 boot checks of this bundle (one 64-token request each, host load not recorded) the served decode rate was 2.2, 5.5, 7.6, 8.3, 9.3, 11.6, 12.3 tok/s. Taken together, the served decode rate of this package has been anywhere from 2.2 to 12.3 tok/s across the benchmark runs above and these boot checks, depending on what else the host was doing.
 
 Decode runs used 5 different prompts with 64 new tokens each, 3 runs per prompt, after one discarded warm-up request. Batching is not supported: a second request gets 503 while one is running.
 
