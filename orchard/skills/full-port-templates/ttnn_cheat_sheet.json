@@ -724,5 +724,37 @@
     }
    ]
   }
+ ],
+ "reported": [
+  {
+   "symptom": "`ttnn.matmul`, `ttnn.linear` or `minimal_matmul` gives wrong results that change from run to run when the inner dimension K is not a multiple of 32 (the report: bf16 [250, 10] @ [10, 1] was off by 27 to 41 across runs, against 0.95 for a CPU bf16 baseline). The matmul sums over the tile padding of K, and other device ops such as reshape leave that padding non-zero.",
+   "fix": "Keep K a multiple of 32 where you choose the shape. Otherwise zero the tile padding of both operands before the matmul: `ttnn.fill_implicit_tile_padding` exists in the ttnn 0.79 python package (found by reading its files, not by running it), and the report used it. Compare the first call with torch on the same inputs, twice. Reported on Kohaku-TT's tt-metal build; not reproduced on our pin.",
+   "source": "Kohaku-TT, docs/reference/ttnn-issues.md (Apache-2.0), seen on that project's tt-metal build",
+   "reproduced": false
+  },
+  {
+   "symptom": "`ttnn.embedding` returns wrong rows when the index is a TILE-layout int32 tensor made on the device (typecast to uint32, turned to row-major, reshaped to 1-D): in the report 450 of 1000 bf16 rows were wrong. An index uploaded from the host as row-major was exact.",
+   "fix": "Upload token ids from the host with `ttnn.from_torch(ids, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, ...)`, as the `ttnn.from_torch` entry says. If an index has to be computed on the device, compare the gathered rows with a host `index_select` before you trust them. Reported on Kohaku-TT's tt-metal build; not reproduced on our pin.",
+   "source": "Kohaku-TT, docs/reference/ttnn-issues.md (Apache-2.0), seen on that project's tt-metal build",
+   "reproduced": false
+  },
+  {
+   "symptom": "`ttnn.linear` with a bias and no program config fails with TT_FATAL \"Broadcast error\" when the input has rank above 2 (for example [batch, seq, hidden]).",
+   "fix": "Reshape the input to 2-D before the call, or call the linear without the bias and add the bias with a separate `ttnn.add`. Print the shapes before the call. Reported on Kohaku-TT's tt-metal build; not reproduced on our pin. It may already work on our version.",
+   "source": "Kohaku-TT, docs/reference/ttnn-issues.md (Apache-2.0), seen on that project's tt-metal build",
+   "reproduced": false
+  },
+  {
+   "symptom": "`ttnn.transformer.scaled_dot_product_attention` with fp32 destination accumulation gives wrong outputs when the sequence length is not a multiple of 32: the padding of the last key tile is read as keys.",
+   "fix": "Use the bf16 destination path for unmasked attention (the report's workaround, which masks that tile), or pad the sequence to a multiple of 32 and mask the padded keys yourself. Check against torch at a length that is not a multiple of 32, such as 58. Reported on Kohaku-TT's tt-metal build; not reproduced on our pin.",
+   "source": "Kohaku-TT, docs/reference/ttnn-issues.md (Apache-2.0), seen on that project's tt-metal build",
+   "reproduced": false
+  },
+  {
+   "symptom": "`ttnn.transformer.scaled_dot_product_attention` with many (batch, head) pairs can mix outputs across pairs: for some pairs the result had cosine similarity 0.93 to 0.997 against the same pair computed alone.",
+   "fix": "When batch times heads is large, split the call into groups of at most 48 pairs (the report's limit) and compare each head's output with torch before you trust the whole tensor. Reported on Kohaku-TT's tt-metal build; not reproduced on our pin.",
+   "source": "Kohaku-TT, docs/reference/ttnn-issues.md (Apache-2.0), seen on that project's tt-metal build",
+   "reproduced": false
+  }
  ]
 }
