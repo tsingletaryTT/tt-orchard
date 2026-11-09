@@ -5053,6 +5053,45 @@ Prompt (operator): keep going; the full suite on main after Eric's four PRs show
 - Change: both modules are named in `UNREGISTERED_MODULES` (the backlog list the test describes), each with a comment pointing at issue 676, which tracks registering their readers. Registering real readers is the follow-up.
 - Check: the two hostile-reader test files pass (4,226); removing one entry turns the registry test red.
 - Review lesson: a review of a PR that adds a module that parses JSON runs `tests/test_hostile_readers.py` as well.
+
+## 2026-11-10: a stage 2 port generator for the standard blocks, and a thin prompt path for the stubs (issue 677, branch `stage2-standard-block-generator`)
+Prompt (operator, through the parent session): a prototype generator that writes the standard blocks of a stage 2 full port and leaves the
+new blocks as marked stubs, and a thinner way to send prompts to the coder than the agent loop, with data from the audition logs.
+- `orchard/port_template.py`: `plan` and `render` take the config, the construction JSON (`effective_construction.py`'s output), the tensor
+  headers, stage 0's ops inventory and the reference excerpts, and write a `port_model.py` whose `load` places every float tensor on the
+  device (Linear weights transposed once, TILE bf16; the embedding table ROW_MAJOR; plain RMSNorm weights as [1, 1, 1, dim], with 1 added
+  when the class's forward multiplies by `1 + weight`; a mesh mapper on more than one chip), whose `prefill` runs the embedding, RMSNorm,
+  the gated MLP, ordinary attention (HF rotary, causal SDPA, grouped keys) and `lm_head` through calls from the verified cheat sheet, and
+  whose `decode_step` re-runs the sequence. Every other block is a function with a `# AGENT:` comment and a NotImplementedError naming the
+  block and its reference class; a layer with children the flow does not know is a stub that lists the generated helpers it can call. An
+  aten op labelled candidate or host under a module makes that block a stub (the inventory lists a few modules per op, so this is partial
+  and the plan says so). `check_port` is the CPU check: a reachable matmul-family call through `ttnn_calls.static_calls` (the port check's
+  own analysis, reused through `orchard/ttnn_calls`), every file parses, no `# AGENT:` marker left. `sheet_problems` lists every `ttnn.<name>` a source uses that
+  the sheet does not cover (an entry, a name in a usage line, or an op the multiply entry says is called the same way) and every keyword
+  outside the entry's signature. Not on the supervisor's path (a test asserts the supervisor does not import it); `python3 -m
+  orchard.port_template generate|check` is the way to run it.
+- Sample: `docs/run-logs/2026-11-10-port-generator-sample.md`, the generated port for the tiny Qwen4 rehearsal checkpoint: embedding,
+  MLP, head and load generated; 15 stubs (model prelude and the hyper-connection mixer, three layer variants, the gated residuals, the
+  gated delta-net, the PLE layer, the attention with its indexer). The construction JSON came from running the stage 2 template under the
+  reference interpreter on the CPU.
+- `orchard/stub_prompts.py` (Part 2, the pieces testable on the CPU): `stub_request` builds one chat request per stub (rules, the port's
+  helper signatures, the sheet's Linear and matmul entries then the entries stage 0 mapped for the block, the mistakes, the construction
+  lines and the excerpt of the block's class, the stub last); `splice` puts the reply's function into the port and refuses anything that
+  is not imports and definitions with the stub's name and arguments, a kept marker, a redefined port function or a forbidden import;
+  `repair_request` builds the repair prompt from `last-check` and `layer-diff` output. The design note with the audition data is
+  `docs/superpowers/specs/2026-11-10-thin-prompt-path.md`: 85 to 96 percent of the prompt tokens in the four arms were repeated context,
+  the first write came at turn 10 to 16 after the same reading sequence (the 46 KB excerpts first, the sheet last or never), arm B spent
+  73 percent of its completion on reasoning, and the two host-only ports were written after 25,000 to 36,000 tokens of torch reference
+  code. Recommendation: generated port plus one request per stub with the CPU check between requests; reorder the gate message and the
+  sheet now. The on-chip experiment (arms E and F) is described there and not run.
+- Tests: `tests/test_port_template.py` (49; a torch-backed fake ttnn in `tests/fake_ttnn_compute.py` runs the generated port against a
+  plain torch forward on one and two devices), `tests/test_stub_prompts.py` (24), `port_sources` registered in `tests/hostile_fs.py`.
+  Mutations: 20 over the generator, 12 over the prompt path, all red; two survived at first (the mesh read-back's `[:1]`, which the
+  reshape made redundant, and the tensor-record shape check, which a later guard masked) and each got a direct test. The module was
+  drafted before its tests and the tests were then written against it; the mutation table is the evidence the guards are live. The
+  hostile-fs, ratchet, readers-registry and README tests pass. No hardware was used.
+- Not verified: the tt-metal tree the sheet was verified against is not on this machine's path, so the emitted calls were checked against
+  the sheet's entries only; the attention path has run only against the fake; nothing ran on a chip.
 ## 2026-11-09, drop-check uses stage 0's capability reader (branch `drop-check-config-reasons`)
 Prompt (operator): do the items unblocked by the merge of PRs 657, 659, 660 and 661.
 - `orchard/drop_check.py` no longer applies capability rules itself: `classify` calls
@@ -5122,3 +5161,9 @@ Prompt (operator): "go ahead and make docs/qwen4-faux.md", after asking whether 
   - The dense feed-forward width is not settled: the dense prep note infers about 14336, the tiny `--width 27b` preset uses it, and the franken uses Qwen3.8's own 17408.
 - **Checks:** the page's numbers were taken from the manifests and proof files under `docs/run-logs/evidence/2026-11-08-qwen4-franken/`, from the two `config.json` files, from the `transformers` source, and from running the tiny model. Not checked: any later `transformers` version, any behaviour on a chip, and anything about a real Qwen4 release.
 - **Test note:** `tests/test_telegraph_notice_places.py::test_the_panel_carries_the_notice_with_the_exact_commands_and_the_meter_says_what_to_run` fails when run with a `--basetemp` under the home directory (the panel then prints `<home>` and quotes the paths) and passes with a basetemp under `/tmp`. It fails the same way on a clean `main`; it is not related to this change.
+
+## 2026-11-10 (UTC): PR 685 review fixes: an AST guard on stub replies, and a stub survives the deletion of its marker comment
+Prompt (operator): "PR 685 do the AST check. #2 good point, should have some kind of check for this. Fix those so 685 can go."
+- `orchard/stub_prompts.py`: `splice` now walks the whole reply (function bodies, default arguments and decorators too) and refuses calls to `exec`, `eval`, `compile`, `open`, `input`, `breakpoint`, `setattr`, `delattr`, `globals`, `locals` and `vars`; any dunder name or attribute (`__import__`, `__class__`, `__subclasses__`); `getattr` without a constant attribute name or with a private one; `torch.load` and `torch.save`; any decorator; a longer list of imports (`importlib`, `ctypes`, `pickle`, `marshal`, `shutil`, `pathlib`, `builtins`, `runpy`, `tempfile`, `multiprocessing` and others besides the earlier ones); and a reply that keeps the generated `NotImplementedError("... is not written yet")`. This is a guard on a coder reply and not a sandbox: the coder can already write any file in the port directory, and the port runs with the run's own settings.
+- `orchard/port_template.py`: `stub_lines` finds a stub by its marker comment or by the generator's own `NotImplementedError` text, once per function, so deleting the comment no longer passes the CPU check. A function that raises some other `NotImplementedError` is not a stub.
+- Tests: 20 new tests in `tests/test_stub_prompts.py` and `tests/test_port_template.py` (18 refusals, one accepted ordinary reply, four stub cases), red before the code. Nine mutations of the new guards (calls, dunder names, imports, decorators, `getattr`, `torch.load`, the generated text in a reply, the raise detection, once-per-function) all went red and were restored from the commit.
