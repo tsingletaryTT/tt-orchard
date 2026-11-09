@@ -1524,6 +1524,7 @@ function wire() {
   $("local-meter").addEventListener("click", () => setView("telegraph"));
   $("settings-form").addEventListener("submit", saveSettings);
   $("checks-run").addEventListener("click", startChecks);
+  $("updates-refresh").addEventListener("click", startUpdatesRefresh);
   $("caches-run").addEventListener("click", loadCaches);
   setInterval(renderNow, 1000);
   $("machine-chip").addEventListener("click", () => setView("hardware"));
@@ -1722,8 +1723,11 @@ async function loadCaches() {
 }
 
 // ---- updates: the rows of `tt-orchard updates` on the Models view (orchard/updates_view.py) ------------------------
-// Read only: one GET of /api/updates when the view opens. The page never asks for a new check; it shows the command to run.
+// Showing the table is one GET of /api/updates when the view opens: it reads the cache file and runs nothing. The "Check now" button
+// (issue 231) is the only thing here that starts a process: a POST that runs `tt-orchard updates --refresh` on the machine that serves the
+// page, which makes network requests. The server refuses it while the UI listens on the network (--lan), and then the button stays hidden.
 const UPDATES_MARK = { good: "●", warn: "▲", bad: "■", dim: "○" };
+let updatesTimer = null;
 
 async function loadUpdates() {
   try {
@@ -1734,6 +1738,41 @@ async function loadUpdates() {
     return;
   }
   renderUpdates();
+  pollUpdatesRefresh(false);
+}
+
+function renderUpdatesRefresh(st) {
+  const btn = $("updates-refresh");
+  btn.hidden = !st.available;
+  btn.disabled = Boolean(st.running);
+  $("updates-refresh-status").textContent = st.running ? "Checking… (it asks GitHub and the Hugging Face Hub)" : st.message || "";
+}
+
+async function pollUpdatesRefresh(again) {
+  clearTimeout(updatesTimer);
+  try {
+    const st = await api("/api/updates/refresh", { quiet: true });
+    renderUpdatesRefresh(st);
+    if (st.running) {
+      updatesTimer = setTimeout(() => pollUpdatesRefresh(true), 2000);
+    } else if (again) {
+      loadUpdates();                       // the run ended: read the new cache file
+    }
+  } catch (err) {
+    $("updates-refresh-status").textContent = err.message;
+  }
+}
+
+async function startUpdatesRefresh() {
+  $("updates-refresh").disabled = true;
+  try {
+    renderUpdatesRefresh(await api("/api/updates/refresh", { body: {} }));
+  } catch (err) {
+    $("updates-refresh").disabled = false;
+    $("updates-refresh-status").textContent = err.message;
+    return;
+  }
+  pollUpdatesRefresh(true);
 }
 
 function renderUpdates() {
