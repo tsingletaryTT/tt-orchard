@@ -1139,6 +1139,21 @@ def test_bringup_passes_the_rehearsal_flag_only_when_asked(conf):
     assert code == 0 and "--full-port-rehearsal" in rec.argv
 
 
+def test_bringup_passes_the_weights_only_rehearsal_flag_only_when_asked(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--weights-only-rehearsal" not in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--weights-only-rehearsal"])
+    assert code == 0 and "--weights-only-rehearsal" in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--weights-only-rehearsal", "--full-port", "--full-port-rehearsal"])
+    assert code == 0 and "--weights-only-rehearsal" in rec.argv and "--full-port-rehearsal" in rec.argv
+
+
+def test_bringup_refuses_a_weights_only_rehearsal_with_a_full_port_that_is_not_one(conf, capsys):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--weights-only-rehearsal", "--full-port"])
+    assert code == cli.EXIT_REFUSED and rec.argv is None
+    assert "Add --full-port-rehearsal as well" in capsys.readouterr().err
+
+
 def test_bringup_passes_port_repair_rounds_to_the_supervisor_only_when_given(conf):
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
     assert "--port-repair-rounds" not in rec.argv

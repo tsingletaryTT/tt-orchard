@@ -430,6 +430,13 @@ def test_full_port_rehearsal_is_added_only_when_the_caller_asks(tmp_path):
     assert supervisor.parse(argv).full_port_rehearsal is True
 
 
+def test_weights_only_rehearsal_is_added_only_when_the_caller_asks(tmp_path):
+    cfg = load(tmp_path)
+    assert "--weights-only-rehearsal" not in bc.supervisor_argv(cfg, "Cloudflare/clef")
+    argv = bc.supervisor_argv(cfg, "Cloudflare/clef", weights_only_rehearsal=True)
+    assert argv.count("--weights-only-rehearsal") == 1 and supervisor.parse(argv).weights_only_rehearsal is True
+
+
 def test_port_repair_rounds_are_added_only_when_the_caller_names_them(tmp_path):
     cfg = load(tmp_path)
     assert "--port-repair-rounds" not in bc.supervisor_argv(cfg, "Cloudflare/clef")          # a resume then keeps the value the run recorded

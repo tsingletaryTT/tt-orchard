@@ -46,7 +46,8 @@ The finish phase writes `result.json` in your stage directory:
 
 The gate needs `serves` true, `coherent` true, `n_tokens` of at least 16, `top1_agreement` of at
 least 0.85, a positive `server_ready_s`, and every evidence path to exist. Label each number measured
-or TODO.
+or TODO. In a run the operator started with `--weights-only-rehearsal` the gate accepts `coherent` false, so copy
+`coherent` as the draft has it, also when it is false.
 
 ## How to work
 

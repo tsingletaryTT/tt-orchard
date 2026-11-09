@@ -801,25 +801,29 @@ def gate_stock_runtime(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
-def gate_weights_swap(stage_dir, run_dir) -> GateResult:
+def gate_weights_swap(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
     """Stage 2 on the weights-only path: the existing TT implementation serves the new weights,
     and its greedy tokens agree with the stage 1 CPU reference (the weights-swap-check skill).
 
     It reads result.json as that skill describes. Each failing field gets its own reason, which
     names the field. After a failed hardware test the skill writes `serves` false with a `failure`
     field. The gate fails that result, and its serves reason quotes the failure text.
+
+    `rehearsal` is the run's `--weights-only-rehearsal`, which the supervisor reads from run_start: a measured `coherent` of false is
+    waived and named in the result's `waived`. Nothing in the stage directory sets it.
     """
     d, err = _load(stage_dir, "result.json")
     if err:
         return GateResult(False, (err,))
-    reasons, seen = _swap_reasons(d), []
+    waived: list[str] = []
+    reasons, seen = _swap_reasons(d, rehearsal=rehearsal, waived=waived), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += _token_check_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", [("result.json", d)], run_dir)
     reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
     reasons += sampling_choice.decision_problems(stage_dir, run_dir)       # the sampling choice (issue 107), when stage 2 made one
     reasons += vocab_trim_problems(stage_dir, run_dir)
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
-    return _done(reasons, seen)
+    return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
 
 
 def gate_sidecar_parity(sp, delta: dict) -> list[str]:
@@ -871,13 +875,15 @@ def gate_sidecar_parity(sp, delta: dict) -> list[str]:
     return reasons
 
 
-def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
+def gate_weights_swap_sidecar(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
     """Stage 2 on the weights+sidecar class: everything gate_weights_swap checks, and the sidecar parity
-    measured in the same lease (orchard/skills/weights-sidecar-check.md)."""
+    measured in the same lease (orchard/skills/weights-sidecar-check.md). `rehearsal` waives a measured `coherent` of false, as in
+    gate_weights_swap; the sidecar parity is held to its bar."""
     d, err = _load(stage_dir, "result.json")
     if err:
         return GateResult(False, (err,))
-    reasons, seen = _swap_reasons(d), []
+    waived: list[str] = []
+    reasons, seen = _swap_reasons(d, rehearsal=rehearsal, waived=waived), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += _token_check_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", [("result.json", d)], run_dir)
     reasons += decision_problems(stage_dir, run_dir)
@@ -892,7 +898,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
         reasons.append("result.json evidence must list evidence/sidecar-parity.json")
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     more, unverified = sidecar_numbers_reasons(stage_dir, run_dir, d)
-    return dataclasses.replace(_done(reasons + more, seen), unverified=unverified)
+    return dataclasses.replace(_done(reasons + more, seen), unverified=unverified, waived=tuple(waived))
 
 
 SIDECAR_RAW = "evidence/sidecar-parity.json"
@@ -920,9 +926,11 @@ def sidecar_numbers_reasons_at(stage_dir, run_dir, name: str, d: dict) -> tuple[
                 "recompute them from",)
 
 
-def _swap_reasons(d: dict, where: str = "") -> list[str]:
+def _swap_reasons(d: dict, where: str = "", *, rehearsal: bool = False, waived: list | None = None) -> list[str]:
     """The swap fields of one result (stage 2's result.json, or one stage 4 configuration), checked
-    against the stage 2 bar. Each failing field gets its own reason, which names the field."""
+    against the stage 2 bar. Each failing field gets its own reason, which names the field. With `rehearsal` (the run's
+    `--weights-only-rehearsal`, given by the supervisor) a `coherent` that is exactly false, a measurement of unreadable text, is no
+    reason and its name goes into `waived`. A missing or malformed `coherent` is still a reason, and every other field is checked as before."""
     reasons = []
     if d.get("serves") is not True:
         reason = f"{where}serves must be true (the server started and answered), got {d.get('serves')!r}"
@@ -932,7 +940,10 @@ def _swap_reasons(d: dict, where: str = "") -> list[str]:
             # escalation and the operator see why the test failed.
             reason += f"; the recorded failure: {failure.strip()[:500]}"
         reasons.append(reason)
-    if d.get("coherent") is not True:
+    if rehearsal and d.get("coherent") is False:
+        if waived is not None and "coherent" not in waived:
+            waived.append("coherent")
+    elif d.get("coherent") is not True:
         reasons.append(f"{where}coherent must be true (the free-run text is readable), got {d.get('coherent')!r}")
     n = d.get("n_tokens")
     if isinstance(n, bool) or not isinstance(n, int) or n < SWAP_MIN_TOKENS:
@@ -1442,7 +1453,7 @@ def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
     return _suite_reasons(report, run_dir, where, requested, Path(path).parent.parent / "model-dir")
 
 
-def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
+def gate_mesh_swap(stage_dir, run_dir, required=None, *, rehearsal: bool = False) -> GateResult:
     """Stage 4 on the weights-only path: `gate_mesh`, and for every configuration that claims a
     pass, proof that the supervisor ran its test and that the test measured a passing swap.
 
@@ -1453,12 +1464,15 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
     - its evidence must include configs/N/evidence/swap-check.json, and that file's result_draft
       must hold the same top1_agreement.
     An entry that does not claim a pass is judged by `gate_mesh` alone.
+    `rehearsal` (the run's `--weights-only-rehearsal`, given by the supervisor) waives a measured `coherent` of false in each passing
+    entry and nothing else.
     """
     base = gate_mesh(stage_dir, run_dir, required)
     d, err = _load(stage_dir, "result.json")
     if err:
         return base
     reasons, seen = list(base.reasons), list(base.evidence)
+    waived: list[str] = []
     rel = os.path.relpath(os.path.realpath(stage_dir), os.path.realpath(run_dir))
     trim = _trim_vocab(run_dir)
     refused = _delta_refusal(run_dir)
@@ -1475,7 +1489,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
             reasons.append(f"{where} claims a pass, but {problem}")
         else:
             seen.append(f"{rel}/tests/{n}/test-result.json")
-        reasons += _swap_reasons(c, f"{where}: ")
+        reasons += _swap_reasons(c, f"{where}: ", rehearsal=rehearsal, waived=waived)
         swap = f"{rel}/configs/{n}/evidence/swap-check.json"
         if swap not in (c.get("evidence") if isinstance(c.get("evidence"), list) else []):
             reasons.append(f"{where}: evidence must include {swap}")
@@ -1502,7 +1516,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
             cdir = Path(stage_dir) / "configs" / str(n)
             reasons += _trim_reasons(trim, _read_checked(cdir / "model-dir-sources.json", f"configs/{n}/model-dir-sources.json", reasons),
                                      report.get("serving") if isinstance(report, dict) else None, f"{where}: ")
-    return _done(reasons, seen)
+    return dataclasses.replace(_done(reasons, seen), waived=tuple(waived))
 
 
 def decision_file_problems(run_dir) -> list[str]:
@@ -1799,13 +1813,14 @@ def boot_check_reasons(stage_dir, run_dir, v) -> tuple[list[str], tuple[str, ...
     return [], ("stage 7 boot check top1 agreement: verify.json holds no teacher_forced records, so the number is the script's own report",)
 
 
-def gate_package(stage_dir, run_dir) -> GateResult:
+def gate_package(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
     """Stage 7: a staged v6 package whose boot check passed.
 
     Everything that matters is checked again from the files on disk: the license (read from the
     new model's snapshot), each staged directory's scrub, run.sh's weights settings, the manifest's
     weights, the card, the boot check's verify.json and the publish commands. package.json only
-    says where to look."""
+    says where to look. `rehearsal` (the run's `--weights-only-rehearsal`, given by the supervisor) waives a boot check whose
+    `coherent` is exactly false and nothing else."""
     # Imported here: orchard.package imports this module.
     from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, acceptance_sources, graft_evidence_problems, graft_problems,
                                  graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
@@ -1863,6 +1878,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
     boot_check, _ = _load(Path(stage_dir) / "verify" / "evidence", "verify.json")
     unverified: tuple[str, ...] = ()
+    waived: list[str] = []
     if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
                for p in profiles):
         failed = [p.get("verify", {}).get("failed") for p in profiles if isinstance(p, dict)]
@@ -1938,7 +1954,10 @@ def gate_package(stage_dir, run_dir) -> GateResult:
             if not _number(top1) or top1 < SWAP_TOP1_MIN:
                 reasons.append(f"profile {name}: the boot check's top1_agreement {top1!r} is below "
                                f"{SWAP_TOP1_MIN}")
-            if v.get("coherent") is not True:
+            if rehearsal and v.get("coherent") is False:
+                if "coherent" not in waived:
+                    waived.append("coherent")
+            elif v.get("coherent") is not True:
                 reasons.append(f"profile {name}: the boot check's free-run text is not coherent")
             if isinstance(n, bool) or not isinstance(n, int) or n < SWAP_MIN_TOKENS:
                 reasons.append(f"profile {name}: the boot check compared {n!r} tokens; at least "
@@ -1957,7 +1976,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons += publish_problems(got.value)
     else:
         reasons.append(got.problem(PUBLISH_FILE) or f"{PUBLISH_FILE} is missing")
-    return dataclasses.replace(_done(reasons, seen), unverified=unverified)
+    return dataclasses.replace(_done(reasons, seen), unverified=unverified, waived=tuple(waived))
 
 
 SKIP_7 = ("stage 7 builds a package only on the weights-only path of a run started with "
@@ -2461,6 +2480,27 @@ def full_port_rehearsal(entries: list[dict]) -> bool:
     """Whether the operator started the run with `--full-port-rehearsal` (issue 357). Only run_start counts: the option waives a gate field,
     so it cannot be added later by a decision, and nothing the coder writes is read."""
     return any(e["event"] == "run_start" and e["data"].get("full_port_rehearsal") is True for e in entries)
+
+
+def weights_only_rehearsal(entries: list[dict]) -> bool:
+    """Whether the operator started the run with `--weights-only-rehearsal` (Track C item C5 of the Qwen4 drop-in plan). Only run_start
+    counts, as for `full_port_rehearsal`: the option waives a gate field, so no later decision can add it and nothing the coder writes is read."""
+    return any(e["event"] == "run_start" and e["data"].get("weights_only_rehearsal") is True for e in entries)
+
+
+# The weights-only gates that take the `rehearsal` keyword: stage 2 (both classes), stage 4 and stage 7's boot check, the three places
+# where the swap check judges the free-run text. The supervisor gives the keyword to these and to no other gate.
+WEIGHTS_ONLY_REHEARSAL_GATES = (gate_weights_swap, gate_weights_swap_sidecar, gate_mesh_swap, gate_package)
+
+
+def rehearsal_options_problem(*, full_port: bool, full_port_rehearsal: bool, weights_only_rehearsal: bool) -> str | None:
+    """Why the rehearsal options given together do not make sense, or None. `--weights-only-rehearsal` says the model's text is not
+    readable. With `--full-port` and without `--full-port-rehearsal`, a run that stage 0 classes full-port would still need readable text in
+    the full-port stages, so it would block there for a reason the operator already knows."""
+    if weights_only_rehearsal and full_port and not full_port_rehearsal:
+        return ("--weights-only-rehearsal says the model's text is not readable, and --full-port lets a full-port class go on, where the "
+                "full-port stages still need readable text. Add --full-port-rehearsal as well, or leave out --full-port")
+    return None
 
 
 PACKAGE_OPTIONS_SET = "package options set"
