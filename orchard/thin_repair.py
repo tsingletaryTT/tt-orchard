@@ -140,6 +140,23 @@ def _holds_generated_mark(port_text: str, function: str) -> bool:
     return False
 
 
+def calling_stubs(port_text: str, helper: str) -> list[str]:
+    """Names of the top-level functions that call `helper` and that the coder writes: not a fixed helper, not a function a block family wrote
+    (it holds GENERATED_BLOCK_MARK). The check's failure line holds one frame, so a failure inside a generated helper names the helper; the
+    stub that passed it something it cannot take is found here (issue 698)."""
+    try:
+        tree = ast.parse(port_text)
+    except (SyntaxError, ValueError, RecursionError):
+        return []
+    out = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name in port_template.FIXED_HELPERS or _holds_generated_mark(port_text, node.name):
+            continue
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == helper for n in ast.walk(node)):
+            out.append(node.name)
+    return out
+
+
 def function_at(port_text: str, line: int) -> str | None:
     """The name of the top-level function whose source holds `line`, or None (module top level, a class, a line past the file, no parse)."""
     try:
@@ -190,16 +207,24 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
     function = function_at(text, failure.line)
     if function is None:
         return Round("fallback", etype=failure.etype, reason="the failing line is not inside a top-level function")
+    via = None                                  # the generated helper the failing line is in, when the stub that called it is the target
     if function in port_template.FIXED_HELPERS or _holds_generated_mark(text, function):
         # The helper is generated text, the same in every port, or a block a registered family wrote (its function holds GENERATED_BLOCK_MARK).
-        # The stub that called it passed it something it cannot take, and the check's failure line holds one frame only, so the agent loop
-        # (which reads the whole traceback) takes the round.
-        return Round("fallback", function=function, etype=failure.etype,
-                     reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")
+        # The failing line holds one frame only. When exactly one function the coder wrote calls the helper, that stub passed it something it
+        # cannot take and it is the target; otherwise the agent loop (which reads the whole traceback) takes the round.
+        callers = calling_stubs(text, function)
+        if len(callers) != 1:
+            return Round("fallback", function=function, etype=failure.etype,
+                         reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")
+        via, function = function, callers[0]
     try:
         if sheet is None:
             sheet = op_cheats.load_sheet(op_cheats.TTNN_SHEET)
         report = "FAILED: " + port_repair.failed_line(raw_output, 1500)
+        if via:
+            report = (f"The failing line is inside the helper `{via}`, which the generator wrote and which is correct for its own arguments. "
+                      f"It was called by `{function}`: change the call in `{function}` (what it passes, or how it prepares the value), "
+                      f"and do not rewrite `{via}`.\n" + report)
         request = stub_prompts.repair_request(text, function, last_check=report, sheet=sheet)
     except (op_cheats.SheetError, KeyError, ValueError, TypeError, SyntaxError, RecursionError) as exc:
         return Round("fallback", function=function, etype=failure.etype, reason=f"the request cannot be built ({exc.__class__.__name__})")
