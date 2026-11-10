@@ -139,3 +139,20 @@ def test_rounds_past_the_thin_cap_are_the_agent_loops(rig, monkeypatch):
     assert thin == [] and len(agent_repair_steps(rig)) == 1
     handed = [d for d in rig.decisions() if d.get("decision") == "thin repair handed to the coder"]
     assert handed and "past the" in handed[0]["reason"]
+
+
+def test_a_failure_that_is_not_the_ports_goes_to_the_agent_loop_without_a_request(rig):
+    """The thin repair asks about Python errors of the port. A numerics failure (the check ran to the end) is the agent loop's."""
+    from orchard.ledger import Ledger
+    from orchard.stages import FULL_PORT_STAGE_2
+    from orchard.supervisor import build
+    asked = []
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        led.append("run_start", None, thin_port=True)
+        sup = build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=100), coder=rig.coder_cls(rig.m), home=rig.home, containers=rig.containers)
+        sup.http = lambda *a, **k: asked.append(a)
+        sup._driven_stop = lambda spec: None              # no watchdog or actuator exists outside a run
+        done, stop = sup._thin_repair_round(FULL_PORT_STAGE_2, rig.run_dir / "stages" / "2", 1, {"kind": "numerics", "op": "numerics"}, "raw", False)
+        assert (done, stop) == (False, None) and asked == []
+        handed = [e["data"] for e in led.read() if e["data"].get("decision") == "thin repair handed to the coder"]
+        assert handed and "not a failure of the port itself" in handed[0]["reason"]

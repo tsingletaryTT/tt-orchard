@@ -329,3 +329,20 @@ def test_the_round_prompt_cap_stops_a_round_whose_prompt_is_too_large(tmp_path, 
     coder = OneShot(FIXED)
     out, _ = _round(tmp_path, coder)
     assert out.status == "fallback" and "prompt size cap" in out.reason and coder.bodies == []
+
+
+def test_function_at_includes_the_first_and_last_line_of_the_function():
+    first = _line_of(PORT, "def _model_prelude")
+    last = _line_of(PORT, "return x") if False else first + 2
+    assert tr.function_at(PORT, first) == "_model_prelude" and tr.function_at(PORT, last) == "_model_prelude"
+    assert tr.function_at(PORT, first - 1) is None
+
+
+def test_the_bounds_of_a_round_are_two_requests_and_six_rounds():
+    assert tr.REQUESTS_PER_ROUND == 2 and tr.MAX_ROUNDS == 6
+    coder = OneShot("no code here")
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as t:
+        out, _ = _round(Path(t), coder)
+    assert out.status == "refused" and len(coder.bodies) == 2
