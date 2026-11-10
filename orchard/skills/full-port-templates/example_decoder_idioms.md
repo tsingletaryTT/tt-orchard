@@ -121,3 +121,11 @@ def _C_self_attn(model, i, x, ids):                              # x [1, 1, S, h
 ```
 Keep every ttnn activation 4-D, and remember that a ttnn tensor has no `.view` or `.t()`. The head split by reshape on a tile-layout tensor has not been
 checked on a board here; if it complains, read the tensor back with `_to_host`, split in torch and upload with `_upload`.
+
+## 8. Checked on a board (probes 6 to 9, issue 711)
+
+These forms ran on a chip and matched the CPU reference (PCC 0.9998 or better):
+- `_apply_rotary(model, x, cos, sin)` with `x [1, heads, S, head_dim]` and tables `[1, 1, S, head_dim]`. The multiply that broadcasts the table over the heads axis works. It raises a named error when `x` has another layout, so reshape and permute `x` to that layout first.
+- A per-head norm by reshape to `[1, 1, S * heads, head_dim]`, `_rms_norm` with the head norm weight, and reshape back; the head permute `(0, 2, 1, 3)`; both at `head_dim` 32.
+- Attention with a per-query selection mask through `ttnn.transformer.scaled_dot_product_attention`, with grouped key-value heads (native or expanded with `repeat_kv`), and the sigmoid output gate.
+- `ttnn.topk` is deterministic. With `stable=True` it picks the lowest index among tied scores. torch's `topk` does not follow that rule on ties, so a selection that has ties (relu scores tie at 0) can differ from torch in which tied entries it takes. Use `stable=True` and say so in the block's comment.
