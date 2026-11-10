@@ -205,6 +205,7 @@ class Plan:
     attention: dict | None                 # settings of the generated attention, when one is generated
     stubs: list                            # Stub
     notes: list
+    default_eps: float = 1e-6              # the config's rms_norm_eps: the eps of a norm that is not in norm_eps (a group_size norm, a gated one)
 
     def summary(self) -> dict:
         """What the ledger or a run log records: the generated blocks and the stubs, without any file content."""
@@ -442,7 +443,7 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     return Plan(model_class=con.model_class, text_path=text_path, layers_path=layers_path, n_layers=n_layers, hidden=hidden, vocab=vocab,
                 pad_id=pad if type(pad) is int and 0 <= pad < vocab else 0, config=small, embed_path=embed_path, final_norm=final_norm,
                 lm_head_path=lm_head_path, tied=tied, prelude_reason=prelude_reason, epilogue=epilogue, layers=layers, placements=placements,
-                norm_eps=norm_eps, plus_one_norms=plus_one, attention=attention_settings, stubs=stubs, notes=notes)
+                norm_eps=norm_eps, plus_one_norms=plus_one, attention=attention_settings, stubs=stubs, notes=notes, default_eps=float(default_eps))
 
 
 def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps, default_eps, hidden):
@@ -524,7 +525,7 @@ def render(p: Plan) -> str:
           "PLACEMENT = {"]
     for k, v in sorted(p.placements.items()):
         L.append(f"    {_lit(k)}: {_lit(v)},")
-    L += ["}", f"NORM_EPS = {_lit(dict(sorted(p.norm_eps.items())))}", "_NUMBER = re.compile(r\"(?<=\\.)\\d+(?=\\.|$)\")", "", ""]
+    L += ["}", f"NORM_EPS = {_lit(dict(sorted(p.norm_eps.items())))}", f"NORM_DEFAULT_EPS = {p.default_eps!r}", "_NUMBER = re.compile(r\"(?<=\\.)\\d+(?=\\.|$)\")", "", ""]
     L += ['def read_tensors(model_dir):',
           '    """Every tensor of the checkpoint as {name: torch tensor}, from one file or from shards."""',
           "    out = {}",
@@ -567,7 +568,7 @@ def render(p: Plan) -> str:
           '    return ttnn.linear(x, w, dtype=ttnn.bfloat16, compute_kernel_config=model["ck"], memory_config=ttnn.DRAM_MEMORY_CONFIG)', "", "",
           "def _rms_norm(model, prefix, x):",
           '    """RMSNorm over the last dim with the weight at `prefix` (uploaded as [1, 1, 1, dim]; a class that adds 1 to its weight had it added at load)."""',
-          '    return ttnn.rms_norm(x, epsilon=NORM_EPS[_pattern(prefix)], weight=model["dev"][prefix + ".weight"])', "", "",
+          '    return ttnn.rms_norm(x, epsilon=NORM_EPS.get(_pattern(prefix), NORM_DEFAULT_EPS), weight=model["dev"][prefix + ".weight"])', "", "",
           "def _embedding(model, prefix, ids):",
           '    """The embedding table at `prefix` looked up for `ids` (a list of ints), as [1, 1, S, HIDDEN] TILE bf16."""',
           "    ids_dev = _upload_ids(model, ids)",
@@ -734,6 +735,7 @@ MODULE_CONSTANTS = {
     "LAYER_VARIANT": "list: layer index -> the key of LAYERS for that layer",
     "PLACEMENT": "dict: tensor name pattern -> how load placed it",
     "NORM_EPS": "dict: norm name pattern -> epsilon",
+    "NORM_DEFAULT_EPS": "the epsilon of a norm that NORM_EPS does not list (the config's rms_norm_eps); _rms_norm uses it",
     "LAYERS": "dict: layer variant key -> the layer function",
 }
 

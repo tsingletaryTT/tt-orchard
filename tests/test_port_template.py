@@ -561,3 +561,29 @@ def test_the_generated_stub_text_is_found_in_a_nested_function_and_a_method_too(
 def test_the_stub_marker_in_a_string_is_still_not_a_stub():
     text = _port_with("    return 'x'  # fine\n    s = '# AGENT: not a stub'")
     assert not pt.check_sources({"port_model.py": text})["stubs"]
+
+
+def test_rms_norm_helper_has_an_eps_for_a_norm_the_generator_left_out():
+    """Arm E8: the hyper-connection norm (a group_size norm) is not in NORM_EPS, and the stubs call _rms_norm with its prefix: a KeyError in a
+    helper the coder cannot fix. The helper falls back to NORM_DEFAULT_EPS, the config's rms_norm_eps."""
+    import ast
+    text, _plan = std_generate()
+    assert "NORM_DEFAULT_EPS = 1e-06" in text or "NORM_DEFAULT_EPS = 1e-6" in text
+    ns = {"NORM_EPS": {}, "NORM_DEFAULT_EPS": 1e-6, "_pattern": pt_pattern}
+    calls = {}
+
+    class T:
+        @staticmethod
+        def rms_norm(x, epsilon, weight):
+            calls["eps"] = epsilon
+            return x
+    fn = next(n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == "_rms_norm")
+    ns["ttnn"] = T
+    exec(compile(ast.Module([fn], []), "p", "exec"), ns)
+    ns["_rms_norm"]({"dev": {"model.layers.0.attn_hyper_connection.hc_norm.weight": 1}}, "model.layers.0.attn_hyper_connection.hc_norm", 7)
+    assert calls["eps"] == 1e-6
+
+
+def pt_pattern(name):
+    import re
+    return re.sub(r"(?<=\.)\d+(?=\.|$)", "{i}", name)

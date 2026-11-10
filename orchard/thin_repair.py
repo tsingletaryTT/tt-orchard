@@ -64,7 +64,8 @@ HINTS = (
      "`{0}` is not a key of CONFIG. CONFIG has exactly these keys: {config_keys}. Read the value from the key that holds it."),
     (re.compile(r"^KeyError$"), re.compile(r"\{i\}"),
      "A key that still holds `{{i}}` is a pattern, not a tensor name. Look a weight up in model['dev'] by its real name with the layer number "
-     "filled in (for example 'model.layers.0.…'), and use _pattern(name) only for NORM_EPS and PLACEMENT."),
+     "filled in (for example 'model.layers.0.…'). _pattern(name) turns a real name into the pattern form that PLACEMENT is keyed by; call "
+     "_rms_norm(model, name, x) for an RMS norm and do not index NORM_EPS yourself."),
     # The shapes below are failures the arm E7 run showed on the chip (issue 677).
     (re.compile(r"^TypeError$"), re.compile(r"bad operand type for unary -"),
      "A ttnn tensor has no unary minus. Use ttnn.neg(x) or ttnn.multiply(x, -1.0). Rotate-half is ttnn.concat([ttnn.neg(x2), x1], dim=-1) "
