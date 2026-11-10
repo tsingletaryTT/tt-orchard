@@ -1,0 +1,2 @@
+target = "0.9.153"
+summary = "--coder-keep-on-stall: an agent-stuck block leaves the coder up and the retry reuses it after a canary check, so a stalled agent step does not cost a coder boot (issue 701)."
