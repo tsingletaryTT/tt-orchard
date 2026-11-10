@@ -1,0 +1,3 @@
+target = "0.9.151"
+summary = "The port generator writes the Qwen4 gated delta net (linear attention) block as the second family of the registry (issue 696, slice 2)."
+kind = "feature"

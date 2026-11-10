@@ -72,7 +72,8 @@ def test_the_sheet_section_names_the_ops_stage_0_mapped_and_says_which_the_sheet
     assert any(o.startswith("aten.clone.default (candidate)") for o in other) and any(o.startswith("aten.matmul.default (candidate)") for o in other)
     section = sp.sheet_section(SHEET, wanted=mapped)
     assert section.startswith("`ttnn.linear(") and "`ttnn.matmul(" in section
-    assert "the sheet has not verified them" in section and "softplus" in section.split("the sheet has not verified them")[1]
+    assert "the sheet has not verified them" in section and "exp" in section.split("the sheet has not verified them")[1]
+    assert "`ttnn.softplus(" in section.split("the sheet has not verified them")[0]            # the sheet holds softplus since the gated delta net family (issue 696, slice 2)
     assert sp.ops_for(None, "x") == ([], []) and sp.ops_for({"ops": [None, {"op": 1}]}, "x") == ([], [])
 
 
