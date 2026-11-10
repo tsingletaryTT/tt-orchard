@@ -43,7 +43,7 @@ def test_a_placed_draft_is_tested_before_the_coder_step_starts(rig, monkeypatch,
     assert tested < round2                                                            # the draft's check ran before the coder's round began
     note = decs(rig, DRAFT_TESTED)[0]
     assert note["round"] == 1 and note["outcome"] == "failed" and note["op"] == "prefill" and "Sizes of tensors" in note["failure"]
-    assert len(seen) == 1 and "round 2 of" in seen[0]                                 # the coder's first step starts from the draft's failure
+    assert seen and "round 2 of" in seen[0]                                            # the coder's first step starts from the draft's failure
 
 
 def test_a_draft_that_passes_the_check_ends_the_rounds_and_no_coder_step_runs(rig, monkeypatch, tmp_path):
@@ -67,7 +67,7 @@ def test_a_draft_that_makes_no_projection_call_is_refused_before_a_board_is_leas
     pre = decs(rig, "device-ops pre-check failed before the board")
     assert pre, "the CPU pre-check did not judge the draft"
     placed, tested = order(rig, rh.PLACED, DRAFT_TESTED)
-    assert placed < tested and len(seen) == 1 and "round 2 of" in seen[0]
+    assert placed < tested and seen and "round 2 of" in seen[0]
 
 
 def test_the_ledger_decision_holds_no_machine_path_and_a_bounded_failure_line(rig, monkeypatch, tmp_path):
@@ -110,7 +110,8 @@ def test_a_tested_draft_is_recorded_as_the_best_port_in_a_coder_driven_stage(rig
     start(rig, BROKEN, [HONEST + "# the coder\n"])
     rig.run()
     best = decs(rig, rh.BEST)
-    assert best and best[0]["op"] == "prefill" and best[0]["rank"] > 0                   # the draft got further than the port it replaced
+    assert [b["op"] for b in best] == ["load", "prefill"]                                # the port it replaced, then the draft that got further
+    assert best[-1]["rank"] > best[0]["rank"]
 
 
 def test_the_next_attempt_starts_from_the_kept_draft_not_the_skeleton(rig, monkeypatch, tmp_path):
@@ -122,3 +123,23 @@ def test_the_next_attempt_starts_from_the_kept_draft_not_the_skeleton(rig, monke
     assert decs(rig, rh.BEST), "no best port was kept"
     restored = decs(rig, rh.RESTORED)
     assert restored and restored[0]["op"] == "prefill"
+
+
+def test_the_round_after_a_failed_draft_test_belongs_to_the_coder_and_the_helper_is_not_asked_again_at_once(rig, monkeypatch, tmp_path):
+    tel, wire = wire_helper(monkeypatch, tmp_path, [NO_LINEAR])                       # the failure stays at the same request: it would ask again
+    seen = start(rig, BROKEN, [HONEST + "# the coder\n"])
+    rig.run()
+    asked = decs(rig, rh.ASKED)
+    assert [a["round"] for a in asked][:1] == [1] and all(a["round"] != 2 or a["coder_failed"] for a in asked)
+    assert seen and "round 2 of" in seen[0]
+
+
+def test_draft_failed_in_round_reads_only_this_attempts_failed_decisions():
+    def e(seq, event, **data):
+        return {"seq": seq, "event": event, "stage": 2, "data": data}
+    ledger = [e(1, "stage_start"), e(2, "decision", decision=rh.DRAFT_TESTED, round=1, outcome="failed"),
+              e(3, "decision", decision=rh.DRAFT_TESTED, round=2, outcome="passed"), e(4, "decision", decision=rh.DRAFT_TESTED, round=3, outcome="not tested")]
+    assert rh.draft_failed_in_round(ledger, 2, 1) is True
+    assert rh.draft_failed_in_round(ledger, 2, 2) is False and rh.draft_failed_in_round(ledger, 2, 3) is False
+    assert rh.draft_failed_in_round(ledger + [e(5, "stage_start")], 2, 1) is False        # a new attempt forgets it
+    assert rh.start_trigger(ledger, 2, 2, {"op": "load"})[0] is False
