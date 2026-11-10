@@ -159,3 +159,173 @@ def test_one_retry_only_and_the_second_failure_leaves_the_stub(tmp_path):
     out, ledger, _ = run_step(tmp_path, coder, sampling={"temperature": 0.6, "max_tokens": 4096})
     first = [d for d in ledger.decisions("thin port request") if d.get("function") == out.stubs_left[0]] if out.stubs_left else []
     assert out.stubs_left and len(first) == 2 and first[-1]["outcome"] == "left as a stub"
+
+
+# ---- (3) the thin repair: one request per failing function -----------------------------------------------------------------------------------
+
+from orchard import thin_repair as tr                                                            # noqa: E402
+
+FAILED = ("FAILED: the port failed at 'prefill': \"[port_model.py:{line}: config = model.config] AttributeError: "
+          "'dict' object has no attribute 'config'\"\nPORT_CHECK_FAILURE {{\"kind\": \"port\", \"op\": \"prefill\"}}\n")
+
+PORT = '''import ttnn
+
+CONFIG = {"head_dim": 4}
+N_LAYERS = 2
+
+
+def _linear(model, prefix, x):
+    return x
+
+
+def _model_prelude(model, x, ids):
+    config = model.config
+    return x
+
+
+def helper_two(a):
+    return a
+'''
+
+
+def _line_of(text, needle):
+    return next(n for n, l in enumerate(text.split("\n"), 1) if needle in l)
+
+
+def test_the_failed_line_is_parsed_strictly():
+    f = tr.parse_failed("port| log line\n" + FAILED.format(line=12))
+    assert (f.op, f.file, f.line, f.etype) == ("prefill", "port_model.py", 12, "AttributeError")
+    assert f.code == "config = model.config" and f.message == "'dict' object has no attribute 'config'"
+    single = ("FAILED: the port failed at 'load': '[port_model.py:69: x = G(config)] NameError: name \\'G\\' is not defined'\n")
+    assert tr.parse_failed(single).etype == "NameError"
+
+
+@pytest.mark.parametrize("text", [
+    "", None, 7, "no failure here", "FAILED: device-ops: no source file under stages/2/port/ makes a reachable ttnn matmul-family call",
+    "FAILED: the port worker did not answer 'load' (it exited or stopped answering)",
+    "FAILED: the port failed at 'prefill': \"[port_model.py:x: code] AttributeError: m\"",          # a line number that is not digits
+    "FAILED: the port failed at 'prefill': \"[port_model.py:12: code] 9Error: m\"",                    # an error type that is not a name
+    "FAILED: the port failed at 'prefill': \"[port_model.py:12: " + "c" * 500 + "] AttributeError: m\"",   # code over its bound
+])
+def test_a_failure_that_is_not_a_python_error_at_a_port_line_is_not_parsed(text):
+    assert tr.parse_failed(text) is None
+
+
+def test_only_the_last_failed_line_counts_and_a_port_cannot_write_one():
+    text = FAILED.format(line=5) + "port| FAILED: the port failed at 'load': \"[port_model.py:1: x] KeyError: 'k'\"\n"
+    assert tr.parse_failed(text).line == 5                       # the worker's `port| ` lines never start with FAILED
+
+
+def test_function_at_finds_the_top_level_function_that_holds_the_line():
+    assert tr.function_at(PORT, _line_of(PORT, "config = model.config")) == "_model_prelude"
+    assert tr.function_at(PORT, _line_of(PORT, "return a")) == "helper_two"
+    assert tr.function_at(PORT, _line_of(PORT, "CONFIG = ")) is None                            # module level
+    assert tr.function_at(PORT, 9999) is None and tr.function_at("def f(:\n", 1) is None
+
+
+def test_the_hint_table_has_one_entry_per_shape_and_fills_in_the_groups():
+    attr = tr.Failure("prefill", "port_model.py", 1, "x", "AttributeError", "'dict' object has no attribute 'config'")
+    h = tr.hint_for(attr, PORT)
+    assert "plain dict" in h and "model.config" in h and "CONFIG" in h
+    name = tr.Failure("load", "port_model.py", 1, "x", "NameError", "name 'GatedResidual' is not defined")
+    h = tr.hint_for(name, PORT)
+    assert "`GatedResidual`" in h and "_linear" in h and "helper_two" in h
+    mod = tr.Failure("load", "port_model.py", 1, "x", "TypeError", "port_model.Qwen4ExpTextDecoderLayer is not a Module subclass")
+    assert "plain functions" in tr.hint_for(mod, PORT)
+    other = tr.Failure("load", "port_model.py", 1, "x", "KeyError", "'weight'")
+    assert tr.hint_for(other, PORT) is None
+    assert tr.hint_for(tr.Failure("p", "port_model.py", 1, "x", "ValueError", "'dict' object has no attribute 'a'"), PORT) is None      # the type must match too
+
+
+def _stage(tmp_path, text=PORT):
+    d = tmp_path / "stages" / "2"
+    (d / "port").mkdir(parents=True)
+    (d / "port" / "port_model.py").write_text(text)
+    return d
+
+
+FIXED = "```python\ndef _model_prelude(model, x, ids):\n    return x  # " + SENTINEL + "\n```"
+
+
+class OneShot:
+    def __init__(self, *contents, finish="stop"):
+        self.contents, self.bodies, self.finish = list(contents), [], finish
+
+    def __call__(self, url, body, timeout):
+        self.bodies.append(body)
+        content = self.contents[min(len(self.bodies) - 1, len(self.contents) - 1)]
+        return {"choices": [{"message": {"content": content}, "finish_reason": self.finish}], "usage": {"completion_tokens": 30}}
+
+
+def _round(tmp_path, post, k=1, raw=None, **kw):
+    d = _stage(tmp_path, kw.pop("text", PORT))
+    raw = raw if raw is not None else FAILED.format(line=_line_of(PORT, "config = model.config"))
+    out = tr.run_round(stage_dir=d, k=k, raw_output=raw, post=post, endpoint="http://x/v1", model="m",
+                       sampling=kw.pop("sampling", {"temperature": 0.6, "max_tokens": 16384}), sheet=SHEET, **kw)
+    return out, d
+
+
+def test_a_round_asks_for_the_failing_function_with_the_hint_and_splices_the_reply(tmp_path):
+    coder = OneShot(FIXED)
+    out, d = _round(tmp_path, coder)
+    assert out.status == "spliced" and out.function == "_model_prelude" and out.etype == "AttributeError" and out.hint is True
+    body = coder.bodies[0]
+    user = body["messages"][-1]["content"]
+    assert "config = model.config" in user and "## Hint for this error (AttributeError)" in user and "plain dict" in user
+    assert body["max_tokens"] == tp.STUB_MAX_TOKENS and "tools" not in body
+    new = (d / "port" / "port_model.py").read_text()
+    assert SENTINEL in new and "model.config" not in new and "def helper_two" in new           # the other functions are untouched
+
+
+def test_a_refused_reply_is_retried_once_with_the_reason_and_a_cooler_sampling(tmp_path):
+    coder = OneShot("no code here", FIXED)
+    out, _ = _round(tmp_path, coder)
+    assert out.status == "spliced" and out.requests == 2
+    assert "## The previous reply was refused" in coder.bodies[1]["messages"][-1]["content"]
+    assert coder.bodies[1]["temperature"] <= tp.RETRY_TEMPERATURE_MAX
+
+
+def test_two_refusals_hand_the_round_to_the_agent_loop_and_leave_the_port_alone(tmp_path):
+    coder = OneShot("no code here")
+    out, d = _round(tmp_path, coder)
+    assert out.status == "refused" and out.requests == tr.REQUESTS_PER_ROUND == len(coder.bodies)
+    assert (d / "port" / "port_model.py").read_text() == PORT
+
+
+def test_a_round_past_the_cap_asks_nobody(tmp_path):
+    coder = OneShot(FIXED)
+    out, _ = _round(tmp_path, coder, k=tr.MAX_ROUNDS + 1)
+    assert out.status == "fallback" and coder.bodies == []
+    ok, _ = _round(tmp_path / "b", OneShot(FIXED), k=tr.MAX_ROUNDS)
+    assert ok.status == "spliced"
+
+
+@pytest.mark.parametrize("raw,why", [
+    ("", "not a Python error"),
+    ("FAILED: device-ops: no source file under stages/2/port/", "not a Python error"),
+    ("FAILED: the port failed at 'load': \"[other.py:3: x] KeyError: 'k'\"\n", "another file"),
+    ("FAILED: the port failed at 'load': \"[port_model.py:4: CONFIG = {}] KeyError: 'k'\"\n", "not inside a top-level function"),
+])
+def test_a_failure_the_thin_repair_cannot_place_goes_to_the_agent_loop_without_a_request(tmp_path, raw, why):
+    coder = OneShot(FIXED)
+    out, _ = _round(tmp_path, coder, raw=raw)
+    assert out.status == "fallback" and why in out.reason and coder.bodies == []
+
+
+def test_an_endpoint_that_fails_ends_the_round_in_error(tmp_path):
+    def boom(url, body, timeout):
+        raise OSError("down")
+    out, d = _round(tmp_path, boom)
+    assert out.status == "error" and out.requests <= tr.REQUESTS_PER_ROUND and (d / "port" / "port_model.py").read_text() == PORT
+
+
+def test_the_result_holds_no_reply_text(tmp_path):
+    out, _ = _round(tmp_path, OneShot(FIXED))
+    assert SENTINEL not in json.dumps(out.__dict__)
+
+
+def test_the_round_prompt_cap_stops_a_round_whose_prompt_is_too_large(tmp_path, monkeypatch):
+    monkeypatch.setattr(tr, "ROUND_PROMPT_CHARS_CAP", 100)
+    coder = OneShot(FIXED)
+    out, _ = _round(tmp_path, coder)
+    assert out.status == "fallback" and "prompt size cap" in out.reason and coder.bodies == []
