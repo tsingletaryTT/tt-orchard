@@ -326,7 +326,7 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
                     sampling: str | None = None, full_port: bool = False, full_port_rehearsal: bool = False,
                     model_kind: str | None = None, port_repair_rounds: int | None = None,
                     telegraph_config: Path | None = None, tool_dedupe: bool = True,
-                    weights_only_rehearsal: bool = False) -> list[str]:
+                    weights_only_rehearsal: bool = False, thin_port: bool = False) -> list[str]:
     """The arguments after `python3 -m orchard.supervisor`. Optional flags appear only when the config
     sets them, so the supervisor's own defaults stay the defaults. `--accept-credentials-visible` is added
     only when the caller says the operator asked for it on the command line; the config cannot add it."""
@@ -380,6 +380,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         argv.append("--full-port-rehearsal")     # only when the operator asked: it waives stage 2's coherence field (issue 357)
     if weights_only_rehearsal:
         argv.append("--weights-only-rehearsal")  # only when the operator asked: it waives the coherence field of stages 2, 4 and 7
+    if thin_port:
+        argv.append("--thin-port")               # only when the operator asked: stage 2 asks the coder for one stub at a time (issue 677)
     if port_repair_rounds is not None:
         argv += ["--port-repair-rounds", str(port_repair_rounds)]      # only when named (0 is a value): a resume then keeps what the run recorded
     if telegraph_config is not None and cfg.telegraph.enabled:

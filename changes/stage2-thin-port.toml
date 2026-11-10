@@ -1,0 +1,3 @@
+target = "0.9.148"
+summary = "--thin-port: stage 2 of a full port fills the stubs of a generated port with one chat request each (orchard/thin_port.py), in place of the agent's prepare step; off by default"
+kind = "feature"

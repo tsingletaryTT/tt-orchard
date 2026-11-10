@@ -1154,6 +1154,19 @@ def test_bringup_refuses_a_weights_only_rehearsal_with_a_full_port_that_is_not_o
     assert "Add --full-port-rehearsal as well" in capsys.readouterr().err
 
 
+def test_bringup_passes_the_thin_port_flag_only_when_asked(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--full-port"])
+    assert "--thin-port" not in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--full-port", "--thin-port"])
+    assert code == 0 and "--thin-port" in rec.argv
+
+
+def test_bringup_refuses_the_thin_port_without_a_full_port(conf, capsys):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--thin-port"])
+    assert code == cli.EXIT_REFUSED and rec.argv is None
+    assert "--full-port" in capsys.readouterr().err
+
+
 def test_bringup_passes_port_repair_rounds_to_the_supervisor_only_when_given(conf):
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
     assert "--port-repair-rounds" not in rec.argv
