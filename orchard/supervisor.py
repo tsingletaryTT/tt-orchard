@@ -2880,6 +2880,10 @@ class Supervisor:
                 # is kept in stages/2.best, so the next attempt does not start again from the skeleton.
                 self._record_best(n, stage_dir, failure)
                 asked_here, friend_note, driven_ok = False, "", False
+                if k > 1 and repair_help.draft_failed_in_round(self.ledger.read(), n, k - 1):
+                    # The helper's draft was tested before the coder's step and failed (issue 596): the coder starts from the draft's own failure.
+                    friend_note = ("The files under `stages/2/port/` are the helper's draft from the previous round, and its check failed as shown "
+                                   "above. Correct what the check shows to be wrong and keep what works.")
                 handed_back = self._helper_drive_on() and repair_help.same_failure_twice(self.ledger.read(), n, k)
                 if handed_back:
                     # Two rounds in a row failed at the same request with the same message: the helper's change moved nothing, so this round is the
