@@ -48,14 +48,12 @@ def test_a_family_must_name_a_reference_test():
 def test_tiny_qwen4_keeps_only_the_blocks_the_registry_does_not_know():
     text, p = tiny_qwen4()
     stubs = {s.function for s in p.stubs}
-    assert stubs == {"_layer_A", "_layer_B", "_B_ple", "_layer_C", "_C_self_attn"}          # the gated delta net is the second family (slice 2)
-    assert len(pt.stub_lines(text)) == 5
+    assert stubs == {"_C_self_attn"}          # the gated delta net is the second family (slice 2), the per-layer embedding the third (slice 3)
+    assert len(pt.stub_lines(text)) == 1
     assert p.placements["model.layers.{i}.attn_hyper_connection.hc_norm.weight"] == "norm_plus_one"
     assert p.placements["model.hyper_connection_mixer.hc_norm.weight"] == "norm_plus_one"
     s = p.summary()
     assert "hyper_connection" in s["generated"]
-    layer_stub = next(x for x in s["stubs"] if x["function"] == "_layer_A")
-    assert "attn_hyper_connection" not in layer_stub["reason"].split("stubs:")[-1]          # generated parts are listed in the stub's body, not as stubs
 
 
 def test_the_layer_stub_lists_the_generated_connection_with_its_return_value_and_the_inject_helper():
@@ -164,10 +162,10 @@ def test_the_reference_comparison_fails_when_a_stream_weight_is_dropped(monkeypa
         test_generated_hyper_connections_match_the_transformers_module(monkeypatch, tmp_path)
 
 
-def test_the_layer_stub_request_tells_the_coder_how_to_use_the_generated_connections():
-    """What the coder reads for `_layer_A`: the connection call, what it returns and the inject helper (its remaining job is the block between)."""
+def test_the_attention_stub_request_tells_the_coder_what_the_generated_layer_passes_and_expects():
+    """What the coder reads for `_C_self_attn` (layer 3 is composed whole around it): the layer calls it on the mixed input and adds no residual for it."""
     from orchard import op_cheats, stub_prompts as sp
     text, p = tiny_qwen4()
-    stub = next(x for x in p.stubs if x.function == "_layer_A")
+    stub = next(x for x in p.stubs if x.function == "_C_self_attn")
     user = sp.stub_request(text, stub, sheet=op_cheats.load_sheet(op_cheats.TTNN_SHEET), excerpts=None)["user"]
-    assert "_A_attn_hyper_connection(model, i, x, ids)" in user and "_hyper_connection_inject(block_out, hyper_input, injection_weights, 4, 64)" in user
+    assert "The generated _layer_C calls this function on the connection's mixed input" in user and "add no residual here" in user

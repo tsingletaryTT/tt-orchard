@@ -235,6 +235,61 @@
      ]
     },
     {
+     "name": "ttnn.abs",
+     "kind": "op",
+     "signature": "ttnn.abs(input_tensor, *, memory_config=None, output_tensor=None, sub_core_grids=None)",
+     "usage": "y = ttnn.abs(x)",
+     "notes": "Elementwise |x|. Not chip-tested here.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/eltwise/unary/unary_nanobind.cpp (bind_unary_operation abs)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.sign",
+     "kind": "op",
+     "signature": "ttnn.sign(input_tensor, *, memory_config=None, output_tensor=None, sub_core_grids=None)",
+     "usage": "y = ttnn.sign(x)",
+     "notes": "Elementwise sign (-1, 0, 1). Not chip-tested here.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/eltwise/unary/unary_nanobind.cpp (bind_unary_operation_subcoregrids sign)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.sqrt",
+     "kind": "op",
+     "signature": "ttnn.sqrt(input_tensor, *, fast_and_approximate_mode=False, memory_config=None, output_tensor=None, sub_core_grids=None)",
+     "usage": "y = ttnn.sqrt(x)",
+     "notes": "Elementwise square root. Not chip-tested here.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/eltwise/unary/unary_nanobind.cpp (bind_unary_operation_with_fast_and_approximate_mode sqrt)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.clamp",
+     "kind": "op",
+     "signature": "ttnn.clamp(input_tensor, min=None, max=None, *, memory_config=None, output_tensor=None)",
+     "usage": "y = ttnn.clamp(x, min=1e-6)",
+     "notes": "Elementwise clamp; min and max are floats. Not chip-tested here.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/eltwise/unary/unary_nanobind.cpp (bind_function clamp)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.sum",
+     "kind": "op",
+     "signature": "ttnn.sum(input_tensor, dim=None, keepdim=False, *, memory_config=None, compute_kernel_config=None, scalar=1.0, correction=None, sub_core_grids=None, fast_and_approximate_mode=False, output_layout=None)",
+     "usage": "s = ttnn.sum(x, dim=3, keepdim=True)",
+     "notes": "Sum over dim; keepdim=True keeps it with size 1. Not chip-tested here.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/reduction/generic/generic_reductions_nanobind.hpp (bind_generic_reductions sum)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
      "name": "ttnn.multiply",
      "kind": "op",
      "signature": "ttnn.multiply(a, b)",

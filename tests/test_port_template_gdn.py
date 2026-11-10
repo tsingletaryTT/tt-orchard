@@ -32,8 +32,8 @@ def test_gated_delta_net_is_a_registered_family_with_a_reference_test():
 
 def test_the_linear_attention_stubs_are_gone_and_the_rest_stay():
     text, p = tiny_qwen4()
-    assert {s.function for s in p.stubs} == {"_layer_A", "_layer_B", "_B_ple", "_layer_C", "_C_self_attn"}
-    assert len(pt.stub_lines(text)) == 5
+    assert {s.function for s in p.stubs} == {"_C_self_attn"}
+    assert len(pt.stub_lines(text)) == 1
     assert "gated_delta_net" in p.summary()["generated"]
 
 
@@ -62,10 +62,12 @@ def test_a_model_without_a_gated_delta_net_gets_no_family_code():
     assert "_gated_delta_net" not in text and "gated_delta_net" not in p.summary()["generated"]
 
 
-def test_the_layer_stub_tells_the_coder_what_the_block_takes_and_returns():
+def test_the_composed_layer_calls_the_block_on_the_mixed_input_and_the_block_says_it_adds_no_residual():
     text, _ = tiny_qwen4()
-    body = text[text.index("def _layer_A("):text.index("def load(")]
-    assert "_A_linear_attn(model, i, mixed, ids)" in body and "no residual" in body
+    tree = ast.parse(text)
+    layer = ast.get_source_segment(text, next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_layer_A"))
+    block = ast.get_source_segment(text, next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_A_linear_attn"))
+    assert "_A_linear_attn(model, i, mixed, ids)" in layer and "without the residual add" in block
 
 
 def test_the_generated_port_still_passes_the_sheet_and_the_cpu_check():
