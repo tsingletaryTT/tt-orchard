@@ -48,13 +48,13 @@ def test_a_family_must_name_a_reference_test():
 def test_tiny_qwen4_keeps_only_the_blocks_the_registry_does_not_know():
     text, p = tiny_qwen4()
     stubs = {s.function for s in p.stubs}
-    assert stubs == {"_layer_A", "_layer_B", "_layer_C", "_C_self_attn"}          # the gated delta net is the second family (slice 2), the per-layer embedding the third (slice 3)
-    assert len(pt.stub_lines(text)) == 4
+    assert stubs == {"_layer_C", "_C_self_attn"}          # the gated delta net is the second family (slice 2), the per-layer embedding the third (slice 3)
+    assert len(pt.stub_lines(text)) == 2
     assert p.placements["model.layers.{i}.attn_hyper_connection.hc_norm.weight"] == "norm_plus_one"
     assert p.placements["model.hyper_connection_mixer.hc_norm.weight"] == "norm_plus_one"
     s = p.summary()
     assert "hyper_connection" in s["generated"]
-    layer_stub = next(x for x in s["stubs"] if x["function"] == "_layer_A")
+    layer_stub = next(x for x in s["stubs"] if x["function"] == "_layer_C")
     assert "attn_hyper_connection" not in layer_stub["reason"].split("stubs:")[-1]          # generated parts are listed in the stub's body, not as stubs
 
 
@@ -165,9 +165,9 @@ def test_the_reference_comparison_fails_when_a_stream_weight_is_dropped(monkeypa
 
 
 def test_the_layer_stub_request_tells_the_coder_how_to_use_the_generated_connections():
-    """What the coder reads for `_layer_A`: the connection call, what it returns and the inject helper (its remaining job is the block between)."""
+    """What the coder reads for `_layer_C` (layers 0 to 2 are composed whole): the connection call, what it returns and the inject helper (its remaining job is the block between)."""
     from orchard import op_cheats, stub_prompts as sp
     text, p = tiny_qwen4()
-    stub = next(x for x in p.stubs if x.function == "_layer_A")
+    stub = next(x for x in p.stubs if x.function == "_layer_C")
     user = sp.stub_request(text, stub, sheet=op_cheats.load_sheet(op_cheats.TTNN_SHEET), excerpts=None)["user"]
-    assert "_A_attn_hyper_connection(model, i, x, ids)" in user and "_hyper_connection_inject(block_out, hyper_input, injection_weights, 4, 64)" in user
+    assert "_C_attn_hyper_connection(model, i, x, ids)" in user and "_hyper_connection_inject(block_out, hyper_input, injection_weights, 4, 64)" in user

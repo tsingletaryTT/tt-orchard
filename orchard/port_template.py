@@ -194,6 +194,7 @@ class Layer:
     standard: bool
     reason: str = ""                       # why the layer is a stub
     blocks: dict = field(default_factory=dict)      # child name -> ("mlp" | "attention" | "rms_norm" | "linear" | "stub" | a registered family name, details)
+    composed: dict | None = None                    # set when the layer is written whole from generated blocks (`_compose_layer`): the streams, the sublayer and whether a PLE block runs first
 
 
 @dataclass
@@ -228,7 +229,8 @@ class Plan:
                 "generated": sorted({"embedding"} | {b[0] for l in self.layers for b in l.blocks.values() if b[0] != "stub"}
                                     | {b[0] for b in self.model_blocks.values()}
                                     | ({"final_norm"} if self.final_norm else set()) | {"lm_head"}
-                                    | ({"layer_flow"} if any(l.standard for l in self.layers) else set())),
+                                    | ({"layer_flow"} if any(l.standard for l in self.layers) else set())
+                                    | ({"layer_composition"} if any(l.composed for l in self.layers) else set())),
                 "layer_variants": [{"key": l.key, "indices": l.indices, "standard": l.standard, "reason": l.reason} for l in self.layers],
                 "stubs": [{"function": s.function, "path": s.path, "class": s.cls, "reason": s.reason} for s in self.stubs],
                 "notes": list(self.notes)}
@@ -743,6 +745,54 @@ register_block_family(BlockFamily(
     name="ple", recognize=_recognize_ple, emit=_emit_ple, reference_test=PLE_REFERENCE_TEST, describe=_describe_ple, helpers=_ple_helpers))
 
 
+# A layer of the Qwen4 family written whole from generated blocks. The reference forward (`Qwen4ExpTextDecoderLayer.forward`, no cache):
+#   if the layer has a PLE block:  x = x + ple(x, ids)
+#   mixed, hyper_input, w = attn_hyper_connection(x);  x = hyper_input + inject(linear_attn(mixed), w)
+#   mixed, hyper_input, w = mlp_hyper_connection(x);   x = hyper_input + inject(mlp(mixed), w)
+# The layer is composed only when every part is a generated block of the expected kind (a layer with a stub part stays a stub). Stage 0 flags the layer with
+# `aten.flatten.using_ints` (the reference's `injection.flatten(-2)`, which `_hyper_connection_inject` writes with a concat); the inventory records one op per
+# module and lists few modules per op, so that one flag is accepted and any other flag on the layer keeps it a stub. The reference test of the layer family is
+# the check that the composition is right.
+LAYER_COMPOSITION_TEST = "tests/test_port_template_layer.py::test_generated_layers_match_the_transformers_decoder_layer"
+_COMPOSABLE_FLAG = "aten.flatten.using_ints (candidate)"
+_COMPOSED_KIDS = frozenset({"attn_hyper_connection", "mlp_hyper_connection", "mlp", "linear_attn"})
+
+
+def _compose_layer(layer: Layer, attrs: dict, flag: str | None):
+    kids = set(layer.blocks)
+    if kids not in (_COMPOSED_KIDS, _COMPOSED_KIDS | {"ple"}) or (flag is not None and flag != _COMPOSABLE_FLAG):
+        return None
+    kinds = {k: v[0] for k, v in layer.blocks.items()}
+    want = {"attn_hyper_connection": "hyper_connection", "mlp_hyper_connection": "hyper_connection", "mlp": "mlp", "linear_attn": "gated_delta_net", "ple": "ple"}
+    if any(kinds[k] != want[k] for k in kids) or attrs.get("layer_type") != "linear_attention":
+        return None
+    a, m = layer.blocks["attn_hyper_connection"][1], layer.blocks["mlp_hyper_connection"][1]
+    if not (a.get("inject") and m.get("inject")) or (a["hc"], a["hidden"]) != (m["hc"], m["hidden"]):
+        return None          # both connections must inject, over the same streams
+    if "ple" in kids and layer.blocks["ple"][1]["hc"] * layer.blocks["ple"][1]["hidden"] != a["hc"] * a["hidden"]:
+        return None
+    return {"hc": a["hc"], "hidden": a["hidden"], "ple": "ple" in kids}
+
+
+def _emit_composed_layer(layer: Layer, layers_path: str) -> list:
+    c, key = layer.composed, layer.key
+    lines = [f"def _layer_{key}(model, i, x, ids, cos, sin):",
+             f'    """Layers {layer.indices}: {layer.cls}, written whole from generated blocks: '
+             + ("the PLE block adds to the streams, then " if c["ple"] else "")
+             + f'attention connection, gated delta net, MLP connection and MLP, each followed by its injection into the {c["hc"]} streams."""',
+             f"    {GENERATED_BLOCK_MARK} layer",
+             f'    p = f"{layers_path}.{{i}}"']
+    if c["ple"]:
+        lines.append(f"    x = ttnn.add(x, _{key}_ple(model, i, x, ids))")
+    lines += [f"    mixed, hyper_input, weights = _{key}_attn_hyper_connection(model, i, x, ids)",
+              f"    out = _{key}_linear_attn(model, i, mixed, ids)",
+              f"    x = _hyper_connection_inject(out, hyper_input, weights, {c['hc']}, {c['hidden']})",
+              f"    mixed, hyper_input, weights = _{key}_mlp_hyper_connection(model, i, x, ids)",
+              '    out = _mlp(model, p + ".mlp", mixed)',
+              f"    return _hyper_connection_inject(out, hyper_input, weights, {c['hc']}, {c['hidden']})", "", ""]
+    return lines
+
+
 def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Plan:
     """The plan of the generated port. Raises PlanError when the inputs do not describe a decoder with an embedding, numbered layers and a head."""
     section = text_section(config)
@@ -919,7 +969,8 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
             and layer.blocks.get("mlp", ("",))[0] == "mlp" and layer.blocks["input_layernorm"][0] == "rms_norm" \
             and layer.blocks["post_attention_layernorm"][0] == "rms_norm" and not own_flag
         layer.standard = standard
-        if not standard:
+        layer.composed = None if standard else _compose_layer(layer, attrs, flagged.get(lp))
+        if not standard and layer.composed is None:
             parts = [f"{k} ({children[k]})" for k, v in sorted(layer.blocks.items()) if v[0] == "stub"]
             layer.reason = (own_flag or (f"{cls or 'the layer class'}'s children are not the standard pre-norm set (input_layernorm, self_attn, "
                             "post_attention_layernorm, mlp)" if set(kids) != STANDARD_LAYER else "a child block is a stub")) \
@@ -1146,6 +1197,9 @@ def render(p: Plan) -> str:
                                     [f"The Linear children of this block are uploaded by load() and can be called as _linear(model, f\"{lp}.{kid}.<name>\", x)."])
             elif kind in BLOCK_FAMILIES:
                 L += BLOCK_FAMILIES[kind].emit(f"_{layer.key}_{kid}", f"{lp}.{kid}", details, "layer")
+        if layer.composed:
+            L += _emit_composed_layer(layer, p.layers_path)
+            continue
         parts = []
         for kid, (kind, details) in sorted(layer.blocks.items()):
             call = {"mlp": f'_mlp(model, p + ".{kid}", x)', "rms_norm": f'_rms_norm(model, p + ".{kid}", x)',

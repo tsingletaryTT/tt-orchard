@@ -35,9 +35,9 @@ def test_ple_is_a_registered_family_with_a_reference_test():
 
 def test_the_ple_stub_is_gone_and_the_others_stay():
     text, p = tiny_qwen4()
-    assert {s.function for s in p.stubs} == {"_layer_A", "_layer_B", "_layer_C", "_C_self_attn"}
+    assert {s.function for s in p.stubs} == {"_layer_C", "_C_self_attn"}
     assert "ple" in p.summary()["generated"]
-    assert len(pt.stub_lines(text)) == 4
+    assert len(pt.stub_lines(text)) == 2
 
 
 def test_the_table_shards_stay_on_the_host_and_the_convolution_gets_taps():

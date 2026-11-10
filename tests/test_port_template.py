@@ -326,14 +326,14 @@ def tiny_qwen4():
 def test_tiny_qwen4_generates_the_standard_parts_and_stubs_every_new_block():
     text, p = tiny_qwen4()
     s = p.summary()
-    assert s["generated"] == ["embedding", "gated_delta_net", "hyper_connection", "lm_head", "mlp", "ple"]
+    assert s["generated"] == ["embedding", "gated_delta_net", "hyper_connection", "layer_composition", "lm_head", "mlp", "ple"]
     assert [v["indices"] for v in s["layer_variants"]] == [[0, 2], [1], [3]] and not any(v["standard"] for v in s["layer_variants"])
     stubs = {x["function"]: x for x in s["stubs"]}
     # The hyper-connection blocks (prelude, mixer and the per-layer connections) and the gated delta net are written by registered families
-    # (issue 696, slices 1 to 3); what is left is the layers that compose them and the indexer attention.
-    assert set(stubs) == {"_layer_A", "_layer_B", "_layer_C", "_C_self_attn"}
+    # (issue 696, slices 1 to 3), and layers 0 to 2 are composed from them; what is left is the indexer attention and the layer that holds it.
+    assert set(stubs) == {"_layer_C", "_C_self_attn"}
     assert "indexer (Qwen4ExpTextQSAIndexer)" in stubs["_C_self_attn"]["reason"]
-    assert len(pt.stub_lines(text)) == 4
+    assert len(pt.stub_lines(text)) == 2
     # Placement: every Linear transposed, the embedding table ROW_MAJOR, the plain head norms with 1 added, integer tables on the host.
     assert p.placements["lm_head.weight"] == "linear_weight" and p.placements["model.embed_tokens.weight"] == "embedding"
     assert p.placements["model.layers.{i}.linear_attn.in_proj_qkv.weight"] == "linear_weight"
@@ -353,6 +353,12 @@ def test_tiny_qwen4_port_loads_through_the_fake_and_makes_linear_calls_before_th
             weights[t["name"]] = (torch.randn(*t["shape"], generator=g) * 0.1).to(torch.bfloat16)
         else:
             weights[t["name"]] = torch.arange(int(torch.tensor(t["shape"]).prod()), dtype=torch.int64).reshape(t["shape"])
+        if t["name"].endswith("ple_embedding.ngram_heads_vocab_sizes"):
+            weights[t["name"]] = torch.tensor([1009, 1013, 1019, 1021])         # the n-gram hash takes a remainder by these: a zero would divide by zero
+        elif t["name"].endswith("ple_embedding.ngram_heads_offsets"):
+            weights[t["name"]] = torch.tensor([0, 1009, 2022, 3041])
+        elif t["name"].endswith("ple_embedding.layer_multipliers"):
+            weights[t["name"]] = torch.tensor([3, 5, 7])
     from safetensors.torch import save_file
     snap = tmp_path / "snap"
     snap.mkdir()
@@ -360,11 +366,11 @@ def test_tiny_qwen4_port_loads_through_the_fake_and_makes_linear_calls_before_th
     model = mod.load(str(snap), fake.MeshDevice(1))
     assert len(model["dev"]) == 103 and len(model["host"]) == 7          # 95 and 3 before the gated delta net family (4 taps in place of 1 tensor per layer); the PLE table moves its 4 shards from the device to the host and adds 4 taps and 3 host buffers
     assert model["dev"]["model.layers.0.linear_attn.in_proj_qkv.weight"].shape == (64, 320)
-    with pytest.raises(NotImplementedError, match="_layer_A"):          # the prelude is generated now; the first layer is a stub
+    with pytest.raises(NotImplementedError, match="_layer_C"):          # the prelude and layers 0 to 2 are generated; the first stub reached is the indexer layer
         mod.prefill(model, [1, 2, 3])
     assert fake.COUNTS["embedding"] == 1
     result = pt.check_sources({"port_model.py": text})
-    assert result["matmul_calls"] >= 2 and not result["ok"] and "4 # AGENT: stub(s) remain" in result["problems"][0]
+    assert result["matmul_calls"] >= 2 and not result["ok"] and "2 # AGENT: stub(s) remain" in result["problems"][0]
 
 
 # ---- every TTNN name the generator emits is in the verified sheet ------------------------------------------------------------------------------
