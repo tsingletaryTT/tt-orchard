@@ -563,13 +563,13 @@ def test_the_stub_marker_in_a_string_is_still_not_a_stub():
     assert not pt.check_sources({"port_model.py": text})["stubs"]
 
 
-def test_rms_norm_helper_has_an_eps_for_a_norm_the_generator_left_out():
-    """Arm E8: the hyper-connection norm (a group_size norm) is not in NORM_EPS, and the stubs call _rms_norm with its prefix: a KeyError in a
-    helper the coder cannot fix. The helper falls back to NORM_DEFAULT_EPS, the config's rms_norm_eps."""
+def test_rms_norm_helper_names_the_prefix_it_has_no_eps_for():
+    """Arm E8: the hyper-connection norm (a group_size norm) is not in NORM_EPS, and a stub called _rms_norm with its prefix. A KeyError inside the
+    helper pointed at the helper. The helper now raises an error that says the caller must compute that norm itself (system review of
+    2026-11-10: a silent fallback to the config eps would turn this into a numerics miss)."""
     import ast
     text, _plan = std_generate()
-    assert "NORM_DEFAULT_EPS = 1e-06" in text or "NORM_DEFAULT_EPS = 1e-6" in text
-    ns = {"NORM_EPS": {}, "NORM_DEFAULT_EPS": 1e-6, "_pattern": pt_pattern}
+    ns = {"NORM_EPS": {"model.norm": 1e-5}, "_pattern": pt_pattern}
     calls = {}
 
     class T:
@@ -580,8 +580,19 @@ def test_rms_norm_helper_has_an_eps_for_a_norm_the_generator_left_out():
     fn = next(n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == "_rms_norm")
     ns["ttnn"] = T
     exec(compile(ast.Module([fn], []), "p", "exec"), ns)
-    ns["_rms_norm"]({"dev": {"model.layers.0.attn_hyper_connection.hc_norm.weight": 1}}, "model.layers.0.attn_hyper_connection.hc_norm", 7)
-    assert calls["eps"] == 1e-6
+    ns["_rms_norm"]({"dev": {"model.norm.weight": 1}}, "model.norm", 7)
+    assert calls["eps"] == 1e-5
+    with pytest.raises(ValueError, match="not a plain RMS norm.*the function that calls _rms_norm"):
+        ns["_rms_norm"]({"dev": {}}, "model.layers.0.attn_hyper_connection.hc_norm", 7)
+
+
+def test_the_fixed_helpers_are_the_functions_the_generator_always_writes_and_none_is_a_stub():
+    import ast
+    text, _plan = std_generate()
+    names = [n.name for n in ast.parse(text).body if isinstance(n, ast.FunctionDef)]
+    assert set(pt.FIXED_HELPERS) <= set(names)
+    assert pt.stub_lines(text) == []
+    assert "_rms_norm" in pt.FIXED_HELPERS and "_layer_A" not in pt.FIXED_HELPERS and "_mlp" not in pt.FIXED_HELPERS
 
 
 def pt_pattern(name):

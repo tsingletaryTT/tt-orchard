@@ -176,6 +176,11 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
     function = function_at(text, failure.line)
     if function is None:
         return Round("fallback", etype=failure.etype, reason="the failing line is not inside a top-level function")
+    if function in port_template.FIXED_HELPERS:
+        # The helper is generated text that is the same in every port. The stub that called it passed it something it cannot take, and the check's
+        # failure line holds one frame only, so the agent loop (which reads the whole traceback) takes the round.
+        return Round("fallback", function=function, etype=failure.etype,
+                     reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")
     try:
         if sheet is None:
             sheet = op_cheats.load_sheet(op_cheats.TTNN_SHEET)
