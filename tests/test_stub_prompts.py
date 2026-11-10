@@ -51,7 +51,7 @@ def test_a_stub_request_holds_the_helpers_the_sheet_the_construction_the_excerpt
     assert "class Qwen4ExpTextGatedDeltaNet(nn.Module)" in user and "class Qwen4ExpTextMLP" not in user   # this class's excerpt only
     assert "num_v_heads=6" in user and "hidden_size=64" not in user                                       # this class's construction lines only
     assert user.rstrip().endswith("Return a ttnn tensor of the shape the layer expects.")
-    assert user.index("def _A_linear_attn(") > user.index("## Reference class")                            # the stub comes last
+    assert user.rindex("def _A_linear_attn(") > user.index("## Reference class")                            # the stub comes last
     assert "# AGENT:" in user                                                                               # the stub as it stands, marker included
     assert "Mistakes seen in runs:" in user
     assert len(user) < 20_000
@@ -88,7 +88,7 @@ def test_a_repair_request_holds_the_report_the_diff_and_the_function(tiny):
     text, _ = tiny
     req = sp.repair_request(text, "_mlp", last_check="FAILED at prefill: " + "z" * 10_000, layer_diff="layer 2 differs", sheet=SHEET)
     assert req["function"] == "_mlp" and req["args"] == ["model", "prefix", "x"]
-    assert len(req["user"]) < 4_000 + 3_000 + 6_000 and "layer 2 differs" in req["user"] and "def _mlp(" in req["user"]
+    assert len(req["user"]) < 4_000 + 3_000 + 6_000 + 3_000 and "layer 2 differs" in req["user"] and "def _mlp(" in req["user"]
     assert "## Mistakes seen in runs" in req["user"]
     with pytest.raises(sp.SpliceError, match="no top-level function"):
         sp.repair_request(text, "_no_such", last_check="x")

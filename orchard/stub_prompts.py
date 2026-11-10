@@ -187,6 +187,40 @@ def helpers_text(port_text: str) -> str:
     return "\n".join(out)
 
 
+SIGNATURES_MAX_CHARS = 5000
+
+
+def signatures_text(port_text: str) -> str:
+    """One line per top-level function of the port with its exact arguments, so a function that calls another (a layer that calls the stubs of
+    its parts) passes the right ones. Bounded."""
+    try:
+        tree = ast.parse(port_text)
+    except (SyntaxError, ValueError, RecursionError):
+        return ""
+    out, size = [], 0
+    for n in tree.body:
+        if isinstance(n, ast.FunctionDef):
+            line = f"def {n.name}({', '.join(_arg_names(n))})"
+            if size + len(line) > SIGNATURES_MAX_CHARS:
+                out.append("(more functions follow; the port file lists them)")
+                break
+            out.append(line)
+            size += len(line) + 1
+    return "\n".join(out)
+
+
+def config_keys(tree: ast.Module) -> list:
+    """The keys of the port's module-level CONFIG literal, or []."""
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CONFIG" for t in n.targets):
+            try:
+                value = ast.literal_eval(n.value)
+            except (ValueError, SyntaxError, RecursionError, MemoryError):
+                return []
+            return sorted(k for k in value if isinstance(k, str)) if isinstance(value, dict) else []
+    return []
+
+
 def _hc_count(tree: ast.Module):
     """CONFIG['hc_count'] of the port's module-level CONFIG literal, or None."""
     for n in tree.body:
@@ -215,6 +249,9 @@ def model_text(port_text: str) -> str:
     lines += [f"- `{k}`: {v}" for k, v in port_template.MODEL_KEYS.items()]
     lines += ["The module constants of the port (read them directly):"]
     lines += [f"- `{k}`: {v}" for k, v in port_template.MODULE_CONSTANTS.items() if k in defined]
+    keys = config_keys(tree)
+    if keys:
+        lines += ["CONFIG has exactly these keys (no other: a key that is not listed raises KeyError): " + ", ".join(keys)[:1800]]
     hc = _hc_count(tree)
     if hc and hc > 1:
         lines += [f"The residual stream has hc_count = {hc} streams (CONFIG['hc_count']), laid out side by side: between the layers x is "
@@ -236,6 +273,7 @@ def stub_request(port_text: str, stub, *, sheet: dict, excerpts: str | None, con
     args = _arg_names(_functions(ast.parse(port_text))[function])
     wanted, other = ops_for(inventory, path)
     parts = [model_text(port_text), "## Helpers of the port (call these; do not rewrite them)", helpers_text(port_text) or "(none)",
+             "## Every function of the port, with its exact arguments (call each with exactly these arguments)", signatures_text(port_text) or "(none)",
              "## Verified ttnn calls", sheet_section(sheet, wanted=wanted)]
     if other:
         parts += ["## Ops of this block that have no verified ttnn form (stage 0 labels)", ", ".join(other),

@@ -60,6 +60,8 @@ HINTS = (
      "ttnn.rms_norm needs a weight whose last dimension equals the input's. For a norm with a group_size smaller than the input width "
      "(the hyper-connection norm), reshape x to [..., width / group_size, group_size], norm over the last dimension with the group's "
      "weight, and reshape back."),
+    (re.compile(r"^KeyError$"), re.compile(r"^'(?P<key>\w+)'$"),
+     "`{0}` is not a key of CONFIG. CONFIG has exactly these keys: {config_keys}. Read the value from the key that holds it."),
     (re.compile(r"^KeyError$"), re.compile(r"\{i\}"),
      "A key that still holds `{{i}}` is a pattern, not a tensor name. Look a weight up in model['dev'] by its real name with the layer number "
      "filled in (for example 'model.layers.0.…'), and use _pattern(name) only for NORM_EPS and PLACEMENT."),
@@ -117,15 +119,19 @@ def function_at(port_text: str, line: int) -> str | None:
 def hint_for(failure: Failure, port_text: str) -> str | None:
     """The hint for the first table entry that matches the error, with the group of its message pattern and the port's function names filled in."""
     try:
-        names = ", ".join(n.name for n in ast.parse(port_text).body if isinstance(n, ast.FunctionDef))[:1200] or "none"
+        tree = ast.parse(port_text)
+        names = ", ".join(n.name for n in tree.body if isinstance(n, ast.FunctionDef))[:1200] or "none"
     except (SyntaxError, ValueError, RecursionError):
-        names = "none"
+        tree, names = None, "none"
+    keys = stub_prompts.config_keys(tree) if tree is not None else []
     for etype, message, text in HINTS:
         if etype.match(failure.etype.split(".")[-1]):
             m = message.search(failure.message)
             if m:
+                if "{config_keys}" in text and (not keys or m.group(1) in keys):
+                    continue                    # the key is in CONFIG, or the port has no CONFIG literal: this entry does not apply
                 groups = m.groups() or ("",)
-                return text.format(*groups, names=names)
+                return text.format(*groups, names=names, config_keys=", ".join(keys)[:1500])
     return None
 
 

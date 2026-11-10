@@ -233,7 +233,9 @@ def test_the_hint_table_has_one_entry_per_shape_and_fills_in_the_groups():
     mod = tr.Failure("load", "port_model.py", 1, "x", "TypeError", "port_model.Qwen4ExpTextDecoderLayer is not a Module subclass")
     assert "plain functions" in tr.hint_for(mod, PORT)
     other = tr.Failure("load", "port_model.py", 1, "x", "KeyError", "'weight'")
-    assert tr.hint_for(other, PORT) is None
+    assert "not a key of CONFIG" in tr.hint_for(other, PORT) and "head_dim" in tr.hint_for(other, PORT)      # PORT's CONFIG has no `weight`
+    inside = tr.Failure("load", "port_model.py", 1, "x", "KeyError", "'head_dim'")
+    assert tr.hint_for(inside, PORT) is None                         # a key that CONFIG has: the hint does not apply
     assert tr.hint_for(tr.Failure("p", "port_model.py", 1, "x", "ValueError", "'dict' object has no attribute 'a'"), PORT) is None      # the type must match too
 
 
