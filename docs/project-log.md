@@ -5209,3 +5209,16 @@ Prompt (operator): finish the remaining part of issue 458 (P1). Tiny Qwen4 rehea
   for `waiting-for-chips`, a run record with its directory and log for `starting` and `running`, name lists that are lists);
   the tick moves it aside and waits for the operator, as for an unreadable file.
 - 14 mutations, all red. Builds on PR 682 (issue 676).
+
+## 2026-11-10: the coder stays up across an agent-stuck retry (issue 701)
+
+The system review of 2026-11-10 counted 25 coder boots in the 12 Coder-Next arms, about a quarter of the wall time. In arms E8 to E12 every `agent-stuck` block stopped the coder, and the automatic retry (the driver starts a new supervisor process) booted it again, about 10 minutes each time, although the stall was in the agent and the coder was healthy.
+
+The mechanism already existed for lab runs: `[coder] keep_up` hands the coder's chips to a gozer lease its container owns and writes `kept.json`; the next run adopts the coder after identity, server, gozer and canary checks (`orchard/kept_coder.py`). This change reuses it for the retry case.
+
+- `--coder-keep-on-stall` (any mode, off by default). When the run ends blocked with the code `agent-stuck`, `_release_or_keep` leaves the coder up (`_leave_coder_up(stall=True)`), writes the record with `reason = "agent-stuck"` and the run directory, and records `coder kept up across retry`. Every other block code, and a run without the flag, stop the coder as before. The existing checks still refuse to keep a coder that is not running, that is mid-boot, or that holds more than one lease unit.
+- At the start of a retry, `_ensure_coder` first calls `_reuse_stall_kept_coder`. It touches only a record this run wrote (same `reason`, same run directory). The coder must list its model, gozer must show the chips held by the kept coder, and it must answer the canary as it did at its first start. Then the ledger records `coder adopted` and `coder reused after retry (canary ok)` and the record is removed (it is written again if the run ends blocked as agent-stuck again). Otherwise the supervisor records `coder restarted (canary failed)` with the reason, stops the coder, releases the kept lease and boots a coder as before.
+- A coder left up and never retried (the last retry ended differently, or nobody ran the command again) keeps running under the adopted lease until `tt-orchard coder stop`.
+- Not covered: a retried run whose later stage parks the coder for a 4-chip test while it holds an adopted lease. The park path was written for leases the supervisor owns, and the lab restriction of `keep_up` came from that. The tiny Qwen4 rehearsal runs the coder on one board and its tests on the other, so it does not park. Whether `gozer reset` accepts an adopted lease is not tested here.
+- Issue 572: `archive_blocked_bundle` already moves `BLOCKED.md` and `blocked.json` aside when a run reaches ready after a retry, so nothing changed there. During the retry itself the old file is still in the run directory.
+- Tests: `tests/test_supervisor_keep_on_stall.py` (10). Mutations that each turn a test red: keeping on any block code, ignoring the flag, touching another run's record, dropping the canary pre-check, skipping the release of the kept lease, leaving the record after reuse, never trying the reuse. Fakes only; no board was used.

@@ -204,6 +204,7 @@ MAX_SWAP_CONFIG_BYTES = 1024 * 1024    # choice: a stage's swap_config.json is a
 WHO = os.environ.get("ORCHARD_LEASE_WHO") or "orchard:supervisor"       # the name gozer shows for the supervisor's leases; an operator's session may set its own
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
 EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
+STALL_CODE = "agent-stuck"     # the block code that leaves the coder up with --coder-keep-on-stall (issue 701)
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
@@ -901,7 +902,7 @@ class Supervisor:
                  paths: RunPaths | None = None, package: dict | None = None,
                  package_added: bool = False, unattended: bool = False, lab=None,
                  four_chip_package: str | None = None, coder_tier: str | None = None,
-                 keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
+                 keep_up: bool = False, keep_on_stall: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
                  full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
                     port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
@@ -958,6 +959,9 @@ class Supervisor:
         self.graft_trial = graft_trial
         # Lab mode only: in local mode tests park the coder for its board, so a kept coder saves little.
         self.keep_up = keep_up and lab is not None
+        # Any mode: an `agent-stuck` block leaves the coder up, and the automatic retry (a new supervisor process) checks and reuses it
+        # instead of booting another (issue 701). A coder-level failure still stops the coder.
+        self.keep_on_stall = keep_on_stall
         self.coder_identity = coder_identity      # what kept_coder.mismatch compares
         self.coder_tier = coder_tier                # the tier whose endpoint is the coder's port
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
@@ -1562,7 +1566,7 @@ class Supervisor:
         # A stage can block while its own test lease is held (a refused reset, for one). That lease goes back first,
         # or the automatic retry would run against chips this process still held.
         self._release_test_lease()
-        self._release_or_keep()
+        self._release_or_keep(code)
         return EXIT_BLOCKED
 
     def _abort(self) -> int:
@@ -1648,14 +1652,15 @@ class Supervisor:
                 ids.add(d.get("kept_lease_id"))
         return ids - {None}
 
-    def _release_or_keep(self) -> bool:
-        if self.keep_up:
-            kept = self._leave_coder_up()
+    def _release_or_keep(self, block_code: str | None = None) -> bool:
+        stall = self.keep_on_stall and block_code == STALL_CODE
+        if self.keep_up or stall:
+            kept = self._leave_coder_up(stall=stall)
             if kept is not None:
                 return kept
         return self._release_all()
 
-    def _leave_coder_up(self) -> bool | None:
+    def _leave_coder_up(self, stall: bool = False) -> bool | None:
         """Hand a healthy coder's chips to a lease its container owns, and write the record the next run
         adopts. None when the coder cannot be kept (the caller releases as usual)."""
         entries = self.ledger.read()
@@ -1711,13 +1716,74 @@ class Supervisor:
         kept_coder.write(self.paths.cache_root, {
             "identity": self.coder_identity, "lease": kept.record(), "holder_pids": holders,
             "server": self.coder.record(), "canary": canary_text, "run_dir": str(self.run_dir),
-            "left_at": self.clock()})
+            "left_at": self.clock(), **({"reason": STALL_CODE} if stall else {})})
         self.ledger.append("decision", None, decision="coder left up", lease_id=lease.lease_id,
                            kept_lease_id=kept_id, holder_pids=holders,
                            record=str(kept_coder.path(self.paths.cache_root)))
+        if stall:
+            self.ledger.append("decision", None, decision="coder kept up across retry", lease_id=kept_id,
+                               why="the block is agent-stuck: the agent stalled, the coder did not")
         return True
 
-    def _adopt_kept_coder(self) -> bool:
+    def _stall_canary_problem(self, kept: dict) -> str | None:
+        """None when the kept coder answers the canary as it did when it was first started; else why it does not. The server record is the
+        one this run wrote when it left the coder up."""
+        try:
+            self.coder.adopt(kept["server"])
+            answer = self.coder.ask(RUN_CANARY_PROMPT)
+        except (KeyError, TypeError, ServerError, CanaryError, OSError) as exc:
+            return f"the canary was not answered ({type(exc).__name__}: {exc})"[:300]
+        before = kept.get("canary")
+        if not isinstance(before, str) or not compare(before, answer).match:
+            return "the canary answer differs from the one the coder gave when it was started"
+        return None
+
+    def _reuse_stall_kept_coder(self) -> bool:
+        """The retry of a run that ended blocked as agent-stuck with `--coder-keep-on-stall`: reuse the coder that run left up when its checks
+        hold (True), and otherwise stop it and release its chips so that the normal start boots another (False). Only a record this run wrote
+        is touched: another run's kept coder is left for its operator."""
+        kept = kept_coder.read(self.paths.cache_root)
+        if kept is None or kept.get("reason") != STALL_CODE or kept.get("run_dir") != str(self.run_dir):
+            return False
+        if self._adopt_kept_coder(stall=True):
+            self.ledger.append("decision", None, decision="coder reused after retry (canary ok)",
+                               lease_id=(kept.get("lease") or {}).get("lease_id"))
+            # The coder is this run's again. The record is for the next process: it is written again if the run ends blocked as agent-stuck.
+            kept_coder.forget(self.paths.cache_root, (kept.get("lease") or {}).get("lease_id"))
+            return True
+        why = next((e["data"].get("reason") for e in reversed(self.ledger.read())
+                    if e["data"].get("decision") == "kept coder not used"), "the checks failed")
+        self._discard_kept_coder(kept, str(why))
+        return False
+
+    def _discard_kept_coder(self, kept: dict, why: str) -> None:
+        """Stop the coder this run left up, give its chips back, and forget the record, so that the coder is booted again."""
+        try:
+            lease = Lease.from_record(kept["lease"])
+            self.coder.adopt(kept["server"])
+        except (KeyError, TypeError, ValueError):
+            self.ledger.append("notice", None, what="the kept coder's record cannot be used; it was left as it is", reason=why[:300])
+            return
+        self.ledger.append("decision", None, decision="coder restarted (canary failed)", reason=why[:300],
+                           lease_id=lease.lease_id)
+        try:
+            if not self.coder.confirm_stopped().stopped:
+                self.ledger.append("decision", None, decision="stopping the coder", result=self.coder.stop())
+            check = wait_stopped(self.coder, self.adapter, lease, quiet_wait_s=self.budgets.quiet_wait_s, poll_s=self.budgets.poll_s,
+                                 clock=self.clock, sleep=self.sleep, accept=("CLAIMED", "STALE", "FREE"))
+            if not check["ok"]:
+                self.ledger.append("notice", None, blocked=True, evidence=check,
+                                   reason="the kept coder is not confirmed stopped; its lease was not released")
+                return
+            self._remove_coder_container()
+            self.adapter.release(lease)
+            self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id)
+            kept_coder.forget(self.paths.cache_root, lease.lease_id)
+        except (AdapterError, ServerError, OSError) as exc:
+            self.ledger.append("notice", None, what="releasing the kept coder's hardware failed", error=str(exc),
+                               device_state=self._device_state(lease.chips))
+
+    def _adopt_kept_coder(self, stall: bool = False) -> bool:
         """Use the coder an earlier run left up, if every check holds (orchard/kept_coder.py). It never
         stops anything: a coder that fails a check is left for the operator (`tt-orchard coder stop`)."""
         kept = kept_coder.read(self.paths.cache_root)
@@ -1746,6 +1812,8 @@ class Supervisor:
                                                       and chips[b].lease_pid in holders)]
                 if bad:
                     why = f"gozer does not show {', '.join(bad)} held by the kept coder"
+        if why is None and stall:
+            why = self._stall_canary_problem(kept)
         if why is not None:
             self.ledger.append("decision", None, decision="kept coder not used", reason=why,
                                from_run=kept.get("run_dir"))
@@ -1782,6 +1850,9 @@ class Supervisor:
                 self.coder_lease = h.lease
                 return
             entries = self.ledger.read()      # abandoned: the coder serves under the old lease
+        if self.keep_on_stall and self._reuse_stall_kept_coder():
+            return
+        entries = self.ledger.read()
         lease_rec, server_rec, canary = coder_state(entries)
         if lease_rec is None:
             if self.keep_up and self._adopt_kept_coder():
@@ -6259,6 +6330,9 @@ def parse(argv=None):
     r.add_argument("--coder-keep-up", action="store_true",
                    help="lab mode: leave the coder serving at the end of the run, and adopt a coder an "
                         "earlier run left up (orchard/kept_coder.py)")
+    r.add_argument("--coder-keep-on-stall", action="store_true",
+                   help="leave the coder serving when the run ends blocked as agent-stuck, and reuse it when the run is started again "
+                        "(checked with the canary; restarted only when the check fails)")
     r.add_argument("--coder-stall-minutes", type=float, default=BOOT_STALL_S / 60, metavar="MIN",
                    help="abandon the coder boot when its container log has not grown for this many minutes and /health is still down "
                         "(default 10; 0 turns the check off)")
@@ -6653,6 +6727,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
                       keep_up=bool(getattr(args, "coder_keep_up", False)),
+                      keep_on_stall=bool(getattr(args, "coder_keep_on_stall", False)),
                       busy_retry_wait_s=_seconds(getattr(args, "coder_busy_retry_s", None), BUSY_RETRY_WAIT_S, "--coder-busy-retry-s"),
                       coder_identity={"target": args.coder_target, "kind": args.coder_kind,
                                       "port": args.coder_port, "profile": args.coder_profile,
