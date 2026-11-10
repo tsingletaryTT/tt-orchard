@@ -63,6 +63,17 @@ def test_the_stage_restart_happens_once(run):
     assert len([d for d in decisions(ledger, RESTARTED) if d.get("trigger") == "stage"]) == 1
 
 
+def test_a_stage_restart_leaves_the_steps_own_restart_for_two_capped_replies_in_a_row(run):
+    run_dir, ledger = run
+    answers = [CAP, call("shell", command="echo a"), CAP, call("shell", command="echo b"), CAP,          # the third capped reply: the stage restarts
+               CAP, CAP, call("shell", command="echo c"), final("done")]                             # then two in a row: the step's own restart
+    with FakeModel(by_request(*answers)) as fm:
+        out = step(run_dir, ledger, fm.endpoint, unstick=runaway.Unstick(), restart_on_caps=1, stage_restart_after=3, stage_block_after=99).run("s", "u")
+    assert out.status == "done"
+    triggers = [d.get("trigger") for d in decisions(ledger, RESTARTED)]
+    assert triggers == ["stage", "caps"], triggers
+
+
 def test_the_stage_count_includes_earlier_steps_and_attempts_of_the_stage(run):
     run_dir, ledger = run
     note_caps(ledger, 0, 2)

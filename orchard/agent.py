@@ -874,7 +874,7 @@ class AgentStep:
         # step may drop its conversation and start again from the task after two capped replies in a row, and goes on.
         self.frequency_penalty, self.repetition_penalty = frequency_penalty, repetition_penalty
         self.unstick, self.restart_on_caps = unstick, restart_on_caps
-        # The stage rules (issue 458, item 4): capped replies counted over the stage since the last resume, not only in a row. After
+        # The stage rules (issue 458, item 4): capped replies counted over the stage since the last resume, whether or not they come in a row. After
         # `stage_restart_after` the step restarts from the task once per stage; at `stage_block_after` it ends with the text the supervisor blocks
         # the run with. 0 turns a rule off, so a step built without them behaves as before.
         self.stage_restart_after, self.stage_block_after = stage_restart_after, stage_block_after

@@ -4432,7 +4432,7 @@ class Supervisor:
         step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
         out = step.run(system, f"{user}\n\n## From the supervisor\n{extra}" if extra else user)
         if out.status == "error" and out.detail.startswith(runaway.REPLIES_CAPPED_MARK):
-            # The coder's replies ran away across the stage (issue 458, item 4): a block that names them, not a failed port.
+            # The coder's replies ran away across the stage (issue 458, item 4): the block names the replies as the cause.
             self._block(n, out.detail)
         return out, step
 
