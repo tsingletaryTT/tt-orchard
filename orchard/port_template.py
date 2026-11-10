@@ -781,7 +781,7 @@ register_block_family(BlockFamily(
 # [1, 1, heads * S, hd], the rotary helpers, the score matmul of [1, heads, S, D] with a [1, 1, D, nb] operand, relu, sum over heads, `ttnn.topk(stable=True)`, the
 # mask built as selection @ expansion + tail, and scaled_dot_product_attention with an additive mask and native grouped KV. Four steps run on the host, on small
 # tensors, because the probes validated the device op and not the chain into it: the block mean of the index keys (the reference takes a float mean too), the
-# transposed pooled keys (probe 9 built that operand on the host), the one-hot of the selected blocks from the top-k indices (the reference loop is host code), and
+# transposed pooled keys (probe 9 built that operand on the host), a one-hot matrix of the selected blocks built from the top-k indices (the reference loop is host code), and
 # the constant masks (validity, expansion, tail), built once per prompt length.
 # TIE RULE: scores tie often (relu gives exact zeros on random weights), and torch.topk's order among tied scores is not the lowest index (probe 7, real shapes: 509 of 2557
 # rows differ). The block uses `stable=True`, which picks the lowest index among tied scores, on every row of a board run. On a model whose scores do not tie
