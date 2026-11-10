@@ -1200,6 +1200,8 @@ def render(p: Plan) -> str:
         L += ["def _apply_rotary(model, x, cos, sin):",
               '    """Rotary position embedding on x [1, heads, S, head_dim] with the tables of _rope_tables (cos, sin [1, 1, S, head_dim]): the first ROTARY["rot"] columns of each head are rotated (rotate-half), the others pass through. Computed as x * cos + (x @ R) * sin with R the constant rotate-half matrix, so it needs no slice and no concat. Returns [1, heads, S, head_dim]."""',
               '    hd, rot = ROTARY["head_dim"], ROTARY["rot"]',
+              "    if len(x.shape) != 4 or x.shape[0] != 1 or x.shape[3] != hd or tuple(cos.shape) != (1, 1, x.shape[2], hd) or tuple(sin.shape) != tuple(cos.shape):",
+              '        raise ValueError(f"_apply_rotary needs x [1, heads, S, {hd}] and tables [1, 1, S, {hd}] (from _rope_tables(model, S)); got x {list(x.shape)}, cos {list(cos.shape)}")',
               "    heads, seq = x.shape[1], x.shape[2]",
               "    half = rot // 2",
               "    rot_m = torch.zeros(hd, hd)",

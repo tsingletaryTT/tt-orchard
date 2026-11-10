@@ -188,3 +188,26 @@ def test_a_partial_rotary_factor_inside_rope_parameters_keeps_the_standard_atten
     _text, p = std_generate(config=cfg)
     assert p.attention is None
     assert any("partial_rotary_factor is 0.5" in s.reason for s in p.stubs)
+
+
+# ---- a wrong layout is named, not left to a device error (arm E14: the stub passed a 5-D permute result and the board said 'Invalid subtile broadcast type') ----
+
+@pytest.mark.parametrize("shape,why", [((1, 1, 32, 4, 32), "[1, heads, S, 32]"),       # the stub's 5-D tensor
+                                       ((1, 32, 4, 32), "[1, heads, S, 32]"),         # the HF layout [1, S, heads, head_dim] has the wrong table length
+                                       ((1, 4, 32, 16), "[1, heads, S, 32]")])        # head_dim does not match the tables
+def test_apply_rotary_names_the_layout_it_needs_when_x_has_another_shape(monkeypatch, tmp_path, shape, why):
+    text, _p = _generate(_config(factor=0.25))
+    mod = import_port(monkeypatch, text, tmp_path)
+    model = _model()
+    gcos, gsin = mod._rope_tables(model, 32)
+    with pytest.raises(ValueError, match=r"_apply_rotary needs x \[1, heads, S, 32\] and tables \[1, 1, S, 32\]"):
+        mod._apply_rotary(model, fake.Tensor(torch.zeros(*shape), layout="TILE"), gcos, gsin)
+
+
+def test_apply_rotary_accepts_the_layout_it_documents(monkeypatch, tmp_path):
+    text, _p = _generate(_config(factor=0.25))
+    mod = import_port(monkeypatch, text, tmp_path)
+    model = _model()
+    gcos, gsin = mod._rope_tables(model, 32)
+    out = mod._apply_rotary(model, fake.Tensor(torch.zeros(1, 4, 32, 32), layout="TILE"), gcos, gsin)
+    assert tuple(out.t.shape) == (1, 4, 32, 32)
