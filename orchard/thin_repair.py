@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import re
 import time
+from pathlib import Path
 from dataclasses import dataclass
 
 from orchard import op_cheats, port_repair, port_template, safeio, stub_prompts, thin_port
@@ -140,7 +141,17 @@ def _holds_generated_mark(port_text: str, function: str) -> bool:
     return False
 
 
-def calling_stubs(port_text: str, helper: str) -> list[str]:
+def recorded_stubs(stage_dir) -> set | None:
+    """The stub names thin_port recorded for this stage, or None when the record is absent or malformed (then every function the coder could
+    have written counts)."""
+    try:
+        data = safeio.read_json(Path(stage_dir) / thin_port.STUBS_RECORD, max_bytes=65536, expect=list)
+    except (safeio.SafeReadError, OSError, ValueError):
+        return None
+    return set(data) if data and all(isinstance(n, str) for n in data) else None
+
+
+def calling_stubs(port_text: str, helper: str, stubs: set | None = None) -> list[str]:
     """Names of the top-level functions that call `helper` and that the coder writes: not a fixed helper, not a function a block family wrote
     (it holds GENERATED_BLOCK_MARK). The check's failure line holds one frame, so a failure inside a generated helper names the helper; the
     stub that passed it something it cannot take is found here (issue 698)."""
@@ -151,6 +162,8 @@ def calling_stubs(port_text: str, helper: str) -> list[str]:
     out = []
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or node.name in port_template.FIXED_HELPERS or _holds_generated_mark(port_text, node.name):
+            continue
+        if stubs is not None and node.name not in stubs:
             continue
         if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == helper for n in ast.walk(node)):
             out.append(node.name)
@@ -212,7 +225,7 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
         # The helper is generated text, the same in every port, or a block a registered family wrote (its function holds GENERATED_BLOCK_MARK).
         # The failing line holds one frame only. When exactly one function the coder wrote calls the helper, that stub passed it something it
         # cannot take and it is the target; otherwise the agent loop (which reads the whole traceback) takes the round.
-        callers = calling_stubs(text, function)
+        callers = calling_stubs(text, function, recorded_stubs(stage_dir))
         if len(callers) != 1:
             return Round("fallback", function=function, etype=failure.etype,
                          reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")

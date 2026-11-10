@@ -28,6 +28,7 @@ status "skipped" with the reason, and the supervisor runs the ordinary agent pre
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -187,6 +188,25 @@ def run(*, run_dir, stage_dir, snapshot, python, ledger, stage: int, post, endpo
                            inputs=given, thinking=thinking, sheet=sheet, **bounds)
 
 
+STUBS_RECORD = "thin_stubs.json"          # in the stage directory (the port directory must hold only port_model.py)
+
+
+def _record_stub_names(stage_dir, todo) -> None:
+    """The names of the functions that are stubs, kept for the repair step: it sends a failure in a generated helper to the one *stub* that calls
+    the helper, and the template's own functions (`_mlp`, `_forward`) call the helpers too. Names from earlier attempts stay in the record."""
+    path = Path(stage_dir) / STUBS_RECORD
+    names = set(todo)
+    try:
+        old = safeio.read_json(path, max_bytes=65536, expect=list)
+        names |= {n for n in old if isinstance(n, str)}
+    except (safeio.SafeReadError, OSError, ValueError):
+        pass
+    try:
+        safeio.atomic_write(path, json.dumps(sorted(names)) + "\n")
+    except (OSError, ValueError):
+        pass                                   # a record that cannot be written leaves the repair step with its earlier rule
+
+
 def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str, model: str, sampling: dict, inputs: Inputs,
                     thinking: bool = False, sheet=None, max_requests: int | None = None, max_prompt_chars: int = PROMPT_CHARS_CAP,
                     clock=time.time) -> Outcome:
@@ -217,6 +237,7 @@ def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str, model
         _write_port(port_dir, text)
     by_name = {s.function: s for s in plan.stubs}
     todo = stub_prompts.stub_names(text)
+    _record_stub_names(stage_dir, todo)
     cap = max_requests if max_requests is not None else request_cap(len(todo))
     url = endpoint.rstrip("/") + "/chat/completions"
     base = {**sampling, "max_tokens": min(sampling.get("max_tokens", STUB_MAX_TOKENS), STUB_MAX_TOKENS)}
