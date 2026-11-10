@@ -265,6 +265,16 @@ AGENT_MAX_TOKENS = 16384        # choice: max_tokens for one model response. A r
 AGENT_RESTARTS_ON_CAPS = 1      # choice: after two replies in a row cut off at max_tokens, a step drops its conversation and starts again
                                 # from the task once and goes on (issue 458). Both full-port bring-ups that reached stage 2 on
                                 # a new model ended on capped replies that were repetition loops in a context of 35,000 tokens and more.
+AGENT_STAGE_CAPS_RESTART = 4    # choice (issue 458, item 4): capped replies in one stage since the last resume before an agent step drops its
+                                # conversation and starts again from the task, once per stage. The step's own rule needs two capped replies in a
+                                # row, and in the rehearsal runs they were spaced out by complete calls. Capped replies in stage 2, from the run
+                                # ledgers of 2026-11-02 to 2026-11-09: at most 1 in the runs that passed it (run 23, the Olmo-Hybrid-7B pilot) and
+                                # in runs 8, 11, 16 and 21; 4, 6, 7, 10, 12 and 12 in runs 14, 24, 12, 18, 20 and 22. Four is above every count of a
+                                # run that passed and is the first count of the runs that struggled.
+AGENT_STAGE_CAPS_BLOCK = 8      # choice (issue 458, item 4): capped replies in one stage since the last resume at which the run stops with the block
+                                # `replies-capped`. Twice the restart count, so a fresh context gets as many replies again before the stop. Three
+                                # of the runs above (18, 20 and 22) reached eight, and each spent more than an hour on a stage whose replies kept
+                                # running away.
 AGENT_REQUEST_TIMEOUT_S = 900.0 # choice: one non-streaming response; prefill alone measured 42 to 78 s
                                 # at 130K to 204K tokens (spec section 3), and contexts here stay short
 TOOL_TIMEOUT_S = 1800.0         # choice: one shell command run for an agent

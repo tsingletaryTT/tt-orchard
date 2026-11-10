@@ -1,0 +1,3 @@
+target = "0.9.149"
+summary = "capped coder replies are counted over the stage: after four the step restarts from a fresh context once, at eight the run ends blocked as replies-capped with a reason that names the coder's replies"
+kind = "fix"
