@@ -29,3 +29,9 @@ def test_shape_gets_a_hint(code, etype, message, needle):
     assert failure is not None
     hint = tr.hint_for(failure, PORT)
     assert hint and needle.lower() in hint.lower(), hint
+
+
+@pytest.mark.parametrize("code,etype,message", [CASES[0][:3], CASES[2][:3]])
+def test_rotary_hints_point_at_the_skill_example(code, etype, message):
+    hint = tr.hint_for(tr.parse_failed(failed(code, etype, message)), PORT)
+    assert "ttnn.concat([ttnn.neg(x2), x1], dim=-1)" in hint and "graph-fusing" in hint

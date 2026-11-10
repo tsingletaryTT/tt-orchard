@@ -67,13 +67,15 @@ HINTS = (
      "filled in (for example 'model.layers.0.…'), and use _pattern(name) only for NORM_EPS and PLACEMENT."),
     # The shapes below are failures the arm E7 run showed on the chip (issue 677).
     (re.compile(r"^TypeError$"), re.compile(r"bad operand type for unary -"),
-     "A ttnn tensor has no unary minus. Use ttnn.neg(x) or ttnn.multiply(x, -1.0)."),
+     "A ttnn tensor has no unary minus. Use ttnn.neg(x) or ttnn.multiply(x, -1.0). Rotate-half is ttnn.concat([ttnn.neg(x2), x1], dim=-1) "
+     "(the graph-fusing skill of tenstorrent/skills shows it, with ttnn.experimental.rotary_embedding as the fused op)."),
     (re.compile(r"^IndexError$"), re.compile(r"Too many indices for tensor of dimension"),
      "A ttnn activation is 4-D, [1, 1, S, F]: index it with at most four indices. For a loop over tokens, read the tensor back with _to_host "
      "first and work on the torch tensor, or slice with ttnn.slice on the sequence dimension."),
     (re.compile(r"^RuntimeError$"), re.compile(r"slice_start|padded_shape\(\)\[i\]"),
      "A slice must lie inside the padded shape. For partial rotary application, take the rotary part x[..., :rot] and the rest x[..., rot:] "
-     "with ttnn.slice, where rot is the cos/sin table's width, and check each end against the last dimension."),
+     "with ttnn.slice, where rot is the cos/sin table's width, and check each end against the last dimension. Rotate-half on the rotary part is "
+     "ttnn.concat([ttnn.neg(x2), x1], dim=-1) (graph-fusing skill, tenstorrent/skills)."),
     (re.compile(r"^RuntimeError$"), re.compile(r"same shape except in the concat dim|concat"),
      "ttnn.concat needs pieces whose shapes match in every dimension except the concat dimension. For partial rotary application, rotate only "
      "the first rot columns ([1, 1, S, rot]), keep the remaining columns ([1, 1, S, F - rot]) unchanged, and concatenate the two on dim=-1."),
