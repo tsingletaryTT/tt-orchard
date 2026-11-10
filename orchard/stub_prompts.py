@@ -299,6 +299,19 @@ def stub_request(port_text: str, stub, *, sheet: dict, excerpts: str | None, con
             if piece:
                 extra_excerpt = (f"## Where the text model's forward uses it (the part of forward after the layer loop)\n\n```python\n{piece}```")
                 break
+    m = re.match(r"^_layer_(\w+)$", function)
+    if m:
+        key = m.group(1)
+        try:
+            tree = ast.parse(port_text)
+        except (SyntaxError, ValueError, RecursionError):
+            tree = ast.Module(body=[], type_ignores=[])
+        sigs = [f"def {n.name}({', '.join(_arg_names(n))})" for n in tree.body
+                if isinstance(n, ast.FunctionDef) and (n.name.startswith(f"_{key}_") or n.name == "_mlp")]
+        parts += ["## The parts of this layer",
+                  "This function runs one layer by calling its parts, which are these functions of the port: " + "; ".join(sigs) + ". Write the "
+                  "layer's forward by calling them in the order the reference class does. Inside a layer function, do not call LAYERS or any _layer_ "
+                  "function (the caller dispatches by variant, so a call back into LAYERS recurses without end)."]
     if "GatedDeltaNet" in cls or "linear_attn" in path:
         parts += ["## How to write this block",
                   "Write the recurrence on the host as a plain for loop over the tokens, with no chunking and no helper classes: read x back with "

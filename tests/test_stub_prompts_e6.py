@@ -72,3 +72,19 @@ def test_a_key_error_on_a_name_config_has_gets_no_config_hint(tiny):
     text, _ = tiny
     failure = tr.parse_failed("FAILED: the port failed at 'prefill': \"[port_model.py:9: w = model['dev']['a.weight']] KeyError: 'a.weight'\"\n")
     assert tr.hint_for(failure, text) is None or "not a key of CONFIG" not in tr.hint_for(failure, text)
+
+
+# ---- a layer function (arm E5: `_layer_A` called LAYERS[variant], which is `_layer_A`, and the run ended in a RecursionError) ----------------
+
+def test_a_layer_request_lists_the_parts_of_that_layer_and_forbids_the_dispatch(tiny):
+    user = _user(tiny, "_layer_A")
+    assert "## The parts of this layer" in user
+    part = user.split("## The parts of this layer", 1)[1].split("\n## ", 1)[0]
+    assert "_A_linear_attn" in part and "_A_attn_hyper_connection" in part and "_A_mlp_hyper_connection" in part
+    assert "_B_linear_attn" not in part and "_C_self_attn" not in part                      # the parts of another variant are not listed
+    assert "do not call LAYERS or any _layer_ function" in part
+
+
+def test_a_request_for_a_part_has_no_parts_section(tiny):
+    assert "## The parts of this layer" not in _user(tiny, "_A_linear_attn")
+    assert "## The parts of this layer" not in _user(tiny, "_model_prelude")
