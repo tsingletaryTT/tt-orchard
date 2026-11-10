@@ -1033,7 +1033,7 @@ sends a Hugging Face token.
 ```text
 python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
     --coder-target CODER_TARGET [--coder-kind {container,bundle}] [--coder-profile CODER_PROFILE]
-    --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID] [--coder-keep-up]
+    --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID] [--coder-keep-up] [--coder-keep-on-stall]
     [--coder-stall-minutes MIN] [--coder-deadline-minutes MIN] [--coder-busy-retry-s SECONDS]
     [--skills-dir SKILLS_DIR] [--input NAME=PATH] [--env NAME=VALUE]
     [--required-chips N,N] [--four-chip-package ORG/NAME] [--cache-root DIR] [--hf-home DIR] [--operator-home DIR]
@@ -1053,6 +1053,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--coder-chips` | yes | How many chips the coder uses. gozer leases whole boards of two chips |
 | `--coder-image-id` | no | The container image id `tt-model list` prints. It helps the supervisor recognise the coder's container in `docker ps` when it confirms a stop |
 | `--coder-keep-up` | no | Lab mode only: leave the coder serving at the end of the run and use a coder an earlier run left up (`[coder] keep_up`, section 5.9) |
+| `--coder-keep-on-stall` | no | Any mode: when the run ends blocked as `agent-stuck`, leave the coder serving, and when the run is started again (the automatic retry) check it with the canary and reuse it. The coder is stopped and booted again only when the check fails. Any other block code stops the coder. A coder left up and never retried stays up until `tt-orchard coder stop`. |
 | `--coder-stall-minutes` | no | Abandon the coder boot when its container log has not grown for this many minutes and `/health` still does not answer. Default 10. 0 turns the check off. Config: `[coder] boot_stall_minutes` |
 | `--coder-deadline-minutes` | no | Abandon the coder boot when `/health` has not answered after this many minutes in all. Default 45. Config: `[coder] boot_deadline_minutes` |
 | `--coder-busy-retry-s` | no | When `tt-model serve` refuses with "chips already in use by another container" and no container of the coder's name exists and no holder of the device is a container, wait this many seconds and start once more. Default 60. 0 turns the retry off. Config: `[coder] busy_retry_s` |
