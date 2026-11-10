@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -51,9 +52,10 @@ HUB = "https://huggingface.co"
 USER_AGENT = "tt-orchard-drop-check"
 TIMEOUT_S = 30
 
-EXIT_COVERED, EXIT_REFUSED, EXIT_NOT_COVERED, EXIT_NEEDS_OPERATOR, EXIT_NOT_FOUND = 0, 2, 3, 4, 5
+EXIT_COVERED, EXIT_REFUSED, EXIT_NOT_COVERED, EXIT_NEEDS_OPERATOR, EXIT_NOT_FOUND, EXIT_UNREACHABLE = 0, 2, 3, 4, 5, 6
 EXIT_FOR = {"covered": EXIT_COVERED, "covered-with-notes": EXIT_COVERED, "refused": EXIT_REFUSED,
-            "not-covered": EXIT_NOT_COVERED, "needs-operator": EXIT_NEEDS_OPERATOR, "not-found": EXIT_NOT_FOUND}
+            "not-covered": EXIT_NOT_COVERED, "needs-operator": EXIT_NEEDS_OPERATOR, "not-found": EXIT_NOT_FOUND,
+            "unreachable": EXIT_UNREACHABLE}
 
 # The files read, with the most bytes each may have. Only config.json is required.
 METADATA_FILES = {"config.json": 1 << 20, "generation_config.json": 1 << 20, "tokenizer_config.json": 8 << 20,
@@ -110,6 +112,12 @@ UNUSABLE_FILE = "the bundle's orchard-capabilities.json cannot be used"   # the 
 
 class Unreadable(RuntimeError):
     """A file of the release exists but cannot be read safely (a link, a special file, a read error)."""
+
+
+class HubUnreachable(RuntimeError):
+    """The Hub did not answer: a connection error, a timeout, a cut-off body or an HTTP status other than 401, 403 and 404.
+    Deliberately not an Unreadable: fetch_metadata turns an unreadable file into a reason, and an outage must not become reasons
+    that send a release down the full-port route."""
 
 
 class TooLarge(Unreadable):
@@ -370,7 +378,9 @@ class HubClient:
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403, 404):
                 return None
-            raise
+            raise HubUnreachable(f"the Hub answered HTTP {exc.code}") from exc
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+            raise HubUnreachable(f"the Hub did not answer ({type(exc).__name__})") from exc
         if len(data) > max_bytes:
             raise TooLarge(f"{url.rsplit('/', 1)[-1]} is larger than {max_bytes} bytes")
         return data
@@ -530,6 +540,11 @@ def parser(add_help: bool = True) -> argparse.ArgumentParser:
     return p
 
 
+def _unreachable(args, exc) -> dict:
+    return {"repo": args.repo, "revision": args.revision, "verdict": "unreachable", "route": None,
+            "reasons": [f"{exc}; nothing was decided, so run the check again later"], "notes": [], "facts": {}, "command": []}
+
+
 def run(args) -> tuple[dict, int]:
     problem = repo_problem(args.repo) or (revision_problem(args.revision) if args.revision else None)
     if problem:
@@ -537,7 +552,10 @@ def run(args) -> tuple[dict, int]:
         res["reasons"] = [problem]
         return res, EXIT_REFUSED
     client = DirClient(args.from_dir) if args.from_dir else HubClient()
-    info = client.info(args.repo, args.revision)
+    try:
+        info = client.info(args.repo, args.revision)
+    except HubUnreachable as exc:
+        return _unreachable(args, exc), EXIT_UNREACHABLE
     if info is None:
         return ({"repo": args.repo, "revision": args.revision, "verdict": "not-found", "route": None,
                  "reasons": ["the repository does not exist, is private or gated, or the Hub did not answer"], "notes": [],
@@ -556,7 +574,10 @@ def run(args) -> tuple[dict, int]:
             dev = safeio.read_json(args.dev_config, max_bytes=1 << 20)
         except (OSError, ValueError, safeio.SafeReadError) as exc:
             dev, extra_notes = None, extra_notes + [f"--dev-config cannot be read ({type(exc).__name__})"]
-    files, problems = fetch_metadata(client, args.repo, revision) if not revision_problem(revision) else ({}, [])
+    try:
+        files, problems = fetch_metadata(client, args.repo, revision) if not revision_problem(revision) else ({}, [])
+    except HubUnreachable as exc:
+        return _unreachable(args, exc), EXIT_UNREACHABLE
     res = classify(args.repo, revision, files, capabilities=caps, dev_config=dev,
                    class_probe=class_probe_for(args.reference_python), qwen4_bundle=args.bundle, qwen38_bundle=args.qwen38_bundle)
     res["notes"] = extra_notes + res["notes"]

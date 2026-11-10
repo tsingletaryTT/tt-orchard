@@ -34,6 +34,7 @@ To rehearse without a release, lay a release out in a directory (`info.json` wit
 | Event | What it means | What you do |
 |---|---|---|
 | `other-release` | A `Qwen/Qwen4-27B*` repository other than the target appeared (FP8, Base). | Nothing; it is not run. |
+| `hub-unreachable` | The Hub did not answer. Sent once per outage; the state does not change and the next tick tries again. | Nothing, unless it lasts; then check the network. |
 | `release-seen` | The target exists. The watcher waits until config, index and every shard are uploaded and the last commit is 30 minutes old. | Nothing. |
 | `check` | `drop-check` ran. The text gives the verdict, the route and every reason. | Read it. A not-covered route starts the full-port fallback when the chips are free. |
 | `waiting-for-chips` | gozer shows a chip held. The watcher never stops a holder. | Free the chips, for example stop the Qwen3.8 server through its own supervisor (it releases its lease). The next tick starts the run. |
@@ -42,7 +43,7 @@ To rehearse without a release, lay a release out in a directory (`info.json` wit
 | `run-ready` | The run is ready for operator review. | Section 4. |
 | `run-blocked` | The run blocked; the text has the code and reason. | Read `BLOCKED.md` in the run directory. Running the same `bringup` again resumes. |
 | `run-failed` | The run aborted or crashed, or bringup exited before the run finished. | Read the bringup log named in the event. |
-| `needs-operator` | The check needs a reference interpreter, or the watcher cannot trust its own state. | Section 3. |
+| `needs-operator` | The check needs a reference interpreter, the Hub record cannot be read, or the watcher cannot trust its own state (a state file it cannot read or that lacks what its state needs is moved aside as `state.json.corrupt-<time>`). | Section 3. |
 
 ## 3. When the watcher needs you
 

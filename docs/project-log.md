@@ -5086,3 +5086,15 @@ Prompt (operator): do the items unblocked by the merge of PRs 657, 659, 660 and 
   refuses the file with the parser's reason, where it was named by field before; the verdict (not covered) is unchanged.
 - 5 mutations (one per guard), all red in the unit tests; 4 of them also red in the corpus.
 - Still open: #666 (a network error or a partial state file ends in a traceback) and #667 (redirects).
+
+## 2026-11-09: a Hub outage and a partial state file in drop-check and the watcher (issue 666)
+
+- `HubClient` raises `HubUnreachable` for a connection error, a timeout, a cut-off answer or an HTTP status other than 401,
+  403 and 404. It is not an `Unreadable`, so `fetch_metadata` cannot turn an outage into reasons that send a release down the
+  full-port route. `drop-check` reports the verdict `unreachable` with exit code 6.
+- The watcher's tick records one `hub-unreachable` event when an outage starts, keeps its state, and tries again next tick;
+  a check the outage interrupted runs again from the start. The flag clears on the next tick the Hub answers.
+- `load_state` refuses a state file that lacks what its state needs (a revision for `check`, a `tt-orchard bringup` command
+  for `waiting-for-chips`, a run record with its directory and log for `starting` and `running`, name lists that are lists);
+  the tick moves it aside and waits for the operator, as for an unreadable file.
+- 14 mutations, all red. Builds on PR 682 (issue 676).
