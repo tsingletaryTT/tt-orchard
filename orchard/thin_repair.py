@@ -79,6 +79,13 @@ HINTS = (
     (re.compile(r"^RuntimeError$"), re.compile(r"same shape except in the concat dim|concat"),
      "ttnn.concat needs pieces whose shapes match in every dimension except the concat dimension. For partial rotary application, rotate only "
      "the first rot columns ([1, 1, S, rot]), keep the remaining columns ([1, 1, S, F - rot]) unchanged, and concatenate the two on dim=-1."),
+    # The shapes below are failures the arm E8 run showed on the chip (issue 677).
+    (re.compile(r"^TypeError$"), re.compile(r"ttnn\.repeat\(\)"),
+     "ttnn.repeat takes the tensor and one repeat shape, not one argument per dimension: ttnn.repeat(x, ttnn.Shape([1, 1, 1, n])) repeats the "
+     "last dimension n times."),
+    (re.compile(r"^KeyError$"), re.compile(r"^'model\.[\w.]+\.weight'$"),
+     "model['dev'] is keyed by the checkpoint tensor's own name. A tensor that is stored without a '.weight' suffix (A_log, dt_bias and other "
+     "bare parameters) has no suffix in its key: look the name up exactly as the tensor list in the port facts spells it."),
 )
 
 

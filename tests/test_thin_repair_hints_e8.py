@@ -35,3 +35,15 @@ def test_shape_gets_a_hint(code, etype, message, needle):
 def test_rotary_hints_point_at_the_skill_example(code, etype, message):
     hint = tr.hint_for(tr.parse_failed(failed(code, etype, message)), PORT)
     assert "ttnn.concat([ttnn.neg(x2), x1], dim=-1)" in hint and "graph-fusing" in hint
+
+
+E9 = [
+    ("x = ttnn.repeat(x, 1, 1, 1, CONFIG['hc_count'])", "TypeError", "\\nttnn.repeat(): incompatible function arguments.\\n\\nCalled with:\\n  repeat(ttnn.Tensor, int, int, int, int)", "ttnn.Shape"),
+    ("A_log = model['dev'][f\"model.layers.{i}.linear_attn.A_log.weight\"]", "KeyError", "'model.layers.0.linear_attn.A_log.weight'", "suffix"),
+]
+
+
+@pytest.mark.parametrize("code,etype,message,needle", E9)
+def test_e9_shape_gets_a_hint(code, etype, message, needle):
+    hint = tr.hint_for(tr.parse_failed(failed(code, etype, message)), PORT)
+    assert hint and needle.lower() in hint.lower(), hint
