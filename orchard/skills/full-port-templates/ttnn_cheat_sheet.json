@@ -191,6 +191,39 @@
      ]
     },
     {
+     "name": "ttnn.permute",
+     "kind": "op",
+     "signature": "ttnn.permute(input_tensor, dims, *, memory_config=None, pad_value=0.0)",
+     "usage": "x = ttnn.permute(x, (0, 2, 1, 3))",
+     "notes": "dims lists one entry per axis of the input, so a 4-D tensor takes four numbers and a 5-D tensor five. Activations in these ports are 4-D: to turn [1, S, heads, head_dim] into [1, heads, S, head_dim], permute (0, 2, 1, 3). A ttnn tensor has no .permute method.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/data_movement/permute/permute_nanobind.cpp; models/tt_transformers/tt/model_config.py:2851",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.neg",
+     "kind": "op",
+     "signature": "ttnn.neg(input_tensor, *, memory_config=None, output_tensor=None, sub_core_grids=None)",
+     "usage": "y = ttnn.neg(x)",
+     "notes": "ttnn.Tensor defines +, -, * and / with another tensor or a number, and no unary minus: `-x` raises TypeError. Use ttnn.neg(x) or ttnn.multiply(x, -1.0). Rotate-half is ttnn.concat([ttnn.neg(x2), x1], dim=-1).",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/eltwise/unary/unary_nanobind.cpp (bind_unary_operation_subcoregrids neg); ttnn/ttnn/__init__.py lists the Tensor operators",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.repeat",
+     "kind": "op",
+     "signature": "ttnn.repeat(input_tensor, repeat_dims, *, memory_config=None, optional_output_tensor=None)",
+     "usage": "y = ttnn.repeat(x, (1, 1, 1, 4))",
+     "notes": "repeat_dims is one tuple with a count for each dimension: here the last dimension is repeated 4 times. ttnn.repeat(x, 1, 1, 1, 4), one argument per dimension, fails with 'incompatible function arguments'.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/data_movement/repeat/repeat_nanobind.cpp; models/autoports/aleph_alpha_kolibri_1_bf16/tt/optimized_decoder.py:473",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
      "name": "ttnn.concat",
      "kind": "op",
      "signature": "ttnn.concat(tensors, dim=0, memory_config=None)",
@@ -822,6 +855,80 @@
      ]
     }
    ]
+  },
+  {
+   "symptom": "`AttributeError: 'ttnn._ttnn.tensor.Tensor' object has no attribute 'view'` (also `.t()`, `.permute(...)`, `.transpose(...)` and `.chunk(...)`).",
+   "fix": "A ttnn tensor has none of these methods. Use the functions: ttnn.reshape(x, shape), ttnn.permute(x, dims), ttnn.transpose(x, a, b), or read the tensor back with _to_host(model, t) and use torch.",
+   "seen_in": "arms E11, E13, E14 (view), C2 (.t)"
+  },
+  {
+   "symptom": "`TypeError: bad operand type for unary -: 'ttnn._ttnn.tensor.Tensor'`.",
+   "fix": "Use ttnn.neg(x) or ttnn.multiply(x, -1.0).",
+   "seen_in": "arm E7; ttnn.Tensor operators are listed in ttnn/ttnn/__init__.py (no __neg__)"
+  },
+  {
+   "symptom": "`TypeError: ttnn.repeat(): incompatible function arguments ... repeat(ttnn.Tensor, int, int, int, int)`.",
+   "fix": "Pass the counts as one tuple: ttnn.repeat(x, (1, 1, 1, n)).",
+   "seen_in": "arms E6, E8",
+   "checks": [
+    {
+     "root": "tt_metal",
+     "name": "ttnn.repeat",
+     "present_args": [
+      "repeat_dims"
+     ]
+    }
+   ]
+  },
+  {
+   "symptom": "`TypeError: chunk(): argument 'input' must be Tensor, not ttnn._ttnn.tensor.Tensor`, or `torch.arange(..., device=x.device)` on a ttnn tensor.",
+   "fix": "A ttnn tensor is not a torch tensor and has no torch device. Read it back first with `h = _to_host(model, t)`, use torch on h, and upload the result with `_upload(model, h, ttnn.TILE_LAYOUT)`.",
+   "seen_in": "arms E11, E12 (chunk), E2, E4 (arange)"
+  },
+  {
+   "symptom": "`TT_FATAL: ... Input and gamma padded widths must match` from `_rms_norm` on a per-head `q_norm` or `k_norm`.",
+   "fix": "Those weights are head_dim wide and the input is heads * head_dim wide. Reshape x to (1, 1, S * heads, head_dim), call _rms_norm(model, name, x), and reshape back to (1, 1, S, heads * head_dim).",
+   "seen_in": "arms E11, E13, E14 (7 checks)"
+  },
+  {
+   "symptom": "`TypeError: _to_host() missing 1 required positional argument: 't'`, or `_upload() missing ... 'layout'`.",
+   "fix": "The helpers are `_to_host(model, t)` and `_upload(model, t, layout)`; `_upload_ids(model, ids)` takes a list of ints. The model comes first.",
+   "seen_in": "arms E12, E14"
+  },
+  {
+   "symptom": "`KeyError: 'model.layers.3.self_attn.weight'` raised inside `_linear`.",
+   "fix": "`_linear(model, prefix, x)` reads model['dev'][prefix + '.weight']. Pass the projection's path, such as `model.layers.3.self_attn.q_proj`, and not the block's path. The exact tensor names of a layer are in port_facts.json.",
+   "seen_in": "arms E11, E12, E13"
+  },
+  {
+   "symptom": "`KeyError: 'model.layers.0.linear_attn.in_proj.weight'`, a `.bias` the checkpoint does not have, or `dt_bias` looked up in `model['host']`.",
+   "fix": "A tensor name is the checkpoint's own: copy it from port_facts.json. A bare parameter such as A_log or dt_bias has no `.weight` suffix.",
+   "seen_in": "arms E9, E10"
+  },
+  {
+   "symptom": "`KeyError: 'head_k_dim'` or `KeyError: 'num_key_value_groups'` on CONFIG.",
+   "fix": "CONFIG holds exactly the keys of the checkpoint's config; the request lists them. Compute a derived value: groups = CONFIG['num_attention_heads'] // CONFIG['num_key_value_heads'].",
+   "seen_in": "arms E5, E7, E10, E11, E12"
+  },
+  {
+   "symptom": "`KeyError: 'mesh_device'`, `'n_devices'`, `'ck'`, `'cos_cached'` or `'rotary_emb.cos_cached'`.",
+   "fix": "`model` is a dict with the keys mesh_device, n_devices, dev, host, ids and ck: read model['mesh_device'], not model['dev']['mesh_device']. model['dev'] and model['host'] hold weights only. The rotary tables come from `_rope_tables(model, n)` when the port has it.",
+   "seen_in": "arms E11 to E14"
+  },
+  {
+   "symptom": "`IndexError: Too many indices for tensor of dimension 4`, or a reshape to 5 dimensions followed by a permute with four axes.",
+   "fix": "Keep ttnn activations 4-D. To split heads: ttnn.reshape(x, (1, S, heads, head_dim)), then ttnn.permute(x, (0, 2, 1, 3)) gives [1, heads, S, head_dim]. The reshape of a tile-layout tensor to a last dimension that is not a multiple of 32 has not been checked on a board here: if it complains, read the tensor back with _to_host, split the heads in torch and upload with _upload.",
+   "seen_in": "arms E7, E8, E14"
+  },
+  {
+   "symptom": "`TT_FATAL` in ttnn.concat about shapes, or in ttnn.slice about a start or end past the dimension.",
+   "fix": "ttnn.concat needs equal shapes in every dimension except dim. A ttnn.slice end must not exceed the dimension and a start must be below it.",
+   "seen_in": "arm E7"
+  },
+  {
+   "symptom": "`ImportError: attempted relative import with no known parent package`, or `ModuleNotFoundError: No module named 'port_helpers'`.",
+   "fix": "The port is one file that the check imports by name. Its helpers (_linear, _rms_norm, _upload, _to_host and the others the request lists) are functions in that file: call them. Import only ttnn, torch, math, numpy, re, functools, itertools, typing and collections.",
+   "seen_in": "arms E2, E3"
   }
  ],
  "reported": [

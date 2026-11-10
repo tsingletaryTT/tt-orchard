@@ -38,7 +38,7 @@ def test_rotary_hints_point_at_the_skill_example(code, etype, message):
 
 
 E9 = [
-    ("x = ttnn.repeat(x, 1, 1, 1, CONFIG['hc_count'])", "TypeError", "\\nttnn.repeat(): incompatible function arguments.\\n\\nCalled with:\\n  repeat(ttnn.Tensor, int, int, int, int)", "ttnn.Shape"),
+    ("x = ttnn.repeat(x, 1, 1, 1, CONFIG['hc_count'])", "TypeError", "\\nttnn.repeat(): incompatible function arguments.\\n\\nCalled with:\\n  repeat(ttnn.Tensor, int, int, int, int)", "(1, 1, 1, n)"),
     ("A_log = model['dev'][f\"model.layers.{i}.linear_attn.A_log.weight\"]", "KeyError", "'model.layers.0.linear_attn.A_log.weight'", "suffix"),
 ]
 
