@@ -36,7 +36,7 @@ PORT_NAME = thin_port.PORT_NAME
 
 # The check's failure text: `the port failed at '<op>': "[port_model.py:<line>: <code>] <ErrorType>: <message>"` (the quote is " or ').
 _FAILED = re.compile(r"^the port failed at '(?P<op>[A-Za-z_]\w{0,40})': (?P<q>[\"'])\[(?P<file>[\w./-]{1,80}\.py):(?P<line>\d{1,6}): "
-                     r"(?P<code>.{0,400}?)\] (?P<etype>[A-Za-z_][\w.]{0,60}): (?P<msg>.{0,600}?)(?P=q)$", re.S)
+                     r"(?P<code>.{0,400}?)\] (?P<etype>[A-Za-z_][\w.]{0,60}): (?P<msg>.{0,600})", re.S)       # the end is open: a long message is cut by failed_line, and the quote may be gone
 
 # Hints for the error shapes the arms showed: (error type pattern, message pattern, text). `{0}` is the first group of the message pattern and
 # `{names}` the port's top-level function names. One place, each entry tested.
@@ -96,7 +96,10 @@ def parse_failed(text) -> Failure | None:
     m = _FAILED.match(line)
     if not m:
         return None
-    return Failure(m["op"], m["file"], int(m["line"]), m["code"], m["etype"], m["msg"])
+    msg = m["msg"]
+    if msg.endswith(m["q"]):
+        msg = msg[:-1]                      # the closing quote of the check's line, when the line was not cut
+    return Failure(m["op"], m["file"], int(m["line"]), m["code"], m["etype"], msg)
 
 
 def function_at(port_text: str, line: int) -> str | None:

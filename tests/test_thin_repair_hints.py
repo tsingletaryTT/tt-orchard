@@ -53,3 +53,27 @@ def test_the_hint_for_a_key_error_names_the_helper_that_makes_the_pattern_key():
 def test_the_rules_say_the_port_is_one_module_and_an_activation_is_a_ttnn_tensor():
     text = stub_prompts.RULES.lower()
     assert "relative import" in text and "ttnn tensor" in text and "no torch device" in text
+
+
+# ---- a failed line with a long message (arm E4: the failure of a KeyError that lists every key was "not a Python error at a line") ------------
+
+def test_a_failed_line_with_a_long_message_still_parses():
+    keys = ", ".join(f"'model.layers.{i}.weight_{j}'" for i in range(4) for j in range(40))
+    text = failed("prefill", 'raise KeyError(f"Position embeddings not found. Available keys: {available_keys}")', "KeyError",
+                  f"Position embeddings not found. Available keys: [{keys}]")
+    assert len(text) > 2000
+    got = tr.parse_failed(text)
+    assert got is not None and got.etype == "KeyError" and got.file == "port_model.py" and got.line == 12
+    assert "Position embeddings not found" in got.message
+
+
+def test_a_failed_line_that_is_cut_before_its_closing_quote_still_parses():
+    text = "FAILED: the port failed at 'prefill': \"[port_model.py:7: x = y['a']] KeyError: 'a is missing and " + "z" * 3000
+    got = tr.parse_failed(text)
+    assert got is not None and got.etype == "KeyError" and got.line == 7 and got.message.startswith("'a is missing")
+
+
+def test_a_line_that_is_not_a_python_error_still_does_not_parse():
+    assert tr.parse_failed("FAILED: device-ops: no source file under stages/2/port/ makes a reachable ttnn matmul-family call") is None
+    assert tr.parse_failed("FAILED: the port worker did not answer 'load' (it exited or stopped answering)") is None
+    assert tr.parse_failed(None) is None
