@@ -139,7 +139,7 @@ from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
-from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_THINKING, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
+from orchard.defaults import (AGENT_STAGE_CAPS_BLOCK, AGENT_STAGE_CAPS_RESTART, AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_THINKING, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               ABORT_STOP_GRACE_S, BOOT_STALL_S, BUSY_RETRY_WAIT_S, COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S, WIDE_FABRIC_RETRIES)
@@ -4415,6 +4415,7 @@ class Supervisor:
                          frequency_penalty=tcfg.get("frequency_penalty"), repetition_penalty=tcfg.get("repetition_penalty"),
                          top_p=tcfg.get("top_p"), top_k=tcfg.get("top_k"),
                          unstick=unstick, restart_on_caps=AGENT_RESTARTS_ON_CAPS,
+                         stage_restart_after=AGENT_STAGE_CAPS_RESTART, stage_block_after=AGENT_STAGE_CAPS_BLOCK,
                          tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
                              **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
                              scratch=(self.run_dir / "tt-metal-scratch"
@@ -4428,7 +4429,11 @@ class Supervisor:
                          finished=self._finished_check(spec, phase, stage_dir))
         name = deliverable(spec, phase)
         step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
-        return step.run(system, f"{user}\n\n## From the supervisor\n{extra}" if extra else user), step
+        out = step.run(system, f"{user}\n\n## From the supervisor\n{extra}" if extra else user)
+        if out.status == "error" and out.detail.startswith(runaway.REPLIES_CAPPED_MARK):
+            # The coder's replies ran away across the stage (issue 458, item 4): the block names the replies as the cause.
+            self._block(n, out.detail)
+        return out, step
 
     def _thin_port_prepare(self, spec, stage_dir: Path, escalated: bool):
         """Stage 2 of a full port run with `--thin-port` (issue 677, arm E): the prepare step as one chat request per stub of a generated port
