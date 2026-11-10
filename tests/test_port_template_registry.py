@@ -45,7 +45,8 @@ def test_a_family_must_name_a_reference_test():
 
 # ---- the plan: the hyper-connection stubs are gone, everything else stays -----------------------------------------------------------------------
 
-def test_tiny_qwen4_keeps_only_the_blocks_the_registry_does_not_know():
+def test_tiny_qwen4_keeps_only_the_blocks_the_registry_does_not_know(monkeypatch):
+    monkeypatch.delitem(pt.BLOCK_FAMILIES, "qsa_attention")        # the indexer attention is the fifth family (slice 5); without it the plan keeps that one stub
     text, p = tiny_qwen4()
     stubs = {s.function for s in p.stubs}
     assert stubs == {"_C_self_attn"}          # the gated delta net is the second family (slice 2), the per-layer embedding the third (slice 3)
@@ -162,9 +163,12 @@ def test_the_reference_comparison_fails_when_a_stream_weight_is_dropped(monkeypa
         test_generated_hyper_connections_match_the_transformers_module(monkeypatch, tmp_path)
 
 
-def test_the_attention_stub_request_tells_the_coder_what_the_generated_layer_passes_and_expects():
-    """What the coder reads for `_C_self_attn` (layer 3 is composed whole around it): the layer calls it on the mixed input and adds no residual for it."""
+def test_the_attention_stub_request_tells_the_coder_what_the_generated_layer_passes_and_expects(monkeypatch):
+    """What the coder reads for `_C_self_attn` (layer 3 is composed whole around it): the layer calls it on the mixed input and adds no residual for it.
+    The indexer attention is written by a family since slice 5; a model whose attention the families do not recognize still gets this stub, so the plan is
+    generated here without that family."""
     from orchard import op_cheats, stub_prompts as sp
+    monkeypatch.delitem(pt.BLOCK_FAMILIES, "qsa_attention")
     text, p = tiny_qwen4()
     stub = next(x for x in p.stubs if x.function == "_C_self_attn")
     user = sp.stub_request(text, stub, sheet=op_cheats.load_sheet(op_cheats.TTNN_SHEET), excerpts=None)["user"]

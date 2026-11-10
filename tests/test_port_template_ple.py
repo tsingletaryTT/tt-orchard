@@ -33,11 +33,11 @@ def test_ple_is_a_registered_family_with_a_reference_test():
     assert callable(fam.recognize) and callable(fam.emit) and fam.reference_test == PLE_TEST and callable(fam.helpers) and not fam.model_level
 
 
-def test_the_ple_stub_is_gone_and_the_others_stay():
+def test_the_ple_stub_is_gone():
     text, p = tiny_qwen4()
-    assert {s.function for s in p.stubs} == {"_C_self_attn"}
+    assert {s.function for s in p.stubs} == set()          # the indexer attention is the fifth family (slice 5)
     assert "ple" in p.summary()["generated"]
-    assert len(pt.stub_lines(text)) == 1
+    assert len(pt.stub_lines(text)) == 0
 
 
 def test_the_table_shards_stay_on_the_host_and_the_convolution_gets_taps():

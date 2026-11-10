@@ -64,7 +64,7 @@ def test_the_tiny_qwen4_port_has_both_rotary_helpers_and_the_constants():
     names = [n.name for n in ast.parse(text).body if isinstance(n, ast.FunctionDef)]
     assert names.count("_rope_tables") == 1 and names.count("_apply_rotary") == 1
     assert "ROTARY = {" in text and "_rope_tables" in pt.FIXED_HELPERS and "_apply_rotary" in pt.FIXED_HELPERS
-    assert pt.stub_lines(text) != [] and pt.sheet_problems(text) == []
+    assert pt.stub_lines(text) == [] and pt.sheet_problems(text) == []          # no stub left since slice 5: the indexer attention calls the helpers itself
 
 
 def test_a_standard_decoder_keeps_its_one_rope_tables_and_gains_apply_rotary():
@@ -175,8 +175,18 @@ def test_has_attention_counts_a_generated_block_and_an_attention_stub_and_not_ot
 
 def test_a_plan_without_an_attention_block_writes_no_rotary_helpers(monkeypatch):
     monkeypatch.setattr(pt, "_has_attention", lambda settings, stubs: False)
+    monkeypatch.delitem(pt.BLOCK_FAMILIES, "qsa_attention")          # the indexer attention calls the helpers, so a plan that uses it always has them
     text, p = tiny_qwen4()
     assert p.rotary is None and "def _apply_rotary" not in text and "def _rope_tables" not in text and "ROTARY" not in text
+
+
+def test_a_family_block_that_needs_the_rotary_helpers_makes_the_plan_write_them(monkeypatch):
+    """The indexer attention (family `qsa_attention`, needs_rotary) calls `_apply_rotary` and reads `ROTARY`, even when the plan has no standard attention block
+    and no attention stub."""
+    monkeypatch.setattr(pt, "_has_attention", lambda settings, stubs: False)
+    text, p = tiny_qwen4()
+    assert pt.BLOCK_FAMILIES["qsa_attention"].needs_rotary and p.rotary == {"head_dim": 32, "rot": 8, "theta": 10000.0}
+    assert "def _apply_rotary" in text and "ROTARY = {" in text
 
 
 def test_a_partial_rotary_factor_inside_rope_parameters_keeps_the_standard_attention_a_stub():
