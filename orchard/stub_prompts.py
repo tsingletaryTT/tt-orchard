@@ -162,6 +162,26 @@ def helpers_text(port_text: str) -> str:
     return "\n".join(out)
 
 
+def model_text(port_text: str) -> str:
+    """The section of a request that says what the arguments of a port function are: `model` is a plain dict with the keys `load` sets, the
+    module constants hold the config and the sizes, and a torch-style attribute does not exist. Derived from port_template.MODEL_KEYS and
+    MODULE_CONSTANTS (a test holds them equal to the generated text); only the constants and helpers the given port has are listed."""
+    try:
+        tree = ast.parse(port_text)
+    except (SyntaxError, ValueError, RecursionError):
+        tree = ast.Module(body=[], type_ignores=[])
+    defined = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    helpers = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in HELPER_NAMES]
+    lines = ["## The arguments of a port function",
+             "`model` is a plain dict, not an object: read `model['dev']`, never `model.dev`. Its keys are exactly:"]
+    lines += [f"- `{k}`: {v}" for k, v in port_template.MODEL_KEYS.items()]
+    lines += ["The module constants of the port (read them directly):"]
+    lines += [f"- `{k}`: {v}" for k, v in port_template.MODULE_CONSTANTS.items() if k in defined]
+    lines += ["There is no model.config, no rotary_emb and no past_key_values: build position tables from CONFIG with the helpers the port "
+              "has (" + (", ".join(f"`{h}`" for h in helpers) or "none") + "), and keep any cache in a local or in model['ids']."]
+    return "\n".join(lines)
+
+
 def stub_request(port_text: str, stub, *, sheet: dict, excerpts: str | None, construction_text: str | None = None, inventory=None) -> dict:
     """The chat request for `stub` (a port_template.Stub, or a dict with function, cls and path): {"system", "user", "function", "args"}.
     The user text puts the shared parts first and the stub last."""
@@ -171,7 +191,7 @@ def stub_request(port_text: str, stub, *, sheet: dict, excerpts: str | None, con
     source = function_source(port_text, function)
     args = _arg_names(_functions(ast.parse(port_text))[function])
     wanted, other = ops_for(inventory, path)
-    parts = ["## Helpers of the port (call these; do not rewrite them)", helpers_text(port_text) or "(none)",
+    parts = [model_text(port_text), "## Helpers of the port (call these; do not rewrite them)", helpers_text(port_text) or "(none)",
              "## Verified ttnn calls", sheet_section(sheet, wanted=wanted)]
     if other:
         parts += ["## Ops of this block that have no verified ttnn form (stage 0 labels)", ", ".join(other),
@@ -191,7 +211,7 @@ def repair_request(port_text: str, function: str, *, last_check: str, layer_diff
     there is one, and the sheet's mistakes. The reply format is the same as for a stub."""
     source = function_source(port_text, function)
     args = _arg_names(_functions(ast.parse(port_text))[function])
-    parts = ["## What the last check said", (last_check or "")[:CHECK_MAX_CHARS]]
+    parts = [model_text(port_text), "## What the last check said", (last_check or "")[:CHECK_MAX_CHARS]]
     if layer_diff:
         parts += ["## The first layer that differs from the CPU reference (layer-diff)", layer_diff[:DIFF_MAX_CHARS]]
     if sheet and sheet.get("mistakes"):

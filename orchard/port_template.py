@@ -713,6 +713,31 @@ def generate(*, config, construction, tensors, inventory=None, excerpts=None) ->
     return render(p), p
 
 
+# What the generated port's `model` argument and module constants are. The stub prompt (orchard/stub_prompts.py `model_text`) prints these, and
+# tests/test_thin_port_e2.py checks them against the generated text, so the prompt names exactly the keys `load()` sets and the constants the
+# port defines (arm E's stubs wrote `model.config`, `model.rotary_emb` and `model.past_key_values`, which do not exist).
+MODEL_KEYS = {
+    "mesh_device": "the ttnn mesh device",
+    "n_devices": "the number of devices (an int)",
+    "dev": "dict: tensor name -> ttnn tensor, as load placed it (read a weight with model['dev'][name + '.weight'])",
+    "host": "dict: tensor name -> torch tensor, for the tensors that stay on the host (integer tables)",
+    "ids": "list of the token ids of the current request (prefill and decode_step set it)",
+    "ck": "the compute kernel config to pass to ttnn.linear",
+}
+MODULE_CONSTANTS = {
+    "CONFIG": "the model config as a dict: CONFIG['head_dim'], CONFIG['hidden_size']; there is no config attribute anywhere",
+    "N_LAYERS": "the number of decoder layers (an int)",
+    "HIDDEN": "the hidden size (an int)",
+    "VOCAB": "the vocabulary size (an int)",
+    "PAD_ID": "the token id used to pad the prompt to a multiple of PAD_TO",
+    "PAD_TO": "the tile multiple the sequence is padded to (32)",
+    "LAYER_VARIANT": "list: layer index -> the key of LAYERS for that layer",
+    "PLACEMENT": "dict: tensor name pattern -> how load placed it",
+    "NORM_EPS": "dict: norm name pattern -> epsilon",
+    "LAYERS": "dict: layer variant key -> the layer function",
+}
+
+
 # ---- the CPU check -----------------------------------------------------------------------------------------------------------------------
 
 STUB_RAISE_TAIL = " is not written yet"          # the end of the message every generated stub raises (`_stub_function`)
