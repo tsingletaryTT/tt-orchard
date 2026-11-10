@@ -180,6 +180,9 @@ def test_no_key_is_a_refusal_not_a_failure(rig, monkeypatch, tmp_path):
     wire = Wire(helper_reply())
     tel = tg.Telegraph(cfg, tmp_path / "tg", transport=wire, environ={}, clock=lambda: 1000.0, hostname="node9", home="/home/someone")
     monkeypatch.setattr(sv, "_telegraph_from", lambda *a, **k: tel)
+    # The subject here is the refusal for a missing key at an attempt start. With the helper on, a later attempt now restores the furthest port
+    # (issue 596) and skips the attempt-start draft, so the keeping of the best port is switched off for this test.
+    monkeypatch.setattr(sv.Supervisor, "_best_port_on", lambda self: False)
     coder(rig)
     rig.run()
     assert wire.requests == []
