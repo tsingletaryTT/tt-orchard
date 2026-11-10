@@ -21,8 +21,25 @@ tables ROW_MAJOR, norm weights as [1, 1, 1, dim], a mesh mapper when the device 
 the embedding, RMSNorm, the gated MLP, ordinary attention (rotary in the HF layout and causal SDPA) and `lm_head` through TTNN calls, a
 `decode_step` that re-runs the whole sequence (the idiom of the port that passed, no cache), and `close`. Every block it cannot write is a
 named function whose body is a `# AGENT:` comment and a NotImplementedError that names the block and the reference class. The generator
-does not know the data flow of a layer with children it does not recognise (a hyper-connection, a gated delta-net, a per-layer
-embedding), so such a layer's function is a stub too, and it lists the generated helpers the coder can call from it.
+does not know the data flow of a layer with children it does not recognise (an indexer, and any per-layer embedding, gated delta net or
+hyper-connection that a registered family does not prove), so such a layer's function is a stub too, and it lists the generated helpers and blocks the coder can call from it.
+A layer whose parts are all generated blocks (or whose attention block is the one remaining stub) is written whole by `_compose_layer`.
+
+Block families (issue 696). A family of blocks that the generator writes whole is one entry in `BLOCK_FAMILIES`: a recognizer over the
+construction and the tensor shapes, an emitter that returns the function text, the module-level helpers it calls, and the id of a test that
+compares the generated block with the transformers module at tiny sizes (`register_block_family` refuses an entry without that id). A function a
+family wrote has `GENERATED_BLOCK_MARK` as its first comment line, so the thin repair never sends it to the coder as a repair target. The first
+entry is the hyper-connection of the Qwen4 family (the prelude that repeats the embedding into the streams, the per-layer connections before
+attention and the MLP, the injection after each block, and the mixer after the last layer). The second is the gated delta net (linear attention: the
+fused projection, a depthwise causal convolution built from shifted multiply-adds, the decay and beta, `ttnn.transformer.chunk_gated_delta_rule` in its
+flat form, the gated norm and the output projection); its load roles are `neg_exp` (minus exp of `A_log`) and `conv_taps` (one device tensor per
+convolution tap). The third is the per-layer embedding (PLE: hashed n-gram ids and the table lookup on the host with the table kept in `model["host"]`, then a gate,
+group norms and a dilated depthwise convolution on the device). A layer of the Qwen4 family is composed from these (the PLE add, the two connections, the sublayer, the
+two injections; issue 696, slice 3). The indexer attention (`Qwen4ExpTextAttention` with a `Qwen4ExpTextQSAIndexer` child) is not written: the project log entry for issue 696, slice 3, lists what blocks it
+(the per-query top-k over pooled key blocks needs ops no probe has run, and a port that ignores the indexer is wrong, issue 638). The standard blocks above are not entries. The
+recognizer returns None when it cannot prove the shapes, and the block is then a stub as before. The ttnn calls of a family's code are
+checked against the verified sheet like the rest. Whether the families' ops (a width-1 slice and a column-broadcast multiply in the injection; `ttnn.softplus`, the row-major concat of the
+convolution's left padding and the delta rule op at these head counts) run on a chip is not shown by the CPU test: the first board check of a run that uses them is that evidence.
 
 The CPU check (`check_port`) runs before any board lease: some file under the port directory must make a reachable ttnn matmul-family
 call (the same static analysis as the port check, `orchard/ttnn_calls.py`), the files must parse, and no `# AGENT:` stub may remain at the
@@ -42,6 +59,7 @@ from orchard import op_cheats, safeio, ttnn_calls
 
 STUB_MARK = "# AGENT:"
 GENERATED_MARK = "# generated-by: orchard/port_template.py"
+GENERATED_BLOCK_MARK = "# GENERATED (not a stub):"      # the first comment line of a function a block family wrote; a failure inside it is never a coder repair target
 SOURCE_MAX = 2 * 1024 * 1024            # one port source file is read to this size (the port check's own bound)
 MAX_PORT_FILES = 64                     # files under stages/2/port/ the check reads; a directory with more is refused
 INPUT_MAX = 16 * 1024 * 1024            # a construction, inventory, config or excerpts file
@@ -179,7 +197,8 @@ class Layer:
     cls: str
     standard: bool
     reason: str = ""                       # why the layer is a stub
-    blocks: dict = field(default_factory=dict)      # child name -> ("mlp" | "attention" | "rms_norm" | "stub", details)
+    blocks: dict = field(default_factory=dict)      # child name -> ("mlp" | "attention" | "rms_norm" | "linear" | "stub" | a registered family name, details)
+    composed: dict | None = None                    # set when the layer is written whole from generated blocks (`_compose_layer`): the streams, the sublayer and whether a PLE block runs first
 
 
 @dataclass
@@ -205,13 +224,17 @@ class Plan:
     attention: dict | None                 # settings of the generated attention, when one is generated
     stubs: list                            # Stub
     notes: list
+    model_blocks: dict = field(default_factory=dict)   # text-model child name -> (family name, settings), a block a registered family writes after the layers
+    prelude_family: tuple | None = None                # (family name, settings) when a family writes the step between the embedding and the first layer
 
     def summary(self) -> dict:
         """What the ledger or a run log records: the generated blocks and the stubs, without any file content."""
         return {"model_class": self.model_class, "layers": self.n_layers,
                 "generated": sorted({"embedding"} | {b[0] for l in self.layers for b in l.blocks.values() if b[0] != "stub"}
+                                    | {b[0] for b in self.model_blocks.values()}
                                     | ({"final_norm"} if self.final_norm else set()) | {"lm_head"}
-                                    | ({"layer_flow"} if any(l.standard for l in self.layers) else set())),
+                                    | ({"layer_flow"} if any(l.standard for l in self.layers) else set())
+                                    | ({"layer_composition"} if any(l.composed for l in self.layers) else set())),
                 "layer_variants": [{"key": l.key, "indices": l.indices, "standard": l.standard, "reason": l.reason} for l in self.layers],
                 "stubs": [{"function": s.function, "path": s.path, "class": s.cls, "reason": s.reason} for s in self.stubs],
                 "notes": list(self.notes)}
@@ -265,6 +288,518 @@ def _eps(attrs: dict, default: float) -> float:
         if v is not None and 0 < v < 1:
             return float(v)
     return default
+
+
+# ---- block families --------------------------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Site:
+    """What a family's recognizer is shown: one module of the construction, with the checkpoint's tensors."""
+    path: str              # module path pattern, such as model.layers.{i}.attn_hyper_connection
+    cls: str               # the reference class
+    attrs: dict            # the construction's attributes of this module
+    kids: dict             # child name -> class
+    by_pattern: dict       # tensor name pattern -> Tensor
+    con: "Construction"
+    plus_one: frozenset    # norm classes whose forward multiplies by 1 + weight (from the reference excerpts)
+    where: str             # "layer" (a child of a decoder layer) or "model" (a child of the text model)
+
+
+@dataclass(frozen=True)
+class BlockFamily:
+    """One family of blocks the generator writes whole, held as data so a later family is an entry and a test.
+
+    recognize(site) -> settings dict, or None when the module is not of this family or the shapes cannot be proved (the block then stays a
+        stub: no silent default). A settings dict may hold "placements": {tensor pattern: role}, which the plan applies.
+    emit(function, site_path, settings, where) -> the lines of the function `function` (the first comment line is GENERATED_BLOCK_MARK).
+    helpers() -> the module-level lines the family's functions call, written once when any block of the family is used.
+    prelude(settings) -> the lines of `_model_prelude` when this family also writes the step before the first layer, else None.
+    reference_test: the pytest node id of the test that compares the generated block with the transformers module at tiny sizes.
+    describe(function, settings) -> one line for the layer stub: the call and what it returns.
+    model_level: the family may also stand as a child of the text model (after the layers)."""
+    name: str
+    recognize: object
+    emit: object
+    reference_test: str
+    describe: object
+    helpers: object = None
+    prelude: object = None
+    model_level: bool = False
+
+
+BLOCK_FAMILIES: dict = {}
+
+
+def register_block_family(family: BlockFamily) -> None:
+    """Add a family. A family without a reference test is refused: a generated block with no comparison against the reference is a claim with no check."""
+    if not isinstance(family.reference_test, str) or "::" not in family.reference_test:
+        raise ValueError(f"family {family.name!r}: reference_test must be a pytest node id (path::test)")
+    if family.name in BLOCK_FAMILIES:
+        raise ValueError(f"family {family.name!r} is already registered")
+    BLOCK_FAMILIES[family.name] = family
+
+
+def _recognize_family(site: Site):
+    """(family, settings) of the first registered family that recognizes the module, or None."""
+    for fam in BLOCK_FAMILIES.values():
+        if site.where == "model" and not fam.model_level:
+            continue
+        settings = fam.recognize(site)
+        if settings is not None:
+            return fam, settings
+    return None
+
+
+# The hyper-connections of the Qwen4 family: a gated residual that mixes `hc` residual streams into one block input and injects the block's
+# output back into each stream. The equations are the transformers `Qwen4ExpTextGatedResidual` (op probe 4 matched them on one chip at PCC 0.9999):
+#   normed = group RMSNorm of x (groups of `hidden`) times (1 + hc_norm weight)
+#   gate   = sigmoid(up(silu(down(normed) / hc)))          mixed = mean over the hc streams of gate * normed
+#   inject = 2 * sigmoid(block_inject(normed) / hc)        (not present for the mixer after the last layer)
+#   after the block: x = x + (block_out per stream * inject per stream)
+_HC_NEED = frozenset({"hc_norm", "input_mix_weight_down", "input_mix_weight_up"})
+
+
+def _recognize_hyper_connection(site: Site):
+    kids = set(site.kids)
+    if not _HC_NEED <= kids or kids - _HC_NEED - {"block_inject_weight"}:
+        return None
+    hc, hidden = site.attrs.get("hc_count"), site.attrs.get("hidden_size")
+    if type(hc) is not int or type(hidden) is not int or hc < 1 or hidden < 32 or hidden % 32:
+        return None          # a slice of a stream must start on a tile
+    norm_cls, norm_attrs = site.con.resolve(site.path + ".hc_norm")
+    if not isinstance(norm_cls, str) or "RMSNorm" not in norm_cls or "Gated" in norm_cls or norm_attrs.get("group_size") != hidden:
+        return None
+    eps = _eps(norm_attrs, -1.0)
+    if eps <= 0:
+        return None          # the construction gave no epsilon: no default is invented
+    n = hc * hidden
+
+    def shape(kid):
+        t = site.by_pattern.get(f"{site.path}.{kid}.weight")
+        return t.shape if t is not None else None
+    low = shape("input_mix_weight_down")
+    if shape("hc_norm") != (n,) or not low or len(low) != 2 or low[1] != n or shape("input_mix_weight_up") != (n, low[0]):
+        return None
+    inject = "block_inject_weight" in kids
+    if inject and shape("block_inject_weight") != (hc, n):
+        return None
+    role = "norm_plus_one" if norm_cls in site.plus_one else "norm"
+    return {"hc": hc, "hidden": hidden, "eps": eps, "inject": inject, "placements": {f"{site.path}.hc_norm.weight": role}}
+
+
+def _hc_args(settings: dict) -> str:
+    return f"hc={settings['hc']}, hidden={settings['hidden']}, eps={settings['eps']!r}, inject={settings['inject']}"
+
+
+def _emit_hyper_connection(function: str, site_path: str, settings: dict, where: str) -> list:
+    if where == "model":
+        return [f"def {function}(model, x):",
+                f'    """The mixer after the last layer ({site_path}): the streams [1, 1, S, HC * HIDDEN] mixed into [1, 1, S, HIDDEN]."""',
+                f"    {GENERATED_BLOCK_MARK} hyper_connection",
+                f'    return _hyper_connection(model, "{site_path}", x, {_hc_args(settings)})[0]', "", ""]
+    return [f"def {function}(model, i, x, ids):",
+            f'    """{site_path}: returns (mixed, hyper_input, injection_weights) for the block that follows; see _hyper_connection_inject."""',
+            f"    {GENERATED_BLOCK_MARK} hyper_connection",
+            f'    return _hyper_connection(model, f"{site_path}", x, {_hc_args(settings)})', "", ""]
+
+
+def _emit_hc_prelude(settings: dict) -> list:
+    return ["def _model_prelude(model, x, ids):",
+            '    """The embedding [1, 1, S, HIDDEN] repeated HC times along the last dimension: the residual streams the layers read and return."""',
+            f"    {GENERATED_BLOCK_MARK} hyper_connection",
+            f"    return ttnn.concat([x] * {settings['hc']}, dim=-1)", "", ""]
+
+
+def _hc_helpers() -> list:
+    return ["def _hyper_connection(model, prefix, x, hc, hidden, eps, inject):",
+            '    """The gated residual at `prefix` on x [1, 1, S, hc * hidden]: (mixed [1, 1, S, hidden], x, injection weights [1, 1, S, hc] or None)."""',
+            f"    {GENERATED_BLOCK_MARK} hyper_connection",
+            "    seq = x.shape[2]",
+            "    n = hc * hidden",
+            "    normed = ttnn.reshape(ttnn.rms_norm(ttnn.reshape(x, (1, 1, seq * hc, hidden)), epsilon=eps), (1, 1, seq, n))",
+            '    normed = ttnn.multiply(normed, model["dev"][prefix + ".hc_norm.weight"])',
+            '    mix = ttnn.silu(ttnn.multiply(_linear(model, prefix + ".input_mix_weight_down", normed), 1.0 / hc))',
+            '    gate = ttnn.sigmoid(_linear(model, prefix + ".input_mix_weight_up", mix))',
+            "    prod = ttnn.multiply(gate, normed)",
+            "    mixed = ttnn.slice(prod, (0, 0, 0, 0), (1, 1, seq, hidden))",
+            "    for j in range(1, hc):",
+            "        mixed = ttnn.add(mixed, ttnn.slice(prod, (0, 0, 0, j * hidden), (1, 1, seq, (j + 1) * hidden)))",
+            "    mixed = ttnn.multiply(mixed, 1.0 / hc)",
+            "    if not inject:",
+            "        return mixed, x, None",
+            '    weights = ttnn.multiply(ttnn.sigmoid(ttnn.multiply(_linear(model, prefix + ".block_inject_weight", normed), 1.0 / hc)), 2.0)',
+            "    return mixed, x, weights", "", "",
+            "def _hyper_connection_inject(block_out, hyper_input, weights, hc, hidden):",
+            '    """hyper_input + block_out scaled by each stream\'s injection weight, the streams joined on the last dimension: [1, 1, S, hc * hidden]."""',
+            f"    {GENERATED_BLOCK_MARK} hyper_connection",
+            "    seq = block_out.shape[2]",
+            "    parts = [ttnn.multiply(block_out, ttnn.slice(weights, (0, 0, 0, j), (1, 1, seq, j + 1))) for j in range(hc)]",
+            "    return ttnn.add(hyper_input, ttnn.concat(parts, dim=-1))", "", ""]
+
+
+def _describe_hyper_connection(function: str, settings: dict) -> str:
+    call = f"{function}(model, i, x, ids)"
+    if not settings["inject"]:
+        return f"{call}"
+    return (f"{call} returns (mixed, hyper_input, injection_weights): run the block on `mixed`, then "
+            f"x = _hyper_connection_inject(block_out, hyper_input, injection_weights, {settings['hc']}, {settings['hidden']})")
+
+
+register_block_family(BlockFamily(
+    name="hyper_connection", recognize=_recognize_hyper_connection, emit=_emit_hyper_connection,
+    reference_test="tests/test_port_template_registry.py::test_generated_hyper_connections_match_the_transformers_module",
+    describe=_describe_hyper_connection, helpers=_hc_helpers, prelude=_emit_hc_prelude, model_level=True))
+
+
+# The gated delta net of the Qwen4 family (linear attention; the Qwen3.5 and Olmo hybrids hold the same projections). The equations are the transformers
+# `Qwen4ExpTextGatedDeltaNet.forward` without a cache (prefill):
+#   qkv = in_proj_qkv(x); z = in_proj_z(x); b = in_proj_b(x); a = in_proj_a(x)
+#   qkv = silu(causal depthwise convolution of qkv over the sequence, kernel K, one weight row per channel and tap)
+#   q, k, v = split(qkv); beta = sigmoid(b); g = -exp(A_log) * softplus(a + dt_bias)
+#   o = the gated delta rule over (q, k, v, g, beta) with the key heads shared across the value heads (repeat_interleave); q and k are L2 normed
+#   o = RMSNorm(o over each value head, weight) * act(z); out = out_proj(o)         act is the norm class's `activation` (sigmoid or silu)
+# The delta rule is `ttnn.transformer.chunk_gated_delta_rule` in its flat (rank 3, token-major) form with `num_key_heads`; op probe 2 matched it with the
+# reference at the Flash-Next head counts (16 key, 48 value heads, width 128) and at 2 key / 4 value heads of width 64. The convolution is four shifted
+# multiply-adds because `ttnn.conv1d` was wrong for a dilated depthwise convolution (probe 1); this convolution has no dilation, and the shifted form is what
+# probe 1 validated. `-exp(A_log)` is computed at load (role `neg_exp`) and each convolution tap is its own device tensor (role `conv_taps`).
+_GDN_KIDS = frozenset({"conv1d", "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "norm", "out_proj"})
+_GDN_GATES = ("sigmoid", "silu")
+
+
+def _recognize_gated_delta_net(site: Site):
+    if site.where != "layer" or set(site.kids) != _GDN_KIDS:
+        return None
+    a = site.attrs
+    hk, hv, dk, dv, kernel, hidden = (a.get(k) for k in ("num_k_heads", "num_v_heads", "head_k_dim", "head_v_dim", "conv_kernel_size", "hidden_size"))
+    if any(type(v) is not int or v < 1 for v in (hk, hv, dk, dv, kernel, hidden)):
+        return None
+    if hv % hk or dk % 32 or dv % 32 or hidden % 32:
+        return None          # the op maps value heads to key heads in whole groups, and a slice of the fused projection must start on a tile
+    if a.get("activation") != "silu":
+        return None          # the convolution's activation: silu is the only one the generator writes
+    norm_cls, norm_attrs = site.con.resolve(site.path + ".norm")
+    gate = norm_attrs.get("activation")
+    if not isinstance(norm_cls, str) or "RMSNormGated" not in norm_cls or gate not in _GDN_GATES:
+        return None
+    eps = _eps(norm_attrs, -1.0)
+    if eps <= 0:
+        return None          # the construction gave no epsilon: no default is invented
+    key_dim, value_dim = hk * dk, hv * dv
+    conv_dim = 2 * key_dim + value_dim
+
+    def shape(name):
+        t = site.by_pattern.get(f"{site.path}.{name}")
+        return t.shape if t is not None and t.dtype in FLOAT_DTYPES else None
+    if (shape("in_proj_qkv.weight") != (conv_dim, hidden) or shape("in_proj_z.weight") != (value_dim, hidden)
+            or shape("in_proj_b.weight") != (hv, hidden) or shape("in_proj_a.weight") != (hv, hidden)
+            or shape("out_proj.weight") != (hidden, value_dim) or shape("conv1d.weight") != (conv_dim, 1, kernel)
+            or shape("norm.weight") != (dv,) or shape("A_log") != (hv,) or shape("dt_bias") != (hv,)):
+        return None
+    return {"hk": hk, "hv": hv, "dk": dk, "dv": dv, "kernel": kernel, "eps": eps, "gate": gate, "hidden": hidden,
+            "placements": {f"{site.path}.norm.weight": "norm", f"{site.path}.A_log": "neg_exp", f"{site.path}.dt_bias": "tile",
+                           f"{site.path}.conv1d.weight": "conv_taps"}}
+
+
+def _emit_gated_delta_net(function: str, site_path: str, settings: dict, where: str) -> list:
+    s = settings
+    return [f"def {function}(model, i, x, ids):",
+            f'    """{site_path}: the gated delta net on x [1, 1, S, {s["hidden"]}] (prefill, no cache); returns the block output [1, 1, S, {s["hidden"]}], without the residual add."""',
+            f"    {GENERATED_BLOCK_MARK} gated_delta_net",
+            f'    return _gated_delta_net(model, f"{site_path}", x, hk={s["hk"]}, hv={s["hv"]}, dk={s["dk"]}, dv={s["dv"]}, kernel={s["kernel"]}, eps={s["eps"]!r}, gate="{s["gate"]}")',
+            "", ""]
+
+
+def _gdn_helpers() -> list:
+    return ["def _causal_conv(model, name, x, kernel, channels):",
+            '    """The depthwise causal convolution over the sequence of x [1, 1, S, channels], then silu: output row t is the sum over taps j of tap j (uploaded by load as `name.tap<j>`) times input row t - (kernel - 1 - j), with zero rows before the first."""',
+            f"    {GENERATED_BLOCK_MARK} gated_delta_net",
+            "    seq = x.shape[2]",
+            "    xpad = ttnn.concat([_upload(model, torch.zeros(1, 1, kernel - 1, channels, dtype=torch.bfloat16), ttnn.ROW_MAJOR_LAYOUT), ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)], dim=2)",
+            "    acc = None",
+            "    for j in range(kernel):",
+            "        piece = ttnn.to_layout(ttnn.slice(xpad, (0, 0, j, 0), (1, 1, j + seq, channels)), ttnn.TILE_LAYOUT)",
+            '        term = ttnn.multiply(piece, model["dev"][f"{name}.tap{j}"])',
+            "        acc = term if acc is None else ttnn.add(acc, term)",
+            "    return ttnn.silu(acc)", "", "",
+            "def _gated_delta_net(model, prefix, x, hk, hv, dk, dv, kernel, eps, gate):",
+            '    """The gated delta net at `prefix` on x [1, 1, S, hidden] (S a multiple of 32, no cache): the block output [1, 1, S, hidden]."""',
+            f"    {GENERATED_BLOCK_MARK} gated_delta_net",
+            "    seq = x.shape[2]",
+            "    key_dim, value_dim = hk * dk, hv * dv",
+            "    conv_dim = 2 * key_dim + value_dim",
+            '    qkv = _linear(model, prefix + ".in_proj_qkv", x)',
+            '    z = _linear(model, prefix + ".in_proj_z", x)',
+            '    b = _linear(model, prefix + ".in_proj_b", x)',
+            '    a = _linear(model, prefix + ".in_proj_a", x)',
+            '    qkv = _causal_conv(model, prefix + ".conv1d.weight", qkv, kernel, conv_dim)',
+            "    beta = ttnn.sigmoid(b)",
+            '    g = ttnn.multiply(ttnn.softplus(ttnn.add(a, model["dev"][prefix + ".dt_bias"])), model["dev"][prefix + ".A_log"])',
+            "    q = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 0), (1, 1, seq, key_dim)), (1, seq, key_dim))",
+            "    k = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, key_dim), (1, 1, seq, 2 * key_dim)), (1, seq, key_dim))",
+            "    v = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 2 * key_dim), (1, 1, seq, conv_dim)), (1, seq, value_dim))",
+            "    g, beta = ttnn.reshape(g, (1, seq, hv)), ttnn.reshape(beta, (1, seq, hv))",
+            "    o = ttnn.transformer.chunk_gated_delta_rule(q, k, v, g, beta, chunk_size=32, num_key_heads=hk)[0]          # [1, S, hv, dv], fp32, ROW_MAJOR",
+            "    o = ttnn.typecast(ttnn.to_layout(ttnn.reshape(o, (1, 1, seq * hv, dv)), ttnn.TILE_LAYOUT), ttnn.bfloat16)",
+            '    o = ttnn.rms_norm(o, epsilon=eps, weight=model["dev"][prefix + ".norm.weight"])',
+            "    z = ttnn.reshape(z, (1, 1, seq * hv, dv))",
+            '    if gate == "sigmoid":',
+            "        z = ttnn.sigmoid(z)",
+            "    else:",
+            "        z = ttnn.silu(z)",
+            "    o = ttnn.multiply(o, z)",
+            '    return _linear(model, prefix + ".out_proj", ttnn.reshape(o, (1, 1, seq, value_dim)))', "", ""]
+
+
+def _describe_gated_delta_net(function: str, settings: dict) -> str:
+    return (f"{function}(model, i, mixed, ids) returns the block output [1, 1, S, {settings['hidden']}] (no residual add; the block's input is the "
+            "mixed input of the connection before it)")
+
+
+register_block_family(BlockFamily(
+    name="gated_delta_net", recognize=_recognize_gated_delta_net, emit=_emit_gated_delta_net, reference_test=(
+        "tests/test_port_template_gdn.py::test_generated_gated_delta_net_matches_the_transformers_module"),
+    describe=_describe_gated_delta_net, helpers=_gdn_helpers))
+
+
+# The per-layer embedding block (PLE) of the Qwen4 family: `Qwen4ExpTextPLELayer.forward` without a cache (prefill). The layer adds its output to the
+# residual streams before the attention connection. The equations:
+#   ids -> n-gram ids: the previous `ngram_size - 1` tokens (the context starts as eos, and a token's context restarts after an eos), shifted copies of the token
+#          history, each head's id = ((t0 * m0) xor (t1 * m1) ...) % head_vocab_size + head_offset, all in int64 (m is the checkpoint's `layer_multipliers`)
+#   emb  = the table rows of those ids, the heads joined: [S, ngram_heads * head_dim] = [S, E]
+#   key  = group RMSNorm(key_proj(emb)) per stream; value = value_proj(emb); query = group RMSNorm(x) per stream
+#   gate = sum over the stream's width of key * query / sqrt(hidden); gate = sign(gate) * sqrt(max(|gate|, 1e-6))
+#   gated = sigmoid(gate) * value (the value is shared by the streams); out = gated + silu(dilated depthwise causal convolution of group RMSNorm(gated))
+# The hashing and the table lookup run on the HOST (`_ple_ngram_embeddings`): the ids are integers, and the table is large (the real model's is over 100 GB), so
+# the table stays in model["host"] as the checkpoint's row shards and is never uploaded. The embeddings (a [S, E] slab) are uploaded once per call. The projections,
+# the norms, the gate and the convolution run on the device. The dilated convolution is shifted multiply-adds (probe 1: `ttnn.conv1d` was wrong for a dilated
+# depthwise convolution). The gate needs `ttnn.sum`, `abs`, `sign`, `sqrt` and `clamp`; none of them has run on a chip in this repository.
+PLE_REFERENCE_TEST = "tests/test_port_template_ple.py::test_generated_ple_matches_the_transformers_module"
+_PLE_KIDS = frozenset({"ple_embedding", "key_proj", "value_proj", "norm_key", "norm_query", "norm_conv", "conv1d"})
+_PLE_TABLE = re.compile(r"\.ple_embedding\.ngram_embedding\.shard_(\d+)\.weight$")
+
+
+def _recognize_ple(site: Site):
+    if site.where != "layer" or set(site.kids) != _PLE_KIDS:
+        return None
+    hc, hidden, state_len = (site.attrs.get(k) for k in ("hc_count", "hidden_size", "short_conv_state_len"))
+    if any(type(v) is not int or v < 1 for v in (hc, hidden, state_len)) or hidden % 32:
+        return None          # a slice of a stream must start on a tile
+    n = hc * hidden
+    emb_cls, emb = site.con.resolve(site.path + ".ple_embedding")
+    ngram, per, eos, ctx, heads = (emb.get(k) for k in ("ngram_size", "heads_per_ngram", "eos_token_id", "context_len", "ngram_heads"))
+    if any(type(v) is not int or v < 1 for v in (ngram, per, eos if type(eos) is int and eos >= 0 else 0, heads)) or ngram < 2 or ctx != ngram - 1 or heads != (ngram - 1) * per:
+        return None
+    total = emb.get("total_vocab_size")
+    if type(total) is not int or total < 1:
+        return None
+    eps = None
+    for norm in ("norm_key", "norm_query", "norm_conv"):
+        cls, attrs = site.con.resolve(f"{site.path}.{norm}")
+        if not isinstance(cls, str) or "RMSNorm" not in cls or "Gated" in cls or attrs.get("group_size") != hidden:
+            return None
+        e = _eps(attrs, -1.0)
+        if e <= 0 or (eps is not None and e != eps):
+            return None      # no epsilon in the construction, or the three norms disagree: no default is invented
+        eps = e
+
+    def shape(name, dtypes=FLOAT_DTYPES):
+        t = site.by_pattern.get(f"{site.path}.{name}")
+        return t.shape if t is not None and t.dtype in dtypes else None
+    conv = shape("conv1d.weight")
+    if conv is None or len(conv) != 3 or conv[0] != n or conv[1] != 1 or conv[2] < 1 or state_len != (conv[2] - 1) * ngram:
+        return None          # depthwise, one channel per stream element, and the state length of the reference's dilation (= ngram_size)
+    kernel = conv[2]
+    key = shape("key_proj.weight")
+    if key is None or len(key) != 2 or key[0] != n or key[1] % heads or shape("value_proj.weight") != (hidden, key[1]):
+        return None
+    head_dim = key[1] // heads
+    if any(shape(f"{k}.weight") != (n,) for k in ("norm_key", "norm_query", "norm_conv")):
+        return None
+    ints = {"I64", "I32"}
+    if (shape("ple_embedding.layer_multipliers", ints) != (ngram,) or shape("ple_embedding.ngram_heads_vocab_sizes", ints) != (heads,)
+            or shape("ple_embedding.ngram_heads_offsets", ints) != (heads,)):
+        return None
+    prefix = site.path + ".ple_embedding.ngram_embedding.shard_"
+    shards = sorted((int(m.group(1)), name) for name in site.by_pattern for m in [_PLE_TABLE.search(name)] if m and name.startswith(prefix))
+    if not shards or [k for k, _ in shards] != list(range(len(shards))):
+        return None          # the table is the checkpoint's row shards, numbered from 0 with no gap
+    rows = 0
+    for _k, name in shards:
+        t = site.by_pattern[name]
+        if t.dtype not in FLOAT_DTYPES or len(t.shape) != 2 or t.shape[1] != head_dim:
+            return None
+        rows += t.shape[0]
+    if rows < total:
+        return None          # the head offsets would point past the table
+    names = [f".ple_embedding.ngram_embedding.shard_{k}.weight" for k, _ in shards]
+    norm_cls, _ = site.con.resolve(site.path + ".norm_key")
+    role = "norm_plus_one" if norm_cls in site.plus_one else "norm"
+    placements = {f"{site.path}.{norm}.weight": role for norm in ("norm_key", "norm_query", "norm_conv")}
+    placements[f"{site.path}.conv1d.weight"] = "conv_taps"
+    placements.update({name: "host" for _k, name in shards})
+    return {"hc": hc, "hidden": hidden, "eps": eps, "kernel": kernel, "dilation": ngram, "ngram": ngram, "per": per, "eos": eos, "tables": tuple(names),
+            "placements": placements}
+
+
+def _emit_ple(function: str, site_path: str, settings: dict, where: str) -> list:
+    s = settings
+    n = s["hc"] * s["hidden"]
+    return [f"def {function}(model, i, x, ids):",
+            f'    """{site_path}: the per-layer embedding on the streams x [1, 1, S, {n}] and the token ids (a list of S ints); returns [1, 1, S, {n}], to be ADDED to x '
+            'before the attention connection."""',
+            f"    {GENERATED_BLOCK_MARK} ple",
+            f'    return _ple(model, f"{site_path}", x, ids, hc={s["hc"]}, hidden={s["hidden"]}, eps={s["eps"]!r}, kernel={s["kernel"]}, dilation={s["dilation"]}, '
+            f'ngram_size={s["ngram"]}, heads_per_ngram={s["per"]}, eos={s["eos"]}, tables={s["tables"]!r})', "", ""]
+
+
+def _ple_helpers() -> list:
+    mark = f"    {GENERATED_BLOCK_MARK} ple"
+    return ["def _ple_shift(token_ids, shift, eos):",
+            '    """The token history moved right by `shift`; a position whose context reaches back past an eos token (or the start) gets eos."""',
+            mark,
+            "    if shift == 0:",
+            "        return token_ids",
+            "    batch, seq = token_ids.shape",
+            "    positions = torch.arange(seq, dtype=torch.long)",
+            "    eos_positions = torch.where(token_ids == eos, positions, -1)",
+            "    previous_eos_inclusive = torch.cummax(eos_positions, dim=1).values",
+            "    previous_eos = torch.cat([eos_positions.new_full((batch, 1), -1), previous_eos_inclusive[:, :-1]], dim=1)",
+            "    position_in_segment = positions.unsqueeze(0) - (previous_eos + 1)",
+            "    source_positions = positions - shift",
+            "    shifted = token_ids.gather(dim=1, index=source_positions.clamp_min(0).unsqueeze(0).expand(batch, -1))",
+            "    valid = (position_in_segment >= shift) & (source_positions.unsqueeze(0) >= 0)",
+            "    return torch.where(valid, shifted, token_ids.new_full((), eos))", "", "",
+            "def _ple_ngram_embeddings(model, prefix, ids, ngram_size, heads_per_ngram, eos, tables):",
+            '    """The hashed n-gram embeddings of the token ids as a host tensor [1, S, ngram_heads * head_dim]. Host code: integer hashing and a lookup in the table shards, which stay in model["host"]."""',
+            mark,
+            "    host = model[\"host\"]",
+            "    ids_t = torch.tensor([[int(t) for t in ids]], dtype=torch.long)",
+            "    history = torch.cat([torch.full((1, ngram_size - 1), eos, dtype=torch.long), ids_t], dim=-1)",
+            "    shifted = [_ple_shift(history, shift, eos) for shift in range(ngram_size)]",
+            '    mult = host[prefix + ".ple_embedding.layer_multipliers"].long()',
+            '    sizes = host[prefix + ".ple_embedding.ngram_heads_vocab_sizes"].long()',
+            '    offsets = host[prefix + ".ple_embedding.ngram_heads_offsets"].long()',
+            "    blocks = []",
+            "    for ngram in range(2, ngram_size + 1):",
+            "        start = (ngram - 2) * heads_per_ngram",
+            "        end = start + heads_per_ngram",
+            "        mixed = shifted[0] * mult[0]",
+            "        for pos in range(1, ngram):",
+            "            mixed = torch.bitwise_xor(mixed, shifted[pos] * mult[pos])",
+            "        vocab, off = sizes[start:end], offsets[start:end]",
+            "        blocks.append(torch.remainder(mixed.unsqueeze(-1), vocab.view(1, 1, -1)) + off.view(1, 1, -1))",
+            "    ngram_ids = torch.cat(blocks, dim=-1)[:, -ids_t.shape[1]:]",
+            "    flat = ngram_ids.reshape(-1)",
+            "    first = host[prefix + tables[0]]",
+            "    out = torch.zeros(flat.shape[0], first.shape[1], dtype=first.dtype)",
+            "    lo = 0",
+            "    for name in tables:",
+            "        part = host[prefix + name]",
+            "        hit = (flat >= lo) & (flat < lo + part.shape[0])",
+            "        out[hit] = part[flat[hit] - lo]",
+            "        lo += part.shape[0]",
+            "    return out.reshape(1, ids_t.shape[1], -1)", "", "",
+            "def _group_rms_norm(model, name, x, hc, hidden, eps):",
+            '    """RMS norm over each stream\'s `hidden` values of x [1, 1, S, hc * hidden], times the weight at `name`."""',
+            mark,
+            "    seq = x.shape[2]",
+            "    normed = ttnn.reshape(ttnn.rms_norm(ttnn.reshape(x, (1, 1, seq * hc, hidden)), epsilon=eps), (1, 1, seq, hc * hidden))",
+            '    return ttnn.multiply(normed, model["dev"][name + ".weight"])', "", "",
+            "def _dilated_causal_conv(model, name, x, kernel, dilation, channels):",
+            '    """The depthwise causal convolution of x [1, 1, S, channels] with dilation, then silu: output row t is the sum over taps j of tap j (uploaded by load as `name.tap<j>`) times row t - (kernel - 1 - j) * dilation."""',
+            mark,
+            "    seq = x.shape[2]",
+            "    pad = (kernel - 1) * dilation",
+            "    xpad = ttnn.concat([_upload(model, torch.zeros(1, 1, pad, channels, dtype=torch.bfloat16), ttnn.ROW_MAJOR_LAYOUT), ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)], dim=2)",
+            "    acc = None",
+            "    for j in range(kernel):",
+            "        piece = ttnn.to_layout(ttnn.slice(xpad, (0, 0, j * dilation, 0), (1, 1, j * dilation + seq, channels)), ttnn.TILE_LAYOUT)",
+            '        term = ttnn.multiply(piece, model["dev"][f"{name}.tap{j}"])',
+            "        acc = term if acc is None else ttnn.add(acc, term)",
+            "    return ttnn.silu(acc)", "", "",
+            "def _ple(model, prefix, x, ids, hc, hidden, eps, kernel, dilation, ngram_size, heads_per_ngram, eos, tables):",
+            '    """The per-layer embedding at `prefix` on the streams x [1, 1, S, hc * hidden]: the tensor to add to x, [1, 1, S, hc * hidden]."""',
+            mark,
+            "    seq = x.shape[2]",
+            "    n = hc * hidden",
+            "    emb = _ple_ngram_embeddings(model, prefix, ids, ngram_size, heads_per_ngram, eos, tables)",
+            "    e = _upload(model, emb.reshape(1, 1, seq, -1).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
+            '    key = _group_rms_norm(model, prefix + ".norm_key", _linear(model, prefix + ".key_proj", e), hc, hidden, eps)',
+            '    value = _linear(model, prefix + ".value_proj", e)',
+            '    query = _group_rms_norm(model, prefix + ".norm_query", x, hc, hidden, eps)',
+            "    prod = ttnn.multiply(key, query)",
+            "    gated_parts = []",
+            "    for j in range(hc):",
+            "        s = ttnn.sum(ttnn.slice(prod, (0, 0, 0, j * hidden), (1, 1, seq, (j + 1) * hidden)), dim=3, keepdim=True)",
+            "        s = ttnn.multiply(s, hidden ** -0.5)",
+            "        mag = ttnn.sqrt(ttnn.clamp(ttnn.abs(s), min=1e-6))",
+            "        gate = ttnn.sigmoid(ttnn.multiply(ttnn.sign(s), mag))",
+            "        gated_parts.append(ttnn.multiply(value, gate))",
+            "    gated = ttnn.concat(gated_parts, dim=-1)",
+            '    normed = _group_rms_norm(model, prefix + ".norm_conv", gated, hc, hidden, eps)',
+            '    return ttnn.add(gated, _dilated_causal_conv(model, prefix + ".conv1d.weight", normed, kernel, dilation, n))', "", ""]
+
+
+def _describe_ple(function: str, settings: dict) -> str:
+    return (f"{function}(model, i, x, ids) returns [1, 1, S, {settings['hc'] * settings['hidden']}], to be ADDED to x before the attention connection "
+            "(x = ttnn.add(x, ...)); ids is the padded token list")
+
+
+register_block_family(BlockFamily(
+    name="ple", recognize=_recognize_ple, emit=_emit_ple, reference_test=PLE_REFERENCE_TEST, describe=_describe_ple, helpers=_ple_helpers))
+
+
+# A layer of the Qwen4 family written whole from generated blocks. The reference forward (`Qwen4ExpTextDecoderLayer.forward`, no cache):
+#   if the layer has a PLE block:  x = x + ple(x, ids)
+#   mixed, hyper_input, w = attn_hyper_connection(x);  x = hyper_input + inject(linear_attn(mixed), w)
+#   mixed, hyper_input, w = mlp_hyper_connection(x);   x = hyper_input + inject(mlp(mixed), w)
+# The layer is composed only when every part is a generated block of the expected kind (a layer with a stub part stays a stub). Stage 0 flags the layer with
+# `aten.flatten.using_ints` (the reference's `injection.flatten(-2)`, which `_hyper_connection_inject` writes with a concat); the inventory records one op per
+# module and lists few modules per op, so that one flag is accepted and any other flag on the layer keeps it a stub. The reference test of the layer family is
+# the check that the composition is right.
+LAYER_COMPOSITION_TEST = "tests/test_port_template_layer.py::test_generated_layers_match_the_transformers_decoder_layer"
+_COMPOSABLE_FLAG = "aten.flatten.using_ints (candidate)"
+
+
+def _compose_layer(layer: Layer, attrs: dict, flag: str | None):
+    """The composition settings of a layer built from generated parts, or None. The sublayer is the gated delta net of a linear-attention layer, or the
+    attention block of an indexed-attention layer, which may still be a stub: the layer then calls the stub, and the stub is the only function the coder writes."""
+    sub = "linear_attn" if "linear_attn" in layer.blocks else "self_attn"
+    kids = set(layer.blocks)
+    base = {"attn_hyper_connection", "mlp_hyper_connection", "mlp", sub}
+    if kids not in (base, base | {"ple"}) or (flag is not None and flag != _COMPOSABLE_FLAG):
+        return None
+    kinds = {k: v[0] for k, v in layer.blocks.items()}
+    want = {"attn_hyper_connection": "hyper_connection", "mlp_hyper_connection": "hyper_connection", "mlp": "mlp", "linear_attn": "gated_delta_net",
+            "self_attn": "stub", "ple": "ple"}
+    layer_type = attrs.get("layer_type")
+    if any(kinds[k] != want[k] for k in kids) or layer_type != ("linear_attention" if sub == "linear_attn" else "indexed_attention"):
+        return None
+    a, m = layer.blocks["attn_hyper_connection"][1], layer.blocks["mlp_hyper_connection"][1]
+    if not (a.get("inject") and m.get("inject")) or (a["hc"], a["hidden"]) != (m["hc"], m["hidden"]):
+        return None          # both connections must inject, over the same streams
+    if "ple" in kids and layer.blocks["ple"][1]["hc"] * layer.blocks["ple"][1]["hidden"] != a["hc"] * a["hidden"]:
+        return None
+    return {"hc": a["hc"], "hidden": a["hidden"], "ple": "ple" in kids, "sublayer": sub, "stub_sublayer": kinds[sub] == "stub"}
+
+
+def _emit_composed_layer(layer: Layer, layers_path: str) -> list:
+    c, key = layer.composed, layer.key
+    lines = [f"def _layer_{key}(model, i, x, ids, cos, sin):",
+             f'    """Layers {layer.indices}: {layer.cls}, written whole from generated blocks: '
+             + ("the PLE block adds to the streams, then " if c["ple"] else "")
+             + f'attention connection, {"the attention block (a stub the coder writes)" if c["stub_sublayer"] else "gated delta net"}, MLP connection and MLP, each followed by its injection into the {c["hc"]} streams."""',
+             f"    {GENERATED_BLOCK_MARK} layer",
+             f'    p = f"{layers_path}.{{i}}"']
+    if c["ple"]:
+        lines.append(f"    x = ttnn.add(x, _{key}_ple(model, i, x, ids))")
+    lines += [f"    mixed, hyper_input, weights = _{key}_attn_hyper_connection(model, i, x, ids)",
+              f"    out = _{key}_{c['sublayer']}(model, i, mixed, ids)",
+              f"    x = _hyper_connection_inject(out, hyper_input, weights, {c['hc']}, {c['hidden']})",
+              f"    mixed, hyper_input, weights = _{key}_mlp_hyper_connection(model, i, x, ids)",
+              '    out = _mlp(model, p + ".mlp", mixed)',
+              f"    return _hyper_connection_inject(out, hyper_input, weights, {c['hc']}, {c['hidden']})", "", ""]
+    return lines
 
 
 def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Plan:
@@ -362,13 +897,30 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     elif norm_path + ".weight" in by_pattern:
         cls, _ = con.resolve(norm_path)
         extra["norm"] = cls or "?"
+    model_blocks: dict = {}
+    for k, v in sorted(extra.items()):
+        mp = f"{text_path}.{k}"
+        mcls, mattrs = con.resolve(mp)
+        hit = _recognize_family(Site(mp, mcls or v, mattrs, con.children(mattrs), by_pattern, con, frozenset(plus_one), "model"))
+        if hit:
+            placements.update(hit[1].get("placements", {}))
+            model_blocks[k] = (hit[0].name, {kk: vv for kk, vv in hit[1].items() if kk != "placements"})
+            del extra[k]
+    prelude_family = next(((name, st) for name, st in model_blocks.values() if BLOCK_FAMILIES[name].prelude), None)
     prelude_reason = None
     if extra:
         prelude_reason = (f"{text_cls or 'the text model'} has children the generated flow does not know: "
                           + ", ".join(f"{k} ({v})" for k, v in sorted(extra.items())))
     if text_path in flagged:          # an op labelled candidate or host in the text model's own forward, between the blocks; a flag under a child goes to that child's block
         flag = f"stage 0 labelled {flagged[text_path]} in {text_path} itself"
-        prelude_reason = (prelude_reason + "; " if prelude_reason else "") + flag
+        if prelude_family and not prelude_reason:
+            # The generated prelude only repeats the embedding into the streams. What the flag marks (masks and the position inputs of the PLE and
+            # linear-attention blocks) is read by those blocks, which are stubs or take `ids`, so the flag stays on record as a note.
+            notes.append(flag + "; the generated prelude only repeats the embedding into the residual streams, and the blocks that read masks or token ids are stubs of their own")
+        else:
+            prelude_reason = (prelude_reason + "; " if prelude_reason else "") + flag
+    if prelude_reason:
+        prelude_family = None        # a stub writes the step before the first layer, and it also repeats the embedding into the streams
     epilogue = sorted((k, v) for k, v in extra.items())
     # The layers: one variant per set of children the tensors show.
     per_layer: dict = {}
@@ -409,6 +961,10 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
                 else:
                     layer.blocks[kid] = ("attention", settings)
                     attention_settings = settings
+            elif hit := _recognize_family(Site(kp, kcls, kattrs, kkids, by_pattern, con, frozenset(plus_one), "layer")):          # a flag under a family block does not stub it: the family writes its own ops and its reference test is the check
+                fam, settings = hit
+                placements.update(settings.get("placements", {}))
+                layer.blocks[kid] = (fam.name, {k: v for k, v in settings.items() if k != "placements"})
             else:
                 why = flag or ("a " + kcls + " block the generator does not write" if kcls != "?" else "a block the construction does not describe")
                 if MLP_CORE <= set(kkids) and not flag:
@@ -422,12 +978,14 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
             and layer.blocks.get("mlp", ("",))[0] == "mlp" and layer.blocks["input_layernorm"][0] == "rms_norm" \
             and layer.blocks["post_attention_layernorm"][0] == "rms_norm" and not own_flag
         layer.standard = standard
+        layer.composed = None if standard else _compose_layer(layer, attrs, flagged.get(lp))
         if not standard:
             parts = [f"{k} ({children[k]})" for k, v in sorted(layer.blocks.items()) if v[0] == "stub"]
             layer.reason = (own_flag or (f"{cls or 'the layer class'}'s children are not the standard pre-norm set (input_layernorm, self_attn, "
                             "post_attention_layernorm, mlp)" if set(kids) != STANDARD_LAYER else "a child block is a stub")) \
                 + ("; stubs: " + ", ".join(parts) if parts else "")
-            stubs.append(Stub(f"_layer_{key}", lp, cls or "?", layer.reason))
+            if layer.composed is None:
+                stubs.append(Stub(f"_layer_{key}", lp, cls or "?", layer.reason))
             for k, v in sorted(layer.blocks.items()):
                 if v[0] == "stub":
                     stubs.append(Stub(f"_{key}_{k}", f"{lp}.{k}", v[1]["cls"], v[1]["reason"]))
@@ -442,7 +1000,8 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     return Plan(model_class=con.model_class, text_path=text_path, layers_path=layers_path, n_layers=n_layers, hidden=hidden, vocab=vocab,
                 pad_id=pad if type(pad) is int and 0 <= pad < vocab else 0, config=small, embed_path=embed_path, final_norm=final_norm,
                 lm_head_path=lm_head_path, tied=tied, prelude_reason=prelude_reason, epilogue=epilogue, layers=layers, placements=placements,
-                norm_eps=norm_eps, plus_one_norms=plus_one, attention=attention_settings, stubs=stubs, notes=notes)
+                norm_eps=norm_eps, plus_one_norms=plus_one, attention=attention_settings, stubs=stubs, notes=notes,
+                model_blocks=model_blocks, prelude_family=prelude_family)
 
 
 def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps, default_eps, hidden):
@@ -567,7 +1126,10 @@ def render(p: Plan) -> str:
           '    return ttnn.linear(x, w, dtype=ttnn.bfloat16, compute_kernel_config=model["ck"], memory_config=ttnn.DRAM_MEMORY_CONFIG)', "", "",
           "def _rms_norm(model, prefix, x):",
           '    """RMSNorm over the last dim with the weight at `prefix` (uploaded as [1, 1, 1, dim]; a class that adds 1 to its weight had it added at load)."""',
-          '    return ttnn.rms_norm(x, epsilon=NORM_EPS[_pattern(prefix)], weight=model["dev"][prefix + ".weight"])', "", "",
+          "    eps = NORM_EPS.get(_pattern(prefix))",
+          "    if eps is None:",
+          '        raise ValueError(f"{prefix} is not a plain RMS norm (NORM_EPS has no entry for it): the function that calls _rms_norm must compute this norm itself")',
+          '    return ttnn.rms_norm(x, epsilon=eps, weight=model["dev"][prefix + ".weight"])', "", "",
           "def _embedding(model, prefix, ids):",
           '    """The embedding table at `prefix` looked up for `ids` (a list of ints), as [1, 1, S, HIDDEN] TILE bf16."""',
           "    ids_dev = _upload_ids(model, ids)",
@@ -613,11 +1175,21 @@ def render(p: Plan) -> str:
               "    o = ttnn.experimental.nlp_concat_heads(o, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
               '    return _linear(model, prefix + ".o_proj", o)', "", ""]
     stubs = {s.function: s for s in p.stubs}
+    used = [name for name in BLOCK_FAMILIES
+            if any(b[0] == name for l in p.layers for b in l.blocks.values()) or any(b[0] == name for b in p.model_blocks.values())
+            or (p.prelude_family and p.prelude_family[0] == name)]
+    for name in used:
+        if BLOCK_FAMILIES[name].helpers:
+            L += BLOCK_FAMILIES[name].helpers()
     if p.prelude_reason:
         L += _stub_function("_model_prelude", "model, x, ids", stubs["_model_prelude"],
                             [f"The reference's forward may change the embedding before the first layer; x is [1, 1, S, HIDDEN] TILE bf16 from _embedding."])
+    elif p.prelude_family:
+        L += BLOCK_FAMILIES[p.prelude_family[0]].prelude(p.prelude_family[1])
     for k, v in p.epilogue:
         L += _stub_function(f"_model_{k}", "model, x", stubs[f"_model_{k}"])
+    for k, (name, settings) in sorted(p.model_blocks.items()):
+        L += BLOCK_FAMILIES[name].emit(f"_model_{k}", f"{p.text_path}.{k}", settings, "model")
     for layer in p.layers:
         lp = f"{p.layers_path}.{{i}}"
         if layer.standard:
@@ -632,12 +1204,20 @@ def render(p: Plan) -> str:
         for kid, (kind, details) in sorted(layer.blocks.items()):
             if kind == "stub":
                 L += _stub_function(f"_{layer.key}_{kid}", "model, i, x, ids", stubs[f"_{layer.key}_{kid}"],
-                                    [f"The Linear children of this block are uploaded by load() and can be called as _linear(model, f\"{lp}.{kid}.<name>\", x)."])
+                                    [f"The Linear children of this block are uploaded by load() and can be called as _linear(model, f\"{lp}.{kid}.<name>\", x)."]
+                                    + ([f"The generated _layer_{layer.key} calls this function on the connection's mixed input x [1, 1, S, {layer.composed['hidden']}] with the padded token ids; "
+                                        f"return the block output [1, 1, S, {layer.composed['hidden']}]. The layer adds it to the residual streams through the injection, so add no residual here."]
+                                       if layer.composed else []))
+            elif kind in BLOCK_FAMILIES:
+                L += BLOCK_FAMILIES[kind].emit(f"_{layer.key}_{kid}", f"{lp}.{kid}", details, "layer")
+        if layer.composed:
+            L += _emit_composed_layer(layer, p.layers_path)
+            continue
         parts = []
         for kid, (kind, details) in sorted(layer.blocks.items()):
             call = {"mlp": f'_mlp(model, p + ".{kid}", x)', "rms_norm": f'_rms_norm(model, p + ".{kid}", x)',
                     "attention": f'_attention(model, p + ".{kid}", x, cos, sin)', "linear": f'_linear(model, p + ".{kid}", x)',
-                    "stub": f"_{layer.key}_{kid}(model, i, x, ids)"}[kind]
+                    "stub": f"_{layer.key}_{kid}(model, i, x, ids)"}.get(kind) or BLOCK_FAMILIES[kind].describe(f"_{layer.key}_{kid}", details)
             parts.append(f"{kid} ({layer.children[kid]}): {call}")
         L += _stub_function(f"_layer_{layer.key}", "model, i, x, ids, cos, sin", stubs[f"_layer_{layer.key}"],
                             [f"Layers {layer.indices}. Parts, each a generated helper or a stub above; compose them as {layer.cls}.forward does:",
@@ -659,6 +1239,11 @@ def render(p: Plan) -> str:
           "            dev[name] = _upload(model, (t.float() + 1.0).to(torch.bfloat16).reshape(1, 1, 1, -1), ttnn.TILE_LAYOUT)",
           '        elif role == "embedding":',
           "            dev[name] = _upload(model, t.to(torch.bfloat16).contiguous(), ttnn.ROW_MAJOR_LAYOUT)",
+          '        elif role == "neg_exp":',
+          "            dev[name] = _upload(model, (-t.float().exp()).to(torch.bfloat16).reshape(1, 1, 1, -1), ttnn.TILE_LAYOUT)",
+          '        elif role == "conv_taps":',
+          "            for j in range(t.shape[-1]):",
+          '                dev[f"{name}.tap{j}"] = _upload(model, t[:, 0, j].to(torch.bfloat16).reshape(1, 1, 1, -1), ttnn.TILE_LAYOUT)',
           '        elif role == "tile":',
           "            dev[name] = _upload(model, t.to(torch.bfloat16).reshape(1, 1, 1, -1) if t.dim() == 1 else t.to(torch.bfloat16).contiguous(), ttnn.TILE_LAYOUT)",
           "        else:",
@@ -675,13 +1260,13 @@ def render(p: Plan) -> str:
         L.append("    cos, sin = _rope_tables(model, len(padded))")
     else:
         L.append("    cos = sin = None")
-    if p.prelude_reason:
+    if p.prelude_reason or p.prelude_family:
         L.append("    x = _model_prelude(model, x, padded)")
     L += ["    for i in range(N_LAYERS):",
           "        x = LAYERS[LAYER_VARIANT[i]](model, i, x, padded, cos, sin)"]
     if p.final_norm:
         L.append(f'    x = _rms_norm(model, "{p.final_norm[0]}", x)')
-    for k, _ in p.epilogue:
+    for k in sorted({k for k, _ in p.epilogue} | set(p.model_blocks)):
         L.append(f"    x = _model_{k}(model, x)")
     L += [f'    logits = _linear(model, "{p.lm_head_path}", x)',
           "    out = _to_host(model, logits).float()",
@@ -711,6 +1296,11 @@ def generate(*, config, construction, tensors, inventory=None, excerpts=None) ->
     """(the port_model.py text, its plan)."""
     p = plan(config=config, construction=construction, tensors=tensors, inventory=inventory, excerpts=excerpts)
     return render(p), p
+
+
+# The functions every generated port holds with the same text. A failure inside one is never sent to the coder as a repair target: the stub that
+# called it passed it something it cannot take (arm E8 spent 11 repair rounds on `_rms_norm`; issue 698).
+FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding")
 
 
 # What the generated port's `model` argument and module constants are. The stub prompt (orchard/stub_prompts.py `model_text`) prints these, and

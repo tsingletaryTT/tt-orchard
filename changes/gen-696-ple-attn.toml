@@ -1,0 +1,3 @@
+target = "0.9.152"
+summary = "The port generator writes the Qwen4 per-layer embedding block and composes whole layers from the generated blocks; only the indexer attention stays a stub (issue 696, slice 3)."
+kind = "feature"

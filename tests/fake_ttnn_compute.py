@@ -68,6 +68,20 @@ def _rotate_half(x):
     return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
 
 
+def _probe_common():
+    """The probes' torch copies of the reference gated delta rule (scripts/qwen4_ops_probe/common.py imports only torch)."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "scripts" / "qwen4_ops_probe" / "common.py"
+    spec = importlib.util.spec_from_file_location("qwen4_probe_common_for_fake", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+builtins_slice = slice          # the fake's own `slice` op below shadows the builtin inside make()
+
+
 def make() -> types.ModuleType:
     """The fake module, fresh (the counts are shared)."""
     m = types.ModuleType("ttnn")
@@ -143,30 +157,81 @@ def make() -> types.ModuleType:
         _count("silu")
         return Tensor(torch.nn.functional.silu(x.t))
 
+    def sigmoid(x):
+        _count("sigmoid")
+        return Tensor(torch.sigmoid(x.t))
+
+    def slice(input_tensor, slice_start, slice_end, slice_step=None, *, memory_config=None):
+        """ttnn.slice on the padded shape: every start inside its dimension and every end at most the dimension (a slice outside fails)."""
+        _count("slice")
+        t = input_tensor.t
+        for d, (lo, hi) in enumerate(zip(slice_start, slice_end)):
+            if not (0 <= lo < t.shape[d] and 0 < hi <= t.shape[d] and lo < hi):
+                raise RuntimeError(f"TT_FATAL: slice [{lo}, {hi}) is outside dimension {d} of size {t.shape[d]}")
+        return Tensor(t[tuple(builtins_slice(lo, hi) for lo, hi in zip(slice_start, slice_end))], input_tensor.replicated, input_tensor.layout)
+
+    def _same_layout(a, b):
+        if isinstance(b, Tensor) and a.layout != b.layout:
+            raise RuntimeError(f"a binary op needs both inputs in one layout, got {a.layout} and {b.layout}")
+
     def multiply(a, b):
         _count("multiply")
-        return Tensor(a.t * (b.t if isinstance(b, Tensor) else b))
+        _same_layout(a, b)
+        return Tensor(a.t * (b.t if isinstance(b, Tensor) else b), layout=a.layout)
 
     def add(a, b):
         _count("add")
-        return Tensor(a.t + (b.t if isinstance(b, Tensor) else b))
+        _same_layout(a, b)
+        return Tensor(a.t + (b.t if isinstance(b, Tensor) else b), layout=a.layout)
 
     def reshape(input_tensor, shape, memory_config=None):
         _count("reshape")
-        return Tensor(input_tensor.t.reshape(tuple(shape)), input_tensor.replicated)
+        return Tensor(input_tensor.t.reshape(tuple(shape)), input_tensor.replicated, input_tensor.layout)
 
     def concat(tensors, dim=0, memory_config=None):
         _count("concat")
-        return Tensor(torch.cat([t.t for t in tensors], dim=dim))
+        return Tensor(torch.cat([t.t for t in tensors], dim=dim), layout=tensors[0].layout)
 
     def deallocate(tensor):
         _count("deallocate")
 
     def to_layout(tensor, layout, dtype=None, memory_config=None):
-        return tensor
+        """The same values in the requested layout; a dtype of bfloat16 rounds them (what the device does when the dtype argument is given)."""
+        _count("to_layout")
+        t = tensor.t.to(torch.bfloat16).float() if dtype == "bfloat16" else tensor.t
+        return Tensor(t, tensor.replicated, layout)
 
+    def typecast(tensor, dtype, memory_config=None):
+        _count("typecast")
+        return Tensor(tensor.t.to(torch.bfloat16).float() if dtype == "bfloat16" else tensor.t, tensor.replicated, tensor.layout)
+
+    def softplus(x, *, beta=1.0, threshold=20.0, memory_config=None, output_tensor=None, sub_core_grids=None):
+        _count("softplus")
+        return Tensor(torch.nn.functional.softplus(x.t, beta=beta, threshold=threshold), x.replicated, x.layout)
+
+    def _unary(name, fn):
+        def op(x, **kwargs):
+            _count(name)
+            return Tensor(fn(x.t), x.replicated, x.layout)
+        return op
+
+    def clamp(x, min=None, max=None, *, memory_config=None, output_tensor=None):
+        """ttnn.clamp with float bounds (the tensor-bound overload is not faked)."""
+        _count("clamp")
+        return Tensor(torch.clamp(x.t, min=min, max=max), x.replicated, x.layout)
+
+    def sum_(x, dim=None, keepdim=False, *, memory_config=None, compute_kernel_config=None, scalar=1.0, correction=None, sub_core_grids=None,
+             fast_and_approximate_mode=False, output_layout=None):
+        """ttnn.sum over one dimension (torch.sum): with keepdim the reduced dimension stays with size 1."""
+        _count("sum")
+        t = x.t.sum() if dim is None else x.t.sum(dim=dim, keepdim=keepdim)
+        return Tensor(t * scalar, x.replicated, x.layout)
+
+    m.abs, m.sign, m.sqrt = _unary("abs", torch.abs), _unary("sign", torch.sign), _unary("sqrt", torch.sqrt)
+    m.clamp, m.sum = clamp, sum_
     m.from_torch, m.to_torch, m.linear, m.matmul, m.embedding, m.rms_norm = from_torch, to_torch, linear, matmul, embedding, rms_norm
     m.silu, m.multiply, m.add, m.reshape, m.concat, m.deallocate, m.to_layout = silu, multiply, add, reshape, concat, deallocate, to_layout
+    m.sigmoid, m.slice, m.typecast, m.softplus = sigmoid, slice, typecast, softplus
 
     ex = types.ModuleType("ttnn.experimental")
 
@@ -212,7 +277,40 @@ def make() -> types.ModuleType:
             scores = scores.masked_fill(torch.ones(s, s, dtype=torch.bool).triu(1), float("-inf"))
         return Tensor(torch.softmax(scores, dim=-1) @ v)
 
+    def chunk_gated_delta_rule(q, k, v, g, beta, *, scale=None, initial_state=None, output_final_state=False, chunk_size=64, use_qk_l2norm=False,
+                               output_head_major=False, program_config=None, wy_inverse=None, memory_config=None, compute_kernel_config=None,
+                               eye=None, tril=None, ones=None, masks=None, num_key_heads=None):
+        """The device op's rank-3 (flat, token-major) form on torch: the reference chunked gated delta rule of the probes (a copy of the
+        transformers code) with the q/k L2 norm and the K ** -0.5 scale the kernel applies. A torch stand-in: it shows that the generated code
+        passes the layouts and head counts the op's documentation asks for (TILE inputs, rank 3, chunk 32, T a multiple of 32, num_key_heads),
+        and that the reference algorithm gives the transformers result. It does not show that the device kernel computes the same numbers."""
+        _count("chunk_gated_delta_rule")
+        for name, x in (("q", q), ("k", k), ("v", v), ("g", g), ("beta", beta)):
+            if x.layout != "TILE":
+                raise RuntimeError(f"chunk_gated_delta_rule: {name} must be a TILE_LAYOUT device tensor, got {x.layout}")
+            if len(x.t.shape) != 3:
+                raise RuntimeError(f"chunk_gated_delta_rule: {name} must be rank 3 (flat, token-major), got rank {len(x.t.shape)}")
+        if chunk_size != 32 or output_final_state or initial_state is not None or scale is not None:
+            raise RuntimeError("the fake covers the prefill call: chunk_size 32, no initial state, the default scale, no final state")
+        batch, seq, _ = q.t.shape
+        if seq % chunk_size:
+            raise RuntimeError("T must be a multiple of chunk_size on the flat path")
+        hv = beta.t.shape[-1]
+        if num_key_heads is None:
+            raise RuntimeError("the generated code passes num_key_heads (K may differ from V)")
+        hk = num_key_heads
+        dk, dv = q.t.shape[-1] // hk, v.t.shape[-1] // hv
+        if q.t.shape[-1] != hk * dk or k.t.shape != q.t.shape or v.t.shape[-1] != hv * dv or g.t.shape != beta.t.shape or hv % hk:
+            raise RuntimeError("chunk_gated_delta_rule: the head counts do not divide the widths")
+        rep = hv // hk
+        qh = q.t.float().reshape(batch, seq, hk, dk).repeat_interleave(rep, dim=2)
+        kh = k.t.float().reshape(batch, seq, hk, dk).repeat_interleave(rep, dim=2)
+        vh = v.t.float().reshape(batch, seq, hv, dv)
+        out, _ = _probe_common().torch_chunk_gated_delta_rule(qh, kh, vh, g.t.float(), beta.t.float(), chunk_size=64, use_qk_l2norm_in_kernel=True)
+        return Tensor(out.float(), layout="ROW_MAJOR"), None
+
     tr.scaled_dot_product_attention = scaled_dot_product_attention
+    tr.chunk_gated_delta_rule = chunk_gated_delta_rule
     m.transformer = tr
     return m
 
