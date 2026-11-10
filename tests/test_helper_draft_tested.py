@@ -143,3 +143,41 @@ def test_draft_failed_in_round_reads_only_this_attempts_failed_decisions():
     assert rh.draft_failed_in_round(ledger, 2, 2) is False and rh.draft_failed_in_round(ledger, 2, 3) is False
     assert rh.draft_failed_in_round(ledger + [e(5, "stage_start")], 2, 1) is False        # a new attempt forgets it
     assert rh.start_trigger(ledger, 2, 2, {"op": "load"})[0] is False
+
+
+# ---- the stage's budget and the operator's commands -----------------------------------------------------------------------------------------------
+
+def test_a_stage_budget_that_ran_out_means_no_draft_test_and_the_decision_says_why(rig, monkeypatch, tmp_path):
+    wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN])
+    seen = start(rig, BROKEN, [HONEST + "# the coder\n"])
+    real = sv.Supervisor._test_placed_draft
+
+    def wrapped(self, *a, **k):
+        self.actuator.deadline_pause = True
+        try:
+            return real(self, *a, **k)
+        finally:
+            self.actuator.deadline_pause = False
+    monkeypatch.setattr(sv.Supervisor, "_test_placed_draft", wrapped)
+    reruns = []
+    real_hw = sv.Supervisor._hardware_phase
+    monkeypatch.setattr(sv.Supervisor, "_hardware_phase", lambda self, *a, **k: (reruns.append(1), real_hw(self, *a, **k))[1])
+    rig.run()
+    note = decs(rig, DRAFT_TESTED)
+    assert len(note) == 1 and note[0]["outcome"] == "not tested" and "budget" in note[0]["reason"]
+    assert seen and "has just replaced" in seen[0]                                    # the coder's step starts on the draft as it did before
+    assert len(reruns) == 2                                                          # the first test and the round's own check, none for the draft
+
+
+def test_an_operator_command_read_before_the_draft_test_stops_the_round_and_no_check_runs(rig, monkeypatch, tmp_path):
+    wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN])
+    start(rig, BROKEN, [HONEST + "# the coder\n"])
+    real = sv.Supervisor._test_placed_draft
+
+    def wrapped(self, *a, **k):
+        sv.Control(self.run_dir).write("abort")
+        return real(self, *a, **k)
+    monkeypatch.setattr(sv.Supervisor, "_test_placed_draft", wrapped)
+    assert rig.run() == EXIT_ABORTED
+    assert decs(rig, DRAFT_TESTED) == []
+    assert len(decs(rig, port_repair.RERUN)) == 0
