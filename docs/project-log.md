@@ -5283,3 +5283,30 @@ Arm E13 ran the generated layers 0 to 2 and failed in the coder-written `_C_self
 - Not shown: the device ops. The fake's `linear`, `multiply`, `add` and `reshape` are torch calls. Whether `ttnn.multiply` broadcasts a `[1, 1, S, head_dim]` table over the heads dimension, and whether `ttnn.linear` accepts the `[1, 1, heads * S, head_dim]` operand with a `[head_dim, head_dim]` weight, is for a board check to settle.
 
 - Arm E14 (issue 696, slice 4 follow-up): the generated `_apply_rotary` failed on the board with `Invalid subtile broadcast type` (five board checks). The coder-written `_C_self_attn` had reshaped to a 5-D tensor and permuted it with four axes, so `x` was not `[1, heads, S, head_dim]`, and the helper passed the wrong shape to `ttnn.multiply`. The helper now checks the layout of `x`, `cos` and `sin` first and raises a `ValueError` that names the layout it needs and the shapes it got. Tests: `test_apply_rotary_names_the_layout_it_needs_when_x_has_another_shape` (three cases, red before the change) and `test_apply_rotary_accepts_the_layout_it_documents`. The broadcast of `[1, 1, S, head_dim]` over the heads axis is still not shown to work on a board, because no check reached it with a valid layout.
+
+## 2026-11-10: board probes 6 to 9 for the Qwen4 indexer attention (issue 711, step 1)
+
+Arm E14 showed that the generated `_apply_rotary` is not yet shown to work on a board, and `_C_self_attn` (the indexer attention) stays a stub until the ops it needs are probed. Four probes in `scripts/qwen4_ops_probe/`, in the style of probes 1 to 5: a CPU `--selftest` without ttnn, a device mode that runs only inside a gozer lease, a `workarounds` list and one `PROBE_RESULT` JSON line. The shared reference code (rotary tables and application, the generated formula `x * cos + (x @ R) * sin`, the QSA indexer selection, RMSNorm) is in `common.py`; `tests/test_qwen4_ops_probe_indexer.py` checks it against the transformers modules (`Qwen4ExpTextRotaryEmbedding`, `apply_rotary_pos_emb`, `Qwen4ExpTextQSAIndexer`: the mask of the module equals the copy) when the reference interpreter exists.
+
+| Probe | Question | What the result decides |
+|---|---|---|
+| `p6_rotary_broadcast.py` | Does `ttnn.multiply` of x [1, heads, S, hd] with a table [1, 1, S, hd] (broadcast over heads) and the `ttnn.linear` rotate-half matmul run, and which of four workaround forms work when not? | Whether `_apply_rotary` can stay as generated or needs the table repeated over heads |
+| `p7_topk_ties.py` | What does `ttnn.topk` (stable false and true) return on block scores with many exact zeros, for k up to 512, and is it deterministic? | The tie rule the generated indexer can promise, and the largest usable k |
+| `p8_masked_sdpa.py` | Does `ttnn.transformer.scaled_dot_product_attention` take the per-query selection mask (`is_causal=False`), with expanded and with native grouped K and V, and can the mask be built on the device from a one-hot selection? | Whether the masked attention and the sigmoid gate can be generated as device ops |
+| `p9_attention_ops.py` | Do the remaining ops run: the q and gate split, per-head RMSNorm, permute, `repeat_interleave`, block mean pooling, pooled key rotary, the score matmul with relu and head sum, and the one-hot from top-k indices? | The list of ops that need a workaround; `OP_COVERAGE` maps every op of the two reference forward methods to the probe step that covers it |
+
+Commands (one chip each, inside a lease, with the ttnn environment's Python; `--preset flash` is the Flash-Next-like size, with 24 and 2 heads, head dimension 256 and 64 rotary columns):
+
+    gozer run --chips 1 --who "claude:probe711" --reason "qwen4 rotary probe" -- python scripts/qwen4_ops_probe/p6_rotary_broadcast.py
+    gozer run --chips 1 --who "claude:probe711" --reason "qwen4 topk ties probe" -- python scripts/qwen4_ops_probe/p7_topk_ties.py --preset real
+    gozer run --chips 1 --who "claude:probe711" --reason "qwen4 masked sdpa probe" -- python scripts/qwen4_ops_probe/p8_masked_sdpa.py
+    gozer run --chips 1 --who "claude:probe711" --reason "qwen4 attention ops probe" -- python scripts/qwen4_ops_probe/p9_attention_ops.py
+
+Each also runs with `--preset tiny` (the default), which matches the tiny checkpoint (8 and 2 heads, head dimension 32, token budget 16, blocks of 4 tokens).
+
+Findings from the CPU side, before any board run:
+- `torch.topk` does not take the lowest index among tied scores. On the tiny tied inputs 9 of 29 rows differ from the lowest-index rule (`torch_tie_rule` in the p7 selftest result). The reference selection is therefore implementation-defined on tied rows, and no device form is expected to reproduce torch's order there. The model needs the chip and the reference to agree on every row without a tie at the boundary, and the chip's choice on tied rows to be deterministic and rule-based. p7 measures the two device forms against both rules.
+- bf16 rounding of the scores can change a selection (two scores that differ by less than the bf16 step collapse into one value); p7's selftest records an example.
+- In the reference mask a query does not always see itself (1 of 32 rows on the tiny inputs), because its own block may not be among the selected blocks and the tail only holds tokens past the last complete block. The reference mask is not guaranteed to contain the diagonal, so a generated mask must not add it.
+- Tests: the selftest of each probe goes red when its reference form is broken (rotate-half matrix, padded tables, stable reference, block expansion, RMSNorm, padding value, mask, coverage table), and a torch-backed stand-in for ttnn runs every device path in the test file, so the probe code (names, shapes, comparisons) is exercised without a board. The stand-in proves nothing about the device ops.
+- Not run on a board. The `ttnn.topk` signature (`stable`) and the SDPA mask shape ([b x nqh x s x s], `is_causal=False` with a mask) are read from the tt-metal bindings of the tree in use.
