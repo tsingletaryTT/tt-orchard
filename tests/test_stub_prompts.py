@@ -180,6 +180,30 @@ def test_a_reply_with_a_call_or_import_a_port_function_has_no_use_for_is_refused
     assert sp.function_source(text, "_A_linear_attn") in text
 
 
+@pytest.mark.parametrize("imp,why", [
+    ("from .helpers import _linear", "relative import"),
+    ("from . import helpers", "relative import"),
+    ("from port_helpers import _linear", "cannot import"),
+    ("import helpers", "cannot import"),
+    ("from my_utils import rms", "cannot import"),
+    ("import scipy", "cannot import"),
+])
+def test_an_import_of_a_module_the_port_does_not_have_is_refused_with_the_reason(tiny, imp, why):
+    # Arm E3: the stubs imported modules that do not exist (`from .helpers import ...`, `from port_helpers import ...`), and the port failed at init
+    # on every board check. The port is one file, so an import is refused unless the module is one a port uses.
+    text, _ = tiny
+    with pytest.raises(sp.SpliceError, match=why):
+        sp.splice(text, "_A_linear_attn", _fn("return x", head=imp + "\n"))
+
+
+@pytest.mark.parametrize("imp", ["import ttnn", "import torch", "import math", "import numpy as np", "from functools import lru_cache",
+                                 "from typing import Any", "import re", "from collections import defaultdict", "import itertools"])
+def test_the_imports_a_port_uses_are_accepted(tiny, imp):
+    text, _ = tiny
+    new = sp.splice(text, "_A_linear_attn", _fn("return x", head=imp + "\n"))
+    assert imp in new
+
+
 def test_a_reply_that_uses_ordinary_port_idioms_is_still_accepted(tiny):
     text, _ = tiny
     reply = _fn("import torch\nimport ttnn\nscale = getattr(model['cfg'], 'scale', 1.0)\nh = ttnn.linear(x, model['dev']['w'])\n"

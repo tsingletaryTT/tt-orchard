@@ -240,6 +240,9 @@ def extract_code(reply: str) -> str:
 DENIED_MODULES = ("transformers", "subprocess", "os", "sys", "socket", "urllib", "requests", "importlib", "ctypes", "pickle", "marshal",
                   "shutil", "pathlib", "builtins", "runpy", "code", "codeop", "pty", "tempfile", "glob", "http", "ftplib", "smtplib",
                   "multiprocessing", "signal", "inspect", "gc", "atexit", "pdb", "site", "sysconfig", "webbrowser")
+# The modules a port function may import (arm E3: replies imported modules the port does not have, such as `.helpers` and `port_helpers`, and
+# the port failed at init on every board check). The denied list above stays as the reason given for the dangerous ones.
+ALLOWED_MODULES = ("ttnn", "torch", "math", "numpy", "re", "functools", "itertools", "typing", "collections")
 DENIED_CALLS = ("exec", "eval", "compile", "open", "input", "breakpoint", "setattr", "delattr", "globals", "locals", "vars")
 DENIED_TORCH_CALLS = ("load", "save")
 
@@ -254,9 +257,15 @@ def _refuse_unusable(tree: ast.Module) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.decorator_list:
             raise SpliceError(f"{node.name} has a decorator; a decorator runs when the port is imported, and no port function needs one")
         if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                raise SpliceError("the reply has a relative import; the port is one file, so there is no package: call its helpers by name")
             names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
             if any(n.split(".")[0] in DENIED_MODULES for n in names):
                 raise SpliceError("the reply imports a module a port function may not use")
+            outside = [n.split(".")[0] for n in names if n.split(".")[0] not in ALLOWED_MODULES]
+            if outside:
+                raise SpliceError(f"the reply imports {outside[0]}, which this port cannot import: the port is one file, so call its helpers by "
+                                  f"name; the modules a port function may import are {', '.join(ALLOWED_MODULES)}")
         elif isinstance(node, ast.Name) and _dunder(node.id):
             raise SpliceError(f"the reply uses the dunder name {node.id}, which a port function has no use for")
         elif isinstance(node, ast.Attribute) and _dunder(node.attr):
