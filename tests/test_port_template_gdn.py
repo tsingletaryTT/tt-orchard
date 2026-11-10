@@ -32,8 +32,8 @@ def test_gated_delta_net_is_a_registered_family_with_a_reference_test():
 
 def test_the_linear_attention_stubs_are_gone_and_the_rest_stay():
     text, p = tiny_qwen4()
-    assert {s.function for s in p.stubs} == {"_layer_A", "_layer_B", "_B_ple", "_layer_C", "_C_self_attn"}
-    assert len(pt.stub_lines(text)) == 5
+    assert {s.function for s in p.stubs} == {"_layer_A", "_layer_B", "_layer_C", "_C_self_attn"}
+    assert len(pt.stub_lines(text)) == 4
     assert "gated_delta_net" in p.summary()["generated"]
 
 

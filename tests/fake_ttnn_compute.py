@@ -209,6 +209,26 @@ def make() -> types.ModuleType:
         _count("softplus")
         return Tensor(torch.nn.functional.softplus(x.t, beta=beta, threshold=threshold), x.replicated, x.layout)
 
+    def _unary(name, fn):
+        def op(x, **kwargs):
+            _count(name)
+            return Tensor(fn(x.t), x.replicated, x.layout)
+        return op
+
+    def clamp(x, min=None, max=None, *, memory_config=None, output_tensor=None):
+        """ttnn.clamp with float bounds (the tensor-bound overload is not faked)."""
+        _count("clamp")
+        return Tensor(torch.clamp(x.t, min=min, max=max), x.replicated, x.layout)
+
+    def sum_(x, dim=None, keepdim=False, *, memory_config=None, compute_kernel_config=None, scalar=1.0, correction=None, sub_core_grids=None,
+             fast_and_approximate_mode=False, output_layout=None):
+        """ttnn.sum over one dimension (torch.sum): with keepdim the reduced dimension stays with size 1."""
+        _count("sum")
+        t = x.t.sum() if dim is None else x.t.sum(dim=dim, keepdim=keepdim)
+        return Tensor(t * scalar, x.replicated, x.layout)
+
+    m.abs, m.sign, m.sqrt = _unary("abs", torch.abs), _unary("sign", torch.sign), _unary("sqrt", torch.sqrt)
+    m.clamp, m.sum = clamp, sum_
     m.from_torch, m.to_torch, m.linear, m.matmul, m.embedding, m.rms_norm = from_torch, to_torch, linear, matmul, embedding, rms_norm
     m.silu, m.multiply, m.add, m.reshape, m.concat, m.deallocate, m.to_layout = silu, multiply, add, reshape, concat, deallocate, to_layout
     m.sigmoid, m.slice, m.typecast, m.softplus = sigmoid, slice, typecast, softplus

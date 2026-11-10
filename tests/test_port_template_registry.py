@@ -48,8 +48,8 @@ def test_a_family_must_name_a_reference_test():
 def test_tiny_qwen4_keeps_only_the_blocks_the_registry_does_not_know():
     text, p = tiny_qwen4()
     stubs = {s.function for s in p.stubs}
-    assert stubs == {"_layer_A", "_layer_B", "_B_ple", "_layer_C", "_C_self_attn"}          # the gated delta net is the second family (slice 2)
-    assert len(pt.stub_lines(text)) == 5
+    assert stubs == {"_layer_A", "_layer_B", "_layer_C", "_C_self_attn"}          # the gated delta net is the second family (slice 2), the per-layer embedding the third (slice 3)
+    assert len(pt.stub_lines(text)) == 4
     assert p.placements["model.layers.{i}.attn_hyper_connection.hc_norm.weight"] == "norm_plus_one"
     assert p.placements["model.hyper_connection_mixer.hc_norm.weight"] == "norm_plus_one"
     s = p.summary()

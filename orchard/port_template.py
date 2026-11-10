@@ -555,6 +555,194 @@ register_block_family(BlockFamily(
     describe=_describe_gated_delta_net, helpers=_gdn_helpers))
 
 
+# The per-layer embedding block (PLE) of the Qwen4 family: `Qwen4ExpTextPLELayer.forward` without a cache (prefill). The layer adds its output to the
+# residual streams before the attention connection. The equations:
+#   ids -> n-gram ids: the previous `ngram_size - 1` tokens (the context starts as eos, and a token's context restarts after an eos), shifted copies of the token
+#          history, each head's id = ((t0 * m0) xor (t1 * m1) ...) % head_vocab_size + head_offset, all in int64 (m is the checkpoint's `layer_multipliers`)
+#   emb  = the table rows of those ids, the heads joined: [S, ngram_heads * head_dim] = [S, E]
+#   key  = group RMSNorm(key_proj(emb)) per stream; value = value_proj(emb); query = group RMSNorm(x) per stream
+#   gate = sum over the stream's width of key * query / sqrt(hidden); gate = sign(gate) * sqrt(max(|gate|, 1e-6))
+#   gated = sigmoid(gate) * value (the value is shared by the streams); out = gated + silu(dilated depthwise causal convolution of group RMSNorm(gated))
+# The hashing and the table lookup run on the HOST (`_ple_ngram_embeddings`): the ids are integers, and the table is large (the real model's is over 100 GB), so
+# the table stays in model["host"] as the checkpoint's row shards and is never uploaded. The embeddings (a [S, E] slab) are uploaded once per call. The projections,
+# the norms, the gate and the convolution run on the device. The dilated convolution is shifted multiply-adds (probe 1: `ttnn.conv1d` was wrong for a dilated
+# depthwise convolution). The gate needs `ttnn.sum`, `abs`, `sign`, `sqrt` and `clamp`; none of them has run on a chip in this repository.
+PLE_REFERENCE_TEST = "tests/test_port_template_ple.py::test_generated_ple_matches_the_transformers_module"
+_PLE_KIDS = frozenset({"ple_embedding", "key_proj", "value_proj", "norm_key", "norm_query", "norm_conv", "conv1d"})
+_PLE_TABLE = re.compile(r"\.ple_embedding\.ngram_embedding\.shard_(\d+)\.weight$")
+
+
+def _recognize_ple(site: Site):
+    if site.where != "layer" or set(site.kids) != _PLE_KIDS:
+        return None
+    hc, hidden, state_len = (site.attrs.get(k) for k in ("hc_count", "hidden_size", "short_conv_state_len"))
+    if any(type(v) is not int or v < 1 for v in (hc, hidden, state_len)) or hidden % 32:
+        return None          # a slice of a stream must start on a tile
+    n = hc * hidden
+    emb_cls, emb = site.con.resolve(site.path + ".ple_embedding")
+    ngram, per, eos, ctx, heads = (emb.get(k) for k in ("ngram_size", "heads_per_ngram", "eos_token_id", "context_len", "ngram_heads"))
+    if any(type(v) is not int or v < 1 for v in (ngram, per, eos if type(eos) is int and eos >= 0 else 0, heads)) or ngram < 2 or ctx != ngram - 1 or heads != (ngram - 1) * per:
+        return None
+    total = emb.get("total_vocab_size")
+    if type(total) is not int or total < 1:
+        return None
+    eps = None
+    for norm in ("norm_key", "norm_query", "norm_conv"):
+        cls, attrs = site.con.resolve(f"{site.path}.{norm}")
+        if not isinstance(cls, str) or "RMSNorm" not in cls or "Gated" in cls or attrs.get("group_size") != hidden:
+            return None
+        e = _eps(attrs, -1.0)
+        if e <= 0 or (eps is not None and e != eps):
+            return None      # no epsilon in the construction, or the three norms disagree: no default is invented
+        eps = e
+
+    def shape(name, dtypes=FLOAT_DTYPES):
+        t = site.by_pattern.get(f"{site.path}.{name}")
+        return t.shape if t is not None and t.dtype in dtypes else None
+    conv = shape("conv1d.weight")
+    if conv is None or len(conv) != 3 or conv[0] != n or conv[1] != 1 or conv[2] < 1 or state_len != (conv[2] - 1) * ngram:
+        return None          # depthwise, one channel per stream element, and the state length of the reference's dilation (= ngram_size)
+    kernel = conv[2]
+    key = shape("key_proj.weight")
+    if key is None or len(key) != 2 or key[0] != n or key[1] % heads or shape("value_proj.weight") != (hidden, key[1]):
+        return None
+    head_dim = key[1] // heads
+    if any(shape(f"{k}.weight") != (n,) for k in ("norm_key", "norm_query", "norm_conv")):
+        return None
+    ints = {"I64", "I32"}
+    if (shape("ple_embedding.layer_multipliers", ints) != (ngram,) or shape("ple_embedding.ngram_heads_vocab_sizes", ints) != (heads,)
+            or shape("ple_embedding.ngram_heads_offsets", ints) != (heads,)):
+        return None
+    prefix = site.path + ".ple_embedding.ngram_embedding.shard_"
+    shards = sorted((int(m.group(1)), name) for name in site.by_pattern for m in [_PLE_TABLE.search(name)] if m and name.startswith(prefix))
+    if not shards or [k for k, _ in shards] != list(range(len(shards))):
+        return None          # the table is the checkpoint's row shards, numbered from 0 with no gap
+    rows = 0
+    for _k, name in shards:
+        t = site.by_pattern[name]
+        if t.dtype not in FLOAT_DTYPES or len(t.shape) != 2 or t.shape[1] != head_dim:
+            return None
+        rows += t.shape[0]
+    if rows < total:
+        return None          # the head offsets would point past the table
+    names = [f".ple_embedding.ngram_embedding.shard_{k}.weight" for k, _ in shards]
+    norm_cls, _ = site.con.resolve(site.path + ".norm_key")
+    role = "norm_plus_one" if norm_cls in site.plus_one else "norm"
+    placements = {f"{site.path}.{norm}.weight": role for norm in ("norm_key", "norm_query", "norm_conv")}
+    placements[f"{site.path}.conv1d.weight"] = "conv_taps"
+    placements.update({name: "host" for _k, name in shards})
+    return {"hc": hc, "hidden": hidden, "eps": eps, "kernel": kernel, "dilation": ngram, "ngram": ngram, "per": per, "eos": eos, "tables": tuple(names),
+            "placements": placements}
+
+
+def _emit_ple(function: str, site_path: str, settings: dict, where: str) -> list:
+    s = settings
+    n = s["hc"] * s["hidden"]
+    return [f"def {function}(model, i, x, ids):",
+            f'    """{site_path}: the per-layer embedding on the streams x [1, 1, S, {n}] and the token ids (a list of S ints); returns [1, 1, S, {n}], to be ADDED to x '
+            'before the attention connection."""',
+            f"    {GENERATED_BLOCK_MARK} ple",
+            f'    return _ple(model, f"{site_path}", x, ids, hc={s["hc"]}, hidden={s["hidden"]}, eps={s["eps"]!r}, kernel={s["kernel"]}, dilation={s["dilation"]}, '
+            f'ngram_size={s["ngram"]}, heads_per_ngram={s["per"]}, eos={s["eos"]}, tables={s["tables"]!r})', "", ""]
+
+
+def _ple_helpers() -> list:
+    mark = f"    {GENERATED_BLOCK_MARK} ple"
+    return ["def _ple_shift(token_ids, shift, eos):",
+            '    """The token history moved right by `shift`; a position whose context reaches back past an eos token (or the start) gets eos."""',
+            mark,
+            "    if shift == 0:",
+            "        return token_ids",
+            "    batch, seq = token_ids.shape",
+            "    positions = torch.arange(seq, dtype=torch.long)",
+            "    eos_positions = torch.where(token_ids == eos, positions, -1)",
+            "    previous_eos_inclusive = torch.cummax(eos_positions, dim=1).values",
+            "    previous_eos = torch.cat([eos_positions.new_full((batch, 1), -1), previous_eos_inclusive[:, :-1]], dim=1)",
+            "    position_in_segment = positions.unsqueeze(0) - (previous_eos + 1)",
+            "    source_positions = positions - shift",
+            "    shifted = token_ids.gather(dim=1, index=source_positions.clamp_min(0).unsqueeze(0).expand(batch, -1))",
+            "    valid = (position_in_segment >= shift) & (source_positions.unsqueeze(0) >= 0)",
+            "    return torch.where(valid, shifted, token_ids.new_full((), eos))", "", "",
+            "def _ple_ngram_embeddings(model, prefix, ids, ngram_size, heads_per_ngram, eos, tables):",
+            '    """The hashed n-gram embeddings of the token ids as a host tensor [1, S, ngram_heads * head_dim]. Host code: integer hashing and a lookup in the table shards, which stay in model["host"]."""',
+            mark,
+            "    host = model[\"host\"]",
+            "    ids_t = torch.tensor([[int(t) for t in ids]], dtype=torch.long)",
+            "    history = torch.cat([torch.full((1, ngram_size - 1), eos, dtype=torch.long), ids_t], dim=-1)",
+            "    shifted = [_ple_shift(history, shift, eos) for shift in range(ngram_size)]",
+            '    mult = host[prefix + ".ple_embedding.layer_multipliers"].long()',
+            '    sizes = host[prefix + ".ple_embedding.ngram_heads_vocab_sizes"].long()',
+            '    offsets = host[prefix + ".ple_embedding.ngram_heads_offsets"].long()',
+            "    blocks = []",
+            "    for ngram in range(2, ngram_size + 1):",
+            "        start = (ngram - 2) * heads_per_ngram",
+            "        end = start + heads_per_ngram",
+            "        mixed = shifted[0] * mult[0]",
+            "        for pos in range(1, ngram):",
+            "            mixed = torch.bitwise_xor(mixed, shifted[pos] * mult[pos])",
+            "        vocab, off = sizes[start:end], offsets[start:end]",
+            "        blocks.append(torch.remainder(mixed.unsqueeze(-1), vocab.view(1, 1, -1)) + off.view(1, 1, -1))",
+            "    ngram_ids = torch.cat(blocks, dim=-1)[:, -ids_t.shape[1]:]",
+            "    flat = ngram_ids.reshape(-1)",
+            "    first = host[prefix + tables[0]]",
+            "    out = torch.zeros(flat.shape[0], first.shape[1], dtype=first.dtype)",
+            "    lo = 0",
+            "    for name in tables:",
+            "        part = host[prefix + name]",
+            "        hit = (flat >= lo) & (flat < lo + part.shape[0])",
+            "        out[hit] = part[flat[hit] - lo]",
+            "        lo += part.shape[0]",
+            "    return out.reshape(1, ids_t.shape[1], -1)", "", "",
+            "def _group_rms_norm(model, name, x, hc, hidden, eps):",
+            '    """RMS norm over each stream\'s `hidden` values of x [1, 1, S, hc * hidden], times the weight at `name`."""',
+            mark,
+            "    seq = x.shape[2]",
+            "    normed = ttnn.reshape(ttnn.rms_norm(ttnn.reshape(x, (1, 1, seq * hc, hidden)), epsilon=eps), (1, 1, seq, hc * hidden))",
+            '    return ttnn.multiply(normed, model["dev"][name + ".weight"])', "", "",
+            "def _dilated_causal_conv(model, name, x, kernel, dilation, channels):",
+            '    """The depthwise causal convolution of x [1, 1, S, channels] with dilation, then silu: output row t is the sum over taps j of tap j (uploaded by load as `name.tap<j>`) times row t - (kernel - 1 - j) * dilation."""',
+            mark,
+            "    seq = x.shape[2]",
+            "    pad = (kernel - 1) * dilation",
+            "    xpad = ttnn.concat([_upload(model, torch.zeros(1, 1, pad, channels, dtype=torch.bfloat16), ttnn.ROW_MAJOR_LAYOUT), ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)], dim=2)",
+            "    acc = None",
+            "    for j in range(kernel):",
+            "        piece = ttnn.to_layout(ttnn.slice(xpad, (0, 0, j * dilation, 0), (1, 1, j * dilation + seq, channels)), ttnn.TILE_LAYOUT)",
+            '        term = ttnn.multiply(piece, model["dev"][f"{name}.tap{j}"])',
+            "        acc = term if acc is None else ttnn.add(acc, term)",
+            "    return ttnn.silu(acc)", "", "",
+            "def _ple(model, prefix, x, ids, hc, hidden, eps, kernel, dilation, ngram_size, heads_per_ngram, eos, tables):",
+            '    """The per-layer embedding at `prefix` on the streams x [1, 1, S, hc * hidden]: the tensor to add to x, [1, 1, S, hc * hidden]."""',
+            mark,
+            "    seq = x.shape[2]",
+            "    n = hc * hidden",
+            "    emb = _ple_ngram_embeddings(model, prefix, ids, ngram_size, heads_per_ngram, eos, tables)",
+            "    e = _upload(model, emb.reshape(1, 1, seq, -1).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
+            '    key = _group_rms_norm(model, prefix + ".norm_key", _linear(model, prefix + ".key_proj", e), hc, hidden, eps)',
+            '    value = _linear(model, prefix + ".value_proj", e)',
+            '    query = _group_rms_norm(model, prefix + ".norm_query", x, hc, hidden, eps)',
+            "    prod = ttnn.multiply(key, query)",
+            "    gated_parts = []",
+            "    for j in range(hc):",
+            "        s = ttnn.sum(ttnn.slice(prod, (0, 0, 0, j * hidden), (1, 1, seq, (j + 1) * hidden)), dim=3, keepdim=True)",
+            "        s = ttnn.multiply(s, hidden ** -0.5)",
+            "        mag = ttnn.sqrt(ttnn.clamp(ttnn.abs(s), min=1e-6))",
+            "        gate = ttnn.sigmoid(ttnn.multiply(ttnn.sign(s), mag))",
+            "        gated_parts.append(ttnn.multiply(value, gate))",
+            "    gated = ttnn.concat(gated_parts, dim=-1)",
+            '    normed = _group_rms_norm(model, prefix + ".norm_conv", gated, hc, hidden, eps)',
+            '    return ttnn.add(gated, _dilated_causal_conv(model, prefix + ".conv1d.weight", normed, kernel, dilation, n))', "", ""]
+
+
+def _describe_ple(function: str, settings: dict) -> str:
+    return (f"{function}(model, i, x, ids) returns [1, 1, S, {settings['hc'] * settings['hidden']}], to be ADDED to x before the attention connection "
+            "(x = ttnn.add(x, ...)); ids is the padded token list")
+
+
+register_block_family(BlockFamily(
+    name="ple", recognize=_recognize_ple, emit=_emit_ple, reference_test=PLE_REFERENCE_TEST, describe=_describe_ple, helpers=_ple_helpers))
+
+
 def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Plan:
     """The plan of the generated port. Raises PlanError when the inputs do not describe a decoder with an embedding, numbered layers and a head."""
     section = text_section(config)
