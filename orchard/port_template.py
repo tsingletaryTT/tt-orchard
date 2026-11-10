@@ -19,7 +19,9 @@ Inputs (all read on the CPU, none from a chip):
 What it writes (`generate`): a complete `load` (every float tensor uploaded, Linear weights transposed once and TILE bf16, embedding
 tables ROW_MAJOR, norm weights as [1, 1, 1, dim], a mesh mapper when the device is a mesh of more than one chip), a `prefill` that runs
 the embedding, RMSNorm, the gated MLP, ordinary attention (rotary in the HF layout and causal SDPA) and `lm_head` through TTNN calls, a
-`decode_step` that re-runs the whole sequence (the idiom of the port that passed, no cache), and `close`. Every block it cannot write is a
+`decode_step` that re-runs the whole sequence (the idiom of the port that passed, no cache), and `close`. When the config gives the default
+rotary settings and the plan has an attention block or an attention stub, it also writes `ROTARY`, `_rope_tables` and `_apply_rotary` (partial
+rotary included), so that an attention stub calls them. Every block it cannot write is a
 named function whose body is a `# AGENT:` comment and a NotImplementedError that names the block and the reference class. The generator
 does not know the data flow of a layer with children it does not recognise (an indexer, and any per-layer embedding, gated delta net or
 hyper-connection that a registered family does not prove), so such a layer's function is a stub too, and it lists the generated helpers and blocks the coder can call from it.
@@ -226,6 +228,7 @@ class Plan:
     notes: list
     model_blocks: dict = field(default_factory=dict)   # text-model child name -> (family name, settings), a block a registered family writes after the layers
     prelude_family: tuple | None = None                # (family name, settings) when a family writes the step between the embedding and the first layer
+    rotary: dict | None = None                         # {head_dim, rot, theta} when the rotary helpers are written (issue 696, slice 4)
 
     def summary(self) -> dict:
         """What the ledger or a run log records: the generated blocks and the stubs, without any file content."""
@@ -997,11 +1000,49 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     pad = section.get("pad_token_id", config.get("pad_token_id"))
     small = {k: v for k, v in section.items() if isinstance(v, (int, float, str, bool)) and not isinstance(v, bool) or isinstance(v, bool)}
     small = {k: v for k, v in small.items() if isinstance(k, str) and _IDENT.fullmatch(k) and (not isinstance(v, str) or len(v) <= 80)}
+    rotary = None
+    if _has_attention(attention_settings, stubs):
+        rotary, why = _rotary_plan(section, hidden)
+        if rotary is None:
+            notes.append(f"no rotary helpers (_rope_tables, _apply_rotary) are written: {why}; an attention block has to build its own rotary tables")
     return Plan(model_class=con.model_class, text_path=text_path, layers_path=layers_path, n_layers=n_layers, hidden=hidden, vocab=vocab,
                 pad_id=pad if type(pad) is int and 0 <= pad < vocab else 0, config=small, embed_path=embed_path, final_norm=final_norm,
                 lm_head_path=lm_head_path, tied=tied, prelude_reason=prelude_reason, epilogue=epilogue, layers=layers, placements=placements,
                 norm_eps=norm_eps, plus_one_norms=plus_one, attention=attention_settings, stubs=stubs, notes=notes,
-                model_blocks=model_blocks, prelude_family=prelude_family)
+                model_blocks=model_blocks, prelude_family=prelude_family, rotary=rotary)
+
+
+def _has_attention(attention_settings, stubs) -> bool:
+    """True when the plan writes an attention block or leaves an attention stub (a stub whose class name holds `Attention` or whose function name
+    holds `attn`): the rotary helpers are written only then."""
+    return attention_settings is not None or any("Attention" in str(x.cls) or "attn" in x.function for x in stubs)
+
+
+def _rope_dict(section: dict) -> dict:
+    rope = section.get("rope_parameters") if isinstance(section.get("rope_parameters"), dict) else section.get("rope_scaling")
+    return rope if isinstance(rope, dict) else {}
+
+
+def _rotary_plan(section: dict, hidden: int):
+    """({head_dim, rot, theta}, None) when the config gives the settings of the default rotary embedding, else (None, why). `rot` is the number of
+    columns of each head that rotate: int(head_dim * partial_rotary_factor), the way the reference computes it. The factor is read from
+    `rope_parameters` first and from the config section second (the transformers config moves it into `rope_parameters`)."""
+    heads = _whole(section, "num_attention_heads")
+    head_dim = _whole(section, "head_dim") or (hidden // heads if heads and hidden else None)
+    if not head_dim:
+        return None, "the config gives neither head_dim nor num_attention_heads"
+    rope = _rope_dict(section)
+    rope_type = rope.get("rope_type", rope.get("type", "default")) if rope else "default"
+    if rope_type != "default":
+        return None, f"rope_type is {rope_type!r}, not the default"
+    factor = _number(rope.get("partial_rotary_factor", section.get("partial_rotary_factor", 1.0)))
+    if factor is None or not 0 < factor <= 1:
+        return None, "partial_rotary_factor is not a number above 0 and at most 1"
+    rot = int(head_dim * factor)
+    if rot < 2 or rot % 2:
+        return None, f"the rotary width int({head_dim} * {factor}) is {rot}, which is not an even number of at least 2"
+    theta = _number(rope.get("rope_theta")) or _number(section.get("rope_theta")) or 10000.0
+    return {"head_dim": head_dim, "rot": rot, "theta": float(theta)}, None
 
 
 def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps, default_eps, hidden):
@@ -1021,7 +1062,7 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
     if q.shape != (heads * head_dim, hidden) or k.shape != (kv * head_dim, hidden) or v.shape != (kv * head_dim, hidden) or o.shape != (hidden, heads * head_dim):
         return None, (f"{kcls}: the projection shapes are not [heads * head_dim, hidden] for q, [kv_heads * head_dim, hidden] for k and v and "
                       f"[hidden, heads * head_dim] for o (q_proj is {list(q.shape)}), so the head split is not the plain one")
-    factor = _number(section.get("partial_rotary_factor"))
+    factor = _number(_rope_dict(section).get("partial_rotary_factor", section.get("partial_rotary_factor")))
     if factor is not None and factor != 1:
         return None, f"{kcls}: partial_rotary_factor is {factor}; the generated rotary rotates the whole head"
     rope = section.get("rope_parameters") if isinstance(section.get("rope_parameters"), dict) else section.get("rope_scaling")
@@ -1144,6 +1185,32 @@ def render(p: Plan) -> str:
           "    for t in (gate, up, h):",
           "        ttnn.deallocate(t)",
           "    return y", "", ""]
+    if p.rotary:
+        L += [f"ROTARY = {_lit(p.rotary)}", "", ""]
+        if not p.attention:
+            L += ["def _rope_tables(model, n):",
+                  '    """cos and sin for positions 0..n-1, [1, 1, n, head_dim] TILE bf16 on the device. The first ROTARY["rot"] columns hold cos and sin of the position times the inverse frequencies (repeated twice, the HF layout); the other columns hold 1 (cos) and 0 (sin), so that they pass through _apply_rotary."""',
+                  '    hd, rot = ROTARY["head_dim"], ROTARY["rot"]',
+                  '    inv = 1.0 / (ROTARY["theta"] ** (torch.arange(0, rot, 2, dtype=torch.float32) / rot))',
+                  "    freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv[None, :]",
+                  "    emb = torch.cat([freqs, freqs], dim=-1)",
+                  "    cos = torch.cat([emb.cos(), torch.ones(n, hd - rot)], dim=-1).reshape(1, 1, n, hd)",
+                  "    sin = torch.cat([emb.sin(), torch.zeros(n, hd - rot)], dim=-1).reshape(1, 1, n, hd)",
+                  "    return _upload(model, cos.to(torch.bfloat16), ttnn.TILE_LAYOUT), _upload(model, sin.to(torch.bfloat16), ttnn.TILE_LAYOUT)", "", ""]
+        L += ["def _apply_rotary(model, x, cos, sin):",
+              '    """Rotary position embedding on x [1, heads, S, head_dim] with the tables of _rope_tables (cos, sin [1, 1, S, head_dim]): the first ROTARY["rot"] columns of each head are rotated (rotate-half), the others pass through. Computed as x * cos + (x @ R) * sin with R the constant rotate-half matrix, so it needs no slice and no concat. Returns [1, heads, S, head_dim]."""',
+              '    hd, rot = ROTARY["head_dim"], ROTARY["rot"]',
+              "    heads, seq = x.shape[1], x.shape[2]",
+              "    half = rot // 2",
+              "    rot_m = torch.zeros(hd, hd)",
+              "    for i in range(half):",
+              "        rot_m[i, i + half] = 1.0",
+              "        rot_m[i + half, i] = -1.0",
+              "    r = _upload(model, rot_m.to(torch.bfloat16), ttnn.TILE_LAYOUT)",
+              "    flat = ttnn.reshape(x, (1, 1, heads * seq, hd))",
+              '    rotated = ttnn.linear(flat, r, dtype=ttnn.bfloat16, compute_kernel_config=model["ck"], memory_config=ttnn.DRAM_MEMORY_CONFIG)',
+              "    rotated = ttnn.reshape(rotated, (1, heads, seq, hd))",
+              "    return ttnn.add(ttnn.multiply(x, cos), ttnn.multiply(rotated, sin))", "", ""]
     if p.attention:
         a = p.attention
         L += [f"ATTENTION = {_lit(a)}", "", "",
@@ -1300,7 +1367,7 @@ def generate(*, config, construction, tensors, inventory=None, excerpts=None) ->
 
 # The functions every generated port holds with the same text. A failure inside one is never sent to the coder as a repair target: the stub that
 # called it passed it something it cannot take (arm E8 spent 11 repair rounds on `_rms_norm`; issue 698).
-FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding")
+FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding", "_rope_tables", "_apply_rotary")
 
 
 # What the generated port's `model` argument and module constants are. The stub prompt (orchard/stub_prompts.py `model_text`) prints these, and
@@ -1324,6 +1391,7 @@ MODULE_CONSTANTS = {
     "LAYER_VARIANT": "list: layer index -> the key of LAYERS for that layer",
     "PLACEMENT": "dict: tensor name pattern -> how load placed it",
     "NORM_EPS": "dict: norm name pattern -> epsilon",
+    "ROTARY": "dict: head_dim, rot (the number of columns of each head that rotate) and theta, for _rope_tables and _apply_rotary",
     "LAYERS": "dict: layer variant key -> the layer function",
 }
 
