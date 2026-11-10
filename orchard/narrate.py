@@ -703,6 +703,13 @@ UNBLOCK = {
         "An agent that reads logs in a loop usually has a failed hardware test behind it. Read "
         "stages/<N>/evidence/hw-test-output.txt yourself and fix that cause.",
         "Then run `tt-orchard bringup <MODEL>` again. The same cause will stop it again."],
+    "replies-capped": [
+        "The coder's replies were cut off at max_tokens again and again in this stage, and a fresh context did not stop it. The reason above says "
+        "how many were cut off and how many were repetition loops. The port may be fine.",
+        "Change what the coder is given: a lower temperature or a repetition_penalty in the tier (orchard/tiers.py keys), a lower max_tokens so "
+        "a reply is one small edit, or another tier for this stage. The step logs in stages/<N>/log show the capped replies.",
+        "Then run `tt-orchard bringup <MODEL>` again. The count starts again at a resume. `bringup` does not retry this block by itself, because "
+        "the same sampling runs away the same way."],
     "retry-budget-spent": [
         "A cap was reached (escalations, unplanned cold coder boots, cold park restores or wall clock). `tt-orchard status <MODEL>` shows the counts.",
         "Find the stage that keeps failing in the list above and fix its cause first; a retry with the same "

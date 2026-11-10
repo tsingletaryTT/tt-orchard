@@ -347,6 +347,7 @@ EMPTY_NUDGE = ("Your last reply was empty: it had no text and no command. Say wh
 # The nudge after a capped reply that repeated itself (orchard/runaway.py): asking it to think briefly again invites the same loop.
 LOOP_NUDGE = ("Your last reply repeated itself until it was cut off. Do not analyse or explain further. "
               "Run one command or write one file now, and keep the reply short.")
+RESTART_DECISION = "context restarted after capped replies"          # the ledger decision of a restart; `trigger` says whether the step or the stage asked
 RESTART_NOTE = ("The conversation was restarted because earlier replies repeated themselves until they were cut off. Everything you "
                 "did is on disk; the files are listed below. What you read before is no longer in this conversation, so read a file again when you "
                 "need its text. Read only what you need, do one thing at a time, and keep every reply short.")
@@ -854,7 +855,8 @@ class AgentStep:
                  thinking: bool = AGENT_THINKING, finished=None, temperature: float = 0,
                  top_p: float | None = None, seed: int | None = None,
                  frequency_penalty: float | None = None, repetition_penalty: float | None = None,
-                 unstick: "runaway.Unstick | None" = None, restart_on_caps: int = 0, top_k: int | None = None):
+                 unstick: "runaway.Unstick | None" = None, restart_on_caps: int = 0, top_k: int | None = None,
+                 stage_restart_after: int = 0, stage_block_after: int = 0):
         self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
         self.ledger, self.stage, self.phase = ledger, stage, phase
         self.feed, self.control, self.http, self.clock = feed, control, http, clock
@@ -872,6 +874,10 @@ class AgentStep:
         # step may drop its conversation and start again from the task after two capped replies in a row, and goes on.
         self.frequency_penalty, self.repetition_penalty = frequency_penalty, repetition_penalty
         self.unstick, self.restart_on_caps = unstick, restart_on_caps
+        # The stage rules (issue 458, item 4): capped replies counted over the stage since the last resume, not only in a row. After
+        # `stage_restart_after` the step restarts from the task once per stage; at `stage_block_after` it ends with the text the supervisor blocks
+        # the run with. 0 turns a rule off, so a step built without them behaves as before.
+        self.stage_restart_after, self.stage_block_after = stage_restart_after, stage_block_after
         self._after_cap, self._caps, self._loops, self._restarts = False, 0, 0, 0
         # The supervisor's instructions that a restart must carry over, as (kind, text), and the task as it was first given.
         self._carry: list[tuple[str, str]] = []
@@ -997,13 +1003,50 @@ class AgentStep:
             self._sent_request = plain                          # the transcript records the request that was actually served
             return self._send(plain)
 
-    def _capped_in_stage(self) -> int:
-        """Capped replies the ledger holds for this stage, from every step so far."""
+    def _stage_caps(self) -> tuple[int, int, bool]:
+        """(capped replies, how many of them were repetition loops, whether a stage-level restart was made) that the ledger holds for this stage
+        since the last `resume` decision. A resume starts the count again: the operator has had the chance to change the sampling."""
+        count = loops = 0
+        restarted = False
         try:
-            return sum(1 for e in self.ledger.read() if e.get("stage") == self.stage and e.get("event") == "notice"
-                       and (e.get("data") or {}).get("reply_capped"))
+            entries = self.ledger.read()
         except Exception:
-            return 0
+            return 0, 0, False
+        for e in reversed(entries):
+            d = e.get("data") or {}
+            if e.get("event") == "decision" and d.get("decision") == "resume":
+                break
+            if e.get("stage") != self.stage:
+                continue
+            if e.get("event") == "notice" and d.get("reply_capped"):
+                count += 1
+                loops += 1 if d.get("repetition") is True else 0
+            elif e.get("event") == "decision" and d.get("decision") == RESTART_DECISION and d.get("trigger") == "stage":
+                restarted = True
+        return count, loops, restarted
+
+    def _capped_in_stage(self) -> int:
+        """Capped replies the ledger holds for this stage since the last resume, from every step so far."""
+        return self._stage_caps()[0]
+
+    def _stage_caps_action(self) -> str | None:
+        """What the stage's count of capped replies calls for, after the notice of the latest one is in the ledger: "block" at the block count,
+        "restart" at the restart count when this stage has not been restarted since the last resume, else None."""
+        count, _, restarted = self._stage_caps()
+        if self.stage_block_after and count >= self.stage_block_after:
+            return "block"
+        if self.stage_restart_after and count >= self.stage_restart_after and not restarted:
+            return "restart"
+        return None
+
+    def _stage_caps_detail(self) -> str:
+        """The text a step ends with when the stage's capped replies reached the block count. It starts with the fixed mark the block classifier
+        reads, and says what ran away, how often, and what the operator can change."""
+        count, loops, _ = self._stage_caps()
+        return (f"{runaway.REPLIES_CAPPED_MARK}: {count} replies in this stage were cut off at max_tokens ({self.max_tokens} tokens each), "
+                f"{loops} of them repetition loops, and a fresh context did not stop it. The port may be fine: the coder's replies are the "
+                "problem. Change the coder's sampling (a lower temperature or a repetition_penalty in its tier), lower max_tokens so a reply is "
+                "one small edit, or use another tier for this stage, then run the command again; the count starts again at a resume.")
 
     def _note_capped(self, content: str, tokens) -> tuple[dict, str | None]:
         """One reply was cut off at max_tokens: count it, find out whether it was a repetition loop, and arm the retry profile. Returns
@@ -1038,7 +1081,7 @@ class AgentStep:
             drop = next((i for i, (k, _) in enumerate(self._carry) if k == "nudge"), 0)
             del self._carry[drop]
 
-    def _restart_fresh(self, turn: int) -> None:
+    def _restart_fresh(self, turn: int, trigger: str = "caps") -> None:
         """Drop the conversation and start again from the task, with the list of files on disk. Called after two capped replies in a row,
         at most `restart_on_caps` times in a step. The loops built up in a context of 35,000 tokens and more; a short context does not
         carry them."""
@@ -1053,10 +1096,11 @@ class AgentStep:
         reset = getattr(self.tools, "reset_dedupe", None)
         if reset is not None:                 # the reads the dropped conversation held are no longer in the agent's context
             reset()
-        self._restarts += 1
-        self.ledger.append("decision", self.stage, decision="context restarted after capped replies", phase=self.phase, turn=turn,
-                           capped_in_step=self._caps, repetition_loops=self._loops, restarts=self._restarts,
-                           files_listed=len(files), instructions_carried=len(self._carry))
+        if trigger == "caps":
+            self._restarts += 1            # the step's own budget; a restart for the stage's count is the stage's and is counted in the ledger
+        self.ledger.append("decision", self.stage, decision=RESTART_DECISION, phase=self.phase, turn=turn, trigger=trigger,
+                           capped_in_step=self._caps, capped_in_stage=self._capped_in_stage(), repetition_loops=self._loops,
+                           restarts=self._restarts, files_listed=len(files), instructions_carried=len(self._carry))
 
     # ---- the loop ---------------------------------------------------------------------------
 
@@ -1183,6 +1227,16 @@ class AgentStep:
                                    what="reply cut off at max_tokens" if bad == "truncated" else "empty reply",
                                    phase=self.phase, turn=turn, finish_reason=finish,
                                    completion_tokens=tokens, in_a_row=len(bad_run), **capped)
+                if bad == "truncated":
+                    # The stage's count (issue 458, item 4): capped replies spaced out by complete calls never reach the step's own rule.
+                    action = self._stage_caps_action()
+                    if action == "block":
+                        return self._end("error", turn, detail=self._stage_caps_detail())
+                    if action == "restart":
+                        self._restart_fresh(turn, trigger="stage")
+                        logged = 0
+                        bad_run, capped_run = [], 0
+                        continue
                 if len(bad_run) >= BAD_REPLIES_IN_A_ROW or capped_run >= BAD_REPLIES_IN_A_ROW:
                     if "truncated" in bad_run and self._restarts < self.restart_on_caps:
                         self._restart_fresh(turn)
@@ -1194,6 +1248,7 @@ class AgentStep:
                 messages.append({"role": "user",
                                  "content": (LOOP_NUDGE if loop else TRUNCATION_NUDGE) if bad == "truncated" else EMPTY_NUDGE})
                 continue
+            stage_action = None
             if finish == "length":
                 # The reply hit max_tokens but ran at least one complete call. Some calls may have been cut inside their arguments; or the
                 # server's parser dropped what it could not finish and every call left is complete, so no cut call is visible. The cap
@@ -1206,6 +1261,7 @@ class AgentStep:
                                          else "reply cut off at max_tokens (every tool call in it was complete and ran)"),
                                    phase=self.phase, turn=turn, finish_reason=finish, completion_tokens=tokens, in_a_row=0,
                                    incomplete_tool_calls=len(cut_calls), complete_tool_calls=len(calls), **capped)
+                stage_action = self._stage_caps_action()          # applied below, once this reply's complete calls have run
             else:
                 self._after_cap = False
                 capped_run = 0
@@ -1246,6 +1302,13 @@ class AgentStep:
                                    phase=self.phase, turn=turn)
                 return self._end("done", turn, detail="the step's files were written and valid, and the agent "
                                                       "gave the same reply again instead of ending")
+            if stage_action == "block":
+                return self._end("error", turn, detail=self._stage_caps_detail())
+            if stage_action == "restart":
+                self._restart_fresh(turn, trigger="stage")
+                logged = 0
+                bad_run, capped_run = [], 0
+                continue
             if capped_run >= BAD_REPLIES_IN_A_ROW:
                 # Two capped replies in a row, the last of which still ran complete calls (they ran above). The runaway tail of each reply is the loop
                 # a fresh context breaks, so restart as the no-call path does, or end a step that may not restart.
