@@ -224,6 +224,17 @@
      ]
     },
     {
+     "name": "ttnn.softplus",
+     "kind": "op",
+     "signature": "ttnn.softplus(input_tensor, *, beta=1.0, threshold=20.0, memory_config=None, output_tensor=None, sub_core_grids=None)",
+     "usage": "y = ttnn.softplus(x)",
+     "notes": "Elementwise log(1 + exp(beta * x)); the defaults match torch.nn.functional.softplus. The Qwen4 gated delta net runs it on the time-step projection plus its bias to make the decay. Not run on a chip by a probe of this repository yet.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/eltwise/unary/unary_nanobind.cpp (bind_softplus)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
      "name": "ttnn.multiply",
      "kind": "op",
      "signature": "ttnn.multiply(a, b)",
@@ -345,6 +356,17 @@
      "usage": "o = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=True, scale=head_dim ** -0.5)",
      "notes": "Prefill attention. k and v may have fewer heads than q (grouped query): do not repeat them yourself. Give only one of attn_mask and is_causal=True. The mask keyword is attn_mask. The sequence must be padded to a multiple of 32.",
      "seen_in": "models/tt_transformers/tt/attention.py:1250",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.transformer.chunk_gated_delta_rule",
+     "kind": "op",
+     "signature": "ttnn.transformer.chunk_gated_delta_rule(q, k, v, g, beta, *, scale=None, initial_state=None, output_final_state=False, chunk_size=64, use_qk_l2norm=False, output_head_major=False, program_config=None, wy_inverse=None, memory_config=None, compute_kernel_config=None, eye=None, tril=None, ones=None, masks=None, num_key_heads=None)",
+     "usage": "o = ttnn.transformer.chunk_gated_delta_rule(q, k, v, g, beta, chunk_size=32, num_key_heads=2)[0]",
+     "notes": "Chunked gated delta rule (linear attention) over a prompt. Flat form: q and k [B, T, heads * K], v [B, T, value heads * V], raw (the op normalises q and k and scales q), g and beta [B, T, value heads]; all TILE device tensors. Needs chunk_size 32, T a multiple of 32 and num_key_heads. Returns (o, state): o is [B, T, value heads, V], fp32, ROW_MAJOR (to_layout TILE, then typecast, before a TILE op). Probe 2 matched torch on a chip at 16 and 48 heads (width 128) and 2 and 4 heads (width 64); other shapes are unprobed.",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/transformer/chunk_gated_delta_rule/chunk_gated_delta_rule_nanobind.cpp; scripts/qwen4_ops_probe/p2_chunk_gdn.py",
      "in": [
       "tt_metal"
      ]

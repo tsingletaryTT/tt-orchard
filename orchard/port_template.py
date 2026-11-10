@@ -21,18 +21,21 @@ tables ROW_MAJOR, norm weights as [1, 1, 1, dim], a mesh mapper when the device 
 the embedding, RMSNorm, the gated MLP, ordinary attention (rotary in the HF layout and causal SDPA) and `lm_head` through TTNN calls, a
 `decode_step` that re-runs the whole sequence (the idiom of the port that passed, no cache), and `close`. Every block it cannot write is a
 named function whose body is a `# AGENT:` comment and a NotImplementedError that names the block and the reference class. The generator
-does not know the data flow of a layer with children it does not recognise (a gated delta-net, a per-layer embedding, an indexer), so
-such a layer's function is a stub too, and it lists the generated helpers and blocks the coder can call from it.
+does not know the data flow of a layer with children it does not recognise (a per-layer embedding, an indexer, and any gated delta net or
+hyper-connection that a registered family does not prove), so such a layer's function is a stub too, and it lists the generated helpers and blocks the coder can call from it.
 
 Block families (issue 696). A family of blocks that the generator writes whole is one entry in `BLOCK_FAMILIES`: a recognizer over the
 construction and the tensor shapes, an emitter that returns the function text, the module-level helpers it calls, and the id of a test that
 compares the generated block with the transformers module at tiny sizes (`register_block_family` refuses an entry without that id). A function a
 family wrote has `GENERATED_BLOCK_MARK` as its first comment line, so the thin repair never sends it to the coder as a repair target. The first
 entry is the hyper-connection of the Qwen4 family (the prelude that repeats the embedding into the streams, the per-layer connections before
-attention and the MLP, the injection after each block, and the mixer after the last layer). The standard blocks above are not entries. The
+attention and the MLP, the injection after each block, and the mixer after the last layer). The second is the gated delta net (linear attention: the
+fused projection, a depthwise causal convolution built from shifted multiply-adds, the decay and beta, `ttnn.transformer.chunk_gated_delta_rule` in its
+flat form, the gated norm and the output projection); its load roles are `neg_exp` (minus exp of `A_log`) and `conv_taps` (one device tensor per
+convolution tap). The standard blocks above are not entries. The
 recognizer returns None when it cannot prove the shapes, and the block is then a stub as before. The ttnn calls of a family's code are
-checked against the verified sheet like the rest. Whether the family's ops (a width-1 slice and a column-broadcast multiply in the injection) run on a chip is
-not shown by the CPU test: the first board check of a run that uses them is that evidence.
+checked against the verified sheet like the rest. Whether the families' ops (a width-1 slice and a column-broadcast multiply in the injection; `ttnn.softplus`, the row-major concat of the
+convolution's left padding and the delta rule op at these head counts) run on a chip is not shown by the CPU test: the first board check of a run that uses them is that evidence.
 
 The CPU check (`check_port`) runs before any board lease: some file under the port directory must make a reachable ttnn matmul-family
 call (the same static analysis as the port check, `orchard/ttnn_calls.py`), the files must parse, and no `# AGENT:` stub may remain at the
@@ -440,6 +443,116 @@ register_block_family(BlockFamily(
     name="hyper_connection", recognize=_recognize_hyper_connection, emit=_emit_hyper_connection,
     reference_test="tests/test_port_template_registry.py::test_generated_hyper_connections_match_the_transformers_module",
     describe=_describe_hyper_connection, helpers=_hc_helpers, prelude=_emit_hc_prelude, model_level=True))
+
+
+# The gated delta net of the Qwen4 family (linear attention; the Qwen3.5 and Olmo hybrids hold the same projections). The equations are the transformers
+# `Qwen4ExpTextGatedDeltaNet.forward` without a cache (prefill):
+#   qkv = in_proj_qkv(x); z = in_proj_z(x); b = in_proj_b(x); a = in_proj_a(x)
+#   qkv = silu(causal depthwise convolution of qkv over the sequence, kernel K, one weight row per channel and tap)
+#   q, k, v = split(qkv); beta = sigmoid(b); g = -exp(A_log) * softplus(a + dt_bias)
+#   o = the gated delta rule over (q, k, v, g, beta) with the key heads shared across the value heads (repeat_interleave); q and k are L2 normed
+#   o = RMSNorm(o over each value head, weight) * act(z); out = out_proj(o)         act is the norm class's `activation` (sigmoid or silu)
+# The delta rule is `ttnn.transformer.chunk_gated_delta_rule` in its flat (rank 3, token-major) form with `num_key_heads`; op probe 2 matched it with the
+# reference at the Flash-Next head counts (16 key, 48 value heads, width 128) and at 2 key / 4 value heads of width 64. The convolution is four shifted
+# multiply-adds because `ttnn.conv1d` was wrong for a dilated depthwise convolution (probe 1); this convolution has no dilation, and the shifted form is what
+# probe 1 validated. `-exp(A_log)` is computed at load (role `neg_exp`) and each convolution tap is its own device tensor (role `conv_taps`).
+_GDN_KIDS = frozenset({"conv1d", "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "norm", "out_proj"})
+_GDN_GATES = ("sigmoid", "silu")
+
+
+def _recognize_gated_delta_net(site: Site):
+    if site.where != "layer" or set(site.kids) != _GDN_KIDS:
+        return None
+    a = site.attrs
+    hk, hv, dk, dv, kernel, hidden = (a.get(k) for k in ("num_k_heads", "num_v_heads", "head_k_dim", "head_v_dim", "conv_kernel_size", "hidden_size"))
+    if any(type(v) is not int or v < 1 for v in (hk, hv, dk, dv, kernel, hidden)):
+        return None
+    if hv % hk or dk % 32 or dv % 32 or hidden % 32:
+        return None          # the op maps value heads to key heads in whole groups, and a slice of the fused projection must start on a tile
+    if a.get("activation") != "silu":
+        return None          # the convolution's activation: silu is the only one the generator writes
+    norm_cls, norm_attrs = site.con.resolve(site.path + ".norm")
+    gate = norm_attrs.get("activation")
+    if not isinstance(norm_cls, str) or "RMSNormGated" not in norm_cls or gate not in _GDN_GATES:
+        return None
+    eps = _eps(norm_attrs, -1.0)
+    if eps <= 0:
+        return None          # the construction gave no epsilon: no default is invented
+    key_dim, value_dim = hk * dk, hv * dv
+    conv_dim = 2 * key_dim + value_dim
+
+    def shape(name):
+        t = site.by_pattern.get(f"{site.path}.{name}")
+        return t.shape if t is not None and t.dtype in FLOAT_DTYPES else None
+    if (shape("in_proj_qkv.weight") != (conv_dim, hidden) or shape("in_proj_z.weight") != (value_dim, hidden)
+            or shape("in_proj_b.weight") != (hv, hidden) or shape("in_proj_a.weight") != (hv, hidden)
+            or shape("out_proj.weight") != (hidden, value_dim) or shape("conv1d.weight") != (conv_dim, 1, kernel)
+            or shape("norm.weight") != (dv,) or shape("A_log") != (hv,) or shape("dt_bias") != (hv,)):
+        return None
+    return {"hk": hk, "hv": hv, "dk": dk, "dv": dv, "kernel": kernel, "eps": eps, "gate": gate, "hidden": hidden,
+            "placements": {f"{site.path}.norm.weight": "norm", f"{site.path}.A_log": "neg_exp", f"{site.path}.dt_bias": "tile",
+                           f"{site.path}.conv1d.weight": "conv_taps"}}
+
+
+def _emit_gated_delta_net(function: str, site_path: str, settings: dict, where: str) -> list:
+    s = settings
+    return [f"def {function}(model, i, x, ids):",
+            f'    """{site_path}: the gated delta net on x [1, 1, S, {s["hidden"]}] (prefill, no cache); returns the block output [1, 1, S, {s["hidden"]}], without the residual add."""',
+            f"    {GENERATED_BLOCK_MARK} gated_delta_net",
+            f'    return _gated_delta_net(model, f"{site_path}", x, hk={s["hk"]}, hv={s["hv"]}, dk={s["dk"]}, dv={s["dv"]}, kernel={s["kernel"]}, eps={s["eps"]!r}, gate="{s["gate"]}")',
+            "", ""]
+
+
+def _gdn_helpers() -> list:
+    return ["def _causal_conv(model, name, x, kernel, channels):",
+            '    """The depthwise causal convolution over the sequence of x [1, 1, S, channels], then silu: output row t is the sum over taps j of tap j (uploaded by load as `name.tap<j>`) times input row t - (kernel - 1 - j), with zero rows before the first."""',
+            f"    {GENERATED_BLOCK_MARK} gated_delta_net",
+            "    seq = x.shape[2]",
+            "    xpad = ttnn.concat([_upload(model, torch.zeros(1, 1, kernel - 1, channels, dtype=torch.bfloat16), ttnn.ROW_MAJOR_LAYOUT), ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)], dim=2)",
+            "    acc = None",
+            "    for j in range(kernel):",
+            "        piece = ttnn.to_layout(ttnn.slice(xpad, (0, 0, j, 0), (1, 1, j + seq, channels)), ttnn.TILE_LAYOUT)",
+            '        term = ttnn.multiply(piece, model["dev"][f"{name}.tap{j}"])',
+            "        acc = term if acc is None else ttnn.add(acc, term)",
+            "    return ttnn.silu(acc)", "", "",
+            "def _gated_delta_net(model, prefix, x, hk, hv, dk, dv, kernel, eps, gate):",
+            '    """The gated delta net at `prefix` on x [1, 1, S, hidden] (S a multiple of 32, no cache): the block output [1, 1, S, hidden]."""',
+            f"    {GENERATED_BLOCK_MARK} gated_delta_net",
+            "    seq = x.shape[2]",
+            "    key_dim, value_dim = hk * dk, hv * dv",
+            "    conv_dim = 2 * key_dim + value_dim",
+            '    qkv = _linear(model, prefix + ".in_proj_qkv", x)',
+            '    z = _linear(model, prefix + ".in_proj_z", x)',
+            '    b = _linear(model, prefix + ".in_proj_b", x)',
+            '    a = _linear(model, prefix + ".in_proj_a", x)',
+            '    qkv = _causal_conv(model, prefix + ".conv1d.weight", qkv, kernel, conv_dim)',
+            "    beta = ttnn.sigmoid(b)",
+            '    g = ttnn.multiply(ttnn.softplus(ttnn.add(a, model["dev"][prefix + ".dt_bias"])), model["dev"][prefix + ".A_log"])',
+            "    q = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 0), (1, 1, seq, key_dim)), (1, seq, key_dim))",
+            "    k = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, key_dim), (1, 1, seq, 2 * key_dim)), (1, seq, key_dim))",
+            "    v = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 2 * key_dim), (1, 1, seq, conv_dim)), (1, seq, value_dim))",
+            "    g, beta = ttnn.reshape(g, (1, seq, hv)), ttnn.reshape(beta, (1, seq, hv))",
+            "    o = ttnn.transformer.chunk_gated_delta_rule(q, k, v, g, beta, chunk_size=32, num_key_heads=hk)[0]          # [1, S, hv, dv], fp32, ROW_MAJOR",
+            "    o = ttnn.typecast(ttnn.to_layout(ttnn.reshape(o, (1, 1, seq * hv, dv)), ttnn.TILE_LAYOUT), ttnn.bfloat16)",
+            '    o = ttnn.rms_norm(o, epsilon=eps, weight=model["dev"][prefix + ".norm.weight"])',
+            "    z = ttnn.reshape(z, (1, 1, seq * hv, dv))",
+            '    if gate == "sigmoid":',
+            "        z = ttnn.sigmoid(z)",
+            "    else:",
+            "        z = ttnn.silu(z)",
+            "    o = ttnn.multiply(o, z)",
+            '    return _linear(model, prefix + ".out_proj", ttnn.reshape(o, (1, 1, seq, value_dim)))', "", ""]
+
+
+def _describe_gated_delta_net(function: str, settings: dict) -> str:
+    return (f"{function}(model, i, mixed, ids) returns the block output [1, 1, S, {settings['hidden']}] (no residual add; the block's input is the "
+            "mixed input of the connection before it)")
+
+
+register_block_family(BlockFamily(
+    name="gated_delta_net", recognize=_recognize_gated_delta_net, emit=_emit_gated_delta_net, reference_test=(
+        "tests/test_port_template_gdn.py::test_generated_gated_delta_net_matches_the_transformers_module"),
+    describe=_describe_gated_delta_net, helpers=_gdn_helpers))
 
 
 def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Plan:
@@ -871,6 +984,11 @@ def render(p: Plan) -> str:
           "            dev[name] = _upload(model, (t.float() + 1.0).to(torch.bfloat16).reshape(1, 1, 1, -1), ttnn.TILE_LAYOUT)",
           '        elif role == "embedding":',
           "            dev[name] = _upload(model, t.to(torch.bfloat16).contiguous(), ttnn.ROW_MAJOR_LAYOUT)",
+          '        elif role == "neg_exp":',
+          "            dev[name] = _upload(model, (-t.float().exp()).to(torch.bfloat16).reshape(1, 1, 1, -1), ttnn.TILE_LAYOUT)",
+          '        elif role == "conv_taps":',
+          "            for j in range(t.shape[-1]):",
+          '                dev[f"{name}.tap{j}"] = _upload(model, t[:, 0, j].to(torch.bfloat16).reshape(1, 1, 1, -1), ttnn.TILE_LAYOUT)',
           '        elif role == "tile":',
           "            dev[name] = _upload(model, t.to(torch.bfloat16).reshape(1, 1, 1, -1) if t.dim() == 1 else t.to(torch.bfloat16).contiguous(), ttnn.TILE_LAYOUT)",
           "        else:",
