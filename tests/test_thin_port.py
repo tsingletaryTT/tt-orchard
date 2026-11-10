@@ -218,7 +218,7 @@ def test_the_ledger_holds_no_reply_text_and_no_machine_path(tmp_path):
     text = json.dumps(ledger.entries)
     assert SENTINEL not in text and str(tmp_path) not in text
     for d in ledger.decisions("thin port request"):
-        assert set(d) <= {"decision", "function", "prompt_chars", "completion_tokens", "seconds", "outcome", "reason", "attempt"}
+        assert set(d) <= {"decision", "function", "prompt_chars", "completion_tokens", "seconds", "outcome", "reason", "attempt", "retry_sampling"}
         assert isinstance(d["prompt_chars"], int) and d["completion_tokens"] == 42
 
 

@@ -84,3 +84,78 @@ def test_the_model_text_lists_only_the_constants_the_port_has():
     port = "CONFIG = {}\nN_LAYERS = 2\n\ndef _linear(model, prefix, x):\n    return x\n"
     text = sp.model_text(port)
     assert "`CONFIG`" in text and "`N_LAYERS`" in text and "`PAD_ID`" not in text and "`_linear`" in text
+
+
+# ---- (2) the token cap of a stub request, and the sampling of a retry --------------------------------------------------------------------------
+
+from orchard import thin_port as tp                                                              # noqa: E402
+from test_thin_port import Coder, run as run_step, SENTINEL                                      # noqa: E402
+
+
+class Capped(Coder):
+    """A coder whose n-th reply (n in `capped`) ends at the token cap; the others are good."""
+
+    def __init__(self, capped=(), refuse=()):
+        super().__init__()
+        self.capped, self.refuse = set(capped), set(refuse)
+
+    def __call__(self, url, body, timeout):
+        self.bodies.append(body)
+        n = len(self.bodies)
+        from test_thin_port import target
+        function, args = target(body["messages"][-1]["content"])
+        if n in self.capped:
+            return {"choices": [{"message": {"content": "x " * 50}, "finish_reason": "length"}], "usage": {"completion_tokens": 16384}}
+        content = "no code here" if n in self.refuse else f"```python\ndef {function}({args}):\n    return x  # {SENTINEL}\n```"
+        return {"choices": [{"message": {"content": content}, "finish_reason": "stop"}], "usage": {"completion_tokens": 40}}
+
+
+def test_the_request_token_cap_is_the_smaller_of_the_tier_cap_and_the_stub_bound(tmp_path):
+    coder = Capped()
+    run_step(tmp_path, coder, sampling={"temperature": 0.6, "max_tokens": 16384})
+    assert coder.bodies and {b["max_tokens"] for b in coder.bodies} == {tp.STUB_MAX_TOKENS}
+    small = Capped()
+    run_step(tmp_path / "b", small, sampling={"temperature": 0.6, "max_tokens": 1000})
+    assert {b["max_tokens"] for b in small.bodies} == {1000}
+
+
+def test_the_first_request_uses_the_tiers_sampling_unchanged(tmp_path):
+    coder = Capped()
+    run_step(tmp_path, coder, sampling={"temperature": 0.6, "top_p": 0.95, "top_k": 20, "max_tokens": 4096})
+    first = coder.bodies[0]
+    assert first["temperature"] == 0.6 and first["top_p"] == 0.95 and first["top_k"] == 20 and "repetition_penalty" not in first
+
+
+def test_a_retry_after_a_refusal_lowers_the_temperature_and_adds_no_penalty(tmp_path):
+    coder = Capped(refuse={1})
+    out, ledger, _ = run_step(tmp_path, coder, sampling={"temperature": 0.6, "max_tokens": 4096})
+    assert coder.bodies[1]["temperature"] <= tp.RETRY_TEMPERATURE_MAX and "repetition_penalty" not in coder.bodies[1]
+    retried = [d for d in ledger.decisions("thin port request") if d.get("attempt") == 2]
+    assert retried and retried[0]["retry_sampling"] == {"temperature": tp.RETRY_TEMPERATURE_MAX}
+
+
+def test_a_retry_never_raises_the_temperature(tmp_path):
+    coder = Capped(refuse={1})
+    run_step(tmp_path, coder, sampling={"temperature": 0.1, "max_tokens": 4096})
+    assert coder.bodies[1]["temperature"] == 0.1
+
+
+def test_a_retry_after_a_capped_reply_adds_a_repetition_penalty_when_the_tier_has_none(tmp_path):
+    coder = Capped(capped={1})
+    out, ledger, _ = run_step(tmp_path, coder, sampling={"temperature": 0.6, "max_tokens": 4096})
+    assert coder.bodies[1]["repetition_penalty"] == tp.RETRY_REPETITION_PENALTY and coder.bodies[1]["temperature"] <= tp.RETRY_TEMPERATURE_MAX
+    retried = [d for d in ledger.decisions("thin port request") if d.get("attempt") == 2]
+    assert retried[0]["retry_sampling"] == {"temperature": tp.RETRY_TEMPERATURE_MAX, "repetition_penalty": tp.RETRY_REPETITION_PENALTY}
+
+
+def test_a_tier_penalty_above_the_retry_penalty_is_kept(tmp_path):
+    coder = Capped(capped={1})
+    run_step(tmp_path, coder, sampling={"temperature": 0.6, "repetition_penalty": 1.3, "max_tokens": 4096})
+    assert coder.bodies[1]["repetition_penalty"] == 1.3
+
+
+def test_one_retry_only_and_the_second_failure_leaves_the_stub(tmp_path):
+    coder = Capped(refuse={1, 2})
+    out, ledger, _ = run_step(tmp_path, coder, sampling={"temperature": 0.6, "max_tokens": 4096})
+    first = [d for d in ledger.decisions("thin port request") if d.get("function") == out.stubs_left[0]] if out.stubs_left else []
+    assert out.stubs_left and len(first) == 2 and first[-1]["outcome"] == "left as a stub"
