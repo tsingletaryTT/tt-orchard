@@ -1,0 +1,31 @@
+"""Hint shapes from the arm E7 run (issue 677): unary minus on a ttnn tensor, five indices on a four-dimensional tensor, a slice outside the
+padded shape, and a concat whose pieces disagree (partial rotary). The failed lines are the check's, with no path."""
+from __future__ import annotations
+
+import pytest
+
+from orchard import thin_repair as tr
+
+PORT = "import ttnn\n\n\ndef _rms_norm(model, prefix, x):\n    return x\n"
+
+
+def failed(code: str, etype: str, message: str) -> str:
+    return f"FAILED: the port failed at 'prefill': '[port_model.py:12: {code}] {etype}: {message}'\n"
+
+
+CASES = [
+    ("x2 = -x[..., :d]", "TypeError", "bad operand type for unary -: 'ttnn._ttnn.tensor.Tensor'", "ttnn.neg"),
+    ("g = g_ttnn[:, :, t:t+1, :, :]", "IndexError", "Too many indices for tensor of dimension 4", "4-D"),
+    ("y = x[:, :, :, :64]", "RuntimeError", "TT_FATAL @ slice_op.cpp: input_tensor.padded_shape()[i] >= slice_start[i] (slice_start[i] < padded_shape)",
+     "rotary"),
+    ("o = ttnn.concat([x_rot_emb, x_pass], dim=-1)", "RuntimeError", "TT_FATAL: Input tensors must have the same shape except in the concat dim",
+     "rotary"),
+]
+
+
+@pytest.mark.parametrize("code,etype,message,needle", CASES)
+def test_shape_gets_a_hint(code, etype, message, needle):
+    failure = tr.parse_failed(failed(code, etype, message))
+    assert failure is not None
+    hint = tr.hint_for(failure, PORT)
+    assert hint and needle.lower() in hint.lower(), hint
