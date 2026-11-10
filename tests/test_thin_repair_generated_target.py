@@ -46,3 +46,17 @@ def test_a_failure_inside_a_stub_function_is_still_repaired(tmp_path):
 
 def test_the_fixed_helper_names_are_in_the_template():
     assert all(name in pt.FIXED_HELPERS for name in ("_rms_norm", "_linear", "_embedding", "_upload", "_to_host", "_pattern"))
+
+
+def test_a_failure_inside_a_function_a_block_family_wrote_is_not_sent_to_the_coder(tmp_path):
+    """The generated hyper-connection functions carry GENERATED_BLOCK_MARK: a failure in one of them goes to the agent loop (issue 698)."""
+    port = ("import ttnn\n\n\ndef _A_attn_hyper_connection(model, i, x, ids):\n    # GENERATED (not a stub): hyper_connection\n"
+            "    return _hyper_connection(model, 'p', x)\n\n\ndef _A_linear_attn(model, i, x, ids):\n    return x\n")
+    d = tmp_path / "stage"
+    (d / "port").mkdir(parents=True)
+    (d / "port" / "port_model.py").write_text(port)
+
+    def post(*a, **k):
+        raise AssertionError("no request may be sent for a generated block")
+    r = tr.run_round(stage_dir=d, k=1, raw_output=_raw(5, "return _hyper_connection(model, 'p', x)"), post=post, endpoint="http://x/v1", model="m", sampling={})
+    assert r.status == "fallback" and r.function == "_A_attn_hyper_connection" and r.requests == 0 and "generated" in r.reason

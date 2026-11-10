@@ -18,6 +18,13 @@ SHEET = op_cheats.load_sheet(op_cheats.TTNN_SHEET)
 SENTINEL = "SENTINEL_5b1e9c"
 
 
+@pytest.fixture(autouse=True)
+def _no_block_families(monkeypatch):
+    """Code under test that generates a port itself (the thin port step) also sees the plan without block families (see _generate_without_families)."""
+    monkeypatch.setattr(pt, "BLOCK_FAMILIES", {})
+
+
+
 def _load(name):
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 

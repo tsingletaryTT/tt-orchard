@@ -126,6 +126,20 @@ def parse_failed(text) -> Failure | None:
     return Failure(m["op"], m["file"], int(m["line"]), m["code"], m["etype"], msg)
 
 
+def _holds_generated_mark(port_text: str, function: str) -> bool:
+    """True when the top-level function `function` has a comment line that starts with GENERATED_BLOCK_MARK (a block a family wrote)."""
+    try:
+        tree = ast.parse(port_text)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    lines = port_text.split("\n")
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            body = lines[node.lineno - 1:(node.end_lineno or node.lineno)]
+            return any(l.strip().startswith(port_template.GENERATED_BLOCK_MARK) for l in body)
+    return False
+
+
 def function_at(port_text: str, line: int) -> str | None:
     """The name of the top-level function whose source holds `line`, or None (module top level, a class, a line past the file, no parse)."""
     try:
@@ -176,9 +190,10 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
     function = function_at(text, failure.line)
     if function is None:
         return Round("fallback", etype=failure.etype, reason="the failing line is not inside a top-level function")
-    if function in port_template.FIXED_HELPERS:
-        # The helper is generated text that is the same in every port. The stub that called it passed it something it cannot take, and the check's
-        # failure line holds one frame only, so the agent loop (which reads the whole traceback) takes the round.
+    if function in port_template.FIXED_HELPERS or _holds_generated_mark(text, function):
+        # The helper is generated text, the same in every port, or a block a registered family wrote (its function holds GENERATED_BLOCK_MARK).
+        # The stub that called it passed it something it cannot take, and the check's failure line holds one frame only, so the agent loop
+        # (which reads the whole traceback) takes the round.
         return Round("fallback", function=function, etype=failure.etype,
                      reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")
     try:

@@ -21,8 +21,18 @@ tables ROW_MAJOR, norm weights as [1, 1, 1, dim], a mesh mapper when the device 
 the embedding, RMSNorm, the gated MLP, ordinary attention (rotary in the HF layout and causal SDPA) and `lm_head` through TTNN calls, a
 `decode_step` that re-runs the whole sequence (the idiom of the port that passed, no cache), and `close`. Every block it cannot write is a
 named function whose body is a `# AGENT:` comment and a NotImplementedError that names the block and the reference class. The generator
-does not know the data flow of a layer with children it does not recognise (a hyper-connection, a gated delta-net, a per-layer
-embedding), so such a layer's function is a stub too, and it lists the generated helpers the coder can call from it.
+does not know the data flow of a layer with children it does not recognise (a gated delta-net, a per-layer embedding, an indexer), so
+such a layer's function is a stub too, and it lists the generated helpers and blocks the coder can call from it.
+
+Block families (issue 696). A family of blocks that the generator writes whole is one entry in `BLOCK_FAMILIES`: a recognizer over the
+construction and the tensor shapes, an emitter that returns the function text, the module-level helpers it calls, and the id of a test that
+compares the generated block with the transformers module at tiny sizes (`register_block_family` refuses an entry without that id). A function a
+family wrote has `GENERATED_BLOCK_MARK` as its first comment line, so the thin repair never sends it to the coder as a repair target. The first
+entry is the hyper-connection of the Qwen4 family (the prelude that repeats the embedding into the streams, the per-layer connections before
+attention and the MLP, the injection after each block, and the mixer after the last layer). The standard blocks above are not entries. The
+recognizer returns None when it cannot prove the shapes, and the block is then a stub as before. The ttnn calls of a family's code are
+checked against the verified sheet like the rest. Whether the family's ops (a width-1 slice and a column-broadcast multiply in the injection) run on a chip is
+not shown by the CPU test: the first board check of a run that uses them is that evidence.
 
 The CPU check (`check_port`) runs before any board lease: some file under the port directory must make a reachable ttnn matmul-family
 call (the same static analysis as the port check, `orchard/ttnn_calls.py`), the files must parse, and no `# AGENT:` stub may remain at the
@@ -42,6 +52,7 @@ from orchard import op_cheats, safeio, ttnn_calls
 
 STUB_MARK = "# AGENT:"
 GENERATED_MARK = "# generated-by: orchard/port_template.py"
+GENERATED_BLOCK_MARK = "# GENERATED (not a stub):"      # the first comment line of a function a block family wrote; a failure inside it is never a coder repair target
 SOURCE_MAX = 2 * 1024 * 1024            # one port source file is read to this size (the port check's own bound)
 MAX_PORT_FILES = 64                     # files under stages/2/port/ the check reads; a directory with more is refused
 INPUT_MAX = 16 * 1024 * 1024            # a construction, inventory, config or excerpts file
@@ -179,7 +190,7 @@ class Layer:
     cls: str
     standard: bool
     reason: str = ""                       # why the layer is a stub
-    blocks: dict = field(default_factory=dict)      # child name -> ("mlp" | "attention" | "rms_norm" | "stub", details)
+    blocks: dict = field(default_factory=dict)      # child name -> ("mlp" | "attention" | "rms_norm" | "linear" | "stub" | a registered family name, details)
 
 
 @dataclass
@@ -205,11 +216,14 @@ class Plan:
     attention: dict | None                 # settings of the generated attention, when one is generated
     stubs: list                            # Stub
     notes: list
+    model_blocks: dict = field(default_factory=dict)   # text-model child name -> (family name, settings), a block a registered family writes after the layers
+    prelude_family: tuple | None = None                # (family name, settings) when a family writes the step between the embedding and the first layer
 
     def summary(self) -> dict:
         """What the ledger or a run log records: the generated blocks and the stubs, without any file content."""
         return {"model_class": self.model_class, "layers": self.n_layers,
                 "generated": sorted({"embedding"} | {b[0] for l in self.layers for b in l.blocks.values() if b[0] != "stub"}
+                                    | {b[0] for b in self.model_blocks.values()}
                                     | ({"final_norm"} if self.final_norm else set()) | {"lm_head"}
                                     | ({"layer_flow"} if any(l.standard for l in self.layers) else set())),
                 "layer_variants": [{"key": l.key, "indices": l.indices, "standard": l.standard, "reason": l.reason} for l in self.layers],
@@ -265,6 +279,167 @@ def _eps(attrs: dict, default: float) -> float:
         if v is not None and 0 < v < 1:
             return float(v)
     return default
+
+
+# ---- block families --------------------------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Site:
+    """What a family's recognizer is shown: one module of the construction, with the checkpoint's tensors."""
+    path: str              # module path pattern, such as model.layers.{i}.attn_hyper_connection
+    cls: str               # the reference class
+    attrs: dict            # the construction's attributes of this module
+    kids: dict             # child name -> class
+    by_pattern: dict       # tensor name pattern -> Tensor
+    con: "Construction"
+    plus_one: frozenset    # norm classes whose forward multiplies by 1 + weight (from the reference excerpts)
+    where: str             # "layer" (a child of a decoder layer) or "model" (a child of the text model)
+
+
+@dataclass(frozen=True)
+class BlockFamily:
+    """One family of blocks the generator writes whole, held as data so a later family is an entry and a test.
+
+    recognize(site) -> settings dict, or None when the module is not of this family or the shapes cannot be proved (the block then stays a
+        stub: no silent default). A settings dict may hold "placements": {tensor pattern: role}, which the plan applies.
+    emit(function, site_path, settings, where) -> the lines of the function `function` (the first comment line is GENERATED_BLOCK_MARK).
+    helpers() -> the module-level lines the family's functions call, written once when any block of the family is used.
+    prelude(settings) -> the lines of `_model_prelude` when this family also writes the step before the first layer, else None.
+    reference_test: the pytest node id of the test that compares the generated block with the transformers module at tiny sizes.
+    describe(function, settings) -> one line for the layer stub: the call and what it returns.
+    model_level: the family may also stand as a child of the text model (after the layers)."""
+    name: str
+    recognize: object
+    emit: object
+    reference_test: str
+    describe: object
+    helpers: object = None
+    prelude: object = None
+    model_level: bool = False
+
+
+BLOCK_FAMILIES: dict = {}
+
+
+def register_block_family(family: BlockFamily) -> None:
+    """Add a family. A family without a reference test is refused: a generated block with no comparison against the reference is a claim with no check."""
+    if not isinstance(family.reference_test, str) or "::" not in family.reference_test:
+        raise ValueError(f"family {family.name!r}: reference_test must be a pytest node id (path::test)")
+    if family.name in BLOCK_FAMILIES:
+        raise ValueError(f"family {family.name!r} is already registered")
+    BLOCK_FAMILIES[family.name] = family
+
+
+def _recognize_family(site: Site):
+    """(family, settings) of the first registered family that recognizes the module, or None."""
+    for fam in BLOCK_FAMILIES.values():
+        if site.where == "model" and not fam.model_level:
+            continue
+        settings = fam.recognize(site)
+        if settings is not None:
+            return fam, settings
+    return None
+
+
+# The hyper-connections of the Qwen4 family: a gated residual that mixes `hc` residual streams into one block input and injects the block's
+# output back into each stream. The equations are the transformers `Qwen4ExpTextGatedResidual` (op probe 4 matched them on one chip at PCC 0.9999):
+#   normed = group RMSNorm of x (groups of `hidden`) times (1 + hc_norm weight)
+#   gate   = sigmoid(up(silu(down(normed) / hc)))          mixed = mean over the hc streams of gate * normed
+#   inject = 2 * sigmoid(block_inject(normed) / hc)        (not present for the mixer after the last layer)
+#   after the block: x = x + (block_out per stream * inject per stream)
+_HC_NEED = frozenset({"hc_norm", "input_mix_weight_down", "input_mix_weight_up"})
+
+
+def _recognize_hyper_connection(site: Site):
+    kids = set(site.kids)
+    if not _HC_NEED <= kids or kids - _HC_NEED - {"block_inject_weight"}:
+        return None
+    hc, hidden = site.attrs.get("hc_count"), site.attrs.get("hidden_size")
+    if type(hc) is not int or type(hidden) is not int or hc < 1 or hidden < 32 or hidden % 32:
+        return None          # a slice of a stream must start on a tile
+    norm_cls, norm_attrs = site.con.resolve(site.path + ".hc_norm")
+    if not isinstance(norm_cls, str) or "RMSNorm" not in norm_cls or "Gated" in norm_cls or norm_attrs.get("group_size") != hidden:
+        return None
+    eps = _eps(norm_attrs, -1.0)
+    if eps <= 0:
+        return None          # the construction gave no epsilon: no default is invented
+    n = hc * hidden
+
+    def shape(kid):
+        t = site.by_pattern.get(f"{site.path}.{kid}.weight")
+        return t.shape if t is not None else None
+    low = shape("input_mix_weight_down")
+    if shape("hc_norm") != (n,) or not low or len(low) != 2 or low[1] != n or shape("input_mix_weight_up") != (n, low[0]):
+        return None
+    inject = "block_inject_weight" in kids
+    if inject and shape("block_inject_weight") != (hc, n):
+        return None
+    role = "norm_plus_one" if norm_cls in site.plus_one else "norm"
+    return {"hc": hc, "hidden": hidden, "eps": eps, "inject": inject, "placements": {f"{site.path}.hc_norm.weight": role}}
+
+
+def _hc_args(settings: dict) -> str:
+    return f"hc={settings['hc']}, hidden={settings['hidden']}, eps={settings['eps']!r}, inject={settings['inject']}"
+
+
+def _emit_hyper_connection(function: str, site_path: str, settings: dict, where: str) -> list:
+    if where == "model":
+        return [f"def {function}(model, x):",
+                f'    """The mixer after the last layer ({site_path}): the streams [1, 1, S, HC * HIDDEN] mixed into [1, 1, S, HIDDEN]."""',
+                f"    {GENERATED_BLOCK_MARK} hyper_connection",
+                f'    return _hyper_connection(model, "{site_path}", x, {_hc_args(settings)})[0]', "", ""]
+    return [f"def {function}(model, i, x, ids):",
+            f'    """{site_path}: returns (mixed, hyper_input, injection_weights) for the block that follows; see _hyper_connection_inject."""',
+            f"    {GENERATED_BLOCK_MARK} hyper_connection",
+            f'    return _hyper_connection(model, f"{site_path}", x, {_hc_args(settings)})', "", ""]
+
+
+def _emit_hc_prelude(settings: dict) -> list:
+    return ["def _model_prelude(model, x, ids):",
+            '    """The embedding [1, 1, S, HIDDEN] repeated HC times along the last dimension: the residual streams the layers read and return."""',
+            f"    {GENERATED_BLOCK_MARK} hyper_connection",
+            f"    return ttnn.concat([x] * {settings['hc']}, dim=-1)", "", ""]
+
+
+def _hc_helpers() -> list:
+    return ["def _hyper_connection(model, prefix, x, hc, hidden, eps, inject):",
+            '    """The gated residual at `prefix` on x [1, 1, S, hc * hidden]: (mixed [1, 1, S, hidden], x, injection weights [1, 1, S, hc] or None)."""',
+            f"    {GENERATED_BLOCK_MARK} hyper_connection",
+            "    seq = x.shape[2]",
+            "    n = hc * hidden",
+            "    normed = ttnn.reshape(ttnn.rms_norm(ttnn.reshape(x, (1, 1, seq * hc, hidden)), epsilon=eps), (1, 1, seq, n))",
+            '    normed = ttnn.multiply(normed, model["dev"][prefix + ".hc_norm.weight"])',
+            '    mix = ttnn.silu(ttnn.multiply(_linear(model, prefix + ".input_mix_weight_down", normed), 1.0 / hc))',
+            '    gate = ttnn.sigmoid(_linear(model, prefix + ".input_mix_weight_up", mix))',
+            "    prod = ttnn.multiply(gate, normed)",
+            "    mixed = ttnn.slice(prod, (0, 0, 0, 0), (1, 1, seq, hidden))",
+            "    for j in range(1, hc):",
+            "        mixed = ttnn.add(mixed, ttnn.slice(prod, (0, 0, 0, j * hidden), (1, 1, seq, (j + 1) * hidden)))",
+            "    mixed = ttnn.multiply(mixed, 1.0 / hc)",
+            "    if not inject:",
+            "        return mixed, x, None",
+            '    weights = ttnn.multiply(ttnn.sigmoid(ttnn.multiply(_linear(model, prefix + ".block_inject_weight", normed), 1.0 / hc)), 2.0)',
+            "    return mixed, x, weights", "", "",
+            "def _hyper_connection_inject(block_out, hyper_input, weights, hc, hidden):",
+            '    """hyper_input + block_out scaled by each stream\'s injection weight, the streams joined on the last dimension: [1, 1, S, hc * hidden]."""',
+            f"    {GENERATED_BLOCK_MARK} hyper_connection",
+            "    seq = block_out.shape[2]",
+            "    parts = [ttnn.multiply(block_out, ttnn.slice(weights, (0, 0, 0, j), (1, 1, seq, j + 1))) for j in range(hc)]",
+            "    return ttnn.add(hyper_input, ttnn.concat(parts, dim=-1))", "", ""]
+
+
+def _describe_hyper_connection(function: str, settings: dict) -> str:
+    call = f"{function}(model, i, x, ids)"
+    if not settings["inject"]:
+        return f"{call}"
+    return (f"{call} returns (mixed, hyper_input, injection_weights): run the block on `mixed`, then "
+            f"x = _hyper_connection_inject(block_out, hyper_input, injection_weights, {settings['hc']}, {settings['hidden']})")
+
+
+register_block_family(BlockFamily(
+    name="hyper_connection", recognize=_recognize_hyper_connection, emit=_emit_hyper_connection,
+    reference_test="tests/test_port_template_registry.py::test_generated_hyper_connections_match_the_transformers_module",
+    describe=_describe_hyper_connection, helpers=_hc_helpers, prelude=_emit_hc_prelude, model_level=True))
 
 
 def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Plan:
@@ -362,13 +537,30 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     elif norm_path + ".weight" in by_pattern:
         cls, _ = con.resolve(norm_path)
         extra["norm"] = cls or "?"
+    model_blocks: dict = {}
+    for k, v in sorted(extra.items()):
+        mp = f"{text_path}.{k}"
+        mcls, mattrs = con.resolve(mp)
+        hit = _recognize_family(Site(mp, mcls or v, mattrs, con.children(mattrs), by_pattern, con, frozenset(plus_one), "model"))
+        if hit:
+            placements.update(hit[1].get("placements", {}))
+            model_blocks[k] = (hit[0].name, {kk: vv for kk, vv in hit[1].items() if kk != "placements"})
+            del extra[k]
+    prelude_family = next(((name, st) for name, st in model_blocks.values() if BLOCK_FAMILIES[name].prelude), None)
     prelude_reason = None
     if extra:
         prelude_reason = (f"{text_cls or 'the text model'} has children the generated flow does not know: "
                           + ", ".join(f"{k} ({v})" for k, v in sorted(extra.items())))
     if text_path in flagged:          # an op labelled candidate or host in the text model's own forward, between the blocks; a flag under a child goes to that child's block
         flag = f"stage 0 labelled {flagged[text_path]} in {text_path} itself"
-        prelude_reason = (prelude_reason + "; " if prelude_reason else "") + flag
+        if prelude_family and not prelude_reason:
+            # The generated prelude only repeats the embedding into the streams. What the flag marks (masks and the position inputs of the PLE and
+            # linear-attention blocks) is read by those blocks, which are stubs or take `ids`, so the flag stays on record as a note.
+            notes.append(flag + "; the generated prelude only repeats the embedding into the residual streams, and the blocks that read masks or token ids are stubs of their own")
+        else:
+            prelude_reason = (prelude_reason + "; " if prelude_reason else "") + flag
+    if prelude_reason:
+        prelude_family = None        # a stub writes the step before the first layer, and it also repeats the embedding into the streams
     epilogue = sorted((k, v) for k, v in extra.items())
     # The layers: one variant per set of children the tensors show.
     per_layer: dict = {}
@@ -409,6 +601,10 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
                 else:
                     layer.blocks[kid] = ("attention", settings)
                     attention_settings = settings
+            elif hit := _recognize_family(Site(kp, kcls, kattrs, kkids, by_pattern, con, frozenset(plus_one), "layer")):          # a flag under a family block does not stub it: the family writes its own ops and its reference test is the check
+                fam, settings = hit
+                placements.update(settings.get("placements", {}))
+                layer.blocks[kid] = (fam.name, {k: v for k, v in settings.items() if k != "placements"})
             else:
                 why = flag or ("a " + kcls + " block the generator does not write" if kcls != "?" else "a block the construction does not describe")
                 if MLP_CORE <= set(kkids) and not flag:
@@ -442,7 +638,8 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     return Plan(model_class=con.model_class, text_path=text_path, layers_path=layers_path, n_layers=n_layers, hidden=hidden, vocab=vocab,
                 pad_id=pad if type(pad) is int and 0 <= pad < vocab else 0, config=small, embed_path=embed_path, final_norm=final_norm,
                 lm_head_path=lm_head_path, tied=tied, prelude_reason=prelude_reason, epilogue=epilogue, layers=layers, placements=placements,
-                norm_eps=norm_eps, plus_one_norms=plus_one, attention=attention_settings, stubs=stubs, notes=notes)
+                norm_eps=norm_eps, plus_one_norms=plus_one, attention=attention_settings, stubs=stubs, notes=notes,
+                model_blocks=model_blocks, prelude_family=prelude_family)
 
 
 def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps, default_eps, hidden):
@@ -616,11 +813,21 @@ def render(p: Plan) -> str:
               "    o = ttnn.experimental.nlp_concat_heads(o, memory_config=ttnn.DRAM_MEMORY_CONFIG)",
               '    return _linear(model, prefix + ".o_proj", o)', "", ""]
     stubs = {s.function: s for s in p.stubs}
+    used = [name for name in BLOCK_FAMILIES
+            if any(b[0] == name for l in p.layers for b in l.blocks.values()) or any(b[0] == name for b in p.model_blocks.values())
+            or (p.prelude_family and p.prelude_family[0] == name)]
+    for name in used:
+        if BLOCK_FAMILIES[name].helpers:
+            L += BLOCK_FAMILIES[name].helpers()
     if p.prelude_reason:
         L += _stub_function("_model_prelude", "model, x, ids", stubs["_model_prelude"],
                             [f"The reference's forward may change the embedding before the first layer; x is [1, 1, S, HIDDEN] TILE bf16 from _embedding."])
+    elif p.prelude_family:
+        L += BLOCK_FAMILIES[p.prelude_family[0]].prelude(p.prelude_family[1])
     for k, v in p.epilogue:
         L += _stub_function(f"_model_{k}", "model, x", stubs[f"_model_{k}"])
+    for k, (name, settings) in sorted(p.model_blocks.items()):
+        L += BLOCK_FAMILIES[name].emit(f"_model_{k}", f"{p.text_path}.{k}", settings, "model")
     for layer in p.layers:
         lp = f"{p.layers_path}.{{i}}"
         if layer.standard:
@@ -636,11 +843,13 @@ def render(p: Plan) -> str:
             if kind == "stub":
                 L += _stub_function(f"_{layer.key}_{kid}", "model, i, x, ids", stubs[f"_{layer.key}_{kid}"],
                                     [f"The Linear children of this block are uploaded by load() and can be called as _linear(model, f\"{lp}.{kid}.<name>\", x)."])
+            elif kind in BLOCK_FAMILIES:
+                L += BLOCK_FAMILIES[kind].emit(f"_{layer.key}_{kid}", f"{lp}.{kid}", details, "layer")
         parts = []
         for kid, (kind, details) in sorted(layer.blocks.items()):
             call = {"mlp": f'_mlp(model, p + ".{kid}", x)', "rms_norm": f'_rms_norm(model, p + ".{kid}", x)',
                     "attention": f'_attention(model, p + ".{kid}", x, cos, sin)', "linear": f'_linear(model, p + ".{kid}", x)',
-                    "stub": f"_{layer.key}_{kid}(model, i, x, ids)"}[kind]
+                    "stub": f"_{layer.key}_{kid}(model, i, x, ids)"}.get(kind) or BLOCK_FAMILIES[kind].describe(f"_{layer.key}_{kid}", details)
             parts.append(f"{kid} ({layer.children[kid]}): {call}")
         L += _stub_function(f"_layer_{layer.key}", "model, i, x, ids, cos, sin", stubs[f"_layer_{layer.key}"],
                             [f"Layers {layer.indices}. Parts, each a generated helper or a stub above; compose them as {layer.cls}.forward does:",
@@ -678,13 +887,13 @@ def render(p: Plan) -> str:
         L.append("    cos, sin = _rope_tables(model, len(padded))")
     else:
         L.append("    cos = sin = None")
-    if p.prelude_reason:
+    if p.prelude_reason or p.prelude_family:
         L.append("    x = _model_prelude(model, x, padded)")
     L += ["    for i in range(N_LAYERS):",
           "        x = LAYERS[LAYER_VARIANT[i]](model, i, x, padded, cos, sin)"]
     if p.final_norm:
         L.append(f'    x = _rms_norm(model, "{p.final_norm[0]}", x)')
-    for k, _ in p.epilogue:
+    for k in sorted({k for k, _ in p.epilogue} | set(p.model_blocks)):
         L.append(f"    x = _model_{k}(model, x)")
     L += [f'    logits = _linear(model, "{p.lm_head_path}", x)',
           "    out = _to_host(model, logits).float()",

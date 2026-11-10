@@ -13,6 +13,14 @@ from orchard import op_cheats, port_template as pt, stub_prompts as sp, thin_rep
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "port-generator"
 SHEET = op_cheats.load_sheet(op_cheats.TTNN_SHEET)
 
+def _generate_without_families(**kw):
+    """The Qwen4 plan with no registered block family: the hyper-connection blocks stay stubs, as before issue 696. These tests exercise the stub
+    requests for that whole list; the plan with the registry is tested in tests/test_port_template_registry.py."""
+    from unittest import mock
+    with mock.patch.dict(pt.BLOCK_FAMILIES, clear=True):
+        return pt.generate(**kw)
+
+
 
 def _load(name):
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
@@ -20,7 +28,7 @@ def _load(name):
 
 @pytest.fixture(scope="module")
 def tiny():
-    return pt.generate(config=_load("tiny-qwen4-config.json"), construction=_load("tiny-qwen4-construction.json"),
+    return _generate_without_families(config=_load("tiny-qwen4-config.json"), construction=_load("tiny-qwen4-construction.json"),
                        tensors=_load("tiny-qwen4-tensors.json"), inventory=_load("tiny-qwen4-ops-inventory.json"))
 
 
