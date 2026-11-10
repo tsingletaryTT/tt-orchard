@@ -139,7 +139,7 @@ from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
-from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
+from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_THINKING, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               ABORT_STOP_GRACE_S, BOOT_STALL_S, BUSY_RETRY_WAIT_S, COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S, WIDE_FABRIC_RETRIES)
@@ -168,9 +168,10 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, FULL_PORT_STAGE_4, SKIP_3_FULL_PORT, SKIP_4_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed,
-                            WEIGHTS_ONLY_REHEARSAL_GATES, rehearsal_options_problem, weights_only_rehearsal)
+                            WEIGHTS_ONLY_REHEARSAL_GATES, rehearsal_options_problem, thin_port, thin_port_options_problem, weights_only_rehearsal)
 from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, op_cheats, phone_a_friend, port_construction, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import repair_help            # the outside helper inside the port repair rounds (issue 427, run11)
+from orchard import thin_port as thin_port_step      # stage 2's prepare step as one chat request per stub (issue 677, arm E)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
 from orchard.stages import UNVERIFIED_LEDGER_DECISION
@@ -901,7 +902,7 @@ class Supervisor:
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
-                 full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
+                 full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
                     port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
                     abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
@@ -944,6 +945,9 @@ class Supervisor:
         # `--weights-only-rehearsal`: the weights-only route's model gives unreadable text on purpose (the perturbed Qwen4 frankenmodel), so a
         # measured `coherent` of false is waived in stages 2, 4 and 7. Recorded in run_start only; the gates get the ledger's answer.
         self.weights_only_rehearsal = weights_only_rehearsal
+        # `--thin-port` (issue 677, arm E): stage 2 of a full port asks the coder for one stub at a time. Recorded in run_start only; the stage reads
+        # the ledger's answer (stages.thin_port), never this request.
+        self.thin_port = thin_port
         # Whether the model's purpose needs sampling: "auto" reads it from stage 0's files, the others are the operator's word (orchard/sampling_choice.py).
         self.sampling = sampling
         # An abort is terminal unless the operator asks for this (`--resume-aborted`): then an operator's or a signal's abort is
@@ -1300,6 +1304,7 @@ class Supervisor:
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
                                **({"weights_only_rehearsal": True} if self.weights_only_rehearsal else {}),
+                               **({"thin_port": True} if self.thin_port else {}),
                                **({"helper_drives": self.helper_drives} if self.helper_drives is not None else {}),
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
@@ -2548,7 +2553,11 @@ class Supervisor:
             elif not (resumed and (stage_dir / "test-result.json").is_file()):
                 self._draft(spec, stage_dir)
                 prepared = self._prepare_in_code(spec, stage_dir)
-                if not prepared.done:
+                thin = None if prepared.done else self._thin_port_prepare(spec, stage_dir, escalated)       # `--thin-port`: stubs by request, no agent step
+                if thin is not None:
+                    if thin.status != "done":
+                        return thin.status, [f"the prepare step ended: {thin.status} {thin.detail}".strip()], None
+                elif not prepared.done:
                     out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed, extra=prepared.note)
                     out = self._wrap_up(spec, stage_dir, prep, out)
                     if out.status != "done":
@@ -4421,6 +4430,45 @@ class Supervisor:
         step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
         return step.run(system, f"{user}\n\n## From the supervisor\n{extra}" if extra else user), step
 
+    def _thin_port_prepare(self, spec, stage_dir: Path, escalated: bool):
+        """Stage 2 of a full port run with `--thin-port` (issue 677, arm E): the prepare step as one chat request per stub of a generated port
+        (orchard/thin_port.py), to the same coder tier the agent step would use and with its sampling. Returns None when the option is off, for
+        any other stage, or when the generator cannot run (the ledger says why and the agent's prepare step runs as without the option); otherwise
+        the step's Outcome: "done" (stubs may be left; the CPU pre-check, the board test and the repair rounds then read the port as usual) or
+        "error" (the coder's endpoint failed after one retry), which ends the stage the way a failed agent prepare step does."""
+        n = spec.number
+        if not (n == 2 and spec.draft == "full_port" and thin_port(self.ledger.read())):
+            return None
+        tier = tier_for(self.cfg, n, phase="prepare", escalated=escalated)
+        try:
+            used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
+        except TierUnavailable as exc:
+            self._block(n, str(exc))
+        if note and not quiet_substitute(self.cfg, self.coder_tier, tier, used):
+            self.ledger.append("decision", n, decision="tier substituted", note=note)
+        tcfg = self.cfg.tiers[used]
+        sampling = {"max_tokens": tcfg.get("max_tokens", AGENT_MAX_TOKENS), "temperature": tcfg.get("temperature", 0),
+                    **{k: tcfg[k] for k in ("frequency_penalty", "repetition_penalty", "top_p", "top_k") if k in tcfg}}
+        self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
+        out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
+                                 python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=endpoint,
+                                 model=tcfg["model"], sampling=sampling, thinking=AGENT_THINKING)
+        if out.status == "skipped":
+            self.ledger.append("decision", n, decision="thin port not used", reason=out.detail[:300],
+                               note="the agent's prepare step runs as it would without the option")
+            return None
+        if out.status == "done":
+            # The agent's prepare step writes handoff.json after the port; the hardware phase reads it (`_read_test`). The supervisor writes it here.
+            _put(stage_dir / "handoff.json", json.dumps({
+                "goal": f"Port {self.model_id} to ttnn and agree with the stage-1 CPU reference on greedy tokens.",
+                "stage": n,
+                "evidence": [f"{full_port.PORT_DIR}port_model.py", "stages/2/evidence/port-check.json", "stages/2/evidence/hw-test-output.txt"],
+                "next_action": "Run the supervisor's hardware check (python3 -P -s stages/2/port_check.py) on a leased board and compare the chip's "
+                               "greedy tokens with the stage 1 CPU reference.",
+                "check_on_return": "top1_agreement >= 0.85 over >=16 tokens; free_run_text is readable; load_s > 0.",
+                "written_by": "the supervisor (--thin-port)"}, indent=2) + "\n")
+        return out
+
     def _draft(self, spec, stage_dir: Path) -> None:
         """Write the config a stage's skill starts from, when the run already holds every fact in it
         (orchard/swap_draft.py), and copy the templates that read it. A config already in the stage
@@ -6227,6 +6275,10 @@ def parse(argv=None):
                         "of scripts/tiny_qwen4/make_franken.py): a measured `coherent` of false is waived in stage 2's swap check, each stage 4 "
                         "configuration and stage 7's boot check, and no other check, and the ledger says so each time. Given when the run starts "
                         "and recorded in run_start; a resume keeps it and cannot add it. With --full-port it needs --full-port-rehearsal too")
+    r.add_argument("--thin-port", action="store_true",
+                   help="stage 2 of a full port fills the stubs of a generated port with one chat request each (orchard/thin_port.py) in place of the "
+                        "agent's prepare step; the board test and the repair rounds are unchanged. Needs --full-port, is given when the run starts "
+                        "and is recorded in run_start; a resume keeps it and cannot add it")
     r.add_argument("--resume-aborted", action="store_true",
                    help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
@@ -6382,9 +6434,18 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                                     weights_only_rehearsal=weights_only_rehearsal(entries) or weights_rehearsal_req)
     if why:
         raise ValueError(why)
+    thin_req = bool(getattr(args, "thin_port", False))
+    if thin_req and progress.started and not thin_port(entries):
+        raise ValueError("--thin-port changes how stage 2 is prepared, so it can be given only when the run starts. This run started without "
+                         "it. Move this run's directory aside and start a new run with the flag")
+    why = thin_port_options_problem(full_port=full_port_enabled(entries) or bool(getattr(args, "full_port", False)),
+                                    thin_port=thin_port(entries) or thin_req)
+    if why:
+        raise ValueError(why)
     if progress.started:
         rehearsal_req = False                   # a resumed run keeps what run_start holds
         weights_rehearsal_req = False
+        thin_req = False
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
         graft_on = False                        # a run that opted out of the graft trial stays opted out
@@ -6480,7 +6541,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       sampling=sampling_mode, port_repair_rounds=repair_rounds, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
-                      weights_only_rehearsal=weights_rehearsal_req, stack_pins=stack_pins,
+                      weights_only_rehearsal=weights_rehearsal_req, thin_port=thin_req, stack_pins=stack_pins,
                       kind_override=getattr(args, "model_kind", None),
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,

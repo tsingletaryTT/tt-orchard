@@ -2490,6 +2490,21 @@ def weights_only_rehearsal(entries: list[dict]) -> bool:
 
 # The weights-only gates that take the `rehearsal` keyword: stage 2 (both classes), stage 4 and stage 7's boot check, the three places
 # where the swap check judges the free-run text. The supervisor gives the keyword to these and to no other gate.
+def thin_port(entries: list[dict]) -> bool:
+    """Whether the operator started the run with `--thin-port` (issue 677, arm E): stage 2 of a full port fills the stubs of a generated port with
+    one chat request each, in place of the agent's prepare step. Only run_start counts, as for `full_port_rehearsal`: no later entry and nothing the
+    coder writes turns it on, and a resume cannot add it."""
+    return any(e["event"] == "run_start" and e["data"].get("thin_port") is True for e in entries)
+
+
+def thin_port_options_problem(*, full_port: bool, thin_port: bool) -> str | None:
+    """Why `--thin-port` does not make sense with the other options, or None. The thin path fills the stubs of a full port's stage 2 port."""
+    if thin_port and not full_port:
+        return ("--thin-port fills the stubs of a generated stage 2 port, which only a full port has. Add --full-port (the run must be a new "
+                "model that needs new code), or leave out --thin-port")
+    return None
+
+
 WEIGHTS_ONLY_REHEARSAL_GATES = (gate_weights_swap, gate_weights_swap_sidecar, gate_mesh_swap, gate_package)
 
 
