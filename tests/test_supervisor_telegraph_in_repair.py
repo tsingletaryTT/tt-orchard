@@ -83,7 +83,9 @@ def stage_ends(rig):
 # ---- the helper at the start of the first round ------------------------------------------------------------------------------------------------
 
 def test_the_first_failed_round_asks_the_helper_places_its_port_and_the_coder_starts_from_it(rig, monkeypatch, tmp_path):
-    tel, wire = wire_helper(monkeypatch, tmp_path, [HONEST])
+    # The helper's draft is tested before the coder's step (issue 596): a draft that still fails (here, one request further along) is the coder's
+    # starting point in the next round, and a draft that passes ends the rounds (tests/test_helper_draft_tested.py).
+    tel, wire = wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN])
     seen = start(rig, BROKEN, [HONEST + "# the coder checked it\n"])
     assert rig.run() == EXIT_ABORTED
     assert stage_ends(rig) == ["pass"]
@@ -93,7 +95,7 @@ def test_the_first_failed_round_asks_the_helper_places_its_port_and_the_coder_st
     assert asked[0]["port_sha256"] == hashlib.sha256(BROKEN.encode()).hexdigest()
     assert placed[0]["sent_sha256"] == placed[0]["found_sha256"] == asked[0]["port_sha256"] and "still the one" in placed[0]["why"]
     assert (rig.run_dir / "stages" / "2" / "telegraph" / "repair-1.py").is_file()
-    assert "has just replaced" in seen[0] and "stages/2/telegraph/repair-1.py" in seen[0] and "OLD file" in seen[0]
+    assert "round 2 of" in seen[0] and "helper's draft" in seen[0] and "prefill" in seen[0]        # the coder starts from the draft's own failure
     assert "# the coder checked it" in port_text(rig)
 
 
@@ -146,12 +148,14 @@ def test_a_failure_that_moved_from_load_to_prefill_is_progress_and_the_next_roun
 
 
 def test_a_failure_at_the_same_request_is_not_progress_and_the_next_round_asks_again(rig, monkeypatch, tmp_path):
+    # Round 1's draft fails at the same request (a draft that fails is the coder's round next); the coder does not move it either, so round 3
+    # starts by asking again (issue 596 moved the second ask from round 2 to round 3).
     still_load = BROKEN.replace("model.layers.2.ple.conv1d.weight", "model.layers.3.other.weight")
     tel, wire = wire_helper(monkeypatch, tmp_path, [still_load, HONEST])
-    start(rig, BROKEN, [still_load + "# a\n", HONEST + "# b\n"])
+    start(rig, BROKEN, [still_load + "# a\n", still_load + "# a2\n", HONEST + "# b\n"])
     assert rig.run() == EXIT_ABORTED
     assert stage_ends(rig) == ["pass"]
-    assert [d["round"] for d in decs(rig, rh.ASKED)] == [1, 2] and [d["k"] for d in decs(rig, rh.ASKED)] == [1, 2]
+    assert [d["round"] for d in decs(rig, rh.ASKED)] == [1, 3] and [d["k"] for d in decs(rig, rh.ASKED)] == [1, 2]
     progress = decs(rig, rh.PROGRESS)
     assert [(p["outcome"], p["helped"]) for p in progress] == [("same request", False), ("passed", True)]
     assert (rig.run_dir / "stages" / "2" / "telegraph" / "repair-2.py").is_file()
@@ -291,21 +295,27 @@ def test_the_limit_is_six_in_the_stage():
 
 def test_the_helper_text_is_never_run_by_the_supervisor(rig, monkeypatch, tmp_path):
     marker = tmp_path / "ran"
-    evil = HONEST + f"\nopen({str(marker)!r}, 'w').write('ran')\n"          # runs only if something imports it at the supervisor's end; the check runs it on the (fake) device
+    # The check runs a placed draft on the (fake) device in its own process (issue 596 tests a draft before the coder's step); the supervisor
+    # process must only read it. The draft writes the pid that imported it: a pid other than the supervisor's means the check ran it.
+    evil = HONEST + f"\nimport os\nopen({str(marker)!r}, 'w').write(str(os.getpid()))\n"
     wire_helper(monkeypatch, tmp_path, [evil])
     start(rig, BROKEN, [HONEST + "# c\n"])
     rig.run()
     import ast
+    import os
     ast.parse((rig.run_dir / "stages" / "2" / "telegraph" / "repair-1.py").read_text())          # the saved reply is text
     assert not decs(rig, rh.STUB)                                                               # and the supervisor judged it by reading it
-    assert not marker.exists(), "the helper's text ran: the supervisor must only read it"          # (finding, PR 496 round 3: the marker was never checked)
+    assert not marker.exists() or marker.read_text() != str(os.getpid()), "the helper's text ran in the supervisor: it must only read it"
 
 
 # ---- review of PR 496 ------------------------------------------------------------------------------------------------------------------------------
 
 def test_after_a_helper_rescued_a_paused_repair_step_the_next_round_still_asks_the_coder(rig, monkeypatch, tmp_path):
     """Finding: the handled watchdog stop stayed set, so the next repair step ended before it sent a request, and the pause entry stayed unresumed."""
-    tel, wire = wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN, PREFILL_BROKEN + "# helper\n", HONEST])
+    # The rescue's draft must move the failure further (to decode) so that round 3 starts with the coder: a failure that did not move on would ask the
+    # helper first, and since issue 596 a draft that passes the check ends the rounds before the coder's step.
+    decode_broken = HONEST.replace("return _peak(token_id + 1)", "raise RuntimeError('decode broke')")
+    tel, wire = wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN, decode_broken, HONEST])
     seen = start(rig, BROKEN, [PREFILL_BROKEN + "# a\n", PREFILL_BROKEN + "# b\n", HONEST])
     looping_coder(rig)
     assert rig.run() == EXIT_ABORTED

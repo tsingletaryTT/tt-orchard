@@ -59,6 +59,7 @@ TOTAL_PER_STAGE = 6                        # asks in stage 2, at attempt starts 
 HELPER_ROUNDS = 10                         # rounds of the helper-driven loop (no coder step) a stage 2 attempt may run
 HELPER_TOTAL = 16                          # asks in stage 2 when the helper drives (attempt starts and rounds together)
 DRIVEN = "helper-driven round"             # the ledger entry of a round the helper drove: `round`, `op`, hashes, `cost_usd`, `change`
+DRAFT_TESTED = "helper draft tested"        # how a placed draft fared in the check before the coder's step (issue 596): `round`, `outcome` (passed, failed, not tested), `op`, `failure`, `reason`
 BEST = "best port recorded"                # the furthest a port has got along the request chain: `op`, `rank`, `port_sha256`, `attempt`
 RESTORED = "best port restored"            # the best port put back at the start of an attempt: `op`, `port_sha256`, `skeleton_sha256`
 BEST_DIR = "2.best"                        # stages/2.best/<snapshot>/: copies of the best port that the move-aside of a failed attempt does not take
@@ -207,10 +208,21 @@ def previous_op(entries: list[dict], n: int, k: int):
     return False, None
 
 
+def draft_failed_in_round(entries: list[dict], n: int, k: int) -> bool:
+    """Whether a draft the helper placed in round `k` of this attempt was tested before the coder's step and failed the check (issue 596). The
+    round after it belongs to the coder: its failure is the draft's, and asking again at once would spend the round cap on drafts that share one
+    failure."""
+    floor = _last_start(entries, n)
+    return any(e.get("stage") == n and e.get("event") == "decision" and _decision(e) == DRAFT_TESTED and e["seq"] > floor
+               and _data(e).get("round") == k and _data(e).get("outcome") == "failed" for e in entries)
+
+
 def start_trigger(entries: list[dict], n: int, k: int, failure: dict) -> tuple[bool, str]:
     """Whether to ask at the start of round `k`: in round 1 (the port as it came out of the attempt's first step failed), and in a later round when
     the failure is no further along than in the round before (the coder did not move it). A round that moved the failure on lets the coder go
     on first; the helper is asked after its step if the step fails (`coder_failed`)."""
+    if k > 1 and draft_failed_in_round(entries, n, k - 1):
+        return False, "the helper's draft was tested in the previous round and failed; the coder goes first on its failure"
     found, before = previous_op(entries, n, k) if k > 1 else (False, None)
     after = failure.get("op")
     if found and before == after == port_repair.NUMERICS_OP:
