@@ -171,6 +171,7 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             WEIGHTS_ONLY_REHEARSAL_GATES, rehearsal_options_problem, thin_port, thin_port_options_problem, weights_only_rehearsal)
 from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, op_cheats, phone_a_friend, port_construction, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import repair_help            # the outside helper inside the port repair rounds (issue 427, run11)
+from orchard import thin_repair                  # the thin repair rounds of a --thin-port run (issue 677, arm E2)
 from orchard import thin_port as thin_port_step      # stage 2's prepare step as one chat request per stub (issue 677, arm E)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
@@ -2902,7 +2903,15 @@ class Supervisor:
                         self._repair_baseline = None          # no coder step ends on a baseline in a round the helper drove
                         self.ledger.append("decision", n, decision=repair_help.DRIVEN, round=k, of=limit, op=failure["op"],
                                            port_sha256=self._port_sha(stage_dir), failure=fline, **extra_numbers)
-                if not driven_ok:
+                thin_ok = False
+                if not driven_ok and thin_port(self.ledger.read()):
+                    # `--thin-port`: the failing function is asked for in one request; the agent's repair step below is the fallback.
+                    thin_ok, stop = self._thin_repair_round(spec, stage_dir, k, failure, raw, escalated)
+                    if stop:
+                        return stop, [f"the thin repair round {k} ended: {stop}"], None
+                    if thin_ok:
+                        self._repair_baseline = None          # no coder step ends on a baseline in a round the thin repair settled
+                if not driven_ok and not thin_ok:
                     if self.repair_help and getattr(self, "telegraph", None) is not None and not handed_back:
                         ask_now, ask_why = repair_help.start_trigger(self.ledger.read(), n, k, failure)
                         if ask_now:
@@ -4439,16 +4448,7 @@ class Supervisor:
         n = spec.number
         if not (n == 2 and spec.draft == "full_port" and thin_port(self.ledger.read())):
             return None
-        tier = tier_for(self.cfg, n, phase="prepare", escalated=escalated)
-        try:
-            used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
-        except TierUnavailable as exc:
-            self._block(n, str(exc))
-        if note and not quiet_substitute(self.cfg, self.coder_tier, tier, used):
-            self.ledger.append("decision", n, decision="tier substituted", note=note)
-        tcfg = self.cfg.tiers[used]
-        sampling = {"max_tokens": tcfg.get("max_tokens", AGENT_MAX_TOKENS), "temperature": tcfg.get("temperature", 0),
-                    **{k: tcfg[k] for k in ("frequency_penalty", "repetition_penalty", "top_p", "top_k") if k in tcfg}}
+        used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "prepare")
         self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
         out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
                                  python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=endpoint,
@@ -4468,6 +4468,49 @@ class Supervisor:
                 "check_on_return": "top1_agreement >= 0.85 over >=16 tokens; free_run_text is readable; load_s > 0.",
                 "written_by": "the supervisor (--thin-port)"}, indent=2) + "\n")
         return out
+
+    def _thin_coder(self, spec, escalated: bool, phase: str):
+        """(tier name, endpoint, tier config, sampling) of the coder tier a thin step of stage `spec.number` uses, the tier an agent step of that phase
+        would use: a tier that is down blocks the run, a substitute is noted in the ledger."""
+        n = spec.number
+        tier = tier_for(self.cfg, n, phase=phase, escalated=escalated)
+        try:
+            used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
+        except TierUnavailable as exc:
+            self._block(n, str(exc))
+        if note and not quiet_substitute(self.cfg, self.coder_tier, tier, used):
+            self.ledger.append("decision", n, decision="tier substituted", note=note)
+        tcfg = self.cfg.tiers[used]
+        sampling = {"max_tokens": tcfg.get("max_tokens", AGENT_MAX_TOKENS), "temperature": tcfg.get("temperature", 0),
+                    **{k: tcfg[k] for k in ("frequency_penalty", "repetition_penalty", "top_p", "top_k") if k in tcfg}}
+        return used, endpoint, tcfg, sampling
+
+    def _thin_repair_round(self, spec, stage_dir: Path, k: int, failure: dict, raw: str, escalated: bool):
+        """Round `k` of the port repair rounds of a `--thin-port` run (issue 677, arm E2): one chat request for the function the check's failed line
+        names (orchard/thin_repair.py) in place of the agent's repair step. Returns (handled, stop): handled is True when the reply was spliced into
+        the port (the round goes on to its check), stop is the operator's or the watchdog's command read before the paid request (the round
+        ends). Anything the thin repair cannot place or settle (a numerics failure, a line outside a function, two refused replies, an endpoint
+        that fails, a round past the cap) is recorded as `thin repair handed to the coder` and the agent's repair step runs as without the option."""
+        n = spec.number
+        if n != 2 or not thin_port(self.ledger.read()):
+            return False, None
+        if stop := self._driven_stop(spec):
+            return False, stop
+        if failure.get("kind") != "port":
+            self.ledger.append("decision", n, decision="thin repair handed to the coder", round=k, reason="the failure is not a failure of the port itself")
+            return False, None
+        used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "repair")
+        started = self.clock()
+        result = thin_repair.run_round(stage_dir=stage_dir, k=k, raw_output=raw, post=self.http, endpoint=endpoint, model=tcfg["model"],
+                                       sampling=sampling, thinking=AGENT_THINKING)
+        fields = dict(round=k, function=result.function, error_type=result.etype, hint=result.hint, requests=result.requests,
+                      prompt_chars=result.prompt_chars, completion_tokens=result.completion_tokens, seconds=round(self.clock() - started, 3))
+        if result.status == "spliced":
+            self.ledger.append("decision", n, decision="thin repair round", outcome="spliced", tier=used, **fields)
+            return True, self._driven_stop(spec)
+        self.ledger.append("decision", n, decision="thin repair handed to the coder", reason=result.reason or result.status, outcome=result.status,
+                           tier=used, **fields)
+        return False, None
 
     def _draft(self, spec, stage_dir: Path) -> None:
         """Write the config a stage's skill starts from, when the run already holds every fact in it
