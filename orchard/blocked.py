@@ -21,12 +21,12 @@ import os
 import time
 from pathlib import Path
 
-from orchard import narrate, safeio
+from orchard import narrate, runaway, safeio
 from orchard.stages import STAGES
 from orchard.status import classify_pause, stage_rows
 
 REASONS = ("needs-new-model-code", "model-does-not-fit", "full-port-stages-unbuilt", "restricted-head", "scoring-route", "audio-path-unbuilt", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
-           "hardware-unhealthy", "coder-unusable", "package-missing", "stack-stale", "helper-unreachable", "blocked", "unclassified")
+           "hardware-unhealthy", "coder-unusable", "package-missing", "stack-stale", "helper-unreachable", "replies-capped", "blocked", "unclassified")
 
 # Blocks that `tt-orchard bringup` retries by itself (orchard/cli.py). A retry resumes from the ledger with a fresh
 # coder context. These three can clear on their own: a coder that did not come up, a chip or lease that settled after a
@@ -53,6 +53,12 @@ BOOT_ABORT_MARKS = ("the coder boot stalled", "the coder container exited", "the
 HELPER_UNREACHABLE_MARK = "the helper endpoint is unreachable"
 
 
+# The fixed start of the block text for a coder whose replies kept running away (cut off at max_tokens) across a stage (issue 458, item 4). The
+# agent writes it (orchard/runaway.py); it is read before any other word because the text that follows names the chip tier and the coder.
+# The block is not retried by itself: the same sampling and the same cap run away the same way.
+REPLIES_CAPPED_MARK = runaway.REPLIES_CAPPED_MARK
+
+
 # The fixed start of the container log lines in a coder boot abort's block text (issue 585). Everything after it is log text from the
 # container, which can say any word (`all-ones`, `chip`, `disk`). The classifier and the retry rule read only what comes before it, so a log
 # line cannot make a boot abort a hardware block, and the supervisor's own verdict sentences stay in front of it.
@@ -77,6 +83,7 @@ def retryable(code: str, reason: str = "") -> bool:
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
 _BLOCKED_WORDS = (
     ("helper-unreachable", (HELPER_UNREACHABLE_MARK,)),       # first: its text names a host and a cause that can hold any other row's words
+    ("replies-capped", (REPLIES_CAPPED_MARK,)),               # first: its text names the chip tier and the coder
     ("hardware-unhealthy", (ALL_ONES_MARK,)),                # first: the chips do not answer, whatever else the text says
     ("hardware-unhealthy", (OFF_BUS_MARK.lower(),)),         # a chip that left the bus outranks a container refusal or a boot abort found in the same text
     ("coder-unusable", BOOT_ABORT_MARKS),                    # next: the text holds container log lines
