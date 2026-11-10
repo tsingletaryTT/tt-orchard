@@ -326,23 +326,20 @@ def tiny_qwen4():
 def test_tiny_qwen4_generates_the_standard_parts_and_stubs_every_new_block():
     text, p = tiny_qwen4()
     s = p.summary()
-    assert s["generated"] == ["embedding", "lm_head", "mlp"]
+    assert s["generated"] == ["embedding", "hyper_connection", "lm_head", "mlp"]
     assert [v["indices"] for v in s["layer_variants"]] == [[0, 2], [1], [3]] and not any(v["standard"] for v in s["layer_variants"])
     stubs = {x["function"]: x for x in s["stubs"]}
-    assert set(stubs) == {"_model_prelude", "_model_hyper_connection_mixer",
-                          "_layer_A", "_A_attn_hyper_connection", "_A_linear_attn", "_A_mlp_hyper_connection",
-                          "_layer_B", "_B_attn_hyper_connection", "_B_linear_attn", "_B_mlp_hyper_connection", "_B_ple",
-                          "_layer_C", "_C_attn_hyper_connection", "_C_mlp_hyper_connection", "_C_self_attn"}
+    # The hyper-connection blocks (prelude, mixer and the per-layer connections) are written by the registered family (issue 696, slice 1).
+    assert set(stubs) == {"_layer_A", "_A_linear_attn", "_layer_B", "_B_linear_attn", "_B_ple", "_layer_C", "_C_self_attn"}
     assert stubs["_A_linear_attn"]["class"] == "Qwen4ExpTextGatedDeltaNet"
     assert stubs["_B_ple"]["class"] == "Qwen4ExpTextPLELayer"
     assert "indexer (Qwen4ExpTextQSAIndexer)" in stubs["_C_self_attn"]["reason"]
-    assert "hyper_connection_mixer (Qwen4ExpTextGatedResidual)" in stubs["_model_prelude"]["reason"]
-    assert len(pt.stub_lines(text)) == 15
+    assert len(pt.stub_lines(text)) == 7
     # Placement: every Linear transposed, the embedding table ROW_MAJOR, the plain head norms with 1 added, integer tables on the host.
     assert p.placements["lm_head.weight"] == "linear_weight" and p.placements["model.embed_tokens.weight"] == "embedding"
     assert p.placements["model.layers.{i}.linear_attn.in_proj_qkv.weight"] == "linear_weight"
     assert p.placements["model.layers.{i}.self_attn.q_norm.weight"] == "norm_plus_one"
-    assert p.placements["model.layers.{i}.attn_hyper_connection.hc_norm.weight"] == "tile"          # group_size 64: not a plain RMSNorm
+    assert p.placements["model.layers.{i}.attn_hyper_connection.hc_norm.weight"] == "norm_plus_one"   # group_size 64: written by the hyper-connection family, with 1 added at load
     assert p.placements["model.layers.{i}.ple.ple_embedding.layer_multipliers"] == "host"
     assert sum(1 for v in p.placements.values() if v == "linear_weight") == 24
 
@@ -364,11 +361,11 @@ def test_tiny_qwen4_port_loads_through_the_fake_and_makes_linear_calls_before_th
     model = mod.load(str(snap), fake.MeshDevice(1))
     assert len(model["dev"]) == 95 and len(model["host"]) == 3
     assert model["dev"]["model.layers.0.linear_attn.in_proj_qkv.weight"].shape == (64, 320)
-    with pytest.raises(NotImplementedError, match="_model_prelude"):
+    with pytest.raises(NotImplementedError, match="_layer_A"):          # the prelude is generated now; the first layer is a stub
         mod.prefill(model, [1, 2, 3])
     assert fake.COUNTS["embedding"] == 1
     result = pt.check_sources({"port_model.py": text})
-    assert result["matmul_calls"] >= 2 and not result["ok"] and "15 # AGENT: stub(s) remain" in result["problems"][0]
+    assert result["matmul_calls"] >= 2 and not result["ok"] and "7 # AGENT: stub(s) remain" in result["problems"][0]
 
 
 # ---- every TTNN name the generator emits is in the verified sheet ------------------------------------------------------------------------------
@@ -561,3 +558,40 @@ def test_the_generated_stub_text_is_found_in_a_nested_function_and_a_method_too(
 def test_the_stub_marker_in_a_string_is_still_not_a_stub():
     text = _port_with("    return 'x'  # fine\n    s = '# AGENT: not a stub'")
     assert not pt.check_sources({"port_model.py": text})["stubs"]
+
+
+def test_rms_norm_helper_names_the_prefix_it_has_no_eps_for():
+    """Arm E8: the hyper-connection norm (a group_size norm) is not in NORM_EPS, and a stub called _rms_norm with its prefix. A KeyError inside the
+    helper pointed at the helper. The helper now raises an error that says the caller must compute that norm itself (system review of
+    2026-11-10: a silent fallback to the config eps would turn this into a numerics miss)."""
+    import ast
+    text, _plan = std_generate()
+    ns = {"NORM_EPS": {"model.norm": 1e-5}, "_pattern": pt_pattern}
+    calls = {}
+
+    class T:
+        @staticmethod
+        def rms_norm(x, epsilon, weight):
+            calls["eps"] = epsilon
+            return x
+    fn = next(n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == "_rms_norm")
+    ns["ttnn"] = T
+    exec(compile(ast.Module([fn], []), "p", "exec"), ns)
+    ns["_rms_norm"]({"dev": {"model.norm.weight": 1}}, "model.norm", 7)
+    assert calls["eps"] == 1e-5
+    with pytest.raises(ValueError, match="not a plain RMS norm.*the function that calls _rms_norm"):
+        ns["_rms_norm"]({"dev": {}}, "model.layers.0.attn_hyper_connection.hc_norm", 7)
+
+
+def test_the_fixed_helpers_are_the_functions_the_generator_always_writes_and_none_is_a_stub():
+    import ast
+    text, _plan = std_generate()
+    names = [n.name for n in ast.parse(text).body if isinstance(n, ast.FunctionDef)]
+    assert set(pt.FIXED_HELPERS) <= set(names)
+    assert pt.stub_lines(text) == []
+    assert "_rms_norm" in pt.FIXED_HELPERS and "_layer_A" not in pt.FIXED_HELPERS and "_mlp" not in pt.FIXED_HELPERS
+
+
+def pt_pattern(name):
+    import re
+    return re.sub(r"(?<=\.)\d+(?=\.|$)", "{i}", name)

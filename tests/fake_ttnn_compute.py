@@ -68,6 +68,9 @@ def _rotate_half(x):
     return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
 
 
+builtins_slice = slice          # the fake's own `slice` op below shadows the builtin inside make()
+
+
 def make() -> types.ModuleType:
     """The fake module, fresh (the counts are shared)."""
     m = types.ModuleType("ttnn")
@@ -143,6 +146,19 @@ def make() -> types.ModuleType:
         _count("silu")
         return Tensor(torch.nn.functional.silu(x.t))
 
+    def sigmoid(x):
+        _count("sigmoid")
+        return Tensor(torch.sigmoid(x.t))
+
+    def slice(input_tensor, slice_start, slice_end, slice_step=None, *, memory_config=None):
+        """ttnn.slice on the padded shape: every start inside its dimension and every end at most the dimension (a slice outside fails)."""
+        _count("slice")
+        t = input_tensor.t
+        for d, (lo, hi) in enumerate(zip(slice_start, slice_end)):
+            if not (0 <= lo < t.shape[d] and 0 < hi <= t.shape[d] and lo < hi):
+                raise RuntimeError(f"TT_FATAL: slice [{lo}, {hi}) is outside dimension {d} of size {t.shape[d]}")
+        return Tensor(t[tuple(builtins_slice(lo, hi) for lo, hi in zip(slice_start, slice_end))], input_tensor.replicated)
+
     def multiply(a, b):
         _count("multiply")
         return Tensor(a.t * (b.t if isinstance(b, Tensor) else b))
@@ -167,6 +183,7 @@ def make() -> types.ModuleType:
 
     m.from_torch, m.to_torch, m.linear, m.matmul, m.embedding, m.rms_norm = from_torch, to_torch, linear, matmul, embedding, rms_norm
     m.silu, m.multiply, m.add, m.reshape, m.concat, m.deallocate, m.to_layout = silu, multiply, add, reshape, concat, deallocate, to_layout
+    m.sigmoid, m.slice = sigmoid, slice
 
     ex = types.ModuleType("ttnn.experimental")
 

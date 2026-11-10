@@ -64,7 +64,29 @@ HINTS = (
      "`{0}` is not a key of CONFIG. CONFIG has exactly these keys: {config_keys}. Read the value from the key that holds it."),
     (re.compile(r"^KeyError$"), re.compile(r"\{i\}"),
      "A key that still holds `{{i}}` is a pattern, not a tensor name. Look a weight up in model['dev'] by its real name with the layer number "
-     "filled in (for example 'model.layers.0.…'), and use _pattern(name) only for NORM_EPS and PLACEMENT."),
+     "filled in (for example 'model.layers.0.…'). _pattern(name) turns a real name into the pattern form that PLACEMENT is keyed by; call "
+     "_rms_norm(model, name, x) for an RMS norm and do not index NORM_EPS yourself."),
+    # The shapes below are failures the arm E7 run showed on the chip (issue 677).
+    (re.compile(r"^TypeError$"), re.compile(r"bad operand type for unary -"),
+     "A ttnn tensor has no unary minus. Use ttnn.neg(x) or ttnn.multiply(x, -1.0). Rotate-half is ttnn.concat([ttnn.neg(x2), x1], dim=-1) "
+     "(the graph-fusing skill of tenstorrent/skills shows it, with ttnn.experimental.rotary_embedding as the fused op)."),
+    (re.compile(r"^IndexError$"), re.compile(r"Too many indices for tensor of dimension"),
+     "A ttnn activation is 4-D, [1, 1, S, F]: index it with at most four indices. For a loop over tokens, read the tensor back with _to_host "
+     "first and work on the torch tensor, or slice with ttnn.slice on the sequence dimension."),
+    (re.compile(r"^RuntimeError$"), re.compile(r"slice_start|padded_shape\(\)\[i\]"),
+     "A slice must lie inside the padded shape. For partial rotary application, take the rotary part x[..., :rot] and the rest x[..., rot:] "
+     "with ttnn.slice, where rot is the cos/sin table's width, and check each end against the last dimension. Rotate-half on the rotary part is "
+     "ttnn.concat([ttnn.neg(x2), x1], dim=-1) (graph-fusing skill, tenstorrent/skills)."),
+    (re.compile(r"^RuntimeError$"), re.compile(r"same shape except in the concat dim|concat"),
+     "ttnn.concat needs pieces whose shapes match in every dimension except the concat dimension. For partial rotary application, rotate only "
+     "the first rot columns ([1, 1, S, rot]), keep the remaining columns ([1, 1, S, F - rot]) unchanged, and concatenate the two on dim=-1."),
+    # The shapes below are failures the arm E8 run showed on the chip (issue 677).
+    (re.compile(r"^TypeError$"), re.compile(r"ttnn\.repeat\(\)"),
+     "ttnn.repeat takes the tensor and one repeat shape, not one argument per dimension: ttnn.repeat(x, ttnn.Shape([1, 1, 1, n])) repeats the "
+     "last dimension n times."),
+    (re.compile(r"^KeyError$"), re.compile(r"^'model\.[\w.]+\.weight'$"),
+     "model['dev'] is keyed by the checkpoint tensor's own name. A tensor that is stored without a '.weight' suffix (A_log, dt_bias and other "
+     "bare parameters) has no suffix in its key: look the name up exactly as the tensor list in the port facts spells it."),
 )
 
 
@@ -102,6 +124,20 @@ def parse_failed(text) -> Failure | None:
     if msg.endswith(m["q"]):
         msg = msg[:-1]                      # the closing quote of the check's line, when the line was not cut
     return Failure(m["op"], m["file"], int(m["line"]), m["code"], m["etype"], msg)
+
+
+def _holds_generated_mark(port_text: str, function: str) -> bool:
+    """True when the top-level function `function` has a comment line that starts with GENERATED_BLOCK_MARK (a block a family wrote)."""
+    try:
+        tree = ast.parse(port_text)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    lines = port_text.split("\n")
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            body = lines[node.lineno - 1:(node.end_lineno or node.lineno)]
+            return any(l.strip().startswith(port_template.GENERATED_BLOCK_MARK) for l in body)
+    return False
 
 
 def function_at(port_text: str, line: int) -> str | None:
@@ -154,6 +190,12 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
     function = function_at(text, failure.line)
     if function is None:
         return Round("fallback", etype=failure.etype, reason="the failing line is not inside a top-level function")
+    if function in port_template.FIXED_HELPERS or _holds_generated_mark(text, function):
+        # The helper is generated text, the same in every port, or a block a registered family wrote (its function holds GENERATED_BLOCK_MARK).
+        # The stub that called it passed it something it cannot take, and the check's failure line holds one frame only, so the agent loop
+        # (which reads the whole traceback) takes the round.
+        return Round("fallback", function=function, etype=failure.etype,
+                     reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")
     try:
         if sheet is None:
             sheet = op_cheats.load_sheet(op_cheats.TTNN_SHEET)

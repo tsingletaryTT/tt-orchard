@@ -346,7 +346,11 @@ def extract_code(reply: str) -> str:
         raise SpliceError("the reply is not a string of bounded size")
     blocks = _FENCE.findall(reply)
     if len(blocks) > 1:
-        raise SpliceError(f"the reply holds {len(blocks)} code blocks; one is expected")
+        # An explanation block (an example call, a shape table) beside the function is usable: take the one block that defines a function.
+        defining = [b for b in blocks if re.search(r"^\s*(async\s+)?def\s+\w+", b, re.M)]
+        if len(defining) != 1:
+            raise SpliceError(f"the reply holds {len(blocks)} code blocks; one is expected")
+        return defining[0]
     return blocks[0] if blocks else reply
 
 

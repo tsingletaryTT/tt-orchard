@@ -202,6 +202,28 @@
      ]
     },
     {
+     "name": "ttnn.slice",
+     "kind": "op",
+     "signature": "ttnn.slice(input_tensor, slice_start, slice_end, slice_step=None, *, memory_config=None)",
+     "usage": "x = ttnn.slice(x, (0, 0, 0, 0), (1, 1, seq_len, 64))",
+     "notes": "Returns the part between the start and end indices (end exclusive), one index per dimension. Every start must be below the dimension and every end at most the dimension; a slice outside the padded shape fails with TT_FATAL.",
+     "seen_in": "models/tt_transformers/tt/model.py (the last-token slice)",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.sigmoid",
+     "kind": "op",
+     "signature": "ttnn.sigmoid(x)",
+     "usage": "g = ttnn.sigmoid(logits)",
+     "notes": "Elementwise logistic function. The Qwen4 gated residual runs it on the up-projection of the mix weights and on the injection weights (op probe 4 matched the torch module at PCC 0.9999 on one chip).",
+     "seen_in": "models/common/moe/tt_moe_gate.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
      "name": "ttnn.multiply",
      "kind": "op",
      "signature": "ttnn.multiply(a, b)",

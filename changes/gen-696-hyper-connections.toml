@@ -1,0 +1,2 @@
+target = "0.9.150"
+summary = "The port generator writes the Qwen4 hyper-connection blocks through a block-family registry (issue 696), and a failure in a generated block is not sent to the coder."
