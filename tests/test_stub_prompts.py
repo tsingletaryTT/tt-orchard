@@ -51,7 +51,7 @@ def test_a_stub_request_holds_the_helpers_the_sheet_the_construction_the_excerpt
     assert "class Qwen4ExpTextGatedDeltaNet(nn.Module)" in user and "class Qwen4ExpTextMLP" not in user   # this class's excerpt only
     assert "num_v_heads=6" in user and "hidden_size=64" not in user                                       # this class's construction lines only
     assert user.rstrip().endswith("Return a ttnn tensor of the shape the layer expects.")
-    assert user.index("def _A_linear_attn(") > user.index("## Reference class")                            # the stub comes last
+    assert user.rindex("def _A_linear_attn(") > user.index("## Reference class")                            # the stub comes last
     assert "# AGENT:" in user                                                                               # the stub as it stands, marker included
     assert "Mistakes seen in runs:" in user
     assert len(user) < 20_000
@@ -88,7 +88,7 @@ def test_a_repair_request_holds_the_report_the_diff_and_the_function(tiny):
     text, _ = tiny
     req = sp.repair_request(text, "_mlp", last_check="FAILED at prefill: " + "z" * 10_000, layer_diff="layer 2 differs", sheet=SHEET)
     assert req["function"] == "_mlp" and req["args"] == ["model", "prefix", "x"]
-    assert len(req["user"]) < 4_000 + 3_000 + 6_000 and "layer 2 differs" in req["user"] and "def _mlp(" in req["user"]
+    assert len(req["user"]) < 4_000 + 3_000 + 6_000 + 3_000 and "layer 2 differs" in req["user"] and "def _mlp(" in req["user"]
     assert "## Mistakes seen in runs" in req["user"]
     with pytest.raises(sp.SpliceError, match="no top-level function"):
         sp.repair_request(text, "_no_such", last_check="x")
@@ -178,6 +178,30 @@ def test_a_reply_with_a_call_or_import_a_port_function_has_no_use_for_is_refused
     with pytest.raises(sp.SpliceError, match=why):
         sp.splice(text, "_A_linear_attn", reply)
     assert sp.function_source(text, "_A_linear_attn") in text
+
+
+@pytest.mark.parametrize("imp,why", [
+    ("from .helpers import _linear", "relative import"),
+    ("from . import helpers", "relative import"),
+    ("from port_helpers import _linear", "cannot import"),
+    ("import helpers", "cannot import"),
+    ("from my_utils import rms", "cannot import"),
+    ("import scipy", "cannot import"),
+])
+def test_an_import_of_a_module_the_port_does_not_have_is_refused_with_the_reason(tiny, imp, why):
+    # Arm E3: the stubs imported modules that do not exist (`from .helpers import ...`, `from port_helpers import ...`), and the port failed at init
+    # on every board check. The port is one file, so an import is refused unless the module is one a port uses.
+    text, _ = tiny
+    with pytest.raises(sp.SpliceError, match=why):
+        sp.splice(text, "_A_linear_attn", _fn("return x", head=imp + "\n"))
+
+
+@pytest.mark.parametrize("imp", ["import ttnn", "import torch", "import math", "import numpy as np", "from functools import lru_cache",
+                                 "from typing import Any", "import re", "from collections import defaultdict", "import itertools"])
+def test_the_imports_a_port_uses_are_accepted(tiny, imp):
+    text, _ = tiny
+    new = sp.splice(text, "_A_linear_attn", _fn("return x", head=imp + "\n"))
+    assert imp in new
 
 
 def test_a_reply_that_uses_ordinary_port_idioms_is_still_accepted(tiny):

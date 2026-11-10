@@ -38,6 +38,11 @@ from orchard import op_cheats, port_construction, port_facts, port_template, res
 REQUEST_TIMEOUT_S = 900.0                # one request; a 27B model at 20 tok/s writes a stub of 2,000 tokens in under two minutes
 PROMPT_CHARS_CAP = 1_500_000             # all requests of one step together: 15 stubs of 20K characters, with two attempts each, fit
 RETRIES_PER_STUB = 1                     # a refused reply gets one more request with the reason added
+STUB_MAX_TOKENS = 4096                   # one stub's reply: the largest stub arm E spliced took 2,509 tokens, and its five runaway replies each ran to the
+                                         # tier's 16,384 and cost minutes; a request is capped at the smaller of the tier's cap and this
+RETRY_TEMPERATURE_MAX = 0.3              # a retry samples at most this warm (never warmer than the tier asked)
+RETRY_REPETITION_PENALTY = 1.1           # added to the retry of a reply that ran to the token cap (a repetition loop) when the tier has no larger one
+CAPPED_REASON = "the reply was cut off at the token cap"
 PORT_NAME = port_facts.SKELETON_NAME
 PORT_FILE_MAX = 4 << 20
 INPUT_MAX = port_template.INPUT_MAX
@@ -156,10 +161,19 @@ def _reply_of(data) -> tuple:
     usage = data.get("usage") if isinstance(data, dict) and isinstance(data.get("usage"), dict) else {}
     tokens = usage.get("completion_tokens") if isinstance(usage.get("completion_tokens"), int) else None
     if choice.get("finish_reason") == "length":
-        return None, tokens, "the reply was cut off at the token cap"
+        return None, tokens, CAPPED_REASON
     if not isinstance(content, str) or not content.strip():
         return None, tokens, "the reply has no content"
     return content, tokens, None
+
+
+def retry_sampling(sampling: dict, *, capped: bool) -> dict:
+    """The sampling of a retry: the temperature lowered to at most RETRY_TEMPERATURE_MAX (never raised), and after a reply that ran to the
+    token cap a repetition penalty of at least RETRY_REPETITION_PENALTY. Returns the changed keys only (what the ledger records)."""
+    changed = {"temperature": min(sampling.get("temperature", 0), RETRY_TEMPERATURE_MAX)}
+    if capped:
+        changed["repetition_penalty"] = max(sampling.get("repetition_penalty", 0), RETRY_REPETITION_PENALTY)
+    return changed
 
 
 def run(*, run_dir, stage_dir, snapshot, python, ledger, stage: int, post, endpoint: str, model: str, sampling: dict,
@@ -205,13 +219,14 @@ def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str, model
     todo = stub_prompts.stub_names(text)
     cap = max_requests if max_requests is not None else request_cap(len(todo))
     url = endpoint.rstrip("/") + "/chat/completions"
+    base = {**sampling, "max_tokens": min(sampling.get("max_tokens", STUB_MAX_TOKENS), STUB_MAX_TOKENS)}
     out = Outcome("done")
     stopped = None
     for name in todo:
         stub = by_name.get(name)
         if stub is None:
             continue                                            # a marked function the plan does not know: left for the repair loop
-        refusal = None
+        refusal, was_capped = None, False
         for attempt in range(1, 2 + RETRIES_PER_STUB):
             request = stub_prompts.stub_request(text, stub, sheet=sheet, excerpts=inputs.excerpts, construction_text=inputs.construction_text,
                                                 inventory=inputs.inventory)
@@ -221,7 +236,8 @@ def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str, model
             if out.prompt_chars + chars > max_prompt_chars:
                 stopped = "prompt size cap"
                 break
-            body = _body(model, request, user, sampling, thinking)
+            changed = retry_sampling(base, capped=was_capped) if attempt > 1 else None
+            body = _body(model, request, user, {**base, **(changed or {})}, thinking)
             started = clock()
             sent = _send(post, url, body, out, cap)
             seconds = round(clock() - started, 3)
@@ -246,6 +262,8 @@ def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str, model
                 except stub_prompts.SpliceError as exc:
                     reason = str(exc)[:200]
             fields = {"function": name, "attempt": attempt, "prompt_chars": chars, "seconds": seconds}
+            if changed:
+                fields["retry_sampling"] = changed
             if tokens is not None:
                 fields["completion_tokens"] = tokens
             if new is not None:
@@ -256,7 +274,7 @@ def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str, model
                 break
             last = attempt == 1 + RETRIES_PER_STUB
             ledger.append("decision", stage, decision="thin port request", outcome="left as a stub" if last else "refused", reason=reason, **fields)
-            refusal = reason
+            refusal, was_capped = reason, reason == CAPPED_REASON
         if stopped:
             break
     if stopped:
