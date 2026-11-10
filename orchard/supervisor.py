@@ -4407,8 +4407,7 @@ class Supervisor:
         # What the replies of this step may use (issue 458): the cap and sampling of the tier, and the retry profile after a capped reply.
         step_sampling = {"max_tokens": tcfg.get("max_tokens", AGENT_MAX_TOKENS), "temperature": tcfg.get("temperature", 0),
                     **{k: tcfg[k] for k in ("frequency_penalty", "repetition_penalty", "top_p", "top_k") if k in tcfg},
-                    "retry_after_cap": unstick.record(), "restarts_on_caps": AGENT_RESTARTS_ON_CAPS,
-                    "stage_restart_after": AGENT_STAGE_CAPS_RESTART, "stage_block_after": AGENT_STAGE_CAPS_BLOCK}
+                    "retry_after_cap": unstick.record(), "restarts_on_caps": AGENT_RESTARTS_ON_CAPS}
         self.ledger.append("decision", n, decision="agent step", phase=phase, tier=used, model=model,
                            escalated=escalated, skill=str(skill), sampling=step_sampling)
         step = AgentStep(agent=AGENT, endpoint=endpoint, model=model,
