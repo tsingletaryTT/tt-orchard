@@ -1,0 +1,4 @@
+target = "0.9.146"
+summary = "A prototype generator writes the standard blocks of a stage 2 full port through verified TTNN calls and leaves the new blocks as marked stubs, with a CPU check and one prompt per stub."
+pr = 685
+kind = "feature"

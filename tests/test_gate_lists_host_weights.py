@@ -186,7 +186,7 @@ def test_the_message_is_capped_and_keeps_the_instruction_when_the_listing_is_lon
     r = scan({"host": {f"{long_key}{i}": torch_t(i + 1) for i in range(50)}, "dev": {f"{long_key}{i}": device_t(2) for i in range(50)}})
     r["host_elements"], r["device_elements"] = 10 ** 6, 1
     msg = failure(r)
-    listing = msg[msg.index("Largest host copies"):msg.index(" Move the computation")]
+    listing = msg[msg.index("Largest host copies"):msg.index(" Run each projection")]
     assert "device copy" in listing and len(listing) <= PC.HOST_MESSAGE_MAX and listing.rstrip().endswith("see stages/2/decoder_idioms.md.")
 
 

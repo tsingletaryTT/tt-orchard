@@ -1,0 +1,3 @@
+target = "0.9.149"
+summary = "The thin port path (--thin-port): stub requests name the model dict and the module constants, are capped at 4096 tokens and retry cooler; a failed board test is repaired by one request for the failing function, with the agent loop as fallback."
+kind = "feature"

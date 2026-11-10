@@ -1,0 +1,3 @@
+target = "0.9.149"
+summary = "A helper draft placed at the start of a stage 2 repair round is tested by the port check before the coder's step, one ledger decision says how it fared, and the furthest port is kept whenever the helper is on."
+kind = "fix"

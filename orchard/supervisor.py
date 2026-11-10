@@ -139,7 +139,7 @@ from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
-from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
+from orchard.defaults import (AGENT_STAGE_CAPS_BLOCK, AGENT_STAGE_CAPS_RESTART, AGENT_CONTINUATION_TURNS, AGENT_MAX_TOKENS, AGENT_RESTARTS_ON_CAPS, AGENT_THINKING, AGENT_TOOL_DEDUPE, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               ABORT_STOP_GRACE_S, BOOT_STALL_S, BUSY_RETRY_WAIT_S, COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S, WIDE_FABRIC_RETRIES)
@@ -168,9 +168,11 @@ from orchard.stages import (TEXT_MAX_BYTES, coder_start_blocked, AGREEMENT_LEDGE
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for,
                             FULL_PORT_ALLOWED, FULL_PORT_STAGE_2, FULL_PORT_STAGE_3, FULL_PORT_STAGE_4, SKIP_3_FULL_PORT, SKIP_4_FULL_PORT, SCORING_STAGE_1, SCORING_STAGE_2, full_port_enabled, full_port_rehearsal,
                             recorded_by_supervisor, run_model_kind, scoring_routed,
-                            WEIGHTS_ONLY_REHEARSAL_GATES, rehearsal_options_problem, weights_only_rehearsal)
+                            WEIGHTS_ONLY_REHEARSAL_GATES, rehearsal_options_problem, thin_port, thin_port_options_problem, weights_only_rehearsal)
 from orchard import full_port, full_port_entries, full_port_quality, full_port_quality_stage, full_port_serve, full_port_serve_stage, full_port_stage4, model_kind, op_cheats, phone_a_friend, port_construction, port_excerpts, port_facts, port_repair, residency, scoring_check
 from orchard import repair_help            # the outside helper inside the port repair rounds (issue 427, run11)
+from orchard import thin_repair                  # the thin repair rounds of a --thin-port run (issue 677, arm E2)
+from orchard import thin_port as thin_port_step      # stage 2's prepare step as one chat request per stub (issue 677, arm E)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
 from orchard.stages import UNVERIFIED_LEDGER_DECISION
@@ -881,6 +883,8 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
 
 
 # Run 20: the coder wrote a file and called `last-check` 23 times, each time reading the old failure and believing the fix had not worked.
+PRECHECK_DEADLINE_S = 60.0          # the static device-ops analysis opens no device: a minute is far more than it needs
+PRECHECK_OUTPUT_MAX = 64 * 1024
 CHECK_RUNS_NOTE = ("The check runs again only when you reply with no tool call. A write does not run it, and `last-check` keeps showing this "
                     "failure until then. Start with `python3 stages/{n}/stage_tools.py last-check`: its `next:` line is the command to run.")
 
@@ -899,7 +903,7 @@ class Supervisor:
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
                  resume_aborted: bool = False, sampling: str = "auto", full_port: bool = False, full_port_added: bool = False,
-                 full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, stack_pins=None, kind_override: str | None = None,
+                 full_port_rehearsal: bool = False, weights_only_rehearsal: bool = False, thin_port: bool = False, stack_pins=None, kind_override: str | None = None,
                     port_repair_rounds: int = port_repair.DEFAULT_ROUNDS, telegraph=None, tool_dedupe: bool = AGENT_TOOL_DEDUPE, repair_help: bool | None = None,
                     helper_drives: bool | None = None, busy_retry_wait_s: float = BUSY_RETRY_WAIT_S,
                     abort_stop_grace_s: float = ABORT_STOP_GRACE_S, holders_scan=None):
@@ -942,6 +946,9 @@ class Supervisor:
         # `--weights-only-rehearsal`: the weights-only route's model gives unreadable text on purpose (the perturbed Qwen4 frankenmodel), so a
         # measured `coherent` of false is waived in stages 2, 4 and 7. Recorded in run_start only; the gates get the ledger's answer.
         self.weights_only_rehearsal = weights_only_rehearsal
+        # `--thin-port` (issue 677, arm E): stage 2 of a full port asks the coder for one stub at a time. Recorded in run_start only; the stage reads
+        # the ledger's answer (stages.thin_port), never this request.
+        self.thin_port = thin_port
         # Whether the model's purpose needs sampling: "auto" reads it from stage 0's files, the others are the operator's word (orchard/sampling_choice.py).
         self.sampling = sampling
         # An abort is terminal unless the operator asks for this (`--resume-aborted`): then an operator's or a signal's abort is
@@ -1298,6 +1305,7 @@ class Supervisor:
                                **({"full_port": True} if self.full_port else {}),
                                **({"full_port_rehearsal": True} if self.full_port_rehearsal else {}),
                                **({"weights_only_rehearsal": True} if self.weights_only_rehearsal else {}),
+                               **({"thin_port": True} if self.thin_port else {}),
                                **({"helper_drives": self.helper_drives} if self.helper_drives is not None else {}),
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
@@ -2546,7 +2554,11 @@ class Supervisor:
             elif not (resumed and (stage_dir / "test-result.json").is_file()):
                 self._draft(spec, stage_dir)
                 prepared = self._prepare_in_code(spec, stage_dir)
-                if not prepared.done:
+                thin = None if prepared.done else self._thin_port_prepare(spec, stage_dir, escalated)       # `--thin-port`: stubs by request, no agent step
+                if thin is not None:
+                    if thin.status != "done":
+                        return thin.status, [f"the prepare step ended: {thin.status} {thin.detail}".strip()], None
+                elif not prepared.done:
                     out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed, extra=prepared.note)
                     out = self._wrap_up(spec, stage_dir, prep, out)
                     if out.status != "done":
@@ -2869,6 +2881,10 @@ class Supervisor:
                 # is kept in stages/2.best, so the next attempt does not start again from the skeleton.
                 self._record_best(n, stage_dir, failure)
                 asked_here, friend_note, driven_ok = False, "", False
+                if k > 1 and repair_help.draft_failed_in_round(self.ledger.read(), n, k - 1):
+                    # The helper's draft was tested before the coder's step and failed (issue 596): the coder starts from the draft's own failure.
+                    friend_note = ("The files under `stages/2/port/` are the helper's draft from the previous round, and its check failed as shown "
+                                   "above. Correct what the check shows to be wrong and keep what works.")
                 handed_back = self._helper_drive_on() and repair_help.same_failure_twice(self.ledger.read(), n, k)
                 if handed_back:
                     # Two rounds in a row failed at the same request with the same message: the helper's change moved nothing, so this round is the
@@ -2891,13 +2907,30 @@ class Supervisor:
                         self._repair_baseline = None          # no coder step ends on a baseline in a round the helper drove
                         self.ledger.append("decision", n, decision=repair_help.DRIVEN, round=k, of=limit, op=failure["op"],
                                            port_sha256=self._port_sha(stage_dir), failure=fline, **extra_numbers)
-                if not driven_ok:
+                thin_ok = False
+                if not driven_ok and thin_port(self.ledger.read()):
+                    # `--thin-port`: the failing function is asked for in one request; the agent's repair step below is the fallback.
+                    thin_ok, stop = self._thin_repair_round(spec, stage_dir, k, failure, raw, escalated)
+                    if stop:
+                        return stop, [f"the thin repair round {k} ended: {stop}"], None
+                    if thin_ok:
+                        self._repair_baseline = None          # no coder step ends on a baseline in a round the thin repair settled
+                if not driven_ok and not thin_ok:
                     if self.repair_help and getattr(self, "telegraph", None) is not None and not handed_back:
                         ask_now, ask_why = repair_help.start_trigger(self.ledger.read(), n, k, failure)
                         if ask_now:
                             friend_note, _placed, asked_here = self._repair_help(spec, stage_dir, k, limit, failure, raw, why=ask_why, coder_failed=False)
                             if _placed:
                                 self._repair_baseline = port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)    # the coder's step ends on ITS edit
+                                # The helper's draft is judged by the port check before the coder's step starts (issue 596): a draft that fails
+                                # earlier or later than the port it replaced, or passes, is known before the coder spends turns on top of it.
+                                drafted = self._test_placed_draft(spec, stage_dir, k, limit)
+                                if isinstance(drafted, tuple):
+                                    self._repair_baseline = None
+                                    return drafted
+                                if drafted == "tested":
+                                    self._repair_baseline = None
+                                    continue
                     try:
                         out, _ = self._step(spec, "repair", stage_dir, escalated, resumed,
                                             extra=self._repair_text(n, k, limit, failure, raw) + (("\n\n" + friend_note) if friend_note else ""))
@@ -2967,6 +3000,46 @@ class Supervisor:
         self.ledger.append("decision", n, decision=port_repair.STOPPED, reason="did not settle", rounds=port_repair.rounds_used(self.ledger.read(), n), of=limit)
         return "fail", [f"the port repair rounds did not settle within {2 * limit + 2} passes, which a ledger that follows the rules cannot cause; "
                         "the attempt fails, and the next attempt starts again"], None
+
+    def _test_placed_draft(self, spec, stage_dir: Path, k: int, limit: int):
+        """Run the port check on the helper draft that was just placed at the start of repair round `k`, before the coder's repair step (issue 596).
+
+        The test is the round's own rerun path (the same ledger entries and `_hardware_phase`, whose CPU pre-check refuses a draft with no
+        projection call before any board is leased), so a resume reads it like any other test. One decision, `helper draft tested`, says how the
+        draft fared: passed, failed (the op and the check's failed line), or not tested and why. Returns "tested" (the round ends here: a draft
+        that passed ends the rounds, a draft that failed makes the next round's failure the draft's), "not tested" (the check could not run: the
+        coder's step starts on the draft as it did before this check existed), or a stop tuple (the operator's command or the stage's budget)."""
+        n = spec.number
+
+        def not_tested(reason: str) -> str:
+            self.ledger.append("decision", n, decision=repair_help.DRAFT_TESTED, round=k, outcome="not tested", reason=reason[:300])
+            return "not tested"
+
+        if getattr(self.actuator, "deadline_pause", False):
+            return not_tested("the stage's wall-clock budget has run out")
+        if stop := self._driven_stop(spec):
+            return stop, [f"the repair round {k} ended before the helper's draft was tested: {stop}"], None
+        self._keep_round_record(n, stage_dir, k)
+        if moved := swap_prepare.set_aside_results(stage_dir, keep=(port_repair.MARKER, port_repair.OUTPUT)):
+            self.ledger.append("decision", n, decision="results written before the test were set aside", files=moved)
+        if problems := self._pin_full_port(spec, stage_dir, command=True):
+            return not_tested("the check cannot run: " + str(problems[0]))
+        test, problems = self._read_test(stage_dir)
+        if problems:
+            return not_tested("the check cannot run: " + str(problems[0]))
+        self.ledger.append("decision", n, decision=port_repair.RERUN, round=k, record=self._seal(stage_dir, port_repair.MARKER))
+        self._hardware_phase(spec, stage_dir, test)
+        self.ledger.append("decision", n, decision=port_repair.TESTED,
+                           sources=port_repair.digest(port_repair.fingerprint(stage_dir / port_repair.PORT_DIR)))
+        self._repair_verdicts(n, stage_dir)
+        failure = port_repair.read_failure(self.run_dir, stage_dir)
+        if failure is None:
+            self.ledger.append("decision", n, decision=repair_help.DRAFT_TESTED, round=k, outcome="passed")
+        else:
+            raw = port_repair.safe_text(self._read_output(stage_dir), self._homes())
+            self.ledger.append("decision", n, decision=repair_help.DRAFT_TESTED, round=k, outcome="failed", op=failure.get("op"),
+                               failure=(port_repair.numeric_line(failure) if failure.get("kind") == "numerics" else port_repair.failed_line(raw))[:300])
+        return "tested"
 
     def _keep_round_record(self, n: int, stage_dir: Path, k: int) -> None:
         """Copy the failed test's output to evidence/port-repair-round-<k>-output.txt before the next test replaces it, and record the copy's
@@ -3997,7 +4070,7 @@ class Supervisor:
         """Keep the furthest port: when the check that just failed got further along the request chain than every earlier check of this stage
         (across attempts), save the port directory it ran as a snapshot under stages/2.best/ and write `best port recorded` with its op, rank, file list and hashes.
         Advisory: nothing here fails the stage."""
-        if n != 2 or not self._helper_drive_on():
+        if n != 2 or not self._best_port_on():
             return
         try:
             # The rank and the agreement come from the failure the ledger vouches for: the test record is matched to the newest hardware test's
@@ -4098,7 +4171,7 @@ class Supervisor:
         """At the start of a stage 2 attempt: when an earlier attempt left a best port and the fresh port is still the unchanged skeleton, put the
         best port in its place (hash-checked) and return the sentence that tells the coder. None otherwise. Advisory."""
         n = spec.number
-        if n != 2 or not self._helper_drive_on():       # a coder-driven stage 2 starts each attempt as it always did
+        if n != 2 or not self._best_port_on():          # a stage 2 without the helper starts each attempt as it always did
             return None
         try:
             best = repair_help.best_state(self.ledger.read(), n)
@@ -4129,6 +4202,12 @@ class Supervisor:
     def _stage_ask_limit(self) -> int:
         """The helper's asks in stage 2, attempt starts and repair rounds together: the larger cap when the helper drives the rounds."""
         return repair_help.HELPER_TOTAL if self._helper_drive_on() else repair_help.TOTAL_PER_STAGE
+
+    def _best_port_on(self) -> bool:
+        """Whether the furthest port is kept across attempts: when the helper drives stage 2's repair rounds, and also when it only helps a
+        coder-driven stage 2 (the helper and the round asks are on). A helper draft is tested before the coder's step (issue 596), so a draft
+        that got further than the port it replaced is worth keeping when the coder's step then stalls."""
+        return self._helper_drive_on() or (getattr(self, "telegraph", None) is not None and bool(self.repair_help))
 
     def _helper_drive_on(self) -> bool:
         """Whether stage 2's repair rounds are driven by the helper: the helper and the round asks are on, and the operator said so
@@ -4404,6 +4483,7 @@ class Supervisor:
                          frequency_penalty=tcfg.get("frequency_penalty"), repetition_penalty=tcfg.get("repetition_penalty"),
                          top_p=tcfg.get("top_p"), top_k=tcfg.get("top_k"),
                          unstick=unstick, restart_on_caps=AGENT_RESTARTS_ON_CAPS,
+                         stage_restart_after=AGENT_STAGE_CAPS_RESTART, stage_block_after=AGENT_STAGE_CAPS_BLOCK,
                          tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
                              **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
                              scratch=(self.run_dir / "tt-metal-scratch"
@@ -4417,7 +4497,84 @@ class Supervisor:
                          finished=self._finished_check(spec, phase, stage_dir))
         name = deliverable(spec, phase)
         step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
-        return step.run(system, f"{user}\n\n## From the supervisor\n{extra}" if extra else user), step
+        out = step.run(system, f"{user}\n\n## From the supervisor\n{extra}" if extra else user)
+        if out.status == "error" and out.detail.startswith(runaway.REPLIES_CAPPED_MARK):
+            # The coder's replies ran away across the stage (issue 458, item 4): the block names the replies as the cause.
+            self._block(n, out.detail)
+        return out, step
+
+    def _thin_port_prepare(self, spec, stage_dir: Path, escalated: bool):
+        """Stage 2 of a full port run with `--thin-port` (issue 677, arm E): the prepare step as one chat request per stub of a generated port
+        (orchard/thin_port.py), to the same coder tier the agent step would use and with its sampling. Returns None when the option is off, for
+        any other stage, or when the generator cannot run (the ledger says why and the agent's prepare step runs as without the option); otherwise
+        the step's Outcome: "done" (stubs may be left; the CPU pre-check, the board test and the repair rounds then read the port as usual) or
+        "error" (the coder's endpoint failed after one retry), which ends the stage the way a failed agent prepare step does."""
+        n = spec.number
+        if not (n == 2 and spec.draft == "full_port" and thin_port(self.ledger.read())):
+            return None
+        used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "prepare")
+        self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
+        out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
+                                 python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=endpoint,
+                                 model=tcfg["model"], sampling=sampling, thinking=AGENT_THINKING)
+        if out.status == "skipped":
+            self.ledger.append("decision", n, decision="thin port not used", reason=out.detail[:300],
+                               note="the agent's prepare step runs as it would without the option")
+            return None
+        if out.status == "done":
+            # The agent's prepare step writes handoff.json after the port; the hardware phase reads it (`_read_test`). The supervisor writes it here.
+            _put(stage_dir / "handoff.json", json.dumps({
+                "goal": f"Port {self.model_id} to ttnn and agree with the stage-1 CPU reference on greedy tokens.",
+                "stage": n,
+                "evidence": [f"{full_port.PORT_DIR}port_model.py", "stages/2/evidence/port-check.json", "stages/2/evidence/hw-test-output.txt"],
+                "next_action": "Run the supervisor's hardware check (python3 -P -s stages/2/port_check.py) on a leased board and compare the chip's "
+                               "greedy tokens with the stage 1 CPU reference.",
+                "check_on_return": "top1_agreement >= 0.85 over >=16 tokens; free_run_text is readable; load_s > 0.",
+                "written_by": "the supervisor (--thin-port)"}, indent=2) + "\n")
+        return out
+
+    def _thin_coder(self, spec, escalated: bool, phase: str):
+        """(tier name, endpoint, tier config, sampling) of the coder tier a thin step of stage `spec.number` uses, the tier an agent step of that phase
+        would use: a tier that is down blocks the run, a substitute is noted in the ledger."""
+        n = spec.number
+        tier = tier_for(self.cfg, n, phase=phase, escalated=escalated)
+        try:
+            used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
+        except TierUnavailable as exc:
+            self._block(n, str(exc))
+        if note and not quiet_substitute(self.cfg, self.coder_tier, tier, used):
+            self.ledger.append("decision", n, decision="tier substituted", note=note)
+        tcfg = self.cfg.tiers[used]
+        sampling = {"max_tokens": tcfg.get("max_tokens", AGENT_MAX_TOKENS), "temperature": tcfg.get("temperature", 0),
+                    **{k: tcfg[k] for k in ("frequency_penalty", "repetition_penalty", "top_p", "top_k") if k in tcfg}}
+        return used, endpoint, tcfg, sampling
+
+    def _thin_repair_round(self, spec, stage_dir: Path, k: int, failure: dict, raw: str, escalated: bool):
+        """Round `k` of the port repair rounds of a `--thin-port` run (issue 677, arm E2): one chat request for the function the check's failed line
+        names (orchard/thin_repair.py) in place of the agent's repair step. Returns (handled, stop): handled is True when the reply was spliced into
+        the port (the round goes on to its check), stop is the operator's or the watchdog's command read before the paid request (the round
+        ends). Anything the thin repair cannot place or settle (a numerics failure, a line outside a function, two refused replies, an endpoint
+        that fails, a round past the cap) is recorded as `thin repair handed to the coder` and the agent's repair step runs as without the option."""
+        n = spec.number
+        if n != 2 or not thin_port(self.ledger.read()):
+            return False, None
+        if stop := self._driven_stop(spec):
+            return False, stop
+        if failure.get("kind") != "port":
+            self.ledger.append("decision", n, decision="thin repair handed to the coder", round=k, reason="the failure is not a failure of the port itself")
+            return False, None
+        used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "repair")
+        started = self.clock()
+        result = thin_repair.run_round(stage_dir=stage_dir, k=k, raw_output=raw, post=self.http, endpoint=endpoint, model=tcfg["model"],
+                                       sampling=sampling, thinking=AGENT_THINKING)
+        fields = dict(round=k, function=result.function, error_type=result.etype, hint=result.hint, requests=result.requests,
+                      prompt_chars=result.prompt_chars, completion_tokens=result.completion_tokens, seconds=round(self.clock() - started, 3))
+        if result.status == "spliced":
+            self.ledger.append("decision", n, decision="thin repair round", outcome="spliced", tier=used, **fields)
+            return True, self._driven_stop(spec)
+        self.ledger.append("decision", n, decision="thin repair handed to the coder", reason=result.reason or result.status, outcome=result.status,
+                           tier=used, **fields)
+        return False, None
 
     def _draft(self, spec, stage_dir: Path) -> None:
         """Write the config a stage's skill starts from, when the run already holds every fact in it
@@ -4954,6 +5111,8 @@ class Supervisor:
         ends however it ends (a result, a timeout, an interrupt, an error) and before the coder is restored or the lease released: the
         trial uses it to stop the servers its helpers started, which a kill of the test's own session does not reach."""
         n = spec.number
+        if self._device_ops_precheck(spec, stage_dir, test):
+            return
         if self.lab is not None:
             return self._lab_hardware_phase(spec, stage_dir, test, after_test=after_test)
         boards = self._phase_boards(spec, stage_dir)
@@ -5435,15 +5594,59 @@ class Supervisor:
         known.update(audit)
         _put(path, json.dumps(known, indent=2, sort_keys=True))
 
+    def _note_port_at_test(self, n: int, stage_dir: Path) -> None:
+        """The port directory as the test is about to run it, written by the supervisor before anything runs: a best-port snapshot is kept
+        only when it holds exactly these files, so an edit made while the supervisor was stopped, or after the test, is never recorded as
+        the port a check ran on (review of PR 497, round 4)."""
+        if self._best_port_on():             # the best-port snapshot is kept only for a port this entry vouches for (issue 596)
+            self.ledger.append("decision", n, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage_dir / port_repair.PORT_DIR))
+
+    def _device_ops_precheck(self, spec, stage_dir: Path, test: dict) -> bool:
+        """Stage 2 of a full port: the port check's static device-ops analysis, run before the supervisor takes a board or parks the coder
+        (issues 677 and 561). A port that makes no reachable ttnn.linear or ttnn.matmul call, or does not parse, fails the board check, which
+        comes after a lease, a park and a reset of the coder's server (arms C and D of the cp4 audition: ten board checks, all of this kind).
+
+        The analysis is the template's own (`port_check.py --static --fresh`, a run of the same file the board check runs, with no device and no
+        worker), so the verdict and its text are the gate's. Returns True when it failed: the failure is left as the attempt's test result in the
+        form a failed board test leaves (test-result.json with exit code 2 and the output file with the template's FAILED line), a ledger decision
+        names it, and nothing else runs. Returns False when it passed, was refused, or gave no verdict: the hardware phase goes on as before."""
+        n = spec.number
+        if n != 2 or spec.draft != "full_port" or self.lab is not None or test.get("command") != full_port.command(2):
+            return False
+        out_path = stage_dir / "evidence" / "hw-test-output.txt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        t0 = self.clock()
+        with _open_fresh(out_path) as out:
+            try:
+                code, timed_out = spawn_checked(test["command"] + " --static --fresh", self.run_dir, agent_env(self.run_dir, extra=self.extra_env),
+                                                PRECHECK_DEADLINE_S, out)
+            except Denied as exc:
+                code, timed_out = None, False
+                out.write(f"refused: {exc}\n".encode("utf-8"))
+        if code == 0 and not timed_out:
+            return False
+        if code != 2 or timed_out:
+            self.ledger.append("decision", n, decision="device-ops pre-check gave no verdict", returncode=code, timed_out=bool(timed_out),
+                               note="the board check runs as it would have")
+            return False
+        try:
+            text = safeio.read_bytes(out_path, max_bytes=PRECHECK_OUTPUT_MAX).decode("utf-8", "replace")
+        except (safeio.SafeReadError, OSError):
+            text = ""
+        self._note_port_at_test(n, stage_dir)
+        self.ledger.append("decision", n, decision="device-ops pre-check failed before the board", message=port_repair.failed_line(text, 700),
+                           note="no lease was taken and the coder was not parked; this is the attempt's test result")
+        result = {"command": test["command"], "returncode": 2, "timed_out": False, "seconds": round(self.clock() - t0, 3), "chips": [],
+                  "output": self._moved_aside_record(out_path)}
+        self._publish_test_result(spec, stage_dir, result)
+        return True
+
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
                   output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,
                   extra: Lease | None = None, boards: int | None = None, final: bool = True) -> dict:
         n = spec.number
-        if n == 2 and record == "test-result.json" and self._helper_drive_on():
-            # The port directory as the test is about to run it, written by the supervisor before anything runs: a best-port snapshot is kept
-            # only when it holds exactly these files, so an edit made while the supervisor was stopped, or after the test, is never recorded as
-            # the port a check ran on (review of PR 497, round 4).
-            self.ledger.append("decision", n, decision=port_repair.PORT_AT_TEST, sources=port_repair.fingerprint(stage_dir / port_repair.PORT_DIR))
+        if n == 2 and record == "test-result.json":
+            self._note_port_at_test(n, stage_dir)
         k = (boards or spec.boards) * CHIPS_PER_BOARD       # a wider test (issue 60) holds more chips than the stage's own
         deadline = min(float(test["deadline_s"]), spec.budget_s)
         out_path = stage_dir / output
@@ -6179,6 +6382,10 @@ def parse(argv=None):
                         "of scripts/tiny_qwen4/make_franken.py): a measured `coherent` of false is waived in stage 2's swap check, each stage 4 "
                         "configuration and stage 7's boot check, and no other check, and the ledger says so each time. Given when the run starts "
                         "and recorded in run_start; a resume keeps it and cannot add it. With --full-port it needs --full-port-rehearsal too")
+    r.add_argument("--thin-port", action="store_true",
+                   help="stage 2 of a full port fills the stubs of a generated port with one chat request each (orchard/thin_port.py) in place of the "
+                        "agent's prepare step; the board test and the repair rounds are unchanged. Needs --full-port, is given when the run starts "
+                        "and is recorded in run_start; a resume keeps it and cannot add it")
     r.add_argument("--resume-aborted", action="store_true",
                    help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
@@ -6334,9 +6541,18 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                                     weights_only_rehearsal=weights_only_rehearsal(entries) or weights_rehearsal_req)
     if why:
         raise ValueError(why)
+    thin_req = bool(getattr(args, "thin_port", False))
+    if thin_req and progress.started and not thin_port(entries):
+        raise ValueError("--thin-port changes how stage 2 is prepared, so it can be given only when the run starts. This run started without "
+                         "it. Move this run's directory aside and start a new run with the flag")
+    why = thin_port_options_problem(full_port=full_port_enabled(entries) or bool(getattr(args, "full_port", False)),
+                                    thin_port=thin_port(entries) or thin_req)
+    if why:
+        raise ValueError(why)
     if progress.started:
         rehearsal_req = False                   # a resumed run keeps what run_start holds
         weights_rehearsal_req = False
+        thin_req = False
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
         graft_on = False                        # a run that opted out of the graft trial stays opted out
@@ -6432,7 +6648,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       sampling=sampling_mode, port_repair_rounds=repair_rounds, tool_dedupe=tool_dedupe,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       full_port=full_port_req, full_port_added=full_port_added, full_port_rehearsal=rehearsal_req,
-                      weights_only_rehearsal=weights_rehearsal_req, stack_pins=stack_pins,
+                      weights_only_rehearsal=weights_rehearsal_req, thin_port=thin_req, stack_pins=stack_pins,
                       kind_override=getattr(args, "model_kind", None),
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,

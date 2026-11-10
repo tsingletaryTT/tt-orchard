@@ -117,3 +117,9 @@ def unstick_from_tier(tier: dict) -> Unstick:
                    max_tokens=tokens if isinstance(tokens, int) and not isinstance(tokens, bool) and 256 <= tokens <= 65_536 else base.max_tokens,
                    frequency_penalty=pick("unstick_frequency_penalty", -2.0, 2.0, base.frequency_penalty),
                    repetition_penalty=pick("unstick_repetition_penalty", 0.5, 2.0, base.repetition_penalty))
+
+
+# The fixed start of the text an agent step ends with when the coder's replies ran away across a stage (issue 458, item 4). The supervisor blocks the
+# run with it, and orchard/blocked.py reads it before any other word: the text that follows names the chip tier and the coder, which other rows
+# look for. It lives here, a module both the agent and the block classifier can import.
+REPLIES_CAPPED_MARK = "the coder's replies keep running away"

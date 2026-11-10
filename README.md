@@ -80,6 +80,42 @@ The early runs were not hands-off. They blocked, and each cause was a bug in tt-
 The later ones needed a person for disk space and for a restart after a power event, and each of those is now a preflight check or a
 block message. The harness has never run end to end with nobody touching the machine.
 
+### Since 2026-11-09
+
+What landed on `main` on 2026-11-09 (pull requests 639 to 675; the project log entries dated 2026-11-09 hold the details). Each item says which
+record holds its numbers.
+
+- **Release-day tooling for a new Qwen release.** Seven pull requests by Eric Zietlow (`ezietlowTT`) were reviewed and merged: 655 (the Qwen4-shaped
+  franken checkpoint writes `layer_types`, drops the extra `seed` key and carries an Apache-2.0 model card), 656 (`--weights-only-rehearsal`), 657
+  (`drop-check`, `drop-watch` and a builder for the reference interpreter), 659 (bundle capabilities in stage 0 and the release's own config in
+  stage 2), 660 (`--base <bundle>` keeps that bundle through the run), 661 (a DFlash2 drafter switches off for another architecture) and 674
+  (`drop-check` uses stage 0's capability reader). The review of 659 found that a run with no bundle input accepted a capabilities record the stage 0
+  agent could write; that is closed before the merge. No Qwen4 weights exist yet, so these checks have run on a Qwen4-shaped test checkpoint and on
+  fakes. They have not run on a release. Sections 4.0 and 4.2 describe the commands.
+- **A down outside helper no longer stops a run (PR 651, issue 650).** On 2026-11-09 the network behind the helper endpoint went away, and each call waited
+  about 7 minutes for the connection to fail. The TCP connect now has its own 10 second timeout, two failures in a row stop the run from asking, one probe
+  goes out every 300 seconds, and the run goes on without help. Blocking the run on a missing helper is an option (section 5.9g).
+- **Thinking models in the stage 5 passkey check, and the sparse-attention facts (PR 652, issues 641 and 638).** The Qwen3.8-27B-QSA passkey check
+  failed because a thinking model's reply was cut at the answer limit. The check now reads the chat template, asks with thinking off when the template has
+  a switch, and otherwise reads the answer after the last `</think>`. Stage 2 records whether a sparse-attention budget was exercised
+  (`indexer_exercised`, `indexer_basis`). Not done: an agreement prompt longer than the indexer's budget, run against a CPU reference that applies the indexer.
+- **Sidecars and the hub-wide blob store (PRs 648 and 644).** Spark-X2.6-4B-Loop-mHC keeps its loop, hyper-connection and n-gram tensors in a file
+  outside the shard index. A full-port class may now list sidecars, and snapshot links into the hub-wide blob store are accepted when the layout and the
+  target are right (PR 622 had refused them).
+- **The Qwen4-shaped franken checkpoint** (PR 639, merged). On 2026-11-09 the 20-layer bf16 checkpoint was generated again with PR 655's generator: 20
+  `layer_types` entries, no `seed` key, an Apache-2.0 card, a reference decode with 14 distinct token ids, and the CPU proofs held (project log, 2026-11-09).
+- **The TTNN cheat sheet lists pitfalls reported by another project (PR 658).** Five items from Kohaku-TT's issues list, each labelled as not
+  reproduced on our pin. The list for failures seen in our own runs is unchanged.
+- **Counts.** The full parallel run on 2026-11-09 on the head of PR 675 passed 28,129 tests (see Tests below). As of 2026-11-09 (22:29Z) the repository has 305
+  merged pull requests, 159 open issues and 206 closed issues. Five issues were closed on 2026-11-09 after checking main and the run ledgers: 61 (the
+  full-port stages have run on real models), 232, 326, 329 and 456. An earlier run on the head of PR 661 found one failing test, the hostile-readers registry
+  (two new modules were not listed); PR 675 fixed it and issue 676 tracks registering real readers for them.
+
+In progress, with no numbers claimed: the audition of the community `mando2222` Qwen3.8-27B DFlash2 bundle (four chips) as the coder, against
+Qwen3-Coder-Next on two chips with two sampling settings (issue 510; the tiny Qwen4 rehearsal, coder alone, helper off). The results are not recorded in
+the repository yet. A generator that writes the standard blocks of a stage 2 port, so the first version already makes `ttnn.linear` calls, is a plan
+(issue 677); nothing of it is built.
+
 ### Since 2026-11-07
 
 What landed on `main` on 2026-11-07 and 2026-11-08 (pull requests 575 to 633, each reviewed by Copilot before it merged; the project log
@@ -99,17 +135,17 @@ entry for 2026-11-08 has the list). Each item says which record holds its number
 - **The coder's start has a watchdog.** A boot whose log stops growing, or that passes its deadline, is stopped with a long grace, the chips are reset
   through the lease, and the log tail goes to the ledger with credentials removed (PRs 580 and 599). The wide test runs again once after a fabric
   handshake timeout (PRs 542 and 619).
-- **Tools for the coder.** `last-check`, `layer-diff`, `facts`, `show`, `cheat` and `edit` stage tools, verified TTNN and TT-Lang cheat sheets and
+- **Tools for the coder.** `last-check`, `gate-check` (the board check's device-ops test on the port, run in seconds with no board; the supervisor runs the same analysis before it leases a board or parks the coder, so a port with no `ttnn.linear` or `ttnn.matmul` call is refused without a park), `layer-diff`, `facts`, `show`, `cheat` and `edit` stage tools, verified TTNN and TT-Lang cheat sheets and
   the effective-construction facts (PRs 506, 528, 529, 543, 564, 611, 627 and 601 for the sheet verifier).
 - **Packaging a full-port model is manual.** Stage 7 builds a package only on the weights-only path. Three models were packaged by hand with
   `tt-orchard can` and published on 2026-11-08 (table rows 10, 12 and 14). `tt-model publish` rewrites the card on the Hub, so the card never
   matches a `SHA256SUMS` made from the staged bundle: upload `SHA256SUMS` last and check the catalog tag after every card upload
   ([docs/canning.md](docs/canning.md)).
-- **Counts.** The full parallel run on 2026-11-08 passed 27,022 tests (see Tests below for how it was measured).
+- **Counts.** The full parallel run on 2026-11-08 passed 27,022 tests; the run of 2026-11-09 is in the section above.
 
 The Qwen3.8-27B-QSA bring-up ended blocked at stage 5 (stage-failed after escalation, 2026-11-08 23:40Z). Stages 0 to 4 passed on four chips. Stage 5 serving matched the reference on all 80 corpus positions. The passkey check failed at both lengths (256 and 8,192 tokens) because a thinking model's reply was cut at the answer limit before a key appeared (issue 641). Separately, QSA was not shown working: the stage 2 port does not use the `_qsa_indexer` tensors and every agreement prompt is shorter than the 2,048-token budget, so the indexer was not exercised (issue 638).
 
-In progress and not claimed as done: the Qwen4 frankenmodel generator and its CPU proofs are done (PR 639, open): the first K layers of real Qwen3.8-27B weights in the `qwen4_exp_text` skeleton with identity-initialised hyper-connections. With K=4 in float32 the logits equal the base exactly (maximum difference 0.0 on three prompts). With K=8 in bf16 the maximum difference is 0.119 and the top-1 token is equal. A seeded perturbation of the hyper-connections changes the logits by 5.23 and the top-1 token differs. An indexer budget of 2,048 equals the base, and a budget of 8 moves the logits by about 1. The checkpoint does not carry the visual tower, the MTP head, per-layer embeddings or the n-gram table, and the truncated weights give incoherent text, so the result shows equivalence only and says nothing about quality. Generator and CPU proofs done, chip run pending. <!-- UPDATE WHEN THE CHIP RUN ENDS -->
+In progress and not claimed as done: the Qwen4 frankenmodel generator and its CPU proofs are done (PR 639, merged 2026-11-09): the first K layers of real Qwen3.8-27B weights in the `qwen4_exp_text` skeleton with identity-initialised hyper-connections. With K=4 in float32 the logits equal the base exactly (maximum difference 0.0 on three prompts). With K=8 in bf16 the maximum difference is 0.119 and the top-1 token is equal. A seeded perturbation of the hyper-connections changes the logits by 5.23 and the top-1 token differs. An indexer budget of 2,048 equals the base, and a budget of 8 moves the logits by about 1. The checkpoint does not carry the visual tower, the MTP head, per-layer embeddings or the n-gram table, and the truncated weights give incoherent text, so the result shows equivalence only and says nothing about quality. Generator and CPU proofs done, chip run pending. <!-- UPDATE WHEN THE CHIP RUN ENDS -->
 
 ### Since 2026-10-27
 
@@ -260,7 +296,7 @@ What is shown, and by what:
   a reset does not always clear (issue 26), a board that dropped off the bus (issue 25) and an agent that loops when the harness drafts nothing (issue 68).
 - **The container path (a v5.1 package as the nearest model) has not yet shown a swapped model served.** The one real run used `raahemnabeel/qwen3-coder-30b-a3b`, whose generator downloads its own hard-coded repository, so the test measured the base model. The 4-chip container tests of the Qwen3.8-27B runs did not fetch anything (their isolated Hugging Face directory stayed empty), so those results stand. The harness now runs a test container with the Hub switched off and fails a test that fetched a model (issue 60 stays open).
 
-The suite has about 27,000 passing tests: 27,022 passed, 123 skipped and 4 expected failures in the full parallel run of 2026-11-08 on the head of PR 633 (`python3 -m pytest tests -n 3`). One load-dependent test failed in that run and passed alone.
+The suite has about 28,000 passing tests: 28,129 passed, 74 skipped and 1 expected failure in the full parallel run of 2026-11-09 on the head of PR 675 (`python3 -m pytest tests -n 3`, 1,291.9 s). The run of 2026-11-08 on the head of PR 633 passed 27,022 tests with 123 skipped and 4 expected failures; the skipped and expected-failure counts differ between the two runs and the difference was not investigated.
 
 ### Stages
 
@@ -358,8 +394,9 @@ against 0.47 for a runtime that applied a causal mask).
 
 ### Tests
 
-The suite has about 27,000 passing tests: 27,022 passed, 123 skipped and 4 expected failures in the full parallel run of 2026-11-08 on the head of PR 633
-(`python3 -m pytest tests -n 3`, about 20 minutes on a busy host; one load-dependent test failed in that run and passed alone). It needs no hardware and
+The suite has about 28,000 passing tests: 28,129 passed, 74 skipped and 1 expected failure in the full parallel run of 2026-11-09 on the head of PR 675
+(`python3 -m pytest tests -n 3`, 1,291.9 s on a busy host). The run of 2026-11-08 on the head of PR 633 passed 27,022 tests with 123 skipped and 4 expected
+failures; the skipped and expected-failure counts differ between the runs and the difference was not investigated. It needs no hardware and
 no network. Some skipped tests are opt-in, for example: one replays local agent transcripts (`ORCHARD_REPLAY=1`), one asks the real Hugging Face hub and GitHub
 (`ORCHARD_LIVE_RESEARCH=1`), and the browser tests of the web page run only where the `playwright` package and Chrome are present (issue 31).
 
@@ -1030,10 +1067,11 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--package-format` | no | `v6` makes stage 7 build a v6 thin package on the weights-only path (see [5.3](#53-what-each-stage-does)). `v5.1` is refused at start, because it needs a container image build. Without this flag stage 7 is skipped. The ledger records it, and a resume with different options is refused. A run that started without it can be given it on a resume, as long as stage 7 has not started |
 | `--package-namespace` | with `--package-format` | Your Hugging Face namespace. Stage 7 writes it into the package card and the publish commands. The run never publishes |
 | `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
-| `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `full-port-stages-unbuilt`, `scoring-route`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `package-missing`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
+| `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `full-port-stages-unbuilt`, `scoring-route`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `replies-capped`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `package-missing`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
 | `--full-port` | no | Let a model that stage 0 classed `full-port` go on into the full-port stages 2 and 3 (see the class table). The ledger records it, and a resume keeps it. It can be added on a resume only before stage 2 has started, so a run that ended blocked with `needs-new-model-code` can be continued. It changes nothing for another class, and `unknown` and `restricted-head` still stop. `tt-orchard bringup` takes the same flag |
 | `--full-port-rehearsal` | no | For a rehearsal model with random weights (`scripts/tiny_qwen4`): stage 2 of a full port waives its `coherent` field and no other check, and the ledger records a decision that says so. Needs `--full-port`, is given when the run starts, and is kept on a resume. A resume cannot add it. `tt-orchard bringup` takes the same flag. The checkpoint comes from `scripts/tiny_qwen4/make_checkpoint.py` (run it with the reference interpreter into a new directory outside the checkout). Its default is the 64-wide model. `--width 27b` keeps four layers and random weights at 27B-class widths (hidden size 5120, vocabulary 248320; 8.2 GB for the dense variant, 37 GB for `mixed` and 47 GB for `moe`) so sharding, tiling and speed on 2 and 4 chips can be seen at a real size. `--set KEY=VALUE` changes one width after the preset, and the script refuses widths that do not tile on 2 and 4 dies and any estimate over `--max-gb` (default 12) or over the free space minus 40 GB. The design note describes the presets |
 | `--weights-only-rehearsal` | no | For a rehearsal model on the weights-only route whose text is not readable on purpose, such as the Qwen4 frankenmodel with perturbed hyper-connection weights (`scripts/tiny_qwen4/make_franken.py`) served through the Qwen4 bundle. Three gates waive a `coherent` field that is exactly `false`: stage 2's swap check (both the `weights-only` and the `weights+sidecar` class), each stage 4 configuration, and stage 7's boot check. A missing or malformed `coherent` still fails, and top-1 agreement, the token count, the ready time, the 32-token recompute, the prompt suite and every other check still apply. The ledger records `weights-only rehearsal: coherence waived` for each stage that passed with the waiver. Given when the run starts and recorded in `run_start`; a resume keeps it and cannot add it. With `--full-port` it needs `--full-port-rehearsal` too (refused otherwise, because the full-port stages would still need readable text). `tt-orchard bringup` takes the same flag |
+| `--thin-port` | no | Stage 2 of a full port fills the stubs of a generated port with one chat request each (`orchard/thin_port.py`, issue 677) in place of the agent's prepare step. The port generator writes a first port that already makes `ttnn.linear` calls and leaves each block it cannot write as a named stub; the coder tier gets one request per stub (the verified calls, the construction lines and the reference excerpt of that class, the stub last), a refused reply is retried once with the reason, and a stub that is still refused is left for the repair rounds. At most two requests per stub plus two and a total size cap bound it, and the ledger gets one decision per request with sizes and an outcome (never the reply). Each stub request names the arguments of a port function (`model` is a plain dict with the keys `load` sets, plus the module constants of the port) and is capped at 4,096 tokens; a retry samples cooler (temperature at most 0.3, and a repetition penalty of 1.1 after a reply that ran to the cap). With the option, a failed board test is repaired in the repair rounds by one request for the function that holds the failing line (`orchard/thin_repair.py`, up to six rounds an attempt and two requests a round, with a hint for the error shapes the arms showed); a failure it cannot place, two refused replies or a failing endpoint hand that round to the agent's repair step. The CPU device-ops pre-check, the board test and the result derivation are unchanged. Needs `--full-port`, is given when the run starts, is recorded in `run_start`; a resume keeps it and cannot add it. When the generator cannot run (no reference interpreter, an unreadable snapshot) the ledger says why and the agent's prepare step runs as without the option. |
 | `--port-repair-rounds` | no | A whole number from 0 to 10, default 3. A full-port stage 2 whose port check failed on the port itself gets up to this many repair rounds in the same attempt (section 5.5e). 0 is no rounds. The ledger records the value in `run_start`, and a resume keeps it and refuses another value. `tt-orchard bringup` takes the same flag |
 | `--no-tool-dedupe` | no | Send the agent every repeat read in full. By default, within one agent step, a repeat read of a file that has not changed since the agent read it (same file, same page, same size and time, same text), and a repeat of a read-only shell command (`ls`, `cat`, `head`, `tail`, `wc`, `stat`, `sed -n`, `grep` without `-r`, `find` with `-name`, `-type` and `-maxdepth` only) that printed the same, is answered with a short note that names the turn holding the text, and three such notes among the last six tool results send the agent one nudge to write. The ledger records the choice when it is off; a resume keeps the recorded choice and refuses to turn it off for a run that started with it on. See [`docs/tool-result-dedupe.md`](docs/tool-result-dedupe.md). |
 | `--telegraph-config` | no | A TOML file with the `[telegraph]` table; `bringup` passes the config it was started with when the table is enabled. A full-port stage 2 whose first attempt failed then asks the outside helper once for a draft port at the start of the next attempt (section 5.9g, "Phone a friend"). Without it, or with the helper off, nothing is sent. A file that cannot be read refuses the start |
@@ -1469,6 +1507,15 @@ releases the leases first. Fix the cause and run the same command to resume. A b
 `notice`) pauses the run and keeps the hardware. Read the reason, fix the cause, then `resume`.
 If the supervisor says releasing the hardware failed, read the last `notice` and `gozer status`
 before doing anything. Never run `tt-smi -r` by hand and never pass `--force` to gozer.
+
+### 5.5aa The `replies-capped` block
+
+An agent step counts the replies of the coder that were cut off at `max_tokens`, over the whole stage and not only in a row (the count starts
+again at a resume). After four (`AGENT_STAGE_CAPS_RESTART`) the step drops its conversation and starts again from the task, once per stage. At
+eight (`AGENT_STAGE_CAPS_BLOCK`) the run ends blocked as `replies-capped`: the reason says how many replies were cut off, how many of them
+were repetition loops, and that the port may be fine. Change the coder's sampling (a lower temperature or a `repetition_penalty` in its tier),
+lower `max_tokens`, or use another tier, then run the command again. `bringup` does not retry this block by itself: the same sampling runs away
+the same way. The counts and the choice of both are in `orchard/defaults.py` (issue 458).
 
 ### 5.5a Automatic retries
 
@@ -2656,7 +2703,7 @@ reply with a required function missing, with the wrong arguments, empty, raising
 and is not placed. A whole port replaces `port_model.py` only when the file is still the one that was sent (its sha256 is on the ask) or the
 coder's step failed, and both hashes go in the ledger (`telegraph repair asked`, `answered`, `placed`, `not placed`, `reply is a stub`). After
 the check runs again each answer gets a verdict: helped when it passed or now fails later in the request chain, and not helped for a different
-message at the same request (`telegraph repair progress`). The helper's problem id is now one per run (`full-port-stage-2:<run name>`), because
+message at the same request (`telegraph repair progress`). A draft placed at the start of a round is tested before the coder's step (issue 596: the check runs on it first, its CPU pre-check refuses a draft with no projection call before any board is leased, and one `helper draft tested` decision says passed, failed with the check's failed line, or not tested and why). A draft that passes ends the rounds, and a draft that fails is the coder's starting point in the next round. The furthest port is kept across attempts whenever the helper is on in stage 2, not only when it drives. The helper's problem id is now one per run (`full-port-stage-2:<run name>`), because
 the helper counts a problem's calls across its whole ledger and one id for every run used up the per-problem cap in three runs. `--no-repair-help`
 turns the round asks off.
 
@@ -2891,8 +2938,12 @@ whose versions equal the new combination. Otherwise it says `unverified` and poi
 written by a person or a verification run after a real run, never by `updates`. Preflight prints one informational line when the
 cache shows something behind or a candidate; it reads the cache only and never blocks.
 
-The Models view of `tt-orchard ui` shows the same rows under "Updates", read from the cache file (`GET /api/updates`). The page makes no
-request and runs nothing; it shows `tt-orchard updates --refresh` as text to run in a terminal.
+The Models view of `tt-orchard ui` shows the same rows under "Updates", read from the cache file (`GET /api/updates`). Showing the rows reads the
+file and runs nothing. A "Check now" button next to them runs `tt-orchard updates --refresh` on the machine that serves the page, which makes
+network requests to public repositories on GitHub and to the Hugging Face Hub (the button's tooltip says so). The button is a POST that needs the
+page's token and origin; it runs a fixed command with a scrubbed environment, a timeout of 4 minutes, one run at a time and at most one start a
+minute; it shows only `ok`, `failed` with the exit code, `timed-out` or `could-not-start`, never the command's output; and it is off while the UI
+listens on the network (`--lan`), where the text is the way to check (`tt-orchard updates --refresh` in a terminal).
 
 To check once a day, run `tt-orchard updates --print-timer`. It prints a systemd user service and timer and a cron line as text and installs nothing.
 The scheduled command is `updates --refresh --fail-when-unknown --json`: it needs the network and no lease, and it exits 3 when every row is unknown,
@@ -2961,6 +3012,7 @@ Each of these happened on the development machine. Details are in the
 | [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
 | [`docs/canning.md`](docs/canning.md), [`docs/can-cards.md`](docs/can-cards.md), [`config/can.*.toml`](config/), [`pkgsrc/`](pkgsrc/) | Packaging a brought-up model as a thin bundle by hand: the spec, the ASGI adapter, the card and the commands (used for Olmo-Hybrid-7B, MiniCPM3-4B and the other cans) |
 | [`scripts/can_cad/`](scripts/can_cad/), [`scripts/olmo_hybrid/`](scripts/olmo_hybrid/) | The scripts behind the Berkelium two-chip package and the Olmo-Hybrid-7B can: benchmark clients, the CadQuery checker, card generators |
+| [`docs/qwen4-faux.md`](docs/qwen4-faux.md), [`examples/qwen4_faux_quickstart.py`](examples/qwen4_faux_quickstart.py) | The Qwen4-shaped test checkpoints (tiny random-weight and franken): the layer, its equations, the config keys, the tensor map, what is verified and what is assumed, and a CPU quick start |
 | [`docs/releases.md`](docs/releases.md), [`changes/`](changes/) | How the version number is computed from change fragments, and how a release is cut |
 | [`CLAUDE.md`](CLAUDE.md) | The decisions and standing rules |
 | [`docs/project-log.md`](docs/project-log.md) | The dated project log: what was done, found and left open |

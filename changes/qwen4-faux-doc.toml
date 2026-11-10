@@ -1,0 +1,3 @@
+target = "0.9.147"
+summary = "docs/qwen4-faux.md and examples/qwen4_faux_quickstart.py: a reader-facing page on the Qwen4-shaped test checkpoints (layer equations from transformers 5.19.0, config keys, tensor map, verified or assumed table, CPU quick start)."
+kind = "docs"

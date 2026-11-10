@@ -1,0 +1,3 @@
+target = "0.9.146"
+summary = "The Updates panel of the web UI gets a Check now button (issue 231): a POST that runs tt-orchard updates --refresh with a fixed command, a scrubbed environment, a timeout, one run at a time and a minimum interval, refused with --lan."
+kind = "feature"

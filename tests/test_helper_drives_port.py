@@ -97,7 +97,7 @@ def test_the_helper_never_touches_the_check_and_the_check_still_runs_under_a_lea
 
 def test_outside_a_rehearsal_the_coder_repairs_unless_the_operator_asks_for_the_helper(rig, monkeypatch, tmp_path):
     rig.args.full_port_rehearsal = False
-    tel, wire = wire_helper(monkeypatch, tmp_path, [HONEST])
+    tel, wire = wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN])      # a draft that still fails: a draft that passes ends the rounds (issue 596)
     seen = start(rig, BROKEN, [HONEST + "# the coder's repair\n"])
     rig.run()
     assert seen and not decs(rig, rh.DRIVEN)
@@ -114,7 +114,7 @@ def test_the_operator_can_switch_the_driving_on_outside_a_rehearsal(rig, monkeyp
 
 def test_no_helper_drives_port_leaves_the_repair_to_the_coder_in_a_rehearsal(rig, monkeypatch, tmp_path):
     rig.args.helper_drives_port = False
-    wire_helper(monkeypatch, tmp_path, [HONEST])
+    wire_helper(monkeypatch, tmp_path, [PREFILL_BROKEN])                    # a draft that still fails: a draft that passes ends the rounds (issue 596)
     seen = start(rig, BROKEN, [HONEST + "# the coder's repair\n"])
     rig.run()
     assert seen and not decs(rig, rh.DRIVEN)
