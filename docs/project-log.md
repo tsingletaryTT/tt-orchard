@@ -5196,3 +5196,16 @@ Prompt (operator): finish the remaining part of issue 458 (P1). Tiny Qwen4 rehea
 - Added: `AgentStep` counts capped replies for the stage since the last `resume` decision (`_stage_caps`, from the ledger, so a restart of the supervisor recomputes it). At `AGENT_STAGE_CAPS_RESTART` = 4 the step restarts from the task once per stage (`context restarted after capped replies` with `trigger: stage`, which leaves the step's own restart budget alone). At `AGENT_STAGE_CAPS_BLOCK` = 8 the step ends with a text that starts with a fixed mark and the supervisor blocks the run with the new code `replies-capped` (`orchard/blocked.py`, `orchard/runaway.py`, `Supervisor._step`). The text says how many replies were cut off at `max_tokens`, how many were repetition loops, that the port may be fine, and what to change (sampling, `max_tokens`, another tier). The block is not in `AUTO_RETRY`. `narrate.UNBLOCK` and the README (section 5.5aa) describe it.
 - The two counts come from the run ledgers of 2026-11-02 to 2026-11-09: stage 2 had at most 1 capped reply in the runs that passed it and 4, 6, 7, 10, 12 and 12 in six that did not; eight is reached by three of them (runs 18, 20 and 22).
 - Tests: `tests/test_agent_stage_caps.py` (12; 11 failed before the change): spaced capped replies restart at the stage count, once, with earlier steps counted; a resume, another stage and a count of 0 change what is counted; the block text and its code, with a Rig run in which every reply is capped ending blocked as `replies-capped`.
+
+
+## 2026-11-09: a Hub outage and a partial state file in drop-check and the watcher (issue 666)
+
+- `HubClient` raises `HubUnreachable` for a connection error, a timeout, a cut-off answer or an HTTP status other than 401,
+  403 and 404. It is not an `Unreadable`, so `fetch_metadata` cannot turn an outage into reasons that send a release down the
+  full-port route. `drop-check` reports the verdict `unreachable` with exit code 6.
+- The watcher's tick records one `hub-unreachable` event when an outage starts, keeps its state, and tries again next tick;
+  a check the outage interrupted runs again from the start. The flag clears on the next tick the Hub answers.
+- `load_state` refuses a state file that lacks what its state needs (a revision for `check`, a `tt-orchard bringup` command
+  for `waiting-for-chips`, a run record with its directory and log for `starting` and `running`, name lists that are lists);
+  the tick moves it aside and waits for the operator, as for an unreadable file.
+- 14 mutations, all red. Builds on PR 682 (issue 676).

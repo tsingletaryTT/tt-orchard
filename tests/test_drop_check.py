@@ -7,6 +7,7 @@ Qwen4 package (covered), the Qwen3.8 bundle (same architecture as Qwen3.8), or t
 downloads weights, never sends a token, and refuses any organisation other than the allowed one. The network is injected, so no
 test touches it."""
 import copy
+import http.client
 import io
 import json
 import urllib.error
@@ -349,6 +350,73 @@ def test_a_chat_template_with_a_lone_surrogate_gives_no_template_note():
     files = files_for(qwen4_dense(), **{"tokenizer_config.json": b'{"chat_template": "\\ud800"}'})
     out = dc.classify("Qwen/Qwen4-27B", REV, files, capabilities=caps())
     assert not any("chat template" in n for n in out["notes"])
+
+
+# ---- a Hub that does not answer (issue 666) ---------------------------------------------------------------------------
+
+class DownOpener:
+    """urlopen that fails as a network outage does."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def __call__(self, req, timeout=None):
+        exc = self.exc(req) if callable(self.exc) and not isinstance(self.exc, type) else self.exc
+        raise exc
+
+
+OUTAGES = {
+    "refused": urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
+    "http-500": lambda req: urllib.error.HTTPError(req.full_url, 500, "server error", {}, None),
+    "http-429": lambda req: urllib.error.HTTPError(req.full_url, 429, "too many requests", {}, None),
+    "timeout": TimeoutError("timed out"),
+    "reset": ConnectionResetError(104, "Connection reset by peer"),
+    "incomplete-read": http.client.IncompleteRead(b"partial"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(OUTAGES))
+def test_a_hub_that_does_not_answer_is_unreachable(name):
+    hub = dc.HubClient(opener=DownOpener(OUTAGES[name]))
+    with pytest.raises(dc.HubUnreachable):
+        hub.info("Qwen/Qwen4-27B")
+    with pytest.raises(dc.HubUnreachable):
+        hub.get("Qwen/Qwen4-27B", REV, "config.json", max_bytes=100)
+
+
+def test_an_outage_is_not_a_missing_or_unreadable_file():
+    """fetch_metadata turns an unreadable file into a reason; an outage must not become reasons that send the release down the
+    full-port route."""
+    assert not issubclass(dc.HubUnreachable, dc.Unreadable)
+    with pytest.raises(dc.HubUnreachable):
+        dc.fetch_metadata(dc.HubClient(opener=DownOpener(OUTAGES["refused"])), "Qwen/Qwen4-27B", REV)
+
+
+class HalfDownHub:
+    """Answers the API record, then fails on the files."""
+
+    def __init__(self, opener=None):
+        pass
+
+    def info(self, repo, revision=None):
+        return {"sha": REV, "siblings": []}
+
+    def get(self, repo, revision, name, *, max_bytes):
+        raise dc.HubUnreachable("the Hub did not answer (URLError)")
+
+
+class DownHub(HalfDownHub):
+    def info(self, repo, revision=None):
+        raise dc.HubUnreachable("the Hub did not answer (URLError)")
+
+
+@pytest.mark.parametrize("client", [DownHub, HalfDownHub], ids=["record", "files"])
+def test_cli_reports_an_unreachable_hub_with_its_own_exit_code(client, monkeypatch, capsys):
+    monkeypatch.setattr(dc, "HubClient", client)
+    code = dc.main(["Qwen/Qwen4-27B", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == dc.EXIT_UNREACHABLE and out["verdict"] == "unreachable" and out["command"] == []
+    assert any("did not answer" in r for r in out["reasons"])
 
 
 # ---- command line ---------------------------------------------------------------------------------------------------

@@ -1,0 +1,4 @@
+target = "0.9.147"
+summary = "drop-check reports a Hub that does not answer as unreachable (exit 6); the watcher records one hub-unreachable event per outage and keeps its state; a state file that lacks what its state needs is moved aside (issue 666)."
+kind = "fix"
+pr = 695

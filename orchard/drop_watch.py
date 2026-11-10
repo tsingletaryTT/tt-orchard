@@ -182,7 +182,34 @@ def load_state(watch_dir) -> dict:
         raise StateCorrupt(f"{STATE_NAME} cannot be read ({type(exc).__name__})") from exc
     if not isinstance(st, dict) or st.get("state") not in STATES:
         raise StateCorrupt(f"{STATE_NAME} has no known state")
+    problem = _state_problem(st)
+    if problem:
+        raise StateCorrupt(f"{STATE_NAME} is in state {st['state']} but {problem}")
     return st
+
+
+def _text_list(v) -> bool:
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def _state_problem(st: dict) -> str | None:
+    """What a state's tick needs that the file lacks (the tick would end in a KeyError or launch a malformed command), or None."""
+    state = st["state"]
+    if (state == "check" or (state == "needs-operator" and st.get("needs") == "check")) and dc.revision_problem(st.get("revision")):
+        return "it has no 40-character revision"
+    if state == "waiting-for-chips":
+        cmd = st.get("command")
+        if not (_text_list(cmd) and cmd[:2] == ["tt-orchard", "bringup"]):
+            return "its command is not a tt-orchard bringup command"
+    if state in ("starting", "running"):
+        run = st.get("run")
+        if not (isinstance(run, dict) and isinstance(run.get("run_dir"), str)
+                and (state == "starting" or isinstance(run.get("log"), str))):
+            return "its run record has no run directory" + ("" if state == "starting" else " and log")
+    for key in ("seen_other", "stages_reported"):
+        if key in st and not _text_list(st[key]):
+            return f"{key} is not a list of names"
+    return None
 
 
 def save_state(watch_dir, st: dict) -> None:
@@ -247,6 +274,12 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
 
         def ev(kind, text):
             events.append({"kind": kind, "text": text, "ts": iso(t), "target": cfg.target})
+
+        def hub_down(exc):
+            """An outage is reported once, when it starts; the state does not change and the next tick tries again."""
+            if not st.get("hub_unreachable"):
+                ev("hub-unreachable", f"{exc}; the watcher tries again next tick")
+                st["hub_unreachable"] = iso(t)
         try:
             st = load_state(watch_dir)
         except StateCorrupt as exc:
@@ -258,36 +291,41 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
         org, name = cfg.target.split("/", 1)
 
         if state in ("waiting", "seen"):
-            seen_other = st.setdefault("seen_other", [])
-            for other in hub.list_models(org, name):
-                if other != cfg.target and other not in seen_other and not dc.repo_problem(other):
-                    seen_other.append(other)
-                    ev("other-release", other)
             try:
-                info, unreadable = hub.info(cfg.target), None
-            except dc.Unreadable as exc:
-                info, unreadable = None, str(exc)
-            if unreadable is not None:
-                ev("needs-operator", f"the Hub record cannot be read: {unreadable}")
-                state, st["needs"] = "needs-operator", "hub"
-            elif info is None:
-                if state == "seen":
-                    ev("release-gone", f"{cfg.target} is no longer visible")
-                state = "waiting"
-            else:
-                sha = info.get("sha")
-                if dc.revision_problem(sha):
-                    ev("needs-operator", "the Hub record has no valid commit hash")
+                seen_other = st.setdefault("seen_other", [])
+                for other in hub.list_models(org, name):
+                    if other != cfg.target and other not in seen_other and not dc.repo_problem(other):
+                        seen_other.append(other)
+                        ev("other-release", other)
+                try:
+                    info, unreadable = hub.info(cfg.target), None
+                except dc.Unreadable as exc:
+                    info, unreadable = None, str(exc)
+                if unreadable is not None:
+                    ev("needs-operator", f"the Hub record cannot be read: {unreadable}")
                     state, st["needs"] = "needs-operator", "hub"
+                elif info is None:
+                    if state == "seen":
+                        ev("release-gone", f"{cfg.target} is no longer visible")
+                    state = "waiting"
                 else:
-                    st["revision"] = sha
-                    if state == "waiting":
-                        ev("release-seen", f"{cfg.target} at {sha[:12]}")
-                        state = "seen"
-                    ok, why = upload_complete(info, hub, cfg.target, sha, t, cfg.quiet_minutes * 60.0)
-                    st["upload"] = "complete" if ok else why
-                    if ok:
-                        state = "check"
+                    sha = info.get("sha")
+                    if dc.revision_problem(sha):
+                        ev("needs-operator", "the Hub record has no valid commit hash")
+                        state, st["needs"] = "needs-operator", "hub"
+                    else:
+                        st["revision"] = sha
+                        if state == "waiting":
+                            ev("release-seen", f"{cfg.target} at {sha[:12]}")
+                            state = "seen"
+                        ok, why = upload_complete(info, hub, cfg.target, sha, t, cfg.quiet_minutes * 60.0)
+                        st["upload"] = "complete" if ok else why
+                        if ok:
+                            state = "check"
+            except dc.HubUnreachable as exc:
+                hub_down(exc)
+            else:
+                st.pop("hub_unreachable", None)
 
         if state == "check" or (state == "needs-operator" and st.get("needs") == "check"):
             rev = st["revision"]
@@ -300,27 +338,33 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
                     caps = safeio.read_json(cfg.capabilities, max_bytes=1 << 20)
                 except (OSError, ValueError, safeio.SafeReadError) as exc:
                     caps = f"unreadable ({type(exc).__name__})"
-            files, problems = dc.fetch_metadata(hub, cfg.target, rev)
-            probe = class_probe if class_probe is not None else dc.class_probe_for(cfg.reference_python)
-            res = dc.classify(cfg.target, rev, files, capabilities=caps, dev_config=dev, class_probe=probe,
-                              qwen4_bundle=cfg.bundle, qwen38_bundle=cfg.qwen38_bundle)
-            res["notes"] = extra_notes + res["notes"]
-            if problems:
-                res["reasons"] = problems + res["reasons"]
-                if res["verdict"] in ("covered", "covered-with-notes"):
-                    res["verdict"], res["route"] = "not-covered", "full-port"
-                    res["command"] = dc._command("full-port", cfg.target, cfg.bundle, cfg.qwen38_bundle)
-            previous = st.get("check")
-            st["check"] = res
-            if res["verdict"] in ("covered", "covered-with-notes", "not-covered"):
-                ev("check", _summary(res))
-                st["route"], st["command"] = res["route"], res["command"]
-                st.pop("needs", None)
-                state = "waiting-for-chips"
-            else:
-                if not previous or previous.get("reasons") != res.get("reasons") or state != "needs-operator":
-                    ev("needs-operator", _summary(res))
-                state, st["needs"] = "needs-operator", "check"
+            try:
+                files, problems = dc.fetch_metadata(hub, cfg.target, rev)
+            except dc.HubUnreachable as exc:
+                hub_down(exc)                       # nothing is decided from part of the files: the check runs again next tick
+                files = None
+            if files is not None:
+                st.pop("hub_unreachable", None)
+                probe = class_probe if class_probe is not None else dc.class_probe_for(cfg.reference_python)
+                res = dc.classify(cfg.target, rev, files, capabilities=caps, dev_config=dev, class_probe=probe,
+                                  qwen4_bundle=cfg.bundle, qwen38_bundle=cfg.qwen38_bundle)
+                res["notes"] = extra_notes + res["notes"]
+                if problems:
+                    res["reasons"] = problems + res["reasons"]
+                    if res["verdict"] in ("covered", "covered-with-notes"):
+                        res["verdict"], res["route"] = "not-covered", "full-port"
+                        res["command"] = dc._command("full-port", cfg.target, cfg.bundle, cfg.qwen38_bundle)
+                previous = st.get("check")
+                st["check"] = res
+                if res["verdict"] in ("covered", "covered-with-notes", "not-covered"):
+                    ev("check", _summary(res))
+                    st["route"], st["command"] = res["route"], res["command"]
+                    st.pop("needs", None)
+                    state = "waiting-for-chips"
+                else:
+                    if not previous or previous.get("reasons") != res.get("reasons") or state != "needs-operator":
+                        ev("needs-operator", _summary(res))
+                    state, st["needs"] = "needs-operator", "check"
 
         if state == "waiting-for-chips":
             c = chips()
@@ -389,7 +433,7 @@ class Hub(dc.HubClient):
         try:
             raw = self._open(f"{self.base}/api/models?author={org}&search={search}&limit=50", MAX_LISTING_BYTES)
             data = safeio.parse_json_bytes(raw, max_bytes=MAX_LISTING_BYTES, expect=list) if raw else []
-        except (OSError, ValueError, dc.Unreadable, safeio.SafeReadError):
+        except (OSError, ValueError, dc.Unreadable, dc.HubUnreachable, safeio.SafeReadError):
             return []
         return [m["id"] for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)]
 
