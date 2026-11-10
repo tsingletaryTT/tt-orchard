@@ -49,6 +49,20 @@ HINTS = (
      "top-level functions are: {names}."),
     (re.compile(r"^TypeError$"), re.compile(r"is not a Module subclass|ModuleList"),
      "This port is not a torch module: use plain functions and the `model` dict, and do not subclass torch.nn.Module or build ModuleList."),
+    # The shapes below are failures the arm E2 run showed on the chip (issue 677).
+    (re.compile(r"^ImportError$"), re.compile(r"attempted relative import"),
+     "The port is one module that the check imports by its file name: it has no package, so there is no relative import. The helpers are "
+     "functions in this same file: {names}. Call them by name."),
+    (re.compile(r"^TypeError$"), re.compile(r"device=nanobind|nb_bound_method|\.device\b"),
+     "An activation `x` is a ttnn tensor with no torch device: do not read x.device or pass it to torch. Build host tensors with plain torch "
+     "(no device argument) and upload them with _upload, or read a tensor back with _to_host first."),
+    (re.compile(r"^RuntimeError$"), re.compile(r"padded widths must match|gamma.*padded_shape"),
+     "ttnn.rms_norm needs a weight whose last dimension equals the input's. For a norm with a group_size smaller than the input width "
+     "(the hyper-connection norm), reshape x to [..., width / group_size, group_size], norm over the last dimension with the group's "
+     "weight, and reshape back."),
+    (re.compile(r"^KeyError$"), re.compile(r"\{i\}"),
+     "A key that still holds `{{i}}` is a pattern, not a tensor name. Look a weight up in model['dev'] by its real name with the layer number "
+     "filled in (for example 'model.layers.0.…'), and use _pattern(name) only for NORM_EPS and PLACEMENT."),
 )
 
 

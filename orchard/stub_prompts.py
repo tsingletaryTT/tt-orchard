@@ -40,7 +40,8 @@ RULES = ("You write one function of a TTNN port of a transformer decoder for a T
          "upload the result with _upload. Use only the ttnn calls listed; an argument that is not listed does not exist. Take every "
          "setting (activation, eps, group size, head counts) from the construction lines; a class default may differ from the resolved value. Answer with one "
          "```python code block that defines the function with the same name and arguments, plus any import it needs, and nothing else. "
-         "Do not leave the `# AGENT:` marker in it.")
+         "Do not leave the `# AGENT:` marker in it. The port is one module imported by its file name: use no relative import, and call the helpers by name. "
+         "An activation or weight is a ttnn tensor with no torch device: do not read x.device or call a torch function on it.")
 
 
 class SpliceError(Exception):
