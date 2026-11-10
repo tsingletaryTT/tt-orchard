@@ -30,11 +30,12 @@ def test_the_layer_composition_test_id_names_a_test_of_this_file():
     assert LAYER_TEST.split("::")[1] in globals()
 
 
-def test_the_two_linear_attention_layers_are_written_whole_and_the_indexer_layer_stays_a_stub():
+def test_every_layer_is_written_whole_and_only_the_indexer_attention_stays_a_stub():
     text, p = tiny_qwen4()
-    assert {s.function for s in p.stubs} == {"_layer_C", "_C_self_attn"}
-    assert [(l.key, bool(l.composed)) for l in p.layers] == [("A", True), ("B", True), ("C", False)]
-    assert "layer_composition" in p.summary()["generated"] and len(pt.stub_lines(text)) == 2
+    assert {s.function for s in p.stubs} == {"_C_self_attn"}
+    assert [(l.key, bool(l.composed)) for l in p.layers] == [("A", True), ("B", True), ("C", True)]
+    assert [l.composed["sublayer"] for l in p.layers] == ["linear_attn", "linear_attn", "self_attn"] and p.layers[2].composed["stub_sublayer"]
+    assert "layer_composition" in p.summary()["generated"] and len(pt.stub_lines(text)) == 1
     a, b = _source(text, "_layer_A"), _source(text, "_layer_B")
     assert pt.GENERATED_BLOCK_MARK in a and "_A_ple" not in a and "_B_ple(model, i, x, ids)" in b
     assert a.index("_A_attn_hyper_connection") < a.index("_A_linear_attn") < a.index("_A_mlp_hyper_connection") < a.index("_mlp(")
@@ -233,7 +234,7 @@ ATTRS = {"layer_type": "linear_attention"}
 
 
 def test_a_constructed_layer_with_every_part_is_composed():
-    assert pt._compose_layer(_layer(), ATTRS, "aten.flatten.using_ints (candidate)") == {"hc": 4, "hidden": 64, "ple": True}
+    assert pt._compose_layer(_layer(), ATTRS, "aten.flatten.using_ints (candidate)") == {"hc": 4, "hidden": 64, "ple": True, "sublayer": "linear_attn", "stub_sublayer": False}
 
 
 def test_a_connection_that_does_not_inject_keeps_the_layer_a_stub():
@@ -249,3 +250,67 @@ def test_connections_over_different_streams_keep_the_layer_a_stub():
 
 def test_a_ple_block_over_other_streams_keeps_the_layer_a_stub():
     assert pt._compose_layer(_layer(ple=("ple", {"hc": 4, "hidden": 32})), ATTRS, None) is None
+
+
+# ---- the layer around a stub attention: the composition is the reference's whatever the sublayer computes ------------------------------------
+
+def _attention_layer_case(monkeypatch, tmp_path):
+    """Layer 3 (indexed attention). Its attention block is a stub the coder writes, so both sides get the same stand-in sublayer: a fixed matrix on the mixed input.
+    The comparison then covers the composition (connections, sublayer call, injections, MLP) and nothing the coder will write."""
+    modeling = pytest.importorskip("transformers.models.qwen4_exp.modeling_qwen4_exp")
+    text, _p = tiny_qwen4()
+    mod = import_port(monkeypatch, text, tmp_path)
+    layer = _hf_layer(3, seed=6)
+    g = torch.Generator().manual_seed(9)
+    w = (0.2 * torch.randn(64, 64, generator=g)).to(torch.bfloat16).float()
+
+    class Stand(torch.nn.Module):
+        def forward(self, hidden_states, *args, **kwargs):
+            return hidden_states @ w.t(), None
+    layer.self_attn = Stand()
+    model = mod.load(str(_checkpoint(tmp_path, {3: layer})), fake.MeshDevice(1))
+    mod._C_self_attn = lambda model, i, x, ids: fake.Tensor(x.t @ w.t(), layout=x.layout)
+    return mod, model, layer
+
+
+def test_generated_attention_layer_composition_matches_the_reference(monkeypatch, tmp_path):
+    mod, model, layer = _attention_layer_case(monkeypatch, tmp_path)
+    ids, x_host = _inputs()
+    with torch.no_grad():
+        want = layer(x_host.float(), None).float()
+    x = fake.Tensor(x_host.reshape(1, 1, len(ids), 256).float(), layout="TILE")
+    got = mod._layer_C(model, 3, x, ids, None, None).t.float().reshape(want.shape)
+    scale = want.abs().max().item()
+    err = (got - want).abs().max().item()
+    assert scale > 0.5, f"layer 3: the reference output is too small ({scale}) for the comparison to mean anything"
+    assert err <= 0.06 * scale, f"layer 3: max abs error {err} against scale {scale}"
+
+
+def test_the_attention_layer_comparison_fails_when_the_emitted_text_is_broken(monkeypatch, tmp_path):
+    text, _p = tiny_qwen4()
+    old = "    x = _hyper_connection_inject(out, hyper_input, weights, 4, 64)\n    mixed, hyper_input, weights = _C_mlp_hyper_connection"
+    assert old in text
+    monkeypatch.setattr(pt, "render", lambda p: text.replace(old, "    x = hyper_input\n    mixed, hyper_input, weights = _C_mlp_hyper_connection"))
+    with pytest.raises(AssertionError, match="max abs error|too small"):
+        test_generated_attention_layer_composition_matches_the_reference(monkeypatch, tmp_path)
+
+
+def _attn_blocks(**over):
+    blocks = {k: v for k, v in _layer().blocks.items() if k not in ("linear_attn", "ple")}
+    blocks["self_attn"] = ("stub", {"cls": "Qwen4ExpTextAttention", "reason": "r"})
+    blocks.update(over)
+    return pt.Layer("C", [3], {k: "?" for k in blocks}, "Qwen4ExpTextDecoderLayer", standard=False, blocks=blocks)
+
+
+def test_a_constructed_attention_layer_is_composed_around_the_stub():
+    got = pt._compose_layer(_attn_blocks(), {"layer_type": "indexed_attention"}, None)
+    assert got == {"hc": 4, "hidden": 64, "ple": False, "sublayer": "self_attn", "stub_sublayer": True}
+
+
+def test_an_attention_sublayer_in_a_linear_layer_or_the_reverse_keeps_the_layer_a_stub():
+    assert pt._compose_layer(_attn_blocks(), {"layer_type": "linear_attention"}, None) is None
+    assert pt._compose_layer(_layer(), {"layer_type": "indexed_attention"}, None) is None
+
+
+def test_a_generated_standard_attention_is_not_composed_here():
+    assert pt._compose_layer(_attn_blocks(self_attn=("attention", {})), {"layer_type": "indexed_attention"}, None) is None

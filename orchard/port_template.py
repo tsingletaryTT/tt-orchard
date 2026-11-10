@@ -21,8 +21,9 @@ tables ROW_MAJOR, norm weights as [1, 1, 1, dim], a mesh mapper when the device 
 the embedding, RMSNorm, the gated MLP, ordinary attention (rotary in the HF layout and causal SDPA) and `lm_head` through TTNN calls, a
 `decode_step` that re-runs the whole sequence (the idiom of the port that passed, no cache), and `close`. Every block it cannot write is a
 named function whose body is a `# AGENT:` comment and a NotImplementedError that names the block and the reference class. The generator
-does not know the data flow of a layer with children it does not recognise (a per-layer embedding, an indexer, and any gated delta net or
+does not know the data flow of a layer with children it does not recognise (an indexer, and any per-layer embedding, gated delta net or
 hyper-connection that a registered family does not prove), so such a layer's function is a stub too, and it lists the generated helpers and blocks the coder can call from it.
+A layer whose parts are all generated blocks (or whose attention block is the one remaining stub) is written whole by `_compose_layer`.
 
 Block families (issue 696). A family of blocks that the generator writes whole is one entry in `BLOCK_FAMILIES`: a recognizer over the
 construction and the tensor shapes, an emitter that returns the function text, the module-level helpers it calls, and the id of a test that
@@ -32,7 +33,10 @@ entry is the hyper-connection of the Qwen4 family (the prelude that repeats the 
 attention and the MLP, the injection after each block, and the mixer after the last layer). The second is the gated delta net (linear attention: the
 fused projection, a depthwise causal convolution built from shifted multiply-adds, the decay and beta, `ttnn.transformer.chunk_gated_delta_rule` in its
 flat form, the gated norm and the output projection); its load roles are `neg_exp` (minus exp of `A_log`) and `conv_taps` (one device tensor per
-convolution tap). The standard blocks above are not entries. The
+convolution tap). The third is the per-layer embedding (PLE: hashed n-gram ids and the table lookup on the host with the table kept in `model["host"]`, then a gate,
+group norms and a dilated depthwise convolution on the device). A layer of the Qwen4 family is composed from these (the PLE add, the two connections, the sublayer, the
+two injections; issue 696, slice 3). The indexer attention (`Qwen4ExpTextAttention` with a `Qwen4ExpTextQSAIndexer` child) is not written: the project log entry for issue 696, slice 3, lists what blocks it
+(the per-query top-k over pooled key blocks needs ops no probe has run, and a port that ignores the indexer is wrong, issue 638). The standard blocks above are not entries. The
 recognizer returns None when it cannot prove the shapes, and the block is then a stub as before. The ttnn calls of a family's code are
 checked against the verified sheet like the rest. Whether the families' ops (a width-1 slice and a column-broadcast multiply in the injection; `ttnn.softplus`, the row-major concat of the
 convolution's left padding and the delta rule op at these head counts) run on a chip is not shown by the CPU test: the first board check of a run that uses them is that evidence.
@@ -755,23 +759,28 @@ register_block_family(BlockFamily(
 # the check that the composition is right.
 LAYER_COMPOSITION_TEST = "tests/test_port_template_layer.py::test_generated_layers_match_the_transformers_decoder_layer"
 _COMPOSABLE_FLAG = "aten.flatten.using_ints (candidate)"
-_COMPOSED_KIDS = frozenset({"attn_hyper_connection", "mlp_hyper_connection", "mlp", "linear_attn"})
 
 
 def _compose_layer(layer: Layer, attrs: dict, flag: str | None):
+    """The composition settings of a layer built from generated parts, or None. The sublayer is the gated delta net of a linear-attention layer, or the
+    attention block of an indexed-attention layer, which may still be a stub: the layer then calls the stub, and the stub is the only function the coder writes."""
+    sub = "linear_attn" if "linear_attn" in layer.blocks else "self_attn"
     kids = set(layer.blocks)
-    if kids not in (_COMPOSED_KIDS, _COMPOSED_KIDS | {"ple"}) or (flag is not None and flag != _COMPOSABLE_FLAG):
+    base = {"attn_hyper_connection", "mlp_hyper_connection", "mlp", sub}
+    if kids not in (base, base | {"ple"}) or (flag is not None and flag != _COMPOSABLE_FLAG):
         return None
     kinds = {k: v[0] for k, v in layer.blocks.items()}
-    want = {"attn_hyper_connection": "hyper_connection", "mlp_hyper_connection": "hyper_connection", "mlp": "mlp", "linear_attn": "gated_delta_net", "ple": "ple"}
-    if any(kinds[k] != want[k] for k in kids) or attrs.get("layer_type") != "linear_attention":
+    want = {"attn_hyper_connection": "hyper_connection", "mlp_hyper_connection": "hyper_connection", "mlp": "mlp", "linear_attn": "gated_delta_net",
+            "self_attn": "stub", "ple": "ple"}
+    layer_type = attrs.get("layer_type")
+    if any(kinds[k] != want[k] for k in kids) or layer_type != ("linear_attention" if sub == "linear_attn" else "indexed_attention"):
         return None
     a, m = layer.blocks["attn_hyper_connection"][1], layer.blocks["mlp_hyper_connection"][1]
     if not (a.get("inject") and m.get("inject")) or (a["hc"], a["hidden"]) != (m["hc"], m["hidden"]):
         return None          # both connections must inject, over the same streams
     if "ple" in kids and layer.blocks["ple"][1]["hc"] * layer.blocks["ple"][1]["hidden"] != a["hc"] * a["hidden"]:
         return None
-    return {"hc": a["hc"], "hidden": a["hidden"], "ple": "ple" in kids}
+    return {"hc": a["hc"], "hidden": a["hidden"], "ple": "ple" in kids, "sublayer": sub, "stub_sublayer": kinds[sub] == "stub"}
 
 
 def _emit_composed_layer(layer: Layer, layers_path: str) -> list:
@@ -779,13 +788,13 @@ def _emit_composed_layer(layer: Layer, layers_path: str) -> list:
     lines = [f"def _layer_{key}(model, i, x, ids, cos, sin):",
              f'    """Layers {layer.indices}: {layer.cls}, written whole from generated blocks: '
              + ("the PLE block adds to the streams, then " if c["ple"] else "")
-             + f'attention connection, gated delta net, MLP connection and MLP, each followed by its injection into the {c["hc"]} streams."""',
+             + f'attention connection, {"the attention block (a stub the coder writes)" if c["stub_sublayer"] else "gated delta net"}, MLP connection and MLP, each followed by its injection into the {c["hc"]} streams."""',
              f"    {GENERATED_BLOCK_MARK} layer",
              f'    p = f"{layers_path}.{{i}}"']
     if c["ple"]:
         lines.append(f"    x = ttnn.add(x, _{key}_ple(model, i, x, ids))")
     lines += [f"    mixed, hyper_input, weights = _{key}_attn_hyper_connection(model, i, x, ids)",
-              f"    out = _{key}_linear_attn(model, i, mixed, ids)",
+              f"    out = _{key}_{c['sublayer']}(model, i, mixed, ids)",
               f"    x = _hyper_connection_inject(out, hyper_input, weights, {c['hc']}, {c['hidden']})",
               f"    mixed, hyper_input, weights = _{key}_mlp_hyper_connection(model, i, x, ids)",
               '    out = _mlp(model, p + ".mlp", mixed)',
@@ -970,12 +979,13 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
             and layer.blocks["post_attention_layernorm"][0] == "rms_norm" and not own_flag
         layer.standard = standard
         layer.composed = None if standard else _compose_layer(layer, attrs, flagged.get(lp))
-        if not standard and layer.composed is None:
+        if not standard:
             parts = [f"{k} ({children[k]})" for k, v in sorted(layer.blocks.items()) if v[0] == "stub"]
             layer.reason = (own_flag or (f"{cls or 'the layer class'}'s children are not the standard pre-norm set (input_layernorm, self_attn, "
                             "post_attention_layernorm, mlp)" if set(kids) != STANDARD_LAYER else "a child block is a stub")) \
                 + ("; stubs: " + ", ".join(parts) if parts else "")
-            stubs.append(Stub(f"_layer_{key}", lp, cls or "?", layer.reason))
+            if layer.composed is None:
+                stubs.append(Stub(f"_layer_{key}", lp, cls or "?", layer.reason))
             for k, v in sorted(layer.blocks.items()):
                 if v[0] == "stub":
                     stubs.append(Stub(f"_{key}_{k}", f"{lp}.{k}", v[1]["cls"], v[1]["reason"]))
@@ -1194,7 +1204,10 @@ def render(p: Plan) -> str:
         for kid, (kind, details) in sorted(layer.blocks.items()):
             if kind == "stub":
                 L += _stub_function(f"_{layer.key}_{kid}", "model, i, x, ids", stubs[f"_{layer.key}_{kid}"],
-                                    [f"The Linear children of this block are uploaded by load() and can be called as _linear(model, f\"{lp}.{kid}.<name>\", x)."])
+                                    [f"The Linear children of this block are uploaded by load() and can be called as _linear(model, f\"{lp}.{kid}.<name>\", x)."]
+                                    + ([f"The generated _layer_{layer.key} calls this function on the connection's mixed input x [1, 1, S, {layer.composed['hidden']}] with the padded token ids; "
+                                        f"return the block output [1, 1, S, {layer.composed['hidden']}]. The layer adds it to the residual streams through the injection, so add no residual here."]
+                                       if layer.composed else []))
             elif kind in BLOCK_FAMILIES:
                 L += BLOCK_FAMILIES[kind].emit(f"_{layer.key}_{kid}", f"{lp}.{kid}", details, "layer")
         if layer.composed:
