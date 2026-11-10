@@ -100,6 +100,30 @@ def class_excerpt(excerpts: str, cls: str, *, max_chars: int = EXCERPT_MAX_CHARS
     return body
 
 
+_LAYER_LOOP = re.compile(r"^(?P<indent>\s*)for\s+[\w, ]+\s+in\s+(?:enumerate\()?self\.layers\b", re.M)
+
+
+def forward_part(code: str, part: str) -> str | None:
+    """The part of a text model's forward before ("before") or after ("after") the loop over its layers, or None when the code has no such
+    loop. The prelude stub needs only what runs before the layers and the epilogue stubs only what runs after, and the whole forward (position
+    ids, masks, caches, the loop) made the coder write torch code for all of it (arm E4)."""
+    m = _LAYER_LOOP.search(code) if isinstance(code, str) else None
+    if m is None:
+        return None
+    if part == "before":
+        return code[: m.start()].rstrip() + "\n"
+    indent = len(m.group("indent"))
+    rest = code[m.end():].split("\n")[1:]               # the lines after the `for` line
+    out = []
+    in_loop = True
+    for line in rest:
+        if in_loop and line.strip() and len(line) - len(line.lstrip()) <= indent:
+            in_loop = False
+        if not in_loop:
+            out.append(line)
+    return "\n".join(out).strip("\n") + "\n"
+
+
 def construction_lines(construction_text: str | None, cls: str) -> list:
     """The lines of effective_construction.txt that name the class (its module groups and its resolved-vs-default flags)."""
     if not isinstance(construction_text, str):
@@ -163,6 +187,19 @@ def helpers_text(port_text: str) -> str:
     return "\n".join(out)
 
 
+def _hc_count(tree: ast.Module):
+    """CONFIG['hc_count'] of the port's module-level CONFIG literal, or None."""
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CONFIG" for t in n.targets):
+            try:
+                value = ast.literal_eval(n.value)
+            except (ValueError, SyntaxError, RecursionError, MemoryError):
+                return None
+            v = value.get("hc_count") if isinstance(value, dict) else None
+            return v if isinstance(v, int) and not isinstance(v, bool) else None
+    return None
+
+
 def model_text(port_text: str) -> str:
     """The section of a request that says what the arguments of a port function are: `model` is a plain dict with the keys `load` sets, the
     module constants hold the config and the sizes, and a torch-style attribute does not exist. Derived from port_template.MODEL_KEYS and
@@ -178,6 +215,12 @@ def model_text(port_text: str) -> str:
     lines += [f"- `{k}`: {v}" for k, v in port_template.MODEL_KEYS.items()]
     lines += ["The module constants of the port (read them directly):"]
     lines += [f"- `{k}`: {v}" for k, v in port_template.MODULE_CONSTANTS.items() if k in defined]
+    hc = _hc_count(tree)
+    if hc and hc > 1:
+        lines += [f"The residual stream has hc_count = {hc} streams (CONFIG['hc_count']), laid out side by side: between the layers x is "
+                  f"[1, 1, S, HC * HIDDEN], stream j in the columns j * HIDDEN to (j + 1) * HIDDEN. The prelude widens the embedding to that shape "
+                  "(the embedding repeated HC times along the last dimension), every layer reads and returns that shape, and the epilogue narrows "
+                  "it back to [1, 1, S, HIDDEN] before the head."]
     lines += ["There is no model.config, no rotary_emb and no past_key_values: build position tables from CONFIG with the helpers the port "
               "has (" + (", ".join(f"`{h}`" for h in helpers) or "none") + "), and keep any cache in a local or in model['ids']."]
     return "\n".join(lines)
@@ -201,7 +244,31 @@ def stub_request(port_text: str, stub, *, sheet: dict, excerpts: str | None, con
     if lines:
         parts += [f"## Resolved settings of {cls} (effective_construction.txt)", *["- " + ln for ln in lines]]
     excerpt = class_excerpt(excerpts, cls)
+    extra_excerpt = None
+    if function == "_model_prelude":
+        fence = re.search(r"```python\n(.*?)```", excerpt or "", re.S)
+        piece = forward_part(fence.group(1), "before") if fence else None
+        if piece:
+            excerpt = (f"(the part of forward before the layer loop; the layers themselves, the position tables and the mask are not written "
+                       f"by this function)\n\n```python\n{piece}```")
+    elif function.startswith("_model_") and isinstance(excerpts, str):
+        # An epilogue stub belongs to a child of the text model (its mixer): its own class is given whole, and the part of the text model's forward
+        # after the layer loop shows where it is called.
+        for sec in re.finditer(r"^## (\S+)\s*$", excerpts, re.M):
+            code = class_excerpt(excerpts, sec.group(1)) or ""
+            fence = re.search(r"```python\n(.*?)```", code, re.S)
+            piece = forward_part(fence.group(1), "after") if fence else None
+            if piece:
+                extra_excerpt = (f"## Where the text model's forward uses it (the part of forward after the layer loop)\n\n```python\n{piece}```")
+                break
+    if "GatedDeltaNet" in cls or "linear_attn" in path:
+        parts += ["## How to write this block",
+                  "Write the recurrence on the host as a plain for loop over the tokens, with no chunking and no helper classes: read x back with "
+                  "_to_host, loop over the tokens updating the state, upload the result with _upload, and return it. Keep the function under 60 lines; "
+                  "a long reply is cut off."]
     parts += [f"## Reference class {cls} (stages/2/reference_excerpts.md)", excerpt or "(the excerpts file has no section for this class; read it from the installed transformers package)"]
+    if extra_excerpt:
+        parts.append(extra_excerpt)
     parts += [f"## The function to write: {function} for {cls} at {path}", "```python", source, "```",
               f"Write `{function}` with these arguments: {', '.join(args)}. Return a ttnn tensor of the shape the layer expects."]
     return {"system": RULES, "user": "\n\n".join(parts), "function": function, "args": args}
