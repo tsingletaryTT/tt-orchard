@@ -61,6 +61,17 @@ HINTS = (
      "ttnn.rms_norm needs a weight whose last dimension equals the input's. For a norm with a group_size smaller than the input width "
      "(the hyper-connection norm), reshape x to [..., width / group_size, group_size], norm over the last dimension with the group's "
      "weight, and reshape back."),
+    # The shapes below are failures the arm E13 run showed on the chip (issue 677). They come before the CONFIG-key entry, which would
+    # otherwise take a model key or a rotary table name for a config key.
+    (re.compile(r"^AttributeError$"), re.compile(r"'ttnn\.[\w.]*Tensor' object has no attribute '(\w+)'"),
+     "A ttnn tensor has no `.{0}` method. Use the ttnn function that does it, for example ttnn.reshape(x, shape), ttnn.permute(x, dims), "
+     "ttnn.transpose(x, a, b), or read the tensor back with _to_host and use torch."),
+    (re.compile(r"^KeyError$"), re.compile(r"^'(mesh_device|n_devices|ck|ids)'$"),
+     "`{0}` is a key of `model` itself: write model['{0}'], not model['dev']['{0}'] or model['host']['{0}']. model['dev'] and model['host'] hold "
+     "weights only, under the checkpoint tensor names."),
+    (re.compile(r"^KeyError$"), re.compile(r"^'(?:rotary_emb\.)?(?:cos|sin)_cached'$"),
+     "The model holds no rotary table (cos_cached and sin_cached do not exist). Build cos and sin with the port's own helper if it has one "
+     "(look for _rope_tables in: {names}); otherwise compute them with torch from the config's rotary settings (CONFIG) and upload them with _upload."),
     (re.compile(r"^KeyError$"), re.compile(r"^'(?P<key>\w+)'$"),
      "`{0}` is not a key of CONFIG. CONFIG has exactly these keys: {config_keys}. Read the value from the key that holds it."),
     (re.compile(r"^KeyError$"), re.compile(r"\{i\}"),
