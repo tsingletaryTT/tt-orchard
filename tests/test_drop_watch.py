@@ -271,6 +271,113 @@ def test_gozer_status_that_is_not_strict_json_is_not_free(stdout):
     assert got["free"] is False and all("\ud800" not in h for h in got["holders"])
 
 
+# ---- a Hub that does not answer, and state files that lack what their state needs (issue 666) -------------------------
+
+class OutageHub(FakeHub):
+    """FakeHub whose record or files can be switched off."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.record_down = self.files_down = False
+
+    def info(self, repo, revision=None):
+        if self.record_down:
+            raise dc.HubUnreachable("the Hub did not answer (URLError)")
+        return super().info(repo, revision)
+
+    def get(self, repo, revision, name, *, max_bytes):
+        if self.files_down:
+            raise dc.HubUnreachable("the Hub did not answer (URLError)")
+        return super().get(repo, revision, name, max_bytes=max_bytes)
+
+
+def test_a_hub_outage_is_reported_once_and_changes_no_state(tmp_path):
+    hub = OutageHub()
+    hub.record_down = True
+    w = World(tmp_path, hub=hub, free=False)
+    res = w.tick()
+    assert res["state"] == "waiting" and kinds(res) == ["hub-unreachable"]
+    assert w.tick()["events"] == []                                # the same outage: no repeat
+    hub.record_down = False
+    res = w.tick()
+    assert res["state"] == "waiting-for-chips" and "hub-unreachable" not in kinds(res)
+    assert "hub_unreachable" not in dw.load_state(w.watch_dir)
+
+
+def test_a_second_outage_is_reported_again(tmp_path):
+    hub = OutageHub(exists=False)
+    hub.record_down = True
+    w = World(tmp_path, hub=hub)
+    assert kinds(w.tick()) == ["hub-unreachable"]
+    hub.record_down = False
+    assert w.tick()["events"] == []
+    hub.record_down = True
+    assert kinds(w.tick()) == ["hub-unreachable"]
+
+
+def test_an_outage_during_the_upload_check_keeps_the_release_seen(tmp_path):
+    hub = OutageHub()
+    hub.files_down = True
+    w = World(tmp_path, hub=hub)
+    res = w.tick()
+    assert res["state"] == "seen" and kinds(res) == ["release-seen", "hub-unreachable"] and w.launched == []
+
+
+def test_an_outage_during_the_check_retries_the_check(tmp_path):
+    hub = OutageHub()
+    w = World(tmp_path, hub=hub, free=True)
+    st = {"state": "check", "revision": SHA}
+    dw.save_state(w.watch_dir, st)
+    hub.files_down = True
+    res = w.tick()
+    assert res["state"] == "check" and kinds(res) == ["hub-unreachable"] and w.launched == []
+    hub.files_down = False
+    res = w.tick()
+    assert res["state"] == "running" and "check" in kinds(res)
+
+
+GOOD_RUN = {"argv": ["tt-orchard", "bringup"], "run_dir": "/x/run", "log": "/x/log", "pid": 1, "start_time": "1"}
+
+
+@pytest.mark.parametrize("st", [
+    {"state": "check"},
+    {"state": "check", "revision": "main"},
+    {"state": "needs-operator", "needs": "check"},
+    {"state": "waiting-for-chips"},
+    {"state": "waiting-for-chips", "command": []},
+    {"state": "waiting-for-chips", "command": ["tt-orchard", "bringup", 5]},
+    {"state": "waiting-for-chips", "command": ["rm", "-rf", "/"]},
+    {"state": "starting"},
+    {"state": "running"},
+    {"state": "running", "run": {"run_dir": "/x/run"}},
+    {"state": "running", "run": ["/x/run"]},
+    {"state": "running", "run": GOOD_RUN, "stages_reported": "1:passed:1"},
+    {"state": "waiting", "seen_other": "Qwen/Qwen4-27B-FP8"},
+], ids=["check-no-revision", "check-bad-revision", "needs-check-no-revision", "chips-no-command", "chips-empty-command",
+        "chips-command-not-text", "chips-other-command", "starting-no-run", "running-no-run", "running-no-log", "running-run-list",
+        "running-reported-not-list", "waiting-seen-other-not-list"])
+def test_a_state_file_without_what_its_state_needs_is_corrupt(tmp_path, st):
+    w = World(tmp_path)
+    w.watch_dir.mkdir(parents=True, exist_ok=True)
+    (w.watch_dir / "state.json").write_text(json.dumps(st))
+    with pytest.raises(dw.StateCorrupt):
+        dw.load_state(w.watch_dir)
+    res = w.tick()
+    assert res["state"] == "needs-operator" and w.launched == [] and "needs-operator" in kinds(res)
+    assert list(w.watch_dir.glob("state.json.corrupt-*"))
+
+
+@pytest.mark.parametrize("st", [
+    {"state": "check", "revision": SHA},
+    {"state": "waiting-for-chips", "revision": SHA, "command": ["tt-orchard", "bringup", "Qwen/Qwen4-27B", "--full-port"]},
+    {"state": "running", "run": GOOD_RUN, "stages_reported": ["1:passed:1"]},
+    {"state": "needs-operator", "needs": "state"},
+], ids=["check", "waiting-for-chips", "running", "needs-operator"])
+def test_a_complete_state_file_loads(tmp_path, st):
+    (tmp_path / "state.json").write_text(json.dumps(st))
+    assert dw.load_state(tmp_path)["state"] == st["state"]
+
+
 def test_a_held_lock_skips_the_tick(tmp_path):
     w = World(tmp_path)
     with dw.locked(w.watch_dir) as got:

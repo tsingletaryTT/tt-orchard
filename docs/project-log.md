@@ -5208,3 +5208,16 @@ Prompt (operator, through the coordinator): write the Qwen4 blocks into the gene
 - Sheet: `ttnn.slice` and `ttnn.sigmoid` are new entries of `ttnn_cheat_sheet.json`. Both names exist in the tt-metal tree used for the check, and the three problems `verify` reports for the whole sheet were there before (`multiply` argument `b`, and two `checks` of mistake 6).
 - Tests: `tests/test_port_template_registry.py` (11) compares the generated per-layer connections, the inject helper, the mixer and the prelude with the transformers module on a tiny checkpoint through the torch-backed fake ttnn, with random bf16 weights. Six mutations (a dropped factor 2 in the injection, a dropped 1/hc, a plain norm weight, a missing shape check, a registry that does not check the test id, and a removed marker refusal) each turned a test red and were restored. Tests that exercised the stub requests for the whole Qwen4 list now generate with the registry emptied, so they keep covering the prelude, epilogue and layer stub requests for a family the registry does not know.
 - Not verified: a chip. The CPU test cannot show that a width-1 `ttnn.slice` and a column-broadcast `ttnn.multiply` (the injection) run on a board; a gozer-leased board check is the evidence. `ttnn.sigmoid` and slices of a stream matched in probe 4.
+
+
+## 2026-11-09: a Hub outage and a partial state file in drop-check and the watcher (issue 666)
+
+- `HubClient` raises `HubUnreachable` for a connection error, a timeout, a cut-off answer or an HTTP status other than 401,
+  403 and 404. It is not an `Unreadable`, so `fetch_metadata` cannot turn an outage into reasons that send a release down the
+  full-port route. `drop-check` reports the verdict `unreachable` with exit code 6.
+- The watcher's tick records one `hub-unreachable` event when an outage starts, keeps its state, and tries again next tick;
+  a check the outage interrupted runs again from the start. The flag clears on the next tick the Hub answers.
+- `load_state` refuses a state file that lacks what its state needs (a revision for `check`, a `tt-orchard bringup` command
+  for `waiting-for-chips`, a run record with its directory and log for `starting` and `running`, name lists that are lists);
+  the tick moves it aside and waits for the operator, as for an unreadable file.
+- 14 mutations, all red. Builds on PR 682 (issue 676).

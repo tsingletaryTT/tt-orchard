@@ -980,11 +980,12 @@ makes a request (look-alike repositories under other names appeared on 2026-11-0
 | `not-covered` | `full-port` | Each reason is named: experts, an n-gram embedding, a missing or malformed key, a width that does not split over 2 and 4 chips, a value outside a capability rule, or no capabilities file yet. |
 | `needs-operator` | | The release needs a reference interpreter whose transformers has its architecture class. |
 | `refused` | | The repository id or revision is not acceptable; nothing was read. |
+| `unreachable` | | The Hub did not answer (a connection error, a timeout, a cut-off answer or an HTTP status other than 401, 403 and 404). Nothing was decided; run the check again. |
 
 The config side of the capabilities check is stage 0's own code (`orchard.bundle_capabilities.config_reasons`,
 `docs/bundle-capabilities.md`), so `drop-check` and stage 0 judge a release's config the same way, including stage 0's rule
 that every config key that differs from the package's own weights must be declared. Tensor rules need the weight headers and
-are applied only at stage 0. The exit code is 0 for covered, 2 refused, 3 not covered, 4 needs the operator and 5 not found.
+are applied only at stage 0. The exit code is 0 for covered, 2 refused, 3 not covered, 4 needs the operator, 5 not found and 6 unreachable.
 Flags: `--revision` (a 40-character commit; default the current one), `--bundle-dir` (the installed package's directory; by
 default the package `--bundle` names under tt-model's models directory), `--hf-home` (the Hugging Face cache that holds the
 package's own weights; default from `bringup.toml`), `--capabilities` and `--dev-config` (the capabilities file and the
@@ -1008,7 +1009,10 @@ Each tick does at most one step and records it in `DIR/state.json`:
 | `waiting-for-chips` | `drop-check` ran and fixed the route. gozer shows a chip held, so nothing starts. The watcher never stops a process that holds a chip. |
 | `running` | Every chip was free, so `tt-orchard bringup <target> --run-dir RUN` was started, once. |
 | `ready`, `blocked`, `failed` | The run ended. Nothing more happens. |
-| `needs-operator` | The check needs a reference interpreter, or the state cannot be trusted (a corrupt state file, or a tick that died after "starting" and before it recorded the process). Nothing starts until you fix the cause and edit or remove `state.json`. |
+| `needs-operator` | The check needs a reference interpreter, or the state cannot be trusted (a corrupt state file, a state file that lacks what its state needs, such as a revision for `check` or a `tt-orchard bringup` command for `waiting-for-chips`, or a tick that died after "starting" and before it recorded the process). Nothing starts until you fix the cause and edit or remove `state.json`. |
+
+When the Hub does not answer, the tick records one `hub-unreachable` event at the start of the outage, keeps its state and
+tries again on the next tick; a check that the outage interrupted runs again from the start.
 
 A covered release starts `bringup --base` the Qwen4 package (or the Qwen3.8 bundle); a release that is not covered starts
 the full-port fallback. Each step is appended to `DIR/events.jsonl`; `tick --json` prints the events of that tick for the
