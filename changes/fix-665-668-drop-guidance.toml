@@ -1,0 +1,2 @@
+target = "0.9.161"
+summary = "drop-watch: the documented --bringup-arg form parses, and the run is pinned to the commit the check read (bringup --revision; the watcher stops when a run started on another commit) (issues 665, 668)."

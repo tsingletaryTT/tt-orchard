@@ -1172,3 +1172,34 @@ def test_bringup_passes_port_repair_rounds_to_the_supervisor_only_when_given(con
     assert "--port-repair-rounds" not in rec.argv
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--port-repair-rounds", "0"])
     assert code == 0 and rec.argv[rec.argv.index("--port-repair-rounds") + 1] == "0"
+
+
+# ---- bringup --revision: a pinned commit (issue 668) ---------------------------------------------------------------------------------------
+
+OTHER_REV = "f" * 40 if REV != "f" * 40 else "e" * 40
+
+
+def test_a_pinned_revision_that_is_the_hubs_latest_commit_runs_as_before(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--revision", REV])
+    assert code == 0 and rec.argv is None
+
+
+def test_a_pinned_revision_that_is_not_the_hubs_latest_commit_refuses_before_any_download(conf):
+    """The drop watcher read one commit; a commit pushed since is what an unpinned run would fetch. The pinned run refuses and names both."""
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--revision", OTHER_REV])
+    assert code == 2 and rec.argv is None and rec.fetched == []
+
+
+def test_a_pinned_revision_that_is_not_a_commit_hash_is_refused(conf):
+    for bad in ("main", "abc", REV[:-1], REV.upper(), "../" + REV[3:], ""):
+        code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--revision", bad])
+        assert code == 2 and rec.argv is None, bad
+
+
+def test_a_malformed_pinned_revision_is_refused_before_the_hub_is_asked(conf):
+    asked = []
+    sig = signals(hub_info=lambda m: asked.append(m) or (pf.parse_hub(PAYLOAD), None))
+    for bad in ("main", REV[:-1], REV.upper()):
+        code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--revision", bad], sig=sig)
+        assert code == 2 and rec.argv is None
+    assert asked == []

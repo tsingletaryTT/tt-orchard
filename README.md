@@ -883,6 +883,7 @@ uses your Hugging Face token: the download runs with every token variable remove
 block and not a login. Files the model repo ships (for example a `.py` file) are downloaded and recorded.
 The harness does not run them outside the agent sandbox. `--no-fetch` skips the download and requires the
 snapshot to be in `hf_home` already.
+`--revision SHA` pins the run to a 40-character commit: when the Hub's latest commit of the model is another one, `bringup` refuses before any download and names both commits. The drop watcher passes the commit its check read, so a commit pushed between the check and the start cannot change what the run decides on; if a run still starts on another commit (the ledger's `run_start` names the snapshot), the watcher stops with a needs-operator event.
 
 While the weights download, a progress line shows the bytes that have arrived, a bar, the speed, an ETA (after the
 first ten seconds) and the files complete. `hf download` prints no byte counts of its own, so the line measures the
@@ -999,7 +1000,7 @@ release laid out in a directory, `info.json` plus the files, for tests and rehea
 
 `drop-watch` starts the bring-up of a release when it appears. `tt-orchard drop-watch init --watch-dir DIR --target
 Qwen/Qwen4-27B --run-dir RUN` writes `DIR/watch.toml` (options: `--capabilities` the Qwen4 package's capabilities file,
-`--bringup-arg` an extra bringup argument, repeatable, `--quiet-minutes` how long the last commit must be quiet, default
+`--bringup-arg=VALUE` an extra bringup argument, repeatable (use the `=` form: a value that starts with two dashes, such as `--bringup-arg=--accept-credentials-visible`, is refused after a space), `--quiet-minutes` how long the last commit must be quiet, default
 30, `--reference-python`, and `--bundle-dir` and `--hf-home` with the meaning they have for `drop-check`). A scheduler runs `tt-orchard drop-watch tick --watch-dir DIR --json` every 30 minutes.
 Each tick does at most one step and records it in `DIR/state.json`:
 

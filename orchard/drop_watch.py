@@ -34,6 +34,7 @@ import dataclasses
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -262,7 +263,7 @@ def _summary(res: dict) -> str:
     return "; ".join(parts)
 
 
-def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, class_probe=None) -> dict:
+def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, class_probe=None, run_revision=None) -> dict:
     """One step of the watcher. Returns {"state", "events"} (or {"skipped": why} when another tick holds the lock)."""
     watch_dir = Path(watch_dir)
     with locked(watch_dir) as got:
@@ -370,6 +371,8 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
             c = chips()
             if c.get("free") is True:
                 argv = list(cfg.command) + list(st["command"][1:]) + ["--run-dir", cfg.run_dir] + list(cfg.bringup_args)
+                if not dc.revision_problem(st.get("revision")):
+                    argv += ["--revision", st["revision"]]       # the run decides on the commit the check read (issue 668)
                 log = str(watch_dir / f"bringup-{int(t)}.log")
                 st["state"], st["run"] = "starting", {"argv": argv, "run_dir": cfg.run_dir, "log": log}
                 save_state(watch_dir, st)
@@ -386,6 +389,16 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
             state = "needs-operator"
             ev("needs-operator", f"a run may have started without its process being recorded; check {st['run']['run_dir']}"
                " and the process list, then set state.json")
+
+        if state == "running":
+            # The run's ledger says which commit it started on (the snapshot directory is named for it). A run on another commit than the one the
+            # check read made its route, capabilities comparison and upload decision on the wrong files: stop following it and ask the operator.
+            started_on = (run_revision or _RUN_REVISION)(st["run"]["run_dir"])
+            if started_on is not None and st.get("revision") and started_on != st["revision"]:
+                st["needs"] = "revision"
+                state = "needs-operator"
+                ev("needs-operator", f"the run started on commit {started_on[:12]} but the check read {st['revision'][:12]}; the route and the checks "
+                   f"may not describe the files the run uses. Check {st['run']['run_dir']}, then stop the run or run drop-check again")
 
         if state == "running":
             s = run_status(st["run"]["run_dir"]) or {}
@@ -478,6 +491,31 @@ def launch_process(argv: list[str], log_path: str) -> dict:
 
 def process_alive(pid, start_time) -> bool:
     return isinstance(pid, int) and pid > 0 and start_time is not None and _start_time(pid) == start_time
+
+
+_SNAPSHOT_COMMIT = re.compile(r"(?:^|/)snapshots/([0-9a-f]{40})/?$")
+
+
+def run_revision(run_dir) -> str | None:
+    """The commit a run started on: the revision directory of the model snapshot that its first run_start ledger entry records, or None when the
+    ledger or the entry is not there yet or the path does not end in `snapshots/<40 hex>`. A ledger that cannot be read gives None too: the next
+    tick asks again."""
+    from orchard import ledger
+    try:
+        entries = ledger.read_entries(Path(run_dir) / "ledger.jsonl")
+    except (ledger.LedgerCorrupt, OSError, ValueError):
+        return None
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("event") == "run_start":
+            data = entry.get("data")
+            inputs = data.get("inputs") if isinstance(data, dict) else None
+            model = inputs.get("model") if isinstance(inputs, dict) else None
+            m = _SNAPSHOT_COMMIT.search(model) if isinstance(model, str) else None
+            return m.group(1) if m else None
+    return None
+
+
+_RUN_REVISION = run_revision      # the tick's default reader (its `run_revision` argument shadows the name)
 
 
 def run_status_of(run_dir) -> dict:
