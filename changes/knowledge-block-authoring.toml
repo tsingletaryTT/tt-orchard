@@ -1,0 +1,2 @@
+target = "0.9.155"
+summary = "A skill that tells a small coder how to author a block family for the port generator (recognizer, emitter, CPU reference test, refusals), with a test that keeps it in step with the code (issue 707)."
