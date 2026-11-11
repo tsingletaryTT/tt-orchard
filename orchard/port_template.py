@@ -19,11 +19,15 @@ Inputs (all read on the CPU, none from a chip):
 What it writes (`generate`): a complete `load` (every float tensor uploaded, Linear weights transposed once and TILE bf16, embedding
 tables ROW_MAJOR, norm weights as [1, 1, 1, dim], a mesh mapper when the device is a mesh of more than one chip), a `prefill` that runs
 the embedding, RMSNorm, the gated MLP, ordinary attention (rotary in the HF layout and causal SDPA) and `lm_head` through TTNN calls, a
-`decode_step` that re-runs the whole sequence (the idiom of the port that passed, no cache), and `close`. Every block it cannot write is a
+`decode_step` that re-runs the whole sequence (the idiom of the port that passed, no cache), and `close`. When the config gives the default
+rotary settings and the plan has an attention block or an attention stub, it also writes `ROTARY`, `_rope_tables` and `_apply_rotary` (partial
+rotary included), so that an attention stub calls them. Every block it cannot write is a
 named function whose body is a `# AGENT:` comment and a NotImplementedError that names the block and the reference class. The generator
 does not know the data flow of a layer with children it does not recognise (an indexer, and any per-layer embedding, gated delta net or
 hyper-connection that a registered family does not prove), so such a layer's function is a stub too, and it lists the generated helpers and blocks the coder can call from it.
 A layer whose parts are all generated blocks (or whose attention block is the one remaining stub) is written whole by `_compose_layer`.
+`Construction.resolve` takes the width of a module's weight vector, so that a norm whose path the construction's cut `paths` list leaves out is not given the
+group size of another variant that cannot divide its width.
 
 Block families (issue 696). A family of blocks that the generator writes whole is one entry in `BLOCK_FAMILIES`: a recognizer over the
 construction and the tensor shapes, an emitter that returns the function text, the module-level helpers it calls, and the id of a test that
@@ -35,8 +39,10 @@ fused projection, a depthwise causal convolution built from shifted multiply-add
 flat form, the gated norm and the output projection); its load roles are `neg_exp` (minus exp of `A_log`) and `conv_taps` (one device tensor per
 convolution tap). The third is the per-layer embedding (PLE: hashed n-gram ids and the table lookup on the host with the table kept in `model["host"]`, then a gate,
 group norms and a dilated depthwise convolution on the device). A layer of the Qwen4 family is composed from these (the PLE add, the two connections, the sublayer, the
-two injections; issue 696, slice 3). The indexer attention (`Qwen4ExpTextAttention` with a `Qwen4ExpTextQSAIndexer` child) is not written: the project log entry for issue 696, slice 3, lists what blocks it
-(the per-query top-k over pooled key blocks needs ops no probe has run, and a port that ignores the indexer is wrong, issue 638). The standard blocks above are not entries. The
+two injections; issue 696, slice 3). The fifth is the indexed attention (`Qwen4ExpTextAttention` with a `Qwen4ExpTextQSAIndexer` child; issue 696, slice 5): the
+block selection runs on the device with the op forms probes 6 to 9 ran on a board, four small steps run on the host (see the comment above `QSA_REFERENCE_TEST`), and
+the tie rule of `ttnn.topk(stable=True)` (the lowest index among tied scores) is the block's rule. With it, the tiny Qwen4 plan has no stub. The sixth is the sparse MoE block (`Qwen4ExpTextSparseMoeBlock`; issue 696, slice 6 and issue 723):
+the router on the device, the routing data back on the host, the experts dense-masked up to `MOE_DENSE_MAX_EXPERTS` experts and gathered per expert above it, and the gated shared expert (see the comment above `MOE_REFERENCE_TEST`); a block whose experts do not fit the per-chip budget `MOE_EXPERT_BYTES_MAX`, or whose checkpoint fuses the experts, stays a stub with that reason. The layer variants of a plan are split by the kind of feed-forward the tensors show (a dense layer 0 and MoE layers after it are two variants). The standard blocks above are not entries. The
 recognizer returns None when it cannot prove the shapes, and the block is then a stub as before. The ttnn calls of a family's code are
 checked against the verified sheet like the rest. Whether the families' ops (a width-1 slice and a column-broadcast multiply in the injection; `ttnn.softplus`, the row-major concat of the
 convolution's left padding and the delta rule op at these head counts) run on a chip is not shown by the CPU test: the first board check of a run that uses them is that evidence.
@@ -55,7 +61,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from orchard import op_cheats, safeio, ttnn_calls
+from orchard import defaults, op_cheats, safeio, ttnn_calls
 
 STUB_MARK = "# AGENT:"
 GENERATED_MARK = "# generated-by: orchard/port_template.py"
@@ -131,6 +137,12 @@ def _number(x):
 
 # ---- the construction: which class is at which module path -------------------------------------------------------------------------------
 
+def _group_size_fits(attrs: dict, width: int) -> bool:
+    """True when a norm with these attributes can have a weight vector of `width` values: no group size, or one that divides the width."""
+    g = attrs.get("group_size")
+    return g is None or (type(g) is int and 0 < g <= width and width % g == 0)
+
+
 class Construction:
     """What `effective_construction.describe` said: for a module path pattern (`model.layers.{i}.mlp`), the class and its settings.
 
@@ -160,9 +172,12 @@ class Construction:
         kids = attrs.get("children")
         return {k: v for k, v in kids.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(kids, dict) else {}
 
-    def resolve(self, path: str, observed: set | None = None) -> tuple[str | None, dict]:
+    def resolve(self, path: str, observed: set | None = None, width: int | None = None) -> tuple[str | None, dict]:
         """(class name, attrs) at the module path pattern `path`, or (None, {}) when the construction does not say. With several
-        candidates, `observed` (the child names the checkpoint's tensors show under the path) picks the variant whose children fit best."""
+        candidates, `observed` (the child names the checkpoint's tensors show under the path) picks the variant whose children fit best.
+        When the construction does not list the path (its `paths` lists are cut) every variant of the class is a candidate, and `width` (the length of
+        the module's weight vector) removes the variants that cannot be: a group size that does not divide the width (arm E14's port facts: the
+        indexer's `k_layernorm`, width 32, was given the hyper-connection norm's group size 64, so it was taken for a grouped norm and had no epsilon)."""
         found = list(self.by_path.get(path, []))
         if not found:
             parent, _, last = path.rpartition(".")
@@ -171,6 +186,9 @@ class Construction:
             if kid is None:
                 return (None, {})
             found = [(kid, a) for a in self.classes.get(kid, [{}])]
+            if width is not None:
+                fits = [f for f in found if _group_size_fits(f[1], width)]
+                found = fits or found
         if len(found) == 1 or observed is None:
             return found[0]
         def fit(item):
@@ -226,6 +244,7 @@ class Plan:
     notes: list
     model_blocks: dict = field(default_factory=dict)   # text-model child name -> (family name, settings), a block a registered family writes after the layers
     prelude_family: tuple | None = None                # (family name, settings) when a family writes the step between the embedding and the first layer
+    rotary: dict | None = None                         # {head_dim, rot, theta} when the rotary helpers are written (issue 696, slice 4)
 
     def summary(self) -> dict:
         """What the ledger or a run log records: the generated blocks and the stubs, without any file content."""
@@ -303,6 +322,8 @@ class Site:
     con: "Construction"
     plus_one: frozenset    # norm classes whose forward multiplies by 1 + weight (from the reference excerpts)
     where: str             # "layer" (a child of a decoder layer) or "model" (a child of the text model)
+    rotary: dict | None = None   # the plan's rotary settings {head_dim, rot, theta} (from the config), or None when the config gives none the generator can use
+    names: frozenset = frozenset()   # every tensor name of the checkpoint (a family that needs to see that a group of numbered tensors is complete reads it)
 
 
 @dataclass(frozen=True)
@@ -316,7 +337,9 @@ class BlockFamily:
     prelude(settings) -> the lines of `_model_prelude` when this family also writes the step before the first layer, else None.
     reference_test: the pytest node id of the test that compares the generated block with the transformers module at tiny sizes.
     describe(function, settings) -> one line for the layer stub: the call and what it returns.
-    model_level: the family may also stand as a child of the text model (after the layers)."""
+    model_level: the family may also stand as a child of the text model (after the layers).
+    needs_rotary: the family's functions call `_apply_rotary` and read `ROTARY`, so the plan writes the rotary helpers when a block of this family is used.
+    refusal: the stub's reason when the module is of this family and the shapes or sizes say no (so the plan names it, not a generic 'a block the generator does not write')."""
     name: str
     recognize: object
     emit: object
@@ -325,6 +348,8 @@ class BlockFamily:
     helpers: object = None
     prelude: object = None
     model_level: bool = False
+    needs_rotary: bool = False
+    refusal: object = None          # refusal(site) -> why this family does not write the block, when the block is of this family but cannot be written (else None)
 
 
 BLOCK_FAMILIES: dict = {}
@@ -337,6 +362,16 @@ def register_block_family(family: BlockFamily) -> None:
     if family.name in BLOCK_FAMILIES:
         raise ValueError(f"family {family.name!r} is already registered")
     BLOCK_FAMILIES[family.name] = family
+
+
+def _family_refusal(site: Site):
+    """The reason a registered family gives for not writing this module, or None."""
+    for fam in BLOCK_FAMILIES.values():
+        if fam.refusal is not None:
+            why = fam.refusal(site)
+            if why:
+                return why
+    return None
 
 
 def _recognize_family(site: Site):
@@ -749,6 +784,393 @@ register_block_family(BlockFamily(
     name="ple", recognize=_recognize_ple, emit=_emit_ple, reference_test=PLE_REFERENCE_TEST, describe=_describe_ple, helpers=_ple_helpers))
 
 
+# The indexed attention of the Qwen4 family: `Qwen4ExpTextAttention` with its `Qwen4ExpTextQSAIndexer` (prefill, no cache). The reference forward:
+#   indexer: qk = index_qk_proj(x); q = RMSNorm(split into index_n_heads heads), rotary at the query position; the index keys are the token keys (one head);
+#            for each query, the visible tokens before its last incomplete block form complete blocks of `ratio` tokens; each block's key is the mean of its token keys,
+#            RMSNorm'ed and rotated at the block's first position; score(block) = sum over index heads of relu(q . block key) / sqrt(index_dim); the
+#            `budget / ratio` best complete blocks are kept, with every visible token after the last complete block (the tail); the mask is those tokens.
+#   attention: q and the output gate come from q_proj ([q | gate] per head), RMSNorm per head on q and k, rotary on q and k (the rotary part of each head),
+#              grouped-key attention under (causal AND selected), joined heads times sigmoid(gate), o_proj.
+# The device ops are the forms probes 6 to 9 ran on a board (PCC 0.9998 or better): the q/gate split by reshape and slice, the head permute, the per-head norm on
+# [1, 1, heads * S, hd], the rotary helpers, the score matmul of [1, heads, S, D] with a [1, 1, D, nb] operand, relu, sum over heads, `ttnn.topk(stable=True)`, the
+# mask built as selection @ expansion + tail, and scaled_dot_product_attention with an additive mask and native grouped KV. Four steps run on the host, on small
+# tensors, because the probes validated the device op and not the chain into it: the block mean of the index keys (the reference takes a float mean too), the
+# transposed pooled keys (probe 9 built that operand on the host), a one-hot matrix of the selected blocks built from the top-k indices (the reference loop is host code), and
+# the constant masks (validity, expansion, tail), built once per prompt length.
+# TIE RULE: scores tie often (relu gives exact zeros on random weights), and torch.topk's order among tied scores is not the lowest index (probe 7, real shapes: 509 of 2557
+# rows differ). The block uses `stable=True`, which picks the lowest index among tied scores, on every row of a board run. On a model whose scores do not tie
+# the two agree. The reference comparison runs the reference with the same rule, and states how far the unmodified reference is.
+QSA_REFERENCE_TEST = "tests/test_port_template_qsa.py::test_generated_qsa_attention_matches_the_transformers_module_with_the_lowest_index_tie_rule"
+_QSA_KIDS = frozenset({"q_proj", "k_proj", "v_proj", "o_proj", "q_norm", "k_norm", "indexer"})
+_QSA_INDEXER_KIDS = frozenset({"index_qk_proj", "q_layernorm", "k_layernorm"})
+
+
+def _recognize_qsa_attention(site: Site):
+    if site.where != "layer" or set(site.kids) != _QSA_KIDS or site.rotary is None:
+        return None
+    hd, groups, scaling = (site.attrs.get(k) for k in ("head_dim", "num_key_value_groups", "scaling"))
+    if type(hd) is not int or hd < 32 or hd % 32 or type(groups) is not int or groups < 1 or site.attrs.get("is_causal") is not True:
+        return None
+    if not isinstance(scaling, (int, float)) or abs(scaling - hd ** -0.5) > 1e-6 * hd ** -0.5 or site.rotary["head_dim"] != hd:
+        return None
+    ind_cls, ind = site.con.resolve(site.path + ".indexer")
+    if set(site.con.children(ind)) != _QSA_INDEXER_KIDS:
+        return None
+    heads_i, kv_i, dim, ratio, budget, topk = (ind.get(k) for k in ("index_n_heads", "index_kv_heads", "index_head_dim", "compress_ratio", "token_budget", "block_topk"))
+    if any(type(v) is not int or v < 1 for v in (heads_i, kv_i, dim, ratio, budget, topk)):
+        return None
+    if kv_i != 1 or dim < 32 or dim % 32 or dim < site.rotary["rot"] or ratio < 2 or 32 % ratio or budget % ratio or topk != budget // ratio:
+        return None          # one index key head, a whole number of tiles wide and at least as wide as the rotary part (the reference rotates the first `rot` columns of an index vector with the attention's tables; Flash-Next has index_head_dim 128 and head_dim 256); a prompt padded to 32 tokens then holds whole blocks
+
+    def shape(name, dtypes=FLOAT_DTYPES):
+        t = site.by_pattern.get(f"{site.path}.{name}")
+        return t.shape if t is not None and t.dtype in dtypes else None
+    q, k, v, o = (shape(f"{n}.weight") for n in ("q_proj", "k_proj", "v_proj", "o_proj"))
+    if any(s is None or len(s) != 2 for s in (q, k, v, o)):
+        return None
+    hidden = q[1]
+    if q[0] % (2 * hd):
+        return None
+    heads, kv = q[0] // (2 * hd), k[0] // hd
+    if heads != kv * groups or k != (kv * hd, hidden) or v != k or o != (hidden, heads * hd) or shape("indexer.index_qk_proj.weight") != ((heads_i + kv_i) * dim, hidden):
+        return None
+    if any(f"{site.path}.{n}.bias" in site.by_pattern for n in ("q_proj", "k_proj", "v_proj", "o_proj", "indexer.index_qk_proj")):
+        return None          # the block writes no bias
+    for norm, width in (("q_norm", hd), ("k_norm", hd), ("indexer.q_layernorm", dim), ("indexer.k_layernorm", dim)):
+        cls, attrs = site.con.resolve(f"{site.path}.{norm}", width=width)
+        if not isinstance(cls, str) or not _is_rms_norm(cls, attrs) or _eps(attrs, -1.0) <= 0 or shape(f"{norm}.weight") != (width,):
+            return None      # no epsilon in the construction: no default is invented
+    return {"heads": heads, "kv_heads": kv, "hd": hd, "index_heads": heads_i, "index_dim": dim, "ratio": ratio, "budget": budget, "hidden": hidden}
+
+
+def _emit_qsa_attention(function: str, site_path: str, s: dict, where: str) -> list:
+    return [f"def {function}(model, i, x, ids):",
+            f'    """{site_path}: the indexed attention on x [1, 1, S, {s["hidden"]}] (prefill, no cache; S a multiple of {s["ratio"]}); returns the block output [1, 1, S, {s["hidden"]}], '
+            'without the residual add."""',
+            f"    {GENERATED_BLOCK_MARK} qsa_attention",
+            f'    return _qsa_attention(model, f"{site_path}", x, heads={s["heads"]}, kv_heads={s["kv_heads"]}, hd={s["hd"]}, index_heads={s["index_heads"]}, '
+            f'index_dim={s["index_dim"]}, ratio={s["ratio"]}, budget={s["budget"]})', "", ""]
+
+
+_QSA_HELPERS = '''def _qsa_rope_tables(model, positions, width):
+    """cos and sin [1, 1, n, width] TILE bf16 for the given positions (a torch tensor of ints), the way _rope_tables builds them: ROTARY["rot"] rotating columns, then 1 and 0. `width` is the head width of the vectors they are applied to (the attention's head_dim, or the indexer's index_head_dim)."""
+    # MARK
+    hd, rot = width, ROTARY["rot"]
+    inv = 1.0 / (ROTARY["theta"] ** (torch.arange(0, rot, 2, dtype=torch.float32) / rot))
+    freqs = positions.to(torch.float32)[:, None] * inv[None, :]
+    emb = torch.cat([freqs, freqs], dim=-1)
+    n = positions.shape[0]
+    cos = torch.cat([emb.cos(), torch.ones(n, hd - rot)], dim=-1).reshape(1, 1, n, hd)
+    sin = torch.cat([emb.sin(), torch.zeros(n, hd - rot)], dim=-1).reshape(1, 1, n, hd)
+    return _upload(model, cos.to(torch.bfloat16), ttnn.TILE_LAYOUT), _upload(model, sin.to(torch.bfloat16), ttnn.TILE_LAYOUT)
+
+
+def _qsa_apply_rotary(model, x, cos, sin):
+    """Rotary on x [1, heads, S, width] with the tables of `_qsa_rope_tables(model, positions, width)`: the first ROTARY["rot"] columns of each head rotate (rotate-half through a constant matrix, as `_apply_rotary` does) and the rest pass through. `width` comes from x, so it serves index vectors that are narrower or wider than the attention head."""
+    # MARK
+    heads, seq, width, rot = x.shape[1], x.shape[2], x.shape[3], ROTARY["rot"]
+    if len(x.shape) != 4 or x.shape[0] != 1 or rot > width or tuple(cos.shape) != (1, 1, seq, width) or tuple(sin.shape) != tuple(cos.shape):
+        raise ValueError(f"_qsa_apply_rotary needs x [1, heads, S, width] with width >= {rot} and tables [1, 1, S, width] (from _qsa_rope_tables(model, positions, width)); got x {list(x.shape)}, cos {list(cos.shape)}")
+    half = rot // 2
+    rot_m = torch.zeros(width, width)
+    for i in range(half):
+        rot_m[i, i + half] = 1.0
+        rot_m[i + half, i] = -1.0
+    r = _upload(model, rot_m.to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    rotated = ttnn.linear(ttnn.reshape(x, (1, 1, heads * seq, width)), r, dtype=ttnn.bfloat16, compute_kernel_config=model["ck"], memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    rotated = ttnn.reshape(rotated, (1, heads, seq, width))
+    return ttnn.add(ttnn.multiply(x, cos), ttnn.multiply(rotated, sin))
+
+
+def _qsa_masks(model, seq, ratio):
+    """The constants of the block selection for a prompt of `seq` tokens, built on the host and uploaded once per (seq, ratio): `valid` [S, nb] (block b is complete
+    for query q when its last token is at or before q), `bias` (0 where valid, -1 where not: scores are never below 0, so an invalid block ranks last), `expand`
+    [nb, S] (block to its tokens) and `tail` [S, S] (the visible tokens after the last complete block)."""
+    # MARK
+    cache = model.setdefault("qsa_cache", {})
+    if (seq, ratio) in cache:
+        return cache[(seq, ratio)]
+    nb = seq // ratio
+    q = torch.arange(seq)
+    valid = ((torch.arange(nb) + 1) * ratio - 1)[None, :] <= q[:, None]
+    tail = (q[None, :] >= (((q + 1) // ratio) * ratio)[:, None]) & (q[None, :] <= q[:, None])
+    expand = (q[None, :] // ratio) == torch.arange(nb)[:, None]
+    up = lambda m: _upload(model, m.to(torch.float32).reshape(1, 1, *m.shape).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    cache[(seq, ratio)] = {"valid_host": valid, "valid": up(valid), "bias": up(valid.to(torch.float32) - 1.0), "expand": up(expand), "tail": up(tail)}
+    return cache[(seq, ratio)]
+
+
+def _qsa_split_heads(x, heads, hd):
+    """x [1, 1, S, heads * hd] to [1, heads, S, hd]: ttnn.reshape to [1, S, heads, hd], then ttnn.permute."""
+    # MARK
+    return ttnn.permute(ttnn.reshape(x, (1, x.shape[2], heads, hd)), (0, 2, 1, 3))
+
+
+def _qsa_norm_heads(model, prefix, y):
+    """The per-head RMS norm of y [1, heads, S, hd] with the weight at `prefix`: rows of width hd, as in probe 9 (head_norm)."""
+    # MARK
+    h, seq, hd = y.shape[1], y.shape[2], y.shape[3]
+    return ttnn.reshape(_rms_norm(model, prefix, ttnn.reshape(y, (1, 1, h * seq, hd))), (1, h, seq, hd))
+
+
+def _qsa_selection_mask(model, prefix, x, index_heads, index_dim, ratio, budget):
+    """The additive attention mask [1, 1, S, S] (0 where a query may attend, -30000 elsewhere) from the indexer at `prefix`: causal AND (selected blocks OR tail)."""
+    # MARK
+    seq = x.shape[2]
+    nb = seq // ratio
+    k = min(budget // ratio, nb)
+    cos, sin = _qsa_rope_tables(model, torch.arange(seq), index_dim)
+    ip = _linear(model, prefix + ".index_qk_proj", x)
+    q = _qsa_split_heads(ttnn.slice(ip, (0, 0, 0, 0), (1, 1, seq, index_heads * index_dim)), index_heads, index_dim)
+    q = _qsa_apply_rotary(model, _qsa_norm_heads(model, prefix + ".q_layernorm", q), cos, sin)
+    keys = _to_host(model, ttnn.slice(ip, (0, 0, 0, index_heads * index_dim), (1, 1, seq, (index_heads + 1) * index_dim))).float()
+    pooled = keys.reshape(nb, ratio, index_dim).mean(dim=1).to(torch.bfloat16)
+    pooled = _rms_norm(model, prefix + ".k_layernorm", _upload(model, pooled.reshape(1, 1, nb, index_dim), ttnn.TILE_LAYOUT))
+    block_cos, block_sin = _qsa_rope_tables(model, torch.arange(nb) * ratio, index_dim)
+    pooled = _to_host(model, _qsa_apply_rotary(model, pooled, block_cos, block_sin)).float().reshape(nb, index_dim)
+    pk = _upload(model, pooled.t().reshape(1, 1, index_dim, nb).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    scores = ttnn.multiply(ttnn.sum(ttnn.relu(ttnn.matmul(q, pk)), dim=1, keepdim=True), index_dim ** -0.5)
+    const = _qsa_masks(model, seq, ratio)
+    scores = ttnn.add(ttnn.multiply(scores, const["valid"]), const["bias"])
+    values, indices = ttnn.topk(scores, k, dim=-1, largest=True, sorted=True, stable=True)
+    chosen = _to_host(model, indices).reshape(seq, -1)[:, :k].long()
+    selected = torch.zeros(seq, nb).scatter_(1, chosen, 1.0) * const["valid_host"].to(torch.float32)
+    selected = _upload(model, selected.reshape(1, 1, seq, nb).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    visible = ttnn.add(ttnn.matmul(selected, const["expand"]), const["tail"])
+    return ttnn.multiply(ttnn.subtract(visible, 1.0), 30000.0)
+
+
+def _qsa_attention(model, prefix, x, heads, kv_heads, hd, index_heads, index_dim, ratio, budget):
+    """The indexed attention at `prefix` on x [1, 1, S, hidden] (S a multiple of `ratio`): the block output [1, 1, S, hidden]."""
+    # MARK
+    seq = x.shape[2]
+    if len(x.shape) != 4 or x.shape[0] != 1 or x.shape[1] != 1 or seq % ratio:
+        raise ValueError(f"_qsa_attention needs x [1, 1, S, hidden] with S a multiple of {ratio}; got {list(x.shape)}")
+    qg = ttnn.reshape(_linear(model, prefix + ".q_proj", x), (1, seq, heads, 2 * hd))
+    q = ttnn.permute(ttnn.slice(qg, (0, 0, 0, 0), (1, seq, heads, hd)), (0, 2, 1, 3))
+    gate = ttnn.reshape(ttnn.slice(qg, (0, 0, 0, hd), (1, seq, heads, 2 * hd)), (1, 1, seq, heads * hd))
+    k = _qsa_norm_heads(model, prefix + ".k_norm", _qsa_split_heads(_linear(model, prefix + ".k_proj", x), kv_heads, hd))
+    v = _qsa_split_heads(_linear(model, prefix + ".v_proj", x), kv_heads, hd)
+    cos, sin = _qsa_rope_tables(model, torch.arange(seq), hd)
+    q = _apply_rotary(model, _qsa_norm_heads(model, prefix + ".q_norm", q), cos, sin)
+    k = _apply_rotary(model, k, cos, sin)
+    mask = _qsa_selection_mask(model, prefix + ".indexer", x, index_heads, index_dim, ratio, budget)
+    out = ttnn.transformer.scaled_dot_product_attention(q, k, v, attn_mask=mask, is_causal=False, scale=hd ** -0.5)
+    joined = ttnn.reshape(ttnn.permute(out, (0, 2, 1, 3)), (1, 1, seq, heads * hd))
+    return _linear(model, prefix + ".o_proj", ttnn.multiply(joined, ttnn.sigmoid(gate)))
+
+
+'''
+
+
+def _qsa_helpers() -> list:
+    """The helper functions as lines; each function's first comment line is the generated-block mark."""
+    mark = f"    {GENERATED_BLOCK_MARK} qsa_attention"
+    return [mark if l.strip() == "# MARK" else l for l in _QSA_HELPERS.rstrip("\n").split("\n")] + ["", ""]
+
+
+def _describe_qsa_attention(function: str, settings: dict) -> str:
+    return (f"{function}(model, i, mixed, ids) returns the block output [1, 1, S, {settings['hidden']}] (no residual add; the block's input is the "
+            "connection's mixed stream)")
+
+
+register_block_family(BlockFamily(
+    name="qsa_attention", recognize=_recognize_qsa_attention, emit=_emit_qsa_attention, reference_test=QSA_REFERENCE_TEST, describe=_describe_qsa_attention,
+    helpers=_qsa_helpers, needs_rotary=True))
+
+
+# The sparse MoE block of the Qwen4 family (`Qwen4ExpTextSparseMoeBlock`; Flash-Next has one in every layer: 512 experts, 10 per token, expert width 640, a shared
+# expert of width 640). The reference forward:
+#   shared  = sigmoid(shared_expert_gate(x)) * shared_expert(x)                 (a gated MLP: silu(gate_proj x) * up_proj x, then down_proj)
+#   probs   = softmax(gate(x)) in float;  (values, idx) = topk(probs, top_k);  values /= values.sum() when norm_topk_prob
+#   routed  = sum over the selected experts of values * expert_e(x)             (the same gated MLP per expert, each expert's tensors `experts.<e>.*`)
+#   out     = routed + shared
+# Op forms (probes 10, 11 and 13, run on a board at tiny and Flash widths, PCC 0.9998 or better with the CPU router's indices):
+#   router    ttnn.linear, then ttnn.topk(stable=True) on the logits and ttnn.softmax over the k selected logits (the same numbers as softmax, top-k and the division
+#             by the selected sum, by monotonicity; without norm_topk_prob: softmax over all experts, then top-k of the probabilities). The device top-k set equals the
+#             CPU top-k of the device logits on every row; it differs from the float32 reference on the few rows where two bf16 logits are closer than the bf16 step.
+#   experts   dense-masked up to MOE_DENSE_MAX_EXPERTS experts (every expert on every token, the output times that expert's column of the routing matrix: no
+#             data-dependent shape, E experts of compute per token), gather/scatter above it (per expert that was hit: its tokens gathered by ttnn.embedding into rows
+#             padded to a multiple of 32, the expert's MLP, the rows weighted, and added back by a one-hot matmul). The routing data comes back to the host after the
+#             router, like the QSA block's selection; the routing matrix, gather ids and scatter matrices are built there and uploaded.
+#   not used  ttnn.sparse_matmul: it ran at the tiny widths and every program config failed at the Flash widths (`num_cores_with_work (10) must be equal to
+#             in0_mcast_receiver_num_cores (12)`), so the block does not use it until a follow-up tunes the config.
+# The experts' weights are separate tensors in the checkpoint (`experts.<e>.gate_proj.weight`, `up_proj`, `down_proj`, as the tiny checkpoints and the real
+# Flash-Next index have them), each uploaded as a linear weight. A checkpoint that stores the experts fused (`experts.gate_up_proj`) is refused. The FP8 variant of the
+# real checkpoint adds scale tensors; that variant is not covered.
+# Size: each layer's experts hold 3 x hidden x expert width weights per expert in bf16 on the device; all layers together have to fit the per-chip budget below
+# (the weights are replicated on every chip of the mesh). The real 512-expert model does not (probe 14: 241.6 GB in bf16, 128.3 GB in bfp8, 67.9 GB in bfp4), so its
+# blocks stay stubs with a reason that names the budget and issue 723 (experts across chips).
+MOE_REFERENCE_TEST = "tests/test_port_template_moe.py::test_generated_sparse_moe_matches_the_transformers_module"
+MOE_DENSE_MAX_EXPERTS = 16          # the dense-masked form runs every expert on every token; 16 is the size probe 11 ran at the real widths
+MOE_EXPERT_BYTES_MAX = int(0.5 * defaults.CHIP_DRAM_GIB * 2 ** 30)     # half of a chip's DRAM (a choice, orchard/defaults.py): the rest holds the other weights, caches and activations
+_MOE_KIDS = frozenset({"gate", "experts", "shared_expert", "shared_expert_gate"})
+_MOE_PROJ = ("gate_proj", "up_proj", "down_proj")
+
+
+def _moe_analysis(site: Site):
+    """(settings, None) for a sparse MoE block the generator can write, (None, reason) for one it recognises and cannot, (None, None) for a module that is not one."""
+    if site.where != "layer" or set(site.kids) != _MOE_KIDS:
+        return None, None
+    path = site.path
+    gate_cls, gate = site.con.resolve(path + ".gate")
+    exp_cls, exp = site.con.resolve(path + ".experts")
+    sh_cls, sh = site.con.resolve(path + ".shared_expert")
+    experts, top_k, hidden, norm = (gate.get(k) for k in ("num_experts", "top_k", "hidden_dim", "norm_topk_prob"))
+    inter, shared = exp.get("intermediate_dim"), sh.get("intermediate_size")
+
+    def whole(v):
+        return type(v) is int and v >= 1
+    if not all(whole(v) for v in (experts, top_k, hidden, inter, shared)) or not isinstance(norm, bool):
+        return None, "the construction does not give the router's expert count, top-k, hidden size and norm_topk_prob, or the expert widths, as whole numbers and a flag"
+    if exp.get("num_experts") != experts or exp.get("hidden_dim") != hidden or top_k > experts or sh.get("hidden_size") != hidden:
+        return None, "the router, the experts and the shared expert disagree on the expert count, the hidden size or top-k"
+    if exp.get("has_bias") is not False or exp.get("has_gate") is not True or exp.get("is_transposed") is not False:
+        return None, "the experts are not the plain gated form (bias, no gate, or transposed weights)"
+    if hidden % 32 or inter % 32 or shared % 32 or experts > 4096:
+        return None, "the hidden size and the expert widths must be multiples of the 32-wide tile, and the expert count at most 4096"
+    if not all("SiLU" in str(site.con.children(a).get("act_fn", "")) for a in (exp, sh)):
+        return None, "an expert activation is not silu (the sheet has silu only)"
+    if site.kids.get("shared_expert_gate") != "Linear":
+        return None, "the shared expert gate is not a linear layer"          # its widths are checked on the tensor below: the construction lists one entry for every Linear
+
+    def shape(name):
+        t = site.by_pattern.get(f"{path}.{name}")
+        return t.shape if t is not None and t.dtype in FLOAT_DTYPES else None
+    if shape("gate.weight") != (experts, hidden) or shape("shared_expert_gate.weight") != (1, hidden) \
+            or any(shape(f"shared_expert.{n}.weight") != s for n, s in (("gate_proj", (shared, hidden)), ("up_proj", (shared, hidden)), ("down_proj", (hidden, shared)))):
+        return None, "the router, shared expert or shared expert gate tensors are missing or have the wrong shape"
+    if any(f"{path}.{n}.bias" in site.by_pattern for n in ("gate", "shared_expert.gate_proj", "shared_expert.up_proj", "shared_expert.down_proj", "shared_expert_gate")):
+        return None, "the block writes no bias"
+    rx = re.compile(r"(\d+)".join(re.escape(part) for part in path.split("{i}")) + r"\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+    layers: dict = {}
+    for name in site.names:
+        m = rx.match(name)
+        if m:
+            *layer_ids, e, proj = m.groups()
+            layers.setdefault(tuple(layer_ids), set()).add((int(e), proj))
+    rx_gate = re.compile(r"(\d+)".join(re.escape(part) for part in path.split("{i}")) + r"\.gate\.weight$")
+    routed_layers = {tuple(m.groups()) for m in map(rx_gate.match, site.names) if m}          # every layer that has this block's router
+    if not layers or set(layers) != routed_layers or any(held != {(e, n) for e in range(experts) for n in _MOE_PROJ} for held in layers.values()):
+        return None, (f"the checkpoint does not hold per-expert tensors {path}.experts.<e>.gate_proj|up_proj|down_proj.weight for all {experts} experts in every layer "
+                      "(a fused experts tensor is not supported)")
+    if any(shape(f"experts.{{i}}.{n}.weight") != s for n, s in (("gate_proj", (inter, hidden)), ("up_proj", (inter, hidden)), ("down_proj", (hidden, inter)))):
+        return None, "the expert tensors have the wrong shapes for the construction's widths"
+    nbytes = len(layers) * experts * 3 * hidden * inter * 2
+    if nbytes > MOE_EXPERT_BYTES_MAX:
+        return None, (f"the routed experts of {len(layers)} layers hold {nbytes / 2 ** 30:.1f} GiB in bf16 and the per-chip budget for them is "
+                      f"{MOE_EXPERT_BYTES_MAX / 2 ** 30:.1f} GiB: experts across several chips (multi-chip expert placement, issue 723) are not written yet")
+    placements = {f"{path}.gate.weight": "linear_weight", f"{path}.shared_expert_gate.weight": "linear_weight"}
+    placements.update({f"{path}.shared_expert.{n}.weight": "linear_weight" for n in _MOE_PROJ})
+    placements.update({f"{path}.experts.{{i}}.{n}.weight": "linear_weight" for n in _MOE_PROJ})
+    return {"experts": experts, "top_k": top_k, "norm_topk": norm, "hidden": hidden, "inter": inter, "shared": shared,
+            "dense": experts <= MOE_DENSE_MAX_EXPERTS, "placements": placements}, None
+
+
+def _recognize_sparse_moe(site: Site):
+    return _moe_analysis(site)[0]
+
+
+def _refuse_sparse_moe(site: Site):
+    return _moe_analysis(site)[1]
+
+
+def _emit_sparse_moe(function: str, site_path: str, s: dict, where: str) -> list:
+    return [f"def {function}(model, i, x, ids):",
+            f'    """{site_path}: the sparse MoE block on x [1, 1, S, {s["hidden"]}]: {s["experts"]} experts, top {s["top_k"]}, and a shared expert with its gate; returns the block output [1, 1, S, {s["hidden"]}]."""',
+            f"    {GENERATED_BLOCK_MARK} sparse_moe",
+            f'    return _sparse_moe(model, f"{site_path}", x, experts={s["experts"]}, top_k={s["top_k"]}, norm_topk={s["norm_topk"]}, dense={s["dense"]})', "", ""]
+
+
+_SPARSE_MOE_HELPERS = '''def _moe_expert_mlp(model, prefix, x):
+    """The gated MLP at `prefix` (one expert, or the shared expert) on x [1, 1, n, hidden]: silu(gate_proj x) * up_proj x, then down_proj."""
+    # MARK
+    gate = _linear(model, prefix + ".gate_proj", x)
+    up = _linear(model, prefix + ".up_proj", x)
+    return _linear(model, prefix + ".down_proj", ttnn.multiply(ttnn.silu(gate), up))
+
+
+def _moe_route(model, prefix, x, top_k, norm_topk):
+    """The router at `prefix` on x [1, 1, S, hidden]: (chosen [S, k] long, scores [S, k] float) on the host. The top-k runs on the device with stable=True (the lowest
+    index among tied logits, probe 7); with norm_topk the scores are the softmax of the k selected logits, without it the top-k probabilities of the full softmax."""
+    # MARK
+    seq = x.shape[2]
+    logits = _linear(model, prefix + ".gate", x)
+    if norm_topk:
+        values, indices = ttnn.topk(logits, top_k, dim=-1, largest=True, sorted=True, stable=True)
+        weights = ttnn.softmax(values, dim=-1)
+    else:
+        weights, indices = ttnn.topk(ttnn.softmax(logits, dim=-1), top_k, dim=-1, largest=True, sorted=True, stable=True)
+    chosen = _to_host(model, indices).reshape(seq, -1)[:, :top_k].long()
+    scores = _to_host(model, weights).float().reshape(seq, -1)[:, :top_k]
+    return chosen, scores
+
+
+def _moe_experts_dense(model, prefix, x, chosen, scores, experts):
+    """Every expert on every token, each output multiplied by that expert's column of the routing matrix [1, 1, S, experts] (0 for a token that did not select it)."""
+    # MARK
+    seq = x.shape[2]
+    routing = torch.zeros(seq, experts).scatter_(1, chosen, scores)
+    routing = _upload(model, routing.reshape(1, 1, seq, experts).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    out = None
+    for e in range(experts):
+        y = ttnn.multiply(_moe_expert_mlp(model, f"{prefix}.experts.{e}", x), ttnn.slice(routing, (0, 0, 0, e), (1, 1, seq, e + 1)))
+        out = y if out is None else ttnn.add(out, y)
+    return out
+
+
+def _moe_experts_gathered(model, prefix, x, chosen, scores, experts):
+    """Per expert that some token selected: gather its tokens (ttnn.embedding of their row numbers, padded with token 0 to a multiple of 32 rows; the padding rows get
+    weight 0), run its MLP, weight the rows and add them back to the token rows with a one-hot matrix and ttnn.matmul."""
+    # MARK
+    seq, hidden = x.shape[2], x.shape[3]
+    flat = ttnn.reshape(x, (seq, hidden))
+    out = None
+    for e in range(experts):
+        tokens, slots = torch.where(chosen == e)
+        n = int(tokens.numel())
+        if n == 0:
+            continue
+        rows = max(32, -(-n // 32) * 32)
+        picked = torch.cat([tokens, torch.zeros(rows - n, dtype=tokens.dtype)])
+        xe = ttnn.reshape(ttnn.embedding(_upload_ids(model, picked.tolist()), flat, layout=ttnn.TILE_LAYOUT), (1, 1, rows, hidden))
+        weight = torch.zeros(rows)
+        weight[:n] = scores[tokens, slots]
+        ye = ttnn.multiply(_moe_expert_mlp(model, f"{prefix}.experts.{e}", xe), _upload(model, weight.reshape(1, 1, rows, 1).to(torch.bfloat16), ttnn.TILE_LAYOUT))
+        back = torch.zeros(seq, rows)
+        back[tokens, torch.arange(n)] = 1.0
+        part = ttnn.matmul(_upload(model, back.reshape(1, 1, seq, rows).to(torch.bfloat16), ttnn.TILE_LAYOUT), ye)
+        out = part if out is None else ttnn.add(out, part)
+    return out
+
+
+def _sparse_moe(model, prefix, x, experts, top_k, norm_topk, dense):
+    """The sparse MoE block at `prefix` on x [1, 1, S, hidden]: the routed experts plus the gated shared expert; the block output [1, 1, S, hidden]."""
+    # MARK
+    if len(x.shape) != 4 or x.shape[0] != 1 or x.shape[1] != 1:
+        raise ValueError(f"_sparse_moe needs x [1, 1, S, hidden]; got {list(x.shape)}")
+    chosen, scores = _moe_route(model, prefix, x, top_k, norm_topk)
+    routed = (_moe_experts_dense if dense else _moe_experts_gathered)(model, prefix, x, chosen, scores, experts)
+    shared = ttnn.multiply(_moe_expert_mlp(model, prefix + ".shared_expert", x), ttnn.sigmoid(_linear(model, prefix + ".shared_expert_gate", x)))
+    return ttnn.add(routed, shared)
+'''
+
+
+def _sparse_moe_helpers() -> list:
+    """The helper functions as lines; each function's first comment line is the generated-block mark."""
+    mark = f"    {GENERATED_BLOCK_MARK} sparse_moe"
+    return [mark if l.strip() == "# MARK" else l for l in _SPARSE_MOE_HELPERS.rstrip("\n").split("\n")] + ["", ""]
+
+
+def _describe_sparse_moe(function: str, settings: dict) -> str:
+    return (f"{function}(model, i, mixed, ids) returns the block output [1, 1, S, {settings['hidden']}] (the routed experts plus the shared expert; no residual add)")
+
+
+register_block_family(BlockFamily(
+    name="sparse_moe", recognize=_recognize_sparse_moe, emit=_emit_sparse_moe, reference_test=MOE_REFERENCE_TEST, describe=_describe_sparse_moe,
+    helpers=_sparse_moe_helpers, refusal=_refuse_sparse_moe))
+
+
 # A layer of the Qwen4 family written whole from generated blocks. The reference forward (`Qwen4ExpTextDecoderLayer.forward`, no cache):
 #   if the layer has a PLE block:  x = x + ple(x, ids)
 #   mixed, hyper_input, w = attn_hyper_connection(x);  x = hyper_input + inject(linear_attn(mixed), w)
@@ -770,17 +1192,17 @@ def _compose_layer(layer: Layer, attrs: dict, flag: str | None):
     if kids not in (base, base | {"ple"}) or (flag is not None and flag != _COMPOSABLE_FLAG):
         return None
     kinds = {k: v[0] for k, v in layer.blocks.items()}
-    want = {"attn_hyper_connection": "hyper_connection", "mlp_hyper_connection": "hyper_connection", "mlp": "mlp", "linear_attn": "gated_delta_net",
-            "self_attn": "stub", "ple": "ple"}
+    want = {"attn_hyper_connection": "hyper_connection", "mlp_hyper_connection": "hyper_connection", "mlp": ("mlp", "sparse_moe"), "linear_attn": "gated_delta_net",
+            "self_attn": ("stub", "qsa_attention"), "ple": "ple"}
     layer_type = attrs.get("layer_type")
-    if any(kinds[k] != want[k] for k in kids) or layer_type != ("linear_attention" if sub == "linear_attn" else "indexed_attention"):
+    if any(kinds[k] not in (want[k] if isinstance(want[k], tuple) else (want[k],)) for k in kids) or layer_type != ("linear_attention" if sub == "linear_attn" else "indexed_attention"):
         return None
     a, m = layer.blocks["attn_hyper_connection"][1], layer.blocks["mlp_hyper_connection"][1]
     if not (a.get("inject") and m.get("inject")) or (a["hc"], a["hidden"]) != (m["hc"], m["hidden"]):
         return None          # both connections must inject, over the same streams
     if "ple" in kids and layer.blocks["ple"][1]["hc"] * layer.blocks["ple"][1]["hidden"] != a["hc"] * a["hidden"]:
         return None
-    return {"hc": a["hc"], "hidden": a["hidden"], "ple": "ple" in kids, "sublayer": sub, "stub_sublayer": kinds[sub] == "stub"}
+    return {"hc": a["hc"], "hidden": a["hidden"], "ple": "ple" in kids, "sublayer": sub, "stub_sublayer": kinds[sub] == "stub", "mlp": kinds["mlp"]}
 
 
 def _emit_composed_layer(layer: Layer, layers_path: str) -> list:
@@ -788,7 +1210,7 @@ def _emit_composed_layer(layer: Layer, layers_path: str) -> list:
     lines = [f"def _layer_{key}(model, i, x, ids, cos, sin):",
              f'    """Layers {layer.indices}: {layer.cls}, written whole from generated blocks: '
              + ("the PLE block adds to the streams, then " if c["ple"] else "")
-             + f'attention connection, {"the attention block (a stub the coder writes)" if c["stub_sublayer"] else "gated delta net"}, MLP connection and MLP, each followed by its injection into the {c["hc"]} streams."""',
+             + f'attention connection, {"the attention block (a stub the coder writes)" if c["stub_sublayer"] else ("gated delta net" if c["sublayer"] == "linear_attn" else "the indexed attention")}, MLP connection and MLP, each followed by its injection into the {c["hc"]} streams."""',
              f"    {GENERATED_BLOCK_MARK} layer",
              f'    p = f"{layers_path}.{{i}}"']
     if c["ple"]:
@@ -797,9 +1219,41 @@ def _emit_composed_layer(layer: Layer, layers_path: str) -> list:
               f"    out = _{key}_{c['sublayer']}(model, i, mixed, ids)",
               f"    x = _hyper_connection_inject(out, hyper_input, weights, {c['hc']}, {c['hidden']})",
               f"    mixed, hyper_input, weights = _{key}_mlp_hyper_connection(model, i, x, ids)",
-              '    out = _mlp(model, p + ".mlp", mixed)',
+              f"    out = _{key}_mlp(model, i, mixed, ids)" if c["mlp"] == "sparse_moe" else '    out = _mlp(model, p + ".mlp", mixed)',
               f"    return _hyper_connection_inject(out, hyper_input, weights, {c['hc']}, {c['hidden']})", "", ""]
     return lines
+
+
+MOE_FAMILY_KIDS = frozenset({"experts", "gate", "shared_expert", "shared_expert_gate"})     # the children of a sparse MoE block (the names its tensors show under `mlp.`)
+
+
+def _mlp_class_kind(cls):
+    """"moe" for a sparse MoE block class, "dense" for a plain MLP class, else None."""
+    if not isinstance(cls, str):
+        return None
+    return "moe" if ("MoE" in cls or "Sparse" in cls or "Expert" in cls) else ("dense" if "MLP" in cls else None)
+
+
+def _layer_of_kind(con, lp, observed, kind, current):
+    """(class, attrs) of the decoder layer at `lp` whose `mlp` child is of the kind the checkpoint's tensors show, when the construction lists several variants of the
+    layer (a model with dense and MoE layers lists both under `model.layers.{i}`); `current` when the kinds already agree or the construction does not say."""
+    if kind not in ("dense", "moe") or _mlp_class_kind(con.children(current[1]).get("mlp")) == kind:
+        return current
+    candidates = [c for c in con.by_path.get(lp, []) if _mlp_class_kind(con.children(c[1]).get("mlp")) == kind]
+    if not candidates:
+        return current
+    return sorted(candidates, key=lambda c: (-len(set(con.children(c[1])) & observed), len(set(con.children(c[1])) ^ observed)))[0]
+
+
+def _mlp_of_kind(con, kp, kind, layer_child_class):
+    """(class, attrs) of the `mlp` module at `kp` for a layer variant of `kind`: the construction's entry of that kind when it lists the path, else the first variant of
+    the class the layer variant names for its `mlp` child."""
+    candidates = [c for c in con.by_path.get(kp, []) if _mlp_class_kind(c[0]) == kind]
+    if candidates:
+        return candidates[0]
+    if _mlp_class_kind(layer_child_class) == kind:
+        return layer_child_class, (con.classes.get(layer_child_class) or [{}])[0]
+    return con.resolve(kp)
 
 
 def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Plan:
@@ -811,6 +1265,7 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     by_pattern: dict[str, Tensor] = {}
     for t in ts:
         by_pattern.setdefault(_NUMBER.sub("{i}", t.name), t)
+    frozen_names = frozenset(names)
     # The layer stack: the dominant `prefix.N.rest` pattern among the tensor names (the first number in a name is the layer number).
     heads: dict = {}
     for t in ts:
@@ -882,7 +1337,8 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
                 yield path
 
     for path in module_paths():
-        cls, attrs = con.resolve(path)
+        w = by_pattern.get(path + ".weight")
+        cls, attrs = con.resolve(path, width=w.shape[0] if w is not None and len(w.shape) == 1 else None)
         place(path, cls, attrs)
     for p, t in by_pattern.items():
         placements.setdefault(p, "tile" if t.dtype in FLOAT_DTYPES else "host")
@@ -890,6 +1346,7 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
         placements["lm_head.weight"] = "linear_weight"      # uploaded from the embedding table in load
     # The final norm or the model-level stubs.
     final_norm = None
+    site_rotary, _why = _rotary_plan(section, hidden)       # also computed at the end for the plan's note; a family that needs it is shown the same settings
     extra = {k: v for k, v in text_kids.items() if k not in MODEL_CHILDREN}
     norm_path = f"{text_path}.norm"
     if norm_path + ".weight" in by_pattern and placements.get(norm_path + ".weight", "").startswith("norm"):
@@ -901,7 +1358,7 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     for k, v in sorted(extra.items()):
         mp = f"{text_path}.{k}"
         mcls, mattrs = con.resolve(mp)
-        hit = _recognize_family(Site(mp, mcls or v, mattrs, con.children(mattrs), by_pattern, con, frozenset(plus_one), "model"))
+        hit = _recognize_family(Site(mp, mcls or v, mattrs, con.children(mattrs), by_pattern, con, frozenset(plus_one), "model", site_rotary, frozen_names))
         if hit:
             placements.update(hit[1].get("placements", {}))
             model_blocks[k] = (hit[0].name, {kk: vv for kk, vv in hit[1].items() if kk != "placements"})
@@ -924,25 +1381,34 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     epilogue = sorted((k, v) for k, v in extra.items())
     # The layers: one variant per set of children the tensors show.
     per_layer: dict = {}
+    mlp_kinds: dict = {}          # layer number -> the kinds of feed-forward its `mlp.*` tensors show ("dense" or "moe")
     for t in ts:
         m = _FIRST_NUMBER.match(t.name)
         if m and m.group("head") == layers_head:
-            per_layer.setdefault(int(m.group("num")), set()).add(m.group("tail").lstrip(".").split(".", 1)[0])
+            tail = m.group("tail").lstrip(".")
+            per_layer.setdefault(int(m.group("num")), set()).add(tail.split(".", 1)[0])
+            if tail.startswith("mlp.") and tail.count(".") >= 2:
+                second = tail.split(".", 2)[1]
+                mlp_kinds.setdefault(int(m.group("num")), set()).add("dense" if second in MLP_CORE else "moe" if second in MOE_FAMILY_KIDS else "other")
     variants: dict = {}
     for i in range(n_layers):
-        variants.setdefault(tuple(sorted(per_layer.get(i, ()))), []).append(i)
+        shown = mlp_kinds.get(i, set())
+        kind = next(iter(shown)) if len(shown) == 1 else ("other" if shown else "")
+        # A layer's variant is its set of children AND the kind of its feed-forward: a model whose first layer has a dense MLP and whose other layers have MoE
+        # blocks (`mlp_only_layers`) has one `mlp` child in every layer, and the plan must not write one kind of block for both.
+        variants.setdefault((tuple(sorted(per_layer.get(i, ()))), kind), []).append(i)
     layers: list = []
     attention_settings = None
-    for n, (kids, idx) in enumerate(sorted(variants.items(), key=lambda kv: kv[1][0])):
+    for n, ((kids, mlp_kind), idx) in enumerate(sorted(variants.items(), key=lambda kv: kv[1][0])):
         key = chr(ord("A") + n) if n < 26 else f"V{n}"
         lp = f"{layers_path}.{{i}}"
-        cls, attrs = con.resolve(lp, observed=set(kids))
+        cls, attrs = _layer_of_kind(con, lp, set(kids), mlp_kind, con.resolve(lp, observed=set(kids)))
         kid_classes = con.children(attrs)
         children = {k: kid_classes.get(k, "?") for k in kids}
         layer = Layer(key, idx, children, cls or "?", standard=False)
         for kid in kids:
             kp = f"{lp}.{kid}"
-            kcls, kattrs = con.resolve(kp)
+            kcls, kattrs = _mlp_of_kind(con, kp, mlp_kind, children[kid]) if kid == "mlp" and mlp_kind in ("dense", "moe") else con.resolve(kp)
             kcls = kcls or children[kid]
             kkids = con.children(kattrs)
             flag = _flag_for(flagged, kp)
@@ -961,12 +1427,13 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
                 else:
                     layer.blocks[kid] = ("attention", settings)
                     attention_settings = settings
-            elif hit := _recognize_family(Site(kp, kcls, kattrs, kkids, by_pattern, con, frozenset(plus_one), "layer")):          # a flag under a family block does not stub it: the family writes its own ops and its reference test is the check
+            elif hit := _recognize_family(Site(kp, kcls, kattrs, kkids, by_pattern, con, frozenset(plus_one), "layer", site_rotary, frozen_names)):          # a flag under a family block does not stub it: the family writes its own ops and its reference test is the check
                 fam, settings = hit
                 placements.update(settings.get("placements", {}))
                 layer.blocks[kid] = (fam.name, {k: v for k, v in settings.items() if k != "placements"})
             else:
-                why = flag or ("a " + kcls + " block the generator does not write" if kcls != "?" else "a block the construction does not describe")
+                why = flag or _family_refusal(Site(kp, kcls, kattrs, kkids, by_pattern, con, frozenset(plus_one), "layer", site_rotary, frozen_names)) \
+                    or ("a " + kcls + " block the generator does not write" if kcls != "?" else "a block the construction does not describe")
                 if MLP_CORE <= set(kkids) and not flag:
                     why = f"{kcls}: its activation is not silu (the sheet has silu only)"
                 elif ATTN_CORE <= set(kkids) and not flag:
@@ -997,11 +1464,50 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
     pad = section.get("pad_token_id", config.get("pad_token_id"))
     small = {k: v for k, v in section.items() if isinstance(v, (int, float, str, bool)) and not isinstance(v, bool) or isinstance(v, bool)}
     small = {k: v for k, v in small.items() if isinstance(k, str) and _IDENT.fullmatch(k) and (not isinstance(v, str) or len(v) <= 80)}
+    rotary = None
+    uses_rotary = any(v[0] in BLOCK_FAMILIES and BLOCK_FAMILIES[v[0]].needs_rotary for l in layers for v in l.blocks.values())
+    if _has_attention(attention_settings, stubs) or uses_rotary:
+        rotary, why = _rotary_plan(section, hidden)
+        if rotary is None:
+            notes.append(f"no rotary helpers (_rope_tables, _apply_rotary) are written: {why}; an attention block has to build its own rotary tables")
     return Plan(model_class=con.model_class, text_path=text_path, layers_path=layers_path, n_layers=n_layers, hidden=hidden, vocab=vocab,
                 pad_id=pad if type(pad) is int and 0 <= pad < vocab else 0, config=small, embed_path=embed_path, final_norm=final_norm,
                 lm_head_path=lm_head_path, tied=tied, prelude_reason=prelude_reason, epilogue=epilogue, layers=layers, placements=placements,
                 norm_eps=norm_eps, plus_one_norms=plus_one, attention=attention_settings, stubs=stubs, notes=notes,
-                model_blocks=model_blocks, prelude_family=prelude_family)
+                model_blocks=model_blocks, prelude_family=prelude_family, rotary=rotary)
+
+
+def _has_attention(attention_settings, stubs) -> bool:
+    """True when the plan writes an attention block or leaves an attention stub (a stub whose class name holds `Attention` or whose function name
+    holds `attn`): the rotary helpers are written only then."""
+    return attention_settings is not None or any("Attention" in str(x.cls) or "attn" in x.function for x in stubs)
+
+
+def _rope_dict(section: dict) -> dict:
+    rope = section.get("rope_parameters") if isinstance(section.get("rope_parameters"), dict) else section.get("rope_scaling")
+    return rope if isinstance(rope, dict) else {}
+
+
+def _rotary_plan(section: dict, hidden: int):
+    """({head_dim, rot, theta}, None) when the config gives the settings of the default rotary embedding, else (None, why). `rot` is the number of
+    columns of each head that rotate: int(head_dim * partial_rotary_factor), the way the reference computes it. The factor is read from
+    `rope_parameters` first and from the config section second (the transformers config moves it into `rope_parameters`)."""
+    heads = _whole(section, "num_attention_heads")
+    head_dim = _whole(section, "head_dim") or (hidden // heads if heads and hidden else None)
+    if not head_dim:
+        return None, "the config gives neither head_dim nor num_attention_heads"
+    rope = _rope_dict(section)
+    rope_type = rope.get("rope_type", rope.get("type", "default")) if rope else "default"
+    if rope_type != "default":
+        return None, f"rope_type is {rope_type!r}, not the default"
+    factor = _number(rope.get("partial_rotary_factor", section.get("partial_rotary_factor", 1.0)))
+    if factor is None or not 0 < factor <= 1:
+        return None, "partial_rotary_factor is not a number above 0 and at most 1"
+    rot = int(head_dim * factor)
+    if rot < 2 or rot % 2:
+        return None, f"the rotary width int({head_dim} * {factor}) is {rot}, which is not an even number of at least 2"
+    theta = _number(rope.get("rope_theta")) or _number(section.get("rope_theta")) or 10000.0
+    return {"head_dim": head_dim, "rot": rot, "theta": float(theta)}, None
 
 
 def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps, default_eps, hidden):
@@ -1021,7 +1527,7 @@ def _attention_plan(section, kp, kcls, kattrs, kkids, by_pattern, con, norm_eps,
     if q.shape != (heads * head_dim, hidden) or k.shape != (kv * head_dim, hidden) or v.shape != (kv * head_dim, hidden) or o.shape != (hidden, heads * head_dim):
         return None, (f"{kcls}: the projection shapes are not [heads * head_dim, hidden] for q, [kv_heads * head_dim, hidden] for k and v and "
                       f"[hidden, heads * head_dim] for o (q_proj is {list(q.shape)}), so the head split is not the plain one")
-    factor = _number(section.get("partial_rotary_factor"))
+    factor = _number(_rope_dict(section).get("partial_rotary_factor", section.get("partial_rotary_factor")))
     if factor is not None and factor != 1:
         return None, f"{kcls}: partial_rotary_factor is {factor}; the generated rotary rotates the whole head"
     rope = section.get("rope_parameters") if isinstance(section.get("rope_parameters"), dict) else section.get("rope_scaling")
@@ -1144,6 +1650,34 @@ def render(p: Plan) -> str:
           "    for t in (gate, up, h):",
           "        ttnn.deallocate(t)",
           "    return y", "", ""]
+    if p.rotary:
+        L += [f"ROTARY = {_lit(p.rotary)}", "", ""]
+        if not p.attention:
+            L += ["def _rope_tables(model, n):",
+                  '    """cos and sin for positions 0..n-1, [1, 1, n, head_dim] TILE bf16 on the device. The first ROTARY["rot"] columns hold cos and sin of the position times the inverse frequencies (repeated twice, the HF layout); the other columns hold 1 (cos) and 0 (sin), so that they pass through _apply_rotary."""',
+                  '    hd, rot = ROTARY["head_dim"], ROTARY["rot"]',
+                  '    inv = 1.0 / (ROTARY["theta"] ** (torch.arange(0, rot, 2, dtype=torch.float32) / rot))',
+                  "    freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv[None, :]",
+                  "    emb = torch.cat([freqs, freqs], dim=-1)",
+                  "    cos = torch.cat([emb.cos(), torch.ones(n, hd - rot)], dim=-1).reshape(1, 1, n, hd)",
+                  "    sin = torch.cat([emb.sin(), torch.zeros(n, hd - rot)], dim=-1).reshape(1, 1, n, hd)",
+                  "    return _upload(model, cos.to(torch.bfloat16), ttnn.TILE_LAYOUT), _upload(model, sin.to(torch.bfloat16), ttnn.TILE_LAYOUT)", "", ""]
+        L += ["def _apply_rotary(model, x, cos, sin):",
+              '    """Rotary position embedding on x [1, heads, S, head_dim] with the tables of _rope_tables (cos, sin [1, 1, S, head_dim]): the first ROTARY["rot"] columns of each head are rotated (rotate-half), the others pass through. Computed as x * cos + (x @ R) * sin with R the constant rotate-half matrix, so it needs no slice and no concat. Returns [1, heads, S, head_dim]."""',
+              '    hd, rot = ROTARY["head_dim"], ROTARY["rot"]',
+              "    if len(x.shape) != 4 or x.shape[0] != 1 or x.shape[3] != hd or tuple(cos.shape) != (1, 1, x.shape[2], hd) or tuple(sin.shape) != tuple(cos.shape):",
+              '        raise ValueError(f"_apply_rotary needs x [1, heads, S, {hd}] and tables [1, 1, S, {hd}] (from _rope_tables(model, S)); got x {list(x.shape)}, cos {list(cos.shape)}")',
+              "    heads, seq = x.shape[1], x.shape[2]",
+              "    half = rot // 2",
+              "    rot_m = torch.zeros(hd, hd)",
+              "    for i in range(half):",
+              "        rot_m[i, i + half] = 1.0",
+              "        rot_m[i + half, i] = -1.0",
+              "    r = _upload(model, rot_m.to(torch.bfloat16), ttnn.TILE_LAYOUT)",
+              "    flat = ttnn.reshape(x, (1, 1, heads * seq, hd))",
+              '    rotated = ttnn.linear(flat, r, dtype=ttnn.bfloat16, compute_kernel_config=model["ck"], memory_config=ttnn.DRAM_MEMORY_CONFIG)',
+              "    rotated = ttnn.reshape(rotated, (1, heads, seq, hd))",
+              "    return ttnn.add(ttnn.multiply(x, cos), ttnn.multiply(rotated, sin))", "", ""]
     if p.attention:
         a = p.attention
         L += [f"ATTENTION = {_lit(a)}", "", "",
@@ -1300,7 +1834,7 @@ def generate(*, config, construction, tensors, inventory=None, excerpts=None) ->
 
 # The functions every generated port holds with the same text. A failure inside one is never sent to the coder as a repair target: the stub that
 # called it passed it something it cannot take (arm E8 spent 11 repair rounds on `_rms_norm`; issue 698).
-FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding")
+FIXED_HELPERS = ("read_tensors", "_pattern", "_n_devices", "_upload", "_upload_ids", "_to_host", "_linear", "_rms_norm", "_embedding", "_rope_tables", "_apply_rotary")
 
 
 # What the generated port's `model` argument and module constants are. The stub prompt (orchard/stub_prompts.py `model_text`) prints these, and
@@ -1324,6 +1858,7 @@ MODULE_CONSTANTS = {
     "LAYER_VARIANT": "list: layer index -> the key of LAYERS for that layer",
     "PLACEMENT": "dict: tensor name pattern -> how load placed it",
     "NORM_EPS": "dict: norm name pattern -> epsilon",
+    "ROTARY": "dict: head_dim, rot (the number of columns of each head that rotate) and theta, for _rope_tables and _apply_rotary",
     "LAYERS": "dict: layer variant key -> the layer function",
 }
 

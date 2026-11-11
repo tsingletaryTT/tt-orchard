@@ -323,27 +323,27 @@ def tiny_qwen4():
                        excerpts="class Qwen4ExpTextRMSNorm(nn.Module):\n    def forward(self, x):\n        output = output * (1.0 + self.weight.float())\n")
 
 
-def test_tiny_qwen4_generates_the_standard_parts_and_stubs_every_new_block():
+def test_tiny_qwen4_generates_every_block_and_leaves_no_stub():
     text, p = tiny_qwen4()
     s = p.summary()
-    assert s["generated"] == ["embedding", "gated_delta_net", "hyper_connection", "layer_composition", "lm_head", "mlp", "ple"]
+    assert s["generated"] == ["embedding", "gated_delta_net", "hyper_connection", "layer_composition", "lm_head", "mlp", "ple", "qsa_attention"]
     assert [v["indices"] for v in s["layer_variants"]] == [[0, 2], [1], [3]] and not any(v["standard"] for v in s["layer_variants"])
     stubs = {x["function"]: x for x in s["stubs"]}
-    # The hyper-connection blocks (prelude, mixer and the per-layer connections) and the gated delta net are written by registered families
-    # (issue 696, slices 1 to 3), and the layers are composed from them; what is left is the indexer attention.
-    assert set(stubs) == {"_C_self_attn"}
-    assert "indexer (Qwen4ExpTextQSAIndexer)" in stubs["_C_self_attn"]["reason"]
-    assert len(pt.stub_lines(text)) == 1
+    # The hyper-connection blocks (prelude, mixer and the per-layer connections), the gated delta net, the PLE block and the indexer attention are written by
+    # registered families (issue 696, slices 1 to 5), and the layers are composed from them: nothing is left for the coder.
+    assert set(stubs) == set()
+    assert len(pt.stub_lines(text)) == 0
     # Placement: every Linear transposed, the embedding table ROW_MAJOR, the plain head norms with 1 added, integer tables on the host.
     assert p.placements["lm_head.weight"] == "linear_weight" and p.placements["model.embed_tokens.weight"] == "embedding"
     assert p.placements["model.layers.{i}.linear_attn.in_proj_qkv.weight"] == "linear_weight"
     assert p.placements["model.layers.{i}.self_attn.q_norm.weight"] == "norm_plus_one"
+    assert p.placements["model.layers.{i}.self_attn.indexer.k_layernorm.weight"] == "norm_plus_one"   # not in the construction's `paths` list: its width (32) rules out the group size 64 of the other variant
     assert p.placements["model.layers.{i}.attn_hyper_connection.hc_norm.weight"] == "norm_plus_one"   # group_size 64: written by the hyper-connection family, with 1 added at load
     assert p.placements["model.layers.{i}.ple.ple_embedding.layer_multipliers"] == "host"
     assert sum(1 for v in p.placements.values() if v == "linear_weight") == 24
 
 
-def test_tiny_qwen4_port_loads_through_the_fake_and_makes_linear_calls_before_the_first_stub(monkeypatch, tmp_path):
+def test_tiny_qwen4_port_loads_through_the_fake_and_runs_a_whole_prefill(monkeypatch, tmp_path):
     text, p = tiny_qwen4()
     mod = import_port(monkeypatch, text, tmp_path)
     g = torch.Generator().manual_seed(1)
@@ -366,11 +366,12 @@ def test_tiny_qwen4_port_loads_through_the_fake_and_makes_linear_calls_before_th
     model = mod.load(str(snap), fake.MeshDevice(1))
     assert len(model["dev"]) == 103 and len(model["host"]) == 7          # 95 and 3 before the gated delta net family (4 taps in place of 1 tensor per layer); the PLE table moves its 4 shards from the device to the host and adds 4 taps and 3 host buffers
     assert model["dev"]["model.layers.0.linear_attn.in_proj_qkv.weight"].shape == (64, 320)
-    with pytest.raises(NotImplementedError, match="_C_self_attn"):          # the prelude and the layers are generated; the first stub reached is the indexer attention
-        mod.prefill(model, [1, 2, 3])
-    assert fake.COUNTS["embedding"] == 1
+    # Every block is generated now (issue 696 slice 5), so the whole prefill runs through the fake. The zero weights give no meaningful logits; the test shows that
+    # the generated functions call each other with the shapes they expect, that the embedding ran once and that the port has no stub left.
+    mod.prefill(model, list(range(1, 33)))
+    assert fake.COUNTS["embedding"] == 1 and fake.COUNTS["topk"] == 1 and fake.COUNTS["scaled_dot_product_attention"] == 1
     result = pt.check_sources({"port_model.py": text})
-    assert result["matmul_calls"] >= 2 and not result["ok"] and "1 # AGENT: stub(s) remain" in result["problems"][0]
+    assert result["matmul_calls"] >= 2 and result["stubs"] == []
 
 
 # ---- every TTNN name the generator emits is in the verified sheet ------------------------------------------------------------------------------

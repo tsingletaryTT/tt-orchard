@@ -29,7 +29,7 @@ CHECK_MAX_CHARS = 4_000              # the last-check report in a repair request
 DIFF_MAX_CHARS = 3_000               # the layer-diff report
 REPLY_MAX_CHARS = 200_000
 MAX_SHEET_ENTRIES = 24
-HELPER_NAMES = ("_linear", "_rms_norm", "_embedding", "_mlp", "_attention", "_upload", "_upload_ids", "_to_host", "_rope_tables")
+HELPER_NAMES = ("_linear", "_rms_norm", "_embedding", "_mlp", "_attention", "_upload", "_upload_ids", "_to_host", "_rope_tables", "_apply_rotary")
 _FENCE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.S)
 _HEADING = re.compile(r"^## (\S+)\s*$", re.M)
 
@@ -260,7 +260,30 @@ def model_text(port_text: str) -> str:
                   "it back to [1, 1, S, HIDDEN] before the head."]
     lines += ["There is no model.config, no rotary_emb and no past_key_values: build position tables from CONFIG with the helpers the port "
               "has (" + (", ".join(f"`{h}`" for h in helpers) or "none") + "), and keep any cache in a local or in model['ids']."]
+    if "_apply_rotary" in helpers:
+        lines += ["Rotary: there is no cos_cached or sin_cached anywhere. Build the tables with `cos, sin = _rope_tables(model, S)` (S is the padded "
+                  "sequence length; both are [1, 1, S, head_dim], the columns past the rotary part hold 1 and 0). Apply them with "
+                  "`_apply_rotary(model, x, cos, sin)` on q and on k, each in the layout [1, heads, S, head_dim] (reshape the projection to "
+                  "[1, S, heads, head_dim] and permute to [1, heads, S, head_dim] first). Only the first ROTARY['rot'] columns of each head rotate "
+                  "and the helper handles that: do not slice, concat or negate tensors yourself for rotary."]
     return "\n".join(lines)
+
+
+# The order in which an attention stub is written, from what arms E11 to E14 got wrong (issue 677): the coder guessed tensor methods (`.view`), tensor
+# paths (`self_attn.weight`), model keys and the rotary tables. Every step names a helper of the port or a verified ttnn call.
+ATTENTION_RECIPE = (
+    "Write the attention in this order. Take the sizes from CONFIG and the tensor names from port_facts.json. "
+    "1. q, k, v: `_linear(model, prefix + \".q_proj\", x)`, and the same for k_proj and v_proj, where prefix is this block's path. A q_proj twice as wide "
+    "as heads * head_dim holds a gate: read it back with _to_host, split it in torch, and upload the halves with _upload. "
+    "2. Per-head norms (q_norm, k_norm): their weights are head_dim wide, so reshape to (1, 1, S * heads, head_dim), call "
+    "`_rms_norm(model, prefix + \".q_norm\", x)`, and reshape back to (1, 1, S, heads * head_dim). "
+    "3. Heads: reshape to (1, S, heads, head_dim), then `ttnn.permute(x, (0, 2, 1, 3))` gives [1, heads, S, head_dim]. If the reshape complains about tile "
+    "padding, do the head split in torch between _to_host and _upload. "
+    "4. Rotary: `cos, sin = _rope_tables(model, S)`, then `_apply_rotary(model, x, cos, sin)` on q and on k. "
+    "5. Scores and softmax: ttnn.matmul and ttnn.softmax, or ttnn.transformer.scaled_dot_product_attention (its arguments are in the sheet). Any token "
+    "selection or mask the reference builds may run in torch on the host between _to_host and _upload. "
+    "6. Join the heads, apply the gate if there is one, and finish with `_linear(model, prefix + \".o_proj\", x)`. "
+    "Return the block output with no residual add. There is no `.view` on a ttnn tensor; keep every ttnn activation 4-D.")
 
 
 def stub_request(port_text: str, stub, *, sheet: dict, excerpts: str | None, construction_text: str | None = None, inventory=None) -> dict:
@@ -317,6 +340,8 @@ def stub_request(port_text: str, stub, *, sheet: dict, excerpts: str | None, con
                   "Write the recurrence on the host as a plain for loop over the tokens, with no chunking and no helper classes: read x back with "
                   "_to_host, loop over the tokens updating the state, upload the result with _upload, and return it. Keep the function under 60 lines; "
                   "a long reply is cut off."]
+    if ("Attention" in cls and "DeltaNet" not in cls) or path.endswith(".self_attn"):
+        parts += ["## How to write this block", ATTENTION_RECIPE]
     parts += [f"## Reference class {cls} (stages/2/reference_excerpts.md)", excerpt or "(the excerpts file has no section for this class; read it from the installed transformers package)"]
     if extra_excerpt:
         parts.append(extra_excerpt)

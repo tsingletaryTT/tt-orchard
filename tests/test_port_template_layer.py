@@ -30,12 +30,19 @@ def test_the_layer_composition_test_id_names_a_test_of_this_file():
     assert LAYER_TEST.split("::")[1] in globals()
 
 
-def test_every_layer_is_written_whole_and_only_the_indexer_attention_stays_a_stub():
+def test_every_layer_is_written_whole_from_generated_blocks():
     text, p = tiny_qwen4()
-    assert {s.function for s in p.stubs} == {"_C_self_attn"}
+    assert {s.function for s in p.stubs} == set()
     assert [(l.key, bool(l.composed)) for l in p.layers] == [("A", True), ("B", True), ("C", True)]
-    assert [l.composed["sublayer"] for l in p.layers] == ["linear_attn", "linear_attn", "self_attn"] and p.layers[2].composed["stub_sublayer"]
-    assert "layer_composition" in p.summary()["generated"] and len(pt.stub_lines(text)) == 1
+    assert [l.composed["sublayer"] for l in p.layers] == ["linear_attn", "linear_attn", "self_attn"] and not any(l.composed["stub_sublayer"] for l in p.layers)
+    assert "layer_composition" in p.summary()["generated"] and len(pt.stub_lines(text)) == 0
+
+
+def test_a_layer_around_an_attention_stub_is_still_composed_when_the_indexer_family_is_absent(monkeypatch):
+    """A model whose attention no family recognizes keeps that one stub, and the layer calls it (the coder writes only that function)."""
+    monkeypatch.delitem(pt.BLOCK_FAMILIES, "qsa_attention")
+    text, p = tiny_qwen4()
+    assert {s.function for s in p.stubs} == {"_C_self_attn"} and p.layers[2].composed["stub_sublayer"] and len(pt.stub_lines(text)) == 1
     a, b = _source(text, "_layer_A"), _source(text, "_layer_B")
     assert pt.GENERATED_BLOCK_MARK in a and "_A_ple" not in a and "_B_ple(model, i, x, ids)" in b
     assert a.index("_A_attn_hyper_connection") < a.index("_A_linear_attn") < a.index("_A_mlp_hyper_connection") < a.index("_mlp(")
@@ -234,7 +241,7 @@ ATTRS = {"layer_type": "linear_attention"}
 
 
 def test_a_constructed_layer_with_every_part_is_composed():
-    assert pt._compose_layer(_layer(), ATTRS, "aten.flatten.using_ints (candidate)") == {"hc": 4, "hidden": 64, "ple": True, "sublayer": "linear_attn", "stub_sublayer": False}
+    assert pt._compose_layer(_layer(), ATTRS, "aten.flatten.using_ints (candidate)") == {"hc": 4, "hidden": 64, "ple": True, "sublayer": "linear_attn", "stub_sublayer": False, "mlp": "mlp"}
 
 
 def test_a_connection_that_does_not_inject_keeps_the_layer_a_stub():
@@ -304,7 +311,7 @@ def _attn_blocks(**over):
 
 def test_a_constructed_attention_layer_is_composed_around_the_stub():
     got = pt._compose_layer(_attn_blocks(), {"layer_type": "indexed_attention"}, None)
-    assert got == {"hc": 4, "hidden": 64, "ple": False, "sublayer": "self_attn", "stub_sublayer": True}
+    assert got == {"hc": 4, "hidden": 64, "ple": False, "sublayer": "self_attn", "stub_sublayer": True, "mlp": "mlp"}
 
 
 def test_an_attention_sublayer_in_a_linear_layer_or_the_reverse_keeps_the_layer_a_stub():
@@ -314,3 +321,8 @@ def test_an_attention_sublayer_in_a_linear_layer_or_the_reverse_keeps_the_layer_
 
 def test_a_generated_standard_attention_is_not_composed_here():
     assert pt._compose_layer(_attn_blocks(self_attn=("attention", {})), {"layer_type": "indexed_attention"}, None) is None
+
+
+def test_the_layer_docstring_names_the_sublayer_the_layer_calls():
+    text, _p = tiny_qwen4()
+    assert "gated delta net, MLP connection" in _source(text, "_layer_A") and "the indexed attention, MLP connection" in _source(text, "_layer_C")

@@ -1,0 +1,2 @@
+target = "0.9.154"
+summary = "Port generator: always writes the rotary helpers _rope_tables and _apply_rotary (partial rotary included) when the plan has an attention block or stub, and the attention plan reads partial_rotary_factor from rope_parameters (issue 696, slice 4)."

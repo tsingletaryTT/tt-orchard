@@ -133,8 +133,10 @@ def make() -> types.ModuleType:
 
     def embedding(input_tensor, weight, *, padding_idx=None, layout=None, embeddings_type=None, dtype=None, memory_config=None):
         _count("embedding")
-        if weight.layout != "ROW_MAJOR" or input_tensor.layout != "ROW_MAJOR":
-            raise RuntimeError("embedding wants ROW_MAJOR ids and a ROW_MAJOR weight table")
+        # The ids are ROW_MAJOR. The table may be ROW_MAJOR (the token embedding) or TILE: probe 11 (gather_scatter_device) ran ttnn.embedding on a board with a TILE
+        # table, the hidden states reshaped to [T, hidden], and matched the reference.
+        if input_tensor.layout != "ROW_MAJOR" or weight.layout not in ("ROW_MAJOR", "TILE"):
+            raise RuntimeError("embedding wants ROW_MAJOR ids and a ROW_MAJOR or TILE weight table")
         out = torch.nn.functional.embedding(input_tensor.t.long(), weight.t)
         return Tensor(out, layout="TILE" if layout == "TILE" else "ROW_MAJOR")
 
@@ -152,6 +154,13 @@ def make() -> types.ModuleType:
                 raise RuntimeError("a TILE weight needs the input's last dim")
             y = y * weight.t
         return Tensor(y)
+
+    def softmax(input_tensor, dim=-1, *, memory_config=None, compute_kernel_config=None, numeric_stable=True):
+        """ttnn.softmax over the last dimension of a TILE tensor (probe 10: the selected logits and the full router row both ran on a board)."""
+        _count("softmax")
+        if input_tensor.layout != "TILE" or dim not in (-1, input_tensor.t.dim() - 1):
+            raise RuntimeError("the fake covers softmax on the last dimension of a TILE tensor")
+        return Tensor(torch.softmax(input_tensor.t.float(), dim=-1), input_tensor.replicated, "TILE")
 
     def silu(x):
         _count("silu")
@@ -187,6 +196,38 @@ def make() -> types.ModuleType:
     def reshape(input_tensor, shape, memory_config=None):
         _count("reshape")
         return Tensor(input_tensor.t.reshape(tuple(shape)), input_tensor.replicated, input_tensor.layout)
+
+    def permute(input_tensor, dims, memory_config=None):
+        """ttnn.permute: the dimensions in the order given (all of them)."""
+        _count("permute")
+        if sorted(dims) != list(range(input_tensor.t.dim())):
+            raise RuntimeError("permute needs every dimension exactly once")
+        return Tensor(input_tensor.t.permute(*dims).contiguous(), input_tensor.replicated, input_tensor.layout)
+
+    def relu(x, **kwargs):
+        _count("relu")
+        return Tensor(torch.relu(x.t), x.replicated, x.layout)
+
+    def subtract(a, b):
+        _count("subtract")
+        _same_layout(a, b)
+        return Tensor(a.t - (b.t if isinstance(b, Tensor) else b), layout=a.layout)
+
+    def topk(input_tensor, k, dim=-1, largest=True, sorted=True, *, stable=False, memory_config=None, **kwargs):
+        """ttnn.topk on the last dimension of a TILE tensor: (values, indices). With stable=True a tie goes to the lower index (the rule probe 7 measured on a
+        board: `index_list_equals_lowest_index_rule` on every row); with stable=False the fake uses torch.topk, whose tie order is not that rule (the probe measured
+        the device's own order as well, and it is deterministic but not documented)."""
+        _count("topk")
+        if input_tensor.layout != "TILE" or dim not in (-1, input_tensor.t.dim() - 1):
+            raise RuntimeError("the fake covers topk on the last dimension of a TILE tensor")
+        x = input_tensor.t
+        if stable:
+            order = torch.sort(x, dim=-1, descending=largest, stable=True)
+            idx = order.indices[..., :k]
+            val = order.values[..., :k]
+        else:
+            val, idx = torch.topk(x, k, dim=-1, largest=largest, sorted=sorted)
+        return Tensor(val, input_tensor.replicated, "TILE"), Tensor(idx.to(torch.int64), input_tensor.replicated, "TILE")
 
     def concat(tensors, dim=0, memory_config=None):
         _count("concat")
@@ -232,6 +273,8 @@ def make() -> types.ModuleType:
     m.from_torch, m.to_torch, m.linear, m.matmul, m.embedding, m.rms_norm = from_torch, to_torch, linear, matmul, embedding, rms_norm
     m.silu, m.multiply, m.add, m.reshape, m.concat, m.deallocate, m.to_layout = silu, multiply, add, reshape, concat, deallocate, to_layout
     m.sigmoid, m.slice, m.typecast, m.softplus = sigmoid, slice, typecast, softplus
+    m.permute, m.relu, m.subtract, m.topk = permute, relu, subtract, topk
+    m.softmax = softmax
 
     ex = types.ModuleType("ttnn.experimental")
 
@@ -272,6 +315,12 @@ def make() -> types.ModuleType:
         rep = q.shape[1] // k.shape[1]
         k, v = k.repeat_interleave(rep, dim=1), v.repeat_interleave(rep, dim=1)
         scores = (q @ k.transpose(-2, -1)) * (scale if scale is not None else q.shape[-1] ** -0.5)
+        if attn_mask is not None:
+            if is_causal:
+                raise RuntimeError("an explicit attn_mask goes with is_causal=False")
+            if attn_mask.layout != "TILE":
+                raise RuntimeError("attn_mask must be a TILE tensor")
+            scores = scores + attn_mask.t               # additive mask [1, 1 or heads, S, S]
         if is_causal:
             s = q.shape[-2]
             scores = scores.masked_fill(torch.ones(s, s, dtype=torch.bool).triu(1), float("-inf"))

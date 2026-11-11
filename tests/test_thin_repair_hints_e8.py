@@ -38,7 +38,7 @@ def test_rotary_hints_point_at_the_skill_example(code, etype, message):
 
 
 E9 = [
-    ("x = ttnn.repeat(x, 1, 1, 1, CONFIG['hc_count'])", "TypeError", "\\nttnn.repeat(): incompatible function arguments.\\n\\nCalled with:\\n  repeat(ttnn.Tensor, int, int, int, int)", "ttnn.Shape"),
+    ("x = ttnn.repeat(x, 1, 1, 1, CONFIG['hc_count'])", "TypeError", "\\nttnn.repeat(): incompatible function arguments.\\n\\nCalled with:\\n  repeat(ttnn.Tensor, int, int, int, int)", "(1, 1, 1, n)"),
     ("A_log = model['dev'][f\"model.layers.{i}.linear_attn.A_log.weight\"]", "KeyError", "'model.layers.0.linear_attn.A_log.weight'", "suffix"),
 ]
 
@@ -47,3 +47,19 @@ E9 = [
 def test_e9_shape_gets_a_hint(code, etype, message, needle):
     hint = tr.hint_for(tr.parse_failed(failed(code, etype, message)), PORT)
     assert hint and needle.lower() in hint.lower(), hint
+
+
+E13 = [
+    ("q = q.view(1, 1, -1, num_attention_heads, head_dim)", "AttributeError", "'ttnn._ttnn.tensor.Tensor' object has no attribute 'view'", "ttnn.reshape"),
+    ("positions = ttnn.arange(0, S, dtype=ttnn.uint32, device=model['dev']['mesh_device'])", "KeyError", "'mesh_device'", "model['mesh_device']"),
+    ("cos = model['host']['cos_cached']", "KeyError", "'cos_cached'", "rotary"),
+    ("cos = model['dev']['rotary_emb.cos_cached']", "KeyError", "'rotary_emb.cos_cached'", "rotary"),
+]
+
+
+@pytest.mark.parametrize("code,etype,message,needle", E13)
+def test_e13_shape_gets_a_hint(code, etype, message, needle):
+    port = PORT + "\n\ndef _C_self_attn(model, i, x, ids):\n    return x\n"
+    hint = tr.hint_for(tr.parse_failed(failed(code, etype, message)), port)
+    assert hint and needle.lower() in hint.lower(), hint
+    assert "not a key of CONFIG" not in hint

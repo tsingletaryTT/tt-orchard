@@ -237,3 +237,200 @@ def timed(fn, ttnn, device, repeat=2):
 def short_exc(exc: BaseException, limit=600) -> str:
     """A one-line description of an exception for a result line."""
     return f"{type(exc).__name__}: {' '.join(str(exc).split())[:limit]}"
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# CPU reference: rotary and the QSA indexer (copied from Qwen4Exp, transformers 5.19.0), for probes 6 to 9
+# --------------------------------------------------------------------------------------------------------------------
+
+def rms_norm_ref(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Qwen4ExpTextRMSNorm without a group: x * rsqrt(mean(x^2) + eps) * (1 + weight), computed in fp32."""
+    x32 = x.float()
+    return (x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + eps) * (1.0 + weight.float())).to(x.dtype)
+
+
+def rotate_half_ref(x: torch.Tensor) -> torch.Tensor:
+    half = x.shape[-1] // 2
+    return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+
+
+def apply_rotary_ref(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """The reference `apply_rotary_pos_emb` for one tensor: the first cos.shape[-1] columns rotate (rotate-half), the rest pass
+    through. cos and sin must already broadcast against x[..., :rot]."""
+    rot = cos.shape[-1]
+    x_rot, x_pass = x[..., :rot], x[..., rot:]
+    return torch.cat([x_rot * cos + rotate_half_ref(x_rot) * sin, x_pass], dim=-1)
+
+
+def rope_tables_ref(n: int, head_dim: int, rot: int, theta: float = 10000.0):
+    """(cos, sin), each [n, rot]: the text-only reference rotary embedding (the three position streams are equal), frequencies repeated twice."""
+    inv_freq = 1.0 / (theta ** (torch.arange(0, rot, 2, dtype=torch.float32) / rot))
+    freqs = torch.arange(n, dtype=torch.float32)[:, None] * inv_freq[None, :]
+    emb = torch.cat([freqs, freqs], dim=-1)
+    return emb.cos(), emb.sin()
+
+
+def padded_tables(cos: torch.Tensor, sin: torch.Tensor, head_dim: int):
+    """The tables the generated port uses: [1, 1, n, head_dim], cos = 1 and sin = 0 past the rotary columns, so that the whole row passes through
+    `x * cos + (x @ R) * sin`."""
+    n, rot = cos.shape
+    one, zero = torch.ones(n, head_dim - rot), torch.zeros(n, head_dim - rot)
+    return (torch.cat([cos, one], dim=-1).reshape(1, 1, n, head_dim), torch.cat([sin, zero], dim=-1).reshape(1, 1, n, head_dim))
+
+
+def rotate_half_matrix(head_dim: int, rot: int) -> torch.Tensor:
+    """R [head_dim, head_dim] with x @ R = rotate_half on the first `rot` columns and 0 elsewhere (the generated `_apply_rotary` matrix)."""
+    r, half = torch.zeros(head_dim, head_dim), rot // 2
+    for i in range(half):
+        r[i, i + half] = 1.0
+        r[i + half, i] = -1.0
+    return r
+
+
+def stable_topk_ref(scores: torch.Tensor, k: int):
+    """Top-k along the last dimension with exact ties broken by the lowest index (what `ttnn.topk(stable=True)` documents)."""
+    order = torch.sort(scores, dim=-1, descending=True, stable=True)
+    return order.values[..., :k], order.indices[..., :k]
+
+
+def qsa_selection_ref(q, raw_keys, cos, sin, *, budget, ratio, k_weight, eps=1e-6, topk=None):
+    """The reference `Qwen4ExpTextQSAIndexer` selection for one sequence, causal, batch 1, as plain tensors.
+    q [S, H, D]: the index queries after their RMSNorm and rotary; raw_keys [S, D]; cos, sin [S, rot] (full positions);
+    k_weight [D]. `topk` replaces `scores.topk(...)` (default: torch.topk, as the reference). Returns a dict: `mask` [S, S] bool (token j selected
+    for query i, the tail included), `blocks` (per query: the selected block indices, as a list), `scores` (per query: the block scores, fp32),
+    `pooled` [S, nb_max, D] and `n_blocks` (per query)."""
+    seq, heads, dim = q.shape
+    block_topk = budget // ratio
+    mask = torch.zeros(seq, seq, dtype=torch.bool)
+    blocks, scores_all, n_blocks = [], [], []
+    for qi in range(seq):
+        visible = torch.arange(qi + 1)
+        nb = visible.shape[0] // ratio
+        n_blocks.append(nb)
+        if nb > 0:
+            block_tokens = visible[: nb * ratio].view(nb, ratio)
+            groups = raw_keys.index_select(0, block_tokens.flatten()).view(nb, ratio, dim)
+            pooled = rms_norm_ref(groups.float().mean(dim=1).to(raw_keys.dtype), k_weight, eps)
+            starts = block_tokens[:, 0]
+            bks = apply_rotary_ref(pooled.unsqueeze(1), cos.index_select(0, starts).unsqueeze(1), sin.index_select(0, starts).unsqueeze(1)).squeeze(1)
+            scores = torch.matmul(q[qi].float(), bks.float().transpose(-1, -2)).transpose(-1, -2)
+            scores = torch.relu(scores).sum(dim=-1) / math.sqrt(dim)
+            k = min(block_topk, nb)
+            idx = (topk or (lambda s, kk: s.topk(kk, dim=0).indices))(scores, k)
+            chosen = block_tokens.index_select(0, idx).flatten()
+            blocks.append([int(b) for b in idx])
+            scores_all.append(scores)
+        else:
+            chosen = torch.tensor([], dtype=torch.long)
+            blocks.append([])
+            scores_all.append(torch.zeros(0))
+        tail = visible[nb * ratio:]
+        mask[qi, torch.cat([chosen, tail])] = True
+    return {"mask": mask, "blocks": blocks, "scores": scores_all, "n_blocks": n_blocks}
+
+
+def selection_inputs(seq=32, heads=4, dim=32, rot=8, seed=0, zero_bias=False):
+    """Random bf16-rounded inputs for `qsa_selection_ref`: (q [S,H,D], raw_keys [S,D], cos, sin [S,rot], k_weight [D]).
+    With `zero_bias` the queries are made non-negative and the keys non-positive, so every query-key product is at most 0 before the pooling
+    and the normalisation. The block scores that come out are not all 0 (the pooled key is normalised and rotated), so this input only
+    raises the share of tied scores; `tied_zero_scores` below builds exact ties for the topk probe."""
+    g = torch.Generator().manual_seed(seed)
+    r = lambda *s: torch.randn(*s, generator=g).bfloat16().float()
+    q, keys, w = r(seq, heads, dim), r(seq, dim), r(dim) * 0.1
+    if zero_bias:
+        q = q.abs()
+        keys = -keys.abs()                  # every q.k is <= 0: relu gives exactly 0, every block ties
+    cos, sin = rope_tables_ref(seq, dim, rot)
+    return q, keys, cos, sin, w
+
+
+def tied_zero_scores(rows: int, n_blocks: int, zero_share: float = 0.6, seed: int = 0) -> torch.Tensor:
+    """Block scores [rows, n_blocks] as the reference computes them after relu and the sum over index heads: non-negative, with a share of
+    entries exactly 0 (the tie case; random weights give many all-negative blocks). Values are rounded to bf16."""
+    g = torch.Generator().manual_seed(seed)
+    scores = torch.rand(rows, n_blocks, generator=g) * 4.0
+    scores[torch.rand(rows, n_blocks, generator=g) < zero_share] = 0.0
+    return scores.bfloat16().float()
+
+
+def device_or_report(probe: str, l1_small_size: int = 0):
+    """(ttnn, device) from `open_device`, or None after printing a result line that says ttnn is not importable. A probe's device mode returns 2 then."""
+    try:
+        return open_device(l1_small_size)
+    except ImportError as exc:
+        emit({"probe": probe, "mode": "device", "ok": False, "failure": f"ttnn is not importable ({short_exc(exc)}); run inside a gozer lease with the ttnn environment"})
+        return None
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# CPU reference: the Qwen4Exp sparse MoE block (transformers 5.19.0 `Qwen4ExpTextSparseMoeBlock`), for probes 10 to 14
+# --------------------------------------------------------------------------------------------------------------------
+
+def moe_inputs(tokens=32, hidden=64, experts=8, top_k=2, inter=64, shared=64, seed=0, tied_pairs=0):
+    """Random bf16-rounded tensors for one MoE block, in the checkpoint's layout (one gate/up/down matrix per expert):
+    hidden [T, H]; router [E, H]; gate and up [E, I, H]; down [E, H, I]; the shared expert s_gate and s_up [S, H], s_down [H, S]; s_gate_w [1, H].
+    The router rows are scaled so that the logits have a standard deviation of about 2 (a softmax that is neither flat nor one-hot). `tied_pairs` makes
+    that many pairs of experts (0 and 1, 2 and 3, ...) share one router row, so that their logits tie exactly for every token: the case where the
+    tie rule of the top-k matters."""
+    g = torch.Generator().manual_seed(seed)
+    r = lambda *s, scale=1.0: (torch.randn(*s, generator=g) * scale).bfloat16().float()
+    router = r(experts, hidden, scale=2.0 / math.sqrt(hidden))
+    for p in range(tied_pairs):
+        router[2 * p + 1] = router[2 * p]
+    return {"hidden": r(tokens, hidden), "router": router,
+            "gate": r(experts, inter, hidden, scale=hidden ** -0.5), "up": r(experts, inter, hidden, scale=hidden ** -0.5),
+            "down": r(experts, hidden, inter, scale=inter ** -0.5),
+            "s_gate": r(shared, hidden, scale=hidden ** -0.5), "s_up": r(shared, hidden, scale=hidden ** -0.5),
+            "s_down": r(hidden, shared, scale=shared ** -0.5), "s_gate_w": r(1, hidden, scale=hidden ** -0.5),
+            "top_k": top_k}
+
+
+def moe_router_ref(hidden, router, top_k, norm_topk_prob=True, stable=False):
+    """`Qwen4ExpTextTopKRouter.forward`: logits = hidden @ router^T; probs = softmax(logits) in fp32; top-k of the probs; when `norm_topk_prob` (the
+    config default) the selected probs are divided by their sum. Returns (logits [T, E], weights [T, k], indices [T, k]). `stable=True` breaks exact
+    ties by the lowest index (what `ttnn.topk(stable=True)` does); the reference uses torch.topk, whose tie order is not the lowest index."""
+    logits = hidden.float() @ router.float().t()
+    probs = torch.softmax(logits, dim=-1)
+    if stable:
+        values, indices = stable_topk_ref(probs, top_k)
+    else:
+        values, indices = torch.topk(probs, top_k, dim=-1)
+    if norm_topk_prob:
+        values = values / values.sum(dim=-1, keepdim=True)
+    return logits, values, indices
+
+
+def moe_experts_ref(hidden, indices, weights, gate, up, down):
+    """`Qwen4ExpTextExperts.forward`: for each expert that some token selected, the gated MLP on those tokens
+    (silu(x @ gate^T) * (x @ up^T)) @ down^T, multiplied by the token's routing weight and added into the token's row. gate/up [E, I, H], down [E, H, I].
+    (The module keeps gate and up fused as one [E, 2I, H] tensor, gate first; the checkpoint stores them per expert.)"""
+    out = torch.zeros(hidden.shape[0], down.shape[1])
+    for e in range(gate.shape[0]):
+        tok, pos = torch.where(indices == e)
+        if tok.numel() == 0:
+            continue
+        x = hidden[tok].float()
+        y = (F.silu(x @ gate[e].float().t()) * (x @ up[e].float().t())) @ down[e].float().t()
+        out.index_add_(0, tok, y * weights[tok, pos, None])
+    return out
+
+
+def moe_shared_ref(hidden, s_gate, s_up, s_down, s_gate_w):
+    """The shared expert: sigmoid(hidden @ s_gate_w^T) * ((silu(hidden @ s_gate^T) * (hidden @ s_up^T)) @ s_down^T). Returns [T, H]."""
+    x = hidden.float()
+    mlp = (F.silu(x @ s_gate.float().t()) * (x @ s_up.float().t())) @ s_down.float().t()
+    return torch.sigmoid(x @ s_gate_w.float().t()) * mlp
+
+
+def moe_block_ref(t: dict, norm_topk_prob=True):
+    """`Qwen4ExpTextSparseMoeBlock.forward` on the tensors of `moe_inputs`: routed experts plus the gated shared expert. Returns [T, H]."""
+    _, weights, indices = moe_router_ref(t["hidden"], t["router"], t["top_k"], norm_topk_prob)
+    routed = moe_experts_ref(t["hidden"], indices, weights, t["gate"], t["up"], t["down"])
+    return routed + moe_shared_ref(t["hidden"], t["s_gate"], t["s_up"], t["s_down"], t["s_gate_w"])
+
+
+def routing_matrix(indices, weights, experts):
+    """The dense routing weights [T, E]: the selected expert's weight at its column, 0 elsewhere (what the dense form multiplies each expert's output by)."""
+    out = torch.zeros(indices.shape[0], experts)
+    out.scatter_(1, indices, weights.to(out.dtype))
+    return out
