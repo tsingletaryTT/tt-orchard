@@ -105,7 +105,7 @@ def gather_inputs(*, run_dir, stage_dir, snapshot, python, construct=None) -> In
         raise Skip("the run has no model snapshot")
     snap = Path(snapshot)
     try:
-        config = safeio.read_json(snap / "config.json", max_bytes=INPUT_MAX, expect=dict)
+        config = port_template.read_snapshot_config(snap)
     except (safeio.SafeReadError, OSError, ValueError) as exc:
         raise Skip(f"the snapshot's config.json cannot be read ({exc.__class__.__name__})") from None
     try:
