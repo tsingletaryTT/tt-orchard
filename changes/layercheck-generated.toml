@@ -1,0 +1,2 @@
+target = "0.9.156"
+summary = "scripts/layer_check_generated.py: run a generated port layer by layer on one chip with no coder and compare each layer with the transformers reference (issue 696)."
