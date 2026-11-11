@@ -254,3 +254,23 @@ def test_device_path_runs_against_a_torch_stand_in_and_every_step_passes(name, p
                 yield from walk(v)
     bad = list(walk(res["result"]))
     assert not bad, bad[:3]
+
+
+# ---- the flash presets (issue 696: the QSA block at Flash-Next widths) --------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", ["p8_masked_sdpa", "p9_attention_ops"])
+def test_the_flash_long_preset_holds_the_real_budget_and_a_prompt_past_it(name):
+    mod = _mod(name)
+    cfg = mod.PRESETS["flash-long"]
+    assert cfg["hd"] == 256 and cfg["index_dim"] == 128 and cfg["budget"] == 2048 and cfg["ratio"] == 4
+    assert cfg["seq"] > cfg["budget"] + cfg["ratio"] - 1 and cfg["seq"] % cfg["ratio"] == 0
+    assert cfg["rot"] == cfg["hd"] // 4 and cfg["heads"] == 24 and cfg["kv_heads"] == 2
+
+
+@pytest.mark.parametrize("name", ["p8_masked_sdpa", "p9_attention_ops"])
+def test_device_path_runs_against_a_torch_stand_in_at_the_flash_preset(name, monkeypatch, capsys):
+    mod = _mod(name)
+    monkeypatch.setitem(sys.modules, "ttnn", _fake_ttnn())
+    assert mod.main(["--preset", "flash"]) == 0
+    line = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("PROBE_RESULT ")][-1]
+    assert json.loads(line[len("PROBE_RESULT "):])["ok"] is True

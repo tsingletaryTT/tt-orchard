@@ -32,7 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 
 PRESETS = {"tiny": dict(heads=8, kv_heads=2, seq=32, hd=32, ratio=4, budget=16, index_heads=4, index_dim=32, rot=8),
-           "flash": dict(heads=24, kv_heads=2, seq=256, hd=256, ratio=4, budget=64, index_heads=4, index_dim=128, rot=64)}
+           "flash": dict(heads=24, kv_heads=2, seq=256, hd=256, ratio=4, budget=64, index_heads=4, index_dim=128, rot=64),
+           # Flash-Next widths with the real token budget and a prompt past it (2048 / 4 = 512 blocks of 4; the masks are S x S): the shapes the generated block meets at the real budget
+           "flash-long": dict(heads=24, kv_heads=2, seq=2560, hd=256, ratio=4, budget=2048, index_heads=4, index_dim=128, rot=64)}
 NEG = -30000.0                     # the additive mask value on the device (bf16 holds it; exp underflows to 0)
 
 

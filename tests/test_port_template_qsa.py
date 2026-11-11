@@ -177,7 +177,7 @@ REFUSALS = {
     "the attention has a child the block does not write": dict(mutate_construction=_add_child(_attn, "sinks")),
     "the attention lacks a child the block needs": dict(mutate_construction=_drop_child(_attn, "k_norm")),
     "the indexer has two key heads": dict(mutate_construction=_set(_indexer, "index_kv_heads", 2), mutate_tensors=_rows("indexer.index_qk_proj.weight", 192)),
-    "the indexer head width differs from the attention head width": dict(mutate_construction=_set(_indexer, "index_head_dim", 96), mutate_tensors=_WIDE_INDEX),
+    "the indexer head width is not a whole number of tiles": dict(mutate_construction=_set(_indexer, "index_head_dim", 48), mutate_tensors=_all(_rows("indexer.index_qk_proj.weight", 240), _width("indexer.q_layernorm.weight", 48), _width("indexer.k_layernorm.weight", 48))),
     "the compression ratio does not divide a tile": dict(mutate_construction=_all(_set(_indexer, "compress_ratio", 5), _set(_indexer, "token_budget", 20))),
     "the block top-k is not the budget over the ratio": dict(mutate_construction=_set(_indexer, "block_topk", 3)),
     "the budget is not a multiple of the ratio": dict(mutate_construction=_set(_indexer, "token_budget", 18)),
@@ -425,13 +425,14 @@ def test_the_unmodified_reference_differs_only_where_scores_tie(monkeypatch, tmp
 
 def _run_with(monkeypatch, tmp_path, old, new, test):
     text, _p = tiny_qwen4()
-    assert old in text, old
+    if old not in text:
+        pytest.fail(f"the mutation does not apply, the test would pass for the wrong reason: {old[:80]}")
     monkeypatch.setattr(pt, "render", lambda p: text.replace(old, new))
     test(monkeypatch, tmp_path)
 
 
 MUTATIONS = {
-    "the pooled keys are not rotated at the block start": ("pooled = _to_host(model, _apply_rotary(model, pooled, block_cos, block_sin)).float().reshape(nb, index_dim)",
+    "the pooled keys are not rotated at the block start": ("pooled = _to_host(model, _qsa_apply_rotary(model, pooled, block_cos, block_sin)).float().reshape(nb, index_dim)",
                                                            "pooled = _to_host(model, pooled).float().reshape(nb, index_dim)"),
     "the block score drops its relu": ("ttnn.sum(ttnn.relu(ttnn.matmul(q, pk)), dim=1, keepdim=True)", "ttnn.sum(ttnn.matmul(q, pk), dim=1, keepdim=True)"),
     "a block that is not complete for the query keeps its score": ("scores = ttnn.add(ttnn.multiply(scores, const[\"valid\"]), const[\"bias\"])",
@@ -439,8 +440,8 @@ MUTATIONS = {
     "the selection keeps blocks that are not complete": ("* const[\"valid_host\"].to(torch.float32)", "* 1.0"),
     "the tail is not added to the mask": ("visible = ttnn.add(ttnn.matmul(selected, const[\"expand\"]), const[\"tail\"])",
                                           "visible = ttnn.matmul(selected, const[\"expand\"])"),
-    "the index queries are not normalised": ("q = _apply_rotary(model, _qsa_norm_heads(model, prefix + \".q_layernorm\", q), cos, sin)\n    keys",
-                                             "q = _apply_rotary(model, q, cos, sin)\n    keys"),
+    "the index queries are not normalised": ("q = _qsa_apply_rotary(model, _qsa_norm_heads(model, prefix + \".q_layernorm\", q), cos, sin)\n    keys",
+                                             "q = _qsa_apply_rotary(model, q, cos, sin)\n    keys"),
     "the output gate is not applied": ("ttnn.multiply(joined, ttnn.sigmoid(gate))", "joined"),
     "the attention queries are not normalised": ("q = _apply_rotary(model, _qsa_norm_heads(model, prefix + \".q_norm\", q), cos, sin)", "q = _apply_rotary(model, q, cos, sin)"),
     "the attention keys are not rotated": ("k = _apply_rotary(model, k, cos, sin)\n    mask", "mask"),
