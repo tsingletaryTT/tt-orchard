@@ -401,7 +401,10 @@ def collect(run_dir, *, now: float | None = None, pid_alive=_supervisor_alive, l
     count = lambda pred: sum(1 for e in entries if pred(e))   # noqa: E731
     counts = {
         "retries": count(lambda e: e["event"] == "retry"),
-        "escalations": count(lambda e: e["event"] == "escalate"),
+        # An escalation to the same model (the coder serves the large tier) is a fresh context and not a second tier tried (issue 704).
+        # An entry with no `same_model` field, an older one, counts as an escalation.
+        "escalations": count(lambda e: e["event"] == "escalate" and e["data"].get("same_model") is not True),
+        "escalations_same_model": count(lambda e: e["event"] == "escalate" and e["data"].get("same_model") is True),
         "nudges": count(lambda e: e["event"] == "retry" and e["data"].get("rung") == "nudge"),
         "pauses": count(lambda e: e["event"] == "decision" and e["data"].get("decision") == "pause"),
         "operator_commands": len(list(run_dir.glob("control.done-*"))),
@@ -464,8 +467,9 @@ def render(f: dict) -> str:
                      if stage["current"] is not None else "none left"),
     ]
     c = f["counts"]
-    lines.append(f"counts: retries {c['retries']}, escalations {c['escalations']}, nudges {c['nudges']}, "
-                 f"pauses {c['pauses']}, operator commands {c['operator_commands']}")
+    same = c.get("escalations_same_model", 0)
+    lines.append(f"counts: retries {c['retries']}, escalations {c['escalations']}{f' (and {same} on the same model)' if same else ''}, "
+                 f"nudges {c['nudges']}, pauses {c['pauses']}, operator commands {c['operator_commands']}")
     if f["blocked"]:
         lines.append(f"blocked: {f['blocked']['code']}")
         lines.append("  " + _one_line(f["blocked"]["reason"], 200))

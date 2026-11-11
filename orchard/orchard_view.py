@@ -66,8 +66,9 @@ def render_pretty(f: dict, style: Style) -> str:
         out += _wrap("rows" if r is f["stages"][0] else "", f"{label}: {mark + ' ' if mark else ''}"
                      f"{r['status']}, {_hms(r['wall_s'])}{extra}", style)
     c = f["counts"]
-    out += _wrap("counts", f"retries {c['retries']}, escalations {c['escalations']}, nudges {c['nudges']}, "
-                 f"pauses {c['pauses']}, operator commands {c['operator_commands']}", style)
+    same = c.get("escalations_same_model", 0)
+    out += _wrap("counts", f"retries {c['retries']}, escalations {c['escalations']}{f' (and {same} on the same model)' if same else ''}, "
+                 f"nudges {c['nudges']}, pauses {c['pauses']}, operator commands {c['operator_commands']}", style)
     if f["pause"]:
         p = f["pause"]
         out += _wrap("paused", f"stage {p['stage']} by {p['detector'] or p['kind']}: {p['reason']}", style, "warn")

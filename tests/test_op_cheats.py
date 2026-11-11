@@ -629,3 +629,50 @@ def test_the_rendered_ttnn_sheet_carries_the_labelled_section_and_stays_in_budge
     text = oc.render(oc.load_sheet(oc.TTNN_SHEET))
     assert REPORTED_HEADING in text and len(text.splitlines()) < oc.RENDER_LINE_BUDGET
     assert text.count("not reproduced on our pin") >= 6          # the heading and one label per entry
+
+
+# ---- issues 605 and 606: the constructor slice ends at its call's closing parenthesis; the template fallback keeps its path -----------------
+
+CLASS_THEN_FREE_FUNCTION = '''
+nb::class_<Foo>(m, "Foo")
+    .def_rw("prop", &Foo::prop)
+    .def(nb::init<int>(), nb::arg("x"));
+ttnn::bind_function<"other">(mod, d, &f, nb::arg("x"), nb::arg("epsilon"));
+'''
+
+
+def test_issue_605_a_registration_after_the_class_is_not_a_constructor_argument(tmp_path):
+    """The last `.def(` of a class used to run to the next class or the end of the file, so `nb::arg("epsilon")` of a free function bound after
+    the class was indexed as an argument of the class constructor."""
+    idx = tree_with(tmp_path, {"foo/foo_nanobind.cpp": CLASS_THEN_FREE_FUNCTION})
+    assert oc.alternatives(idx["tt_metal"], "ttnn.Foo") == [["x"]]
+    wrong = entry("ttnn.Foo", "ttnn.Foo(x, epsilon)", "a = ttnn.Foo(x, epsilon)")
+    right = entry("ttnn.Foo", "ttnn.Foo(x)", "a = ttnn.Foo(x)")
+    assert oc.verify(sheet_of(right), idx) == []
+    assert any("'epsilon'" in p or "no single definition" in p for p in oc.verify(sheet_of(wrong), idx))
+    assert oc.alternatives(idx["tt_metal"], "ttnn.other") == [["x", "epsilon"]]          # the free function keeps its own arguments
+
+
+def test_issue_605_the_matching_parenthesis_skips_strings_and_nested_calls():
+    text = 'f(a, g(b, ")"), "x)y", h(\'(\'), nb::arg("k")) tail(nb::arg("z"))'
+    end = oc._matching_paren(text, text.index("("))
+    assert text[:end + 1] == 'f(a, g(b, ")"), "x)y", h(\'(\'), nb::arg("k"))'
+    assert oc._matching_paren("f(a, b", 1) == len("f(a, b")            # no closing parenthesis: the slice runs to the end of the text
+
+
+TEMPLATE_UNDER_NORM = {"norm/norm_nanobind.cpp": 'detail::bind_unary<"relu">(mod, doc);\nmod.attr("MY_CONST") = 1;\n'}
+
+
+def test_issue_606_a_template_registration_counts_only_under_the_requested_namespace(tmp_path):
+    """`bind_unary<"relu">` in a file under norm/ made `ttnn.experimental.relu` resolve: the template fallback searched every file."""
+    idx = tree_with(tmp_path, TEMPLATE_UNDER_NORM)
+    assert oc.resolve(idx["tt_metal"], "ttnn.relu")[0] is True                          # no namespace: any file counts
+    assert oc.resolve(idx["tt_metal"], "ttnn.experimental.relu")[0] is False            # a namespace the registering file is not under
+    assert oc.resolve(idx["tt_metal"], "ttnn.MY_CONST")[0] is True
+    assert oc.verify(sheet_of(entry("ttnn.experimental.relu", "ttnn.experimental.relu(x)", "y = ttnn.experimental.relu(x)")), idx)
+
+
+def test_issue_606_a_template_registration_under_the_namespace_still_resolves(tmp_path):
+    idx = tree_with(tmp_path, {"experimental/foo/foo_nanobind.cpp": 'detail::bind_unary<"relu">(mod, doc);\n'})
+    assert oc.resolve(idx["tt_metal"], "ttnn.experimental.relu")[0] is True
+    assert oc.resolve(idx["tt_metal"], "ttnn.transformer.relu")[0] is False             # a different namespace

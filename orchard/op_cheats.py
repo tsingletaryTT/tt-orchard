@@ -224,6 +224,7 @@ class Index:
         self.alias: dict[str, str] = {}
         self.imported: set = set()
         self.text: list[str] = []
+        self.text_where: list[str] = []      # the relative path of each entry of `text`, for the namespace filter of a template registration (issue 606)
         self.files = 0
         self.incomplete = False
         self.skipped: list[str] = []         # files that were over the size limit or could not be read: a definition in one of them is not in the index
@@ -261,6 +262,33 @@ _FIELD = re.compile(r'\.def_(?:rw|ro)\("(\w+)"')
 _DEF_STATEMENT = re.compile(r'\.def\w*\(')
 
 
+def _matching_paren(text: str, open_at: int) -> int:
+    """The index of the `)` that closes the `(` at `open_at`, or len(text) when it is never closed. Parentheses inside a double- or
+    single-quoted literal (with backslash escapes), a `//` comment or a `/* */` comment do not count (issue 605: a constructor binding ends at
+    its own closing parenthesis, not at the next class or the end of the file)."""
+    depth, i, n = 0, open_at, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'":
+            i += 1
+            while i < n and text[i] != ch:
+                i += 2 if text[i] == "\\" else 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 1
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n
+
+
 def _cpp_classes(text: str):
     """(class name, one argument list per constructor binding) for each bound class in a C++ file. The text from one class binding to the next
     is cut into `.def...(` statements; each `.def(nb::init<...>(), ...)` or `.def("__init__", ...)` is a constructor and its `nb::arg` names are one overload. Method
@@ -269,10 +297,11 @@ def _cpp_classes(text: str):
     marks = list(_CLASS.finditer(text))
     for i, m in enumerate(marks):
         region = text[m.end(): marks[i + 1].start() if i + 1 < len(marks) else len(text)]
-        starts = [d.start() for d in _DEF_STATEMENT.finditer(region)]
+        found = list(_DEF_STATEMENT.finditer(region))
         ctors = []
-        for j, st in enumerate(starts):
-            statement = region[st: starts[j + 1] if j + 1 < len(starts) else len(region)]
+        for d in found:
+            st = d.start()
+            statement = region[st: _matching_paren(region, d.end() - 1) + 1]          # this call only (issue 605)
             if re.match(r'\.def\(\s*(?:nb::init\b|"__init__")', statement):       # `.def(nb::init<...>(), ...)` or a `.def("__init__", lambda, ...)`
                 ctors.append([a or b for a, b in _NB_ARG.findall(statement)])
         yield m.group(1), ctors or [[]]
@@ -345,6 +374,7 @@ def build_index(root, *, max_depth: int = 24) -> Index:
                 _index_python(index, source, rel)
             else:
                 index.text.append(source)
+                index.text_where.append(rel)
                 for leaf, args in _cpp_blocks(source):
                     index._add(leaf, args, rel)
                 for leaf, overloads in _cpp_classes(source):
@@ -358,13 +388,18 @@ def build_index(root, *, max_depth: int = 24) -> Index:
 _SPACES = ("experimental", "transformer")
 
 
+def _space_of(parts: list):
+    """The namespace part of a dotted name (`experimental` in `ttnn.experimental.foo`), or None."""
+    return parts[-2] if len(parts) >= 3 and parts[-2] in _SPACES else None
+
+
 def _bindings(index: Index, name: str) -> list:
     """(argument list, file) for each separate definition or binding of the last part of `name`, an alias followed once. When the name has a
     namespace part (`ttnn.experimental.foo`), only the bindings whose file path contains it count, for the signature check and for the
     lookup alike (issue 532)."""
     parts = name.split(".")
     leaf = parts[-1]
-    space = parts[-2] if len(parts) >= 3 and parts[-2] in _SPACES else None
+    space = _space_of(parts)
     out = []
     for key in (leaf, index.alias.get(leaf)):
         if key is None:
@@ -409,8 +444,11 @@ def resolve(index: Index, name: str):
         return False, None, []                # bound, but not under the requested namespace
     if leaf in index.imported:
         return True, None, []
-    if any(_registered(leaf, t) for t in index.text):
-        return True, None, []                 # registered by a template or class: the name exists, its arguments are not read
+    space = _space_of(parts)
+    for i, t in enumerate(index.text):
+        where = index.text_where[i] if i < len(index.text_where) else ""
+        if (space is None or space in where) and _registered(leaf, t):
+            return True, None, []             # registered by a template or class: the name exists, its arguments are not read (under the namespace, issue 606)
     return False, None, []
 
 
