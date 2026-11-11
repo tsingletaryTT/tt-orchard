@@ -1,2 +1,2 @@
 target = "0.9.154"
-summary = "bringup --dry-run and supervisor run --dry-run also print stage 0's class, route, nearest model and reasons from snapshots already on disk, with --json, and start nothing (issue 705)."
+summary = "bringup --classify and supervisor run --classify print stage 0's class, route, nearest model and reasons and the command, list machine-state preflight blocks as would-block lines, and start nothing; --dry-run is unchanged (issue 705)."

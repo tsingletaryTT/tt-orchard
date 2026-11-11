@@ -172,21 +172,21 @@ from orchard import cli, fetch, preflight as pf  # noqa: E402
 from test_cli import Pipe, Recorder, conf, run as cli_run, signals  # noqa: E402,F401
 
 
-def test_bringup_dry_run_for_a_model_that_is_not_downloaded_says_so_and_downloads_nothing(conf):
-    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"])
+def test_bringup_classify_for_a_model_that_is_not_downloaded_says_so_and_downloads_nothing(conf):
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify"])
     assert code == 0 and rec.argv is None and rec.fetched == []
     assert "stage 0" in out and "not classified" in out and "the model is not downloaded" in out
     assert "python3 -m orchard.supervisor run --model Cloudflare/clef" in out
 
 
-def test_bringup_dry_run_json_prints_one_object_and_only_that(conf):
-    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--json"])
+def test_bringup_classify_json_prints_one_object_and_only_that(conf):
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify", "--json"])
     d = json.loads(out)
     assert code == 0 and d["ok"] is False and "the model is not downloaded" in d["problem"] and d["command"].startswith("python3 -m orchard.supervisor run")
     assert rec.argv is None and rec.fetched == []
 
 
-def test_bringup_dry_run_with_local_snapshots_prints_the_classification_through_the_module(conf, pair, monkeypatch):
+def test_bringup_classify_with_local_snapshots_prints_the_classification_through_the_module(conf, pair, monkeypatch):
     model, nearest = pair
     seen = {}
 
@@ -202,29 +202,29 @@ def test_bringup_dry_run_with_local_snapshots_prints_the_classification_through_
         return [pf.Check("base", "ok", "Qwen/Qwen3.8-27B", data={"base": "Qwen/Qwen3.8-27B", "snapshot": str(nearest)}) if c.name == "base" else c
                 for c in checks]
     monkeypatch.setattr(pf, "run_preflight", with_base)
-    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=signals(local_snapshot=lambda m: str(model)))
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify"], sig=signals(local_snapshot=lambda m: str(model)))
     assert code == 0 and rec.argv is None and rec.fetched == []
     assert seen["model_snapshot"] == str(model) and seen["nearest_snapshot"] == str(nearest) and seen["nearest_id"] == "Qwen/Qwen3.8-27B"
     assert "class full-port" in out and "num_attention_heads differs" in out and "python3 -m orchard.supervisor run" in out
 
 
-def test_supervisor_run_dry_run_classifies_the_inputs_and_opens_no_run_directory(pair, tmp_path, capsys):
+def test_supervisor_run_classify_classifies_the_inputs_and_opens_no_run_directory(pair, tmp_path, capsys):
     from orchard import supervisor
     model, nearest = pair
     run_dir = tmp_path / "no-such-run"
     code = supervisor.main(["run", "--model", "Altworld/Hemmingway-1", "--run-dir", str(run_dir), "--tiers", "x.toml", "--coder-target", "t",
                             "--coder-port", "8011", "--coder-chips", "2", "--input", f"model={model}", "--input", f"base={nearest}",
-                            "--dry-run", "--json"])
+                            "--classify", "--json"])
     d = json.loads(capsys.readouterr().out)
     assert code == 0 and d["ok"] is True and d["class"] == "weights-only" and not run_dir.exists()
-    assert "--dry-run" not in d["command"] and "--json" not in d["command"] and "supervisor run" in d["command"]
+    assert "--classify" not in d["command"] and "--json" not in d["command"] and "supervisor run" in d["command"]
 
 
-def test_supervisor_run_dry_run_without_a_base_input_is_refused_with_a_reason(pair, tmp_path, capsys):
+def test_supervisor_run_classify_without_a_base_input_is_refused_with_a_reason(pair, tmp_path, capsys):
     from orchard import supervisor
     model, _nearest = pair
     code = supervisor.main(["run", "--model", "m/x", "--run-dir", str(tmp_path / "r"), "--tiers", "x.toml", "--coder-target", "t",
-                            "--coder-port", "8011", "--coder-chips", "2", "--input", f"model={model}", "--dry-run"])
+                            "--coder-port", "8011", "--coder-chips", "2", "--input", f"model={model}", "--classify"])
     out = capsys.readouterr().out
     assert code == supervisor.EXIT_REFUSED and "not classified" in out and "nearest" in out
 
@@ -253,7 +253,7 @@ def test_a_full_disk_and_a_busy_port_do_not_stop_the_classification(conf, pair, 
     model, nearest = pair
     seen = _with_local_base(monkeypatch, model, nearest)
     sig = signals(local_snapshot=lambda m: str(model), free_gb=lambda p: 1.0, port_in_use=lambda p: True)
-    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=sig)
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify"], sig=sig)
     assert code == 0 and rec.argv is None and rec.fetched == []
     assert seen["model_snapshot"] == str(model) and "class weights-only" in out
     assert "would block a real run" in out and "disk-full" in out and "coder-unusable" in out
@@ -264,23 +264,23 @@ def test_json_carries_a_would_block_list_and_the_classification(conf, pair, monk
     model, nearest = pair
     _with_local_base(monkeypatch, model, nearest)
     sig = signals(local_snapshot=lambda m: str(model), free_gb=lambda p: 1.0, port_in_use=lambda p: True)
-    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--json"], sig=sig)
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify", "--json"], sig=sig)
     d = json.loads(out)
     assert code == 0 and d["ok"] is True and d["class"] == "weights-only"
     assert {w["reason"] for w in d["would_block"]} >= {"disk-full", "coder-unusable"}
     assert all(set(w) == {"check", "reason", "detail"} for w in d["would_block"])
 
 
-def test_a_dry_run_with_no_machine_blocks_has_an_empty_would_block_list(conf, pair, monkeypatch):
+def test_a_classify_with_no_machine_blocks_has_an_empty_would_block_list(conf, pair, monkeypatch):
     model, nearest = pair
     _with_local_base(monkeypatch, model, nearest)
-    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--json"], sig=signals(local_snapshot=lambda m: str(model)))
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify", "--json"], sig=signals(local_snapshot=lambda m: str(model)))
     assert code == 0 and json.loads(out)["would_block"] == [] and "would block" not in out
 
 
-def test_a_block_that_makes_classification_impossible_still_stops_a_dry_run(conf):
+def test_a_block_that_makes_classification_impossible_still_stops_a_classify(conf):
     sig = signals(hub_info=lambda m: (None, "no such repository"))
-    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=sig)
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify"], sig=sig)
     assert code == 2 and "frost before planting" in out and "class " not in out and rec.argv is None
 
 
@@ -297,3 +297,48 @@ def test_the_text_lists_each_would_block_line_with_left_bars_only():
     lines = text.splitlines()
     assert any("would block a real run" in l and "disk-full" in l and "75 GB free" in l for l in lines)
     assert not any(l.rstrip().endswith("║") for l in lines)
+
+
+# ---- --classify is a new flag; --dry-run is what it was -------------------------------------------------------------------------------------
+
+def test_classify_and_dry_run_refusal_text_reaches_the_operator(conf, capsys):
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify", "--dry-run"])
+    err = capsys.readouterr().err
+    assert code == 2 and "cannot be given together" in (out + err)
+
+
+def test_dry_run_alone_still_stops_on_a_machine_block_and_prints_no_classification(conf):
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=signals(free_gb=lambda p: 1.0))
+    assert code == 2 and "frost before planting" in out and "disk-full" in out
+    assert "║  stage 0 " not in out and "would block a real run" not in out and rec.argv is None
+
+
+def test_dry_run_alone_prints_the_command_and_no_classification(conf):
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"])
+    assert code == 0 and "║  stage 0 " not in out and "python3 -m orchard.supervisor run --model Cloudflare/clef" in out
+
+
+def test_the_supervisor_run_parser_has_classify_and_json_and_no_dry_run():
+    from orchard import supervisor
+    ns = supervisor.parse(["run", "--model", "m/x", "--run-dir", "r", "--tiers", "t", "--coder-target", "c", "--coder-port", "1", "--coder-chips", "1",
+                           "--classify", "--json"])
+    assert ns.classify is True and ns.json is True and not hasattr(ns, "dry_run")
+
+
+def test_classify_creates_no_run_directory_and_writes_no_research_cache(conf, tmp_path):
+    cli_run(conf, ["bringup", "Cloudflare/clef", "--classify"])
+    assert not (tmp_path / "runs" / "cloudflare--clef").exists()
+
+
+def test_classify_writes_no_research_report_even_when_the_base_row_carries_one(conf, pair, monkeypatch):
+    model, nearest = pair
+    wrote = []
+    monkeypatch.setattr("orchard.research.report.write", lambda *a, **k: wrote.append(a))
+    monkeypatch.setattr("orchard.dry_classify.classify", lambda **kw: {"ok": True, "model": "m", "nearest_model": "n", "class": "weights-only",
+                                                                     "path": "weights-only", "reasons": [], "differences": []})
+    real = pf.run_preflight
+    monkeypatch.setattr(pf, "run_preflight", lambda *a, **kw: [
+        pf.Check("base", "ok", "Qwen/Qwen3.8-27B", data={"base": "Qwen/Qwen3.8-27B", "snapshot": str(nearest), "report": {"k": 1}})
+        if c.name == "base" else c for c in real(*a, **kw)])
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--classify"], sig=signals(local_snapshot=lambda m: str(model)))
+    assert code == 0 and wrote == [] and "class weights-only" in out

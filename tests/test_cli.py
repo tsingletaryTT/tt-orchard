@@ -108,15 +108,9 @@ def test_a_blocked_preflight_never_reaches_the_supervisor_or_the_download(conf, 
     assert "credentials-needed" in out and "coder-unusable" in out and "Nothing was started" in out
 
 
-def test_a_dry_run_that_is_blocked_by_the_machine_prints_the_block_and_exits_0(conf):
-    """Changed for issue 705: a machine-state block (here gozer gives no status) is a 'would block a real run' line; the dry run goes on."""
+def test_a_dry_run_that_is_blocked_still_exits_2(conf):
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run"],
                          sig=signals(gozer_status=lambda: ""))
-    assert code == 0 and rec.argv is None and "would block a real run" in out and "stage 0" in out
-
-
-def test_a_dry_run_whose_model_cannot_be_found_still_exits_2(conf):
-    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=signals(hub_info=lambda m: (None, "no such repository")))
     assert code == 2 and rec.argv is None
 
 
