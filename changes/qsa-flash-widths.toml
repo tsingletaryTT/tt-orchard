@@ -1,0 +1,2 @@
+target = "0.9.159"
+summary = "The generated QSA attention accepts an index head width that differs from the attention head width (Flash-Next: 128 and 256), with its own rotary helper for the index vectors and flash presets for the board probes (issue 696)."
