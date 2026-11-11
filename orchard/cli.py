@@ -118,6 +118,10 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("model", help="Hugging Face model id, org/name")
     b.add_argument("--run-dir", help="default: <runs_root>/<org>--<name>")
     b.add_argument("--dry-run", action="store_true", help="print the checks and the command; start nothing")
+    b.add_argument("--classify", action="store_true",
+                   help="print stage 0's class, route, nearest model and reasons (from snapshots already on disk) and the command; machine-state "
+                        "preflight blocks print as 'would block a real run' lines and do not stop it; starts nothing; not with --dry-run")
+    b.add_argument("--json", action="store_true", help="with --classify: print the classification and the command as one JSON object")
     b.add_argument("--no-fetch", action="store_true", help="never download; the snapshot must be local")
     b.add_argument("--accept-credentials-visible", action="store_true",
                    help="accept that credential files are visible to agent shells (this is the default; the "
@@ -1120,6 +1124,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     fetcher = fetcher or fetch.fetch_snapshot
     puller = puller or nearest.pull
     args = _parser().parse_args(argv)
+    if getattr(args, "cmd", None) == "bringup" and getattr(args, "classify", False) and getattr(args, "json", False):
+        args._json_out = out                  # the checks go to a sink and the JSON object is the only thing printed (issue 705)
+        out = io.StringIO()
     style = ui.detect(out, env, getattr(args, "style", "auto"))
     home = Path(env.get("HOME") or Path.home())
 
@@ -1275,6 +1282,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     from orchard.stages import thin_port_options_problem
     if why := thin_port_options_problem(full_port=args.full_port, thin_port=args.thin_port):
         return _refuse(why)
+    if args.classify and args.dry_run:
+        return _refuse("--classify and --dry-run cannot be given together: --dry-run prints the preflight checks and stops on a blocked "
+                       "machine; --classify prints stage 0's classification and lists the machine blocks. Give one of them")
     try:
         cfg, cfg_path = config()
         cfg = bringup_config.for_mode(cfg, args.mode or cfg.mode)
@@ -1291,7 +1301,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         print(f"{style.icon('🔎')}{text}...", file=out, flush=True)
 
     progress = None if args.quiet else status
-    research_options = Options(cache_dir=None if args.dry_run else run_dir / "research" / "cache",
+    no_start = args.dry_run or args.classify          # neither starts, downloads or writes anything
+    research_options = Options(cache_dir=None if no_start else run_dir / "research" / "cache",
                                offline=args.offline, no_github=args.no_github, refresh=args.refresh_research,
                                progress=progress)
     sig = signals or preflight.default_signals(cfg, research_options=research_options)
@@ -1300,7 +1311,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         state, why = audio_base_decision(args.base, args.model, sig)
         if why:
             return _refuse(why)
-        override, named_bundle, why = resolve_base_bundle(args.base, sig, puller, out, style, dry_run=args.dry_run, pull=state == "text")
+        override, named_bundle, why = resolve_base_bundle(args.base, sig, puller, out, style, dry_run=no_start, pull=state == "text")
         if why:
             return _refuse(why)
 
@@ -1318,7 +1329,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     checks = preflight_page()
     base_check = next(c for c in checks if c.name == "base")
     if (base_check.status == preflight.BLOCK and (base_check.data or {}).get("candidates") and not args.base
-            and not args.dry_run):
+            and not no_start):
         if chooser is None and sys.stdin.isatty() and ui.stream_is_tty(out):
             chooser = lambda c, m, b: pick_base(c, m, b, out=out,                    # noqa: E731
                                                 inferred=bool(base_check.data.get("inferred")))
@@ -1335,10 +1346,16 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         short = preflight.prunable_shortfall(disk_row) if disk_row is not None else None
         if short:
             ok, _gone = tensor_caches.prune_to_fit(cfg, short, say=lambda m: print(f"{style.icon('🧹')}{m}", file=out),
-                                            dry_run=args.dry_run)
-            if ok and not args.dry_run:
+                                            dry_run=no_start)
+            if ok and not no_start:
                 checks = preflight_page()
                 stops = preflight.blocked(checks)
+    would_block = []
+    if stops and args.classify:
+        # A classification answers "what class is this model" whatever the machine's state is now: the machine-state blocks are printed
+        # as lines that would stop a real run, and only a block that makes the classification impossible stops it (issue 705).
+        stops, held = preflight.split_for_dry_run(stops)
+        would_block = [{"check": c.name, "reason": str(c.reason), "detail": str(c.detail)[:300]} for c in held]
     if stops:
         print(lexicon.refused_line([c.reason for c in stops], style), file=out)
         for c in stops:
@@ -1355,7 +1372,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _refuse("--no-fetch was given and the snapshot is not in " + str(hf_home))
     else:
         snapshot = fetch.snapshot_dir(hf_home, args.model, hub.sha)      # where the download will put it
-    if local is None and resuming and not args.dry_run and not _served_the_model(run_dir):
+    if local is None and resuming and not no_start and not _served_the_model(run_dir):
         # The weights are about to be downloaded, so an earlier run read a snapshot with none (a run that passed stage 2 did not). Its stage 0 verdict (a full port,
         # for bytkim/Qwen3.8-27B-pi) and stage 1 reference describe that empty snapshot, and a retry would keep both.
         # The directory is moved, not deleted, and never while a supervisor still holds its ledger lock.
@@ -1368,7 +1385,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         print(f"{style.icon('🍂')}the earlier run read a snapshot with no weights; set aside as {aside}", file=out)
     base_data = next(c for c in checks if c.name == "base").data or {}
     base_hub, base_snapshot = None, base_data.get("snapshot")
-    if base_data.get("needs_fetch") and args.no_fetch and not args.dry_run:
+    if base_data.get("needs_fetch") and args.no_fetch and not no_start:
         return _refuse(f"--no-fetch was given and the base model {base_data['base']} is not in {hf_home}; stage 0 compares against it")
     if base_data.get("needs_fetch"):
         base_hub, why = sig.hub_info(base_data["base"])
@@ -1379,7 +1396,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     # The report is written only after the preflight passed (a blocked run returned above) and never on a
     # dry run. The research cache (<run dir>/research/cache) is different: the fetcher fills it during the
     # preflight, before anyone knows the preflight passes, so a blocked run can leave that directory behind. The model id is checked again here because --run-dir skips the slug check that guards the path.
-    if base_data.get("report") and not args.dry_run and research_types.valid_id(args.model):
+    if base_data.get("report") and not no_start and research_types.valid_id(args.model):
         from orchard.research import report as research_report
         research_report.write(run_dir, base_data["report"])
         # Stage 0 reads the candidates-only view. The full report (base-candidates.json) holds text from the
@@ -1411,6 +1428,23 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               port_repair_rounds=args.port_repair_rounds, telegraph_config=cfg_path,
                                               tool_dedupe=not args.no_tool_dedupe)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
+    if args.classify:
+        from orchard import dry_classify
+        if stock_dir:
+            result = {"ok": False, "problem": "the model takes the stock-runtime path: stage 0 runs as code there and has no template to run"}
+        elif local is None:
+            result = {"ok": False, "problem": "the model is not downloaded, and a classification downloads nothing; classify it after a fetch or "
+                                              "give a local snapshot"}
+        elif not base_data.get("base") or not (base_snapshot and Path(base_snapshot).is_dir()):
+            result = {"ok": False, "problem": "no nearest model is on disk to compare against (a classification downloads nothing)"}
+        else:
+            result = dry_classify.classify(model_id=args.model, model_snapshot=str(snapshot), nearest_id=base_data["base"],
+                                           nearest_snapshot=str(base_snapshot), bundle_dir=bundle_dir)
+        if args.json:
+            print(json.dumps({**result, "would_block": would_block, "command": command}, sort_keys=True), file=getattr(args, "_json_out", out))
+        else:
+            print(dry_classify.render(result, command=command, would_block=would_block), file=out)
+        return EXIT_OK
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)
         return EXIT_OK

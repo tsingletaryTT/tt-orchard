@@ -120,6 +120,7 @@ import shutil
 import stat
 import signal
 import subprocess
+import shlex
 import sys
 import threading
 import time
@@ -6327,6 +6328,10 @@ def parse(argv=None):
                    help="the port of the chip tier the coder serves (matches its endpoint in --tiers)")
     r.add_argument("--coder-chips", type=int, required=True)
     r.add_argument("--coder-image-id", default=None)
+    r.add_argument("--classify", action="store_true",
+                   help="run only stage 0's measurement of --input model= against --input base= and print the class, the route, the "
+                        "reasons and this command; no run directory, coder, lease or container is touched (orchard/dry_classify.py)")
+    r.add_argument("--json", action="store_true", help="with --classify: print the classification as JSON")
     r.add_argument("--coder-keep-up", action="store_true",
                    help="lab mode: leave the coder serving at the end of the run, and adopt a coder an "
                         "earlier run left up (orchard/kept_coder.py)")
@@ -6822,6 +6827,27 @@ def stack_check_for(sup, args, environ=None):
     return stack_pins_mod.make_check(sources, probe_env=agent_env(sup.run_dir, extra=sup.extra_env), block=env.get(stack_pins_mod.BLOCK_ENV) == "1")
 
 
+def classify_main(args, argv=None) -> int:
+    """`run --classify` (issue 705): classify --input model= against --input base= and print it. Nothing is opened: no ledger, no run directory,
+    no coder, no lease. Exit 0 when the classification ran, EXIT_REFUSED when it could not."""
+    from orchard import dry_classify
+    named = {}
+    for item in args.input:
+        if isinstance(item, str) and "=" in item:
+            k, _, v = item.partition("=")
+            named[k] = v
+    command = "python3 -m orchard.supervisor " + shlex.join(a for a in (list(argv) if argv is not None else sys.argv[1:]) if a not in ("--classify", "--json"))
+    base = named.get("base")
+    result = dry_classify.classify(model_id=args.model, model_snapshot=named.get("model"),
+                                   nearest_id=Path(base).parent.parent.name.replace("models--", "").replace("--", "/") if base else None,
+                                   nearest_snapshot=base, bundle_dir=named.get("bundle"))
+    if getattr(args, "json", False):
+        print(json.dumps({**result, "would_block": [], "command": command}, sort_keys=True))
+    else:
+        print(dry_classify.render(result, command=command))
+    return 0 if result.get("ok") else EXIT_REFUSED
+
+
 def main(argv=None, *, home=None) -> int:
     args = parse(argv)
     if args.cmd == "control":
@@ -6833,6 +6859,8 @@ def main(argv=None, *, home=None) -> int:
         from orchard import status
         return status.main(["--run-dir", args.run_dir] + (["--json"] if args.json else [])
                            + (["--style", args.style] if args.style else []))
+    if args.cmd == "run" and getattr(args, "classify", False):
+        return classify_main(args, argv)
     run_dir = Path(args.run_dir)
     try:
         with Ledger(run_dir / "ledger.jsonl") as ledger:

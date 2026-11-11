@@ -1553,6 +1553,18 @@ def blocked(checks: list[Check]) -> list[Check]:
     return [c for c in checks if c.status == BLOCK]
 
 
+# The block reasons that make a dry classification impossible (issue 705): the model or its nearest model cannot be found or the config
+# cannot be used. Every other block describes the machine or the run (disk, port, chips, lease, coder, tiers, credentials, licence, fit) and
+# is listed as "would block a real run" while the classification goes on.
+CLASSIFICATION_BLOCKS = ("config-invalid", "model-unavailable", "nearest-model-missing")
+
+
+def split_for_dry_run(stops: list[Check]) -> tuple[list[Check], list[Check]]:
+    """(blocks that stop a dry run, blocks that only would stop a real run)."""
+    hard = [c for c in stops if c.reason in CLASSIFICATION_BLOCKS]
+    return hard, [c for c in stops if c not in hard]
+
+
 # ---- the real signals ---------------------------------------------------------------------------
 
 def _nearest_existing(path: Path) -> Path:
