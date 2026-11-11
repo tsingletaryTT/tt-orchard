@@ -624,3 +624,13 @@ def test_bundle_inputs_refuses_a_link_out_of_the_cache(tmp_path):
     (snap / "config.json").symlink_to(outside)
     _, dev, notes = dc.bundle_inputs(bundle, hf)
     assert dev is None and any("outside" in n for n in notes)
+
+
+def test_no_guidance_names_a_script_that_does_not_exist():
+    """Issue 665: `scripts/reference_venv.sh` was named in guidance; the script is `scripts/reference_venv.py`. The project log may quote the old name."""
+    root = Path(__file__).resolve().parent.parent
+    assert (root / "scripts" / "reference_venv.py").is_file() and not (root / "scripts" / "reference_venv.sh").exists()
+    offenders = [str(p.relative_to(root)) for pattern in ("orchard/**/*.py", "tests/**/*.py", "docs/**/*.md", "README.md")
+                 for p in root.glob(pattern)
+                 if p.name not in ("project-log.md", "test_drop_check.py") and "reference_venv.sh" in p.read_text(encoding="utf-8", errors="replace")]
+    assert offenders == []
