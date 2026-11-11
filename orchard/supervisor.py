@@ -6842,9 +6842,9 @@ def dry_run_main(args, argv=None) -> int:
                                    nearest_id=Path(base).parent.parent.name.replace("models--", "").replace("--", "/") if base else None,
                                    nearest_snapshot=base, bundle_dir=named.get("bundle"))
     if getattr(args, "json", False):
-        print(json.dumps({**result, "command": command}, sort_keys=True))
+        print(json.dumps({**result, "would_block": [], "command": command}, sort_keys=True))
     else:
-        print(dry_classify.render(result, command=command) + "\n╚══")
+        print(dry_classify.render(result, command=command))
     return 0 if result.get("ok") else EXIT_REFUSED
 
 

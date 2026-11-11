@@ -1345,6 +1345,12 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             if ok and not args.dry_run:
                 checks = preflight_page()
                 stops = preflight.blocked(checks)
+    would_block = []
+    if stops and args.dry_run:
+        # A dry classification answers "what class is this model" whatever the machine's state is now: the machine-state blocks are printed
+        # as lines that would stop a real run, and only a block that makes the classification impossible stops it (issue 705).
+        stops, held = preflight.split_for_dry_run(stops)
+        would_block = [{"check": c.name, "reason": str(c.reason), "detail": str(c.detail)[:300]} for c in held]
     if stops:
         print(lexicon.refused_line([c.reason for c in stops], style), file=out)
         for c in stops:
@@ -1430,9 +1436,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             result = dry_classify.classify(model_id=args.model, model_snapshot=str(snapshot), nearest_id=base_data["base"],
                                            nearest_snapshot=str(base_snapshot), bundle_dir=bundle_dir)
         if args.json:
-            print(json.dumps({**result, "command": command}, sort_keys=True), file=getattr(args, "_json_out", out))
+            print(json.dumps({**result, "would_block": would_block, "command": command}, sort_keys=True), file=getattr(args, "_json_out", out))
         else:
-            print(dry_classify.render(result, command=command) + "\n╚══", file=out)
+            print(dry_classify.render(result, command=command, would_block=would_block), file=out)
         return EXIT_OK
 
     if local is None:

@@ -137,18 +137,33 @@ def _summary(delta: dict, model_id: str, nearest_id: str) -> dict:
             "class": cls, "path": shown(path, "unknown"), "reasons": [_cut(r) for r in reasons[:MAX_ITEMS]], "differences": rows[:MAX_ITEMS]}
 
 
-def render(result: dict, *, command: str) -> str:
-    """The text of a dry classification, left bars only (a right border breaks in a narrow terminal)."""
+WIDTH = 80                      # the preflight page keeps every line inside 80 columns (tests/test_cli.py)
+
+
+def _wrapped(label: str, text: str) -> list[str]:
+    """`║  <label> <text>` wrapped to WIDTH columns, continuation lines indented under the text. Left bar only."""
+    import textwrap
+    head = f"║  {label} "
+    return textwrap.wrap(text, width=WIDTH, initial_indent=head, subsequent_indent="║" + " " * (len(head) - 1),
+                         break_long_words=True, break_on_hyphens=False) or [head.rstrip()]
+
+
+def render(result: dict, *, command: str, would_block=()) -> str:
+    """The text of a dry classification, left bars only (a right border breaks in a narrow terminal) and wrapped to 80 columns. The box is closed
+    and the command follows it on one unframed line, so that it can be copied. `would_block` lists the machine-state blocks of the preflight
+    ({"check", "reason", "detail"}) that would stop a real run and did not stop this one."""
     lines = []
     if not result.get("ok"):
-        lines.append(f"║  stage 0   not classified: {result.get('problem', 'unknown problem')}")
+        lines += _wrapped("stage 0 ", f"not classified: {result.get('problem', 'unknown problem')}")
     else:
-        lines.append(f"║  stage 0   class {result['class']}   route {result['path']}")
-        lines.append(f"║  model     {result['model']}")
-        lines.append(f"║  nearest   {result['nearest_model']}")
+        lines += _wrapped("stage 0 ", f"class {result['class']}   route {result['path']}")
+        lines += _wrapped("model   ", result["model"])
+        lines += _wrapped("nearest ", result["nearest_model"])
         for r in result["reasons"]:
-            lines.append(f"║  reason    {r}")
+            lines += _wrapped("reason  ", r)
         for d in result["differences"]:
-            lines.append(f"║  {d['area']:<10} {d['finding']}")
-    lines.append(f"║  command   {command}")
-    return "\n".join(lines)
+            lines += _wrapped(f"{d['area'][:8]:<8}", d["finding"])
+    for w in would_block:
+        lines += _wrapped("would block a real run", f"{w['reason']}: {w['detail']}")
+    # The command is printed below the box, unframed and unwrapped, so that it can be copied as it is.
+    return "\n".join(lines + ["╚══", f"command   {command}"])

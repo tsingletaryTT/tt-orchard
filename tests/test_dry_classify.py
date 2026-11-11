@@ -154,13 +154,14 @@ def test_the_text_lists_class_route_nearest_reasons_and_the_command_with_left_ba
     text = dry_classify.render(r, command="python3 -m orchard.supervisor run --model m")
     lines = text.splitlines()
     assert lines[0].startswith("║") and any("class" in l and "weights-only" in l for l in lines)
-    assert any("nearest" in l for l in lines) and any("python3 -m orchard.supervisor run" in l for l in lines)
-    assert not any(l.rstrip().endswith("║") for l in lines)
+    assert any("nearest" in l for l in lines) and lines[-1].startswith("command") and "python3 -m orchard.supervisor run" in lines[-1]
+    assert "╚══" in lines and not any(l.rstrip().endswith("║") for l in lines)
+    assert all(len(l) <= dry_classify.WIDTH for l in lines if l.startswith("║"))
 
 
 def test_the_text_of_a_problem_says_so_and_still_prints_the_command():
     text = dry_classify.render({"ok": False, "problem": "the model snapshot is not a directory"}, command="cmd")
-    assert "not a directory" in text and "cmd" in text
+    assert "not a directory" in text and text.splitlines()[-1] == "command   cmd"
 
 
 # ---- the commands -------------------------------------------------------------------------------------------------------------------
@@ -226,3 +227,73 @@ def test_supervisor_run_dry_run_without_a_base_input_is_refused_with_a_reason(pa
                             "--coder-port", "8011", "--coder-chips", "2", "--input", f"model={model}", "--dry-run"])
     out = capsys.readouterr().out
     assert code == supervisor.EXIT_REFUSED and "not classified" in out and "nearest" in out
+
+
+# ---- machine-state blocks do not stop a dry classification (coordinator follow-up on issue 705) -----------------------------------------------
+
+def _with_local_base(monkeypatch, model, nearest, result=None):
+    """A preflight that finds the nearest model on disk, and a classifier that records what it was asked."""
+    seen = {}
+
+    def fake(**kw):
+        seen.update(kw)
+        return result or {"ok": True, "model": "Cloudflare/clef@r", "nearest_model": "Qwen/Qwen3.8-27B@s", "class": "weights-only",
+                          "path": "weights-only", "reasons": [], "differences": []}
+    monkeypatch.setattr("orchard.dry_classify.classify", fake)
+    real = pf.run_preflight
+
+    def with_base(*a, **kw):
+        return [pf.Check("base", "ok", "Qwen/Qwen3.8-27B", data={"base": "Qwen/Qwen3.8-27B", "snapshot": str(nearest)}) if c.name == "base" else c
+                for c in real(*a, **kw)]
+    monkeypatch.setattr(pf, "run_preflight", with_base)
+    return seen
+
+
+def test_a_full_disk_and_a_busy_port_do_not_stop_the_classification(conf, pair, monkeypatch):
+    model, nearest = pair
+    seen = _with_local_base(monkeypatch, model, nearest)
+    sig = signals(local_snapshot=lambda m: str(model), free_gb=lambda p: 1.0, port_in_use=lambda p: True)
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=sig)
+    assert code == 0 and rec.argv is None and rec.fetched == []
+    assert seen["model_snapshot"] == str(model) and "class weights-only" in out
+    assert "would block a real run" in out and "disk-full" in out and "coder-unusable" in out
+    assert "frost before planting" not in out
+
+
+def test_json_carries_a_would_block_list_and_the_classification(conf, pair, monkeypatch):
+    model, nearest = pair
+    _with_local_base(monkeypatch, model, nearest)
+    sig = signals(local_snapshot=lambda m: str(model), free_gb=lambda p: 1.0, port_in_use=lambda p: True)
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--json"], sig=sig)
+    d = json.loads(out)
+    assert code == 0 and d["ok"] is True and d["class"] == "weights-only"
+    assert {w["reason"] for w in d["would_block"]} >= {"disk-full", "coder-unusable"}
+    assert all(set(w) == {"check", "reason", "detail"} for w in d["would_block"])
+
+
+def test_a_dry_run_with_no_machine_blocks_has_an_empty_would_block_list(conf, pair, monkeypatch):
+    model, nearest = pair
+    _with_local_base(monkeypatch, model, nearest)
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--json"], sig=signals(local_snapshot=lambda m: str(model)))
+    assert code == 0 and json.loads(out)["would_block"] == [] and "would block" not in out
+
+
+def test_a_block_that_makes_classification_impossible_still_stops_a_dry_run(conf):
+    sig = signals(hub_info=lambda m: (None, "no such repository"))
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=sig)
+    assert code == 2 and "frost before planting" in out and "class " not in out and rec.argv is None
+
+
+def test_a_real_run_still_stops_on_a_machine_block(conf):
+    sig = signals(free_gb=lambda p: 1.0)
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef"], sig=sig)
+    assert code == 2 and "disk-full" in out and rec.argv is None and "would block a real run" not in out
+
+
+def test_the_text_lists_each_would_block_line_with_left_bars_only():
+    text = dry_classify.render({"ok": True, "model": "m", "nearest_model": "n", "class": "weights-only", "path": "weights-only",
+                                "reasons": [], "differences": []}, command="cmd",
+                               would_block=[{"check": "disk", "reason": "disk-full", "detail": "needs 80 GB, 75 GB free"}])
+    lines = text.splitlines()
+    assert any("would block a real run" in l and "disk-full" in l and "75 GB free" in l for l in lines)
+    assert not any(l.rstrip().endswith("║") for l in lines)
