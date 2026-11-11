@@ -1,0 +1,2 @@
+target = "0.9.157"
+summary = "Board probes 10 to 14 for the Qwen4 sparse MoE block (router, routed experts with and without sparse_matmul, shared expert and block, memory estimate), with CPU selftests and tests (issue 723)."
