@@ -776,8 +776,9 @@ class Ladder:
     supervisor's own action.
     """
 
-    def __init__(self, actuator: Actuator, ledger, launched, *, caps: dict | None = None):
+    def __init__(self, actuator: Actuator, ledger, launched, *, caps: dict | None = None, escalation_info=None):
         self.actuator, self.ledger = actuator, ledger
+        self.escalation_info = escalation_info     # stage -> the fields that say which tier and model serve an escalated attempt (issue 704), or None
         self.launched = frozenset(launched)
         self.caps = dict(RUNG_CAPS if caps is None else caps)
         missing = set(RUNGS) - set(self.caps)
@@ -812,6 +813,16 @@ class Ladder:
         self.ledger.append(event, stage, watchdog=True, rung=rung, agent=agent, findings=records,
                            **extra)
         self._taken[(agent, stage, rung)] += 1
+
+    def _served_by(self, stage) -> dict:
+        """The tier fields of an escalate entry. A provider that fails leaves the entry as it was: the rung is taken either way."""
+        if self.escalation_info is None:
+            return {}
+        try:
+            info = self.escalation_info(stage)
+        except (KeyError, ValueError, TypeError):
+            return {}
+        return info if isinstance(info, dict) else {}
 
     def _pause(self, agent: str, stage, records: list) -> str:
         reason = "watchdog: " + "; ".join(r["summary"] for r in records)
@@ -869,7 +880,7 @@ class Ladder:
             self.actuator.nudge(agent, message)
             return "nudge"
         if self._left(agent, stage, "escalate"):
-            self._take("escalate", agent, stage, "escalate", records)
+            self._take("escalate", agent, stage, "escalate", records, **self._served_by(stage))
             self.actuator.escalate(agent, stage)
             return "escalate"
         if self._left(agent, stage, "pause"):

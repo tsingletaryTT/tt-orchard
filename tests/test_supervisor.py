@@ -166,6 +166,10 @@ def test_a_failed_gate_escalates_once_to_the_diagnose_tier(rig):
     assert [d["result"] for d in rig.ends(2)] == ["escalate", "pass"]
     esc = [e["data"] for e in rig.entries() if e["event"] == "escalate"]
     assert esc[0]["by"] == "stage machine" and "top1_agreement 0.1 is below" in esc[0]["reasons"][0]
+    # Issue 704: the entry says which tier and model served the escalated attempt. In this layout large and small are one model, so it is a
+    # fresh context on the same model and not a second tier tried.
+    assert esc[0]["tier_before"] == "small" and esc[0]["tier_after"] == "large"
+    assert esc[0]["served_model"] == "qwen-27b" and esc[0]["same_model"] is True
     steps = [d for d in rig.decisions() if d["decision"] == "agent step" and d["escalated"]]
     assert steps and all(d["tier"] == "large" for d in steps)
     assert (rig.run_dir / "stages" / "2.partial-1" / "result.json").exists()   # kept, never deleted
