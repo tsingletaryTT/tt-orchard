@@ -94,8 +94,17 @@ HINTS = (
      "the first rot columns ([1, 1, S, rot]), keep the remaining columns ([1, 1, S, F - rot]) unchanged, and concatenate the two on dim=-1."),
     # The shapes below are failures the arm E8 run showed on the chip (issue 677).
     (re.compile(r"^TypeError$"), re.compile(r"ttnn\.repeat\(\)"),
-     "ttnn.repeat takes the tensor and one repeat shape, not one argument per dimension: ttnn.repeat(x, ttnn.Shape([1, 1, 1, n])) repeats the "
-     "last dimension n times."),
+     "ttnn.repeat takes the tensor and one tuple with a count per dimension: ttnn.repeat(x, (1, 1, 1, n)) repeats the last dimension n times. "
+     "It does not take one argument per dimension."),
+    # The shapes below come from the catalog of arms C to E14 (issue 677).
+    (re.compile(r"^TypeError$"), re.compile(r"_(?:to_host|upload|upload_ids)\(\) missing"),
+     "The port's helpers take the model first: `_to_host(model, t)`, `_upload(model, t, layout)` and `_upload_ids(model, ids)`."),
+    (re.compile(r"^TypeError$"), re.compile(r"must be Tensor, not ttnn"),
+     "A ttnn tensor is not a torch tensor. Read it back with `h = _to_host(model, t)`, use torch on h, and upload the result with "
+     "`_upload(model, h, ttnn.TILE_LAYOUT)`."),
+    (re.compile(r"^KeyError$"), re.compile(r"^'model\.layers\.\d+\.(?:self_attn|linear_attn|mlp|attn|ple)\.weight'$"),
+     "That is the block's path with `.weight` added. `_linear(model, prefix, x)` reads model['dev'][prefix + '.weight'], so pass the projection's "
+     "path, for example `model.layers.3.self_attn.q_proj`. The names of a layer's tensors are in port_facts.json."),
     (re.compile(r"^KeyError$"), re.compile(r"^'model\.[\w.]+\.weight'$"),
      "model['dev'] is keyed by the checkpoint tensor's own name. A tensor that is stored without a '.weight' suffix (A_log, dt_bias and other "
      "bare parameters) has no suffix in its key: look the name up exactly as the tensor list in the port facts spells it."),
@@ -135,6 +144,7 @@ def parse_failed(text) -> Failure | None:
     msg = m["msg"]
     if msg.endswith(m["q"]):
         msg = msg[:-1]                      # the closing quote of the check's line, when the line was not cut
+    msg = msg.replace("\\'", "'")           # the check prints a message that holds quotes as a repr: \'name\' stands for 'name' (arms E11 to E13)
     return Failure(m["op"], m["file"], int(m["line"]), m["code"], m["etype"], msg)
 
 

@@ -86,3 +86,46 @@ Deallocate each device weight in a try block, then drop the dicts. The check clo
 
 A KV cache, a paged cache, tracing, sharding across chips, a router for a mixture-of-experts layer, and a device implementation of the
 recurrent or sparse layers. Each of them needs its own evidence.
+
+## 7. The generated port already has these functions: call them, do not rewrite them
+
+<!-- generated-port-functions: _linear _rms_norm _group_rms_norm _upload _upload_ids _to_host _rope_tables _apply_rotary _gated_delta_net _ple _hyper_connection _hyper_connection_inject _C_self_attn -->
+
+A port the generator wrote already holds the blocks it knows, with these exact arguments. The model comes first in each. Names such as `lin` and
+`upload` in sections 1 to 4 belong to the passed port those sections come from; in your port the names are the ones below.
+- `_linear(model, prefix, x)`: x [1, 1, S, in] to [1, 1, S, out]. `prefix` is the path of the projection, for example
+  `model.layers.3.self_attn.q_proj`; it reads `model['dev'][prefix + '.weight']`, so the block's own path fails with a KeyError.
+- `_rms_norm(model, prefix, x)`: RMS norm over the last dimension with the weight at `prefix`. It raises for a prefix that is not a plain RMS
+  norm; the function that calls it must compute that norm itself. `_group_rms_norm(model, name, x, hc, hidden, eps)` norms each of hc groups.
+- `_to_host(model, t)` returns a torch tensor; `_upload(model, t, layout)` puts a torch tensor on the device; `_upload_ids(model, ids)` takes a
+  list of ints. A ttnn tensor is not a torch tensor: read it back with `_to_host` before any torch call.
+- `_rope_tables(model, n)` returns `(cos, sin)`, each [1, 1, n, head_dim]; `_apply_rotary(model, x, cos, sin)` rotates x [1, heads, S, head_dim]
+  (partial rotary included). The model holds no `cos_cached`, no `rotary_emb` and no `config`.
+- `_gated_delta_net`, `_ple`, `_hyper_connection` and `_hyper_connection_inject` are written for you. The layer function calls the parts of a layer
+  in the reference's order; the one function the coder writes is the attention: `_C_self_attn(model, i, x, ids)`. The layer passes the attention
+  connection's output as `x` and adds the returned block output itself, so return the block output with no residual add.
+
+An attention written with these calls (names and sizes come from port_facts.json and CONFIG):
+
+```python
+def _C_self_attn(model, i, x, ids):                              # x [1, 1, S, hidden]
+    p = f"model.layers.{i}.self_attn"
+    S, heads, hd = x.shape[2], CONFIG["num_attention_heads"], CONFIG["head_dim"]
+    q = _linear(model, p + ".q_proj", x)                          # [1, 1, S, heads * hd]
+    q = ttnn.reshape(_rms_norm(model, p + ".q_norm", ttnn.reshape(q, (1, 1, S * heads, hd))), (1, S, heads, hd))
+    q = ttnn.permute(q, (0, 2, 1, 3))                             # [1, heads, S, hd]
+    cos, sin = _rope_tables(model, S)
+    q = _apply_rotary(model, q, cos, sin)
+    # k and v the same way with the key-value head count; scores, softmax and the value mix; join the heads; then
+    return _linear(model, p + ".o_proj", joined)                  # joined [1, 1, S, heads * hd]
+```
+Keep every ttnn activation 4-D, and remember that a ttnn tensor has no `.view` or `.t()`. The head split by reshape on a tile-layout tensor has not been
+checked on a board here; if it complains, read the tensor back with `_to_host`, split in torch and upload with `_upload`.
+
+## 8. Checked on a board (probes 6 to 9, issue 711)
+
+These forms ran on a chip and matched the CPU reference (PCC 0.9998 or better):
+- `_apply_rotary(model, x, cos, sin)` with `x [1, heads, S, head_dim]` and tables `[1, 1, S, head_dim]`. The multiply that broadcasts the table over the heads axis works. It raises a named error when `x` has another layout, so reshape and permute `x` to that layout first.
+- A per-head norm by reshape to `[1, 1, S * heads, head_dim]`, `_rms_norm` with the head norm weight, and reshape back; the head permute `(0, 2, 1, 3)`; both at `head_dim` 32.
+- Attention with a per-query selection mask through `ttnn.transformer.scaled_dot_product_attention`, with grouped key-value heads (native or expanded with `repeat_kv`), and the sigmoid output gate.
+- `ttnn.topk` is deterministic. With `stable=True` it picks the lowest index among tied scores. torch's `topk` does not follow that rule on ties, so a selection that has ties (relu scores tie at 0) can differ from torch in which tied entries it takes. Use `stable=True` and say so in the block's comment.

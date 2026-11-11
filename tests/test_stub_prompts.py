@@ -62,7 +62,7 @@ def test_a_stub_request_holds_the_helpers_the_sheet_the_construction_the_excerpt
     assert user.rindex("def _A_linear_attn(") > user.index("## Reference class")                            # the stub comes last
     assert "# AGENT:" in user                                                                               # the stub as it stands, marker included
     assert "Mistakes seen in runs:" in user
-    assert len(user) < 20_000
+    assert len(user) < 26_000          # was 20_000 until the 13 mistakes of arms C to E14 joined the sheet (about 3,400 characters in every request; issue 677)
 
 
 def test_the_sheet_section_names_the_ops_stage_0_mapped_and_says_which_the_sheet_lacks(tiny):
@@ -97,7 +97,8 @@ def test_a_repair_request_holds_the_report_the_diff_and_the_function(tiny):
     text, _ = tiny
     req = sp.repair_request(text, "_mlp", last_check="FAILED at prefill: " + "z" * 10_000, layer_diff="layer 2 differs", sheet=SHEET)
     assert req["function"] == "_mlp" and req["args"] == ["model", "prefix", "x"]
-    assert len(req["user"]) < 4_000 + 3_000 + 6_000 + 3_000 and "layer 2 differs" in req["user"] and "def _mlp(" in req["user"]
+    # +5_000: the sheet's mistakes list grew by about 3,400 characters (issue 677)
+    assert len(req["user"]) < 4_000 + 3_000 + 6_000 + 3_000 + 5_000 and "layer 2 differs" in req["user"] and "def _mlp(" in req["user"]
     assert "## Mistakes seen in runs" in req["user"]
     with pytest.raises(sp.SpliceError, match="no top-level function"):
         sp.repair_request(text, "_no_such", last_check="x")
