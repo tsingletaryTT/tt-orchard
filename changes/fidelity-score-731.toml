@@ -1,0 +1,2 @@
+target = "0.9.162"
+summary = "scripts/fidelity_score.py scores a candidate model against a reference on text the reference sampled itself (10 times the perplexity ratio, from Compression-Bench), including simulated int8, int4, fp8 and block-float weights; issue 731."
