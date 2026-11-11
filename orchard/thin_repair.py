@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import re
 import time
+from pathlib import Path
 from dataclasses import dataclass
 
 from orchard import op_cheats, port_repair, port_template, safeio, stub_prompts, thin_port
@@ -60,6 +61,17 @@ HINTS = (
      "ttnn.rms_norm needs a weight whose last dimension equals the input's. For a norm with a group_size smaller than the input width "
      "(the hyper-connection norm), reshape x to [..., width / group_size, group_size], norm over the last dimension with the group's "
      "weight, and reshape back."),
+    # The shapes below are failures the arm E13 run showed on the chip (issue 677). They come before the CONFIG-key entry, which would
+    # otherwise take a model key or a rotary table name for a config key.
+    (re.compile(r"^AttributeError$"), re.compile(r"'ttnn\.[\w.]*Tensor' object has no attribute '(\w+)'"),
+     "A ttnn tensor has no `.{0}` method. Use the ttnn function that does it, for example ttnn.reshape(x, shape), ttnn.permute(x, dims), "
+     "ttnn.transpose(x, a, b), or read the tensor back with _to_host and use torch."),
+    (re.compile(r"^KeyError$"), re.compile(r"^'(mesh_device|n_devices|ck|ids)'$"),
+     "`{0}` is a key of `model` itself: write model['{0}'], not model['dev']['{0}'] or model['host']['{0}']. model['dev'] and model['host'] hold "
+     "weights only, under the checkpoint tensor names."),
+    (re.compile(r"^KeyError$"), re.compile(r"^'(?:rotary_emb\.)?(?:cos|sin)_cached'$"),
+     "The model holds no rotary table (cos_cached and sin_cached do not exist). Build cos and sin with the port's own helper if it has one "
+     "(look for _rope_tables in: {names}); otherwise compute them with torch from the config's rotary settings (CONFIG) and upload them with _upload."),
     (re.compile(r"^KeyError$"), re.compile(r"^'(?P<key>\w+)'$"),
      "`{0}` is not a key of CONFIG. CONFIG has exactly these keys: {config_keys}. Read the value from the key that holds it."),
     (re.compile(r"^KeyError$"), re.compile(r"\{i\}"),
@@ -140,6 +152,35 @@ def _holds_generated_mark(port_text: str, function: str) -> bool:
     return False
 
 
+def recorded_stubs(stage_dir) -> set | None:
+    """The stub names thin_port recorded for this stage, or None when the record is absent or malformed (then every function the coder could
+    have written counts)."""
+    try:
+        data = safeio.read_json(Path(stage_dir) / thin_port.STUBS_RECORD, max_bytes=65536, expect=list)
+    except (safeio.SafeReadError, OSError, ValueError):
+        return None
+    return set(data) if data and all(isinstance(n, str) for n in data) else None
+
+
+def calling_stubs(port_text: str, helper: str, stubs: set | None = None) -> list[str]:
+    """Names of the top-level functions that call `helper` and that the coder writes: not a fixed helper, not a function a block family wrote
+    (it holds GENERATED_BLOCK_MARK). The check's failure line holds one frame, so a failure inside a generated helper names the helper; the
+    stub that passed it something it cannot take is found here (issue 698)."""
+    try:
+        tree = ast.parse(port_text)
+    except (SyntaxError, ValueError, RecursionError):
+        return []
+    out = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name in port_template.FIXED_HELPERS or _holds_generated_mark(port_text, node.name):
+            continue
+        if stubs is not None and node.name not in stubs:
+            continue
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == helper for n in ast.walk(node)):
+            out.append(node.name)
+    return out
+
+
 def function_at(port_text: str, line: int) -> str | None:
     """The name of the top-level function whose source holds `line`, or None (module top level, a class, a line past the file, no parse)."""
     try:
@@ -190,16 +231,24 @@ def run_round(*, stage_dir, k: int, raw_output: str, post, endpoint: str, model:
     function = function_at(text, failure.line)
     if function is None:
         return Round("fallback", etype=failure.etype, reason="the failing line is not inside a top-level function")
+    via = None                                  # the generated helper the failing line is in, when the stub that called it is the target
     if function in port_template.FIXED_HELPERS or _holds_generated_mark(text, function):
         # The helper is generated text, the same in every port, or a block a registered family wrote (its function holds GENERATED_BLOCK_MARK).
-        # The stub that called it passed it something it cannot take, and the check's failure line holds one frame only, so the agent loop
-        # (which reads the whole traceback) takes the round.
-        return Round("fallback", function=function, etype=failure.etype,
-                     reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")
+        # The failing line holds one frame only. When exactly one function the coder wrote calls the helper, that stub passed it something it
+        # cannot take and it is the target; otherwise the agent loop (which reads the whole traceback) takes the round.
+        callers = calling_stubs(text, function, recorded_stubs(stage_dir))
+        if len(callers) != 1:
+            return Round("fallback", function=function, etype=failure.etype,
+                         reason=f"the failing line is in a generated helper ({function}); a stub that calls it passed something it cannot take")
+        via, function = function, callers[0]
     try:
         if sheet is None:
             sheet = op_cheats.load_sheet(op_cheats.TTNN_SHEET)
         report = "FAILED: " + port_repair.failed_line(raw_output, 1500)
+        if via:
+            report = (f"The failing line is inside the helper `{via}`, which the generator wrote and which is correct for its own arguments. "
+                      f"It was called by `{function}`: change the call in `{function}` (what it passes, or how it prepares the value), "
+                      f"and do not rewrite `{via}`.\n" + report)
         request = stub_prompts.repair_request(text, function, last_check=report, sheet=sheet)
     except (op_cheats.SheetError, KeyError, ValueError, TypeError, SyntaxError, RecursionError) as exc:
         return Round("fallback", function=function, etype=failure.etype, reason=f"the request cannot be built ({exc.__class__.__name__})")

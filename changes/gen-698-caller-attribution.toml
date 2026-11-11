@@ -1,0 +1,2 @@
+target = "0.9.153"
+summary = "Thin repair: a failure inside a generated helper goes to the one stub that calls it, with a note that the helper is correct and the call is what to change (issue 698)."

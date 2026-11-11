@@ -29,7 +29,7 @@ CHECK_MAX_CHARS = 4_000              # the last-check report in a repair request
 DIFF_MAX_CHARS = 3_000               # the layer-diff report
 REPLY_MAX_CHARS = 200_000
 MAX_SHEET_ENTRIES = 24
-HELPER_NAMES = ("_linear", "_rms_norm", "_embedding", "_mlp", "_attention", "_upload", "_upload_ids", "_to_host", "_rope_tables")
+HELPER_NAMES = ("_linear", "_rms_norm", "_embedding", "_mlp", "_attention", "_upload", "_upload_ids", "_to_host", "_rope_tables", "_apply_rotary")
 _FENCE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.S)
 _HEADING = re.compile(r"^## (\S+)\s*$", re.M)
 
@@ -260,6 +260,12 @@ def model_text(port_text: str) -> str:
                   "it back to [1, 1, S, HIDDEN] before the head."]
     lines += ["There is no model.config, no rotary_emb and no past_key_values: build position tables from CONFIG with the helpers the port "
               "has (" + (", ".join(f"`{h}`" for h in helpers) or "none") + "), and keep any cache in a local or in model['ids']."]
+    if "_apply_rotary" in helpers:
+        lines += ["Rotary: there is no cos_cached or sin_cached anywhere. Build the tables with `cos, sin = _rope_tables(model, S)` (S is the padded "
+                  "sequence length; both are [1, 1, S, head_dim], the columns past the rotary part hold 1 and 0). Apply them with "
+                  "`_apply_rotary(model, x, cos, sin)` on q and on k, each in the layout [1, heads, S, head_dim] (reshape the projection to "
+                  "[1, S, heads, head_dim] and permute to [1, heads, S, head_dim] first). Only the first ROTARY['rot'] columns of each head rotate "
+                  "and the helper handles that: do not slice, concat or negate tensors yourself for rotary."]
     return "\n".join(lines)
 
 

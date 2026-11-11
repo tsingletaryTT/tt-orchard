@@ -1,0 +1,2 @@
+target = "0.9.155"
+summary = "Probes 6 to 9 for the Qwen4 indexer attention and the generated rotary helper: rotary broadcast, topk ties, masked SDPA and the remaining attention ops, with CPU selftests and tests (issue 711)."

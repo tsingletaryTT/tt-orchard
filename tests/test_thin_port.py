@@ -265,3 +265,13 @@ def test_a_snapshot_that_cannot_be_read_gives_up_so_the_agent_prepare_step_runs(
     out = tp.run(run_dir=tmp_path, stage_dir=stage_dir, snapshot=str(tmp_path / "missing"), python="/nonexistent/python", ledger=Ledger(),
                  stage=2, post=Coder(), endpoint="http://127.0.0.1:1/v1", model="m", sampling={})
     assert out.status == "skipped" and out.detail
+
+
+def test_the_names_of_the_stubs_are_recorded_in_the_stage_directory_for_the_repair_step(tmp_path):
+    """Issue 698: the repair step finds the stub that called a failing generated helper among the functions that were stubs; a function the
+    template wrote (`_mlp`, `_forward`) also calls `_linear` and is not one. The file is in the stage directory, not the port directory
+    (the step skips a port directory that holds other files)."""
+    out, ledger, stage_dir = run(tmp_path, Coder())
+    names = json.loads((stage_dir / "thin_stubs.json").read_text())
+    assert names and all(isinstance(n, str) for n in names) and len(names) == 15 and "_mlp" not in names
+    assert not (stage_dir / "port" / "thin_stubs.json").exists()
