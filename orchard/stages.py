@@ -2556,6 +2556,27 @@ def tier_for(cfg: TierConfig, stage: int, *, phase: str, escalated: bool) -> str
     return entry["run"]
 
 
+def escalation_info(cfg: TierConfig, stage: int, *, coder_tier: str | None) -> dict:
+    """What an escalation of `stage` will be served by, for its ledger entry (issue 704), computed from the config without asking any server.
+
+    `tier_before` is the tier the stage ran on and `tier_after` the diagnose tier it escalates to. A chip tier that is never started (the large
+    tier of the Coder-Next layout) is served by the coder when the coder's tier has the same model, so `served_tier` is then the coder's tier.
+    `same_model` is true when the attempt after the escalation runs the model the attempt before it ran: it is a fresh context and not a
+    second tier tried. A stage that loads no model gives {}."""
+    try:
+        before = tier_for(cfg, stage, phase="run", escalated=False)
+        after = tier_for(cfg, stage, phase="run", escalated=True)
+    except ValueError:
+        return {}
+    served = after
+    if (coder_tier is not None and coder_tier in cfg.tiers and after != coder_tier and cfg.tiers[after]["placement"] == "chips"
+            and cfg.tiers[coder_tier]["model"] == cfg.tiers[after]["model"]):
+        served = coder_tier
+    model = cfg.tiers[served]["model"]
+    return {"tier_before": before, "tier_after": after, "served_tier": served, "served_model": model,
+            "same_model": cfg.tiers[before]["model"] == model}
+
+
 def resolve_endpoint(cfg: TierConfig, tier: str, probe) -> tuple[str, str, str | None]:
     """(tier used, endpoint, note). `probe(endpoint, model)` says whether a server answers.
 
