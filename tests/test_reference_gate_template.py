@@ -224,6 +224,19 @@ def test_the_reference_ids_have_the_shape_stage_2_reads(good_run):
 
 
 @needs_stack
+def test_every_step_records_the_log_probability_the_reference_gave_its_chosen_token(good_run):
+    # Issue 731: stage 2 scores the port's log-probability of the same token against this number.
+    import math
+    stage, _ = good_run
+    steps = json.loads(ev(stage, "reference", "top5-logits.json").read_text())["steps"]
+    for s in steps:
+        lp = s["logprob"]
+        assert isinstance(lp, float) and math.isfinite(lp) and lp <= 0
+        # The chosen token is the argmax, so its probability is at least one over the vocabulary size and at most one.
+        assert lp >= -math.log(1000) and s["chosen"] == s["top5"][0]["id"]
+
+
+@needs_stack
 def test_the_decode_checks_are_recorded(good_run):
     stage, _ = good_run
     ref = json.loads((stage / "reference.json").read_text())

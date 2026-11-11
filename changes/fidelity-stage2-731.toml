@@ -1,0 +1,2 @@
+target = "0.9.163"
+summary = "Stage 2 reports a fidelity score (10 times the perplexity ratio, from Compression-Bench) next to top-1 agreement: the reference records its own log-probabilities, the port check scores the port's probabilities for the same tokens, the gate recomputes the value; report-only (issue 731)."

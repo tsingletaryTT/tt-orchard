@@ -79,7 +79,13 @@ def site_with_tokenizers() -> str:
     return str(Path(tokenizers.__file__).resolve().parent.parent)
 
 
-def make_run(tmp_path: Path, port_src: str = HONEST, *, extra_files: dict | None = None, template_text: str | None = None):
+# What the honest port's softmax gives its peak token: one logit of 1.0 among 199 zeros (VOCAB 200).
+import math as _math
+HONEST_LP = 1.0 - _math.log(_math.e + 199.0)
+
+
+def make_run(tmp_path: Path, port_src: str = HONEST, *, extra_files: dict | None = None, template_text: str | None = None,
+             reference_logprob: float | None = HONEST_LP):
     """A run directory with the stage 1 reference, a snapshot with a tokenizer, stages/2/port/port_model.py, and the template and its config
     copied the way the supervisor copies them. Returns (run_dir, stage_dir, snapshot_dir)."""
     run = tmp_path / "run"
@@ -87,6 +93,9 @@ def make_run(tmp_path: Path, port_src: str = HONEST, *, extra_files: dict | None
     ev.mkdir(parents=True)
     (ev / "generated-ids.json").write_text(json.dumps({"generated_ids": REF_IDS, "generated_text": "x"}))
     (ev / "prompt-ids.json").write_text(json.dumps({"prompt_ids": PROMPT_IDS, "prompt_text": "p"}))
+    if reference_logprob is not None:             # a stage 1 reference made since issue 731 records the log-probability of each token it chose
+        (ev / "top5-logits.json").write_text(json.dumps({"steps": [{"step": k, "chosen": t, "logprob": reference_logprob, "top5": []}
+                                                                    for k, t in enumerate(REF_IDS)]}))
     snap = tmp_path / "snapshot"
     snap.mkdir()
     tokenizer_json(snap / "tokenizer.json")

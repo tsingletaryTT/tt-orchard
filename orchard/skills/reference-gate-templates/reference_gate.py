@@ -542,7 +542,10 @@ def decode(torch, model, tokenizer, prompt: str, tag: str) -> dict:
         before = list(seq)
         seq = seq + [chosen]
         steps.append({"chosen": chosen, "before": before, "after": list(seq)})
+        # logprob: the log-probability the reference gives its own chosen token (log-softmax over the whole vocabulary). The stage 2 check scores
+        # the port's log-probability of the same token against it (issue 731, the fidelity score of Compression-Bench).
         records.append({"step": k, "position": len(before) - 1, "chosen": chosen,
+                        "logprob": round(float(torch.log_softmax(logits, dim=-1)[chosen]), 6),
                         "top5": top(torch, tokenizer, logits)})
         generated = seq[len(prompt_ids):]
         write_json(REFERENCE / f"{tag}generated-ids.json",

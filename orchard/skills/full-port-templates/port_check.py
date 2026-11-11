@@ -71,6 +71,7 @@ import importlib
 import inspect
 import itertools
 import json
+import math
 import os
 import re
 import signal
@@ -95,6 +96,9 @@ MAX_LAYERS = 512                 # choice: more layers than any decoder stack; a
 MAX_NUMEL = 2 ** 28              # choice: total elements saved (1 GiB as float32); a larger result is refused before anything is written
 REFERENCE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT = "stages/1/evidence/reference/prompt-ids.json"
+TOP5 = "stages/1/evidence/reference/top5-logits.json"       # holds the reference's own log-probability of each token it chose (reference_gate.py)
+FIDELITY_SCALE = 10.0            # Compression-Bench: 10 means the port predicts the reference's tokens as the reference does
+FIDELITY_MIN_TOKENS = 4000       # below this a difference of a few percent is inside the noise (scripts/fidelity_score.py)
 MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache
 FREE_RUN_TOKENS = 48             # choice: a few sentences of text for the person who reads it
 EXIT_GRACE_S = 60.0              # how long a worker that was asked to close may take to exit before it is killed
@@ -325,6 +329,15 @@ def argmax(logits) -> int:
         if v > best:
             best, at = v, i
     return int(at)
+
+
+def logprob(logits, token: int) -> float:
+    """The log-probability of `token` under a softmax over whatever the port returned (list, numpy or torch), computed in float64 on the host."""
+    flat = logits.reshape(-1).tolist() if hasattr(logits, "reshape") and hasattr(logits, "tolist") else list(logits)
+    if not 0 <= token < len(flat):
+        raise ValueError(f"target token {token} is outside the {len(flat)} logits the port returned")
+    top = max(flat)
+    return float(flat[token] - top - math.log(sum(math.exp(v - top) for v in flat)))
 
 
 # An exception's text goes into a reply line that the supervisor's ledger, prompt and narration quote. URL user information and token-shaped words
@@ -661,10 +674,14 @@ def worker(read_fd: int, write_fd: int) -> int:
                 reply({"ok": True, "weights": scan_weights(model, vars(mod), labels=["model", "port_module"])})
             elif op == "prefill":
                 COUNTS.clear()
-                reply({"ok": True, "id": argmax(mod.prefill(model, [int(i) for i in req["ids"]])), OPS_KEY: take_counts()})
+                out = mod.prefill(model, [int(i) for i in req["ids"]])
+                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(),
+                       **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "decode":
                 COUNTS.clear()
-                reply({"ok": True, "id": argmax(mod.decode_step(model, int(req["token"]), int(req["position"]))), OPS_KEY: take_counts()})
+                out = mod.decode_step(model, int(req["token"]), int(req["position"]))
+                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(),
+                       **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "layers":         # optional, untimed, after the comparison: per-layer hidden states for `layer-diff`
                 reply(save_layers(mod, model, [int(i) for i in req["ids"]]))
             elif op == "close":
@@ -1034,6 +1051,34 @@ def static_main(flags) -> int:
     return 0
 
 
+def reference_logprobs(n: int) -> list | None:
+    """The reference's log-probability of each of its first `n` chosen tokens, or None when the stage 1 file has none (a reference made before
+    issue 731) or they do not line up with the ids."""
+    try:
+        data = json.loads((RUN_DIR / TOP5).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    steps = data.get("steps") if isinstance(data, dict) else None
+    if not isinstance(steps, list) or len(steps) < n:
+        return None
+    out = [s.get("logprob") if isinstance(s, dict) else None for s in steps[:n]]
+    return out if all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v <= 1e-6 for v in out) else None
+
+
+def fidelity_block(ref_lp: list, chip_lp: list) -> dict:
+    """The report-only fidelity of the port to the reference on the reference's own tokens: 10 * PPL_reference / PPL_port, which is
+    10 * exp(mean(chip logprob) - mean(reference logprob)). The text is the reference's greedy text, so the number is not comparable with the
+    sampled-text score of scripts/fidelity_score.py; it shows how far the port's probabilities for those tokens are from the reference's."""
+    n = len(ref_lp)
+    value = FIDELITY_SCALE * math.exp(sum(chip_lp) / n - sum(ref_lp) / n)
+    block = {"kind": "reference-greedy-text", "scale": FIDELITY_SCALE, "tokens": n, "value": value,
+             "reference_logprobs": ref_lp, "chip_logprobs": chip_lp}
+    if n < FIDELITY_MIN_TOKENS:
+        block["note"] = (f"only {n} scored tokens (< {FIDELITY_MIN_TOKENS}): a difference of a few percent is inside the noise; "
+                         "this number is reported, not gated")
+    return block
+
+
 def main() -> int:
     config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     model_dir = config["model_snapshot"]
@@ -1051,6 +1096,7 @@ def main() -> int:
         if stale.exists() or stale.is_symlink():
             stale.unlink()
 
+    ref_lp = reference_logprobs(n)
     floor, layers = layer_floor(read_config(model_dir))
     device_ops = DeviceOps(floor, layers)
     device_ops.check_static()          # the early reject: no reachable ttnn matmul-family call anywhere in the port, so nothing to run on the device
@@ -1066,11 +1112,13 @@ def main() -> int:
         w.ask(op="scan")                 # untimed: where the weights the port holds live
         device_ops.check_weights(w.last.get("weights"))
         # Teacher forced: at position i the port's argmax is taken, then the reference id i is fed in, never the port's own.
-        chip = [w.ask(op="prefill", ids=prompt)]
+        chip = [w.ask(op="prefill", ids=prompt, target=ref[0])]
+        chip_lp = [w.last.get("lp")]
         device_ops.add_prefill(w.last.get(OPS_KEY))
         device_ops.check_prefill()       # the first forward pass is the cheapest place to learn it never touched the device
         for i in range(1, n):
-            chip.append(w.ask(op="decode", token=ref[i - 1], position=len(prompt) + i - 1))
+            chip.append(w.ask(op="decode", token=ref[i - 1], position=len(prompt) + i - 1, target=ref[i]))
+            chip_lp.append(w.last.get("lp"))
             device_ops.add_decode(w.last.get(OPS_KEY))
         device_ops.check_decode()
         # Free run: a fresh prefill, then the port's own greedy ids.
@@ -1105,6 +1153,7 @@ def main() -> int:
               "prompt": {"path": PROMPT, "sha256": sha_file(RUN_DIR / PROMPT)},
               "reference_ids": ref, "chip_ids": chip,
               "top1_agreement": agreement,
+              **({"fidelity": fidelity_block(ref_lp, chip_lp)} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
               "chips": chips, "load_s": load_s, "free_run_ids": free, "free_run_text": free_run_text(model_dir, free),
               "device_ops": device_ops.record(),
               "port_sources": port_sources(), "template_sha256": sha_file(__file__),
@@ -1114,6 +1163,9 @@ def main() -> int:
     tmp.write_bytes(data)
     os.replace(tmp, RECORD)
     print(f"top-1 agreement {record['top1_agreement']:.4f} over {n} positions", flush=True)
+    if "fidelity" in record:
+        print(f"fidelity {record['fidelity']['value']:.3f} (10 = predicts the reference's tokens as the reference does; reference greedy text, "
+              f"{n} tokens, reported not gated)", flush=True)
     print("PORT_CHECK_SHA256", sha_bytes(data), flush=True)
     return 0
 
