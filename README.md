@@ -698,6 +698,7 @@ config implies. A run it starts is an ordinary supervisor run. Run the same comm
 ln -s <ORCHARD_DIR>/bin/tt-orchard ~/.local/bin/tt-orchard     # a link, so it follows the checkout
 cp config/bringup.example.toml config/bringup.toml            # then edit it; CHANGE-ME values are refused
 tt-orchard bringup org/name --dry-run                         # the checks and the command; starts nothing
+tt-orchard bringup org/name --classify [--json]               # stage 0's class, route, nearest model and reasons from snapshots already on disk, and the command; machine-state blocks (disk, port, chips, coder, lease, tiers) print as 'would block a real run' lines and do not stop it; starts nothing; not with --dry-run
 tt-orchard bringup org/name                                   # check, fetch, run
 tt-orchard bringup org/name --base <bundle or model id>       # base the run on this model
 tt-orchard bringup org/name --offline                         # skip the base-model research (the hub lookup and downloads still run)
@@ -882,6 +883,7 @@ uses your Hugging Face token: the download runs with every token variable remove
 block and not a login. Files the model repo ships (for example a `.py` file) are downloaded and recorded.
 The harness does not run them outside the agent sandbox. `--no-fetch` skips the download and requires the
 snapshot to be in `hf_home` already.
+`--revision SHA` pins the run to a 40-character commit: when the Hub's latest commit of the model is another one, `bringup` refuses before any download and names both commits. The drop watcher passes the commit its check read, so a commit pushed between the check and the start cannot change what the run decides on; if a run still starts on another commit (the ledger's `run_start` names the snapshot), the watcher stops with a needs-operator event.
 
 While the weights download, a progress line shows the bytes that have arrived, a bar, the speed, an ETA (after the
 first ten seconds) and the files complete. `hf download` prints no byte counts of its own, so the line measures the
@@ -998,7 +1000,7 @@ release laid out in a directory, `info.json` plus the files, for tests and rehea
 
 `drop-watch` starts the bring-up of a release when it appears. `tt-orchard drop-watch init --watch-dir DIR --target
 Qwen/Qwen4-27B --run-dir RUN` writes `DIR/watch.toml` (options: `--capabilities` the Qwen4 package's capabilities file,
-`--bringup-arg` an extra bringup argument, repeatable, `--quiet-minutes` how long the last commit must be quiet, default
+`--bringup-arg=VALUE` an extra bringup argument, repeatable (use the `=` form: a value that starts with two dashes, such as `--bringup-arg=--accept-credentials-visible`, is refused after a space), `--quiet-minutes` how long the last commit must be quiet, default
 30, `--reference-python`, and `--bundle-dir` and `--hf-home` with the meaning they have for `drop-check`). A scheduler runs `tt-orchard drop-watch tick --watch-dir DIR --json` every 30 minutes.
 Each tick does at most one step and records it in `DIR/state.json`:
 
@@ -1053,6 +1055,8 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--coder-chips` | yes | How many chips the coder uses. gozer leases whole boards of two chips |
 | `--coder-image-id` | no | The container image id `tt-model list` prints. It helps the supervisor recognise the coder's container in `docker ps` when it confirms a stop |
 | `--coder-keep-up` | no | Lab mode only: leave the coder serving at the end of the run and use a coder an earlier run left up (`[coder] keep_up`, section 5.9) |
+| `--classify` | no | Run only stage 0's measurement of `--input model=` against `--input base=` and print the class, the route, the reasons and the command, then exit. No run directory, coder, lease or container is touched (`orchard/dry_classify.py`). `tt-orchard bringup --classify` does the same from the snapshots already on disk and also lists the machine-state preflight blocks as `would block a real run` lines. |
+| `--json` | no | With `--classify`: print the classification (and, from `bringup`, the `would_block` list) as one JSON object. |
 | `--coder-keep-on-stall` | no | Any mode: when the run ends blocked as `agent-stuck`, leave the coder serving, and when the run is started again (the automatic retry) check it with the canary and reuse it. The coder is stopped and booted again only when the check fails. Any other block code stops the coder. A coder left up and never retried stays up until `tt-orchard coder stop`. |
 | `--coder-stall-minutes` | no | Abandon the coder boot when its container log has not grown for this many minutes and `/health` still does not answer. Default 10. 0 turns the check off. Config: `[coder] boot_stall_minutes` |
 | `--coder-deadline-minutes` | no | Abandon the coder boot when `/health` has not answered after this many minutes in all. Default 45. Config: `[coder] boot_deadline_minutes` |

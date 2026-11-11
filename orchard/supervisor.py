@@ -120,6 +120,7 @@ import shutil
 import stat
 import signal
 import subprocess
+import shlex
 import sys
 import threading
 import time
@@ -175,7 +176,7 @@ from orchard import thin_repair                  # the thin repair rounds of a -
 from orchard import thin_port as thin_port_step      # stage 2's prepare step as one chat request per stub (issue 677, arm E)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
-from orchard.stages import UNVERIFIED_LEDGER_DECISION
+from orchard.stages import UNVERIFIED_LEDGER_DECISION, escalation_info
 from orchard import stages as _stages          # `_mask_python`: the interpreter the run names for the reference (issue 505)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (DedupeStreak, FirstWriteDeadline, Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
@@ -1093,13 +1094,23 @@ class Supervisor:
         if dead:
             self._block(stage, f"{dead}. It was found after this failure: {reason}", off_bus=True, **evidence)
 
+    def _bus_after_blocked(self, stage, exc: Blocked, held) -> None:
+        """A handoff failed with `exc`: check the bus as a failed coder boot does (_block_if_off_bus), unless the exception's evidence already
+        holds `device_state`. The boot abort read the device state with a time limit (DEVICE_STATE_READ_S) and blocked on what it found; a second
+        synchronous probe here could hang before the pause and the cleanup (issue 603). Any other handoff failure is probed as before."""
+        evidence = getattr(exc, "evidence", None)
+        if isinstance(evidence, dict) and "device_state" in evidence:
+            return
+        self._block_if_off_bus(stage, exc.reason, held)
+
     def _restore_coder(self, stage, h) -> None:
         """Bring the parked coder back (Handoff.restore). A failure is checked against the bus first, as a failed coder boot is
-        (_block_if_off_bus): the board that was reset may have left the bus, and a retry would meet the same board."""
+        (_block_if_off_bus): the board that was reset may have left the bus, and a retry would meet the same board. A boot abort has read the
+        device state already and is not probed again (_bus_after_blocked)."""
         try:
             h.restore()
         except Blocked as exc:
-            self._block_if_off_bus(stage, exc.reason, h.lease.chips)
+            self._bus_after_blocked(stage, exc, h.lease.chips)
             raise
 
     def _evidence_file(self, stem: str, text: str) -> Path:
@@ -1844,7 +1855,7 @@ class Supervisor:
                 h.recover_and_restore(rec, chips=self.coder_chips, who=WHO, reason="coder",
                                       wait_budget_s=COLD_BOOT_BUDGET_S)
             except Blocked as exc:
-                self._block_if_off_bus(hp.stage, exc.reason, h.lease.chips)
+                self._bus_after_blocked(hp.stage, exc, h.lease.chips)
                 raise
             if rec.action != "abandon":
                 self.coder_lease = h.lease
@@ -1955,9 +1966,14 @@ class Supervisor:
                 # stopped container under the coder's name is that launch's leftover: remove it and start once more. Anything else is
                 # not ours to remove, and the block says what holds the chips and how to clear it (issue 417). When no container exists
                 # at all, the claim may be a short host process: the holders are recorded and the start is tried once more (issue 560).
+                # The refusal is written first, with owned False (this attempt launched nothing), so a crash in the lookups below cannot
+                # leave "coder starting ... owned: None" as the latest record, which recovery reads as a container that may be this run's
+                # own (issue 604). The launch after a removal is preceded by an unknown-ownership record again.
+                self._record_refused_start(lease, held)
                 if not self._remove_own_leftover(lease):
-                    self._start_after_busy_refusal(held, lease)
+                    self._start_after_busy_refusal(held, lease, recorded=True)
                 else:
+                    self._record_launch_about_to_run(lease)
                     self.coder.start(lease)
             self._note_created_container(lease, before)
         except ServerChipsHeld as exc:
@@ -2273,7 +2289,17 @@ class Supervisor:
         from orchard.telegraph import redact
         return redact(text or "", hostname=socket.gethostname(), home=str(Path.home()))[-limit:]
 
-    def _start_after_busy_refusal(self, held: Exception, lease: Lease) -> None:
+    def _record_refused_start(self, lease: Lease, exc: Exception) -> None:
+        """`coder not started` with the coder's own record, whose `owned` is False after a refusal: nothing was launched, so nothing of the
+        coder's exists to stop or to reset under. A fresh invocation adopts the latest server record (stages.coder_state)."""
+        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(), reason=str(exc))
+
+    def _record_launch_about_to_run(self, lease: Lease) -> None:
+        """`coder starting` with owned None, immediately before a launch: a crash during it can leave a container that is this run's own, so
+        ownership is unknown again until the start returns (issue 604; the first launch is recorded the same way)."""
+        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(), server={**self.coder.record(), "owned": None})
+
+    def _start_after_busy_refusal(self, held: Exception, lease: Lease, *, recorded: bool = False) -> None:
         """`tt-model serve` refused the start as 'in use by another container' and this run has no leftover of its own to remove (issue 560).
 
         The holders of the device nodes and gozer's view are written to the ledger first. When no container of the coder's name exists and no
@@ -2283,7 +2309,8 @@ class Supervisor:
         # Recorded first (issue 590): gathering the evidence reads docker, /proc and gozer, and the wait below lasts a minute. A supervisor
         # that crashed in either would otherwise leave "coder starting ... owned: None" as the latest record, and recovery would take a
         # container that appeared under the coder's name for its own and stop it. This refusal launched nothing.
-        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(), reason=str(held))
+        if not recorded:
+            self._record_refused_start(lease, held)
         try:
             found = self.coder.find_container() if hasattr(self.coder, "find_container") else None
         except (ServerError, OSError):
@@ -2291,16 +2318,19 @@ class Supervisor:
         evidence = self._busy_evidence(held, lease, found)
         retry = (found == [] and not evidence["container_holder"] and self.busy_retry_wait_s > 0)
         if not retry:
-            self._block_chips_held(held, lease, evidence=evidence)
+            self._block_chips_held(held, lease, evidence=evidence, recorded=True)          # the refusal is in the ledger above
         self.ledger.append("decision", None, decision="retrying the coder start once: no container holds the chips",
                            lease_id=lease.lease_id, wait_s=self.busy_retry_wait_s)
         self.sleep(self.busy_retry_wait_s)
         # Unknown ownership again, recorded immediately before the second launch, as "coder starting" does for the first (issue 590).
-        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(), server={**self.coder.record(), "owned": None})
+        self._record_launch_about_to_run(lease)
         try:
             self.coder.start(lease)
         except ServerChipsHeld as again:
-            self._block_chips_held(again, lease, retried=False, evidence=self._busy_evidence(again, lease, found, second=True), after_retry=True)
+            # The second refusal is recorded before its evidence is gathered (issue 604): the evidence reads docker, /proc and gozer.
+            self._record_refused_start(lease, again)
+            self._block_chips_held(again, lease, retried=False, evidence=self._busy_evidence(again, lease, found, second=True), after_retry=True,
+                                   recorded=True)
 
     def _busy_evidence(self, refusal: Exception, lease: Lease, found, *, second: bool = False) -> dict:
         """Look at who holds the device nodes now, and write it to the ledger."""
@@ -2319,14 +2349,14 @@ class Supervisor:
         return evidence
 
     def _block_chips_held(self, exc: Exception, lease: Lease, retried: bool = False, *, evidence: dict | None = None,
-                          after_retry: bool = False) -> None:
+                          after_retry: bool = False, recorded: bool = False) -> None:
         """Block after `tt-model serve` refused because a container holds the chips. The reason names the container that is left over and
         the command that removes it, and says the chips are not at fault, so the block is classed as a coder problem and not a hardware one
         (orchard/blocked.py). A chip that has in fact left the bus is still reported first, as for any failed boot."""
         # Recorded before the block, as the not-owned refusal is: a fresh invocation adopts the latest server record, and the record written at
         # "coder starting" says the owner is unknown, which would let a relaunch stop and remove the container that caused this refusal.
-        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(),
-                           reason=str(exc))
+        if not recorded:
+            self._record_refused_start(lease, exc)
         found = None
         try:
             found = self.coder.find_container() if hasattr(self.coder, "find_container") else None
@@ -2405,7 +2435,7 @@ class Supervisor:
                      StageOverBudget({spec.number: spec.budget_s})]
         if spec.draft == "full_port" and spec.number == 2:
             detectors.append(FirstWriteDeadline(self._write_deadline_hint))      # issue 427: a first attempt that only reads is told what to write
-        wd = Watchdog(detectors, Ladder(self.actuator, self.ledger, {AGENT}))
+        wd = Watchdog(detectors, Ladder(self.actuator, self.ledger, {AGENT}, escalation_info=self._escalation_fields))
         t0 = attempt_started_ts(self.ledger.read(), spec.number) or self.clock()
         wd.feed(Event(ts=t0, agent="supervisor", kind="ledger", name="stage_start", stage=spec.number))
         return wd
@@ -3898,7 +3928,7 @@ class Supervisor:
             return "escalate"
         if not escalated:
             # The escalate entry comes first: a crash between the two resumes the stage escalated.
-            self.ledger.append("escalate", n, by="stage machine", reasons=reasons)
+            self.ledger.append("escalate", n, by="stage machine", reasons=reasons, **self._escalation_fields(n))
             self.ledger.append("stage_end", n, result="escalate", reasons=reasons)
             return "escalate"
         self.ledger.append("decision", n, decision="pause",
@@ -4517,6 +4547,13 @@ class Supervisor:
                 reason = f"the verdict could not be written ({exc.__class__.__name__})"
             self.ledger.append("decision", n, decision=phone_a_friend.REPORTED, call_id=call_id, helped=helped,
                                **({"reason": reason} if reason else {}))
+
+    def _escalation_fields(self, n) -> dict:
+        """The tier and model that will serve stage `n` after an escalation, for the escalate entry (issue 704)."""
+        try:
+            return escalation_info(self.cfg, n, coder_tier=self.coder_tier)
+        except (KeyError, ValueError, TypeError):
+            return {}
 
     def _step(self, spec, phase: str, stage_dir: Path, escalated: bool, resumed: bool, extra: str | None = None):
         """One agent step. `extra`, when given, is added to the task message (stage 2's prepare gets the script's message)."""
@@ -6327,6 +6364,10 @@ def parse(argv=None):
                    help="the port of the chip tier the coder serves (matches its endpoint in --tiers)")
     r.add_argument("--coder-chips", type=int, required=True)
     r.add_argument("--coder-image-id", default=None)
+    r.add_argument("--classify", action="store_true",
+                   help="run only stage 0's measurement of --input model= against --input base= and print the class, the route, the "
+                        "reasons and this command; no run directory, coder, lease or container is touched (orchard/dry_classify.py)")
+    r.add_argument("--json", action="store_true", help="with --classify: print the classification as JSON")
     r.add_argument("--coder-keep-up", action="store_true",
                    help="lab mode: leave the coder serving at the end of the run, and adopt a coder an "
                         "earlier run left up (orchard/kept_coder.py)")
@@ -6822,6 +6863,27 @@ def stack_check_for(sup, args, environ=None):
     return stack_pins_mod.make_check(sources, probe_env=agent_env(sup.run_dir, extra=sup.extra_env), block=env.get(stack_pins_mod.BLOCK_ENV) == "1")
 
 
+def classify_main(args, argv=None) -> int:
+    """`run --classify` (issue 705): classify --input model= against --input base= and print it. Nothing is opened: no ledger, no run directory,
+    no coder, no lease. Exit 0 when the classification ran, EXIT_REFUSED when it could not."""
+    from orchard import dry_classify
+    named = {}
+    for item in args.input:
+        if isinstance(item, str) and "=" in item:
+            k, _, v = item.partition("=")
+            named[k] = v
+    command = "python3 -m orchard.supervisor " + shlex.join(a for a in (list(argv) if argv is not None else sys.argv[1:]) if a not in ("--classify", "--json"))
+    base = named.get("base")
+    result = dry_classify.classify(model_id=args.model, model_snapshot=named.get("model"),
+                                   nearest_id=Path(base).parent.parent.name.replace("models--", "").replace("--", "/") if base else None,
+                                   nearest_snapshot=base, bundle_dir=named.get("bundle"))
+    if getattr(args, "json", False):
+        print(json.dumps({**result, "would_block": [], "command": command}, sort_keys=True))
+    else:
+        print(dry_classify.render(result, command=command))
+    return 0 if result.get("ok") else EXIT_REFUSED
+
+
 def main(argv=None, *, home=None) -> int:
     args = parse(argv)
     if args.cmd == "control":
@@ -6833,6 +6895,8 @@ def main(argv=None, *, home=None) -> int:
         from orchard import status
         return status.main(["--run-dir", args.run_dir] + (["--json"] if args.json else [])
                            + (["--style", args.style] if args.style else []))
+    if args.cmd == "run" and getattr(args, "classify", False):
+        return classify_main(args, argv)
     run_dir = Path(args.run_dir)
     try:
         with Ledger(run_dir / "ledger.jsonl") as ledger:

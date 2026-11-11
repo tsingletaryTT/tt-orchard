@@ -1,0 +1,2 @@
+target = "0.9.161"
+summary = "Stage 0 refuses a bundle tensor pattern that can backtrack exponentially (nested quantifier, alternation under a quantifier, lookaround, back-reference, too many unbounded quantifiers) with a named problem, and keeps names over 512 characters out of pattern matches (issue 671)."

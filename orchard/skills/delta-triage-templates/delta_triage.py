@@ -3202,6 +3202,8 @@ CAP_RULE_NAMES = ("equals", "one_of", "multiple_of", "min", "max")      # orchar
 CAP_INDEXER_FEATURES = ("off", "exact-up-to-2051", "full")              # orchard/drop_check.py INDEXER_FEATURES
 CAP_MAX_ENTRIES = 500                     # choice: keys, shape entries or optional tensors in one file
 CAP_MAX_REGEX = 500                       # choice: the longest tensor pattern accepted
+CAP_MAX_NAME = 512                        # choice: a tensor name longer than this takes no part in a pattern match (a pattern match is at worst polynomial in the name)
+CAP_MAX_UNBOUNDED = 2                     # choice: the most unbounded quantifiers (*, +, {n,}) one tensor pattern may hold
 CAP_MAX_EXPR = 200                        # choice: the longest dimension expression accepted
 CAP_MAX_FACTOR = 10 ** 12                 # a config value larger than this does not take part in a dimension expression
 CAP_MAX_DIM = 10 ** 15                    # an expression whose value passes this gives nothing
@@ -3275,15 +3277,94 @@ def _cap_expr(expr, where: str, problems: list) -> str | None:
     return expr
 
 
+try:                                       # the pattern parser: re._parser from Python 3.11, sre_parse before
+    from re import _parser as _SRE_PARSE
+    from re import _constants as _SRE_CONST
+except ImportError:                        # pragma: no cover - Python before 3.11
+    import sre_constants as _SRE_CONST
+    import sre_parse as _SRE_PARSE
+
+
+def _backtrack_problem(text: str):
+    """None when the pattern cannot take exponential time on a tensor name, else the reason (issue 671).
+
+    The check reads the parsed pattern (the standard library's parser, linear in the pattern's length, which `CAP_MAX_REGEX` bounds), so it
+    cannot hang. It refuses what makes the matcher backtrack exponentially or with a high power: a quantifier inside a quantifier (bounded
+    ones too, they multiply), an alternation, a lookaround or a back-reference under a quantifier or anywhere (a lookaround and a
+    back-reference are refused outright: no real pattern needs them), two unbounded quantifiers in a row, and more than `CAP_MAX_UNBOUNDED`
+    unbounded quantifiers in all. What is left matches in time at most polynomial in the name's length (`CAP_MAX_NAME` bounds it), and linear
+    for the patterns a bundle uses (literal text, `\\d+`, `[kv]`, `(gate|up)`, one `.+`)."""
+    try:
+        tree = _SRE_PARSE.parse(text)
+    except (re.error, RecursionError, OverflowError, ValueError) as exc:
+        return f"is not a regular expression ({exc.__class__.__name__})"
+    repeats = {_SRE_CONST.MAX_REPEAT, _SRE_CONST.MIN_REPEAT, getattr(_SRE_CONST, "POSSESSIVE_REPEAT", _SRE_CONST.MAX_REPEAT)}
+    forbidden = {_SRE_CONST.ASSERT, _SRE_CONST.ASSERT_NOT, _SRE_CONST.GROUPREF, _SRE_CONST.GROUPREF_EXISTS}
+    unbounded = 0
+
+    def walk(items, under: bool):
+        nonlocal unbounded
+        previous_unbounded = False
+        for op, av in items:
+            this_unbounded = False
+            if op in repeats:
+                low, high, sub = av
+                many = high > 1
+                if many and under:
+                    return "has a quantifier inside a quantifier"
+                this_unbounded = high == _SRE_CONST.MAXREPEAT
+                if this_unbounded:
+                    unbounded += 1
+                    if previous_unbounded:
+                        return "has two unbounded quantifiers in a row"
+                found = walk(sub, under or many)
+                if found:
+                    return found
+            elif op in forbidden:
+                return "uses a lookaround or a back-reference"
+            elif op == _SRE_CONST.BRANCH:
+                if under:
+                    return "has an alternation under a quantifier"
+                for branch in av[1]:
+                    found = walk(branch, under)
+                    if found:
+                        return found
+            elif op == _SRE_CONST.SUBPATTERN:
+                found = walk(av[-1], under)
+                if found:
+                    return found
+            previous_unbounded = this_unbounded
+        return None
+
+    problem = walk(tree, False)
+    if problem is None and unbounded > CAP_MAX_UNBOUNDED:
+        problem = f"has {unbounded} unbounded quantifiers"
+    return problem
+
+
+def cap_fullmatch(regex, name):
+    """`regex.fullmatch(name)`, except that a name over `CAP_MAX_NAME` characters matches nothing (issue 671)."""
+    if not isinstance(name, str) or len(name) > CAP_MAX_NAME:
+        return None
+    return regex.fullmatch(name)
+
+
 def _cap_regex(text, where: str, problems: list):
     if not isinstance(text, str) or not text or len(text) > CAP_MAX_REGEX:
         problems.append(f"{where}: the tensor pattern must be a regular expression of 1 to {CAP_MAX_REGEX} characters")
         return None
     try:
-        return re.compile(text)
+        compiled = re.compile(text)
     except re.error as exc:
         problems.append(f"{where}: {text[:80]!r} is not a regular expression ({exc})")
         return None
+    why = _backtrack_problem(text)
+    if why is not None:
+        problems.append(f"{where}: {text[:80]!r} {why}, which can make the match backtrack for a very long time. A tensor pattern may use literal text, "
+                        f"\\d+, a character class, an alternation such as (gate|up) that is not under a quantifier, and at most two unbounded "
+                        f"quantifiers that are not next to each other and not inside another quantifier")
+        return None
+    return compiled
 
 
 def _cap_rule_problems(key: str, rule) -> list[str]:
@@ -3505,7 +3586,7 @@ def _shape_explained(name: str, mshape, bshape, caps: dict, mcfg, bcfg) -> str |
     if not isinstance(mshape, list) or not isinstance(bshape, list) or len(mshape) != len(bshape):
         return "its rank differs, which no declaration covers"
     differing = [i for i in range(len(mshape)) if mshape[i] != bshape[i]]
-    entries = [s for s in caps["shapes"] if s["regex"].fullmatch(name)]
+    entries = [s for s in caps["shapes"] if cap_fullmatch(s["regex"], name)]
     if not entries:
         return "no shapes entry of the nearest bundle's capabilities names this tensor"
     why = None
@@ -3529,7 +3610,7 @@ def _layer_analogue(name: str, own_n: dict, other_n: dict, caps: dict, own_cfg, 
     the other model's layer count and below the own model's, and the analogue must sit at a layer of the same type (when both configs list
     their layer types)."""
     lay = caps["layers"]
-    m = lay["regex"].fullmatch(name)
+    m = cap_fullmatch(lay["regex"], name)
     if not m or m.group("layer") is None:
         return None
     i = int(m.group("layer"))
@@ -3645,7 +3726,7 @@ def _review_tensors(caps: dict, t: dict, mcfg, bcfg, mtensors: dict, btensors: d
             ("model", ns["unexplained_only_in_model"], mn, bn, mcfg, bcfg, out["only_m_ok"]),
             ("base", ns["unexplained_only_in_base"], bn, mn, bcfg, mcfg, out["only_b_ok"])):
         for name in names:
-            opt = next((o for o in caps["optional"] if o["regex"].fullmatch(name)), None)
+            opt = next((o for o in caps["optional"] if cap_fullmatch(o["regex"], name)), None)
             if opt is not None:
                 info = own_n.get(name) or {}
                 if side == "model" and opt["shape"] is not None and info.get("shape") != [dim_value(e, own_cfg) for e in opt["shape"]]:

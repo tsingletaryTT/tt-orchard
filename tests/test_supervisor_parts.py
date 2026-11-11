@@ -74,7 +74,7 @@ def test_the_stage_watchdog_runs_the_writeless_turn_detector(tmp_path):
     from orchard.supervisor import Supervisor
     from orchard.watchdog import NoFileWritten
     with Ledger(tmp_path / "ledger.jsonl") as led:
-        fake = SimpleNamespace(actuator=None, ledger=led, clock=lambda: 0.0)
+        fake = SimpleNamespace(actuator=None, ledger=led, clock=lambda: 0.0, _escalation_fields=lambda n: {})
         wd = Supervisor._watchdog(fake, spec_for(2, "weights-only"))
     assert any(isinstance(d, NoFileWritten) for d in wd.detectors)
 
@@ -87,7 +87,7 @@ def test_the_stage_watchdog_runs_the_turn_repeat_detector(tmp_path):
     from orchard.supervisor import Supervisor
     from orchard.watchdog import TurnRepeat
     with Ledger(tmp_path / "ledger.jsonl") as led:
-        fake = SimpleNamespace(actuator=None, ledger=led, clock=lambda: 0.0)
+        fake = SimpleNamespace(actuator=None, ledger=led, clock=lambda: 0.0, _escalation_fields=lambda n: {})
         wd = Supervisor._watchdog(fake, spec_for(2, "weights-only"))
     assert any(isinstance(d, TurnRepeat) for d in wd.detectors)
 
@@ -135,3 +135,17 @@ def test_a_fifo_in_place_of_the_record_counts_as_a_failure_and_does_not_block(tm
 def test_a_missing_record_counts_as_a_failure(tmp_path):
     got = hardware_test_failure(tmp_path)
     assert got is not None and "test-result.json" in got["problem"]
+
+
+def test_the_stage_watchdogs_ladder_gets_the_escalation_fields_provider_of_the_supervisor(tmp_path):
+    """Issue 704: the ladder writes the tier and model that serve an escalation into the escalate entry; the supervisor hands it its own provider."""
+    from types import SimpleNamespace
+
+    from orchard.ledger import Ledger
+    from orchard.stages import spec_for
+    from orchard.supervisor import Supervisor
+    calls = []
+    with Ledger(tmp_path / "ledger.jsonl") as led:
+        fake = SimpleNamespace(actuator=None, ledger=led, clock=lambda: 0.0, _escalation_fields=lambda n: calls.append(n) or {"served_tier": "t"})
+        wd = Supervisor._watchdog(fake, spec_for(2, "weights-only"))
+        assert wd.ladder.escalation_info(2) == {"served_tier": "t"} and calls == [2]

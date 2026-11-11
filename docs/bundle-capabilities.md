@@ -58,6 +58,12 @@ fields after them are read by stage 0 only, and the release-day check ignores th
 unknown top-level field, a malformed rule, a pattern that does not compile, a link in place of the file, a file larger than 256 KiB,
 a repeated JSON key and a NaN; it then calls the run a full port and names the problem.
 
+A tensor pattern (`layers.pattern`, `shapes[].tensor`, `optional_tensors[].tensor`) is matched against every tensor name of both models, so stage 0 also
+refuses a pattern that can make the match backtrack for a very long time (issue 671). A pattern may use literal text, `\d+`, a character class such as
+`[kv]`, an alternation such as `(gate|up)` that is not under a quantifier, and at most two unbounded quantifiers (`*`, `+`, `{n,}`) that are not next to
+each other and not inside another quantifier. A quantifier inside a quantifier (`(a+)+`), an alternation under a quantifier (`(a|aa)+`), a lookaround and a
+back-reference are refused, and the problem names the pattern. A tensor name over 512 characters takes no part in a match.
+
 ### Rules
 
 A rule in `keys` holds one or more of `equals`, `one_of`, `multiple_of`, `min` and `max`, and the new value must meet every one it

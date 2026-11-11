@@ -536,3 +536,93 @@ def test_the_watcher_reads_the_installed_package_and_its_weights_config(tmp_path
     state = json.loads((w.watch_dir / "state.json").read_text())
     assert state["route"] == "full-port"
     assert any("num_hidden_layers differs" in r for r in state["check"]["reasons"])
+
+
+# ---- the guidance in the runbook and the README parses (issue 665) --------------------------------------------------------------------------
+
+REPO = Path(__file__).resolve().parent.parent
+RUNBOOK = REPO / "docs" / "runbooks" / "qwen4-drop-day.md"
+
+
+def _bringup_arg_mentions():
+    """Every `--bringup-arg ...` the runbook and the README show, as the text after the flag name."""
+    import re
+    found = []
+    for path in (RUNBOOK, REPO / "README.md"):
+        for m in re.finditer(r"--bringup-arg(?P<sep>[= ])(?P<value>\S+)", path.read_text(encoding="utf-8")):
+            found.append((path.name, m.group("sep"), m.group("value")))
+    return found
+
+
+def test_the_runbook_arms_the_watcher_with_a_form_argparse_accepts():
+    """`--bringup-arg --accept-credentials-visible` (a space) fails with 'expected one argument': a value that starts with two dashes needs the
+    `=` form. The documented command must parse and give the right list."""
+    base = ["init", "--watch-dir", "W", "--target", "Qwen/Qwen4-27B", "--run-dir", "R"]
+    ok = dw.parser(add_help=False).parse_args(base + ["--bringup-arg=--accept-credentials-visible"])
+    assert ok.bringup_arg == ["--accept-credentials-visible"]
+    with pytest.raises(SystemExit):
+        dw.parser(add_help=False).parse_args(base + ["--bringup-arg", "--accept-credentials-visible"])
+
+
+def test_every_bringup_arg_the_docs_show_uses_the_equals_form_when_the_value_starts_with_dashes():
+    mentions = _bringup_arg_mentions()
+    assert mentions, "the runbook shows --bringup-arg: the scan found nothing"
+    bad = [(f, v) for f, sep, v in mentions if v.startswith("--") and sep != "="]
+    assert not bad, f"these need the --bringup-arg=VALUE form: {bad}"
+    assert any(v.startswith("--accept-credentials-visible") for _f, _s, v in mentions)     # the runbook names it
+
+
+# ---- the run starts on the commit the check read (issue 668) ---------------------------------------------------------------------------------
+
+def test_the_run_is_started_pinned_to_the_commit_the_check_read(tmp_path):
+    w = World(tmp_path)
+    w.tick()
+    argv = w.launched[0]
+    assert argv[argv.index("--revision") + 1] == SHA and argv.count("--revision") == 1
+
+
+def test_a_run_that_started_on_another_commit_stops_the_watcher_with_a_needs_operator_event(tmp_path):
+    w = World(tmp_path)
+    w.tick()
+    res = w.tick(run_revision=lambda run_dir: SHA2)
+    assert res["state"] == "needs-operator" and "needs-operator" in kinds(res) and "run-failed" not in kinds(res)
+    text = next(e["text"] for e in res["events"] if e["kind"] == "needs-operator")
+    assert SHA2[:12] in text and SHA[:12] in text
+    assert w.tick(run_revision=lambda run_dir: SHA2)["events"] == [] and w.launched[0:1] == w.launched    # reported once, nothing started again
+
+
+def test_a_run_on_the_checked_commit_or_with_no_recorded_commit_yet_goes_on_running(tmp_path):
+    for seen in (SHA, None):
+        w = World(tmp_path / str(seen))
+        w.tick()
+        res = w.tick(run_revision=lambda run_dir, seen=seen: seen)
+        assert res["state"] == "running" and "needs-operator" not in kinds(res)
+
+
+def test_the_revision_a_run_started_on_is_read_from_the_snapshot_path_in_its_ledger(tmp_path):
+    from orchard import ledger
+    run = tmp_path / "run"
+    run.mkdir()
+    assert dw.run_revision(run) is None                                     # no ledger yet
+    entry = {"event": "run_start", "stage": None, "data": {"inputs": {"model": f"/hf/hub/models--Qwen--Qwen4-27B/snapshots/{SHA2}"}}}
+    with ledger.Ledger(run / "ledger.jsonl") as led:
+        led.append(entry["event"], None, **entry["data"])
+    assert dw.run_revision(run) == SHA2
+
+
+@pytest.mark.parametrize("model", ["/hf/models--x/snapshots/main", "/hf/models--x/snapshots/" + "G" * 40, "/hf/x", None, 3, ["/a"],
+                                   "/hf/models--x/snapshots/" + SHA2 + "/extra", "/hf/models--x/snapshots/" + SHA2 + "a"])
+def test_a_snapshot_path_without_a_commit_hash_gives_no_revision(tmp_path, model):
+    from orchard import ledger
+    run = tmp_path / "run"
+    run.mkdir()
+    with ledger.Ledger(run / "ledger.jsonl") as led:
+        led.append("run_start", None, inputs={"model": model})
+    assert dw.run_revision(run) is None
+
+
+def test_a_ledger_that_cannot_be_read_gives_no_revision(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "ledger.jsonl").write_text("not json at all\n")
+    assert dw.run_revision(run) is None

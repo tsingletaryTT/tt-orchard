@@ -1,0 +1,2 @@
+target = "0.9.161"
+summary = "Cheat sheet verifier: a constructor binding ends at its own closing parenthesis, and a template registration counts only under the requested namespace (issues 605 and 606)."
