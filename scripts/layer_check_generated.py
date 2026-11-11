@@ -212,9 +212,11 @@ def _port_frame(exc: BaseException, port_path: Path) -> dict:
     return {"port_function": f.name, "port_line": f.lineno, "code": (f.line or "").strip()[:200]}
 
 
-def device_phase(*, snapshot, construction, inventory, excerpts, reference_path, device, patch=None) -> dict:
+def device_phase(*, snapshot, construction, inventory, excerpts, reference_path, device, patch=None, teacher_forced=False) -> dict:
     """Generate the port, run it layer by layer on `device` and compare each layer's stream with the saved reference.
-    `patch(module)` may replace port functions before the run (a test uses it to make one raise)."""
+    `patch(module)` may replace port functions before the run (a test uses it to make one raise). With `teacher_forced`, each layer reads the
+    reference's own input stream (uploaded from the saved reference), so a layer's numbers hold that layer's error alone and not the error of the
+    layers before it; a routed or otherwise discontinuous block (MoE with near-tied routers) is judged without the earlier layers' drift."""
     import torch
     from orchard import port_template
     ref = torch.load(str(reference_path), weights_only=True)
@@ -256,6 +258,13 @@ def device_phase(*, snapshot, construction, inventory, excerpts, reference_path,
                     stopped = True
                     continue
                 try:
+                    if teacher_forced:
+                        ref_in = ref["stream_in"][:n] if i == 0 else ref["layers"][i - 1][:n]
+                        feed = torch.zeros(len(padded), ref_in.shape[-1], dtype=ref_in.dtype)
+                        feed[:n] = ref_in
+                        import ttnn as _ttnn
+                        x = mod._upload(model, feed.reshape(1, 1, len(padded), -1).to(torch.bfloat16), _ttnn.TILE_LAYOUT)
+                        prev_dev = ref_in.float()
                     x = fn(model, i, x, padded, cos, sin)
                     got = _host_rows(mod, model, x, n)
                     stream = compare(got, ref["layers"][i])
@@ -349,7 +358,7 @@ def device_main(args, *, importer=None, device_factory=None) -> int:
     device, closer = (device_factory or open_chip)(ttnn)
     try:
         result = device_phase(snapshot=args.snapshot, construction=args.construction, inventory=args.inventory, excerpts=args.excerpts,
-                              reference_path=args.reference or args.reference_out, device=device)
+                              reference_path=args.reference or args.reference_out, device=device, teacher_forced=bool(getattr(args, 'teacher_forced', False)))
     finally:
         try:
             closer(device)
@@ -463,6 +472,7 @@ def main(argv=None) -> int:
     ap.add_argument("--reference-out", help="where the reference phase writes its .pt file")
     ap.add_argument("--reference-python", default=os.environ.get("ORCHARD_REFERENCE_PYTHON"),
                     help="interpreter for the reference phase when it is not this one (default: $ORCHARD_REFERENCE_PYTHON)")
+    ap.add_argument("--teacher-forced", action="store_true", help="each layer reads the reference's own input stream, so a layer's numbers hold its own error only")
     ap.add_argument("--reference", help="the .pt file the device phase compares with (default: --reference-out)")
     ap.add_argument("--out", help="also write the result JSON here")
     args = ap.parse_args(argv)

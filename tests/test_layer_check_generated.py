@@ -303,3 +303,29 @@ def test_a_moe_checkpoint_matches_the_reference_layer_by_layer_and_in_the_logits
     assert "all 4 layers and the logits were compared" in res["note"]
     updates = [r["update"]["pcc"] for r in res["layers"] if r.get("update")]
     assert len(updates) == 4 and min(updates) > 0.999, updates
+
+
+# ---- teacher forcing: each layer reads the reference's own input stream ----------------------------------------------------------------------
+
+@needs_reference
+def test_teacher_forced_layers_match_the_reference_each_from_its_own_input(env):
+    res = env.run(teacher_forced=True)
+    assert res["ok"] and res["covered"] == [0, 1, 2, 3] and res["raised"] == []
+    assert all(r["update"]["pcc"] > 0.999 for r in res["layers"] if r.get("layer") is not None)
+
+
+@needs_reference
+def test_a_layer_run_teacher_forced_does_not_read_the_previous_layers_output(env):
+    """Make layer 0 return garbage; a chained run then fails layers 1 to 3 as well, a teacher-forced run fails layer 0 only (layers 1 to 3 start
+    from the reference's stream, so the damage does not travel)."""
+    def break_layer_0(mod):
+        good = mod.LAYERS[mod.LAYER_VARIANT[0]]
+        def bad(model, i, x, ids, cos, sin):
+            out = good(model, i, x, ids, cos, sin)
+            return mod.ttnn.multiply(out, 3.0) if i == 0 else out
+        mod.LAYERS[mod.LAYER_VARIANT[0]] = bad
+    chained = env.run(patch=break_layer_0)
+    forced = env.run(patch=break_layer_0, teacher_forced=True)
+    bad_chained = [r["layer"] for r in chained["layers"] if r.get("layer") is not None and r["status"] == "compared" and not r["ok"]]
+    bad_forced = [r["layer"] for r in forced["layers"] if r.get("layer") is not None and r["status"] == "compared" and not r["ok"]]
+    assert 0 in bad_chained and len(bad_chained) > len(bad_forced) and 0 in bad_forced
