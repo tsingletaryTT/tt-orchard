@@ -601,3 +601,20 @@ def test_the_fixed_helpers_are_the_functions_the_generator_always_writes_and_non
 def pt_pattern(name):
     import re
     return re.sub(r"(?<=\.)\d+(?=\.|$)", "{i}", name)
+
+
+def test_a_tower_with_more_tensors_but_fewer_layers_than_the_config_is_not_taken_for_the_text_stack():
+    # Issue 735: Gemma-4-E4B holds a 12-layer audio tower with more tensors than its 42 text layers; the plan took the tower and refused the model.
+    weights = std_weights()
+    for j in range(1):                                              # one tower layer, many tensors: it outweighs the two text layers
+        for k in range(60):
+            weights[f"audio_tower.layers.{j}.block.w{k}.weight"] = torch.zeros(4, 4).to(torch.bfloat16)
+    text, p = std_generate(weights=weights)
+    assert p.stubs == [] and p.layers_path == "model.layers" and p.n_layers == 2
+
+
+def test_when_no_stack_matches_the_config_the_dominant_stack_still_decides_and_the_layer_count_is_refused():
+    weights = std_weights()
+    cfg = {**STD_CONFIG, "num_hidden_layers": 5}
+    with pytest.raises(pt.PlanError, match="holds tensors for 2"):
+        std_generate(weights=weights, config=cfg)

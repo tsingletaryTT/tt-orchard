@@ -1274,11 +1274,16 @@ def plan(*, config, construction, tensors, inventory=None, excerpts=None) -> Pla
             heads.setdefault(m.group("head"), set()).add(int(m.group("num")))
     if not heads:
         raise PlanError("no tensor name holds a layer number, so there is no layer stack to plan")
-    layers_head = max(heads, key=lambda h: (sum(1 for t in ts if t.name.startswith(h)), -len(h)))
+    n_config = _whole(section, "num_hidden_layers") or (len(section["layer_types"]) if isinstance(section.get("layer_types"), list) else None)
+    # A multimodal checkpoint also holds numbered stacks for its vision and audio towers, and a tower can hold more tensors than the text stack (Gemma-4-E4B:
+    # a 12-layer audio tower against 42 text layers, issue 735). When the config names a layer count, the stack whose numbers are exactly 0..count-1 is the
+    # text stack; the tensor count only decides among stacks that fit, or when none does.
+    pool = [h for h in heads if n_config and heads[h] == set(range(n_config))] or list(heads)
+    layers_head = max(pool, key=lambda h: (sum(1 for t in ts if t.name.startswith(h)), -len(h)))
     layers_path = layers_head.rstrip(".")
     text_path = layers_path.rpartition(".")[0]
     indices = sorted(heads[layers_head])
-    n_layers = _whole(section, "num_hidden_layers") or (len(section["layer_types"]) if isinstance(section.get("layer_types"), list) else None) or len(indices)
+    n_layers = n_config or len(indices)
     if n_layers > MAX_LAYERS or indices != list(range(len(indices))):
         raise PlanError("the layer numbers in the tensor names are not 0..N-1")
     if len(indices) < n_layers:

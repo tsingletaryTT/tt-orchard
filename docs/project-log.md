@@ -5472,6 +5472,13 @@ Two ways a sheet entry could verify without being true, both found in the review
 - Tests (`tests/test_op_cheats.py`, four new, all red before the change): a class followed by a free-function registration, the parenthesis matcher on nested calls and quoted parentheses, a template registration under `norm/` that must not resolve `ttnn.experimental.relu`, and one under the namespace that must. Five mutations (statement not bounded, the matcher running to the end, no namespace filter, the path not recorded, quoted parentheses counted) each turned a test red.
 - `scripts/verify_cheat_sheet.py` against a tt-metal tree gives the same eight problems before and after (`ttnn.relu`, `neg`, `sign`, `sqrt`, `sum` with `input_tensor`, `ttnn.multiply` with `b`, and two absence claims). No sheet entry depended on either bug.
 
+## 2026-11-11: the planner took the audio tower for Gemma-4's text stack (issue 735)
+
+With the config read fixed (issue 733), the Gemma-4-E4B plan stopped with `the config says 42 layers and the checkpoint holds tensors for 12`. The planner chose the numbered stack with the most tensors, and Gemma-4's 12-layer audio tower has more tensors than the 42 text layers. Now the stack whose layer numbers are exactly 0 to the configured count minus one is preferred; tensor count decides only among stacks that fit, or when none does.
+
+- Tests (`tests/test_port_template.py`, two new): a one-layer tower with 60 tensors does not displace the two text layers (red without the change); with no matching stack the dominant one still decides and the count mismatch is still refused.
+- Not covered: the generated loader still uploads the towers' tensors through the generic `tile` role (a few hundred million parameters for E4B); issue 735 notes it as a follow-up.
+
 ## 2026-11-11: the generator ran on no real Hugging Face model (issue 733)
 
 The first full-port run on real Gemma-4-E4B weights (arm G1) ended its generator step with `thin port not used: the snapshot's config.json cannot be read (PathRefused)`. `thin_port.gather_inputs` and `port_template.generate_from_files` read `config.json` with a reader that refuses links, and a Hugging Face cache snapshot holds every file as a link into `blobs/`. The tiny rehearsal checkpoints were plain directories, so no earlier run met it. The coder then wrote the port alone and the run blocked at stage 2 (`agent-stuck`).
