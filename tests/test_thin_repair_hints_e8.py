@@ -47,3 +47,19 @@ E9 = [
 def test_e9_shape_gets_a_hint(code, etype, message, needle):
     hint = tr.hint_for(tr.parse_failed(failed(code, etype, message)), PORT)
     assert hint and needle.lower() in hint.lower(), hint
+
+
+E13 = [
+    ("q = q.view(1, 1, -1, num_attention_heads, head_dim)", "AttributeError", "'ttnn._ttnn.tensor.Tensor' object has no attribute 'view'", "ttnn.reshape"),
+    ("positions = ttnn.arange(0, S, dtype=ttnn.uint32, device=model['dev']['mesh_device'])", "KeyError", "'mesh_device'", "model['mesh_device']"),
+    ("cos = model['host']['cos_cached']", "KeyError", "'cos_cached'", "rotary"),
+    ("cos = model['dev']['rotary_emb.cos_cached']", "KeyError", "'rotary_emb.cos_cached'", "rotary"),
+]
+
+
+@pytest.mark.parametrize("code,etype,message,needle", E13)
+def test_e13_shape_gets_a_hint(code, etype, message, needle):
+    port = PORT + "\n\ndef _C_self_attn(model, i, x, ids):\n    return x\n"
+    hint = tr.hint_for(tr.parse_failed(failed(code, etype, message)), port)
+    assert hint and needle.lower() in hint.lower(), hint
+    assert "not a key of CONFIG" not in hint
