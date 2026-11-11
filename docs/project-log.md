@@ -5472,6 +5472,14 @@ Two ways a sheet entry could verify without being true, both found in the review
 - Tests (`tests/test_op_cheats.py`, four new, all red before the change): a class followed by a free-function registration, the parenthesis matcher on nested calls and quoted parentheses, a template registration under `norm/` that must not resolve `ttnn.experimental.relu`, and one under the namespace that must. Five mutations (statement not bounded, the matcher running to the end, no namespace filter, the path not recorded, quoted parentheses counted) each turned a test red.
 - `scripts/verify_cheat_sheet.py` against a tt-metal tree gives the same eight problems before and after (`ttnn.relu`, `neg`, `sign`, `sqrt`, `sum` with `input_tensor`, `ttnn.multiply` with `b`, and two absence claims). No sheet entry depended on either bug.
 
+## 2026-11-11: the generator ran on no real Hugging Face model (issue 733)
+
+The first full-port run on real Gemma-4-E4B weights (arm G1) ended its generator step with `thin port not used: the snapshot's config.json cannot be read (PathRefused)`. `thin_port.gather_inputs` and `port_template.generate_from_files` read `config.json` with a reader that refuses links, and a Hugging Face cache snapshot holds every file as a link into `blobs/`. The tiny rehearsal checkpoints were plain directories, so no earlier run met it. The coder then wrote the port alone and the run blocked at stage 2 (`agent-stuck`).
+
+- Fix: `port_template.read_snapshot_config` follows the link with `safeio.resolved_inside` and refuses one that leaves the snapshot and its blobs directory; both callers use it.
+- Tests (`tests/test_thin_port.py`, three new): a hub-layout snapshot with links into `blobs/` is read (red before the change with the run's exact error); a link to a file outside is refused; the command-line reader behaves the same. A mutation that removes the explicit `None` check survives: `read_json(None)` refuses anyway, so the check only makes the message clearer.
+- Not covered: the rest of the Gemma-4 port (weight prefix `model.language_model.` for the generated norms; sliding and full attention layers); see the arm G1 run.
+
 ## 2026-11-11: a fidelity score for dtype choices (issue 731)
 
 Eric Zietlow pointed at Compression-Bench (Infini-AI-Lab, Apache-2.0, arXiv 2611.06858) as possibly useful for orchard. The repo is real. Its reward is `10 * PPL_ref / PPL_candidate` on text the reference sampled itself, which is about `10 * exp(-KL)`, behind a separate correctness gate.

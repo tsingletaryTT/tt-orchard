@@ -1,0 +1,2 @@
+target = "0.9.162"
+summary = "The thin port and the generator command line follow the links of a Hugging Face cache snapshot when they read config.json (issue 733); a real model no longer skips the generator."

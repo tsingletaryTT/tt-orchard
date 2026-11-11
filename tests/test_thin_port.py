@@ -275,3 +275,45 @@ def test_the_names_of_the_stubs_are_recorded_in_the_stage_directory_for_the_repa
     names = json.loads((stage_dir / "thin_stubs.json").read_text())
     assert names and all(isinstance(n, str) for n in names) and len(names) == 15 and "_mlp" not in names
     assert not (stage_dir / "port" / "thin_stubs.json").exists()
+
+
+def _hub_snapshot(tmp_path, *, config_target_outside=False):
+    """A Hugging Face cache snapshot: every file of the snapshot is a link into the model's blobs directory."""
+    import struct
+
+    model = tmp_path / "hub" / "models--org--m"
+    (model / "blobs").mkdir(parents=True)
+    snap = model / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    header = json.dumps({"w": {"dtype": "BF16", "shape": [2, 2], "data_offsets": [0, 8]}}).encode()
+    (model / "blobs" / "h1").write_bytes(struct.pack("<Q", len(header)) + header + b"\0" * 8)
+    if config_target_outside:
+        (tmp_path / "elsewhere.json").write_text('{"hidden_size": 4}')
+        (model / "blobs" / "h2").symlink_to(tmp_path / "elsewhere.json")
+    else:
+        (model / "blobs" / "h2").write_text('{"hidden_size": 4}')
+    (snap / "model.safetensors").symlink_to("../../blobs/h1")
+    (snap / "config.json").symlink_to("../../blobs/h2")
+    return snap
+
+
+def test_a_hugging_face_snapshot_whose_files_are_links_into_blobs_is_read(tmp_path):
+    # Issue 733: the config read refused every link, so a real hub snapshot always skipped the generator (Gemma-4 run).
+    snap = _hub_snapshot(tmp_path)
+    got = tp.gather_inputs(run_dir=tmp_path, stage_dir=tmp_path, snapshot=str(snap), python="py", construct=lambda p, s: ({"ok": 1}, ""))
+    assert got.config == {"hidden_size": 4}
+    assert [t.name for t in got.tensors] == ["w"]
+
+
+def test_a_config_link_that_leaves_the_snapshot_and_its_blobs_is_still_refused(tmp_path):
+    snap = _hub_snapshot(tmp_path, config_target_outside=True)
+    with pytest.raises(tp.Skip, match="config.json"):
+        tp.gather_inputs(run_dir=tmp_path, stage_dir=tmp_path, snapshot=str(snap), python="py", construct=lambda p, s: ({"ok": 1}, ""))
+
+
+def test_the_generator_command_line_reads_a_hub_snapshot_config_too(tmp_path):
+    snap = _hub_snapshot(tmp_path)
+    assert pt.read_snapshot_config(snap) == {"hidden_size": 4}
+    outside = _hub_snapshot(tmp_path / "o", config_target_outside=True)
+    with pytest.raises(Exception, match="config.json"):
+        pt.read_snapshot_config(outside)
