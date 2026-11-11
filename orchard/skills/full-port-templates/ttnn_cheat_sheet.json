@@ -180,6 +180,28 @@
      ]
     },
     {
+     "name": "ttnn.permute",
+     "kind": "op",
+     "signature": "ttnn.permute(input_tensor, dims, *, memory_config=None, pad_value=0.0)",
+     "usage": "heads = ttnn.permute(ttnn.reshape(x, (1, seq, heads, head_dim)), (0, 2, 1, 3))",
+     "notes": "Reorders every dimension (dims names all of them). The head split of a projection is reshape to [1, S, heads, hd] then permute (0, 2, 1, 3) to [1, heads, S, hd]; the way back is the same permute and a reshape to [1, 1, S, heads * hd]. Run on a chip by op probe 9 (head_permute, PCC 1.0) and probe 8 (the output join).",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/data_movement/permute/permute_nanobind.cpp; scripts/qwen4_ops_probe/p9_attention_ops.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.relu",
+     "kind": "op",
+     "signature": "ttnn.relu(input_tensor, *, memory_config=None, output_tensor=None, sub_core_grids=None)",
+     "usage": "s = ttnn.relu(scores)",
+     "notes": "Elementwise max(x, 0). The Qwen4 indexer scores each key block with relu(q . block key) summed over the index heads; exact zeros are common, so the scores tie (see ttnn.topk). Run on a chip by op probe 9 (index_scores, PCC 0.99998).",
+     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/eltwise/unary/unary_nanobind.cpp (bind_unary_operation_subcoregrids relu); scripts/qwen4_ops_probe/p9_attention_ops.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
      "name": "ttnn.transpose",
      "kind": "op",
      "signature": "ttnn.transpose(input_tensor, dim1, dim2, memory_config=None)",
@@ -505,10 +527,10 @@
     {
      "name": "ttnn.topk",
      "kind": "op",
-     "signature": "ttnn.topk(input_tensor, k, dim=-1, largest=True, sorted=True, memory_config=None)",
-     "usage": "vals, idx = ttnn.topk(logits, 32)",
-     "notes": "Returns (values, indices). The input is TILE on the device; N*C*H must be a multiple of 32 and the last dim is padded to tiles.",
-     "seen_in": "models/tt_transformers/tt/mixtral_moe.py:117",
+     "signature": "ttnn.topk(input_tensor, k=32, dim=-1, largest=True, sorted=True, *, memory_config=None, sub_core_grids=None, indices_tensor=None, output_tensor=None, stable=False)",
+     "usage": "vals, idx = ttnn.topk(scores, 4, dim=-1, largest=True, sorted=True, stable=True)",
+     "notes": "Returns (values, indices). The input is TILE on the device; N*C*H must be a multiple of 32 and the last dim is padded to tiles. Among tied scores stable=True takes the lowest index (op probe 7 on a chip: the index list equals the lowest-index rule on every row, k from 4 to 512, deterministic); stable=False is deterministic too but does not follow that rule, and torch.topk does not either (509 of 2557 rows differ on the real-size probe). Read the indices back with to_torch when a mask is built from them.",
+     "seen_in": "models/tt_transformers/tt/mixtral_moe.py:117; tt-metal ttnn/cpp/ttnn/operations/reduction/topk/topk_nanobind.cpp; scripts/qwen4_ops_probe/p7_topk_ties.py",
      "in": [
       "tt_metal"
      ]
