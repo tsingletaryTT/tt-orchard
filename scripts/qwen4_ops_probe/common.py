@@ -360,3 +360,77 @@ def device_or_report(probe: str, l1_small_size: int = 0):
     except ImportError as exc:
         emit({"probe": probe, "mode": "device", "ok": False, "failure": f"ttnn is not importable ({short_exc(exc)}); run inside a gozer lease with the ttnn environment"})
         return None
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# CPU reference: the Qwen4Exp sparse MoE block (transformers 5.19.0 `Qwen4ExpTextSparseMoeBlock`), for probes 10 to 14
+# --------------------------------------------------------------------------------------------------------------------
+
+def moe_inputs(tokens=32, hidden=64, experts=8, top_k=2, inter=64, shared=64, seed=0, tied_pairs=0):
+    """Random bf16-rounded tensors for one MoE block, in the checkpoint's layout (one gate/up/down matrix per expert):
+    hidden [T, H]; router [E, H]; gate and up [E, I, H]; down [E, H, I]; the shared expert s_gate and s_up [S, H], s_down [H, S]; s_gate_w [1, H].
+    The router rows are scaled so that the logits have a standard deviation of about 2 (a softmax that is neither flat nor one-hot). `tied_pairs` makes
+    that many pairs of experts (0 and 1, 2 and 3, ...) share one router row, so that their logits tie exactly for every token: the case where the
+    tie rule of the top-k matters."""
+    g = torch.Generator().manual_seed(seed)
+    r = lambda *s, scale=1.0: (torch.randn(*s, generator=g) * scale).bfloat16().float()
+    router = r(experts, hidden, scale=2.0 / math.sqrt(hidden))
+    for p in range(tied_pairs):
+        router[2 * p + 1] = router[2 * p]
+    return {"hidden": r(tokens, hidden), "router": router,
+            "gate": r(experts, inter, hidden, scale=hidden ** -0.5), "up": r(experts, inter, hidden, scale=hidden ** -0.5),
+            "down": r(experts, hidden, inter, scale=inter ** -0.5),
+            "s_gate": r(shared, hidden, scale=hidden ** -0.5), "s_up": r(shared, hidden, scale=hidden ** -0.5),
+            "s_down": r(hidden, shared, scale=shared ** -0.5), "s_gate_w": r(1, hidden, scale=hidden ** -0.5),
+            "top_k": top_k}
+
+
+def moe_router_ref(hidden, router, top_k, norm_topk_prob=True, stable=False):
+    """`Qwen4ExpTextTopKRouter.forward`: logits = hidden @ router^T; probs = softmax(logits) in fp32; top-k of the probs; when `norm_topk_prob` (the
+    config default) the selected probs are divided by their sum. Returns (logits [T, E], weights [T, k], indices [T, k]). `stable=True` breaks exact
+    ties by the lowest index (what `ttnn.topk(stable=True)` does); the reference uses torch.topk, whose tie order is not the lowest index."""
+    logits = hidden.float() @ router.float().t()
+    probs = torch.softmax(logits, dim=-1)
+    if stable:
+        values, indices = stable_topk_ref(probs, top_k)
+    else:
+        values, indices = torch.topk(probs, top_k, dim=-1)
+    if norm_topk_prob:
+        values = values / values.sum(dim=-1, keepdim=True)
+    return logits, values, indices
+
+
+def moe_experts_ref(hidden, indices, weights, gate, up, down):
+    """`Qwen4ExpTextExperts.forward`: for each expert that some token selected, the gated MLP on those tokens
+    (silu(x @ gate^T) * (x @ up^T)) @ down^T, multiplied by the token's routing weight and added into the token's row. gate/up [E, I, H], down [E, H, I].
+    (The module keeps gate and up fused as one [E, 2I, H] tensor, gate first; the checkpoint stores them per expert.)"""
+    out = torch.zeros(hidden.shape[0], down.shape[1])
+    for e in range(gate.shape[0]):
+        tok, pos = torch.where(indices == e)
+        if tok.numel() == 0:
+            continue
+        x = hidden[tok].float()
+        y = (F.silu(x @ gate[e].float().t()) * (x @ up[e].float().t())) @ down[e].float().t()
+        out.index_add_(0, tok, y * weights[tok, pos, None])
+    return out
+
+
+def moe_shared_ref(hidden, s_gate, s_up, s_down, s_gate_w):
+    """The shared expert: sigmoid(hidden @ s_gate_w^T) * ((silu(hidden @ s_gate^T) * (hidden @ s_up^T)) @ s_down^T). Returns [T, H]."""
+    x = hidden.float()
+    mlp = (F.silu(x @ s_gate.float().t()) * (x @ s_up.float().t())) @ s_down.float().t()
+    return torch.sigmoid(x @ s_gate_w.float().t()) * mlp
+
+
+def moe_block_ref(t: dict, norm_topk_prob=True):
+    """`Qwen4ExpTextSparseMoeBlock.forward` on the tensors of `moe_inputs`: routed experts plus the gated shared expert. Returns [T, H]."""
+    _, weights, indices = moe_router_ref(t["hidden"], t["router"], t["top_k"], norm_topk_prob)
+    routed = moe_experts_ref(t["hidden"], indices, weights, t["gate"], t["up"], t["down"])
+    return routed + moe_shared_ref(t["hidden"], t["s_gate"], t["s_up"], t["s_down"], t["s_gate_w"])
+
+
+def routing_matrix(indices, weights, experts):
+    """The dense routing weights [T, E]: the selected expert's weight at its column, 0 elsewhere (what the dense form multiplies each expert's output by)."""
+    out = torch.zeros(indices.shape[0], experts)
+    out.scatter_(1, indices, weights.to(out.dtype))
+    return out
