@@ -5478,3 +5478,20 @@ With the config read fixed (issue 733), the Gemma-4-E4B plan stopped with `the c
 
 - Tests (`tests/test_port_template.py`, two new): a one-layer tower with 60 tensors does not displace the two text layers (red without the change); with no matching stack the dominant one still decides and the count mismatch is still refused.
 - Not covered: the generated loader still uploads the towers' tensors through the generic `tile` role (a few hundred million parameters for E4B); issue 735 notes it as a follow-up.
+
+## 2026-11-11: the generator ran on no real Hugging Face model (issue 733)
+
+The first full-port run on real Gemma-4-E4B weights (arm G1) ended its generator step with `thin port not used: the snapshot's config.json cannot be read (PathRefused)`. `thin_port.gather_inputs` and `port_template.generate_from_files` read `config.json` with a reader that refuses links, and a Hugging Face cache snapshot holds every file as a link into `blobs/`. The tiny rehearsal checkpoints were plain directories, so no earlier run met it. The coder then wrote the port alone and the run blocked at stage 2 (`agent-stuck`).
+
+- Fix: `port_template.read_snapshot_config` follows the link with `safeio.resolved_inside` and refuses one that leaves the snapshot and its blobs directory; both callers use it.
+- Tests (`tests/test_thin_port.py`, three new): a hub-layout snapshot with links into `blobs/` is read (red before the change with the run's exact error); a link to a file outside is refused; the command-line reader behaves the same. A mutation that removes the explicit `None` check survives: `read_json(None)` refuses anyway, so the check only makes the message clearer.
+- Not covered: the rest of the Gemma-4 port (weight prefix `model.language_model.` for the generated norms; sliding and full attention layers); see the arm G1 run.
+
+## 2026-11-11: a fidelity score for dtype choices (issue 731)
+
+Eric Zietlow pointed at Compression-Bench (Infini-AI-Lab, Apache-2.0, arXiv 2611.06858) as possibly useful for orchard. The repo is real. Its reward is `10 * PPL_ref / PPL_candidate` on text the reference sampled itself, which is about `10 * exp(-KL)`, behind a separate correctness gate.
+
+- `scripts/fidelity_score.py` computes it on CPU for any Hugging Face reference. The candidate is another checkpoint or the reference with its Linear weights rounded to fp8, int8, int4 or block-float 8 or 4 bits (approximations of the chip formats, not the chip kernels). It reports the score, the exact KL over the whole vocabulary, top-1 agreement and a note when fewer than 4,000 tokens were scored.
+- Run on Qwen3-0.6B (4,096 scored tokens, one seed): control 10.000, bfp8 9.976, int8 9.949, fp8 9.864, bfp4 7.795, int4 7.000. The score matches `10*exp(-KL)` within 0.1 for every format. Record: `docs/run-logs/2026-11-11-fidelity-score-qwen3-0.6b.json`.
+- Tests: `tests/test_fidelity_score.py` (13). Five mutations (swapped ratio, rounding the head, no column padding, no integer clamp, no noise note): four turn a test red. The integer clamp mutation survives because the clamp cannot trigger when each group's scale comes from its own maximum.
+- Not covered: the chip's own bfp8 and bfp4 kernels, a model larger than 0.6B, more than one seed, the 150-item correctness gate.

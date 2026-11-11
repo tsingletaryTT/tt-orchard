@@ -2031,12 +2031,22 @@ def read_construction(path) -> dict:
     return data
 
 
+def read_snapshot_config(snapshot) -> dict:
+    """The snapshot's config.json as a dict. A Hugging Face cache snapshot holds the file as a link into the cache's blobs directory, so the
+    link is followed when it stays inside the snapshot or its blobs directory (issue 733) and refused otherwise (safeio.PathRefused)."""
+    snap = Path(snapshot)
+    path = safeio.resolved_inside(snap / "config.json", snap)
+    if path is None:
+        raise safeio.PathRefused("config.json is a link that leaves the snapshot and the cache's blobs directory")
+    return safeio.read_json(path, max_bytes=INPUT_MAX, expect=dict)
+
+
 def generate_from_files(*, snapshot, construction, inventory=None, excerpts=None) -> tuple[str, Plan]:
     """The generated port for the checkpoint at `snapshot` (its config.json and safetensors headers), the construction file, and the optional
     inventory JSON and excerpts Markdown."""
     from orchard import residency
     snap = Path(snapshot)
-    config = safeio.read_json(snap / "config.json", max_bytes=INPUT_MAX, expect=dict)
+    config = read_snapshot_config(snap)
     headers = residency.read_headers(snap)
     inv = safeio.read_json(inventory, max_bytes=INPUT_MAX, expect=dict) if inventory else None
     exc = safeio.read_bytes(excerpts, max_bytes=INPUT_MAX).decode("utf-8", "replace") if excerpts else None
