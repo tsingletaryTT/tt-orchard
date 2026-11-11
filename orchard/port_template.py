@@ -805,8 +805,8 @@ def _recognize_qsa_attention(site: Site):
     heads_i, kv_i, dim, ratio, budget, topk = (ind.get(k) for k in ("index_n_heads", "index_kv_heads", "index_head_dim", "compress_ratio", "token_budget", "block_topk"))
     if any(type(v) is not int or v < 1 for v in (heads_i, kv_i, dim, ratio, budget, topk)):
         return None
-    if kv_i != 1 or dim != hd or ratio < 2 or 32 % ratio or budget % ratio or topk != budget // ratio:
-        return None          # one index key head of the attention's head width; a prompt padded to 32 tokens then holds whole blocks
+    if kv_i != 1 or dim < 32 or dim % 32 or dim < site.rotary["rot"] or ratio < 2 or 32 % ratio or budget % ratio or topk != budget // ratio:
+        return None          # one index key head, a whole number of tiles wide and at least as wide as the rotary part (the reference rotates the first `rot` columns of an index vector with the attention's tables; Flash-Next has index_head_dim 128 and head_dim 256); a prompt padded to 32 tokens then holds whole blocks
 
     def shape(name, dtypes=FLOAT_DTYPES):
         t = site.by_pattern.get(f"{site.path}.{name}")
@@ -838,10 +838,10 @@ def _emit_qsa_attention(function: str, site_path: str, s: dict, where: str) -> l
             f'index_dim={s["index_dim"]}, ratio={s["ratio"]}, budget={s["budget"]})', "", ""]
 
 
-_QSA_HELPERS = '''def _qsa_rope_tables(model, positions):
-    """cos and sin [1, 1, n, head_dim] TILE bf16 for the given positions (a torch tensor of ints), the way _rope_tables builds them: ROTARY["rot"] rotating columns, then 1 and 0."""
+_QSA_HELPERS = '''def _qsa_rope_tables(model, positions, width):
+    """cos and sin [1, 1, n, width] TILE bf16 for the given positions (a torch tensor of ints), the way _rope_tables builds them: ROTARY["rot"] rotating columns, then 1 and 0. `width` is the head width of the vectors they are applied to (the attention's head_dim, or the indexer's index_head_dim)."""
     # MARK
-    hd, rot = ROTARY["head_dim"], ROTARY["rot"]
+    hd, rot = width, ROTARY["rot"]
     inv = 1.0 / (ROTARY["theta"] ** (torch.arange(0, rot, 2, dtype=torch.float32) / rot))
     freqs = positions.to(torch.float32)[:, None] * inv[None, :]
     emb = torch.cat([freqs, freqs], dim=-1)
@@ -849,6 +849,23 @@ _QSA_HELPERS = '''def _qsa_rope_tables(model, positions):
     cos = torch.cat([emb.cos(), torch.ones(n, hd - rot)], dim=-1).reshape(1, 1, n, hd)
     sin = torch.cat([emb.sin(), torch.zeros(n, hd - rot)], dim=-1).reshape(1, 1, n, hd)
     return _upload(model, cos.to(torch.bfloat16), ttnn.TILE_LAYOUT), _upload(model, sin.to(torch.bfloat16), ttnn.TILE_LAYOUT)
+
+
+def _qsa_apply_rotary(model, x, cos, sin):
+    """Rotary on x [1, heads, S, width] with the tables of `_qsa_rope_tables(model, positions, width)`: the first ROTARY["rot"] columns of each head rotate (rotate-half through a constant matrix, as `_apply_rotary` does) and the rest pass through. `width` comes from x, so it serves index vectors that are narrower or wider than the attention head."""
+    # MARK
+    heads, seq, width, rot = x.shape[1], x.shape[2], x.shape[3], ROTARY["rot"]
+    if len(x.shape) != 4 or x.shape[0] != 1 or rot > width or tuple(cos.shape) != (1, 1, seq, width) or tuple(sin.shape) != tuple(cos.shape):
+        raise ValueError(f"_qsa_apply_rotary needs x [1, heads, S, width] with width >= {rot} and tables [1, 1, S, width] (from _qsa_rope_tables(model, positions, width)); got x {list(x.shape)}, cos {list(cos.shape)}")
+    half = rot // 2
+    rot_m = torch.zeros(width, width)
+    for i in range(half):
+        rot_m[i, i + half] = 1.0
+        rot_m[i + half, i] = -1.0
+    r = _upload(model, rot_m.to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    rotated = ttnn.linear(ttnn.reshape(x, (1, 1, heads * seq, width)), r, dtype=ttnn.bfloat16, compute_kernel_config=model["ck"], memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    rotated = ttnn.reshape(rotated, (1, heads, seq, width))
+    return ttnn.add(ttnn.multiply(x, cos), ttnn.multiply(rotated, sin))
 
 
 def _qsa_masks(model, seq, ratio):
@@ -888,15 +905,15 @@ def _qsa_selection_mask(model, prefix, x, index_heads, index_dim, ratio, budget)
     seq = x.shape[2]
     nb = seq // ratio
     k = min(budget // ratio, nb)
-    cos, sin = _qsa_rope_tables(model, torch.arange(seq))
+    cos, sin = _qsa_rope_tables(model, torch.arange(seq), index_dim)
     ip = _linear(model, prefix + ".index_qk_proj", x)
     q = _qsa_split_heads(ttnn.slice(ip, (0, 0, 0, 0), (1, 1, seq, index_heads * index_dim)), index_heads, index_dim)
-    q = _apply_rotary(model, _qsa_norm_heads(model, prefix + ".q_layernorm", q), cos, sin)
+    q = _qsa_apply_rotary(model, _qsa_norm_heads(model, prefix + ".q_layernorm", q), cos, sin)
     keys = _to_host(model, ttnn.slice(ip, (0, 0, 0, index_heads * index_dim), (1, 1, seq, (index_heads + 1) * index_dim))).float()
     pooled = keys.reshape(nb, ratio, index_dim).mean(dim=1).to(torch.bfloat16)
     pooled = _rms_norm(model, prefix + ".k_layernorm", _upload(model, pooled.reshape(1, 1, nb, index_dim), ttnn.TILE_LAYOUT))
-    block_cos, block_sin = _qsa_rope_tables(model, torch.arange(nb) * ratio)
-    pooled = _to_host(model, _apply_rotary(model, pooled, block_cos, block_sin)).float().reshape(nb, index_dim)
+    block_cos, block_sin = _qsa_rope_tables(model, torch.arange(nb) * ratio, index_dim)
+    pooled = _to_host(model, _qsa_apply_rotary(model, pooled, block_cos, block_sin)).float().reshape(nb, index_dim)
     pk = _upload(model, pooled.t().reshape(1, 1, index_dim, nb).to(torch.bfloat16), ttnn.TILE_LAYOUT)
     scores = ttnn.multiply(ttnn.sum(ttnn.relu(ttnn.matmul(q, pk)), dim=1, keepdim=True), index_dim ** -0.5)
     const = _qsa_masks(model, seq, ratio)
@@ -920,7 +937,7 @@ def _qsa_attention(model, prefix, x, heads, kv_heads, hd, index_heads, index_dim
     gate = ttnn.reshape(ttnn.slice(qg, (0, 0, 0, hd), (1, seq, heads, 2 * hd)), (1, 1, seq, heads * hd))
     k = _qsa_norm_heads(model, prefix + ".k_norm", _qsa_split_heads(_linear(model, prefix + ".k_proj", x), kv_heads, hd))
     v = _qsa_split_heads(_linear(model, prefix + ".v_proj", x), kv_heads, hd)
-    cos, sin = _qsa_rope_tables(model, torch.arange(seq))
+    cos, sin = _qsa_rope_tables(model, torch.arange(seq), hd)
     q = _apply_rotary(model, _qsa_norm_heads(model, prefix + ".q_norm", q), cos, sin)
     k = _apply_rotary(model, k, cos, sin)
     mask = _qsa_selection_mask(model, prefix + ".indexer", x, index_heads, index_dim, ratio, budget)
