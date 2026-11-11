@@ -487,7 +487,7 @@ def fidelity_value(ref_lp: list, chip_lp: list, scale: float = 10.0) -> float:
 
 def _lps(v, n: int) -> bool:
     return (isinstance(v, list) and len(v) == n
-            and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x <= 1e-6 for x in v))
+            and all(safeio.is_finite_number(x) and x <= 1e-6 for x in v))
 
 
 def _fidelity_reasons(record: dict, run_dir: Path, positions: int, reasons: list) -> None:

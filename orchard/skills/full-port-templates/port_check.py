@@ -1055,14 +1055,15 @@ def reference_logprobs(n: int) -> list | None:
     """The reference's log-probability of each of its first `n` chosen tokens, or None when the stage 1 file has none (a reference made before
     issue 731) or they do not line up with the ids."""
     try:
-        data = json.loads((RUN_DIR / TOP5).read_text(encoding="utf-8"))
+        with open(RUN_DIR / TOP5, "rb") as fh:      # hardening: ok the supervisor's own stage 1 file under the run directory; bounded read in a try
+            data = json.loads(fh.read(64 * 1024 * 1024))
     except (OSError, ValueError):
         return None
     steps = data.get("steps") if isinstance(data, dict) else None
     if not isinstance(steps, list) or len(steps) < n:
         return None
     out = [s.get("logprob") if isinstance(s, dict) else None for s in steps[:n]]
-    return out if all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v <= 1e-6 for v in out) else None
+    return out if all(isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float('inf') and v <= 1e-6 for v in out) else None
 
 
 def fidelity_block(ref_lp: list, chip_lp: list) -> dict:
