@@ -30,9 +30,13 @@ def test_the_note_names_the_composer_a_mesh_tensor_needs_when_read_back():
     assert "mesh_composer" in note and "distributed" in note
 
 
-def test_the_note_says_what_is_not_measured_and_points_at_the_issue():
+def test_the_note_says_the_replication_was_measured_and_points_at_the_issue():
+    # The first version of the note said replication was "not measured". The
+    # lease measurement settled it, so the note must now say "measured" and must
+    # not keep the old hedge.
     note = from_torch_entry()["notes"]
-    assert "not measured" in note and "563" in note
+    assert "measured on 1 x 2" in note and "563" in note
+    assert "not measured" not in note
 
 
 def test_the_usage_line_still_passes_a_mapper_for_a_mesh():
