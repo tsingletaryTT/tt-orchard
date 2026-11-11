@@ -176,7 +176,7 @@ from orchard import thin_repair                  # the thin repair rounds of a -
 from orchard import thin_port as thin_port_step      # stage 2's prepare step as one chat request per stub (issue 677, arm E)
 from orchard import token_check            # bounded reasons for the ledger (bound_reasons)
 from orchard import raw_evidence            # hashes of the raw files the gates recompute from (issue 445)
-from orchard.stages import UNVERIFIED_LEDGER_DECISION
+from orchard.stages import UNVERIFIED_LEDGER_DECISION, escalation_info
 from orchard import stages as _stages          # `_mask_python`: the interpreter the run names for the reference (issue 505)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (DedupeStreak, FirstWriteDeadline, Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
@@ -2406,7 +2406,7 @@ class Supervisor:
                      StageOverBudget({spec.number: spec.budget_s})]
         if spec.draft == "full_port" and spec.number == 2:
             detectors.append(FirstWriteDeadline(self._write_deadline_hint))      # issue 427: a first attempt that only reads is told what to write
-        wd = Watchdog(detectors, Ladder(self.actuator, self.ledger, {AGENT}))
+        wd = Watchdog(detectors, Ladder(self.actuator, self.ledger, {AGENT}, escalation_info=self._escalation_fields))
         t0 = attempt_started_ts(self.ledger.read(), spec.number) or self.clock()
         wd.feed(Event(ts=t0, agent="supervisor", kind="ledger", name="stage_start", stage=spec.number))
         return wd
@@ -3899,7 +3899,7 @@ class Supervisor:
             return "escalate"
         if not escalated:
             # The escalate entry comes first: a crash between the two resumes the stage escalated.
-            self.ledger.append("escalate", n, by="stage machine", reasons=reasons)
+            self.ledger.append("escalate", n, by="stage machine", reasons=reasons, **self._escalation_fields(n))
             self.ledger.append("stage_end", n, result="escalate", reasons=reasons)
             return "escalate"
         self.ledger.append("decision", n, decision="pause",
@@ -4518,6 +4518,13 @@ class Supervisor:
                 reason = f"the verdict could not be written ({exc.__class__.__name__})"
             self.ledger.append("decision", n, decision=phone_a_friend.REPORTED, call_id=call_id, helped=helped,
                                **({"reason": reason} if reason else {}))
+
+    def _escalation_fields(self, n) -> dict:
+        """The tier and model that will serve stage `n` after an escalation, for the escalate entry (issue 704)."""
+        try:
+            return escalation_info(self.cfg, n, coder_tier=self.coder_tier)
+        except (KeyError, ValueError, TypeError):
+            return {}
 
     def _step(self, spec, phase: str, stage_dir: Path, escalated: bool, resumed: bool, extra: str | None = None):
         """One agent step. `extra`, when given, is added to the task message (stage 2's prepare gets the script's message)."""
