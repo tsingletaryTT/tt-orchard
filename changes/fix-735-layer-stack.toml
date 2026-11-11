@@ -1,0 +1,2 @@
+target = "0.9.162"
+summary = "The port planner picks the numbered stack that matches the config layer count as the text stack, so a multimodal tower with more tensors is no longer taken for it (issue 735)."
