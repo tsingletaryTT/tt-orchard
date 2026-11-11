@@ -187,7 +187,7 @@ def test_counts(tmp_path, clock):
     (run / "control.done-1").write_text("resume\n")
     (run / "control.done-2").write_text("pause\n")
     c = facts(run, alive=True)["counts"]
-    assert c == {"retries": 2, "escalations": 1, "nudges": 2, "pauses": 2, "operator_commands": 2}
+    assert c == {"retries": 2, "escalations": 1, "escalations_same_model": 0, "nudges": 2, "pauses": 2, "operator_commands": 2}
 
 
 def test_the_last_five_events(tmp_path, clock):
@@ -448,3 +448,20 @@ def test_a_run_that_is_not_blocked_has_a_null_block(tmp_path, clock):
 def test_the_text_block_prints_the_code_when_blocked(tmp_path, clock):
     text = status.render(facts(write_run(tmp_path / "run", clock, BLOCKED)))
     assert "blocked: stage-failed" in text and "state: blocked" in text
+
+
+def test_counts_leave_out_an_escalation_to_the_same_model(tmp_path, clock):
+    """Issue 704: the coder serves the large tier with the same model, so such an escalation is a fresh context and not a second tier tried."""
+    run = write_run(tmp_path / "run", clock, [
+        (1, "escalate", 2, {"by": "stage machine", "same_model": True, "served_model": "coder-model"}),
+        (2, "escalate", 2, {"watchdog": True, "rung": "escalate", "same_model": False, "served_model": "big-model"}),
+        (3, "escalate", 3, {"by": "stage machine"})])               # an older entry has no field and counts as an escalation
+    c = facts(run, alive=True)["counts"]
+    assert c["escalations"] == 2 and c["escalations_same_model"] == 1
+
+
+def test_the_counts_line_shows_the_same_model_escalations_apart(tmp_path, clock):
+    run = write_run(tmp_path / "run", clock, [(1, "escalate", 2, {"by": "stage machine", "same_model": True})])
+    f = facts(run, alive=True)
+    text = status.render(f)
+    assert "escalations 0" in text and "1 on the same model" in text
