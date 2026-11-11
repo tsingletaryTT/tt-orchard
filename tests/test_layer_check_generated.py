@@ -108,7 +108,15 @@ def _tiny_port_text() -> str:
     return tiny_qwen4()[0]
 
 
-def test_the_stub_and_the_layers_that_reach_it_are_found_in_the_generated_port():
+def test_a_plan_with_every_block_family_has_no_stub():
+    text = _tiny_port_text()
+    assert lc.stub_functions(text) == set()
+
+
+def test_the_stub_and_the_layers_that_reach_it_are_found_when_the_attention_family_is_missing(monkeypatch):
+    sys.path.insert(0, str(REPO / "orchard"))
+    from orchard import port_template as pt
+    monkeypatch.setattr(pt, "BLOCK_FAMILIES", {k: v for k, v in pt.BLOCK_FAMILIES.items() if k != "qsa_attention"})
     text = _tiny_port_text()
     stubs = lc.stub_functions(text)
     graph = lc.call_graph(text)
