@@ -117,7 +117,10 @@ def _parser() -> argparse.ArgumentParser:
     b = sub.add_parser("bringup", parents=[common], help="check, fetch and start (or resume) a run")
     b.add_argument("model", help="Hugging Face model id, org/name")
     b.add_argument("--run-dir", help="default: <runs_root>/<org>--<name>")
-    b.add_argument("--dry-run", action="store_true", help="print the checks and the command; start nothing")
+    b.add_argument("--dry-run", action="store_true",
+                   help="print the checks, stage 0's classification (class, route, nearest model and reasons, from the snapshots that are already "
+                        "local) and the command; start nothing")
+    b.add_argument("--json", action="store_true", help="with --dry-run: print the classification and the command as one JSON object")
     b.add_argument("--no-fetch", action="store_true", help="never download; the snapshot must be local")
     b.add_argument("--accept-credentials-visible", action="store_true",
                    help="accept that credential files are visible to agent shells (this is the default; the "
@@ -1120,6 +1123,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     fetcher = fetcher or fetch.fetch_snapshot
     puller = puller or nearest.pull
     args = _parser().parse_args(argv)
+    if getattr(args, "cmd", None) == "bringup" and getattr(args, "dry_run", False) and getattr(args, "json", False):
+        args._json_out = out                  # the checks go to a sink and the JSON object is the only thing printed (issue 705)
+        out = io.StringIO()
     style = ui.detect(out, env, getattr(args, "style", "auto"))
     home = Path(env.get("HOME") or Path.home())
 
@@ -1412,7 +1418,21 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                               tool_dedupe=not args.no_tool_dedupe)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
-        print(f"║  command  {command}\n╚══", file=out)
+        from orchard import dry_classify
+        if stock_dir:
+            result = {"ok": False, "problem": "the model takes the stock-runtime path: stage 0 runs as code there and has no template to run"}
+        elif local is None:
+            result = {"ok": False, "problem": "the model is not downloaded, and a dry run downloads nothing; classify it after a fetch or "
+                                              "give a local snapshot"}
+        elif not base_data.get("base") or not (base_snapshot and Path(base_snapshot).is_dir()):
+            result = {"ok": False, "problem": "no nearest model is on disk to compare against (a dry run downloads nothing)"}
+        else:
+            result = dry_classify.classify(model_id=args.model, model_snapshot=str(snapshot), nearest_id=base_data["base"],
+                                           nearest_snapshot=str(base_snapshot), bundle_dir=bundle_dir)
+        if args.json:
+            print(json.dumps({**result, "command": command}, sort_keys=True), file=getattr(args, "_json_out", out))
+        else:
+            print(dry_classify.render(result, command=command) + "\n╚══", file=out)
         return EXIT_OK
 
     if local is None:

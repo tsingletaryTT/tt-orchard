@@ -698,6 +698,8 @@ config implies. A run it starts is an ordinary supervisor run. Run the same comm
 ln -s <ORCHARD_DIR>/bin/tt-orchard ~/.local/bin/tt-orchard     # a link, so it follows the checkout
 cp config/bringup.example.toml config/bringup.toml            # then edit it; CHANGE-ME values are refused
 tt-orchard bringup org/name --dry-run                         # the checks and the command; starts nothing
+tt-orchard bringup org/name --dry-run [--json]                # also stage 0's class, route, nearest model and reasons, from snapshots already on disk (nothing is downloaded or started)
+python3 -m orchard.supervisor run ... --dry-run [--json]        # the same classification of --input model= against --input base=; no run directory is opened
 tt-orchard bringup org/name                                   # check, fetch, run
 tt-orchard bringup org/name --base <bundle or model id>       # base the run on this model
 tt-orchard bringup org/name --offline                         # skip the base-model research (the hub lookup and downloads still run)
