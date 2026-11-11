@@ -29,6 +29,7 @@ ttnn and must not read the reference) make the plain forms visible.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 from pathlib import Path
@@ -89,6 +90,8 @@ def command(stage: int = 2, entry: int | None = None) -> str:
 EVIDENCE_NAMES = ("port-check.json", "hw-test-output.txt")     # result.json's evidence list must name both
 JSON_MAX = 16 * 1024 * 1024
 SOURCE_MAX = 2 * 1024 * 1024
+TOP5_FILE = "stages/1/evidence/reference/top5-logits.json"      # the reference's log-probability of each token it chose (issue 731)
+FIDELITY_TOLERANCE = 1e-6             # the gate's recomputed fidelity against the value in the record
 TOLERANCE = 1e-6                      # the gate's recomputed agreement against the number result.json reports
 
 
@@ -273,6 +276,9 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
             reasons.append(f"top1_agreement {top1} differs from the {got:.6f} the gate recomputed from the record's ids")
         if got < TOP1_MIN and not (_num(top1) and top1 < TOP1_MIN):
             reasons.append(f"top1_agreement recomputed from the record is {got:.4f}, below the minimum of {TOP1_MIN}")
+
+    if _ids(chip_ids) and chip_ids:
+        _fidelity_reasons(record, run_dir, len(chip_ids), reasons)
 
     # ---- a sparse attention the check did or did not exercise (issue 638) ----
     if stage == 2 and entry is None and _ids(chip_ids) and chip_ids:
@@ -471,6 +477,51 @@ def _reference_ids(record: dict, run_dir: Path, reasons: list) -> list | None:
             if ids is None:
                 reasons.append(f"{want} holds no list of generated_ids")
     return ids
+
+
+def fidelity_value(ref_lp: list, chip_lp: list, scale: float = 10.0) -> float:
+    """10 * PPL_reference / PPL_port over the same tokens: scale * exp(mean(port log-probability) - mean(reference log-probability))."""
+    n = len(ref_lp)
+    return scale * math.exp(sum(chip_lp) / n - sum(ref_lp) / n)
+
+
+def _lps(v, n: int) -> bool:
+    return (isinstance(v, list) and len(v) == n
+            and all(safeio.is_finite_number(x) and x <= 1e-6 for x in v))
+
+
+def _fidelity_reasons(record: dict, run_dir: Path, positions: int, reasons: list) -> None:
+    """The record's report-only `fidelity` block, when it has one: well formed, recomputed from its own log-probabilities, and its reference
+    log-probabilities equal to the stage 1 file's. It never fails a run for being low (nothing gates on it yet); it fails a record that
+    disagrees with itself or with the reference on disk, since that record is evidence."""
+    block = record.get("fidelity")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        reasons.append("fidelity must be an object")
+        return
+    ref_lp, chip_lp = block.get("reference_logprobs"), block.get("chip_logprobs")
+    if not _lps(ref_lp, positions) or not _lps(chip_lp, positions):
+        reasons.append(f"fidelity reference_logprobs and chip_logprobs must each be {positions} finite log-probabilities (at most 0)")
+        return
+    value = block.get("value")
+    if block.get("tokens") != positions:
+        reasons.append(f"fidelity tokens {block.get('tokens')!r} differs from the {positions} positions the record compares")
+    if not _num(value) or abs(value - fidelity_value(ref_lp, chip_lp, float(block.get("scale") or 10.0))) > FIDELITY_TOLERANCE * max(1.0, abs(value)):
+        reasons.append(f"fidelity value {value!r} differs from the {fidelity_value(ref_lp, chip_lp):.6f} the gate recomputed from the record's log-probabilities")
+    f = _inside(run_dir, TOP5_FILE)
+    if f is None:
+        reasons.append(f"fidelity: {TOP5_FILE} is not a file in the run directory, so the reference log-probabilities cannot be checked")
+        return
+    try:
+        steps = safeio.read_json(f, max_bytes=JSON_MAX, expect=dict).get("steps")
+    except safeio.SafeReadError as exc:
+        reasons.append(f"{TOP5_FILE} is not readable JSON: {exc.reason}")
+        return
+    on_disk = [s.get("logprob") if isinstance(s, dict) else None for s in (steps if isinstance(steps, list) else [])[:positions]]
+    if on_disk != ref_lp:
+        reasons.append(f"fidelity reference_logprobs are not the first log-probabilities of the stage 1 reference ({TOP5_FILE}): "
+                       "the score was made against numbers the reference did not produce")
 
 
 def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list, record_sha: str | None = None) -> None:
