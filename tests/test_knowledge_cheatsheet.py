@@ -83,7 +83,16 @@ def test_every_function_the_idioms_tell_the_reader_to_call_exists_in_the_generat
 # ---- the attention stub request ---------------------------------------------------------------------------------------------------------
 
 def _attention_request():
-    text, plan = tiny_qwen4()
+    """The request for an attention stub. The generator now writes the tiny plan's QSA attention (issue 696, slice 5), so the stub is made by
+    leaving that family out of the registry; the recipe is for attention blocks the generator cannot write."""
+    from orchard import port_template as pt
+    saved = dict(pt.BLOCK_FAMILIES)
+    pt.BLOCK_FAMILIES.pop("qsa_attention", None)
+    try:
+        text, plan = tiny_qwen4()
+    finally:
+        pt.BLOCK_FAMILIES.clear()
+        pt.BLOCK_FAMILIES.update(saved)
     stub = next(s for s in plan.stubs if s.function == "_C_self_attn")
     return sp.stub_request(text, stub, sheet=SHEET, excerpts=None, inventory=_load("tiny-qwen4-ops-inventory.json"))["user"]
 

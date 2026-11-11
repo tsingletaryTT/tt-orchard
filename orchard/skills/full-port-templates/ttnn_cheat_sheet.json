@@ -184,7 +184,7 @@
      "kind": "op",
      "signature": "ttnn.permute(input_tensor, dims, *, memory_config=None, pad_value=0.0)",
      "usage": "heads = ttnn.permute(ttnn.reshape(x, (1, seq, heads, head_dim)), (0, 2, 1, 3))",
-     "notes": "Reorders every dimension (dims names all of them). The head split of a projection is reshape to [1, S, heads, hd] then permute (0, 2, 1, 3) to [1, heads, S, hd]; the way back is the same permute and a reshape to [1, 1, S, heads * hd]. Run on a chip by op probe 9 (head_permute, PCC 1.0) and probe 8 (the output join).",
+     "notes": "Reorders every dimension (dims names all of them). The head split of a projection is reshape to [1, S, heads, hd] then permute (0, 2, 1, 3) to [1, heads, S, hd]; the way back is the same permute and a reshape to [1, 1, S, heads * hd]. Run on a chip by op probe 9 (head_permute, PCC 1.0) and probe 8 (the output join). dims lists one entry per axis of the input, so a 4-D tensor takes four numbers and a 5-D tensor five. A ttnn tensor has no .permute method.",
      "seen_in": "tt-metal ttnn/cpp/ttnn/operations/data_movement/permute/permute_nanobind.cpp; scripts/qwen4_ops_probe/p9_attention_ops.py",
      "in": [
       "tt_metal"
@@ -208,17 +208,6 @@
      "usage": "kt = ttnn.transpose(k, -2, -1)",
      "notes": "Swaps two dims.",
      "seen_in": "models/tt_transformers/tt/attention.py",
-     "in": [
-      "tt_metal"
-     ]
-    },
-    {
-     "name": "ttnn.permute",
-     "kind": "op",
-     "signature": "ttnn.permute(input_tensor, dims, *, memory_config=None, pad_value=0.0)",
-     "usage": "x = ttnn.permute(x, (0, 2, 1, 3))",
-     "notes": "dims lists one entry per axis of the input, so a 4-D tensor takes four numbers and a 5-D tensor five. Activations in these ports are 4-D: to turn [1, S, heads, head_dim] into [1, heads, S, head_dim], permute (0, 2, 1, 3). A ttnn tensor has no .permute method.",
-     "seen_in": "tt-metal ttnn/cpp/ttnn/operations/data_movement/permute/permute_nanobind.cpp; models/tt_transformers/tt/model_config.py:2851",
      "in": [
       "tt_metal"
      ]
