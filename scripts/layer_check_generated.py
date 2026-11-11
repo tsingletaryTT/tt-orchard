@@ -212,9 +212,11 @@ def _port_frame(exc: BaseException, port_path: Path) -> dict:
     return {"port_function": f.name, "port_line": f.lineno, "code": (f.line or "").strip()[:200]}
 
 
-def device_phase(*, snapshot, construction, inventory, excerpts, reference_path, device, patch=None) -> dict:
+def device_phase(*, snapshot, construction, inventory, excerpts, reference_path, device, patch=None, teacher_forced=False) -> dict:
     """Generate the port, run it layer by layer on `device` and compare each layer's stream with the saved reference.
-    `patch(module)` may replace port functions before the run (a test uses it to make one raise)."""
+    `patch(module)` may replace port functions before the run (a test uses it to make one raise). With `teacher_forced`, each layer reads the
+    reference's own input stream (uploaded from the saved reference), so a layer's numbers hold that layer's error alone and not the error of the
+    layers before it; a routed or otherwise discontinuous block (MoE with near-tied routers) is judged without the earlier layers' drift."""
     import torch
     from orchard import port_template
     ref = torch.load(str(reference_path), weights_only=True)
@@ -256,6 +258,13 @@ def device_phase(*, snapshot, construction, inventory, excerpts, reference_path,
                     stopped = True
                     continue
                 try:
+                    if teacher_forced:
+                        ref_in = ref["stream_in"][:n] if i == 0 else ref["layers"][i - 1][:n]
+                        feed = torch.zeros(len(padded), ref_in.shape[-1], dtype=ref_in.dtype)
+                        feed[:n] = ref_in
+                        import ttnn as _ttnn
+                        x = mod._upload(model, feed.reshape(1, 1, len(padded), -1).to(torch.bfloat16), _ttnn.TILE_LAYOUT)
+                        prev_dev = ref_in.float()
                     x = fn(model, i, x, padded, cos, sin)
                     got = _host_rows(mod, model, x, n)
                     stream = compare(got, ref["layers"][i])
@@ -349,7 +358,7 @@ def device_main(args, *, importer=None, device_factory=None) -> int:
     device, closer = (device_factory or open_chip)(ttnn)
     try:
         result = device_phase(snapshot=args.snapshot, construction=args.construction, inventory=args.inventory, excerpts=args.excerpts,
-                              reference_path=args.reference or args.reference_out, device=device)
+                              reference_path=args.reference or args.reference_out, device=device, teacher_forced=bool(getattr(args, 'teacher_forced', False)))
     finally:
         try:
             closer(device)
@@ -398,8 +407,8 @@ def control_references(ref: dict) -> dict:
             "scaled_update": {**ref, "layers": scaled}}
 
 
-def selftest(seq: int = 24, reference_python=None) -> dict:
-    """Build the tiny dense Qwen4 checkpoint, save the reference, run the generated port through the fake ttnn layer by layer. The result is
+def selftest(seq: int = 24, reference_python=None, variant: str = "dense") -> dict:
+    """Build the tiny Qwen4 checkpoint of `variant` (dense, moe or mixed; dense by default), save the reference, run the generated port through the fake ttnn layer by layer. The result is
     ok when every layer that does not reach a stub was compared and ok, the first layer that does is the first one skipped, and the same
     run against each wrong reference of `control_references` fails on every layer it compares (`control_detected`)."""
     sys.path.insert(0, str(REPO / "scripts" / "tiny_qwen4"))
@@ -409,7 +418,7 @@ def selftest(seq: int = 24, reference_python=None) -> dict:
         tmpdir = Path(tmp)
         import make_checkpoint
         snap = tmpdir / "snapshot"
-        rc = make_checkpoint.main(["--out", str(snap), "--variant", "dense", "--no-tokenizer", "--no-reference"])
+        rc = make_checkpoint.main(["--out", str(snap), "--variant", variant, "--no-tokenizer", "--no-reference"])
         if rc != 0:
             return {"ok": False, "error": f"make_checkpoint exited {rc}"}
         ref_path = tmpdir / "reference.pt"
@@ -417,7 +426,7 @@ def selftest(seq: int = 24, reference_python=None) -> dict:
         excerpts = tmpdir / "excerpts.md"
         excerpts.write_text(SELFTEST_EXCERPTS, encoding="utf-8")
         fake = _install_fake_ttnn()
-        inputs = dict(snapshot=snap, construction=fixtures / "tiny-qwen4-construction.json",
+        inputs = dict(snapshot=snap, construction=fixtures / ("tiny-qwen4-construction.json" if variant == "dense" else f"tiny-qwen4-{variant}-construction.json"),
                       inventory=fixtures / "tiny-qwen4-ops-inventory.json", excerpts=excerpts)
         try:
             result = device_phase(reference_path=ref_path, device=fake.MeshDevice(1), **inputs)
@@ -426,9 +435,9 @@ def selftest(seq: int = 24, reference_python=None) -> dict:
             import torch
             true_ref = torch.load(str(ref_path), weights_only=True)
             detected = {}
-            for name, variant in control_references(true_ref).items():
+            for name, wrong in control_references(true_ref).items():
                 path = tmpdir / f"reference_{name}.pt"
-                torch.save(variant, str(path))
+                torch.save(wrong, str(path))
                 control = device_phase(reference_path=path, device=fake.MeshDevice(1), **inputs)
                 rows = [r for r in control["layers"] if r.get("status") == "compared"]
                 detected[name] = bool(rows) and not any(r["ok"] for r in rows)
@@ -453,6 +462,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--phase", choices=("reference", "device", "both"), default="both")
     ap.add_argument("--selftest", action="store_true", help="CPU only: build the tiny checkpoint, use the fake ttnn, check the harness")
+    ap.add_argument("--variant", choices=("dense", "moe", "mixed"), default="dense", help="with --selftest: which tiny checkpoint to build")
     ap.add_argument("--snapshot", help="the checkpoint directory (config.json and the safetensors file)")
     ap.add_argument("--construction", help="the construction file of the model (stage 2's effective construction)")
     ap.add_argument("--inventory", help="the ops inventory JSON (optional)")
@@ -462,11 +472,12 @@ def main(argv=None) -> int:
     ap.add_argument("--reference-out", help="where the reference phase writes its .pt file")
     ap.add_argument("--reference-python", default=os.environ.get("ORCHARD_REFERENCE_PYTHON"),
                     help="interpreter for the reference phase when it is not this one (default: $ORCHARD_REFERENCE_PYTHON)")
+    ap.add_argument("--teacher-forced", action="store_true", help="each layer reads the reference's own input stream, so a layer's numbers hold its own error only")
     ap.add_argument("--reference", help="the .pt file the device phase compares with (default: --reference-out)")
     ap.add_argument("--out", help="also write the result JSON here")
     args = ap.parse_args(argv)
     if args.selftest:
-        res = selftest(args.seq, args.reference_python)
+        res = selftest(args.seq, args.reference_python, args.variant)
         emit(res, args.out)
         return 0 if res.get("selftest_ok") else 1
     if not args.snapshot:

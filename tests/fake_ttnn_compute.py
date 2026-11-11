@@ -133,8 +133,10 @@ def make() -> types.ModuleType:
 
     def embedding(input_tensor, weight, *, padding_idx=None, layout=None, embeddings_type=None, dtype=None, memory_config=None):
         _count("embedding")
-        if weight.layout != "ROW_MAJOR" or input_tensor.layout != "ROW_MAJOR":
-            raise RuntimeError("embedding wants ROW_MAJOR ids and a ROW_MAJOR weight table")
+        # The ids are ROW_MAJOR. The table may be ROW_MAJOR (the token embedding) or TILE: probe 11 (gather_scatter_device) ran ttnn.embedding on a board with a TILE
+        # table, the hidden states reshaped to [T, hidden], and matched the reference.
+        if input_tensor.layout != "ROW_MAJOR" or weight.layout not in ("ROW_MAJOR", "TILE"):
+            raise RuntimeError("embedding wants ROW_MAJOR ids and a ROW_MAJOR or TILE weight table")
         out = torch.nn.functional.embedding(input_tensor.t.long(), weight.t)
         return Tensor(out, layout="TILE" if layout == "TILE" else "ROW_MAJOR")
 
@@ -152,6 +154,13 @@ def make() -> types.ModuleType:
                 raise RuntimeError("a TILE weight needs the input's last dim")
             y = y * weight.t
         return Tensor(y)
+
+    def softmax(input_tensor, dim=-1, *, memory_config=None, compute_kernel_config=None, numeric_stable=True):
+        """ttnn.softmax over the last dimension of a TILE tensor (probe 10: the selected logits and the full router row both ran on a board)."""
+        _count("softmax")
+        if input_tensor.layout != "TILE" or dim not in (-1, input_tensor.t.dim() - 1):
+            raise RuntimeError("the fake covers softmax on the last dimension of a TILE tensor")
+        return Tensor(torch.softmax(input_tensor.t.float(), dim=-1), input_tensor.replicated, "TILE")
 
     def silu(x):
         _count("silu")
@@ -265,6 +274,7 @@ def make() -> types.ModuleType:
     m.silu, m.multiply, m.add, m.reshape, m.concat, m.deallocate, m.to_layout = silu, multiply, add, reshape, concat, deallocate, to_layout
     m.sigmoid, m.slice, m.typecast, m.softplus = sigmoid, slice, typecast, softplus
     m.permute, m.relu, m.subtract, m.topk = permute, relu, subtract, topk
+    m.softmax = softmax
 
     ex = types.ModuleType("ttnn.experimental")
 
