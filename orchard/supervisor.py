@@ -1093,13 +1093,23 @@ class Supervisor:
         if dead:
             self._block(stage, f"{dead}. It was found after this failure: {reason}", off_bus=True, **evidence)
 
+    def _bus_after_blocked(self, stage, exc: Blocked, held) -> None:
+        """A handoff failed with `exc`: check the bus as a failed coder boot does (_block_if_off_bus), unless the exception's evidence already
+        holds `device_state`. The boot abort read the device state with a time limit (DEVICE_STATE_READ_S) and blocked on what it found; a second
+        synchronous probe here could hang before the pause and the cleanup (issue 603). Any other handoff failure is probed as before."""
+        evidence = getattr(exc, "evidence", None)
+        if isinstance(evidence, dict) and "device_state" in evidence:
+            return
+        self._block_if_off_bus(stage, exc.reason, held)
+
     def _restore_coder(self, stage, h) -> None:
         """Bring the parked coder back (Handoff.restore). A failure is checked against the bus first, as a failed coder boot is
-        (_block_if_off_bus): the board that was reset may have left the bus, and a retry would meet the same board."""
+        (_block_if_off_bus): the board that was reset may have left the bus, and a retry would meet the same board. A boot abort has read the
+        device state already and is not probed again (_bus_after_blocked)."""
         try:
             h.restore()
         except Blocked as exc:
-            self._block_if_off_bus(stage, exc.reason, h.lease.chips)
+            self._bus_after_blocked(stage, exc, h.lease.chips)
             raise
 
     def _evidence_file(self, stem: str, text: str) -> Path:
@@ -1844,7 +1854,7 @@ class Supervisor:
                 h.recover_and_restore(rec, chips=self.coder_chips, who=WHO, reason="coder",
                                       wait_budget_s=COLD_BOOT_BUDGET_S)
             except Blocked as exc:
-                self._block_if_off_bus(hp.stage, exc.reason, h.lease.chips)
+                self._bus_after_blocked(hp.stage, exc, h.lease.chips)
                 raise
             if rec.action != "abandon":
                 self.coder_lease = h.lease
@@ -1955,9 +1965,14 @@ class Supervisor:
                 # stopped container under the coder's name is that launch's leftover: remove it and start once more. Anything else is
                 # not ours to remove, and the block says what holds the chips and how to clear it (issue 417). When no container exists
                 # at all, the claim may be a short host process: the holders are recorded and the start is tried once more (issue 560).
+                # The refusal is written first, with owned False (this attempt launched nothing), so a crash in the lookups below cannot
+                # leave "coder starting ... owned: None" as the latest record, which recovery reads as a container that may be this run's
+                # own (issue 604). The launch after a removal is preceded by an unknown-ownership record again.
+                self._record_refused_start(lease, held)
                 if not self._remove_own_leftover(lease):
-                    self._start_after_busy_refusal(held, lease)
+                    self._start_after_busy_refusal(held, lease, recorded=True)
                 else:
+                    self._record_launch_about_to_run(lease)
                     self.coder.start(lease)
             self._note_created_container(lease, before)
         except ServerChipsHeld as exc:
@@ -2273,7 +2288,17 @@ class Supervisor:
         from orchard.telegraph import redact
         return redact(text or "", hostname=socket.gethostname(), home=str(Path.home()))[-limit:]
 
-    def _start_after_busy_refusal(self, held: Exception, lease: Lease) -> None:
+    def _record_refused_start(self, lease: Lease, exc: Exception) -> None:
+        """`coder not started` with the coder's own record, whose `owned` is False after a refusal: nothing was launched, so nothing of the
+        coder's exists to stop or to reset under. A fresh invocation adopts the latest server record (stages.coder_state)."""
+        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(), reason=str(exc))
+
+    def _record_launch_about_to_run(self, lease: Lease) -> None:
+        """`coder starting` with owned None, immediately before a launch: a crash during it can leave a container that is this run's own, so
+        ownership is unknown again until the start returns (issue 604; the first launch is recorded the same way)."""
+        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(), server={**self.coder.record(), "owned": None})
+
+    def _start_after_busy_refusal(self, held: Exception, lease: Lease, *, recorded: bool = False) -> None:
         """`tt-model serve` refused the start as 'in use by another container' and this run has no leftover of its own to remove (issue 560).
 
         The holders of the device nodes and gozer's view are written to the ledger first. When no container of the coder's name exists and no
@@ -2283,7 +2308,8 @@ class Supervisor:
         # Recorded first (issue 590): gathering the evidence reads docker, /proc and gozer, and the wait below lasts a minute. A supervisor
         # that crashed in either would otherwise leave "coder starting ... owned: None" as the latest record, and recovery would take a
         # container that appeared under the coder's name for its own and stop it. This refusal launched nothing.
-        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(), reason=str(held))
+        if not recorded:
+            self._record_refused_start(lease, held)
         try:
             found = self.coder.find_container() if hasattr(self.coder, "find_container") else None
         except (ServerError, OSError):
@@ -2291,16 +2317,19 @@ class Supervisor:
         evidence = self._busy_evidence(held, lease, found)
         retry = (found == [] and not evidence["container_holder"] and self.busy_retry_wait_s > 0)
         if not retry:
-            self._block_chips_held(held, lease, evidence=evidence)
+            self._block_chips_held(held, lease, evidence=evidence, recorded=True)          # the refusal is in the ledger above
         self.ledger.append("decision", None, decision="retrying the coder start once: no container holds the chips",
                            lease_id=lease.lease_id, wait_s=self.busy_retry_wait_s)
         self.sleep(self.busy_retry_wait_s)
         # Unknown ownership again, recorded immediately before the second launch, as "coder starting" does for the first (issue 590).
-        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(), server={**self.coder.record(), "owned": None})
+        self._record_launch_about_to_run(lease)
         try:
             self.coder.start(lease)
         except ServerChipsHeld as again:
-            self._block_chips_held(again, lease, retried=False, evidence=self._busy_evidence(again, lease, found, second=True), after_retry=True)
+            # The second refusal is recorded before its evidence is gathered (issue 604): the evidence reads docker, /proc and gozer.
+            self._record_refused_start(lease, again)
+            self._block_chips_held(again, lease, retried=False, evidence=self._busy_evidence(again, lease, found, second=True), after_retry=True,
+                                   recorded=True)
 
     def _busy_evidence(self, refusal: Exception, lease: Lease, found, *, second: bool = False) -> dict:
         """Look at who holds the device nodes now, and write it to the ledger."""
@@ -2319,14 +2348,14 @@ class Supervisor:
         return evidence
 
     def _block_chips_held(self, exc: Exception, lease: Lease, retried: bool = False, *, evidence: dict | None = None,
-                          after_retry: bool = False) -> None:
+                          after_retry: bool = False, recorded: bool = False) -> None:
         """Block after `tt-model serve` refused because a container holds the chips. The reason names the container that is left over and
         the command that removes it, and says the chips are not at fault, so the block is classed as a coder problem and not a hardware one
         (orchard/blocked.py). A chip that has in fact left the bus is still reported first, as for any failed boot."""
         # Recorded before the block, as the not-owned refusal is: a fresh invocation adopts the latest server record, and the record written at
         # "coder starting" says the owner is unknown, which would let a relaunch stop and remove the container that caused this refusal.
-        self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id, server=self.coder.record(),
-                           reason=str(exc))
+        if not recorded:
+            self._record_refused_start(lease, exc)
         found = None
         try:
             found = self.coder.find_container() if hasattr(self.coder, "find_container") else None

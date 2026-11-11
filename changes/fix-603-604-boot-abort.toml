@@ -1,0 +1,2 @@
+target = "0.9.161"
+summary = "Coder boot and refusal handlers: no second bus probe after a boot abort has read the device state (603); a refused start is recorded with owned False before any lookup, and each launch is preceded by an unknown-ownership record (604)."
