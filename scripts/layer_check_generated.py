@@ -398,8 +398,8 @@ def control_references(ref: dict) -> dict:
             "scaled_update": {**ref, "layers": scaled}}
 
 
-def selftest(seq: int = 24, reference_python=None) -> dict:
-    """Build the tiny dense Qwen4 checkpoint, save the reference, run the generated port through the fake ttnn layer by layer. The result is
+def selftest(seq: int = 24, reference_python=None, variant: str = "dense") -> dict:
+    """Build the tiny Qwen4 checkpoint of `variant` (dense, moe or mixed; dense by default), save the reference, run the generated port through the fake ttnn layer by layer. The result is
     ok when every layer that does not reach a stub was compared and ok, the first layer that does is the first one skipped, and the same
     run against each wrong reference of `control_references` fails on every layer it compares (`control_detected`)."""
     sys.path.insert(0, str(REPO / "scripts" / "tiny_qwen4"))
@@ -409,7 +409,7 @@ def selftest(seq: int = 24, reference_python=None) -> dict:
         tmpdir = Path(tmp)
         import make_checkpoint
         snap = tmpdir / "snapshot"
-        rc = make_checkpoint.main(["--out", str(snap), "--variant", "dense", "--no-tokenizer", "--no-reference"])
+        rc = make_checkpoint.main(["--out", str(snap), "--variant", variant, "--no-tokenizer", "--no-reference"])
         if rc != 0:
             return {"ok": False, "error": f"make_checkpoint exited {rc}"}
         ref_path = tmpdir / "reference.pt"
@@ -417,7 +417,7 @@ def selftest(seq: int = 24, reference_python=None) -> dict:
         excerpts = tmpdir / "excerpts.md"
         excerpts.write_text(SELFTEST_EXCERPTS, encoding="utf-8")
         fake = _install_fake_ttnn()
-        inputs = dict(snapshot=snap, construction=fixtures / "tiny-qwen4-construction.json",
+        inputs = dict(snapshot=snap, construction=fixtures / ("tiny-qwen4-construction.json" if variant == "dense" else f"tiny-qwen4-{variant}-construction.json"),
                       inventory=fixtures / "tiny-qwen4-ops-inventory.json", excerpts=excerpts)
         try:
             result = device_phase(reference_path=ref_path, device=fake.MeshDevice(1), **inputs)
@@ -426,9 +426,9 @@ def selftest(seq: int = 24, reference_python=None) -> dict:
             import torch
             true_ref = torch.load(str(ref_path), weights_only=True)
             detected = {}
-            for name, variant in control_references(true_ref).items():
+            for name, wrong in control_references(true_ref).items():
                 path = tmpdir / f"reference_{name}.pt"
-                torch.save(variant, str(path))
+                torch.save(wrong, str(path))
                 control = device_phase(reference_path=path, device=fake.MeshDevice(1), **inputs)
                 rows = [r for r in control["layers"] if r.get("status") == "compared"]
                 detected[name] = bool(rows) and not any(r["ok"] for r in rows)
@@ -453,6 +453,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--phase", choices=("reference", "device", "both"), default="both")
     ap.add_argument("--selftest", action="store_true", help="CPU only: build the tiny checkpoint, use the fake ttnn, check the harness")
+    ap.add_argument("--variant", choices=("dense", "moe", "mixed"), default="dense", help="with --selftest: which tiny checkpoint to build")
     ap.add_argument("--snapshot", help="the checkpoint directory (config.json and the safetensors file)")
     ap.add_argument("--construction", help="the construction file of the model (stage 2's effective construction)")
     ap.add_argument("--inventory", help="the ops inventory JSON (optional)")
@@ -466,7 +467,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", help="also write the result JSON here")
     args = ap.parse_args(argv)
     if args.selftest:
-        res = selftest(args.seq, args.reference_python)
+        res = selftest(args.seq, args.reference_python, args.variant)
         emit(res, args.out)
         return 0 if res.get("selftest_ok") else 1
     if not args.snapshot:

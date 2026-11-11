@@ -1,0 +1,2 @@
+target = "0.9.160"
+summary = "The port generator writes the Qwen4 sparse MoE block (router, experts, gated shared expert) as a registered family; layer variants are split by the kind of feed-forward (issues 696 slice 6, 723)."

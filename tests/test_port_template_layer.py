@@ -241,7 +241,7 @@ ATTRS = {"layer_type": "linear_attention"}
 
 
 def test_a_constructed_layer_with_every_part_is_composed():
-    assert pt._compose_layer(_layer(), ATTRS, "aten.flatten.using_ints (candidate)") == {"hc": 4, "hidden": 64, "ple": True, "sublayer": "linear_attn", "stub_sublayer": False}
+    assert pt._compose_layer(_layer(), ATTRS, "aten.flatten.using_ints (candidate)") == {"hc": 4, "hidden": 64, "ple": True, "sublayer": "linear_attn", "stub_sublayer": False, "mlp": "mlp"}
 
 
 def test_a_connection_that_does_not_inject_keeps_the_layer_a_stub():
@@ -311,7 +311,7 @@ def _attn_blocks(**over):
 
 def test_a_constructed_attention_layer_is_composed_around_the_stub():
     got = pt._compose_layer(_attn_blocks(), {"layer_type": "indexed_attention"}, None)
-    assert got == {"hc": 4, "hidden": 64, "ple": False, "sublayer": "self_attn", "stub_sublayer": True}
+    assert got == {"hc": 4, "hidden": 64, "ple": False, "sublayer": "self_attn", "stub_sublayer": True, "mlp": "mlp"}
 
 
 def test_an_attention_sublayer_in_a_linear_layer_or_the_reverse_keeps_the_layer_a_stub():
