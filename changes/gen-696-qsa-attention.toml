@@ -1,0 +1,2 @@
+target = "0.9.156"
+summary = "The port generator writes the Qwen4 indexed attention (the QSA indexer with its block selection) as a registered block family, so the tiny Qwen4 plan has no stub left (issue 696 slice 5, issue 711)."

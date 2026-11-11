@@ -2,13 +2,14 @@
 `model['host']['cos_cached']`, which does not exist)."""
 from __future__ import annotations
 
-from orchard import op_cheats, stub_prompts as sp
+from orchard import op_cheats, port_template as pt, stub_prompts as sp
 from test_port_template import _load, tiny_qwen4, std_generate
 
 SHEET = op_cheats.load_sheet(op_cheats.TTNN_SHEET)
 
 
-def test_an_attention_stub_request_names_the_rotary_helpers_and_the_layout():
+def test_an_attention_stub_request_names_the_rotary_helpers_and_the_layout(monkeypatch):
+    monkeypatch.delitem(pt.BLOCK_FAMILIES, "qsa_attention")          # the indexer attention is written by a family; a stub is left for an attention no family recognizes
     text, plan = tiny_qwen4()
     stub = next(s for s in plan.stubs if s.function == "_C_self_attn")
     user = sp.stub_request(text, stub, sheet=SHEET, excerpts=None, inventory=_load("tiny-qwen4-ops-inventory.json"))["user"]
