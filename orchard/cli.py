@@ -58,6 +58,7 @@ import io
 import fcntl
 import json
 import os
+import re
 import shlex
 import sys
 import threading
@@ -117,6 +118,8 @@ def _parser() -> argparse.ArgumentParser:
     b = sub.add_parser("bringup", parents=[common], help="check, fetch and start (or resume) a run")
     b.add_argument("model", help="Hugging Face model id, org/name")
     b.add_argument("--run-dir", help="default: <runs_root>/<org>--<name>")
+    b.add_argument("--revision", metavar="SHA", help="pin the run to this 40-character commit of the model repository: the run refuses to start "
+                                                     "when the Hub's latest commit is another one (the drop watcher passes the commit its check read)")
     b.add_argument("--dry-run", action="store_true", help="print the checks and the command; start nothing")
     b.add_argument("--no-fetch", action="store_true", help="never download; the snapshot must be local")
     b.add_argument("--accept-credentials-visible", action="store_true",
@@ -697,6 +700,9 @@ def _download_meter(model_id: str, hub, hf_home, out, style, quiet: bool):
         files=hub.files, total_bytes=hub.total_bytes, out=out, style=style)
 
 
+_REVISION = re.compile(r"[0-9a-f]{40}")      # a commit hash pinned with --revision
+
+
 def _refuse(message: str) -> int:
     print(f"refused: {message}", file=sys.stderr)
     return EXIT_REFUSED
@@ -1268,6 +1274,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             return supervisor_main(fwd)
         return supervisor_main(["control", "--run-dir", run_dir, args.cmd])
 
+    if args.revision is not None and not _REVISION.fullmatch(args.revision):
+        return _refuse("--revision must be a 40-character lowercase commit hash")
     from orchard.stages import rehearsal_options_problem
     if why := rehearsal_options_problem(full_port=args.full_port, full_port_rehearsal=args.full_port_rehearsal,
                                         weights_only_rehearsal=args.weights_only_rehearsal):
@@ -1347,6 +1355,10 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return EXIT_REFUSED
 
     hub = checks[0].data
+    if args.revision is not None and getattr(hub, "sha", None) != args.revision:
+        # The commit the caller read is not the Hub's latest one: a run now would fetch and decide on a different commit than the check did.
+        return _refuse(f"the Hub's latest commit of {args.model} is {str(getattr(hub, 'sha', None))[:12]}, not the pinned {args.revision[:12]}; "
+                       "check the release again and start the run on the commit that was checked")
     hf_home = preflight.hf_home_for(cfg)
     local = sig.local_snapshot(args.model)
     if local is not None:
