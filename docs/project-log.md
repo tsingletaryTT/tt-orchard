@@ -5599,3 +5599,27 @@ Replaying the loop as a trace changes the time by less than 5%, so the 0.12 ms p
 Ideas this points to (not tried): one matmul for gate and up with the two weights stored side by side; the routing weight folded into the scatter matrix, which removes the weight multiply; silu fused into the multiply; one embedding for all slots and one scatter matmul over the concatenated rows, which removes the per-slot add and scatter; a matmul program config chosen for 32-row inputs. If the first four work, a slot would cost about 90 µs, down from 170.
 
 Not measured here: any of those changes, four chips, the router read-back, quality. 5 CPU tests still pass; the new modes need a chip and have no CPU test.
+
+## 2026-11-12: probe 17 tries five changes to the slot loop (issue 723)
+
+`scripts/qwen4_ops_probe/p17_moe_loop_variants.py` runs the 128-slot loop of probe 16 on one chip in variants: each of five changes alone, the changes added one at a time, and a form that runs all slots as one batch. Run log: `docs/run-logs/2026-11-12-probe17-moe-loop-variants-one-chip.json` (bfp4 weights, random weights and routing, inputs on the chip, fastest of 15 calls). Device time of one layer's loop on one chip, in milliseconds:
+
+| variant | 1 token (3 slots) | 8 (17) | 32 (56) | 256 (127) |
+|---|---|---|---|---|
+| baseline | 0.40 | 2.14 | 6.94 | 18.4 |
+| gate and up in one matmul | 0.37 | 2.07 | 7.35 | 16.8 |
+| routing weight folded into the scatter matrix | 0.38 | 2.04 | 6.62 | 17.7 |
+| silu fused into the multiply | 0.38 | 2.10 | 6.80 | 18.1 |
+| LoFi matmuls | 0.39 | 2.15 | 6.93 | 18.4 |
+| one embedding, one concat, one scatter matmul | 0.38 | 1.88 | 6.12 | 13.9 |
+| all five together | 0.27 | 1.22 | 3.94 | 9.8 |
+| the four without the gate-up fusion | 0.38 | 1.74 | 5.67 | 12.9 |
+| all slots as one batch (batched matmuls) | 11.3 | 11.3 | 11.3 | 11.3 |
+
+The five together make the loop 1.5 times faster at one token and 1.75 to 1.9 times faster from 8 tokens up, about 70 µs per hit slot at 32 and 256 tokens (baseline 125 to 145). The output matches the baseline loop with PCC 0.9999 or better (LoFi accounts for the drop from 1.0). What each change does alone: the single concat and scatter matmul helps most, and the gain grows with the token count because the per-slot add and scatter matmul grow with it. Folding the weight and fusing silu each save a few percent. LoFi saves nothing alone and a little in the chain. The fused gate and up matmul needs two slices after it, and alone it costs more than it saves at 32 tokens; it pays only together with the others. The first run of the table was noisy (the host was running a test suite); the table above is the second run, and a repeat of the last three variants agrees with it.
+
+The batched form (stacked weights `[1, 128, in, out]`, one embedding, three batched matmuls) takes 11.3 ms whatever the token count and with LoFi or HiFi. That is 360 MB of weights read in 11.3 ms, about 32 GB/s, far below what one chip's DRAM can deliver, so the default batched matmul is not bound by memory. A kernel that streamed the weights at DRAM speed would be bound by the weight read, which I estimate at about 1 ms per layer (not measured). The batched form has a fixed shape, so it could be traced; at 11.3 ms it loses to the loop below 256 tokens.
+
+What this means for Flash-Next on four chips (my arithmetic from the device times; none of it was measured). With the five changes the visited slots cost about 110 µs at one token (fixed per-op costs dominate), so about 10 slots cost 1.1 ms per layer, which is 53 ms over 48 layers, roughly 19 tokens per second from the expert loop at batch 1, up from about 7. At 32 tokens about 117 slots cost 8 ms per layer, about 80 tokens per second in aggregate. A 256-token prefill takes about 10 ms per layer, about 500 tokens per second. The host work (building and uploading the ids and the scatter matrix) is two uploads per layer in the batched form, against three per slot in the loop, but it was not timed here.
+
+Next: change the emitter (`_moe_experts_parallel`) to the batched-scatter form with the weight folded in, fused silu and LoFi matmuls; time the generated block under four chips; and look for a kernel or a program config that makes the batched matmul memory-bound (a sparse matmul, or a TT-Lang kernel). 9 CPU tests across probes 16 and 17; the CPU forms of all variants match the baseline loop.
