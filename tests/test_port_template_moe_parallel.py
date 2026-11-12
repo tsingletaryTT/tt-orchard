@@ -28,8 +28,12 @@ def parallel_text(monkeypatch, budget):
     return text
 
 
+_PORTS = iter(range(10 ** 6))
+
+
 def run_block(monkeypatch, tmp_path, text, chips, seed=11):
-    mod = import_port(monkeypatch, text, tmp_path)
+    # a new module name each time: two texts of one size written within a second would otherwise share a stale .pyc
+    mod = import_port(monkeypatch, text, tmp_path, name=f"generated_port_{next(_PORTS)}")
     _config, block = _hf_block(seed)
     model = mod.load(str(_checkpoint(tmp_path, block)), fake.MeshDevice(chips))
     x_host = (torch.randn(1, SEQ, 64, generator=torch.Generator().manual_seed(5)) * 0.8).to(torch.bfloat16)
@@ -138,6 +142,59 @@ def test_each_mutation_of_the_parallel_form_turns_the_comparison_red(monkeypatch
     out, want, _m, _model = run_block(monkeypatch, tmp_path, text.replace(old, new, 1), 4)
     with pytest.raises(AssertionError):
         check(out, want)
+
+
+# ---- the weight format of the sharded experts (issue 731: bfp4 only above a measured bar; the plan command says so) ---------------------------------------------
+
+def dtype_text(monkeypatch, fmt, budget=TOTAL // 2):
+    monkeypatch.setattr(pt, "MOE_EXPERT_DTYPE", fmt)
+    return parallel_text(monkeypatch, budget)
+
+
+def test_the_expert_format_is_bf16_unless_the_environment_names_bfp8_or_bfp4():
+    assert pt._moe_dtype({}) == "bf16"
+    assert pt._moe_dtype({"ORCHARD_MOE_EXPERT_DTYPE": "bfp4"}) == "bfp4"
+    assert pt._moe_dtype({"ORCHARD_MOE_EXPERT_DTYPE": " bfp8 "}) == "bfp8"
+    for bad in ("fp8", "int4", "BFP4x", "0"):
+        with pytest.raises(ValueError, match="ORCHARD_MOE_EXPERT_DTYPE"):
+            pt._moe_dtype({"ORCHARD_MOE_EXPERT_DTYPE": bad})
+
+
+def test_the_generated_text_names_the_format_and_the_bytes_each_format_takes(monkeypatch):
+    text = dtype_text(monkeypatch, "bfp4")
+    assert 'MOE_EXPERT_DTYPE = "bfp4"' in text and "bfloat4_b" in text and "_BYTES_PER_ELEMENT" in text
+
+
+@pytest.mark.parametrize("fmt,bound", [("bfp8", 0.12), ("bfp4", 0.40)])
+def test_the_block_with_quantized_experts_stays_near_the_reference_and_is_not_exact(monkeypatch, tmp_path, fmt, bound):
+    text = dtype_text(monkeypatch, fmt)
+    out, want, _m, _model = run_block(monkeypatch, tmp_path, text, 2)
+    scale = want.abs().max().item()
+    err = (out.t[0].float().reshape(want.shape) - want).abs().max().item()
+    assert 0.002 * scale < err < bound * scale, f"{fmt}: error {err / scale:.4f} of scale"
+
+
+def test_the_uploaded_expert_weights_are_the_rounded_values_not_the_bf16_ones(monkeypatch, tmp_path):
+    text = dtype_text(monkeypatch, "bfp4")
+    _o, _w, _mod, model = run_block(monkeypatch, tmp_path, text, 2)
+    w = model["dev"]["model.layers.0.mlp.experts.slot0.gate_proj.weight"]
+    assert w.dtype == "bfloat4_b"
+    vals = w.t[0, 0]
+    assert len({round(float(v), 6) for v in vals[0, :16]}) <= 8 * 2, "a block of 16 bfp4 values has few distinct magnitudes"
+
+
+def test_the_chip_count_check_uses_the_bytes_of_the_chosen_format(monkeypatch, tmp_path):
+    """The tiny experts hold 786432 bytes in bf16 and 221184 in bfp4. With a budget of 393216 one chip cannot hold them in bf16 and can in bfp4."""
+    with pytest.raises(ValueError, match="at least 2 chips"):
+        run_block(monkeypatch, tmp_path, dtype_text(monkeypatch, "bf16"), 1)
+    out, want, _m, _model = run_block(monkeypatch, tmp_path, dtype_text(monkeypatch, "bfp4"), 1)
+    assert out.t.shape[0] == 1
+
+
+def test_the_refusal_names_the_format_when_a_smaller_format_would_fit(monkeypatch, tmp_path):
+    text = dtype_text(monkeypatch, "bf16", budget=TOTAL // 8)         # 98304 bytes: bf16 needs 8 chips, bfp4 (221184) needs 3
+    with pytest.raises(ValueError, match=r"in bf16 .* at least 8 chips"):
+        run_block(monkeypatch, tmp_path, text, 4)
 
 
 # ---- the budget override ----------------------------------------------------------------------------------------------------------------------

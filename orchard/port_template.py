@@ -1004,6 +1004,21 @@ register_block_family(BlockFamily(
 # blocks stay stubs with a reason that names the budget and issue 723 (experts across chips).
 MOE_REFERENCE_TEST = "tests/test_port_template_moe.py::test_generated_sparse_moe_matches_the_transformers_module"
 MOE_DENSE_MAX_EXPERTS = 16          # the dense-masked form runs every expert on every token; 16 is the size probe 11 ran at the real widths
+MOE_EXPERT_FORMATS = ("bf16", "bfp8", "bfp4")
+
+
+def _moe_dtype(environ) -> str:
+    """The weight format of the sharded routed experts: `ORCHARD_MOE_EXPERT_DTYPE` (bf16, bfp8 or bfp4) when set, else bf16. A format below bfp8 needs a measured fidelity
+    score first (`tt-orchard plan` applies the rule, issue 731); this variable is the operator's word that it has one."""
+    raw = environ.get("ORCHARD_MOE_EXPERT_DTYPE", "").strip()
+    if not raw:
+        return "bf16"
+    if raw not in MOE_EXPERT_FORMATS:
+        raise ValueError(f"ORCHARD_MOE_EXPERT_DTYPE must be one of {', '.join(MOE_EXPERT_FORMATS)}, got {raw[:40]!r}")
+    return raw
+
+
+MOE_EXPERT_DTYPE = _moe_dtype(os.environ)
 def _moe_budget(environ) -> int:
     """The per-chip budget for the routed experts: `ORCHARD_MOE_EXPERT_BYTES_MAX` (a positive whole number of bytes) when it is set, else half a chip's DRAM. The variable
     lets a rehearsal on a tiny checkpoint use the expert-parallel form, which a real-sized checkpoint triggers by itself."""
@@ -1155,12 +1170,15 @@ def _moe_experts_gathered(model, prefix, x, chosen, scores, experts):
 
 
 _EXPERT_NAME = re.compile(r"(.*)\\.experts\\.(\\d+)\\.(gate_proj|up_proj|down_proj)\\.weight$")
-MOE_BYTES_PER_CHIP = __BUDGET__          # the routed experts of the whole checkpoint, in bf16, may take this much on one chip
+MOE_BYTES_PER_CHIP = __BUDGET__          # the routed experts of the whole checkpoint, in the format below, may take this much on one chip
+MOE_EXPERT_DTYPE = "__DTYPE__"
+_BYTES_PER_ELEMENT = {"bf16": 2.0, "bfp8": 1.0625, "bfp4": 0.5625}          # bfp: one shared exponent byte per 16 values
+_TTNN_DTYPE = {"bf16": "bfloat16", "bfp8": "bfloat8_b", "bfp4": "bfloat4_b"}
 
 
-def _upload_shard(model, t, layout):
-    """A host tensor [chips, ...] onto the mesh as bf16, slice c on chip c (shape per chip: the same with a leading 1)."""
-    return ttnn.from_torch(t, dtype=ttnn.bfloat16, layout=layout, device=model["mesh_device"], memory_config=ttnn.DRAM_MEMORY_CONFIG,
+def _upload_shard(model, t, layout, dtype="bf16"):
+    """A host tensor [chips, ...] onto the mesh in `dtype` (bf16, bfp8 or bfp4; the host tensor is bf16), slice c on chip c (shape per chip: the same with a leading 1)."""
+    return ttnn.from_torch(t, dtype=getattr(ttnn, _TTNN_DTYPE[dtype]), layout=layout, device=model["mesh_device"], memory_config=ttnn.DRAM_MEMORY_CONFIG,
                            mesh_mapper=ttnn.ShardTensorToMesh(model["mesh_device"], dim=0))
 
 
@@ -1181,10 +1199,10 @@ def _moe_upload_parallel(model, tensors):
         if PLACEMENT.get(_pattern(name)) == "expert_shard":
             m = _EXPERT_NAME.match(name)
             groups.setdefault(m.group(1), {})[(int(m.group(2)), m.group(3))] = name
-    total = 2 * sum(tensors[n].numel() for held in groups.values() for n in held.values())
+    total = _BYTES_PER_ELEMENT[MOE_EXPERT_DTYPE] * sum(tensors[n].numel() for held in groups.values() for n in held.values())
     if total / chips > MOE_BYTES_PER_CHIP:
-        raise ValueError(f"the routed experts hold {total / 2 ** 30:.1f} GiB in bf16 and one chip may hold {MOE_BYTES_PER_CHIP / 2 ** 30:.1f} GiB of them, so this checkpoint "
-                         f"needs at least {-(-total // MOE_BYTES_PER_CHIP)} chips; the device has {chips}")
+        raise ValueError(f"the routed experts hold {total / 2 ** 30:.1f} GiB in {MOE_EXPERT_DTYPE} and one chip may hold {MOE_BYTES_PER_CHIP / 2 ** 30:.1f} GiB of them, so this "
+                         f"checkpoint needs at least {-(-int(total) // MOE_BYTES_PER_CHIP)} chips; the device has {chips}")
     for prefix, held in groups.items():
         experts = 1 + max(e for e, _ in held)
         if experts % chips:
@@ -1194,7 +1212,7 @@ def _moe_upload_parallel(model, tensors):
             for proj in ("gate_proj", "up_proj", "down_proj"):
                 shape = tensors[held[(j, proj)]].t().shape
                 stack = torch.stack([tensors[held[(c * per + j, proj)]].to(torch.bfloat16).t().contiguous() for c in range(chips)]).reshape(chips, 1, *shape)
-                model["dev"][f"{prefix}.experts.slot{j}.{proj}.weight"] = _upload_shard(model, stack, ttnn.TILE_LAYOUT)
+                model["dev"][f"{prefix}.experts.slot{j}.{proj}.weight"] = _upload_shard(model, stack, ttnn.TILE_LAYOUT, MOE_EXPERT_DTYPE)
 
 
 def _moe_experts_parallel(model, prefix, x, chosen, scores, experts):
@@ -1246,7 +1264,7 @@ def _sparse_moe(model, prefix, x, experts, top_k, norm_topk, dense, parallel=Fal
 def _sparse_moe_helpers() -> list:
     """The helper functions as lines; each function's first comment line is the generated-block mark."""
     mark = f"    {GENERATED_BLOCK_MARK} sparse_moe"
-    text = _SPARSE_MOE_HELPERS.replace("__BUDGET__", str(int(MOE_EXPERT_BYTES_MAX)))
+    text = _SPARSE_MOE_HELPERS.replace("__BUDGET__", str(int(MOE_EXPERT_BYTES_MAX))).replace("__DTYPE__", MOE_EXPERT_DTYPE)
     return [mark if l.strip() == "# MARK" else l for l in text.rstrip("\n").split("\n")] + ["", ""]
 
 
