@@ -164,6 +164,23 @@ again on the same chips and writes the new record. A change to `test-result.json
 nothing, the rounds end. After the last round the stage goes on as a failed test: the finish phase records it and the next attempt
 starts again.
 
+## Reading a disagreement
+
+A low top-1 agreement does not always mean a wrong port. Look at the line that says how many disagreements are near-ties of the reference (the
+record's `near_ties` block). At a near-tie the reference's own top two logits differ by at most 0.125, which is two bf16 steps at a logit of 8
+to 16, so any bf16 port can flip it. A skills-only port of the tiny Qwen4 had 3 mismatches in about 300 positions, and all 3 were such ties.
+The block is reported and not gated, and the gate recomputes it from the stage 1 file. A disagreement outside the ties is where to look.
+
+To find where a real disagreement starts, compare each layer's output with the reference's at the same input. A good port keeps every layer
+at a correlation of 0.9999 or better. The first layer that drops names the block to read. A block that picks discrete items from scores (a
+sparse-attention indexer's top-k blocks, a mixture router's experts) can choose differently when two scores are close. Look at the score
+margin of the row that flipped before you change the port. Computing the scores in float32 narrows the margin where this happens and does
+not remove it.
+
+A causal model gives the same predictions from one forward pass over the whole sequence as from feeding the tokens one at a time. A port can use
+that to check itself: `prefill` of a prompt and `prefill` of a shorter prompt followed by `decode_step` must agree. Check lengths that sit on a
+boundary of the tile size: 1, 2 and 3 tokens, exactly 32, and 33.
+
 ## Goal
 
 The finish phase writes `result.json` in your stage directory:

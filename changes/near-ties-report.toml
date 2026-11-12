@@ -1,0 +1,2 @@
+target = "0.9.164"
+summary = "Stage 2 reports which top-1 disagreements are near-ties of the reference, the gate recomputes the block, and the full-port skill says how to read a disagreement (issue 740)."

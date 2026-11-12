@@ -92,6 +92,7 @@ JSON_MAX = 16 * 1024 * 1024
 SOURCE_MAX = 2 * 1024 * 1024
 TOP5_FILE = "stages/1/evidence/reference/top5-logits.json"      # the reference's log-probability of each token it chose (issue 731)
 FIDELITY_TOLERANCE = 1e-6             # the gate's recomputed fidelity against the value in the record
+TIE_GAP = 0.125            # equal to TIE_GAP in the port_check template (a test keeps them equal)
 TOLERANCE = 1e-6                      # the gate's recomputed agreement against the number result.json reports
 
 
@@ -279,6 +280,8 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
 
     if _ids(chip_ids) and chip_ids:
         _fidelity_reasons(record, run_dir, len(chip_ids), reasons)
+        if _ids(record.get("reference_ids")) and len(record["reference_ids"]) == len(chip_ids):
+            _near_tie_reasons(record, run_dir, record["reference_ids"], chip_ids, reasons)
 
     # ---- a sparse attention the check did or did not exercise (issue 638) ----
     if stage == 2 and entry is None and _ids(chip_ids) and chip_ids:
@@ -522,6 +525,51 @@ def _fidelity_reasons(record: dict, run_dir: Path, positions: int, reasons: list
     if on_disk != ref_lp:
         reasons.append(f"fidelity reference_logprobs are not the first log-probabilities of the stage 1 reference ({TOP5_FILE}): "
                        "the score was made against numbers the reference did not produce")
+
+
+def _near_tie_reasons(record: dict, run_dir: Path, ref_ids: list, chip_ids: list, reasons: list) -> None:
+    """The record's report-only `near_ties` block, when it has one: recomputed here from the record's own ids and the stage 1 top-5 file. It never
+    fails a run for the number of disagreements; it fails a block that does not match what the reference on disk says, since the block is
+    evidence for reading the agreement."""
+    block = record.get("near_ties")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        reasons.append("near_ties must be an object")
+        return
+    f = _inside(run_dir, TOP5_FILE)
+    if f is None:
+        reasons.append(f"near_ties: {TOP5_FILE} is not a file in the run directory, so the block cannot be checked")
+        return
+    try:
+        steps = safeio.read_json(f, max_bytes=JSON_MAX, expect=dict).get("steps")
+    except safeio.SafeReadError as exc:
+        reasons.append(f"{TOP5_FILE} is not readable JSON: {exc.reason}")
+        return
+    n = len(chip_ids)
+    if not isinstance(steps, list) or len(steps) < n or len(ref_ids) < n:
+        reasons.append("near_ties: the stage 1 top-5 file has fewer steps than the record compares")
+        return
+
+    def logit(step, token):
+        for e in (step.get("top5") if isinstance(step, dict) and isinstance(step.get("top5"), list) else []):
+            if isinstance(e, dict) and e.get("id") == token and safeio.is_finite_number(e.get("logit")):
+                return float(e["logit"])
+        return None
+    wrong = [i for i in range(n) if chip_ids[i] != ref_ids[i]]
+    ties = []
+    for i in wrong:
+        a, b = logit(steps[i], ref_ids[i]), logit(steps[i], chip_ids[i])
+        if a is not None and b is not None and abs(a - b) <= TIE_GAP:
+            ties.append(i)
+    if block.get("tie_gap") != TIE_GAP or block.get("disagreements") != len(wrong) or block.get("near_tie_positions") != ties \
+            or block.get("near_ties") != len(ties):
+        reasons.append(f"near_ties does not match what the gate recomputed from the record's ids and {TOP5_FILE}: "
+                       f"{len(wrong)} disagreements, {len(ties)} near-ties at {ties} (gap {TIE_GAP})")
+        return
+    want = (n - len(wrong) + len(ties)) / n
+    if not _num(block.get("agreement_excluding_near_ties")) or abs(block["agreement_excluding_near_ties"] - want) > 1e-9:
+        reasons.append(f"near_ties agreement_excluding_near_ties {block.get('agreement_excluding_near_ties')!r} differs from the {want} the gate recomputed")
 
 
 def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list, record_sha: str | None = None) -> None:
