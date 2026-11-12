@@ -1,0 +1,3 @@
+target = "0.9.167"
+summary = "Expert placement across chips: an owner for each routed expert, and a CPU model of the split MoE computation that the chip emitter has to match (issue 723)."
+pr = 745
