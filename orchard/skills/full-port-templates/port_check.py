@@ -98,6 +98,7 @@ REFERENCE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT = "stages/1/evidence/reference/prompt-ids.json"
 TOP5 = "stages/1/evidence/reference/top5-logits.json"       # holds the reference's own log-probability of each token it chose (reference_gate.py)
 FIDELITY_SCALE = 10.0            # Compression-Bench: 10 means the port predicts the reference's tokens as the reference does
+TIE_GAP = 0.125                  # choice: two bf16 steps at a logit of 8 to 16 (0.0625 each); a flip inside it is a tie any bf16 port could lose
 FIDELITY_MIN_TOKENS = 4000       # below this a difference of a few percent is inside the noise (scripts/fidelity_score.py)
 MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache
 FREE_RUN_TOKENS = 48             # choice: a few sentences of text for the person who reads it
@@ -1051,19 +1052,52 @@ def static_main(flags) -> int:
     return 0
 
 
-def reference_logprobs(n: int) -> list | None:
-    """The reference's log-probability of each of its first `n` chosen tokens, or None when the stage 1 file has none (a reference made before
-    issue 731) or they do not line up with the ids."""
+def top5_steps() -> list | None:
+    """The `steps` list of the stage 1 top-5 file, or None when the file is missing, unreadable or has no such list."""
     try:
         with open(RUN_DIR / TOP5, "rb") as fh:      # hardening: ok the supervisor's own stage 1 file under the run directory; bounded read in a try
             data = json.loads(fh.read(64 * 1024 * 1024))
     except (OSError, ValueError):
         return None
     steps = data.get("steps") if isinstance(data, dict) else None
-    if not isinstance(steps, list) or len(steps) < n:
+    return steps if isinstance(steps, list) else None
+
+
+def reference_logprobs(n: int) -> list | None:
+    """The reference's log-probability of each of its first `n` chosen tokens, or None when the stage 1 file has none (a reference made before
+    issue 731) or they do not line up with the ids."""
+    steps = top5_steps()
+    if steps is None or len(steps) < n:
         return None
     out = [s.get("logprob") if isinstance(s, dict) else None for s in steps[:n]]
     return out if all(isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float('inf') and v <= 1e-6 for v in out) else None
+
+
+def _logit_of(step, token: int):
+    """The reference's logit for `token` at one step, when that token is in the step's top 5; otherwise None."""
+    top = step.get("top5") if isinstance(step, dict) else None
+    for e in top if isinstance(top, list) else []:
+        if isinstance(e, dict) and e.get("id") == token and isinstance(e.get("logit"), (int, float)) and not isinstance(e.get("logit"), bool):
+            return float(e["logit"])
+    return None
+
+
+def near_tie_block(ref: list, chip: list, steps) -> dict | None:
+    """Report-only: how many of the port's top-1 disagreements are near-ties of the reference. A disagreement is a near-tie when the port's token
+    and the reference's token are both in the reference's top 5 at that position and their logits differ by at most TIE_GAP (two bf16 steps at a
+    logit of 8 to 16), so any bf16 port could flip it. The block lists those positions so the gate can recompute it. None when the
+    stage 1 file has no top 5 to look at."""
+    n = len(ref)
+    if not isinstance(steps, list) or len(steps) < n or len(chip) != n:
+        return None
+    wrong = [i for i in range(n) if chip[i] != ref[i]]
+    ties = []
+    for i in wrong:
+        a, b = _logit_of(steps[i], ref[i]), _logit_of(steps[i], chip[i])
+        if a is not None and b is not None and abs(a - b) <= TIE_GAP:
+            ties.append(i)
+    return {"tie_gap": TIE_GAP, "disagreements": len(wrong), "near_ties": len(ties), "near_tie_positions": ties,
+            "agreement_excluding_near_ties": (n - len(wrong) + len(ties)) / n}
 
 
 def fidelity_block(ref_lp: list, chip_lp: list) -> dict:
@@ -1142,6 +1176,7 @@ def main() -> int:
     finally:
         w.stop()
     refuse_links()                  # again: a link made while the port ran
+    ties = near_tie_block(ref, chip, top5_steps())
     if FORGED.is_set():
         raise PortFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
 
@@ -1155,6 +1190,7 @@ def main() -> int:
               "reference_ids": ref, "chip_ids": chip,
               "top1_agreement": agreement,
               **({"fidelity": fidelity_block(ref_lp, chip_lp)} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
+              **({"near_ties": ties} if ties is not None else {}),
               "chips": chips, "load_s": load_s, "free_run_ids": free, "free_run_text": free_run_text(model_dir, free),
               "device_ops": device_ops.record(),
               "port_sources": port_sources(), "template_sha256": sha_file(__file__),
@@ -1164,6 +1200,10 @@ def main() -> int:
     tmp.write_bytes(data)
     os.replace(tmp, RECORD)
     print(f"top-1 agreement {record['top1_agreement']:.4f} over {n} positions", flush=True)
+    if "near_ties" in record and record["near_ties"]["disagreements"]:
+        t = record["near_ties"]
+        print(f"{t['near_ties']} of {t['disagreements']} disagreements are near-ties of the reference (logits within {t['tie_gap']}); agreement without "
+              f"them {t['agreement_excluding_near_ties']:.4f} (reported, not gated)", flush=True)
     if "fidelity" in record:
         print(f"fidelity {record['fidelity']['value']:.3f} (10 = predicts the reference's tokens as the reference does; reference greedy text, "
               f"{n} tokens, reported not gated)", flush=True)
