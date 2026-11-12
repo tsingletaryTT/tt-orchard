@@ -238,6 +238,9 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("caches", parents=[common, _caches.parser(add_help=False)],
                    help="list the tensor caches (here and on the lab) and prune the ones no run uses")
     from orchard import drop_check as _drop_check
+    from orchard import plan as _plan
+    sub.add_parser("plan", parents=[common, _plan.parser(add_help=False)],
+                   help="what precision and placement a checkpoint needs on N chips, from its safetensors headers alone (read-only)")
     sub.add_parser("drop-check", parents=[common, _drop_check.parser(add_help=False)],
                    help="say which bring-up route a new Qwen release takes, from its config alone (read-only)")
     dwp = sub.add_parser("drop-watch", parents=[common],
@@ -1219,6 +1222,10 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _coder_speed(args, env, home, out)
     if args.cmd == "ui":
         return _ui(args, env, home, out)
+    if args.cmd == "plan":
+        from orchard import plan as _plan_mod
+        return _plan_mod.main([args.snapshot, "--chips", str(args.chips), "--chip-gib", str(args.chip_gib), "--weight-share", str(args.weight_share)]
+                              + (["--json"] if args.json else []), out)
     if args.cmd == "drop-check":
         from orchard import drop_check
         try:
