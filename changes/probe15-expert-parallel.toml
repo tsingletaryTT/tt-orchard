@@ -1,0 +1,3 @@
+target = "0.9.169"
+summary = "Probe 15: a MoE experts layer split over the two chips of one board with an all-reduce matches the unsplit layer on a board (issue 723)."
+pr = 747
