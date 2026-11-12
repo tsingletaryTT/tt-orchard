@@ -1,7 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Test-run hooks and shared fixtures."""
+import os
+from pathlib import Path
+
 import pytest
+
+# Tests that start processes with multiprocessing's "spawn" method (tests/test_telegraph_store.py) need those children to import
+# `orchard`. The package is not installed, and under pytest-xdist the repo root is not on a worker's sys.path, so the children
+# failed with ModuleNotFoundError and the pool waited until the 300 s timeout (issue 679). A child inherits the environment, so the
+# repo root goes in PYTHONPATH once, here.
+_REPO = str(Path(__file__).resolve().parent.parent)
+if _REPO not in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (_REPO, os.environ.get("PYTHONPATH", "")) if p)
 
 
 class StubTools:

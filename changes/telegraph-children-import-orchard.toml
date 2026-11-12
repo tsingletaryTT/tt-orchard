@@ -1,0 +1,3 @@
+target = "0.9.167"
+summary = "Test children started with multiprocessing spawn find the orchard package, which ends the seven four-process telegraph test failures in the full suite (issue 679)."
+pr = 744
