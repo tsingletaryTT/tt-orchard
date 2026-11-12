@@ -5562,3 +5562,20 @@ Flash-Next on four chips is now possible in principle: bfp4 experts are 17.0 GB 
 ### 2026-11-12 - the generated loader reads one tensor at a time (issue 723)
 
 The generated `read_tensors` read every tensor of the checkpoint into one dict in host memory before uploading anything, so a 360 GB Flash-Next checkpoint could not load on a host with 249 GB of RAM. It now returns `_Tensors`, a mapping that opens the file and reads a tensor only when it is indexed (`tensors[name]`); `shape(name)`, `numel(name)` and `is_float(name)` come from the safetensors headers and read no data. `load` walks the names, skips the sharded experts, reads and uploads the other tensors one at a time, and `_moe_upload_parallel` reads the experts one slot at a time (the chips' tensors of one slot are stacked, uploaded and released), sizing the chip-count check from headers. Each expert tensor is read from disk exactly once. Tests (3 new, 84 in the two MoE files; 870 in the wider port set): the read-once count per tensor, the number of expert-sized tensors alive at once during `load` (under half of all), and the header-only shape and numel; two mutations (experts also read in the loop, and an eager reader) went red. Chip run (parallel form, bfp4 experts, `local/tiny-qwen4-moe`, ledger 20:33:05Z to 21:27:00Z, about 54 minutes): stages 0 to 6 pass, 7 skipped, 8 pass; stage 2 top-1 1.0, fidelity 10.006, prefill against prefill-plus-decode agreeing, 576,006 device and 65,547 host elements (the same as the eager loader); stage 4 ran the 2-chip and 4-chip entries. Not done: the Flash-Next-size speed of the per-slot loop.
+
+## 2026-11-12: probe 16 times the 128-expert loop on one chip (issue 723)
+
+`scripts/qwen4_ops_probe/p16_moe_loop_cost.py` runs the per-slot gather/scatter loop of the generated expert-parallel block on one chip that holds 128 expert slots at Flash widths (hidden 2560, expert width 640, bfp4 weights, top 10 of 512 experts, random routing, random weights). It times the host work that builds the id, weight and scatter tensors, the upload of those tensors, the device work, and the whole loop. Run log: `docs/run-logs/2026-11-12-probe16-moe-loop-cost-one-chip.json`. Steady-state wall times (the fourth call; the first includes compilation), for one layer on one chip:
+
+| tokens | slots hit on this chip | host prep | upload | device | whole loop |
+|---|---|---|---|---|---|
+| 1 | 3 | 0.4 ms | 0.1 ms | 0.4 ms | 0.9 ms |
+| 8 | 17 | 0.5 ms | 0.6 ms | 2.2 ms | 3.2 ms |
+| 32 | 56 | 0.9 ms | 1.7 ms | 7.0 ms | 9.7 ms |
+| 256 | 127 | 2.1 ms | 4.2 ms | 18.5 ms | 25.1 ms |
+
+Each hit slot costs about 0.13 to 0.15 ms of device time and 0.17 to 0.3 ms with host prep and upload. The device time per slot barely changes between 32 and 256 tokens, so the loop is limited by the number of launches, not by matmul size.
+
+What this means for Flash-Next on four chips (my arithmetic from these numbers, not a measurement). The generated loop visits slot j if any of the four chips has a token on its expert j, so at one token it visits about 10 slots (10 picks land on 10 mostly different slots) and at 32 tokens about 117. That gives roughly 3 ms per layer at one token, 11 ms at 8 tokens, 20 ms at 32 tokens and 25 ms for a 256-token prefill. Over 48 layers the expert loop alone would allow about 7 tokens per second at batch 1, about 33 tokens per second in aggregate at batch 32, and about 210 tokens per second of prefill. Attention, the router read-back, the all-reduce and the shared expert come on top.
+
+Not measured: the all-reduce and four chips together (probe 15 measured the all-reduce alone at about 0.1 ms), the read-back of the router's choices to the host that the loop needs once per layer, real routing skew (probe on OLMoE: the busiest 25% of experts take 61% of picks, which lowers the number of slots hit), trace replay (the loop is launch-bound, so a trace may remove much of the 0.13 ms per slot), and any quality result (the weights are random). 5 CPU tests; one mutation of the scatter matrix turned two of them red.
