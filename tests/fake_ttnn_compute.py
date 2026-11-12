@@ -21,12 +21,28 @@ COUNTS: collections.Counter = collections.Counter()
 class Tensor:
     """A device tensor: a torch tensor plus whether it was replicated on a mesh."""
 
-    def __init__(self, t: torch.Tensor, replicated: bool = False, layout: str = "TILE", chips: int = 0):
+    def __init__(self, t: torch.Tensor, replicated: bool = False, layout: str = "TILE", chips: int = 0, dtype: str = "bfloat16"):
+        self.dtype = dtype          # "bfloat16", or the block-float format the values were rounded to ("bfloat8_b", "bfloat4_b")
         self.t = t
         self.replicated = replicated
         self.layout = layout
         self.chips = chips          # > 0: `t` holds one slice per chip along dim 0 (ShardTensorToMesh); `shape` is one chip's
         self.shape = (1,) + tuple(t.shape[1:]) if chips else tuple(t.shape)
+
+
+def _block_float(x: torch.Tensor, mant_bits: int) -> torch.Tensor:
+    """Round to a shared power-of-two exponent per 16 values along the last dimension, each value keeping `mant_bits` mantissa bits and a sign (the block-float
+    formats of the chip, approximately: this is the rounding of scripts/fidelity_score.py)."""
+    n = x.shape[-1]
+    pad = (-n) % 16
+    if pad:
+        x = torch.cat([x, x.new_zeros(*x.shape[:-1], pad)], dim=-1)
+    g = x.reshape(*x.shape[:-1], -1, 16)
+    amax = g.abs().amax(dim=-1, keepdim=True).clamp_min(1e-30)
+    step = torch.exp2(torch.floor(torch.log2(amax)) - (mant_bits - 1))
+    lim = (2 ** mant_bits - 1) * step
+    q = ((g / step).round() * step).clamp(-lim, lim)
+    return q.reshape(*x.shape[:-1], -1)[..., :n]
 
 
 def _mk(out: torch.Tensor, *inputs, layout=None, replicated=False) -> "Tensor":
@@ -104,6 +120,7 @@ def make() -> types.ModuleType:
     """The fake module, fresh (the counts are shared)."""
     m = types.ModuleType("ttnn")
     m.bfloat16, m.uint32, m.int32, m.bfloat8_b = "bfloat16", "uint32", "int32", "bfloat8_b"
+    m.bfloat4_b = "bfloat4_b"
     m.TILE_LAYOUT, m.ROW_MAJOR_LAYOUT, m.DRAM_MEMORY_CONFIG = "TILE", "ROW_MAJOR", "DRAM"
     m.Tensor, m.MeshDevice = Tensor, MeshDevice
     m.ReplicateTensorToMesh, m.ConcatMeshToTensor = ReplicateTensorToMesh, ConcatMeshToTensor
@@ -124,7 +141,10 @@ def make() -> types.ModuleType:
             raise TypeError(f"a float tensor is uploaded as bfloat16 from a bfloat16 host tensor, got {tensor.dtype}")
         if layout not in ("TILE", "ROW_MAJOR"):
             raise TypeError("a layout is required")
-        return Tensor(tensor.float(), mesh_mapper is not None and not shard, layout, chips)
+        values = tensor.float()
+        if dtype in ("bfloat8_b", "bfloat4_b"):
+            values = _block_float(values, 7 if dtype == "bfloat8_b" else 3)
+        return Tensor(values, mesh_mapper is not None and not shard, layout, chips, dtype if dtype in ("bfloat8_b", "bfloat4_b") else "bfloat16")
 
     def to_torch(tensor, dtype=None, device=None, mesh_composer=None):
         _count("to_torch")
