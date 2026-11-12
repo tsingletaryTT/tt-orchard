@@ -57,6 +57,7 @@ rehearsal model is in docs/run-logs/2026-11-10-port-generator-sample.md.
 from __future__ import annotations
 
 import ast
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1003,7 +1004,18 @@ register_block_family(BlockFamily(
 # blocks stay stubs with a reason that names the budget and issue 723 (experts across chips).
 MOE_REFERENCE_TEST = "tests/test_port_template_moe.py::test_generated_sparse_moe_matches_the_transformers_module"
 MOE_DENSE_MAX_EXPERTS = 16          # the dense-masked form runs every expert on every token; 16 is the size probe 11 ran at the real widths
-MOE_EXPERT_BYTES_MAX = int(0.5 * defaults.CHIP_DRAM_GIB * 2 ** 30)     # half of a chip's DRAM (a choice, orchard/defaults.py): the rest holds the other weights, caches and activations
+def _moe_budget(environ) -> int:
+    """The per-chip budget for the routed experts: `ORCHARD_MOE_EXPERT_BYTES_MAX` (a positive whole number of bytes) when it is set, else half a chip's DRAM. The variable
+    lets a rehearsal on a tiny checkpoint use the expert-parallel form, which a real-sized checkpoint triggers by itself."""
+    raw = environ.get("ORCHARD_MOE_EXPERT_BYTES_MAX", "").strip()
+    if raw:
+        if not raw.isdigit() or int(raw) < 1:
+            raise ValueError(f"ORCHARD_MOE_EXPERT_BYTES_MAX must be a positive whole number of bytes, got {raw[:40]!r}")
+        return int(raw)
+    return int(0.5 * defaults.CHIP_DRAM_GIB * 2 ** 30)
+
+
+MOE_EXPERT_BYTES_MAX = _moe_budget(os.environ)     # half of a chip's DRAM (a choice, orchard/defaults.py): the rest holds the other weights, caches and activations
 _MOE_KIDS = frozenset({"gate", "experts", "shared_expert", "shared_expert_gate"})
 _MOE_PROJ = ("gate_proj", "up_proj", "down_proj")
 

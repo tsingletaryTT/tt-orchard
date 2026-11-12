@@ -138,3 +138,17 @@ def test_each_mutation_of_the_parallel_form_turns_the_comparison_red(monkeypatch
     out, want, _m, _model = run_block(monkeypatch, tmp_path, text.replace(old, new, 1), 4)
     with pytest.raises(AssertionError):
         check(out, want)
+
+
+# ---- the budget override ----------------------------------------------------------------------------------------------------------------------
+
+def test_the_budget_is_half_a_chips_dram_unless_the_environment_names_another():
+    assert pt._moe_budget({}) == 16 * 2 ** 30
+    assert pt._moe_budget({"ORCHARD_MOE_EXPERT_BYTES_MAX": "400000"}) == 400000
+    assert pt._moe_budget({"ORCHARD_MOE_EXPERT_BYTES_MAX": "  "}) == 16 * 2 ** 30
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "1e6", "lots", "12 34"])
+def test_a_budget_that_is_not_a_positive_whole_number_is_refused(bad):
+    with pytest.raises(ValueError, match="ORCHARD_MOE_EXPERT_BYTES_MAX"):
+        pt._moe_budget({"ORCHARD_MOE_EXPERT_BYTES_MAX": bad})
