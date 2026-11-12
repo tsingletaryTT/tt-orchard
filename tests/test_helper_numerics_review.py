@@ -87,3 +87,15 @@ def test_a_supporting_file_changed_added_or_removed_after_the_check_makes_the_re
         else:
             (port / "sub" / "deep.py").write_text("D = 9\n")
         assert port_repair.numerics_state(run, stage) == ("unreadable", None), action
+
+
+# ---- issue 703: a port that agrees but did not show its work on the device is not a pass ---------------------------------------------------
+
+def test_a_port_that_agrees_but_whose_device_ops_the_gate_refuses_is_not_a_pass(tmp_path, monkeypatch):
+    """The state "passed" feeds the helper's "helped" verdict, the model ladder and the best-port ranking, so it must include the device-ops check."""
+    run, stage = _checked_with_helper(tmp_path)
+    assert port_repair.numerics_state(run, stage)[0] == "passed"
+    from orchard import full_port
+    seen = []
+    monkeypatch.setattr(full_port, "_device_ops_reasons", lambda record, run_dir, reasons, stage_dir: (seen.append(1), reasons.append("dummy matmuls"))[0])
+    assert port_repair.numerics_state(run, stage) == ("unreadable", None) and seen

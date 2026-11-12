@@ -1,0 +1,3 @@
+target = "0.9.169"
+summary = "A port counts as passed only when its device-ops evidence is valid, and a rehearsal pass says in the ledger that it is not a quality result (issue 703 items 2 and 3)."
+pr = 748

@@ -233,6 +233,8 @@ STAGE_3_SEED_FILE_BYTES = 2 * 1024 * 1024  # each at most this big (the gate rea
 STAGE_3_SEED_ENTRIES = 1000               # the scan stops after this many entries of any kind (files, directories, links, caches): the file count alone
                                           # would let a directory of a million subdirectories be read to the end before anything refused it
 STAGE_3_SEED_DEPTH = 8                    # and at this many directory levels below the port directory
+REHEARSAL_STAGE_END_NOTE = ("full-port rehearsal (random weights): this pass checks the plumbing. The coherence and word-count checks are waived where "
+                            "the decision entries say so, so it is not a result about the model's quality")
 REHEARSAL_WORDS_WAIVED = "full-port rehearsal: word count waived"      # issue 568: the ledger decision written when the word count of the free-run text was waived
 REHEARSAL_WAIVED = "full-port rehearsal: coherence waived"      # the ledger decision written when stage 2 passed with `coherent` not true
 # The ledger decision written when a weights-only gate (stage 2, 4 or 7) passed with a measured `coherent` of false (`--weights-only-rehearsal`).
@@ -3905,6 +3907,10 @@ class Supervisor:
                 self._stage_0_residency(stage_dir)
             extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts(), "model_kind": kind_rec}
                      if n == 0 else {})
+            if self.full_port_rehearsal and n >= 2:
+                # Issue 703: a pass under the rehearsal flag shows the plumbing works. The coherence and word-count checks are waived (each waiver is
+                # its own decision entry), so a bundle must not be read as a result about quality.
+                extra["rehearsal"] = REHEARSAL_STAGE_END_NOTE
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)
             return "pass"
         if status == "pause":
