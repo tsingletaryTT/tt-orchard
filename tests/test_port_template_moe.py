@@ -250,21 +250,22 @@ def test_a_checkpoint_that_fuses_the_experts_is_refused_with_a_reason_that_says_
     assert "per-expert tensors" in reasons and "fused" in reasons
 
 
-def test_experts_that_do_not_fit_one_chip_stay_a_stub_that_names_the_budget_and_the_multi_chip_issue(monkeypatch):
+def test_experts_that_do_not_fit_one_chip_are_written_in_the_parallel_form(monkeypatch):
+    """Issue 723: over the per-chip budget the block is no longer a stub; every chip holds a share of the experts (tests/test_port_template_moe_parallel.py)."""
     monkeypatch.setattr(pt, "MOE_EXPERT_BYTES_MAX", 1000)
-    _text, p = _generate()
-    reasons = " ".join(s.reason for s in p.stubs if s.function.endswith("_mlp"))
-    assert {"_A_mlp", "_B_mlp", "_C_mlp"} <= {s.function for s in p.stubs}
-    assert "per-chip budget" in reasons and "multi-chip" in reasons and "723" in reasons
+    text, p = _generate()
+    assert p.stubs == [] and "parallel=True" in text
 
 
 def test_the_budget_counts_every_layer_not_one_layer_variant(monkeypatch):
-    """Four layers hold experts: 8 experts x 3 x 64 x 64 x 2 bytes each. A budget of one layer and a bit refuses, a budget of all four layers accepts."""
+    """Four layers hold experts: 8 experts x 3 x 64 x 64 x 2 bytes each. A budget of one byte less than all four layers picks the parallel form, a budget of all four
+    layers the replicated one."""
     per_layer = 8 * 3 * 64 * 64 * 2
     monkeypatch.setattr(pt, "MOE_EXPERT_BYTES_MAX", per_layer * 4 - 1)
-    assert _generate()[1].stubs
+    assert "parallel=True" in _generate()[0]
     monkeypatch.setattr(pt, "MOE_EXPERT_BYTES_MAX", per_layer * 4)
-    assert _generate()[1].stubs == []
+    text, p = _generate()
+    assert p.stubs == [] and "parallel=True" not in text
 
 
 def _flash_like(experts):
@@ -301,17 +302,17 @@ def _flash_like(experts):
     return construction, tensors
 
 
-def test_the_real_512_expert_shape_stays_a_stub_on_the_chip_budget_and_256_experts_are_written():
-    """4 layers x 512 experts x 3 x 2560 x 640 x 2 bytes = 18.8 GiB (20.1 GB): over the 16 GiB budget. 256 experts are 9.4 GiB: written, in the gather form (above the dense bound)."""
+def test_the_real_512_expert_shape_is_written_in_the_parallel_form_and_256_experts_in_the_replicated_gather_form():
+    """4 layers x 512 experts x 3 x 2560 x 640 x 2 bytes = 18.8 GiB (20.1 GB): over the 16 GiB budget, so each chip holds a share. 256 experts are 9.4 GiB: written
+    replicated, in the gather form (above the dense bound)."""
     mc, mt = _flash_like(512)
-    _text, p = _generate(mutate_construction=mc, mutate_tensors=mt)
-    reasons = " ".join(s.reason for s in p.stubs if s.function.endswith("_mlp"))
-    assert {"_A_mlp", "_B_mlp", "_C_mlp"} <= {s.function for s in p.stubs}
-    assert "18.8 GiB" in reasons and "16.0 GiB" in reasons and "multi-chip" in reasons
+    text, p = _generate(mutate_construction=mc, mutate_tensors=mt)
+    assert not {s.function for s in p.stubs} & {"_A_mlp", "_B_mlp", "_C_mlp"}
+    assert "experts=512, top_k=10, norm_topk=True, dense=False, parallel=True" in text
     mc, mt = _flash_like(256)
     text, p = _generate(mutate_construction=mc, mutate_tensors=mt)
     assert not {s.function for s in p.stubs} & {"_A_mlp", "_B_mlp", "_C_mlp"}
-    assert "experts=256, top_k=10, norm_topk=True, dense=False" in text
+    assert "experts=256, top_k=10, norm_topk=True, dense=False)" in text
 
 
 def test_the_expert_bound_and_the_chip_budget_are_stated_constants():
