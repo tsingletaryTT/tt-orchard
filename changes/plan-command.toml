@@ -1,0 +1,2 @@
+target = "0.9.166"
+summary = "tt-orchard plan: what precision and placement a checkpoint needs on N chips, from its safetensors headers alone (issue 739)."

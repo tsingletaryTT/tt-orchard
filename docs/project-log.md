@@ -5507,6 +5507,10 @@ First step of putting the Compression-Bench score on the happy path (PR 732 adde
 - Tests: `tests/test_port_check_fidelity.py` (17), one in `tests/test_reference_gate_template.py`. Eight mutations (no recomputation, no comparison with stage 1, no shape check, no max shift, swapped ratio, no noise note, accepting a positive or NaN reference, no `logprob` in the reference) each turn a test red. 1,074 related tests pass.
 - Not covered: a real chip run. Next: score the ports we have (tiny dense, Flash-width dense, Olmo-Hybrid) to see the spread before any threshold; a longer sampled-text run for a claim below a few percent; the dtype choice.
 
+### 2026-11-11 - `tt-orchard plan` (issue 739)
+
+Operator: "implement ... plan command" (the plan before any download, after reading the Strata fit plan). `tt-orchard plan SNAPSHOT_DIR [--chips N] [--json]` reads only safetensors headers, splits routed experts from everything else, prices bf16, bfp8 and bfp4 (2, 1.0625 and 0.5625 bytes per element, the ratios of probe 14), and says what each combination needs per chip replicated and with the experts split over the chips (not written yet: issue 723), with a best fit and the one measured fidelity pair as a quality note. Checked on the Qwen3-Coder-Next snapshot (80 B, 512 experts): bf16 148 GiB needs 7 chips split; bfp8 + bfp4 experts 42.8 GiB needs 2 chips, which is the two-chip profile the coder runs in. 15 tests, 7 mutations (6 red; the shared-expert guard was redundant and was removed).
+
 ### 2026-11-11 - lessons from a skills-only port of the tiny Qwen4 (issue 740)
 
 Operator: "instead of doing a trial like that, learn from all the choices sonnet made and implement them into tt-orchard." Claude Sonnet with the Tenstorrent skills alone ported the tiny Qwen4 in about 20 minutes (held-out check: log-probability differences up to 0.034, fidelity 9.96 to 10.01 on random weights). First change: stage 2 reports which top-1 disagreements are near-ties of the reference (`near_ties` block, report-only, recomputed by the gate; 13 tests, 5 mutations red), and `full-port-check.md` gains a section on reading a disagreement. Next: a prefill/decode length check.

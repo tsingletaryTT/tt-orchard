@@ -1022,6 +1022,14 @@ notifier. `drop-watch show --watch-dir DIR` prints the state. `tick --hub-dir RE
 directory, for rehearsals. A lock file keeps two ticks apart. The watcher never publishes or pushes anything and never
 sends a Hugging Face token.
 
+#### Before a download: `tt-orchard plan`
+
+`tt-orchard plan SNAPSHOT` reads the safetensors headers of a checkpoint directory (no weights are loaded) and prices it for the
+chips you have. It lists the bytes of the whole checkpoint and of its routed experts in bf16, bfp8 and bfp4, and recommends the
+largest format mix whose weights fit in a share of the DRAM. `--chips N` sets the chip count (default 4), `--chip-gib` (a number of GiB) the
+DRAM per chip, `--weight-share` (a fraction) the share the weights may take, and `--json` prints the result as JSON. The quality
+notes in the output quote measured fidelity scores for bfp8 and bfp4 (docs/project-log.md, issue 731).
+
 ### 4.1 Before you start
 
 - `gozer status` shows every chip `FREE` and no other lease.
