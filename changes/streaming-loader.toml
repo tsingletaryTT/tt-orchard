@@ -1,0 +1,3 @@
+target = "0.9.174"
+summary = "A generated port reads each checkpoint tensor from disk when it is needed (read-on-demand reader with header-only shapes), so a checkpoint larger than host memory can be loaded (issue 723)."
+pr = 755

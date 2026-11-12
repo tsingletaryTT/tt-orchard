@@ -1199,7 +1199,7 @@ def _moe_upload_parallel(model, tensors):
         if PLACEMENT.get(_pattern(name)) == "expert_shard":
             m = _EXPERT_NAME.match(name)
             groups.setdefault(m.group(1), {})[(int(m.group(2)), m.group(3))] = name
-    total = _BYTES_PER_ELEMENT[MOE_EXPERT_DTYPE] * sum(tensors[n].numel() for held in groups.values() for n in held.values())
+    total = _BYTES_PER_ELEMENT[MOE_EXPERT_DTYPE] * sum(tensors.numel(n) for held in groups.values() for n in held.values())
     if total / chips > MOE_BYTES_PER_CHIP:
         raise ValueError(f"the routed experts hold {total / 2 ** 30:.1f} GiB in {MOE_EXPERT_DTYPE} and one chip may hold {MOE_BYTES_PER_CHIP / 2 ** 30:.1f} GiB of them, so this "
                          f"checkpoint needs at least {-(-int(total) // MOE_BYTES_PER_CHIP)} chips; the device has {chips}")
@@ -1210,7 +1210,7 @@ def _moe_upload_parallel(model, tensors):
         per = experts // chips
         for j in range(per):
             for proj in ("gate_proj", "up_proj", "down_proj"):
-                shape = tensors[held[(j, proj)]].t().shape
+                shape = tuple(reversed(tensors.shape(held[(j, proj)])))          # the weight goes up transposed: [in, out]
                 stack = torch.stack([tensors[held[(c * per + j, proj)]].to(torch.bfloat16).t().contiguous() for c in range(chips)]).reshape(chips, 1, *shape)
                 model["dev"][f"{prefix}.experts.slot{j}.{proj}.weight"] = _upload_shard(model, stack, ttnn.TILE_LAYOUT, MOE_EXPERT_DTYPE)
 
@@ -1701,14 +1701,55 @@ def render(p: Plan) -> str:
     for k, v in sorted(p.placements.items()):
         L.append(f"    {_lit(k)}: {_lit(v)},")
     L += ["}", f"NORM_EPS = {_lit(dict(sorted(p.norm_eps.items())))}", "_NUMBER = re.compile(r\"(?<=\\.)\\d+(?=\\.|$)\")", "", ""]
-    L += ['def read_tensors(model_dir):',
-          '    """Every tensor of the checkpoint as {name: torch tensor}, from one file or from shards."""',
-          "    out = {}",
-          '    for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):',
-          '        with safe_open(path, framework="pt") as f:',
-          "            for name in f.keys():",
-          "                out[name] = f.get_tensor(name)",
-          "    return out", "", "",
+    L += ["class _Tensors:",
+          '    """The checkpoint as a mapping {name: torch tensor} that reads a tensor from disk only when it is asked for (`tensors[name]`), from one file or from shards.',
+          '    `shape(name)`, `numel(name)` and `is_float(name)` come from the file headers and read no data; `keys()` and `len()` read only the headers too."""',
+          "",
+          "    _FLOATS = frozenset({'F64', 'F32', 'F16', 'BF16', 'F8_E4M3', 'F8_E5M2'})",
+          "",
+          "    def __init__(self, model_dir):",
+          "        self._where = {}",
+          '        for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):',
+          '            with safe_open(path, framework="pt") as f:',
+          "                for name in f.keys():",
+          "                    self._where[name] = path",
+          "",
+          "    def keys(self):",
+          "        return self._where.keys()",
+          "",
+          "    def __iter__(self):",
+          "        return iter(self._where)",
+          "",
+          "    def __len__(self):",
+          "        return len(self._where)",
+          "",
+          "    def __contains__(self, name):",
+          "        return name in self._where",
+          "",
+          "    def __getitem__(self, name):",
+          '        with safe_open(self._where[name], framework="pt") as f:',
+          "            return f.get_tensor(name)",
+          "",
+          "    def _slice(self, name):",
+          '        with safe_open(self._where[name], framework="pt") as f:',
+          "            s = f.get_slice(name)",
+          "            return list(s.get_shape()), s.get_dtype()",
+          "",
+          "    def shape(self, name):",
+          "        return self._slice(name)[0]",
+          "",
+          "    def numel(self, name):",
+          "        n = 1",
+          "        for d in self.shape(name):",
+          "            n *= d",
+          "        return n",
+          "",
+          "    def is_float(self, name):",
+          "        return self._slice(name)[1] in self._FLOATS",
+          "", "",
+          "def read_tensors(model_dir):",
+          '    """The checkpoint as a read-on-demand mapping {name: torch tensor} (see _Tensors): a checkpoint far larger than host memory can be loaded one tensor at a time."""',
+          "    return _Tensors(model_dir)", "", "",
           "def _pattern(name):", '    return _NUMBER.sub("{i}", name)', "", "",
           "def _n_devices(mesh_device):",
           '    """How many chips the device the check opened holds (1 for ttnn.open_device, N for a mesh)."""',
@@ -1874,8 +1915,12 @@ def render(p: Plan) -> str:
           '    model["ck"] = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)',
           '    dev, host = model["dev"], model["host"]',
           "    tensors = read_tensors(model_dir)          # a local: the model object keeps no host copy of an uploaded weight",
-          "    for name, t in tensors.items():",
-          '        role = PLACEMENT.get(_pattern(name), "tile" if t.is_floating_point() else "host")',
+          "    for name in list(tensors.keys()):",
+          "        role = PLACEMENT.get(_pattern(name))",
+          '        if role == "expert_shard":',
+          "            continue          # uploaded sharded over the chips by _moe_upload_parallel after the loop, read from disk there",
+          "        t = tensors[name]          # one tensor at a time: it is released when the next one is read",
+          '        role = role or ("tile" if t.is_floating_point() else "host")',
           '        if role == "linear_weight":',
           "            dev[name] = _upload(model, t.to(torch.bfloat16).t().contiguous(), ttnn.TILE_LAYOUT)",
           '        elif role == "linear_bias" or role == "norm":',
@@ -1889,8 +1934,6 @@ def render(p: Plan) -> str:
           '        elif role == "conv_taps":',
           "            for j in range(t.shape[-1]):",
           '                dev[f"{name}.tap{j}"] = _upload(model, t[:, 0, j].to(torch.bfloat16).reshape(1, 1, 1, -1), ttnn.TILE_LAYOUT)',
-          '        elif role == "expert_shard":',
-          "            pass          # uploaded sharded over the chips by _moe_upload_parallel after the loop",
           '        elif role == "tile":',
           "            dev[name] = _upload(model, t.to(torch.bfloat16).reshape(1, 1, 1, -1) if t.dim() == 1 else t.to(torch.bfloat16).contiguous(), ttnn.TILE_LAYOUT)",
           "        else:",

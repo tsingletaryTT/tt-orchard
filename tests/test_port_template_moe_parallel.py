@@ -209,3 +209,107 @@ def test_the_budget_is_half_a_chips_dram_unless_the_environment_names_another():
 def test_a_budget_that_is_not_a_positive_whole_number_is_refused(bad):
     with pytest.raises(ValueError, match="ORCHARD_MOE_EXPERT_BYTES_MAX"):
         pt._moe_budget({"ORCHARD_MOE_EXPERT_BYTES_MAX": bad})
+
+
+# ---- the loader reads each tensor when it is needed (issue 723: a 360 GB checkpoint cannot be read into host memory first) -------------------------------------
+
+def counted_load(monkeypatch, tmp_path, text, chips):
+    """Load the tiny checkpoint with `safe_open` wrapped to count `get_tensor` calls by tensor name; returns the module, the model and the counts."""
+    import collections
+    mod = import_port(monkeypatch, text, tmp_path, name=f"generated_port_{next(_PORTS)}")
+    _config, block = _hf_block(11)
+    snap = _checkpoint(tmp_path, block)
+    reads = collections.Counter()
+    real = mod.safe_open
+
+    class Counting:
+        def __init__(self, path, framework="pt"):
+            self.f = real(path, framework=framework)
+
+        def __enter__(self):
+            self.f.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self.f.__exit__(*a)
+
+        def keys(self):
+            return self.f.keys()
+
+        def get_tensor(self, name):
+            reads[name] += 1
+            return self.f.get_tensor(name)
+
+        def get_slice(self, name):
+            return self.f.get_slice(name)
+
+    monkeypatch.setattr(mod, "safe_open", Counting)
+    model = mod.load(str(snap), fake.MeshDevice(chips))
+    return mod, model, reads
+
+
+def test_each_expert_tensor_is_read_from_disk_exactly_once(monkeypatch, tmp_path):
+    text = parallel_text(monkeypatch, TOTAL // 2)
+    _mod, _model, reads = counted_load(monkeypatch, tmp_path, text, 4)
+    experts = {n: c for n, c in reads.items() if ".experts." in n and ".slot" not in n}
+    assert len(experts) == 4 * 8 * 3                       # four layers, eight experts, three projections each
+    assert set(experts.values()) == {1}, {n: c for n, c in experts.items() if c != 1}
+
+
+def test_loading_the_model_does_not_hold_every_tensor_in_memory_at_once(monkeypatch, tmp_path):
+    """The reader hands out one tensor at a time: the most tensors alive at once during load is far below the checkpoint's tensor count."""
+    import gc
+    text = parallel_text(monkeypatch, TOTAL // 2)
+    mod = import_port(monkeypatch, text, tmp_path, name=f"generated_port_{next(_PORTS)}")
+    _config, block = _hf_block(11)
+    snap = _checkpoint(tmp_path, block)
+    alive = []
+    real_upload = mod._upload_shard
+
+    def watching(model, t, layout, dtype="bf16"):
+        gc.collect()
+        alive.append(sum(1 for o in gc.get_objects() if isinstance(o, torch.Tensor) and o.dim() == 2 and o.shape == (64, 64) and o.dtype == torch.bfloat16))
+        return real_upload(model, t, layout, dtype)
+
+    monkeypatch.setattr(mod, "_upload_shard", watching)
+    mod.load(str(snap), fake.MeshDevice(4))
+    total_experts = 4 * 8 * 3
+    assert alive and max(alive) < total_experts // 2, f"{max(alive)} expert-sized tensors alive at once out of {total_experts}"
+
+
+def test_the_lazy_reader_gives_shapes_without_reading_data(monkeypatch, tmp_path):
+    text = parallel_text(monkeypatch, TOTAL // 2)
+    mod = import_port(monkeypatch, text, tmp_path, name=f"generated_port_{next(_PORTS)}")
+    _config, block = _hf_block(11)
+    snap = _checkpoint(tmp_path, block)
+    reads = []
+    real = mod.safe_open
+
+    class Counting(real.__class__ if False else object):
+        def __init__(self, path, framework="pt"):
+            self.f = real(path, framework=framework)
+
+        def __enter__(self):
+            self.f.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self.f.__exit__(*a)
+
+        def keys(self):
+            return self.f.keys()
+
+        def get_tensor(self, name):
+            reads.append(name)
+            return self.f.get_tensor(name)
+
+        def get_slice(self, name):
+            return self.f.get_slice(name)
+
+    monkeypatch.setattr(mod, "safe_open", Counting)
+    tensors = mod.read_tensors(str(snap))
+    name = "model.layers.0.mlp.experts.3.gate_proj.weight"
+    assert tuple(tensors.shape(name)) == (64, 64) and tensors.numel(name) == 64 * 64
+    assert name in tensors and len(tensors) == len(list(tensors.keys()))
+    assert reads == []
+    assert tensors[name].shape == (64, 64) and reads == [name]
