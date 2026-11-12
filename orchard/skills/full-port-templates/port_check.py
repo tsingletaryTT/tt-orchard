@@ -98,6 +98,7 @@ REFERENCE = "stages/1/evidence/reference/generated-ids.json"
 PROMPT = "stages/1/evidence/reference/prompt-ids.json"
 TOP5 = "stages/1/evidence/reference/top5-logits.json"       # holds the reference's own log-probability of each token it chose (reference_gate.py)
 FIDELITY_SCALE = 10.0            # Compression-Bench: 10 means the port predicts the reference's tokens as the reference does
+LENGTH_CHECK_LENGTHS = (2, 3, 4, 31, 32, 33)      # choice: the shortest prompts and the sizes at and around one tile of 32 tokens, where padding bugs sit
 TIE_GAP = 0.125                  # choice: two bf16 steps at a logit of 8 to 16 (0.0625 each); a flip inside it is a tie any bf16 port could lose
 FIDELITY_MIN_TOKENS = 4000       # below this a difference of a few percent is inside the noise (scripts/fidelity_score.py)
 MAX_POSITIONS = 64               # choice: enough to give the agreement a spread, short enough to run in minutes on a cold cache
@@ -1100,6 +1101,31 @@ def near_tie_block(ref: list, chip: list, steps) -> dict | None:
             "agreement_excluding_near_ties": (n - len(wrong) + len(ties)) / n}
 
 
+def length_check(w, seq: list) -> dict:
+    """Report-only self-check of a causal port at short lengths and at the sizes around a tile: for each length L, one prefill of seq[:L] must give
+    the same next-token prediction as a prefill of seq[:L-1] followed by one decode step on seq[L-1]. It needs no reference. A port that pads
+    a prompt wrongly, or loses a token at a tile boundary, disagrees with itself here. A failure of the port is recorded as `error` and does not
+    fail the check (the worker's silence still does)."""
+    rows = []
+    try:
+        for n in LENGTH_CHECK_LENGTHS:
+            if n + 1 > len(seq):
+                continue
+            target = seq[n]
+            a = w.ask(op="prefill", ids=seq[:n], target=target)
+            lp_a = w.last.get("lp")
+            w.ask(op="prefill", ids=seq[:n - 1])
+            b = w.ask(op="decode", token=seq[n - 1], position=n - 1, target=target)
+            lp_b = w.last.get("lp")
+            rows.append({"length": n, "prefill_id": a, "decode_id": b, "agree": a == b,
+                         "logprob_delta": abs(lp_a - lp_b) if isinstance(lp_a, float) and isinstance(lp_b, float) else None})
+    except PortFailed as exc:
+        if "did not answer" in str(exc):
+            raise
+        return {"error": str(exc)[:600], "lengths": rows}
+    return {"lengths": rows, "all_agree": all(r["agree"] for r in rows)}
+
+
 def fidelity_block(ref_lp: list, chip_lp: list) -> dict:
     """The report-only fidelity of the port to the reference on the reference's own tokens: 10 * PPL_reference / PPL_port, which is
     10 * exp(mean(chip logprob) - mean(reference logprob)). The text is the reference's greedy text, so the number is not comparable with the
@@ -1161,6 +1187,7 @@ def main() -> int:
         for k in range(1, FREE_RUN_TOKENS):
             free.append(w.ask(op="decode", token=free[-1], position=len(prompt) + k - 1))
         agreement = sum(1 for a, b in zip(ref, chip) if a == b) / n
+        lengths = length_check(w, prompt + reference)      # after everything the record needs from the port; nothing in it can change the top-1 agreement
         layers_note, n_layers = None, 0
         if agreement < LAYER_DIAG_BELOW:          # advice for the coder, after everything the record needs; nothing in it can change the record
             try:
@@ -1191,6 +1218,7 @@ def main() -> int:
               "top1_agreement": agreement,
               **({"fidelity": fidelity_block(ref_lp, chip_lp)} if ref_lp is not None and all(isinstance(v, float) for v in chip_lp) else {}),
               **({"near_ties": ties} if ties is not None else {}),
+              "length_check": lengths,
               "chips": chips, "load_s": load_s, "free_run_ids": free, "free_run_text": free_run_text(model_dir, free),
               "device_ops": device_ops.record(),
               "port_sources": port_sources(), "template_sha256": sha_file(__file__),
@@ -1204,6 +1232,13 @@ def main() -> int:
         t = record["near_ties"]
         print(f"{t['near_ties']} of {t['disagreements']} disagreements are near-ties of the reference (logits within {t['tie_gap']}); agreement without "
               f"them {t['agreement_excluding_near_ties']:.4f} (reported, not gated)", flush=True)
+    lc = record["length_check"]
+    if "error" in lc:
+        print(f"length check: the port failed it: {lc['error']} (reported, not gated)", flush=True)
+    elif not lc["all_agree"]:
+        bad = [r["length"] for r in lc["lengths"] if not r["agree"]]
+        print(f"length check: prefill and prefill-then-decode give different next tokens at lengths {bad} (reported, not gated). A port that pads a "
+              "prompt or handles a tile boundary wrongly does this; look at how prefill and decode_step treat the last tokens.", flush=True)
     if "fidelity" in record:
         print(f"fidelity {record['fidelity']['value']:.3f} (10 = predicts the reference's tokens as the reference does; reference greedy text, "
               f"{n} tokens, reported not gated)", flush=True)
