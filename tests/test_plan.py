@@ -58,7 +58,7 @@ def test_each_format_is_priced_at_its_bytes_per_element(tmp_path):
 def test_a_dense_model_has_no_mixed_row_and_fits_replicated(tmp_path):
     res = plan.plan(snap(tmp_path, {"model.layers.0.mlp.gate_proj.weight": (64, 64)}), 1)
     assert [r["name"] for r in res["rows"]] == ["all bf16", "all bfp8", "all bfp4"]
-    assert res["recommendation"] == {"row": "all bf16", "placement": "replicated", "needs": None}
+    assert res["recommendation"] == {"row": "all bf16", "placement": "replicated", "gate": "ok", "needs": None}
 
 
 def test_a_model_too_big_to_replicate_needs_the_experts_split_and_the_plan_says_so_and_names_the_issue(tmp_path):
@@ -66,7 +66,7 @@ def test_a_model_too_big_to_replicate_needs_the_experts_split_and_the_plan_says_
     res = plan.plan(snap(tmp_path), 4, chip_gib=0.000175, share=1.0)
     row = {r["name"]: r for r in res["rows"]}["all bf16"]
     assert not row["fits_replicated"] and row["fits_sharded"] and row["min_chips_sharded"] == 2
-    assert res["recommendation"] == {"row": "all bfp8", "placement": "replicated", "needs": None}      # a smaller format that fits replicated beats a split of bf16
+    assert res["recommendation"] == {"row": "all bfp8", "placement": "replicated", "gate": "ok", "needs": None}      # a smaller format that fits replicated beats a split of bf16
 
 
 def test_a_recommendation_that_needs_the_experts_split_says_so_and_names_the_issue(tmp_path):
@@ -78,7 +78,7 @@ def test_a_recommendation_that_needs_the_experts_split_says_so_and_names_the_iss
 
 def test_when_nothing_fits_even_split_the_plan_says_so(tmp_path):
     res = plan.plan(snap(tmp_path), 4, chip_gib=0.00001, share=1.0)
-    assert res["recommendation"] is None and any("nothing fits" in n for n in res["notes"])
+    assert res["recommendation"] is None and any("nothing that passes the fidelity rule fits" in n for n in res["notes"])
 
 
 def test_sharding_divides_only_the_experts(tmp_path):
@@ -146,3 +146,55 @@ def test_the_cli_has_the_plan_subcommand(tmp_path, capsys):
     from orchard import cli
     assert cli.main(["plan", str(snap(tmp_path)), "--chips", "1"]) == 0
     assert "best fit" in capsys.readouterr().out
+
+
+# ---- the fidelity rule for bfp4 (issue 731) ----------------------------------------------------------------------------------------------------
+
+ONLY_BFP4 = dict(chip_gib=4.8e-5, share=1.0)           # with the MOE fixture on 4 chips only all-bfp4 split fits (see above)
+
+
+def test_bfp8_needs_no_score_and_bfp4_needs_one(tmp_path):
+    assert plan.format_gate("bf16", None) == plan.format_gate("bfp8", None) == "ok"
+    assert plan.format_gate("bfp4", None) == "unscored"
+
+
+def test_a_bfp4_score_counts_only_at_or_above_the_bar_and_with_enough_tokens():
+    assert plan.format_gate("bfp4", {"bfp4": (plan.FIDELITY_BAR, plan.MIN_SCORED_TOKENS)}) == "ok"
+    assert plan.format_gate("bfp4", {"bfp4": (plan.FIDELITY_BAR - 0.01, plan.MIN_SCORED_TOKENS)}) == "below-bar"
+    assert plan.format_gate("bfp4", {"bfp4": (10.0, plan.MIN_SCORED_TOKENS - 1)}) == "too-few-tokens"
+
+
+def test_the_bar_sits_between_the_two_measured_scores():
+    assert 9.821 < plan.FIDELITY_BAR < 9.991            # bfp4 9.821 and bfp8 9.991 on the one calibration port (docs/project-log.md, issue 731)
+
+
+def test_a_row_that_fits_only_with_unscored_bfp4_is_recommended_with_its_gate_and_a_note_on_what_to_measure(tmp_path):
+    res = plan.plan(snap(tmp_path), 4, **ONLY_BFP4)
+    assert res["recommendation"]["row"] == "all bfp4" and res["recommendation"]["gate"] == "unscored"
+    assert any("scripts/fidelity_score.py" in n and "--fidelity-bfp4" in n for n in res["notes"])
+
+
+def test_a_passing_bfp4_score_makes_the_row_ok_and_drops_the_note(tmp_path):
+    res = plan.plan(snap(tmp_path), 4, scores={"bfp4": (9.95, 4096)}, **ONLY_BFP4)
+    assert res["recommendation"]["gate"] == "ok" and not any("no usable score" in n for n in res["notes"])
+
+
+def test_a_bfp4_score_below_the_bar_removes_the_row_and_the_plan_says_which_rows_fit_but_fail(tmp_path):
+    res = plan.plan(snap(tmp_path), 4, scores={"bfp4": (9.82, 4096)}, **ONLY_BFP4)
+    assert res["recommendation"] is None
+    assert any("score below" in n and "all bfp4" in n for n in res["notes"])
+
+
+def test_a_verified_row_wins_over_an_unscored_one_that_would_also_fit(tmp_path):
+    res = plan.plan(snap(tmp_path), 4)                  # the default budget fits every row
+    assert res["recommendation"]["row"] == "all bf16" and res["recommendation"]["gate"] == "ok"
+
+
+def test_the_cli_takes_the_score_and_refuses_a_bad_one(tmp_path, capsys):
+    d = snap(tmp_path)
+    args = [str(d), "--chips", "4", "--chip-gib", "4.8e-5", "--weight-share", "1", "--json"]
+    out = io.StringIO()
+    assert plan.main(args + ["--fidelity-bfp4", "9.95", "--fidelity-tokens", "4096"], out=out) == 0
+    assert json.loads(out.getvalue())["recommendation"]["gate"] == "ok"
+    assert plan.main(args + ["--fidelity-bfp4", "11"], out=io.StringIO()) == 2
+    assert plan.main(args + ["--fidelity-bfp4", "nan"], out=io.StringIO()) == 2

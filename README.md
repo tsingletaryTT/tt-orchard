@@ -1027,8 +1027,10 @@ sends a Hugging Face token.
 `tt-orchard plan SNAPSHOT` reads the safetensors headers of a checkpoint directory (no weights are loaded) and prices it for the
 chips you have. It lists the bytes of the whole checkpoint and of its routed experts in bf16, bfp8 and bfp4, and recommends the
 largest format mix whose weights fit in a share of the DRAM. `--chips N` sets the chip count (default 4), `--chip-gib` (a number of GiB) the
-DRAM per chip, `--weight-share` (a fraction) the share the weights may take, and `--json` prints the result as JSON. The quality
-notes in the output quote measured fidelity scores for bfp8 and bfp4 (docs/project-log.md, issue 731).
+DRAM per chip, `--weight-share` (a fraction) the share the weights may take, and `--json` prints the result as JSON. bfp8 is the default format below bf16. A row that uses bfp4 is recommended only with a score measured on the model's own port: pass it with
+`--fidelity-bfp4` (the score, 0 to 10) and `--fidelity-tokens` (the scored tokens, at least 4000). The bar is 9.9, a provisional figure between the
+two measured points (bfp8 9.991, bfp4 9.821 on one 7B port; docs/project-log.md, issue 731). A score below the bar removes the row. Without a score,
+a bfp4 row is shown as `unscored` and recommended only when nothing else fits. Measure with `scripts/fidelity_score.py`.
 
 ### 4.1 Before you start
 

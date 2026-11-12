@@ -1,0 +1,3 @@
+target = "0.9.169"
+summary = "tt-orchard plan applies a fidelity rule to the format: bfp8 by default, bfp4 only with a measured score at or above 9.9 on at least 4000 tokens (issue 731)."
+pr = 749
