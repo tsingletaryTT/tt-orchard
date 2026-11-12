@@ -21,11 +21,20 @@ COUNTS: collections.Counter = collections.Counter()
 class Tensor:
     """A device tensor: a torch tensor plus whether it was replicated on a mesh."""
 
-    def __init__(self, t: torch.Tensor, replicated: bool = False, layout: str = "TILE"):
+    def __init__(self, t: torch.Tensor, replicated: bool = False, layout: str = "TILE", chips: int = 0):
         self.t = t
         self.replicated = replicated
         self.layout = layout
-        self.shape = tuple(t.shape)
+        self.chips = chips          # > 0: `t` holds one slice per chip along dim 0 (ShardTensorToMesh); `shape` is one chip's
+        self.shape = (1,) + tuple(t.shape[1:]) if chips else tuple(t.shape)
+
+
+def _mk(out: torch.Tensor, *inputs, layout=None, replicated=False) -> "Tensor":
+    """A result tensor: sharded (one slice per chip) when an input is and the result still has one slice per chip."""
+    chips = max((i.chips for i in inputs if isinstance(i, Tensor)), default=0)
+    if chips and (out.dim() == 0 or out.shape[0] != chips):
+        chips = 0
+    return Tensor(out, replicated, layout or next((i.layout for i in inputs if isinstance(i, Tensor)), "TILE"), chips)
 
 
 class MeshDevice:
@@ -39,6 +48,15 @@ class MeshDevice:
 class ReplicateTensorToMesh:
     def __init__(self, mesh_device):
         self.mesh = mesh_device
+
+
+class ShardTensorToMesh:
+    def __init__(self, mesh_device, dim):
+        self.mesh, self.dim = mesh_device, dim
+
+
+class Topology:
+    Linear, Ring = "Linear", "Ring"
 
 
 class ConcatMeshToTensor:
@@ -89,22 +107,31 @@ def make() -> types.ModuleType:
     m.TILE_LAYOUT, m.ROW_MAJOR_LAYOUT, m.DRAM_MEMORY_CONFIG = "TILE", "ROW_MAJOR", "DRAM"
     m.Tensor, m.MeshDevice = Tensor, MeshDevice
     m.ReplicateTensorToMesh, m.ConcatMeshToTensor = ReplicateTensorToMesh, ConcatMeshToTensor
+    m.ShardTensorToMesh, m.Topology = ShardTensorToMesh, Topology
     m.WormholeComputeKernelConfig, m.MathFidelity = WormholeComputeKernelConfig, MathFidelity
 
     def from_torch(tensor, dtype=None, layout=None, device=None, memory_config=None, mesh_mapper=None):
         _count("from_torch")
+        shard = isinstance(mesh_mapper, ShardTensorToMesh)
+        if shard and (mesh_mapper.dim != 0 or tensor.shape[0] != mesh_mapper.mesh.get_num_devices()):
+            raise RuntimeError(f"a sharded upload needs the leading dimension to equal the chip count ({mesh_mapper.mesh.get_num_devices()}) and dim 0, got shape {tuple(tensor.shape)}")
+        chips = mesh_mapper.mesh.get_num_devices() if shard else 0
         if dtype == "uint32":
             if not (tensor.dtype in (torch.int32, torch.int64) and layout == "ROW_MAJOR"):
                 raise TypeError("token ids must be an integer tensor in ROW_MAJOR layout")
-            return Tensor(tensor.clone(), mesh_mapper is not None, "ROW_MAJOR")
+            return Tensor(tensor.clone(), mesh_mapper is not None and not shard, "ROW_MAJOR", chips)
         if tensor.dtype != torch.bfloat16:
             raise TypeError(f"a float tensor is uploaded as bfloat16 from a bfloat16 host tensor, got {tensor.dtype}")
         if layout not in ("TILE", "ROW_MAJOR"):
             raise TypeError("a layout is required")
-        return Tensor(tensor.float(), mesh_mapper is not None, layout)
+        return Tensor(tensor.float(), mesh_mapper is not None and not shard, layout, chips)
 
     def to_torch(tensor, dtype=None, device=None, mesh_composer=None):
         _count("to_torch")
+        if tensor.chips:
+            if mesh_composer is None:
+                raise RuntimeError("Can't convert a tensor distributed on a mesh without a mesh composer")
+            return tensor.t.clone()
         if tensor.replicated:
             if mesh_composer is None:
                 raise RuntimeError("Can't convert a tensor distributed on a mesh without a mesh composer")
@@ -124,7 +151,7 @@ def make() -> types.ModuleType:
         y = a @ b
         if bias is not None:
             y = y + bias.t
-        return Tensor(y)
+        return _mk(y, input_tensor_a, input_tensor_b, layout="TILE")
 
     def matmul(input_tensor_a, input_tensor_b, *, transpose_a=False, transpose_b=False, memory_config=None, dtype=None, program_config=None,
                activation=None, compute_kernel_config=None, core_grid=None):
@@ -138,7 +165,7 @@ def make() -> types.ModuleType:
         if input_tensor.layout != "ROW_MAJOR" or weight.layout not in ("ROW_MAJOR", "TILE"):
             raise RuntimeError("embedding wants ROW_MAJOR ids and a ROW_MAJOR or TILE weight table")
         out = torch.nn.functional.embedding(input_tensor.t.long(), weight.t)
-        return Tensor(out, layout="TILE" if layout == "TILE" else "ROW_MAJOR")
+        return _mk(out, input_tensor, weight, layout="TILE" if layout == "TILE" else "ROW_MAJOR")
 
     def rms_norm(input_tensor, *, epsilon=1e-12, weight=None, bias=None, residual_input_tensor=None, memory_config=None, program_config=None,
                  compute_kernel_config=None):
@@ -153,7 +180,7 @@ def make() -> types.ModuleType:
             if weight.t.shape[-1] != x.shape[-1]:
                 raise RuntimeError("a TILE weight needs the input's last dim")
             y = y * weight.t
-        return Tensor(y)
+        return _mk(y, input_tensor, layout="TILE")
 
     def softmax(input_tensor, dim=-1, *, memory_config=None, compute_kernel_config=None, numeric_stable=True):
         """ttnn.softmax over the last dimension of a TILE tensor (probe 10: the selected logits and the full router row both ran on a board)."""
@@ -164,11 +191,11 @@ def make() -> types.ModuleType:
 
     def silu(x):
         _count("silu")
-        return Tensor(torch.nn.functional.silu(x.t))
+        return _mk(torch.nn.functional.silu(x.t), x)
 
     def sigmoid(x):
         _count("sigmoid")
-        return Tensor(torch.sigmoid(x.t))
+        return _mk(torch.sigmoid(x.t), x)
 
     def slice(input_tensor, slice_start, slice_end, slice_step=None, *, memory_config=None):
         """ttnn.slice on the padded shape: every start inside its dimension and every end at most the dimension (a slice outside fails)."""
@@ -186,15 +213,17 @@ def make() -> types.ModuleType:
     def multiply(a, b):
         _count("multiply")
         _same_layout(a, b)
-        return Tensor(a.t * (b.t if isinstance(b, Tensor) else b), layout=a.layout)
+        return _mk(a.t * (b.t if isinstance(b, Tensor) else b), a, b, layout=a.layout)
 
     def add(a, b):
         _count("add")
         _same_layout(a, b)
-        return Tensor(a.t + (b.t if isinstance(b, Tensor) else b), layout=a.layout)
+        return _mk(a.t + (b.t if isinstance(b, Tensor) else b), a, b, layout=a.layout)
 
     def reshape(input_tensor, shape, memory_config=None):
         _count("reshape")
+        if input_tensor.chips:          # the shape is one chip's: every slice is reshaped
+            return _mk(input_tensor.t.reshape((input_tensor.chips,) + tuple(shape)[1:]), input_tensor, layout=input_tensor.layout)
         return Tensor(input_tensor.t.reshape(tuple(shape)), input_tensor.replicated, input_tensor.layout)
 
     def permute(input_tensor, dims, memory_config=None):
@@ -233,6 +262,14 @@ def make() -> types.ModuleType:
         _count("concat")
         return Tensor(torch.cat([t.t for t in tensors], dim=dim), layout=tensors[0].layout)
 
+    def all_reduce(input_tensor, *, cluster_axis=None, num_links=1, topology=None, **kwargs):
+        """The sum of every chip's slice, left on every chip."""
+        _count("all_reduce")
+        if not input_tensor.chips:
+            raise RuntimeError("all_reduce needs a tensor with one slice per chip")
+        total = input_tensor.t.sum(0, keepdim=True).expand_as(input_tensor.t).clone()
+        return _mk(total, input_tensor, layout=input_tensor.layout)
+
     def deallocate(tensor):
         _count("deallocate")
 
@@ -240,11 +277,11 @@ def make() -> types.ModuleType:
         """The same values in the requested layout; a dtype of bfloat16 rounds them (what the device does when the dtype argument is given)."""
         _count("to_layout")
         t = tensor.t.to(torch.bfloat16).float() if dtype == "bfloat16" else tensor.t
-        return Tensor(t, tensor.replicated, layout)
+        return _mk(t, tensor, layout=layout, replicated=tensor.replicated)
 
     def typecast(tensor, dtype, memory_config=None):
         _count("typecast")
-        return Tensor(tensor.t.to(torch.bfloat16).float() if dtype == "bfloat16" else tensor.t, tensor.replicated, tensor.layout)
+        return _mk(tensor.t.to(torch.bfloat16).float() if dtype == "bfloat16" else tensor.t, tensor, layout=tensor.layout, replicated=tensor.replicated)
 
     def softplus(x, *, beta=1.0, threshold=20.0, memory_config=None, output_tensor=None, sub_core_grids=None):
         _count("softplus")
@@ -272,6 +309,7 @@ def make() -> types.ModuleType:
     m.clamp, m.sum = clamp, sum_
     m.from_torch, m.to_torch, m.linear, m.matmul, m.embedding, m.rms_norm = from_torch, to_torch, linear, matmul, embedding, rms_norm
     m.silu, m.multiply, m.add, m.reshape, m.concat, m.deallocate, m.to_layout = silu, multiply, add, reshape, concat, deallocate, to_layout
+    m.all_reduce = all_reduce
     m.sigmoid, m.slice, m.typecast, m.softplus = sigmoid, slice, typecast, softplus
     m.permute, m.relu, m.subtract, m.topk = permute, relu, subtract, topk
     m.softmax = softmax

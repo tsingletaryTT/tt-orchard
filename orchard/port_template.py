@@ -1057,14 +1057,12 @@ def _moe_analysis(site: Site):
     if any(shape(f"experts.{{i}}.{n}.weight") != s for n, s in (("gate_proj", (inter, hidden)), ("up_proj", (inter, hidden)), ("down_proj", (hidden, inter)))):
         return None, "the expert tensors have the wrong shapes for the construction's widths"
     nbytes = len(layers) * experts * 3 * hidden * inter * 2
-    if nbytes > MOE_EXPERT_BYTES_MAX:
-        return None, (f"the routed experts of {len(layers)} layers hold {nbytes / 2 ** 30:.1f} GiB in bf16 and the per-chip budget for them is "
-                      f"{MOE_EXPERT_BYTES_MAX / 2 ** 30:.1f} GiB: experts across several chips (multi-chip expert placement, issue 723) are not written yet")
+    parallel = nbytes > MOE_EXPERT_BYTES_MAX          # too big for one chip: every chip holds a share of each layer's experts (issue 723); `load` checks the mesh
     placements = {f"{path}.gate.weight": "linear_weight", f"{path}.shared_expert_gate.weight": "linear_weight"}
     placements.update({f"{path}.shared_expert.{n}.weight": "linear_weight" for n in _MOE_PROJ})
-    placements.update({f"{path}.experts.{{i}}.{n}.weight": "linear_weight" for n in _MOE_PROJ})
+    placements.update({f"{path}.experts.{{i}}.{n}.weight": "expert_shard" if parallel else "linear_weight" for n in _MOE_PROJ})
     return {"experts": experts, "top_k": top_k, "norm_topk": norm, "hidden": hidden, "inter": inter, "shared": shared,
-            "dense": experts <= MOE_DENSE_MAX_EXPERTS, "placements": placements}, None
+            "dense": experts <= MOE_DENSE_MAX_EXPERTS and not parallel, "parallel": parallel, "placements": placements}, None
 
 
 def _recognize_sparse_moe(site: Site):
@@ -1079,7 +1077,7 @@ def _emit_sparse_moe(function: str, site_path: str, s: dict, where: str) -> list
     return [f"def {function}(model, i, x, ids):",
             f'    """{site_path}: the sparse MoE block on x [1, 1, S, {s["hidden"]}]: {s["experts"]} experts, top {s["top_k"]}, and a shared expert with its gate; returns the block output [1, 1, S, {s["hidden"]}]."""',
             f"    {GENERATED_BLOCK_MARK} sparse_moe",
-            f'    return _sparse_moe(model, f"{site_path}", x, experts={s["experts"]}, top_k={s["top_k"]}, norm_topk={s["norm_topk"]}, dense={s["dense"]})', "", ""]
+            f'    return _sparse_moe(model, f"{site_path}", x, experts={s["experts"]}, top_k={s["top_k"]}, norm_topk={s["norm_topk"]}, dense={s["dense"]}' + (", parallel=True" if s.get("parallel") else "") + ")", "", ""]
 
 
 _SPARSE_MOE_HELPERS = '''def _moe_expert_mlp(model, prefix, x):
@@ -1144,13 +1142,90 @@ def _moe_experts_gathered(model, prefix, x, chosen, scores, experts):
     return out
 
 
-def _sparse_moe(model, prefix, x, experts, top_k, norm_topk, dense):
+_EXPERT_NAME = re.compile(r"(.*)\\.experts\\.(\\d+)\\.(gate_proj|up_proj|down_proj)\\.weight$")
+MOE_BYTES_PER_CHIP = __BUDGET__          # the routed experts of the whole checkpoint, in bf16, may take this much on one chip
+
+
+def _upload_shard(model, t, layout):
+    """A host tensor [chips, ...] onto the mesh as bf16, slice c on chip c (shape per chip: the same with a leading 1)."""
+    return ttnn.from_torch(t, dtype=ttnn.bfloat16, layout=layout, device=model["mesh_device"], memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                           mesh_mapper=ttnn.ShardTensorToMesh(model["mesh_device"], dim=0))
+
+
+def _upload_ids_shard(model, ids):
+    """Token ids [chips, rows] as a uint32 ROW_MAJOR tensor, row c on chip c."""
+    return ttnn.from_torch(ids, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=model["mesh_device"],
+                           mesh_mapper=ttnn.ShardTensorToMesh(model["mesh_device"], dim=0))
+
+
+def _moe_upload_parallel(model, tensors):
+    """Upload the routed experts sharded over the chips (issue 723). Chip c holds experts c*per .. (c+1)*per - 1 of every layer, per = experts // chips, and slot j
+    of chip c is expert c*per + j: `dev[<block>.experts.slot<j>.<proj>.weight]` is one tensor [chips, 1, in, out] with slice c on chip c. Refuses a mesh whose chips
+    cannot hold the experts (MOE_BYTES_PER_CHIP each) or one the expert count does not divide."""
+    # MARK
+    chips = model["n_devices"]
+    groups = {}
+    for name in tensors:
+        if PLACEMENT.get(_pattern(name)) == "expert_shard":
+            m = _EXPERT_NAME.match(name)
+            groups.setdefault(m.group(1), {})[(int(m.group(2)), m.group(3))] = name
+    total = 2 * sum(tensors[n].numel() for held in groups.values() for n in held.values())
+    if total / chips > MOE_BYTES_PER_CHIP:
+        raise ValueError(f"the routed experts hold {total / 2 ** 30:.1f} GiB in bf16 and one chip may hold {MOE_BYTES_PER_CHIP / 2 ** 30:.1f} GiB of them, so this checkpoint "
+                         f"needs at least {-(-total // MOE_BYTES_PER_CHIP)} chips; the device has {chips}")
+    for prefix, held in groups.items():
+        experts = 1 + max(e for e, _ in held)
+        if experts % chips:
+            raise ValueError(f"{experts} experts do not split evenly over {chips} chips")
+        per = experts // chips
+        for j in range(per):
+            for proj in ("gate_proj", "up_proj", "down_proj"):
+                shape = tensors[held[(j, proj)]].t().shape
+                stack = torch.stack([tensors[held[(c * per + j, proj)]].to(torch.bfloat16).t().contiguous() for c in range(chips)]).reshape(chips, 1, *shape)
+                model["dev"][f"{prefix}.experts.slot{j}.{proj}.weight"] = _upload_shard(model, stack, ttnn.TILE_LAYOUT)
+
+
+def _moe_experts_parallel(model, prefix, x, chosen, scores, experts):
+    """The gather/scatter form on every chip at once: slot j of chip c is expert c*per + j. Per slot some chip's expert was picked by a token: each chip gathers its
+    tokens (a [chips, rows] id tensor, rows the largest count padded to 32; padding rows get weight 0), runs the slot's MLP, weights the rows and adds them back with a
+    one-hot matmul; the partial outputs of all slots are then added across the chips by ttnn.all_reduce."""
+    # MARK
+    chips = model["n_devices"]
+    per = experts // chips
+    seq, hidden = x.shape[2], x.shape[3]
+    flat = ttnn.reshape(x, (seq, hidden))
+    out = None
+    for j in range(per):
+        picks = []
+        for c in range(chips):
+            tokens, slots = torch.where(chosen == c * per + j)
+            picks.append((tokens, scores[tokens, slots]))
+        most = max(int(t.numel()) for t, _ in picks)
+        if most == 0:
+            continue
+        rows = max(32, -(-most // 32) * 32)
+        ids = torch.zeros(chips, rows, dtype=torch.int32)
+        weight = torch.zeros(chips, 1, rows, 1)
+        back = torch.zeros(chips, 1, seq, rows)
+        for c, (tokens, w) in enumerate(picks):
+            n = int(tokens.numel())
+            ids[c, :n] = tokens.to(torch.int32)
+            weight[c, 0, :n, 0] = w
+            back[c, 0, tokens, torch.arange(n)] = 1.0
+        xe = ttnn.reshape(ttnn.embedding(_upload_ids_shard(model, ids), flat, layout=ttnn.TILE_LAYOUT), (1, 1, rows, hidden))
+        ye = ttnn.multiply(_moe_expert_mlp(model, f"{prefix}.experts.slot{j}", xe), _upload_shard(model, weight.to(torch.bfloat16), ttnn.TILE_LAYOUT))
+        part = ttnn.matmul(_upload_shard(model, back.to(torch.bfloat16), ttnn.TILE_LAYOUT), ye)
+        out = part if out is None else ttnn.add(out, part)
+    return ttnn.all_reduce(out, cluster_axis=1, num_links=1, topology=ttnn.Topology.Linear)
+
+
+def _sparse_moe(model, prefix, x, experts, top_k, norm_topk, dense, parallel=False):
     """The sparse MoE block at `prefix` on x [1, 1, S, hidden]: the routed experts plus the gated shared expert; the block output [1, 1, S, hidden]."""
     # MARK
     if len(x.shape) != 4 or x.shape[0] != 1 or x.shape[1] != 1:
         raise ValueError(f"_sparse_moe needs x [1, 1, S, hidden]; got {list(x.shape)}")
     chosen, scores = _moe_route(model, prefix, x, top_k, norm_topk)
-    routed = (_moe_experts_dense if dense else _moe_experts_gathered)(model, prefix, x, chosen, scores, experts)
+    routed = (_moe_experts_parallel if parallel else _moe_experts_dense if dense else _moe_experts_gathered)(model, prefix, x, chosen, scores, experts)
     shared = ttnn.multiply(_moe_expert_mlp(model, prefix + ".shared_expert", x), ttnn.sigmoid(_linear(model, prefix + ".shared_expert_gate", x)))
     return ttnn.add(routed, shared)
 '''
@@ -1159,7 +1234,8 @@ def _sparse_moe(model, prefix, x, experts, top_k, norm_topk, dense):
 def _sparse_moe_helpers() -> list:
     """The helper functions as lines; each function's first comment line is the generated-block mark."""
     mark = f"    {GENERATED_BLOCK_MARK} sparse_moe"
-    return [mark if l.strip() == "# MARK" else l for l in _SPARSE_MOE_HELPERS.rstrip("\n").split("\n")] + ["", ""]
+    text = _SPARSE_MOE_HELPERS.replace("__BUDGET__", str(int(MOE_EXPERT_BYTES_MAX)))
+    return [mark if l.strip() == "# MARK" else l for l in text.rstrip("\n").split("\n")] + ["", ""]
 
 
 def _describe_sparse_moe(function: str, settings: dict) -> str:
@@ -1783,10 +1859,14 @@ def render(p: Plan) -> str:
           '        elif role == "conv_taps":',
           "            for j in range(t.shape[-1]):",
           '                dev[f"{name}.tap{j}"] = _upload(model, t[:, 0, j].to(torch.bfloat16).reshape(1, 1, 1, -1), ttnn.TILE_LAYOUT)',
+          '        elif role == "expert_shard":',
+          "            pass          # uploaded sharded over the chips by _moe_upload_parallel after the loop",
           '        elif role == "tile":',
           "            dev[name] = _upload(model, t.to(torch.bfloat16).reshape(1, 1, 1, -1) if t.dim() == 1 else t.to(torch.bfloat16).contiguous(), ttnn.TILE_LAYOUT)",
           "        else:",
           "            host[name] = t",
+          '    if "expert_shard" in PLACEMENT.values():',
+          "        _moe_upload_parallel(model, tensors)",
           f'    if "{p.lm_head_path}.weight" not in dev:         # tied embeddings: the head is the embedding table, uploaded once more as a Linear weight',
           f'        dev["{p.lm_head_path}.weight"] = _upload(model, tensors["{p.embed_path}.weight"].to(torch.bfloat16).t().contiguous(), ttnn.TILE_LAYOUT)',
           "    return model", "", "",

@@ -1,0 +1,3 @@
+target = "0.9.171"
+summary = "The port generator writes the sparse MoE block in an expert-parallel form (a share of the experts on each chip, all_reduce) when the experts do not fit one chip, instead of leaving a stub (issue 723)."
+pr = 752
