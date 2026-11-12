@@ -280,6 +280,7 @@ def check(stage_dir, run_dir, *, rehearsal: bool = False, waived: list | None = 
 
     if _ids(chip_ids) and chip_ids:
         _fidelity_reasons(record, run_dir, len(chip_ids), reasons)
+        _length_check_reasons(record, reasons)
         if _ids(record.get("reference_ids")) and len(record["reference_ids"]) == len(chip_ids):
             _near_tie_reasons(record, run_dir, record["reference_ids"], chip_ids, reasons)
 
@@ -570,6 +571,34 @@ def _near_tie_reasons(record: dict, run_dir: Path, ref_ids: list, chip_ids: list
     want = (n - len(wrong) + len(ties)) / n
     if not _num(block.get("agreement_excluding_near_ties")) or abs(block["agreement_excluding_near_ties"] - want) > 1e-9:
         reasons.append(f"near_ties agreement_excluding_near_ties {block.get('agreement_excluding_near_ties')!r} differs from the {want} the gate recomputed")
+
+
+def _length_check_reasons(record: dict, reasons: list) -> None:
+    """The record's report-only `length_check` block, when it has one: well formed and consistent with itself (each row's `agree` is whether its two
+    ids are equal, `all_agree` is whether every row agrees). The block comes from the port's own prefill and decode, so the gate cannot recompute
+    the ids; it never fails a run for a disagreement, and it fails a block that says something its own rows do not."""
+    block = record.get("length_check")
+    if block is None:
+        return
+    rows = block.get("lengths") if isinstance(block, dict) else None
+    if not isinstance(rows, list):
+        reasons.append("length_check must be an object with a list of lengths")
+        return
+    last = 0
+    for r in rows:
+        ok = (isinstance(r, dict) and _ids([r.get("length"), r.get("prefill_id"), r.get("decode_id")]) and isinstance(r.get("agree"), bool)
+              and r["length"] > last)
+        if not ok:
+            reasons.append("length_check rows must each hold a length (rising), prefill_id, decode_id and a boolean agree")
+            return
+        last = r["length"]
+        if r["agree"] != (r["prefill_id"] == r["decode_id"]):
+            reasons.append(f"length_check at length {r['length']} says agree={r['agree']} but its ids are {r['prefill_id']} and {r['decode_id']}")
+    if "error" in block:
+        if not isinstance(block["error"], str) or "all_agree" in block:
+            reasons.append("length_check with an error holds a string error and no all_agree")
+    elif block.get("all_agree") is not all(r["agree"] for r in rows) or not isinstance(block.get("all_agree"), bool):
+        reasons.append("length_check all_agree is not whether every row agrees")
 
 
 def _output_reasons(stage_dir: Path, run_dir: Path, marker: dict, reasons: list, record_sha: str | None = None) -> None:
