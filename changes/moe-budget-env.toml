@@ -1,0 +1,3 @@
+target = "0.9.172"
+summary = "ORCHARD_MOE_EXPERT_BYTES_MAX sets the per-chip budget for the routed experts, so a tiny checkpoint can run the expert-parallel form; the tiny MoE rehearsal passed stages 0 to 6 and 8 with it (issue 723)."
+pr = 753

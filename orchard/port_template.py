@@ -1019,7 +1019,18 @@ def _moe_dtype(environ) -> str:
 
 
 MOE_EXPERT_DTYPE = _moe_dtype(os.environ)
-MOE_EXPERT_BYTES_MAX = int(0.5 * defaults.CHIP_DRAM_GIB * 2 ** 30)     # half of a chip's DRAM (a choice, orchard/defaults.py): the rest holds the other weights, caches and activations
+def _moe_budget(environ) -> int:
+    """The per-chip budget for the routed experts: `ORCHARD_MOE_EXPERT_BYTES_MAX` (a positive whole number of bytes) when it is set, else half a chip's DRAM. The variable
+    lets a rehearsal on a tiny checkpoint use the expert-parallel form, which a real-sized checkpoint triggers by itself."""
+    raw = environ.get("ORCHARD_MOE_EXPERT_BYTES_MAX", "").strip()
+    if raw:
+        if not raw.isdigit() or int(raw) < 1:
+            raise ValueError(f"ORCHARD_MOE_EXPERT_BYTES_MAX must be a positive whole number of bytes, got {raw[:40]!r}")
+        return int(raw)
+    return int(0.5 * defaults.CHIP_DRAM_GIB * 2 ** 30)
+
+
+MOE_EXPERT_BYTES_MAX = _moe_budget(os.environ)     # half of a chip's DRAM (a choice, orchard/defaults.py): the rest holds the other weights, caches and activations
 _MOE_KIDS = frozenset({"gate", "experts", "shared_expert", "shared_expert_gate"})
 _MOE_PROJ = ("gate_proj", "up_proj", "down_proj")
 
