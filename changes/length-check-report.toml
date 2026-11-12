@@ -1,0 +1,2 @@
+target = "0.9.165"
+summary = "Stage 2 reports whether prefill and prefill-then-decode agree at short and tile-boundary lengths; the gate checks the block against itself (issue 740)."
