@@ -403,6 +403,9 @@ def test_warnings_before_the_answer_do_not_hide_it(py):
 def run_script(monkeypatch, capsys, fake_module, classes):
     monkeypatch.setitem(sys.modules, "transformers", fake_module) if fake_module is not None else monkeypatch.delitem(sys.modules, "transformers", raising=False)
     monkeypatch.setattr(sys, "argv", ["-c", "-", *classes])
+    # The probe script takes the current directory off sys.path. Run in this process it would do that for every later test in the worker, and
+    # the four-process telegraph tests then failed because their spawned children could not import orchard (issue 679). A copy goes back after the test.
+    monkeypatch.setattr(sys, "path", list(sys.path))
     exec(compile(sp.PROBE_SCRIPT, "<probe>", "exec"), {})
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
@@ -583,3 +586,16 @@ def test_behind_days_is_left_alone_unless_asked_for(tmp_path):
     f = skillsfresh.check_clone(d, source="s", runner=skillsfresh.ReadOnlyRunner(fake), cache=skillsfresh.Cache(write=False), update=skillsfresh.skills_update)
     assert f.state == skillsfresh.BEHIND and f.behind_days is None
     assert not any("/commits/" in c[2] for c in fake.calls if c[0] == "gh")
+
+
+def test_running_the_probe_script_leaves_the_repository_on_sys_path(monkeypatch, capsys):
+    """Issue 679: the script removes the current directory from sys.path; the removal must end with the test that ran it."""
+    import os
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    monkeypatch.setattr(sys, "path", [repo, *sys.path])
+    mod = types.ModuleType("transformers")
+    mod.__spec__ = importlib.machinery.ModuleSpec("transformers", None)
+    mod.__version__ = "5.1.0"
+    with pytest.MonkeyPatch.context() as inner:           # stands for one test's own monkeypatch, undone when that test ends
+        run_script(inner, capsys, mod, ["A"])
+    assert repo in sys.path
