@@ -10,6 +10,7 @@ import pytest
 
 from orchard import full_port, full_port_serve
 from orchard.stages import FULL_PORT_STAGE_5, spec_for
+from orchard import supervisor
 from orchard.supervisor import EXIT_BLOCKED, EXIT_READY, EXIT_ABORTED, REHEARSAL_WAIVED, Control
 import port_serve_fakes as fk
 from run_fakes import note
@@ -165,6 +166,17 @@ def test_the_rehearsal_option_lets_the_random_weight_model_pass_stage_5_and_the_
     result = json.loads((rig.run_dir / "stages" / "5" / "result.json").read_text())
     assert result["coherent"] is False and result["corpus_matched"] == result["corpus_positions"] == 80
     assert result["checks"]["passkey"]["answered"] == [False, False]
+
+
+def test_a_pass_under_the_rehearsal_flag_says_so_in_the_stage_end_entry_and_a_normal_pass_does_not(rig):
+    """Issue 703: a ledger reader must not take a rehearsal pass for a quality result."""
+    go(rig, fk.RANDOM_WEIGHTS)
+    rig.args.full_port_rehearsal = True
+    assert rig.run() == EXIT_READY
+    passes = [e["data"] for e in rig.entries() if e["event"] == "stage_end" and e["data"].get("result") == "pass" and e["stage"] >= 2]
+    assert passes and all(d.get("rehearsal") == supervisor.REHEARSAL_STAGE_END_NOTE for d in passes)
+    early = [e["data"] for e in rig.entries() if e["event"] == "stage_end" and e["data"].get("result") == "pass" and e["stage"] < 2]
+    assert early and not any("rehearsal" in d for d in early)
 
 
 def test_the_operator_bundle_lists_the_stage_5_checks_with_their_labels(rig):

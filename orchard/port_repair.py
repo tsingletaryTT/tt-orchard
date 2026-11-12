@@ -398,6 +398,12 @@ def numerics_state(run_dir, stage_dir, *, marker: dict | None = None) -> tuple[s
         return "unreadable", None
     agreement = full_port.agreement(ref, chip)
     if agreement >= full_port.TOP1_MIN:
+        # A port that agrees but did not show its computing on the device (a missing or inconsistent `device_ops` block: dummy matmuls, weights
+        # left on the host) is not a pass: the helper's "helped" verdict, the model ladder and the best-port ranking all read this state (issue 703).
+        device_reasons: list = []
+        full_port._device_ops_reasons(record, run_dir, device_reasons, stage_dir)
+        if device_reasons:
+            return "unreadable", None
         return "passed", {"agreement": round(agreement, 6), "n": len(chip)}      # kept: the better of two passing ports has the higher agreement
     rows = [(i, a, b) for i, (a, b) in enumerate(zip(ref, chip)) if a != b]
     return "below", {"kind": "numerics", "op": NUMERICS_OP, "returncode": 0, "agreement": round(agreement, 6), "n": len(chip),
