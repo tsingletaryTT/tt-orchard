@@ -1422,8 +1422,16 @@ class Supervisor:
                     # a model that cannot fit the box starts no prepare step (issue 327)
                     self._check_residency(spec, hardware_pending=self._hardware_pending(
                         spec, resuming=p.open_stage == p.next_stage, escalated=p.next_stage in p.escalated))
-                if spec.needs_coder or self._coder_in_use():
-                    self._ensure_coder()
+                self._coder_deferred = False
+                # A skipped stage makes no model request, so it boots no coder (issue 713); a coder already in the run is still adopted or checked.
+                if (spec.needs_coder and not spec.skip) or self._coder_in_use():
+                    if self._coder_deferrable(spec):
+                        # Issue 713: the coder boots at the stage's first model request (`_need_coder`), or never when there is none.
+                        self._coder_deferred = True
+                        self.ledger.append("decision", spec.number, decision="coder start deferred",
+                                           reason="stage 2 of a thin-port run starts the coder at its first model request")
+                    else:
+                        self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
                                          escalated=p.next_stage in p.escalated)
             except Blocked as exc:
@@ -1536,6 +1544,25 @@ class Supervisor:
         self.ledger.append("decision", 1, decision=audio_runtime.AUDIO_RUNTIME_SELECTED, runtime=audio_runtime.RUNTIME, paths=paths.record(),
                            scripts=audio_runtime.script_hashes(), model=self.model_id)
         return "selected"
+
+    def _coder_deferrable(self, spec) -> bool:
+        """Issue 713: stage 2 of a `--thin-port` full port may start with no coder. The thin port step fills the generated port's stubs with
+        one request each, so a plan with no stubs makes no model request until a repair, a finish step or an escalation asks for one. Deferred
+        only when the run has no coder now: no unreleased coder lease in the ledger, so there is nothing to adopt or check. A park or restore
+        that was cut short holds an unreleased lease, so `_ensure_coder` still recovers it before the stage. A fresh run boots the coder for
+        stages 0 and 1, whose steps are model requests, so this applies to a run resumed at stage 2 after its coder was released."""
+        if spec.number != 2 or spec.draft != "full_port" or not thin_port(self.ledger.read()):
+            return False
+        return not self._coder_in_use()
+
+    def _need_coder(self, n: int, why: str) -> None:
+        """Start the coder before a model request when the stage deferred it (`_coder_deferrable`); otherwise do nothing. The ledger names the
+        request that needed it. The start is `_ensure_coder`, the same lease handling as a start before the stage."""
+        if not getattr(self, "_coder_deferred", False):
+            return
+        self._coder_deferred = False
+        self.ledger.append("decision", n, decision="coder started for a model request", reason=why)
+        self._ensure_coder()
 
     def _coder_in_use(self) -> bool:
         """The ledger holds a coder lease this run has not released: a coder is part of the run even when the next stage does not need it, so
@@ -4564,6 +4591,7 @@ class Supervisor:
     def _step(self, spec, phase: str, stage_dir: Path, escalated: bool, resumed: bool, extra: str | None = None):
         """One agent step. `extra`, when given, is added to the task message (stage 2's prepare gets the script's message)."""
         n = spec.number
+        self._need_coder(n, f"the stage's {phase} agent step")         # before the tier is probed: a deferred coder is not up yet (issue 713)
         tier = tier_for(self.cfg, n, phase=phase, escalated=escalated)
         try:
             used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
@@ -4626,11 +4654,28 @@ class Supervisor:
         n = spec.number
         if not (n == 2 and spec.draft == "full_port" and thin_port(self.ledger.read())):
             return None
-        used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "prepare")
-        self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
-        out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
-                                 python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=endpoint,
-                                 model=tcfg["model"], sampling=sampling, thinking=AGENT_THINKING)
+        if getattr(self, "_coder_deferred", False):
+            # Issue 713: the coder is started only when the plan has a stub to send, inside the step, after the plan is made.
+            asked = []
+
+            def connect(n_stubs: int):
+                asked.append(n_stubs)
+                self._need_coder(n, f"the thin port step has {n_stubs} stub(s) to fill")
+                used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "prepare")
+                self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
+                return endpoint, tcfg["model"], sampling
+            out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
+                                     python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=None,
+                                     model=None, sampling=None, thinking=AGENT_THINKING, connect=connect)
+            if out.status == "done" and not asked:
+                self.ledger.append("decision", n, decision="coder not started", reason="the plan has no stubs",
+                                   note="a later model request of the stage (a repair, a finish step, an escalation) starts it")
+        else:
+            used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "prepare")
+            self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
+            out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
+                                     python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=endpoint,
+                                     model=tcfg["model"], sampling=sampling, thinking=AGENT_THINKING)
         if out.status == "skipped":
             self.ledger.append("decision", n, decision="thin port not used", reason=out.detail[:300],
                                note="the agent's prepare step runs as it would without the option")
@@ -4649,8 +4694,9 @@ class Supervisor:
 
     def _thin_coder(self, spec, escalated: bool, phase: str):
         """(tier name, endpoint, tier config, sampling) of the coder tier a thin step of stage `spec.number` uses, the tier an agent step of that phase
-        would use: a tier that is down blocks the run, a substitute is noted in the ledger."""
+        would use: a tier that is down blocks the run, a substitute is noted in the ledger. A deferred coder is started first (issue 713)."""
         n = spec.number
+        self._need_coder(n, f"a thin {phase} request")
         tier = tier_for(self.cfg, n, phase=phase, escalated=escalated)
         try:
             used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
