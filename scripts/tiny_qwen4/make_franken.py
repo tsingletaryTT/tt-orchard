@@ -52,8 +52,10 @@ sources) and, with `--prove`, `proofs.json`. The generator's `--seed` goes in th
 Qwen4Exp config is the n-gram hash seed. A base whose own card names a license other than Apache-2.0 is refused, since the card written
 here would then be wrong; a base card that names no license is accepted and the written card says so.
 
-Exit codes: 0 done; 2 refused before writing (bad option, snapshot, output directory, size, the base card's license); 3 a proof
-failed; 4 torch, transformers or safetensors is not importable.
+Exit codes: 0 done; 2 refused before writing (bad option, snapshot, an unreadable or oversized tokenizer file, an output directory that
+exists or is inside the repository, size, the base card's license, a teacher-forced passage shorter than 64 tokens); 3 a proof failed or
+the reference decode is degenerate; 4 torch, transformers or safetensors is not importable. The output directory must not exist: the
+script makes it with one mkdir just before the first write, so of two runs on one output only one writes.
 """
 from __future__ import annotations
 
@@ -81,6 +83,7 @@ HC_COUNT = 4
 INDEXER_RATIO = 4
 MAX_CONFIG_BYTES = 1 << 20
 MAX_CARD_BYTES = 4 << 20          # the base's README.md is read up to this size (a Qwen card is tens of kilobytes)
+MAX_TOKENIZER_BYTES = 1 << 28     # each tokenizer file is read up to this size (256 MiB); a larger one is refused
 PROMPT_LENGTHS = (8, 16, 33)
 STAGE1_PROMPT = "Write the text I send my landlord about the broken boiler."     # the prompt stage 1 decodes (reference_gate.py PROMPT)
 N_DECODE = 32                     # greedy tokens, as stage 1 decodes
@@ -457,11 +460,14 @@ def write_json(path: Path, data) -> None:
 
 def read_tokenizer(snapshot: Path) -> dict:
     """{file name: bytes} of the tokenizer files the snapshot has, resolved and read before the output directory exists, so a refused link
-    leaves nothing behind."""
+    leaves nothing behind. A file that is too large or cannot be read is a refusal (exit 2, issue 646)."""
     files = {}
     for name in TOKENIZER_FILES:
         if (snapshot / name).exists():
-            files[name] = safeio.read_bytes(snap_file(snapshot, name), max_bytes=1 << 28)
+            try:
+                files[name] = safeio.read_bytes(snap_file(snapshot, name), max_bytes=MAX_TOKENIZER_BYTES)
+            except safeio.SafeReadError as exc:
+                raise FrankenRefused(f"the base snapshot's {name} cannot be read: {getattr(exc, 'reason', exc)}") from None
     return files
 
 
@@ -667,12 +673,28 @@ def teacher_forced_prompt(transformers, out: Path, vocab: int, tok):
     return ids, source
 
 
-def reference_decode(torch, transformers, qd, out: Path, cfg: dict) -> dict:
-    """Greedy-decode the stage 1 prompt on the CPU with the written checkpoint and say how many distinct ids came out."""
-    ids, source, tok = stage1_prompt(transformers, out, cfg["vocab_size"])
+def reference_prompts(transformers, cfg: dict, tokenizer_files: dict) -> dict:
+    """The stage 1 prompt and the teacher-forced passage as token ids, worked out before the output directory exists (issue 646): a
+    passage that tokenizes shorter than TEACHER_FORCED_MIN_POSITIONS is refused (exit 2) with nothing written. The tokenizer is loaded
+    from a scratch directory holding the same config.json and tokenizer files the checkpoint will hold, so it is the tokenizer the
+    written checkpoint loads."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="make-franken-tokenizer-") as tmp:
+        scratch = Path(tmp)
+        write_json(scratch / "config.json", cfg)
+        write_tokenizer(scratch, tokenizer_files)
+        ids, source, tok = stage1_prompt(transformers, scratch, cfg["vocab_size"])
+        tf_ids, tf_source = teacher_forced_prompt(transformers, scratch, cfg["vocab_size"], tok)
+    return {"prompt_ids": ids, "prompt_source": source, "tokenizer": tok, "teacher_forced_ids": tf_ids, "teacher_forced_source": tf_source}
+
+
+def reference_decode(torch, transformers, qd, out: Path, cfg: dict, prompts: dict) -> dict:
+    """Greedy-decode the stage 1 prompt on the CPU with the written checkpoint and say how many distinct ids came out. `prompts` is
+    reference_prompts' result, checked before anything was written."""
+    ids, source, tok = prompts["prompt_ids"], prompts["prompt_source"], prompts["tokenizer"]
     model = load_franken(torch, transformers, qd, out)
     new = greedy_ids(torch, model, ids)
-    tf_ids, tf_source = teacher_forced_prompt(transformers, out, cfg["vocab_size"], tok)
+    tf_ids, tf_source = prompts["teacher_forced_ids"], prompts["teacher_forced_source"]
     tf = teacher_forced_reference(torch, model, tf_ids)
     del model
     ref_dir = out / "reference"
@@ -741,12 +763,25 @@ def compare(torch, a, b, prompts) -> dict:
     return {"prompts": rows, "max_abs_diff": max(r["max_abs_diff"] for r in rows), "top1_equal_all": all(r["top1_equal"] for r in rows)}
 
 
+def tolerance(result: dict, dtype: str) -> float:
+    """The largest logit difference the rule for `dtype` allows in `result`: PROOF_FLOAT32_ABS_TOL for float32, else PROOF_BF16_REL_TOL
+    of the largest logit in `result` itself. The recorded tolerance and the verdict both come from here, so a record names the bound its
+    own verdict used (issue 646)."""
+    if dtype == "float32":
+        return PROOF_FLOAT32_ABS_TOL
+    return PROOF_BF16_REL_TOL * max(r["max_abs_logit"] for r in result["prompts"])
+
+
+def tolerance_rule(dtype: str) -> str:
+    return ("absolute, and every top-1 equal" if dtype == "float32"
+            else f"{PROOF_BF16_REL_TOL} of the largest logit; top-1 may flip on near ties")
+
+
 def within(result: dict, dtype: str) -> bool:
     """Whether a comparison with the base is inside the rule for `dtype` (see PROOF_FLOAT32_ABS_TOL and PROOF_BF16_REL_TOL)."""
-    biggest = max(r["max_abs_logit"] for r in result["prompts"])
     if dtype == "float32":
-        return result["max_abs_diff"] <= PROOF_FLOAT32_ABS_TOL and result["top1_equal_all"]
-    return result["max_abs_diff"] <= PROOF_BF16_REL_TOL * biggest
+        return result["max_abs_diff"] <= tolerance(result, dtype) and result["top1_equal_all"]
+    return result["max_abs_diff"] <= tolerance(result, dtype)
 
 
 def all_selected_budget(longest: int) -> int:
@@ -782,11 +817,8 @@ def run_proofs(torch, transformers, qd, out: Path, text: dict, base: dict, cfg: 
                                     "distinct_top1_base": len(set(base_tf)), "agree_fraction": fraction, "same_top1_as_base": equal_all}
     del base_model
     configured = compare(torch, first, reference, prompts)
-    biggest = max(r["max_abs_logit"] for r in configured["prompts"])
-    configured["tolerance"] = PROOF_FLOAT32_ABS_TOL if dtype == "float32" else PROOF_BF16_REL_TOL * biggest
-    configured["tolerance_rule"] = ("absolute, and every top-1 equal" if dtype == "float32"
-                                    else f"{PROOF_BF16_REL_TOL} of the largest logit; top-1 may flip on near ties")
-    proofs["against_base"] = configured                       # the franken as configured (its own indexer budget)
+    configured["tolerance"], configured["tolerance_rule"] = tolerance(configured, dtype), tolerance_rule(dtype)
+    proofs["against_base"] = configured                      # the franken as configured (its own indexer budget)
     every = all_selected_budget(longest)
     if cfg["indexer_budget"] >= every:
         all_logits, all_budget = first, cfg["indexer_budget"]
@@ -796,7 +828,7 @@ def run_proofs(torch, transformers, qd, out: Path, text: dict, base: dict, cfg: 
         all_logits, all_budget = logits_of(torch, sparse, prompts), every
         del sparse
     selected = compare(torch, all_logits, reference, prompts)
-    selected["tolerance"], selected["tolerance_rule"] = configured["tolerance"], configured["tolerance_rule"]
+    selected["tolerance"], selected["tolerance_rule"] = tolerance(selected, dtype), tolerance_rule(dtype)    # the bound `within` applies below
     proofs["against_base_all_selected"] = selected
     equal = within(selected, dtype)
     if hc_sigma == 0:
@@ -828,6 +860,16 @@ def proofs_pass(proofs: dict) -> bool:
 
 # ---- command line -----------------------------------------------------------------------------------------------------------------
 
+def claim_output_dir(out: Path) -> None:
+    """Make `out` with a single mkdir that fails when it exists. Two runs on one output can both pass the checks at the start; only the
+    run whose mkdir succeeds writes, and the other is refused (exit 2) without touching the directory (issue 646)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out.mkdir()
+    except FileExistsError:
+        raise FrankenRefused(f"{out} exists (made by another run after this run's first check); nothing was written") from None
+
+
 def make(args) -> int:
     mc, qd = helpers()
     torch, transformers = import_stack()
@@ -843,6 +885,8 @@ def make(args) -> int:
         raise FrankenRefused("--hc-sigma must be a number between 0 and 1")
     cfg = franken_config(text, args.layers, dtype=args.dtype, sets=parse_sets(args.set))
     out = mc.check_output_dir(Path(args.out))
+    if os.path.lexists(out):          # check_output_dir accepts an empty directory; this script claims a new one (see claim_output_dir)
+        raise FrankenRefused(f"{out} exists; give a new directory, which this script makes itself")
     indexer_dir = Path(args.indexers) if args.indexers else None
     estimate = estimate_bytes(torch, None, cfg, layer_types, snapshot, args.layers)
     say(f"estimated size {estimate / GB:.1f} GB for {args.layers} layers in {args.dtype}")
@@ -858,7 +902,8 @@ def make(args) -> int:
     for key, value in meta.state_dict().items():
         if tuple(value.shape) != tuple(tensors[key].shape):
             raise FrankenRefused(f"{key}: the class wants {tuple(value.shape)}, the converted tensor is {tuple(tensors[key].shape)}")
-    out.mkdir(parents=True, exist_ok=True)
+    prompts = None if args.skip_decode_check else reference_prompts(transformers, cfg, tokenizer_files)
+    claim_output_dir(out)
     write_json(out / "config.json", cfg)         # the generator's seed goes in the manifest: `seed` in a Qwen4Exp config is the n-gram hash seed
     write_json(out / "generation_config.json", {"do_sample": False, "eos_token_id": cfg.get("eos_token_id"), "bos_token_id": cfg.get("bos_token_id")})
     from safetensors.torch import save_file
@@ -872,7 +917,7 @@ def make(args) -> int:
         say("warning: the degenerate-reference check was skipped (--skip-decode-check)")
     else:
         say("decoding the stage 1 prompt on the CPU")
-        decode = reference_decode(torch, transformers, qd, out, cfg)
+        decode = reference_decode(torch, transformers, qd, out, cfg, prompts)
         say(f"{decode['distinct_ids']} distinct ids in {N_DECODE} greedy tokens; first 12: {decode['generated_ids'][:12]}")
     proofs = None
     if args.prove:
