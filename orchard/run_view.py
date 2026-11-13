@@ -149,6 +149,34 @@ def _dicts(value) -> list[dict]:
     return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
 
 
+def _number(value):
+    """A JSON number (not a boolean), else None."""
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def port_check(run_dir, host=None) -> dict | None:
+    """What stage 2 measured for a full port on the chips, from `stages/2/evidence/port-check.json`: top-1 agreement, the fidelity score and how many tokens it
+    rests on, the near-tie disagreements, whether prefill and decode agree at the lengths checked, the device matmul count and the weight elements on the device and
+    the host. A field that is missing or of the wrong type is None; the whole record is None when the file is absent."""
+    rec = _read_obj(Path(run_dir) / "stages" / "2" / "evidence" / "port-check.json")
+    if rec is None:
+        return None
+    fid = rec.get("fidelity") if isinstance(rec.get("fidelity"), dict) else {}
+    ties = rec.get("near_ties") if isinstance(rec.get("near_ties"), dict) else {}
+    length = rec.get("length_check") if isinstance(rec.get("length_check"), dict) else {}
+    ops = rec.get("device_ops") if isinstance(rec.get("device_ops"), dict) else {}
+    weights = ops.get("weights") if isinstance(ops.get("weights"), dict) else {}
+    text = rec.get("free_run_text")
+    all_agree = length.get("all_agree")
+    return {"top1_agreement": _number(rec.get("top1_agreement")),
+            "fidelity": _number(fid.get("value")), "fidelity_tokens": _number(fid.get("tokens")),
+            "near_ties": _number(ties.get("near_ties")), "near_tie_disagreements": _number(ties.get("disagreements")),
+            "lengths_agree": all_agree if isinstance(all_agree, bool) else None, "lengths_checked": len(_dicts(length.get("lengths"))),
+            "decode_matmul_calls": _number(ops.get("decode_matmul_calls_max")),
+            "device_elements": _number(weights.get("device_elements")), "host_elements": _number(weights.get("host_elements")),
+            "chips": _number(rec.get("chips")), "free_run_text": text[:FREE_TEXT_CHARS] if isinstance(text, str) else None, "host": host}
+
+
 def results(run_dir, entries: list[dict]) -> dict:
     """The run's measured results: stage 0's finding, stage 2's swap check, stage 4 per chip count."""
     run_dir = Path(run_dir)
@@ -169,6 +197,9 @@ def results(run_dir, entries: list[dict]) -> dict:
                        "server_ready_s": r.get("server_ready_s"), "coherent": r.get("coherent"),
                        "free_run_text": (r.get("free_run_text") or "")[:FREE_TEXT_CHARS],
                        "test_seconds": test.get("seconds"), "host": where.get((2, None))}
+    pc = port_check(run_dir, where.get((2, None)))
+    if pc:
+        out["port_check"] = pc
     s4 = _read_obj(run_dir / "stages" / "4" / "result.json") or {}
     plan = _read_obj(run_dir / "stages" / "4" / "tests" / "plan.json") or {}
     configs, planned = _dicts(s4.get("configs")), _dicts(plan.get("tests"))
