@@ -117,11 +117,35 @@ def splice_extra_args(text: str, extra: str) -> str:
 
 
 ADDITIONAL = re.compile(r"--additional-config\s+'([^']*)'")
-# The drafter's own settings. TT_AUXILIARY_WEIGHTS is here too: the bundles that set it name the drafter's repo there (the launcher downloads
-# every entry before vLLM starts), and the card names every repo in a package's environment as the drafter (aux_repos), so a package served
-# with the drafter off carries none of it.
-DRAFTER_ENV = re.compile(r"^(DFLASH_WEIGHTS|QWEN36_DFLASH_\w+|TT_AUXILIARY_WEIGHTS)$")
+# The drafter's own settings, which a package served with the drafter off does not carry. TT_AUXILIARY_WEIGHTS is handled apart: it is a
+# comma-separated list of repos the bundle's launcher downloads before vLLM starts. The bundles that set it name the drafter's repo there, and
+# a bundle may name other repos too. With the drafter off, stage 2's prepare_swap.py removes only the drafter's entry (the repo
+# DFLASH_WEIGHTS names, at any revision) and keeps the others. Stage 7 applies the same rule (issue 672).
+DRAFTER_ENV = re.compile(r"^(DFLASH_WEIGHTS|QWEN36_DFLASH_\w+)$")
+AUX_KEY = "TT_AUXILIARY_WEIGHTS"
 AUX_EXPORT = re.compile(r"^\s*export\s+TT_AUXILIARY_WEIGHTS=(.*)$")
+DFLASH_EXPORT = re.compile(r"^\s*export\s+DFLASH_WEIGHTS=(.*)$")
+
+
+def aux_entries(value) -> list[str]:
+    """The entries of a TT_AUXILIARY_WEIGHTS value ("org/name@rev,org/name"), stripped, with empty ones left out. Quotes around
+    the whole value (as a run.sh export writes it) are removed."""
+    return [x.strip() for x in str(value).strip().strip("\"'").split(",") if x.strip()]
+
+
+def drafter_repos(env: dict, run_sh: str = "") -> set[str]:
+    """The drafter's repo, without a revision: what DFLASH_WEIGHTS names in `env` and in any `export DFLASH_WEIGHTS=` line of
+    `run_sh`. Empty when neither names one. prepare_swap.py then leaves TT_AUXILIARY_WEIGHTS as it is, and so does stage 7."""
+    values = [str(env.get("DFLASH_WEIGHTS") or "")]
+    values += [m.group(1) for ln in run_sh.splitlines() if (m := DFLASH_EXPORT.match(ln))]
+    return {v.strip().strip("\"'").split("@", 1)[0] for v in values} - {""}
+
+
+def stage_2_drafter_repos(run_dir) -> set[str] | None:
+    """The drafter's repo as the run script stage 2 served with names it. None when that script is missing or unreadable: the
+    caller then cannot tell the drafter's TT_AUXILIARY_WEIGHTS entry apart from the others."""
+    got = safeio.read_text_checked(Path(run_dir) / "stages/2/run.sh", max_bytes=MAX_RECORD_BYTES)
+    return drafter_repos({}, got.value) if got.ok else None
 
 
 def drop_device_sampling(extra: str) -> str:
@@ -149,12 +173,20 @@ def drop_device_sampling(extra: str) -> str:
 
 def serving_env(env: dict, *, drafter_off: bool) -> dict:
     """The manifest environment package-thin is given. With the drafter off, QWEN36_DRAFTER is empty
-    and the drafter's own settings (its repo, tensor-parallel size, block sizes, and TT_AUXILIARY_WEIGHTS, which
-    names the drafter's repo for the launcher to download) are not passed, so the package names no drafter repo and
-    downloads none."""
+    and the drafter's own settings (its repo, tensor-parallel size and block sizes) are not passed. From
+    TT_AUXILIARY_WEIGHTS only the drafter's entry is removed (the repo DFLASH_WEIGHTS names, at any revision), as
+    stage 2's prepare_swap.py does. The other entries stay, and a list left empty is not passed. Without a
+    DFLASH_WEIGHTS value the list is passed as it is, as stage 2 leaves it."""
     if not drafter_off:
         return dict(env)
+    drafters = drafter_repos(env)
     out = {k: v for k, v in env.items() if not DRAFTER_ENV.match(k)}
+    if AUX_KEY in out and drafters:
+        keep = [x for x in aux_entries(out[AUX_KEY]) if x.split("@", 1)[0] not in drafters]
+        if keep:
+            out[AUX_KEY] = ",".join(keep)
+        else:
+            del out[AUX_KEY]
     out["QWEN36_DRAFTER"] = ""
     return out
 
@@ -168,12 +200,17 @@ def _drafter_on(run_sh: str, env: dict) -> bool:
 
 
 def serving_problems(run_sh: str, env: dict, *, drafter_off: bool, host_sampling: bool,
-                     model_has_mtp: bool | None = None, graft: bool = False) -> list[str]:
+                     model_has_mtp: bool | None = None, graft: bool = False, drafters: set[str] | None = None) -> list[str]:
     """What is wrong with a staged package's serving settings next to what stage 2 served with.
 
     `model_has_mtp` is stage 0's finding (None when it did not record one). A package that turns the drafter on
     for a model with no mtp.* tensors needs a graft (`graft`: the package has a graft.json); without one the
-    server stops at start with "model has no MTP head"."""
+    server stops at start with "model has no MTP head".
+
+    `drafters` is the drafter's repo (without a revision) as the source bundle or stage 2's run script names it. With
+    the drafter off, a TT_AUXILIARY_WEIGHTS entry for one of those repos (in the environment or in a run.sh export) is
+    a problem, and other entries are allowed. None means the caller cannot say which repo is the drafter, and then any
+    entry is a problem."""
     problems = []
     if drafter_off:
         drafter = [m.group(1).strip().strip("\"'") for ln in run_sh.splitlines()
@@ -184,11 +221,18 @@ def serving_problems(run_sh: str, env: dict, *, drafter_off: bool, host_sampling
             problems.append(f"the manifest sets QWEN36_DRAFTER={env['QWEN36_DRAFTER']!r}; stage 2 "
                             "served with the drafter off")
         left = sorted(k for k in env if DRAFTER_ENV.match(k)) + \
-            (["DFLASH_WEIGHTS in run.sh"] if "DFLASH_WEIGHTS" in run_sh else []) + \
-            (["TT_AUXILIARY_WEIGHTS in run.sh"] if any((m := AUX_EXPORT.match(ln)) and m.group(1).strip().strip("\"'")
-                                                       for ln in run_sh.splitlines()) else [])
+            (["DFLASH_WEIGHTS in run.sh"] if "DFLASH_WEIGHTS" in run_sh else [])
         if left:
             problems.append(f"the drafter's settings are still in the package: {left}")
+
+        def drafter_entries(value) -> list[str]:
+            return [x for x in aux_entries(value) if drafters is None or x.split("@", 1)[0] in drafters]
+        aux_left = drafter_entries(env.get(AUX_KEY) or "")
+        if aux_left:
+            problems.append(f"the manifest's {AUX_KEY} still names the drafter's {', '.join(aux_left)} with the drafter off")
+        aux_left = [x for ln in run_sh.splitlines() if (m := AUX_EXPORT.match(ln)) for x in drafter_entries(m.group(1))]
+        if aux_left:
+            problems.append(f"run.sh's export {AUX_KEY}= still names the drafter's {', '.join(aux_left)} with the drafter off")
         repos = aux_repos(env, nearest_model="")
         if repos:
             problems.append(f"the package's environment names {', '.join(repos)} with the drafter off, and the card would name it as the "
@@ -1018,7 +1062,7 @@ def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | N
     manifest_env = _json(out / "tt_kernel_manifest.json", "the staged manifest").get("env") or {}
     problems = serving_problems(text, manifest_env, drafter_off=facts.drafter_off,
                                 host_sampling=facts.host_sampling, model_has_mtp=facts.model_has_mtp,
-                                graft=facts.graft is not None)
+                                graft=facts.graft is not None, drafters=drafter_repos(src.manifest.get("env") or {}))
     if problems:
         raise PackageError(f"{name}: " + "; ".join(problems))
     safeio.atomic_write(run_sh, text, mode=0o755)         # 0755 as make_executable sets it; a link at the path is replaced, not followed
@@ -1052,9 +1096,19 @@ AUX_REPO = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:@[0-9a-f]{40})?$")
 
 
 def aux_repos(env: dict, *, nearest_model: str) -> list[str]:
-    """Hugging Face repos the bundle's environment names (such as the drafter in DFLASH_WEIGHTS),
-    without the nearest model, whose weights the package must never load."""
-    found = {m.group(1) for v in env.values() if (m := AUX_REPO.match(str(v)))}
+    """Hugging Face repos the bundle's environment names as a single value (such as the drafter in DFLASH_WEIGHTS),
+    without the nearest model, whose weights the package must never load. The card names these as the drafter.
+    TT_AUXILIARY_WEIGHTS is left out: with the drafter on it repeats DFLASH_WEIGHTS, and with the drafter off its kept
+    entries are other weights (issue 672). `download_repos` counts its entries."""
+    found = {m.group(1) for k, v in env.items() if k != AUX_KEY and (m := AUX_REPO.match(str(v)))}
+    return sorted(found - {nearest_model})
+
+
+def download_repos(env: dict, *, nearest_model: str) -> list[str]:
+    """Every Hugging Face repo the package's environment names: `aux_repos` and each TT_AUXILIARY_WEIGHTS entry.
+    The boot check links these from the HF cache stage 2 served with."""
+    found = set(aux_repos(env, nearest_model=nearest_model))
+    found |= {m.group(1) for x in aux_entries(env.get(AUX_KEY) or "") if (m := AUX_REPO.match(x))}
     return sorted(found - {nearest_model})
 
 
@@ -1087,7 +1141,7 @@ def prepare_verify(staged: Path, verify_dir: Path, facts: RunFacts, *, env: dict
     _repo_dir(hub, facts.model_id).symlink_to(facts.new_snapshot.parents[1])
     linked, missing = [facts.model_id], []
     manifest = _json(bundle / "tt_kernel_manifest.json", "the staged manifest")
-    for repo in aux_repos(manifest.get("env") or {}, nearest_model=facts.nearest_model):
+    for repo in download_repos(manifest.get("env") or {}, nearest_model=facts.nearest_model):
         theirs = _repo_dir(facts.hf_home / "hub", repo)
         if theirs.is_dir():
             _repo_dir(hub, repo).symlink_to(theirs)
