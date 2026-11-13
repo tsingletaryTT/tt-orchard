@@ -901,7 +901,7 @@ function renderNow() {
 
 function renderResults(d) {
   const r = d.results || {}, box = clear($("results-body"));
-  const any = r.swap || (r.configs && r.configs.length) || r.triage;
+  const any = r.swap || r.port_check || (r.configs && r.configs.length) || r.triage;
   $("results").hidden = !any;
   if (!any) return;
   if (r.triage) {
@@ -918,6 +918,20 @@ function renderResults(d) {
         h("span", {}, "server ready in ", h("b", {}, s.server_ready_s ? dur(s.server_ready_s) : "–")),
         h("span", {}, s.coherent ? "✓ coherent text" : "✕ not coherent")),
       s.free_run_text ? h("blockquote", { class: "free-text" }, `“${s.free_run_text}…”`) : null));
+  }
+  if (r.port_check) {
+    const p = r.port_check, few = p.fidelity_tokens !== null && p.fidelity_tokens < 4000;
+    const host = p.host_elements, dev = p.device_elements, share = host !== null && dev !== null && host + dev > 0 ? (100 * host) / (host + dev) : null;
+    box.append(h("div", { class: "result-card", dataset: { ok: String(p.top1_agreement !== null && p.top1_agreement >= 0.95 && p.lengths_agree !== false) } },
+      h("div", { class: "result-head" }, h("strong", {}, "Full port: stage 2 check on the chips "), h("span", { class: "muted" }, p.chips ? `${p.chips} chip${p.chips > 1 ? "s" : ""} · ` : "", where(p.host))),
+      h("div", { class: "result-nums" },
+        h("span", {}, h("b", {}, pct(p.top1_agreement)), " top-1 agreement with the CPU reference"),
+        p.fidelity !== null ? h("span", {}, "fidelity ", h("b", {}, p.fidelity.toFixed(2)), ` on ${p.fidelity_tokens} tokens`, few ? " (too few to compare formats)" : "") : null,
+        p.near_ties !== null ? h("span", {}, h("b", {}, String(p.near_tie_disagreements ?? 0)), ` disagreements, ${p.near_ties} near-ties`) : null,
+        p.lengths_agree !== null ? h("span", {}, p.lengths_agree ? "✓" : "✕", ` prefill and decode agree at ${p.lengths_checked} lengths`) : null,
+        p.decode_matmul_calls !== null ? h("span", {}, h("b", {}, String(p.decode_matmul_calls)), " device matmuls in a decode step") : null,
+        share !== null ? h("span", {}, h("b", {}, `${share.toFixed(0)}%`), " of weight elements on the host") : null),
+      p.free_run_text ? h("blockquote", { class: "free-text" }, `“${p.free_run_text}…”`) : null));
   }
   if (r.configs && r.configs.length) {
     const rows = r.configs.map((c) => h("tr", { dataset: { tone: c.pass === true ? "good" : c.pass === false ? "bad" : "" } },
