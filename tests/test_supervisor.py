@@ -11,7 +11,7 @@ from fake_model import FakeModel, turn
 from fakes import Crash
 from pathlib import Path
 
-from orchard import supervisor
+from orchard import device_holders, supervisor
 from orchard.adapters import AdapterError
 from orchard.ledger import Ledger, LedgerCorrupt
 from orchard.supervisor import (EXIT_ABORTED, EXIT_ERROR, EXIT_READY, EXIT_REFUSED, Control, build,
@@ -26,6 +26,10 @@ pytestmark = pytest.mark.usefixtures("stub_tools")
 
 class Stop(Exception):
     """Ends a test that would otherwise wait for the operator forever."""
+
+
+_REAL_SCAN = device_holders.scan
+_NO_HOLDERS = {"holders": [], "unreadable": 0, "fuser": None, "truncated": False, "nodes": [], "nodes_error": None}
 
 
 class Rig:
@@ -46,6 +50,11 @@ class Rig:
         self.adapter_cls, self.coder_cls = MachineAdapter, MachineCoder
         self.containers = FakeContainers()
 
+    def holders_scan(self):
+        """Who holds the device nodes. A test that patches `device_holders.scan` gets its patch; otherwise nothing holds them, because the supervisor must not read the real /proc
+        of the machine that runs the tests: a live coder container there made a refused start look like a start blocked by a container (issue 761)."""
+        return device_holders.scan() if device_holders.scan is not _REAL_SCAN else dict(_NO_HOLDERS)
+
     def sleep(self, s):
         self.clock.sleep(s)
         if self.on_sleep:
@@ -59,6 +68,7 @@ class Rig:
                         coder=self.coder_cls(self.m), versions={"tt_model": "test"}, clock=self.clock,
                         sleep=self.sleep, disk_usage=lambda p: self.usage(p), home=self.home,
                         containers=self.containers)
+            sup.holders_scan = self.holders_scan
             return sup.run()
 
     def entries(self):

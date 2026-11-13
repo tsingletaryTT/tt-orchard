@@ -157,3 +157,13 @@ def test_the_refusal_is_recorded_once_per_refusal_not_twice(rig):
     launch(rig, lambda m: ScriptedCoder(m, serve=[(1, "", REFUSAL)], rows=[]))
     assert rig.run() == 5
     assert len([d for d in rig.decisions() if d["decision"] == "coder not started"]) == 1
+
+
+def test_the_rig_does_not_read_the_real_device_holders_of_the_machine(rig, monkeypatch):
+    """Issue 761: the rig's supervisor read the real /proc. With a live coder container on the machine the first refusal looked like a container holding the chips, the retry
+    was skipped, and the scenario of the test above never reached its second look. The real scan lists the device nodes first, so a counter on that shows whether it ran."""
+    from orchard import device_holders
+    calls = []
+    monkeypatch.setattr(device_holders, "list_nodes", lambda *a, **k: calls.append(1) or ([], None))
+    test_a_crash_while_collecting_the_second_refusals_evidence_leaves_owned_false(rig, monkeypatch)
+    assert calls == [], "the supervisor under test scanned the real machine"
