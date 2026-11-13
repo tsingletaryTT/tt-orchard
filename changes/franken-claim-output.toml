@@ -1,3 +1,4 @@
 target = "0.9.184"
 summary = "make_franken claims its output directory with one mkdir, refuses an unreadable tokenizer file with exit 2, records the tolerance each proof used, and checks the reference prompts before writing."
 kind = "fix"
+pr = 771
