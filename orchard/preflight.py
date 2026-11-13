@@ -862,11 +862,32 @@ def _text_runtime_check(model_id: str, base_override: str | None, *, allowed: bo
                      "base": None, "snapshot": None, "bundle": None, "needs_fetch": False, "candidates": [], "report": None, "text_runtime": rtm.name})
 
 
+PIN_WHY_MAX = 300           # the longest reason --nearest-why takes: one line, recorded in run_start and shown in the base row
+
+
+def pin_why_problem(why) -> str | None:
+    """Why `--nearest-why` cannot be recorded, or None. The reason goes into the ledger's run_start and into every stage's run facts, so it
+    is one printable line of 1 to PIN_WHY_MAX characters."""
+    if not isinstance(why, str) or not why.strip():
+        return "--nearest-why needs a reason: say why this model is the nearest one"
+    if len(why) > PIN_WHY_MAX:
+        return f"--nearest-why is {len(why)} characters; keep it to {PIN_WHY_MAX}"
+    if not why.isprintable():
+        return "--nearest-why must be one line of printable text (no newline, tab or control character)"
+    return None
+
+
+def _pin_record(base: str, why: str, bundle: str | None) -> dict:
+    """The base row's record of an operator's pinned nearest model (issue 559)."""
+    return {"repo": base, "why": why, "bundle": bundle, "source": "operator"}
+
+
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
                installed: list, search: Callable | None, report: dict | None = None,
                accept_inferred: bool = False, stock: Callable | None = None, audio: str | None = None,
                base_hub_info: Callable | None = None, audio_paths=None, text_runtime_ok: bool = True,
-               weights_records: dict | None = None, base_bundle: str | None = None) -> Check:
+               weights_records: dict | None = None, base_bundle: str | None = None,
+               pinned_why: str | None = None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
@@ -880,7 +901,10 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     orchard/weights_source.py) does not count as serving the base. `weights_records` replaces the shipped record, for tests.
     `base_bundle` is the bundle --base named (cli.resolve_base_bundle): it is the bundle the run uses, and `data["bundle_dir"]` records
     its directory for the run's `bundle` input. Without a name, installed bundles that serve the base and belong to different families
-    (nearest.ambiguity), or two that serve the same chip count, block until the operator names one."""
+    (nearest.ambiguity), or two that serve the same chip count, block until the operator names one. `pinned_why` is the operator's reason
+    for choosing `base_override` as the nearest model (`bringup --base <model id> --nearest-why`, issue 559). With it, a base that no installed
+    bundle serves is a warning: stage 0 compares against the pinned model, `data["pin"]` records the repository, the reason and that no
+    bundle serves it, and the stages that serve through a bundle meet the gap when they run."""
     from orchard import nearest, weights_source
     if (found := _text_runtime_check(model_id, base_override, allowed=text_runtime_ok)) is not None:
         return found
@@ -932,7 +956,8 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
         chosen = serving[0] if base_bundle else next((b for b in serving if b.schema == "6"), serving[0])
         data = {"base": base, "snapshot": snap, "bundle": chosen.name, "needs_fetch": snap is None,
                 "bundle_dir": (chosen.directory or None) if chosen.schema == "6" else None, "bundle_named": bool(base_bundle),
-                "candidates": [], "report": report, "refused": refused_data}
+                "candidates": [], "report": report, "refused": refused_data,
+                **({"pin": _pin_record(base, pinned_why, chosen.name)} if pinned_why and base_override else {})}
         where = "its snapshot is local" if snap else "its snapshot will be downloaded"
         note = _class_note(report, base)
         named_note = " (named by --base)" if base_bundle else ""
@@ -947,6 +972,16 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
         return Check("base", OK, f"base {base}: bundle {chosen.name}{named_note} is installed; {where}{note}", data=data)
     if (stock_row := _stock_check(report, stock, model_id, hub, local_snapshot)) is not None:
         return stock_row
+    if pinned_why and base_override:
+        # The operator chose this nearest model and said why (issue 559). Stage 0 compares against it; no bundle serves it, and the
+        # record says so, so the evidence shows the choice came from the operator and was made knowing there is no bundle.
+        snap = local_snapshot(base)
+        lead = (weights_source.refusal_text(base, refused) + " ") if refused else ""
+        return Check("base", WARN, f"{lead}base {base}: pinned by the operator as the nearest model ({pinned_why}); no installed bundle "
+                     f"serves it, so stage 0 compares against it and a stage that serves through a bundle has none; "
+                     + ("its snapshot is local" if snap else "its snapshot will be downloaded"),
+                     data={"base": base, "snapshot": snap, "bundle": None, "bundle_dir": None, "needs_fetch": snap is None,
+                           "candidates": [], "report": report, "refused": refused_data, "pin": _pin_record(base, pinned_why, None)})
     family = nearest.family_query(base)
     found = None
     if search is not None:
@@ -984,7 +1019,10 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
             "0, 2 and 4 have nothing to compare it with or serve it through.")
     return Check("base", BLOCK, f"{lead}{code} {listing}."
                  f"{'' if code else _port_note(report)} "
-                 "Pick one with --base <bundle>, or install a bundle yourself and run bringup again",
+                 "Pick one with --base <bundle>, or install a bundle yourself and run bringup again"
+                 # --base named a model id with no bundle (issue 559): say how to pin it anyway.
+                 + (f". To compare against {base} with no bundle, add --nearest-why <reason> (stage 0 then uses it, and the run "
+                    "records it as your choice)" if base_override else ""),
                  "nearest-model-missing", data={"base": base, "snapshot": None, "bundle": None,
                                                 "needs_fetch": False, "candidates": ordered, "report": report,
                                                 "refused": refused_data})
@@ -1277,10 +1315,11 @@ def cache_root_for(cfg) -> Path:
 def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
                   resuming: bool = False, base_override: str | None = None,
                   accept_inferred_base: bool = False, progress: Callable[[str], None] | None = None,
-                  stock_recorded: str | None = None, no_fetch: bool = False, base_bundle: str | None = None) -> list[Check]:
+                  stock_recorded: str | None = None, no_fetch: bool = False, base_bundle: str | None = None,
+                  pinned_why: str | None = None) -> list[Check]:
     """`progress(text)` is told what is about to run (the hub lookup, the research, the machine checks), so a
     terminal is not silent while the research reads weight headers for a minute or two. With `no_fetch` nothing is downloaded: the
-    disk row counts no download and the base row says a missing snapshot is not fetched (issue 409)."""
+    disk row counts no download and the base row says a missing snapshot is not fetched (issue 409). `pinned_why` is check_base's."""
     from orchard.research.types import reporter
     say = reporter(progress)
     s = signals or default_signals(cfg)
@@ -1332,7 +1371,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                 report = s.research(model_id, hub, base_override, inst)
             except Exception as exc:                  # a failed research call leaves the earlier checks in force
                 report, failed = None, type(exc).__name__
-        found = check_base(model_id=model_id, hub=hub, base_override=base_override, base_bundle=base_bundle,
+        found = check_base(model_id=model_id, hub=hub, base_override=base_override, base_bundle=base_bundle, pinned_why=pinned_why,
                            local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report,
                            accept_inferred=accept_inferred_base,
                            # the parameters directory is in this box's tt-metal tree; a lab runs its tests on another box
