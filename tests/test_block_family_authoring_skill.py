@@ -42,7 +42,7 @@ def _generated_names() -> set:
 
 def _sources() -> str:
     text, _plan = tiny_qwen4()
-    return "\n".join([(ROOT / "orchard" / "port_template.py").read_text(), (ROOT / "tests" / "fake_ttnn_compute.py").read_text(), text])
+    return "\n".join([(ROOT / "orchard" / "port_template.py").read_text(), (ROOT / "orchard" / "skills" / "full-port-templates" / "cpu_ttnn.py").read_text(), text])
 
 
 def _fields() -> set:
