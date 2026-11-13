@@ -39,6 +39,13 @@ The counts go into the record as `device_ops` and the gate (orchard/full_port.py
 port that calls ttnn.linear on a dummy tensor and computes elsewhere passes the count; the weight scan sees only what `load` returned and the
 module's globals; and the proxy sees attribute access on `ttnn` and `from ttnn import name`, and misses `from ttnn.sub import name`.
 
+CPU run before the board (issue 697). `port_check.py --cpu N` runs the port's load, one prefill of the stage 1 prompt and one decode step in a
+worker that imports the torch stand-in of ttnn (stages/2/cpu_ttnn.py, copied by the supervisor) in place of the runtime, with every op
+checked against the verified sheet's signature (stages/2/cheat_sheet.json). No chip is opened and no record is written. A call the sheet
+refuses, or a missing name, key, index or import raised at a line of the port, fails with the same FAILED and PORT_CHECK_FAILURE lines a
+board failure prints, so the supervisor's repair rounds take it without a board. Anything the stand-in may cause (a name it lacks, an error
+inside it, an AttributeError or RuntimeError at a port line) exits 3, "no verdict", and the board check decides. See `cpu_main`.
+
 Port module interface (stages/2/port/port_model.py), all four functions required:
 
     load(model_dir: str, mesh_device) -> model
@@ -122,6 +129,12 @@ CONFIG_MAX = 1 << 20             # the snapshot's config.json is a few kilobytes
 SOURCE_MAX = 1 << 21             # a port source file is read to this size for the static count
 MARK = "PORT_CHECK"              # the start of the line the parent prints last; a port that prints it fails the run
 FORGED = threading.Event()       # set when a line from the worker mentions MARK
+# The CPU run (issue 697): `--cpu N` runs load, one prefill and one decode step of the port against the torch stand-in of ttnn, with no chip.
+CPU_TTNN = HERE / "cpu_ttnn.py"           # the stand-in, copied here by the supervisor (orchard/skills/full-port-templates/cpu_ttnn.py)
+CHEAT_FILE = HERE / "cheat_sheet.json"    # the verified sheet, copied here by the supervisor; its signatures are checked on every call
+CHEAT_MAX = 1 << 22                       # bytes of the sheet read
+CPU_RUN_MAX_BYTES = 4 << 30               # choice: a larger checkpoint is not loaded on the CPU (the stand-in keeps float32 copies of the weights)
+CPU_NO_VERDICT = 3                        # the exit code of a CPU run that neither passed nor found a fault of the port
 
 
 def sha_bytes(data: bytes) -> str:
@@ -486,6 +499,182 @@ class CountingModule(types.ModuleType):
         return dir(self._real)
 
 
+# ---- the CPU run: the stand-in ttnn behind the cheat sheet's signatures (issue 697) ----------------------------------------------
+
+class SheetMismatch(TypeError):
+    """A ttnn call whose arguments the verified sheet's signature for that op does not accept. The CPU run counts it as a fault of the port."""
+
+
+class StandInGap(AttributeError):
+    """A name or a call form the CPU stand-in does not cover. It says nothing about the port, so the CPU run gives no verdict on it. It is an
+    AttributeError so `hasattr(ttnn, name)` and `getattr(ttnn, name, None)` in a port behave as they do on a module that lacks the name."""
+
+
+def parse_signature(signature: str):
+    """The parameters of a sheet signature such as `ttnn.reshape(input_tensor, shape, memory_config=None)`, or None when the entry has no
+    parameter list (a constant) or the list does not parse. `full` is true when the signature lists defaults or keyword-only parameters: only
+    then does the sheet record which keywords the op takes. A short form such as `ttnn.multiply(a, b)` names its positional inputs only."""
+    start, end = signature.find("("), signature.rfind(")")
+    if start < 0 or end < start:
+        return None
+    try:
+        fn = ast.parse(f"def _f({signature[start + 1:end]}): pass").body[0]
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    a = fn.args
+    positional = [x.arg for x in a.posonlyargs + a.args]
+    return {"positional": positional, "required": positional[:len(positional) - len(a.defaults)],
+            "kwonly": [x.arg for x in a.kwonlyargs], "kw_required": [x.arg for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is None],
+            "varargs": a.vararg is not None, "varkw": a.kwarg is not None,
+            "full": bool(a.defaults or a.kwonlyargs or a.vararg or a.kwarg), "text": signature}
+
+
+_SAME_WAY = re.compile(r"\b([a-z_]+(?:, [a-z_]+)*) and ([a-z_]+) are called the same way")      # orchard/port_template.py reads the notes the same way
+
+
+def read_sheet() -> dict:
+    """{dotted ttnn name: parsed signature} for every sheet entry with a parameter list, and for the ops an entry's notes say are "called the
+    same way" (the multiply entry names add, subtract and silu that way). An absent or unreadable sheet gives {}: no call is then checked."""
+    try:
+        with open(CHEAT_FILE, "rb") as fh:          # hardening: ok the supervisor's own copy of the sheet in the stage directory; bounded read in a try
+            data = json.loads(fh.read(CHEAT_MAX))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    out: dict = {}
+    sections = data.get("sections") if isinstance(data, dict) else None
+    for section in sections if isinstance(sections, list) else []:
+        entries = section.get("entries") if isinstance(section, dict) else None
+        for e in entries if isinstance(entries, list) else []:
+            if not isinstance(e, dict) or not isinstance(e.get("name"), str) or not isinstance(e.get("signature"), str):
+                continue
+            sig = parse_signature(e["signature"])
+            if sig is None:
+                continue
+            out[e["name"]] = sig
+            m = _SAME_WAY.search(e["notes"]) if isinstance(e.get("notes"), str) else None
+            if m:
+                for leaf in [*m.group(1).split(", "), m.group(2)]:
+                    out.setdefault(f"ttnn.{leaf}", sig)
+    return out
+
+
+def sheet_mismatch(name: str, sig: dict, args: tuple, kwargs: dict) -> str | None:
+    """Why the sheet's signature for `name` refuses this call, or None when it accepts it. Positional counts and required parameters are
+    checked for every signature; keywords only for a full one (see parse_signature)."""
+    pos = sig["positional"]
+    if not sig["varargs"] and len(args) > len(pos):
+        return f"{name} takes {len(pos)} positional argument(s) in the verified sheet and the port passed {len(args)}"
+    for kw in kwargs:
+        if kw in pos[:len(args)]:
+            return f"{name} got {kw!r} both by position and by keyword"
+        if sig["full"] and not sig["varkw"] and kw not in pos and kw not in sig["kwonly"]:
+            return f"{name} passes {kw!r}, which the verified sheet's signature does not list"
+    missing = [p for p in sig["required"][len(args):] if p not in kwargs]
+    if sig["full"]:
+        missing += [k for k in sig["kw_required"] if k not in kwargs]
+    if missing:
+        return f"{name} is missing the argument(s) {', '.join(missing)} that the verified sheet's signature requires"
+    return None
+
+
+class SheetChecked:
+    """A stand-in op behind the sheet: the call is checked against the sheet's signature (a refusal is a SheetMismatch), then bound to the
+    stand-in's own signature (a refusal there is a StandInGap: the sheet allows the call and the stand-in does not cover it), then run."""
+
+    def __init__(self, fn, name, sig):
+        self.__dict__.update(_fn=fn, _name=name, _sig=sig)
+
+    def __call__(self, *args, **kwargs):
+        if self._sig is not None:
+            why = sheet_mismatch(self._name, self._sig, args, kwargs)
+            if why:
+                raise SheetMismatch(f"{why} (verified sheet: {self._sig['text']})")
+        try:
+            inspect.signature(self._fn).bind(*args, **kwargs)
+        except TypeError as exc:
+            raise StandInGap(f"the CPU stand-in's {self._name} does not take this call ({exc})") from None
+        except ValueError:
+            pass                                   # no signature to bind to: the call itself decides
+        return self._fn(*args, **kwargs)
+
+    def __getattr__(self, attr):
+        if attr in ("_fn", "_name", "_sig"):
+            raise AttributeError(attr)
+        return getattr(self._fn, attr)
+
+
+class SheetCheckedModule(types.ModuleType):
+    """The CPU stand-in (or one of its namespaces) as the port sees it: a name the stand-in lacks raises StandInGap, every op is a SheetChecked,
+    and classes and constants come back unchanged, so `isinstance(x, ttnn.Tensor)` and `ttnn.TILE_LAYOUT` behave as on the stand-in."""
+
+    def __init__(self, real, name, sheet):
+        super().__init__(name)
+        self.__dict__.update(_real=real, _cname=name, _sheet=sheet)
+
+    def __getattr__(self, attr):
+        if attr in ("_real", "_cname", "_sheet"):
+            raise AttributeError(attr)
+        full = f"{self._cname}.{attr}"
+        try:
+            value = getattr(self._real, attr)
+        except AttributeError:
+            raise StandInGap(f"{full} is not in the CPU stand-in of ttnn") from None
+        if isinstance(value, types.ModuleType):
+            return SheetCheckedModule(value, full, self._sheet)
+        if inspect.isclass(value) or not callable(value):
+            return value
+        return SheetChecked(value, full, self._sheet.get(full))
+
+    def __dir__(self):
+        return dir(self._real)
+
+
+def load_stand_in(n_chips: int):
+    """The stand-in module behind the sheet and a stand-in device of `n_chips` chips. The stand-in is loaded by path from the stage directory
+    (the supervisor's copy), never from sys.path, and nothing imports the real ttnn."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("orchard_cpu_ttnn", CPU_TTNN)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"the CPU stand-in {CPU_TTNN.name} cannot be loaded")
+    real = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(real)
+    return SheetCheckedModule(real.make(), "ttnn", read_sheet()), real.MeshDevice(n_chips)
+
+
+# The exceptions that, raised at a line of the port, are the port's own fault on any device: a missing name, a missing dict key, an index past
+# the end, an import that fails in this environment (the board check runs in the same one). Other kinds raised at a port line (an AttributeError,
+# a RuntimeError, a ValueError) can come from the stand-in's tensors differing from the device's, so they give no verdict.
+CPU_FAULTS = (NameError, KeyError, IndexError, ImportError, SyntaxError)
+# A TypeError raised at a port line by a call with the wrong arguments (the port's own function or a library's). Every stand-in op is bound
+# before it runs, so a wrong call to one is a SheetMismatch or a StandInGap and never reaches this pattern.
+_CALL_ERROR = re.compile(r"takes (?:from )?\d+ (?:to \d+ )?positional|missing \d+ required|got an unexpected keyword|got multiple values")
+
+
+def cpu_fault(exc) -> tuple[bool, str]:
+    """(is the port's fault, why) for an exception of the CPU run. True only for a SheetMismatch, or an exception of CPU_FAULTS (or a TypeError
+    from a wrong call) whose innermost frame is in the port directory and that is not about a ttnn module the stand-in lacks."""
+    if isinstance(exc, SheetMismatch):
+        return True, "the verified sheet refuses the call"
+    if isinstance(exc, StandInGap):
+        return False, "the CPU stand-in does not cover this call"
+    root = os.path.realpath(PORT_DIR)
+    last = None
+    tb = getattr(exc, "__traceback__", None)
+    while tb is not None:
+        if not tb.tb_frame.f_code.co_filename.startswith("<frozen"):
+            last = os.path.realpath(tb.tb_frame.f_code.co_filename)
+        tb = tb.tb_next
+    if isinstance(exc, SyntaxError) and isinstance(getattr(exc, "filename", None), str):
+        last = os.path.realpath(exc.filename)          # a syntax error names the file that does not parse; its traceback has no frame there
+    if last is None or not last.startswith(root + os.sep):
+        return False, "it was raised outside the port's files (in the stand-in or a library), which the device may not share"
+    if isinstance(exc, ImportError) and str(getattr(exc, "name", "") or "").split(".")[0] == "ttnn":
+        return False, "a ttnn module the CPU stand-in does not provide"
+    if isinstance(exc, CPU_FAULTS) or (type(exc) is TypeError and _CALL_ERROR.search(str(exc))):
+        return True, "raised at a line of the port"
+    return False, f"a {type(exc).__name__} at a line of the port can come from the stand-in's tensors; the board check decides"
+
+
 def take_counts() -> dict:
     """The tally since the last call, as {name: count} for the MAX_OP_NAMES most called names, and the counter cleared."""
     out = dict(COUNTS.most_common(MAX_OP_NAMES))
@@ -650,11 +839,25 @@ def worker(read_fd: int, write_fd: int) -> int:
         wr.flush()
 
     model = mod = device = closer = None
+    cpu = False                  # the CPU run (`--cpu`): the stand-in ttnn, no device, and each failure says whether it is the port's fault
     for line in rd:
         try:
             req = json.loads(line)
             op = req["op"]
-            if op == "init":             # untimed: import the runtime, open the device, import the port module
+            if op == "init" and req.get("cpu") is True:      # the CPU run: the stand-in behind the sheet, then the port module
+                cpu = True
+                try:
+                    stand_in, device = load_stand_in(int(req["n_chips"]))
+                except (Exception, SystemExit) as exc:
+                    reply({"ok": False, "kind": "setup", "error": clip(f"{type(exc).__name__}: {exc}")})
+                    continue
+                sys.modules["ttnn"] = stand_in
+                sys.modules["ttnn.experimental"] = stand_in.experimental
+                sys.modules["ttnn.transformer"] = stand_in.transformer
+                sys.path.insert(0, str(PORT_DIR))
+                mod = importlib.import_module(PORT_MODULE)
+                reply({"ok": True})
+            elif op == "init":           # untimed: import the runtime, open the device, import the port module
                 try:
                     # The runtime is imported here, inside the guard, and before the port directory is on sys.path, so a file named ttnn.py
                     # there cannot stand in for it. A failure of the import (a missing dependency, a broken install) is the runtime's, like a
@@ -697,7 +900,11 @@ def worker(read_fd: int, write_fd: int) -> int:
             else:
                 reply({"ok": False, "error": f"unknown op {op!r}"})
         except BaseException as exc:             # the port's failure goes back as text; the parent decides what it means
-            reply({"ok": False, "error": clip(f"{port_frame(exc)}{type(exc).__name__}: {exc}")})
+            extra = {}
+            if cpu:
+                fault, why = cpu_fault(exc)
+                extra = {"cpu_fault": fault, "why": why}
+            reply({"ok": False, "error": clip(f"{port_frame(exc)}{type(exc).__name__}: {exc}"), **extra})
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 return 1
     return 0
@@ -731,6 +938,7 @@ class Worker:
         self.pumps = [threading.Thread(target=self._pump, args=(s,), daemon=True) for s in (self.proc.stdout, self.proc.stderr)]
         for t in self.pumps:
             t.start()
+        self.last = {}
 
     @staticmethod
     def _pump(stream) -> None:
@@ -755,6 +963,7 @@ class Worker:
         except ValueError:
             raise PortFailed(f"the port worker's answer to {req['op']!r} was not JSON", op=req["op"])
         if not isinstance(answer, dict) or answer.get("ok") is not True:
+            self.last = answer if isinstance(answer, dict) else {}         # the CPU run reads `cpu_fault` and `why` from a failed answer
             runtime = isinstance(answer, dict) and answer.get("kind") == "setup"       # only the worker's own device-open failure says so
             raise PortFailed(f"the port failed at {req['op']!r}: {answer.get('error') if isinstance(answer, dict) else answer!r}", op=req["op"],
                              kind="setup" if runtime else "port")
@@ -1053,6 +1262,73 @@ def static_main(flags) -> int:
     return 0
 
 
+def checkpoint_bytes(model_dir: str) -> int:
+    """The bytes of the regular files at the top of the snapshot directory (links are followed: a Hugging Face snapshot links to its blobs)."""
+    total = 0
+    with os.scandir(model_dir) as it:
+        for e in it:
+            try:
+                if e.is_file():
+                    total += e.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def cpu_main(flags) -> int:
+    """`port_check.py --cpu N` (issue 697): the port's load, one prefill of the stage 1 prompt and one decode step, in a worker that imports the
+    CPU stand-in of ttnn (stages/2/cpu_ttnn.py) behind the verified sheet's signatures, with a stand-in device of N chips. No chip is opened
+    and no record is written. The supervisor runs it after the static check and before it takes a board, and again after each repair.
+
+    Exit 0: every request ran. Exit 2 with the usual FAILED and PORT_CHECK_FAILURE lines: a fault of the port, either a call the sheet refuses
+    or a missing name, key, index or import (or a wrong call) raised at a line of the port (`cpu_fault`); the board would fail the same way.
+    Exit CPU_NO_VERDICT: anything else (the stand-in lacks an op, an error inside the stand-in, no torch, a checkpoint over CPU_RUN_MAX_BYTES,
+    a missing stage 1 file); the line `CPU run gave no verdict: ...` says why and the board check decides. What a pass does not show: that the
+    numbers are right, that the device accepts the shapes and layouts, or anything about code the three requests did not reach."""
+    if len(flags) != 1 or not flags[0].isdigit() or not 0 < int(flags[0]) <= 64:
+        print("usage: port_check.py --cpu N   (N: the chips the board check will hold)")
+        return 2
+    n_chips = int(flags[0])
+    if not (PORT_DIR / f"{PORT_MODULE}.py").is_file():
+        raise PortFailed(f"stages/2/port/{PORT_MODULE}.py does not exist: the port module is the file the coder writes")
+    refuse_links()
+    try:
+        model_dir = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))["model_snapshot"]      # hardening: ok the supervisor-written config next to this file, as main() reads it
+        size = checkpoint_bytes(model_dir)
+        prompt, first = read_ids(PROMPT, "prompt_ids"), read_ids(REFERENCE, "generated_ids")[0]
+    except (OSError, ValueError, KeyError, TypeError, PortFailed) as exc:
+        print(f"CPU run gave no verdict: its inputs do not read ({type(exc).__name__}: {str(exc)[:300]})", flush=True)
+        return CPU_NO_VERDICT
+    if size > CPU_RUN_MAX_BYTES:
+        print(f"CPU run gave no verdict: the checkpoint holds {size} bytes, above the CPU run's limit of {CPU_RUN_MAX_BYTES}; it was not loaded",
+              flush=True)
+        return CPU_NO_VERDICT
+    w = Worker()
+    try:
+        w.ask(op="init", n_chips=n_chips, cpu=True)
+        w.ask(op="load", model_dir=model_dir)
+        w.ask(op="prefill", ids=prompt)
+        w.ask(op="decode", token=first, position=len(prompt))
+        w.ask(op="close")
+    except PortFailed as exc:
+        if exc.kind == "port" and w.last.get("cpu_fault") is True:
+            # The FAILED line keeps the board check's own form ("the port failed at 'op': ..."), which the repair rounds and the thin
+            # repair parse; this line before it says where it came from.
+            print(f"CPU run found a fault of the port ({w.last.get('why')}). No board was used; the board check would fail the same way.",
+                  flush=True)
+            raise
+        why = w.last.get("why") if isinstance(w.last.get("why"), str) else "the worker gave no reason"
+        print(f"CPU run gave no verdict: {exc} ({why})", flush=True)
+        return CPU_NO_VERDICT
+    finally:
+        w.stop()
+    if FORGED.is_set():
+        raise PortFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
+    print(f"CPU run passed: load, a prefill of {len(prompt)} tokens and one decode step ran against the CPU stand-in of ttnn on {n_chips} "
+          "stand-in chip(s). No board was used, so this does not show the port runs on the chip or computes the right numbers.", flush=True)
+    return 0
+
+
 def top5_steps() -> list | None:
     """The `steps` list of the stage 1 top-5 file, or None when the file is missing, unreadable or has no such list."""
     try:
@@ -1250,7 +1526,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--worker":
         sys.exit(worker(int(sys.argv[2]), int(sys.argv[3])))
     try:
-        sys.exit(static_main(sys.argv[2:]) if sys.argv[1:2] == ["--static"] else main())
+        sys.exit(static_main(sys.argv[2:]) if sys.argv[1:2] == ["--static"] else cpu_main(sys.argv[2:]) if sys.argv[1:2] == ["--cpu"] else main())
     except PortFailed as exc:
         print(f"FAILED: {exc}", flush=True)
         print("PORT_CHECK_FAILURE " + json.dumps({"kind": exc.kind, "op": exc.op}), flush=True)      # after the text: the supervisor reads this line
