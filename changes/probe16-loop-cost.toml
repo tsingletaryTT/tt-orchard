@@ -1,0 +1,2 @@
+target = "0.9.175"
+summary = "Probe 16 times the per-slot gather/scatter loop with 128 experts on one chip at Flash widths (issue 723)."

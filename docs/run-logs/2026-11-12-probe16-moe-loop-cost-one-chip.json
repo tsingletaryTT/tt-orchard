@@ -1,0 +1,162 @@
+{
+  "chips_modelled": 4,
+  "date": "2026-11-12",
+  "lease": "gozer run --chips 1 (board of two chips, one used)",
+  "probe": "p16_moe_loop_cost",
+  "results": [
+    {
+      "by_tokens": [
+        {
+          "device_seconds": [
+            1.0618,
+            0.0004,
+            0.0004,
+            0.0004
+          ],
+          "host_prep_seconds": [
+            0.0102,
+            0.0004,
+            0.0004,
+            0.0004
+          ],
+          "rows_per_slot": [
+            32,
+            32,
+            32
+          ],
+          "slots_hit": 3,
+          "tokens": 1,
+          "total_seconds": [
+            0.0013,
+            0.001,
+            0.0009,
+            0.0009
+          ],
+          "upload_seconds": [
+            0.0003,
+            0.0002,
+            0.0001,
+            0.0001
+          ]
+        },
+        {
+          "device_seconds": [
+            0.2055,
+            0.0022,
+            0.0022,
+            0.0022
+          ],
+          "host_prep_seconds": [
+            0.0007,
+            0.0006,
+            0.0005,
+            0.0005
+          ],
+          "rows_per_slot": [
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32
+          ],
+          "slots_hit": 17,
+          "tokens": 8,
+          "total_seconds": [
+            0.0035,
+            0.0033,
+            0.0033,
+            0.0032
+          ],
+          "upload_seconds": [
+            0.0009,
+            0.0006,
+            0.0006,
+            0.0006
+          ]
+        },
+        {
+          "device_seconds": [
+            0.0244,
+            0.007,
+            0.007,
+            0.007
+          ],
+          "host_prep_seconds": [
+            0.001,
+            0.001,
+            0.001,
+            0.0009
+          ],
+          "rows_per_slot": [
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32
+          ],
+          "slots_hit": 56,
+          "tokens": 32,
+          "total_seconds": [
+            0.0099,
+            0.0097,
+            0.0097,
+            0.0097
+          ],
+          "upload_seconds": [
+            0.0023,
+            0.0026,
+            0.0018,
+            0.0017
+          ]
+        },
+        {
+          "device_seconds": [
+            0.5298,
+            0.0186,
+            0.0187,
+            0.0185
+          ],
+          "host_prep_seconds": [
+            0.002,
+            0.002,
+            0.0023,
+            0.0021
+          ],
+          "rows_per_slot": [
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32
+          ],
+          "slots_hit": 127,
+          "tokens": 256,
+          "total_seconds": [
+            0.0259,
+            0.0254,
+            0.0253,
+            0.0251
+          ],
+          "upload_seconds": [
+            0.0042,
+            0.0043,
+            0.0044,
+            0.0042
+          ]
+        }
+      ],
+      "dtype": "bfp4",
+      "experts_on_chip": 128,
+      "preset": "flash"
+    }
+  ]
+}
