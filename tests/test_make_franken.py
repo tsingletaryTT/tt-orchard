@@ -775,3 +775,113 @@ def test_an_oversized_base_card_is_refused_not_a_traceback(base_snapshot, tmp_pa
 ])
 def test_the_base_card_license_is_read_from_the_front_matter_only(text, want):
     assert mf.card_license(text) == want
+
+
+# ---- issue 646: the output directory is claimed exclusively, tokenizer read errors are refusals, the recorded tolerance, and the
+# reference prompts are checked before anything is written -------------------------------------------------------------------------
+
+def _argv(base, out, *extra):
+    return ["--out", str(out), "--base-snapshot", str(base), "--layers", "4", "--dtype", "float32", "--max-gb", "1", *extra]
+
+
+def test_an_existing_empty_output_directory_is_refused(base_snapshot, tmp_path, capsys, monkeypatch):
+    """Refused at the first check, before the base tensors are read."""
+    out = tmp_path / "empty"
+    out.mkdir()
+    monkeypatch.setattr(mf, "read_base_tensors", lambda *a: pytest.fail("the base tensors were read for an output that exists"))
+    assert mf.main(_argv(base_snapshot, out, "--skip-decode-check")) == 2
+    assert "exists" in capsys.readouterr().err and list(out.iterdir()) == []
+
+
+def test_a_directory_made_after_the_check_is_refused_and_left_alone(base_snapshot, tmp_path, monkeypatch, capsys):
+    """Two runs on one output can both pass the first check. The claim before the first write is exclusive, so the second run stops."""
+    out = tmp_path / "raced"
+    real = mf.read_base_tensors
+
+    def other_run_claims_it(snapshot, layers):
+        out.mkdir()
+        (out / "theirs.txt").write_text("the other run's file")
+        return real(snapshot, layers)
+    monkeypatch.setattr(mf, "read_base_tensors", other_run_claims_it)
+    assert mf.main(_argv(base_snapshot, out, "--skip-decode-check")) == 2
+    assert "exists" in capsys.readouterr().err
+    assert sorted(p.name for p in out.iterdir()) == ["theirs.txt"]
+
+
+def _copied(base_snapshot, tmp_path, name):
+    import shutil
+    snap = tmp_path / name / "snapshots" / ("e1" * 20)
+    shutil.copytree(base_snapshot, snap)
+    return snap
+
+
+def test_a_tokenizer_file_that_is_a_fifo_is_refused_not_a_traceback(base_snapshot, tmp_path, capsys):
+    snap = _copied(base_snapshot, tmp_path, "fifo")
+    (snap / "tokenizer.json").unlink()
+    os.mkfifo(snap / "tokenizer.json")
+    out = tmp_path / "o"
+    assert mf.main(_argv(snap, out, "--skip-decode-check")) == 2
+    assert "tokenizer.json" in capsys.readouterr().err and not out.exists()
+
+
+def test_an_oversized_tokenizer_file_is_refused_not_a_traceback(base_snapshot, tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(mf, "MAX_TOKENIZER_BYTES", 1)
+    out = tmp_path / "o"
+    assert mf.main(_argv(base_snapshot, out, "--skip-decode-check")) == 2
+    assert "tokenizer.json" in capsys.readouterr().err and not out.exists()
+
+
+class ShortTok:
+    """A tokenizer whose every text is ten tokens: the stage 1 prompt works and the teacher-forced passage is too short."""
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        return "prompt"
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": list(range(10))}
+
+
+def test_a_short_teacher_forced_passage_is_refused_before_anything_is_written(base_snapshot, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", classmethod(lambda cls, *a, **k: ShortTok()))
+    out = tmp_path / "short"
+    assert mf.main(_argv(base_snapshot, out)) == 2
+    assert "fewer than" in capsys.readouterr().err and not out.exists()
+
+
+def test_the_reference_prompts_are_read_with_the_checkpoints_config_and_tokenizer_files(monkeypatch):
+    """The prompts are tokenized before the output exists, from a scratch directory holding the same config.json and tokenizer files."""
+    seen = {}
+
+    def load(cls, path, *a, **k):
+        seen["files"] = sorted(p.name for p in Path(path).iterdir())
+        seen["config"] = json.loads((Path(path) / "config.json").read_text())
+        raise OSError("no tokenizer")
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", classmethod(load))
+    cfg = {"vocab_size": 300, "model_type": "qwen4_exp_text"}
+    prompts = mf.reference_prompts(transformers, cfg, {"tokenizer.json": b"{}"})
+    assert seen["files"] == ["config.json", "tokenizer.json"] and seen["config"] == cfg
+    assert prompts["prompt_source"].startswith("seeded ids") and len(prompts["teacher_forced_ids"]) >= mf.TEACHER_FORCED_MIN_POSITIONS
+
+
+def test_the_recorded_tolerance_is_taken_from_the_result_it_judges():
+    rows = [{"max_abs_logit": 10.0}, {"max_abs_logit": 40.0}]
+    assert mf.tolerance({"prompts": rows}, "bfloat16") == pytest.approx(mf.PROOF_BF16_REL_TOL * 40.0)
+    assert mf.tolerance({"prompts": rows}, "float32") == mf.PROOF_FLOAT32_ABS_TOL
+
+
+@needs_real_forward
+def test_a_sparse_bf16_run_records_the_all_selected_tolerance_from_the_all_selected_logits(base_snapshot, tmp_path):
+    """Every proof prompt is longer than the budget plus one block, so the sparse model differs from the all-selected one on each prompt
+    and their largest logits differ. The script runs in the reference interpreter with only PROMPT_LENGTHS changed."""
+    out = tmp_path / "sparse-bf16"
+    code = ("import importlib.util, sys; s = importlib.util.spec_from_file_location('mf', sys.argv[1]); m = importlib.util.module_from_spec(s); "
+            "s.loader.exec_module(m); m.PROMPT_LENGTHS = (24, 33, 40); sys.exit(m.main(sys.argv[2:]))")
+    r = subprocess.run([PY, "-c", code, str(SCRIPT), *_argv(base_snapshot, out, "--prove", "--allow-degenerate", "--set", "indexer_budget=8"),
+                        "--dtype", "bfloat16"], capture_output=True, text=True)
+    assert r.returncode in (0, 3), r.stderr
+    p = proofs_of(out)
+    sel, conf = p["against_base_all_selected"], p["against_base"]
+    big_sel = max(r["max_abs_logit"] for r in sel["prompts"])
+    big_conf = max(r["max_abs_logit"] for r in conf["prompts"])
+    assert big_sel != big_conf                          # the two models' largest logits differ, so the test can tell the two rules apart
+    assert sel["tolerance"] == pytest.approx(mf.PROOF_BF16_REL_TOL * big_sel)
+    assert conf["tolerance"] == pytest.approx(mf.PROOF_BF16_REL_TOL * big_conf)
