@@ -189,14 +189,16 @@ def test_the_sheet_decides_the_argument_check(tmp_path):
     assert no_verdict_line(r).endswith("(the CPU stand-in does not cover this call)")
 
 
-def test_a_short_sheet_signature_checks_positions_and_not_keywords(tmp_path):
-    """`ttnn.multiply(a, b)` is a short form: it names the inputs and no keywords, so a keyword is not refused, and a third input is."""
+def test_a_sheet_signature_that_lists_keywords_refuses_an_unlisted_keyword(tmp_path):
+    """`ttnn.multiply` lists its keyword `input_tensor_a_activations` since issue 759, so the check treats the signature as complete: a keyword the sheet
+    does not list is a fault of the port (exit 2), and so is a third input. (Keywords are checked only where the sheet lists them; no entry of the
+    sheet is a short form any more for multiply and add.)"""
     kw = GOOD.replace("y = ttnn.reshape(y, (1, 1, 32, 32))", "y = ttnn.multiply(y, y, memory_config=None)\n    y = ttnn.reshape(y, (1, 1, 32, 32))")
     r = run_cpu(stage(tmp_path / "kw", kw))
-    assert r.returncode == 3 and "does not take this call" in no_verdict_line(r)            # the stand-in's multiply takes no keyword
+    assert r.returncode == 2 and "input_tensor_a_activations" in failed_line(r)                  # the sheet lists one keyword and memory_config is not it
     three = GOOD.replace("y = ttnn.reshape(y, (1, 1, 32, 32))", "y = ttnn.add(y, y, y)\n    y = ttnn.reshape(y, (1, 1, 32, 32))")
     r = run_cpu(stage(tmp_path / "three", three))
-    assert r.returncode == 2 and "ttnn.add takes 2 positional argument(s)" in failed_line(r)        # add is "called the same way" as multiply
+    assert r.returncode == 2 and "ttnn.add takes 2 positional argument(s)" in failed_line(r)
 
 
 def test_no_stand_in_gives_no_verdict(tmp_path):

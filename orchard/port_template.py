@@ -1294,44 +1294,67 @@ def _moe_upload_parallel(model, tensors):
             raise ValueError(f"{experts} experts do not split evenly over {chips} chips")
         per = experts // chips
         for j in range(per):
-            for proj in ("gate_proj", "up_proj", "down_proj"):
+            def stacked(proj):
                 shape = tuple(reversed(tensors.shape(held[(j, proj)])))          # the weight goes up transposed: [in, out]
-                stack = torch.stack([tensors[held[(c * per + j, proj)]].to(torch.bfloat16).t().contiguous() for c in range(chips)]).reshape(chips, 1, *shape)
-                model["dev"][f"{prefix}.experts.slot{j}.{proj}.weight"] = _upload_shard(model, stack, ttnn.TILE_LAYOUT, MOE_EXPERT_DTYPE)
+                return torch.stack([tensors[held[(c * per + j, proj)]].to(torch.bfloat16).t().contiguous() for c in range(chips)]).reshape(chips, 1, *shape)
+            gate, up = stacked("gate_proj"), stacked("up_proj")
+            if gate.shape != up.shape:
+                raise ValueError(f"{prefix}: expert {j} has gate_proj {list(gate.shape[2:])} and up_proj {list(up.shape[2:])}; the two must match to be stored side by side")
+            model["dev"][f"{prefix}.experts.slot{j}.gate_up.weight"] = _upload_shard(model, torch.cat([gate, up], dim=-1), ttnn.TILE_LAYOUT, MOE_EXPERT_DTYPE)
+            model["dev"][f"{prefix}.experts.slot{j}.down_proj.weight"] = _upload_shard(model, stacked("down_proj"), ttnn.TILE_LAYOUT, MOE_EXPERT_DTYPE)
+
+
+def _moe_lofi(model):
+    """The compute kernel config of the expert matmuls: LoFi and approximate math (the expert weights keep 3 or 7 mantissa bits, so more passes add little; probe 17 measured
+    PCC 0.9999 against HiFi4)."""
+    if "ck_experts" not in model:
+        model["ck_experts"] = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi, math_approx_mode=True, fp32_dest_acc_en=False, packer_l1_acc=True)
+    return model["ck_experts"]
 
 
 def _moe_experts_parallel(model, prefix, x, chosen, scores, experts):
-    """The gather/scatter form on every chip at once: slot j of chip c is expert c*per + j. Per slot some chip's expert was picked by a token: each chip gathers its
-    tokens (a [chips, rows] id tensor, rows the largest count padded to 32; padding rows get weight 0), runs the slot's MLP, weights the rows and adds them back with a
-    one-hot matmul; the partial outputs of all slots are then added across the chips by ttnn.all_reduce."""
+    """The routed experts on every chip at once (probe 17 measured this form at 1.5 to 1.9 times the speed of one gather, MLP and scatter per slot). Slot j of chip c is
+    expert c*per + j. For every slot that some chip's token picked, each chip gets a token list (a [chips, rows] id tensor, rows the largest count padded to 32). One
+    embedding gathers the rows of all slots; each slot runs its MLP (gate and up in one matmul, silu fused into the multiply, LoFi matmuls); the outputs of all slots are
+    joined by one concat and added back by one matmul with a scatter matrix that holds the routing weights; ttnn.all_reduce adds the partial outputs of the chips."""
     # MARK
     chips = model["n_devices"]
     per = experts // chips
     seq, hidden = x.shape[2], x.shape[3]
     flat = ttnn.reshape(x, (seq, hidden))
-    out = None
+    inter = model["dev"][f"{prefix}.experts.slot0.down_proj.weight"].shape[2]
+    ck = _moe_lofi(model)
+    slots = []
     for j in range(per):
         picks = []
         for c in range(chips):
-            tokens, slots = torch.where(chosen == c * per + j)
-            picks.append((tokens, scores[tokens, slots]))
+            tokens, slot_of = torch.where(chosen == c * per + j)
+            picks.append((tokens, scores[tokens, slot_of]))
         most = max(int(t.numel()) for t, _ in picks)
         if most == 0:
             continue
         rows = max(32, -(-most // 32) * 32)
         ids = torch.zeros(chips, rows, dtype=torch.int32)
-        weight = torch.zeros(chips, 1, rows, 1)
         back = torch.zeros(chips, 1, seq, rows)
         for c, (tokens, w) in enumerate(picks):
             n = int(tokens.numel())
             ids[c, :n] = tokens.to(torch.int32)
-            weight[c, 0, :n, 0] = w
-            back[c, 0, tokens, torch.arange(n)] = 1.0
-        xe = ttnn.reshape(ttnn.embedding(_upload_ids_shard(model, ids), flat, layout=ttnn.TILE_LAYOUT), (1, 1, rows, hidden))
-        ye = ttnn.multiply(_moe_expert_mlp(model, f"{prefix}.experts.slot{j}", xe), _upload_shard(model, weight.to(torch.bfloat16), ttnn.TILE_LAYOUT))
-        part = ttnn.matmul(_upload_shard(model, back.to(torch.bfloat16), ttnn.TILE_LAYOUT), ye)
-        out = part if out is None else ttnn.add(out, part)
-    return ttnn.all_reduce(out, cluster_axis=1, num_links=1, topology=ttnn.Topology.Linear)
+            back[c, 0, tokens, torch.arange(n)] = w.to(torch.float32)          # the routing weight sits in the scatter matrix; padding rows stay 0
+        slots.append((j, rows, ids, back))
+    total = sum(rows for _, rows, _, _ in slots)
+    xe_all = ttnn.reshape(ttnn.embedding(_upload_ids_shard(model, torch.cat([s[2] for s in slots], dim=1)), flat, layout=ttnn.TILE_LAYOUT), (1, 1, total, hidden))
+    ys, start = [], 0
+    for j, rows, _, _ in slots:
+        xe = ttnn.slice(xe_all, (0, 0, start, 0), (1, 1, start + rows, hidden))
+        start += rows
+        gate_up = ttnn.matmul(xe, model["dev"][f"{prefix}.experts.slot{j}.gate_up.weight"], compute_kernel_config=ck)
+        gate = ttnn.slice(gate_up, (0, 0, 0, 0), (1, 1, rows, inter))
+        up = ttnn.slice(gate_up, (0, 0, 0, inter), (1, 1, rows, 2 * inter))
+        h = ttnn.multiply(gate, up, input_tensor_a_activations=[ttnn.UnaryOpType.SILU])
+        ys.append(ttnn.matmul(h, model["dev"][f"{prefix}.experts.slot{j}.down_proj.weight"], compute_kernel_config=ck))
+    back_all = _upload_shard(model, torch.cat([s[3] for s in slots], dim=3).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+    part = ttnn.matmul(back_all, ttnn.concat(ys, dim=2), compute_kernel_config=ck)
+    return ttnn.all_reduce(part, cluster_axis=1, num_links=1, topology=ttnn.Topology.Linear)
 
 
 def _sparse_moe(model, prefix, x, experts, top_k, norm_topk, dense, parallel=False):

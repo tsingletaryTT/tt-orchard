@@ -92,10 +92,10 @@ def test_each_chip_holds_only_its_share_of_the_experts(monkeypatch, tmp_path):
     text = parallel_text(monkeypatch, TOTAL // 2)
     _out, _want, _mod, model = run_block(monkeypatch, tmp_path, text, 4)
     slots = [n for n in model["dev"] if ".experts.slot" in n and n.startswith("model.layers.0.")]
-    assert len(slots) == 2 * 3                                # 8 experts over 4 chips = 2 slots, three projections each
+    assert len(slots) == 2 * 2                                # 8 experts over 4 chips = 2 slots; gate and up are stored side by side, so two weights per slot
     assert not [n for n in model["dev"] if ".experts." in n and ".slot" not in n], "no replicated expert weight may be uploaded"
-    w = model["dev"]["model.layers.0.mlp.experts.slot0.gate_proj.weight"]
-    assert w.t.shape[0] == 4 and w.shape == (1, 1, 64, 64)
+    w = model["dev"]["model.layers.0.mlp.experts.slot0.gate_up.weight"]
+    assert w.t.shape[0] == 4 and w.shape == (1, 1, 64, 128)
 
 
 def test_slot_j_of_chip_c_holds_expert_c_times_per_plus_j(monkeypatch, tmp_path):
@@ -104,10 +104,11 @@ def test_slot_j_of_chip_c_holds_expert_c_times_per_plus_j(monkeypatch, tmp_path)
     _config, block = _hf_block(11)
     inter = block.experts.intermediate_dim
     gate_up = block.state_dict()["experts.gate_up_proj"].to(torch.bfloat16)
-    w = model["dev"]["model.layers.0.mlp.experts.slot1.gate_proj.weight"].t            # [chips, 1, in, out]
+    w = model["dev"]["model.layers.0.mlp.experts.slot1.gate_up.weight"].t            # [chips, 1, in, 2 * inter]: gate then up
     for c in range(4):
         e = c * 2 + 1
-        assert torch.equal(w[c, 0].to(torch.bfloat16), gate_up[e][:inter].t().to(torch.bfloat16))
+        assert torch.equal(w[c, 0, :, :inter].to(torch.bfloat16), gate_up[e][:inter].t().to(torch.bfloat16))
+        assert torch.equal(w[c, 0, :, inter:].to(torch.bfloat16), gate_up[e][inter:].t().to(torch.bfloat16))
 
 
 # ---- what load refuses -----------------------------------------------------------------------------------------------------------------------
@@ -127,10 +128,14 @@ def test_a_chip_count_the_experts_do_not_divide_is_refused(monkeypatch, tmp_path
 # ---- mutations of the emitted text: each must turn the comparison red -------------------------------------------------------------------------
 
 MUTATIONS = {
-    "no all_reduce": ("    return ttnn.all_reduce(out, cluster_axis=1, num_links=1, topology=ttnn.Topology.Linear)", "    return out"),
+    "no all_reduce": ("    return ttnn.all_reduce(part, cluster_axis=1, num_links=1, topology=ttnn.Topology.Linear)", "    return part"),
     "slot j of chip c is expert j*chips + c": ("for c in range(chips)]).reshape(chips, 1, *shape)", "for c in range(chips)][::-1]).reshape(chips, 1, *shape)"),
-    "the routing weights are ignored": ("weight[c, 0, :n, 0] = w", "weight[c, 0, :n, 0] = 1.0"),
-    "the scatter is dropped": ("back[c, 0, tokens, torch.arange(n)] = 1.0", "back[c, 0, 0, 0] = 1.0"),
+    "the routing weights are ignored": ("back[c, 0, tokens, torch.arange(n)] = w.to(torch.float32)", "back[c, 0, tokens, torch.arange(n)] = 1.0"),
+    "the scatter is dropped": ("back[c, 0, tokens, torch.arange(n)] = w.to(torch.float32)", "back[c, 0, 0, 0] = 1.0"),
+    "silu is dropped from the multiply": ("input_tensor_a_activations=[ttnn.UnaryOpType.SILU]", "input_tensor_a_activations=[]"),
+    "gate and up are swapped": ("gate = ttnn.slice(gate_up, (0, 0, 0, 0), (1, 1, rows, inter))", "gate = ttnn.slice(gate_up, (0, 0, 0, inter), (1, 1, rows, 2 * inter))"),
+    "a slot reads the rows of the slot before it": ("        start += rows\n", "        start += 0\n"),
+    "the down projection of slot 0 is used for every slot": ('model["dev"][f"{prefix}.experts.slot{j}.down_proj.weight"], compute_kernel_config=ck))', 'model["dev"][f"{prefix}.experts.slot0.down_proj.weight"], compute_kernel_config=ck))'),
 }
 
 
@@ -177,7 +182,7 @@ def test_the_block_with_quantized_experts_stays_near_the_reference_and_is_not_ex
 def test_the_uploaded_expert_weights_are_the_rounded_values_not_the_bf16_ones(monkeypatch, tmp_path):
     text = dtype_text(monkeypatch, "bfp4")
     _o, _w, _mod, model = run_block(monkeypatch, tmp_path, text, 2)
-    w = model["dev"]["model.layers.0.mlp.experts.slot0.gate_proj.weight"]
+    w = model["dev"]["model.layers.0.mlp.experts.slot0.gate_up.weight"]
     assert w.dtype == "bfloat4_b"
     vals = w.t[0, 0]
     assert len({round(float(v), 6) for v in vals[0, :16]}) <= 8 * 2, "a block of 16 bfp4 values has few distinct magnitudes"
@@ -313,3 +318,16 @@ def test_the_lazy_reader_gives_shapes_without_reading_data(monkeypatch, tmp_path
     assert name in tensors and len(tensors) == len(list(tensors.keys()))
     assert reads == []
     assert tensors[name].shape == (64, 64) and reads == [name]
+
+
+# ---- the shape of the loop (probe 17: one gather and one scatter for all slots, not one of each per slot) ---------------------------------------------
+
+def test_one_layer_runs_one_embedding_one_concat_one_all_reduce_and_two_matmuls_per_hit_slot_plus_the_scatter(monkeypatch, tmp_path):
+    text = parallel_text(monkeypatch, TOTAL // 2)
+    fake.COUNTS.clear()
+    _o, _w, _mod, _model = run_block(monkeypatch, tmp_path, text, 4)
+    c = fake.COUNTS
+    assert c["all_reduce"] == 1 and c["concat"] == 1
+    assert c["embedding"] == 1, "all slots are gathered by one embedding"
+    # the shared expert's gated MLP is three linears; the routed experts are two matmuls per slot and one scatter matmul
+    assert c["matmul"] >= 1 and c["matmul"] % 2 == 1

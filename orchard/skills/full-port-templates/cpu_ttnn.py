@@ -93,6 +93,11 @@ class WormholeComputeKernelConfig:
 
 class MathFidelity:
     HiFi4 = "HiFi4"
+    LoFi = "LoFi"
+
+
+class UnaryOpType:
+    SILU = "SILU"
 
 
 def _count(name):
@@ -135,7 +140,7 @@ def make() -> types.ModuleType:
     m.Tensor, m.MeshDevice = Tensor, MeshDevice
     m.ReplicateTensorToMesh, m.ConcatMeshToTensor = ReplicateTensorToMesh, ConcatMeshToTensor
     m.ShardTensorToMesh, m.Topology = ShardTensorToMesh, Topology
-    m.WormholeComputeKernelConfig, m.MathFidelity = WormholeComputeKernelConfig, MathFidelity
+    m.WormholeComputeKernelConfig, m.MathFidelity, m.UnaryOpType = WormholeComputeKernelConfig, MathFidelity, UnaryOpType
 
     def from_torch(tensor, dtype=None, layout=None, device=None, memory_config=None, mesh_mapper=None):
         _count("from_torch")
@@ -228,22 +233,31 @@ def make() -> types.ModuleType:
         return _mk(torch.sigmoid(x.t), x)
 
     def slice(input_tensor, slice_start, slice_end, slice_step=None, *, memory_config=None):
-        """ttnn.slice on the padded shape: every start inside its dimension and every end at most the dimension (a slice outside fails)."""
+        """ttnn.slice on the padded shape: every start inside its dimension and every end at most the dimension (a slice outside fails). The bounds are one chip's
+        for a sharded tensor (its leading dimension is the chip count and stays whole)."""
         _count("slice")
         t = input_tensor.t
+        lead = 1 if input_tensor.chips else 0
         for d, (lo, hi) in enumerate(zip(slice_start, slice_end)):
-            if not (0 <= lo < t.shape[d] and 0 < hi <= t.shape[d] and lo < hi):
-                raise RuntimeError(f"TT_FATAL: slice [{lo}, {hi}) is outside dimension {d} of size {t.shape[d]}")
+            if not (0 <= lo < input_tensor.shape[d] and 0 < hi <= input_tensor.shape[d] and lo < hi):
+                raise RuntimeError(f"TT_FATAL: slice [{lo}, {hi}) is outside dimension {d} of size {input_tensor.shape[d]}")
+        if lead:
+            return _mk(t[(builtins_slice(None),) + tuple(builtins_slice(lo, hi) for lo, hi in list(zip(slice_start, slice_end))[1:])], input_tensor, layout=input_tensor.layout)
         return Tensor(t[tuple(builtins_slice(lo, hi) for lo, hi in zip(slice_start, slice_end))], input_tensor.replicated, input_tensor.layout)
 
     def _same_layout(a, b):
         if isinstance(b, Tensor) and a.layout != b.layout:
             raise RuntimeError(f"a binary op needs both inputs in one layout, got {a.layout} and {b.layout}")
 
-    def multiply(a, b):
+    def multiply(a, b, *, input_tensor_a_activations=None, **kwargs):
         _count("multiply")
         _same_layout(a, b)
-        return _mk(a.t * (b.t if isinstance(b, Tensor) else b), a, b, layout=a.layout)
+        x = a.t
+        for act in input_tensor_a_activations or []:
+            if act != UnaryOpType.SILU:
+                raise RuntimeError(f"the fake multiply fuses only SILU, got {act!r}")
+            x = torch.nn.functional.silu(x)
+        return _mk(x * (b.t if isinstance(b, Tensor) else b), a, b, layout=a.layout)
 
     def add(a, b):
         _count("add")
@@ -290,7 +304,7 @@ def make() -> types.ModuleType:
 
     def concat(tensors, dim=0, memory_config=None):
         _count("concat")
-        return Tensor(torch.cat([t.t for t in tensors], dim=dim), layout=tensors[0].layout)
+        return _mk(torch.cat([t.t for t in tensors], dim=dim), *tensors, layout=tensors[0].layout)
 
     def all_reduce(input_tensor, *, cluster_axis=None, num_links=1, topology=None, **kwargs):
         """The sum of every chip's slice, left on every chip."""
