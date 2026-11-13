@@ -45,3 +45,15 @@ def test_the_tiny_qwen4_layers_have_the_op_counts_the_generated_text_implies():
     assert 50 < a < b and c < b, "the PLE layer is the largest; the gated-delta-net layer is the smallest"
     assert layers["variant_of_layer"] == ["A", "B", "A", "C"]
     assert m.total(layers["mixer_and_head"]) < a
+
+
+def test_the_decode_step_runs_one_row_per_layer_from_state_and_its_counts_add_up():
+    m = load()
+    layers = m.count_layers()
+    d = layers["decode"]
+    assert d["layer_A"]["fused_recurrent_gated_delta_rule"] == 1 and not d["layer_A"].get("chunk_gated_delta_rule"), "a decode step uses the recurrent op"
+    assert layers["layer_A"]["chunk_gated_delta_rule"] == 1 and not layers["layer_A"].get("fused_recurrent_gated_delta_rule"), "the prefill uses the chunk op"
+    uses = collections.Counter(layers["variant_of_layer"])
+    parts = sum(m.total(d[f"layer_{v}"]) * n for v, n in uses.items()) + m.total(d["outside_layers"])
+    assert abs(parts - m.total(d["whole_step"])) <= len(uses), "the layers plus the outside ops make the whole step (integer division per variant rounds)"
+

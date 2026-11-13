@@ -86,8 +86,49 @@ def count_layers() -> dict:
         out["mixer_and_head"] = collections.Counter(fake.COUNTS)
         out["layer_variants"] = {v: i for v, i in first.items()}
         out["variant_of_layer"] = [mod.LAYER_VARIANT[i] for i in range(mod.N_LAYERS)]
+        if hasattr(mod, "_forward_step"):
+            out["decode"] = _count_decode_step(mod, model, fake, ids)
     mp.undo()
     return out
+
+
+def _count_decode_step(mod, model, fake, ids) -> dict:
+    """The ops of one cached decode step (issue 759): run `prefill` on the prompt, then `decode_step` once with each layer function wrapped so its calls are counted
+    per variant. Returns {"layer_<variant>": Counter, "outside_layers": Counter (embedding, prelude, mixer and head), "whole_step": Counter}."""
+    mod.prefill(model, ids)
+    per_variant = {}
+    originals = dict(mod.LAYERS)
+
+    def wrap(variant, fn):
+        def counted(*args, **kw):
+            before = collections.Counter(fake.COUNTS)
+            res = fn(*args, **kw)
+            delta = collections.Counter(fake.COUNTS)
+            delta.subtract(before)
+            per_variant.setdefault(variant, collections.Counter()).update({k: v for k, v in delta.items() if v})
+            return res
+        return counted
+
+    for variant, fn in originals.items():
+        mod.LAYERS[variant] = wrap(variant, fn)
+    try:
+        fake.COUNTS.clear()
+        mod.decode_step(model, 5, len(ids))
+        whole = collections.Counter(fake.COUNTS)
+    finally:
+        mod.LAYERS.update(originals)
+    # a variant is used by more than one layer of the tiny port (A twice): report one layer's share
+    uses = collections.Counter(mod.LAYER_VARIANT[i] for i in range(mod.N_LAYERS))
+    res = {}
+    layers_total = collections.Counter()
+    for variant, c in per_variant.items():
+        layers_total.update(c)
+        res[f"layer_{variant}"] = collections.Counter({k: v // uses[variant] for k, v in c.items()})
+    outside = collections.Counter(whole)
+    outside.subtract(layers_total)
+    res["outside_layers"] = collections.Counter({k: v for k, v in outside.items() if v})
+    res["whole_step"] = whole
+    return res
 
 
 def count_moe_block() -> dict:
@@ -150,6 +191,8 @@ def main(argv=None) -> int:
     moe = count_moe_block()
     result = {"layers": {k: dict(v) for k, v in layers.items() if isinstance(v, collections.Counter)}, "moe_block_4chips_tiny": dict(moe["whole_block"]),
               "layer_variants": layers["layer_variants"], "variant_of_layer": layers["variant_of_layer"]}
+    if "decode" in layers:
+        result["decode_step"] = {k: dict(v) for k, v in layers["decode"].items()}
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
@@ -158,6 +201,12 @@ def main(argv=None) -> int:
             print(f"{name:24} {total(c):4} ops  " + "  ".join(f"{k}={v}" for k, v in c.most_common(9)))
     print(f"{'moe_block (4 chips)':24} {total(moe['whole_block']):4} ops  " + "  ".join(f"{k}={v}" for k, v in moe["whole_block"].most_common(9)))
     ops = {k: total(v) for k, v in layers.items() if isinstance(v, collections.Counter)}
+    if "decode" in layers:
+        d = layers["decode"]
+        print(f"\ncached decode step (one row through every layer, state kept): {total(d['whole_step'])} ops in the tiny port")
+        for name, c in d.items():
+            if name != "whole_step":
+                print(f"  {'decode_' + name:30} {total(c):4} ops  " + "  ".join(f"{k}={v}" for k, v in c.most_common(9)))
     if not moe["whole_block"].get("concat"):
         print("\nthis checkout's generator writes the older per-slot MoE form (one embedding and one scatter per slot); the projection below assumes the batched form, so it is skipped")
         return 0
@@ -167,6 +216,16 @@ def main(argv=None) -> int:
         r = project(ops, fixed, slots, args.us_per_op)
         print(f"Flash-Next forward, {what}: {r['ops']} ops ({r['mixer_ops']} in the mixers and gated residuals, {r['moe_ops']} in the MoE), "
               f"{r['floor_ms']} ms at {args.us_per_op:g} us per op")
+    if "decode" in layers:
+        d = layers["decode"]
+        dec = {k: total(v) for k, v in d.items() if k.startswith("layer_")}
+        if set(dec) >= {"layer_A", "layer_B", "layer_C"}:
+            dec["embedding_and_prelude"] = total(d["outside_layers"])           # the outside ops of a step are reported as one figure
+            dec["mixer_and_head"] = 0
+            for slots, what in ((10, "one token on 4 chips: about 10 slots hit"),):
+                r = project(dec, fixed, slots, args.us_per_op)
+                print(f"Flash-Next cached decode step, {what}: {r['ops']} ops ({r['mixer_ops']} in the mixers and gated residuals, {r['moe_ops']} in the MoE), "
+                      f"{r['floor_ms']} ms at {args.us_per_op:g} us per op")
     return 0
 
 
