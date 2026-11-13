@@ -276,6 +276,15 @@ def test_tokenizer_and_template_notes():
 # ---- the Hub client -------------------------------------------------------------------------------------------------
 
 class FakeResponse(io.BytesIO):
+    """A response body and the URL it came from after any redirect (urllib's geturl())."""
+
+    def __init__(self, body, url):
+        super().__init__(body)
+        self.url = url
+
+    def geturl(self):
+        return self.url
+
     def __enter__(self):
         return self
 
@@ -284,6 +293,8 @@ class FakeResponse(io.BytesIO):
 
 
 class FakeOpener:
+    """Routes by URL suffix. A route's value is a body, an HTTP status, or (body, final URL) for a request the Hub redirected."""
+
     def __init__(self, routes):
         self.routes, self.requests = routes, []
 
@@ -293,7 +304,9 @@ class FakeOpener:
             if req.full_url.endswith(suffix):
                 if isinstance(body, int):
                     raise urllib.error.HTTPError(req.full_url, body, "x", {}, None)
-                return FakeResponse(body)
+                if isinstance(body, tuple):
+                    return FakeResponse(*body)
+                return FakeResponse(body, req.full_url)
         raise urllib.error.HTTPError(req.full_url, 404, "not found", {}, None)
 
 
@@ -417,6 +430,83 @@ def test_cli_reports_an_unreachable_hub_with_its_own_exit_code(client, monkeypat
     out = json.loads(capsys.readouterr().out)
     assert code == dc.EXIT_UNREACHABLE and out["verdict"] == "unreachable" and out["command"] == []
     assert any("did not answer" in r for r in out["reasons"])
+
+
+# ---- the host a redirect ends on (issue 667) --------------------------------------------------------------------------
+
+FILE = f"/resolve/{REV}/tokenizer.json"
+
+
+@pytest.mark.parametrize("final", [
+    "https://cdn-lfs.hf.co/repos/aa/bb/tokenizer.json?X-Amz=1",
+    "https://cas-bridge.xethub.hf.co/xet-bridge-us/abc?sig=1",
+    "https://hf.co/x",
+    f"https://huggingface.co/Qwen/Qwen4-27B-Renamed/resolve/{REV}/tokenizer.json",
+    f"https://huggingface.co/api/resolve-cache/models/Qwen/Qwen4-27B/{REV}/tokenizer.json?etag=1",
+    "https://HUGGINGFACE.CO/Qwen/Qwen4-27B/resolve/main/tokenizer.json",
+], ids=["cdn-lfs", "xet-bridge", "hf.co", "renamed-in-org", "resolve-cache", "upper-case-host"])
+def test_a_redirect_to_the_content_hosts_or_within_an_allowed_organisation_is_read(final):
+    hub = dc.HubClient(opener=FakeOpener({FILE: (b"tok", final)}))
+    assert hub.get("Qwen/Qwen4-27B", REV, "tokenizer.json", max_bytes=100) == b"tok"
+
+
+@pytest.mark.parametrize("final", [
+    "https://example.com/tokenizer.json",
+    "https://hf.co.example.com/tokenizer.json",
+    "https://evilhf.co/tokenizer.json",
+    "https://huggingface.co.example.com/Qwen/x/resolve/main/tokenizer.json",
+    "http://cdn-lfs.hf.co/repos/aa/bb/tokenizer.json",
+    "https://user:pw@cdn-lfs.hf.co/repos/aa/bb/tokenizer.json",
+    "https://cdn-lfs.hf.co:8443/repos/aa/bb/tokenizer.json",
+    f"https://huggingface.co/someone/Qwen4-27B/resolve/{REV}/tokenizer.json",
+    f"https://huggingface.co/api/resolve-cache/models/someone/Qwen4-27B/{REV}/tokenizer.json",
+    "https://huggingface.co/api/models/someone/Qwen4-27B",
+    "https://huggingface.co/api/whoami",
+    "https://huggingface.co/Qwen",
+    f"https://huggingface.co/Qwen/%2e%2e/someone/resolve/{REV}/tokenizer.json",
+    "https://spaces.huggingface.co/x",
+    "file:///etc/passwd",
+], ids=["other-host", "hf.co-prefix", "hf.co-suffix", "hub-prefix", "plain-http", "userinfo", "port", "other-org",
+        "resolve-cache-other-org", "api-other-org", "api-no-org", "org-only", "encoded-dots", "hub-subdomain", "file"])
+def test_a_redirect_that_leaves_the_hub_or_the_organisation_is_refused(final):
+    hub = dc.HubClient(opener=FakeOpener({FILE: (b"tok", final), "?blobs=true": (b'{"sha": "x"}', final)}))
+    with pytest.raises(dc.RedirectRefused):
+        hub.get("Qwen/Qwen4-27B", REV, "tokenizer.json", max_bytes=100)
+    with pytest.raises(dc.RedirectRefused):
+        hub.info("Qwen/Qwen4-27B")
+
+
+def test_a_redirect_of_the_api_record_within_the_organisation_is_read():
+    final = "https://huggingface.co/api/models/Qwen/Qwen4-27B-Renamed?blobs=true"
+    hub = dc.HubClient(opener=FakeOpener({"?blobs=true": (b'{"sha": "x"}', final)}))
+    assert hub.info("Qwen/Qwen4-27B") == {"sha": "x"}
+
+
+def test_a_refused_redirect_is_not_a_reason_about_the_files():
+    """fetch_metadata turns an unreadable file into a reason that can send the release down the full-port route; a file served from
+    somewhere else stops the check."""
+    hub = dc.HubClient(opener=FakeOpener({"/config.json": (b"{}", "https://example.com/config.json")}))
+    with pytest.raises(dc.RedirectRefused):
+        dc.fetch_metadata(hub, "Qwen/Qwen4-27B", REV)
+
+
+class RedirectedHub(HalfDownHub):
+    def get(self, repo, revision, name, *, max_bytes):
+        raise dc.RedirectRefused("config.json was redirected to example.com, outside the Hub and its content hosts")
+
+
+class RedirectedRecordHub(HalfDownHub):
+    def info(self, repo, revision=None):
+        raise dc.RedirectRefused("the Hub record was redirected to /api/models/someone/x, outside the allowed organisations")
+
+
+@pytest.mark.parametrize("client", [RedirectedRecordHub, RedirectedHub], ids=["record", "files"])
+def test_cli_refuses_a_release_whose_request_was_redirected_away(client, monkeypatch, capsys):
+    monkeypatch.setattr(dc, "HubClient", client)
+    code = dc.main(["Qwen/Qwen4-27B", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == dc.EXIT_REFUSED and out["verdict"] == "refused" and out["command"] == []
+    assert any("redirected" in r for r in out["reasons"])
 
 
 # ---- command line ---------------------------------------------------------------------------------------------------

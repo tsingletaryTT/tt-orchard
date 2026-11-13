@@ -344,6 +344,9 @@ def tick(watch_dir, *, hub, chips, launch, run_status, alive, now=time.time, cla
             except dc.HubUnreachable as exc:
                 hub_down(exc)                       # nothing is decided from part of the files: the check runs again next tick
                 files = None
+            except dc.RedirectRefused as exc:       # a file came from outside the Hub or the organisation (issue 667): nothing starts
+                ev("needs-operator", f"the release's files cannot be checked: {exc}")
+                state, st["needs"], files = "needs-operator", "hub", None
             if files is not None:
                 st.pop("hub_unreachable", None)
                 probe = class_probe if class_probe is not None else dc.class_probe_for(cfg.reference_python)

@@ -58,8 +58,8 @@
      "name": "ttnn.WormholeComputeKernelConfig",
      "kind": "symbol",
      "signature": "ttnn.WormholeComputeKernelConfig(math_fidelity, math_approx_mode, fp32_dest_acc_en, packer_l1_acc)",
-     "usage": "ck = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)",
-     "notes": "Precision of a matmul or norm. HiFi4 with fp32 accumulation is the safe choice while matching the CPU reference; lower fidelity comes after the check passes. Blackhole uses the same class.",
+     "usage": "ck = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)   # lower: math_fidelity=ttnn.MathFidelity.LoFi, math_approx_mode=True, fp32_dest_acc_en=False",
+     "notes": "Precision of a matmul or norm. HiFi4 with fp32 accumulation is the safe choice while matching the CPU reference; lower fidelity comes after the check passes. Blackhole uses the same class. LoFi with approximate math ran on a Blackhole chip in probe 17 for matmuls with bfp4 weights and kept PCC 0.9999 against HiFi4.",
      "seen_in": "models/tt_transformers/tt/model_config.py",
      "in": [
       "tt_metal"
@@ -336,9 +336,9 @@
     {
      "name": "ttnn.multiply",
      "kind": "op",
-     "signature": "ttnn.multiply(a, b)",
-     "usage": "y = ttnn.multiply(gate, up)",
-     "notes": "Elementwise product; b may be a Python scalar. add, subtract and silu are called the same way.",
+     "signature": "ttnn.multiply(a, b, *, input_tensor_a_activations=None)",
+     "usage": "y = ttnn.multiply(gate, up)   # or, with silu applied to gate inside the op: ttnn.multiply(gate, up, input_tensor_a_activations=[ttnn.UnaryOpType.SILU])",
+     "notes": "Elementwise product; b may be a Python scalar. add, subtract and silu are called the same way. input_tensor_a_activations=[ttnn.UnaryOpType.SILU] applies silu to the first input inside the multiply, which saves one op (it ran on a Blackhole chip in probe 17 with the same result as a separate silu).",
      "seen_in": "models/tt_transformers/tt/mlp.py (w1 silu times w3)",
      "in": [
       "tt_metal"
@@ -466,6 +466,17 @@
      "usage": "o = ttnn.transformer.chunk_gated_delta_rule(q, k, v, g, beta, chunk_size=32, num_key_heads=2)[0]",
      "notes": "Chunked gated delta rule (linear attention) over a prompt. Flat form: q and k [B, T, heads * K], v [B, T, value heads * V], raw (the op normalises q and k and scales q), g and beta [B, T, value heads]; all TILE device tensors. Needs chunk_size 32, T a multiple of 32 and num_key_heads. Returns (o, state): o is [B, T, value heads, V], fp32, ROW_MAJOR (to_layout TILE, then typecast, before a TILE op). Probe 2 matched torch on a chip at 16 and 48 heads (width 128) and 2 and 4 heads (width 64); other shapes are unprobed.",
      "seen_in": "tt-metal ttnn/cpp/ttnn/operations/transformer/chunk_gated_delta_rule/chunk_gated_delta_rule_nanobind.cpp; scripts/qwen4_ops_probe/p2_chunk_gdn.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
+     "name": "ttnn.transformer.fused_recurrent_gated_delta_rule",
+     "kind": "op",
+     "signature": "ttnn.transformer.fused_recurrent_gated_delta_rule(q, k, v, g, beta, *, initial_state=None, output_final_state=False)",
+     "usage": "o, state = ttnn.transformer.fused_recurrent_gated_delta_rule(q, k, v, g, beta, initial_state=state, output_final_state=True)",
+     "notes": "One decode step of the gated delta rule from the state the chunk op returned. q and k are [B, 1, heads, K] TILE and must already be L2-normalised (the op scales q by K ** -0.5 itself; ttnn.rms_norm with epsilon 1e-6 / K times K ** -0.5 gives x / sqrt(sum(x ** 2) + 1e-6)); v is [B, 1, value heads, V]; g and beta are [B, 1, value heads]; the state is [B, value heads, K, V] fp32. q and k may have fewer heads than v (the op expands them). Returns (o, new state). Probe 3 matched the torch recurrence on a chip after prefills of 128 and 512 tokens: o PCC 0.99999, state PCC 1.0.",
+     "seen_in": "scripts/qwen4_ops_probe/p3_recurrent_gdn.py",
      "in": [
       "tt_metal"
      ]

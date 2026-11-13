@@ -1,0 +1,2 @@
+target = "0.9.181"
+summary = "The generated expert-parallel MoE block uses one embedding and one scatter matmul for all slots, a folded routing weight, fused silu, one gate-up matmul and LoFi matmuls (probe 17)."

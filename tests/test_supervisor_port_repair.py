@@ -28,6 +28,15 @@ def broken(k):
 
 
 @pytest.fixture
+def board_only(monkeypatch):
+    """The CPU run before the board (issue 697) is switched off. BROKEN fails at load with a KeyError, which the CPU run finds before any board, so
+    the tests that place a crash at the Nth hardware phase would count one phase fewer. They are about the board check and its resume, so they
+    run without it; tests/test_cpu_run_before_board.py covers the CPU run."""
+    from orchard.supervisor import Supervisor
+    monkeypatch.setattr(Supervisor, "_cpu_run_precheck", lambda self, spec, stage_dir, test: False)
+
+
+@pytest.fixture
 def rig(tmp_path):
     r = Rig(tmp_path)
     with_snapshot(r, tmp_path)
@@ -545,6 +554,7 @@ def test_a_record_changed_with_no_rerun_in_flight_is_still_refused_on_resume(rig
     assert not any(e["data"].get("unvouched") for e in rig.entries() if e["event"] == "decision")
 
 
+@pytest.mark.usefixtures("board_only")
 def test_a_crash_between_the_repair_edit_and_the_rerun_tests_the_fix_on_resume(rig):
     # Round 1 writes the fixed port; the supervisor is killed when the rerun starts. The resumed attempt's repair step changes nothing more.
     start(rig, per_round=[{"port/port_model.py": HONEST}, {}], unattended=False)
@@ -617,6 +627,7 @@ def tests_started(rig):
 
 
 @pytest.mark.parametrize("escalated", [False, True], ids=["first attempt", "escalated attempt"])
+@pytest.mark.usefixtures("board_only")
 def test_a_kill_when_the_last_repair_round_reruns_tests_the_fix_on_resume(rig, escalated):
     # The escalated variant: the attempt's only round is already counted when the kill comes, so `used < rounds` is false (Copilot, PR 425).
     crash_at_rerun(rig, escalated=escalated)
@@ -627,6 +638,7 @@ def test_a_kill_when_the_last_repair_round_reruns_tests_the_fix_on_resume(rig, e
 
 
 @pytest.mark.parametrize("escalated", [False, True], ids=["first attempt", "escalated attempt"])
+@pytest.mark.usefixtures("board_only")
 def test_a_kill_after_the_rerun_replaced_the_output_file_tests_the_fix_on_resume(rig, escalated):
     # The test's output file is opened fresh when the rerun starts, so from then until the record is written the old record's output hash no
     # longer matches. The resume used to read no failure there and went on to the finish step with the old failure (Copilot, PR 425).
@@ -642,6 +654,7 @@ def test_a_kill_after_the_rerun_replaced_the_output_file_tests_the_fix_on_resume
     assert "first lines of the rerun" not in saved and "PORT_CHECK_FAILURE" in saved      # what the repair step was shown, not the cut-short rerun
 
 
+@pytest.mark.usefixtures("board_only")
 def test_a_kill_after_the_rerun_wrote_its_record_does_not_run_the_test_again(rig):
     start(rig, per_round=[{"port/port_model.py": HONEST}, {}], unattended=False)
     released = []

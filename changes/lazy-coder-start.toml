@@ -1,0 +1,4 @@
+target = "0.9.184"
+summary = "Stage 2 of a thin-port run resumed with no coder starts the coder at its first model request, so a plan with no stubs passes stage 2 without a coder boot; skipped stages boot no coder."
+kind = "feature"
+pr = 774

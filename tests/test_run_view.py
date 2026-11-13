@@ -94,6 +94,47 @@ def test_results_read_stage_0_2_and_4_and_where_each_test_ran(tmp_path):
     assert rows[4]["pass"] is False and "2 chips" in rows[4]["reason"]
 
 
+PORT_CHECK = {"top1_agreement": 1.0, "fidelity": {"kind": "reference-greedy-text", "value": 10.005, "tokens": 32}, "chips": 2,
+              "near_ties": {"near_ties": 0, "disagreements": 0}, "length_check": {"all_agree": True, "lengths": [{"length": 2}, {"length": 3}]},
+              "device_ops": {"decode_matmul_calls_max": 112, "weights": {"device_elements": 576006, "host_elements": 65547}},
+              "free_run_text": "y" * 500}
+
+
+def write_port_check(tmp_path, record):
+    run = tmp_path / "run"
+    (run / "stages" / "2" / "evidence").mkdir(parents=True)
+    (run / "stages" / "2" / "evidence" / "port-check.json").write_text(json.dumps(record))
+    return run
+
+
+def test_results_read_the_stage_2_port_check_of_a_full_port(tmp_path):
+    run = write_port_check(tmp_path, PORT_CHECK)
+    entries = [e(1, 0, "decision", 2, decision="hardware test started", where="this box")]
+    pc = run_view.results(run, entries)["port_check"]
+    assert pc["top1_agreement"] == 1.0 and pc["fidelity"] == 10.005 and pc["fidelity_tokens"] == 32 and pc["chips"] == 2
+    assert pc["near_ties"] == 0 and pc["near_tie_disagreements"] == 0
+    assert pc["lengths_agree"] is True and pc["lengths_checked"] == 2
+    assert pc["decode_matmul_calls"] == 112 and pc["device_elements"] == 576006 and pc["host_elements"] == 65547
+    assert len(pc["free_run_text"]) == run_view.FREE_TEXT_CHARS
+
+
+def test_a_malformed_port_check_gives_empty_fields_and_no_error(tmp_path):
+    run = write_port_check(tmp_path, {"top1_agreement": True, "fidelity": "high", "near_ties": [1], "length_check": {"all_agree": "yes", "lengths": 3},
+                                      "device_ops": {"weights": 5, "decode_matmul_calls_max": None}, "free_run_text": 7, "chips": "2"})
+    pc = run_view.results(run, [])["port_check"]
+    assert all(v is None for k, v in pc.items() if k not in ("lengths_checked", "host")) and pc["lengths_checked"] == 0
+
+
+def test_a_run_without_a_port_check_has_no_port_check_result(tmp_path):
+    (tmp_path / "run" / "stages" / "2").mkdir(parents=True)
+    assert "port_check" not in run_view.results(tmp_path / "run", [])
+
+
+def test_the_page_script_renders_the_port_check_card():
+    js = Path(run_view.__file__).resolve().parent.joinpath("web", "app.js").read_text(encoding="utf-8")
+    assert "r.port_check" in js and "Full port: stage 2 check on the chips" in js and "prefill and decode agree" in js
+
+
 def test_the_narration_names_the_lab_and_what_was_copied():
     lines = [l.text for ent in LAB_TEST for l in narrate._decision(ent, ent["data"]) if ent["event"] == "decision"]
     joined = "\n".join(lines)
