@@ -440,7 +440,32 @@ def _r_port_sources(env):
     return classify_scan([tuple(rel.split("/")) for rel in seen])
 
 
+def _r_bounded_walk(env):
+    """The lazy, bounded walk the gate, the repair fingerprint, the evidence listing and the stage 3 seed share (orchard/boundedwalk.py, issue 457).
+    Passing a bound raises `boundedwalk.Limit`, which counts as a refusal."""
+    import contextlib
+
+    from orchard import boundedwalk
+    walk = boundedwalk.Walk(env["root"])
+    try:
+        with contextlib.closing(iter(walk)) as entries:
+            return classify_scan([parts for parts, _kind, _identity in entries])
+    except boundedwalk.Limit:
+        return "refused"
+
+
+def _r_port_fingerprint(env):
+    """The repair loop's fingerprint of a port directory (orchard/port_repair.py), which reads each listed file beneath the walk's descriptor."""
+    from orchard import port_repair
+    fp = port_repair.fingerprint(env["root"])
+    if port_repair.SCAN_LIMIT_KEY in fp:
+        return "refused"                    # past a bound the fingerprint says so and lists nothing
+    return classify_scan([tuple(rel.split("/")) for rel in fp]) if fp else "refused"
+
+
 PATH_READERS: list[PathReader] = [
+    PathReader("boundedwalk.Walk", "scan", _r_bounded_walk, claims_pin=False),
+    PathReader("port_repair.fingerprint", "scan", _r_port_fingerprint, claims_pin=False),
     PathReader("safeio.read_bytes(anchor=pin)", "pinned_read", _pinned(_r_read_bytes_anchor)),
     PathReader("port_template.port_sources", "scan", _r_port_sources, claims_pin=False),
     PathReader("safeio.read_beneath", "pinned_read", _pinned(_r_read_beneath)),
