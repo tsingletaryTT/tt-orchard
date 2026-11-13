@@ -1,0 +1,2 @@
+target = "0.9.178"
+summary = "Count the device ops of the generated Qwen4 port per layer on the CPU, and write up how the published Flash-Next ports differ from ours."
