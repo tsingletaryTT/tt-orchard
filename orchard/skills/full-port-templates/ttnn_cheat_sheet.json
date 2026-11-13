@@ -471,6 +471,17 @@
      ]
     },
     {
+     "name": "ttnn.transformer.fused_recurrent_gated_delta_rule",
+     "kind": "op",
+     "signature": "ttnn.transformer.fused_recurrent_gated_delta_rule(q, k, v, g, beta, *, initial_state=None, output_final_state=False)",
+     "usage": "o, state = ttnn.transformer.fused_recurrent_gated_delta_rule(q, k, v, g, beta, initial_state=state, output_final_state=True)",
+     "notes": "One decode step of the gated delta rule from the state the chunk op returned. q and k are [B, 1, heads, K] TILE and must already be L2-normalised (the op scales q by K ** -0.5 itself; ttnn.rms_norm with epsilon 1e-6 / K times K ** -0.5 gives x / sqrt(sum(x ** 2) + 1e-6)); v is [B, 1, value heads, V]; g and beta are [B, 1, value heads]; the state is [B, value heads, K, V] fp32. q and k may have fewer heads than v (the op expands them). Returns (o, new state). Probe 3 matched the torch recurrence on a chip after prefills of 128 and 512 tokens: o PCC 0.99999, state PCC 1.0.",
+     "seen_in": "scripts/qwen4_ops_probe/p3_recurrent_gdn.py",
+     "in": [
+      "tt_metal"
+     ]
+    },
+    {
      "name": "ttnn.transformer.scaled_dot_product_attention_decode",
      "kind": "op",
      "signature": "ttnn.transformer.scaled_dot_product_attention_decode(input_tensor_q, input_tensor_k, input_tensor_v, *, is_causal=True, attn_mask=None, cur_pos=None, cur_pos_tensor=None, scale=None, sliding_window_size=None, memory_config=None, program_config=None, compute_kernel_config=None)",
