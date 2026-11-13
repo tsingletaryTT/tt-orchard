@@ -1619,7 +1619,7 @@ def gate_record(problems: list[str]) -> dict:
 
 
 def _finite_rate(value):
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
+    return float(value) if safeio.fits_float(value) and value >= 0 else None
 
 
 def boot_record(evidence: dict, cache_state: str | None) -> dict:

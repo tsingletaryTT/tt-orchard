@@ -18,7 +18,6 @@ stands and the reason is recorded.
 from __future__ import annotations
 
 import json
-import math
 import os
 from pathlib import Path
 
@@ -44,7 +43,7 @@ def candidate(delta) -> dict | None:
 
 
 def _number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    return safeio.fits_float(v)
 
 
 def _positive(v) -> bool:

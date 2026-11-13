@@ -1,0 +1,318 @@
+{
+  "chips_modelled": 4,
+  "date": "2026-11-12",
+  "lease": "gozer run --chips 1 (two runs: --trace, then --ops)",
+  "probe": "p16_moe_loop_cost",
+  "results": [
+    {
+      "by_tokens": [
+        {
+          "device_seconds": [
+            0.1426,
+            0.0004,
+            0.0004,
+            0.0005,
+            0.0006
+          ],
+          "host_prep_seconds": [
+            0.0061,
+            0.0004,
+            0.0004,
+            0.0004,
+            0.0004
+          ],
+          "op_microseconds": {
+            "add_partial": 13.7,
+            "embedding": 19.7,
+            "matmul_down": 15.5,
+            "matmul_gate_or_up": 37.4,
+            "matmul_scatter": 12.4,
+            "multiply_gate_up": 12.9,
+            "multiply_weight": 13.9,
+            "silu": 7.5
+          },
+          "rows_per_slot": [
+            32,
+            32,
+            32
+          ],
+          "slots_hit": 3,
+          "tokens": 1,
+          "total_seconds": [
+            0.0012,
+            0.0009,
+            0.001,
+            0.0009,
+            0.0014
+          ],
+          "traced": {
+            "all_slots_32_rows": {
+              "traced_seconds": [
+                0.01566,
+                0.01566,
+                0.01565,
+                0.01565,
+                0.01564
+              ],
+              "untraced_seconds": [
+                0.01573,
+                0.01572,
+                0.01575,
+                0.01576,
+                0.01857
+              ]
+            },
+            "hit_slots": [
+              0.00039,
+              0.00038,
+              0.00038,
+              0.00038,
+              0.00038
+            ]
+          },
+          "upload_seconds": [
+            0.0002,
+            0.0001,
+            0.0001,
+            0.0002,
+            0.0001
+          ]
+        },
+        {
+          "device_seconds": [
+            0.0064,
+            0.0022,
+            0.0022,
+            0.0022,
+            0.0022
+          ],
+          "host_prep_seconds": [
+            0.0008,
+            0.0005,
+            0.0005,
+            0.0006,
+            0.0005
+          ],
+          "op_microseconds": {
+            "add_partial": 16.3,
+            "embedding": 17.5,
+            "matmul_down": 15.6,
+            "matmul_gate_or_up": 37.4,
+            "matmul_scatter": 12.5,
+            "multiply_gate_up": 14.5,
+            "multiply_weight": 16.3,
+            "silu": 8.8
+          },
+          "rows_per_slot": [
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32
+          ],
+          "slots_hit": 17,
+          "tokens": 8,
+          "total_seconds": [
+            0.0034,
+            0.0033,
+            0.0035,
+            0.0033,
+            0.0034
+          ],
+          "traced": {
+            "all_slots_32_rows": {
+              "traced_seconds": [
+                0.0159,
+                0.01591,
+                0.0159,
+                0.01591,
+                0.0159
+              ],
+              "untraced_seconds": [
+                0.01607,
+                0.01598,
+                0.01619,
+                0.01591,
+                0.01597
+              ]
+            },
+            "hit_slots": [
+              0.00212,
+              0.00212,
+              0.00212,
+              0.00212,
+              0.00212
+            ]
+          },
+          "upload_seconds": [
+            0.0008,
+            0.0006,
+            0.0006,
+            0.0006,
+            0.0006
+          ]
+        },
+        {
+          "device_seconds": [
+            0.0108,
+            0.007,
+            0.0074,
+            0.0072,
+            0.007
+          ],
+          "host_prep_seconds": [
+            0.0011,
+            0.001,
+            0.0009,
+            0.0009,
+            0.001
+          ],
+          "op_microseconds": {
+            "add_partial": 14.1,
+            "embedding": 19.0,
+            "matmul_down": 15.5,
+            "matmul_gate_or_up": 37.5,
+            "matmul_scatter": 12.4,
+            "multiply_gate_up": 13.1,
+            "multiply_weight": 14.2,
+            "silu": 7.9
+          },
+          "rows_per_slot": [
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32
+          ],
+          "slots_hit": 56,
+          "tokens": 32,
+          "total_seconds": [
+            0.0098,
+            0.0109,
+            0.0097,
+            0.0097,
+            0.0096
+          ],
+          "traced": {
+            "all_slots_32_rows": {
+              "traced_seconds": [
+                0.01575,
+                0.01574,
+                0.01574,
+                0.01575,
+                0.01577
+              ],
+              "untraced_seconds": [
+                0.01615,
+                0.01581,
+                0.01581,
+                0.0158,
+                0.0158
+              ]
+            },
+            "hit_slots": [
+              0.00691,
+              0.0069,
+              0.0069,
+              0.0069,
+              0.0069
+            ]
+          },
+          "upload_seconds": [
+            0.002,
+            0.0018,
+            0.0018,
+            0.0018,
+            0.0018
+          ]
+        },
+        {
+          "device_seconds": [
+            0.0231,
+            0.0185,
+            0.0186,
+            0.0188,
+            0.0185
+          ],
+          "host_prep_seconds": [
+            0.0023,
+            0.0021,
+            0.0023,
+            0.0021,
+            0.0021
+          ],
+          "op_microseconds": {
+            "add_partial": 15.1,
+            "embedding": 27.1,
+            "matmul_down": 15.5,
+            "matmul_gate_or_up": 37.4,
+            "matmul_scatter": 13.1,
+            "multiply_gate_up": 13.3,
+            "multiply_weight": 14.2,
+            "silu": 7.7
+          },
+          "rows_per_slot": [
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32,
+            32
+          ],
+          "slots_hit": 127,
+          "tokens": 256,
+          "total_seconds": [
+            0.0249,
+            0.0253,
+            0.025,
+            0.0255,
+            0.0251
+          ],
+          "traced": {
+            "all_slots_32_rows": {
+              "traced_seconds": [
+                0.01856,
+                0.01857,
+                0.01855,
+                0.01855,
+                0.01854
+              ],
+              "untraced_seconds": [
+                0.01894,
+                0.01859,
+                0.01858,
+                0.01858,
+                0.01859
+              ]
+            },
+            "hit_slots": [
+              0.0185,
+              0.01847,
+              0.01843,
+              0.01839,
+              0.01842
+            ]
+          },
+          "upload_seconds": [
+            0.0051,
+            0.0043,
+            0.005,
+            0.0043,
+            0.0043
+          ]
+        }
+      ],
+      "dtype": "bfp4",
+      "experts_on_chip": 128,
+      "preset": "flash"
+    }
+  ]
+}

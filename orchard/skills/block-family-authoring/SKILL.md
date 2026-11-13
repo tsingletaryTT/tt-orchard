@@ -13,7 +13,8 @@ blocks it knows. A block it does not know stays a stub, and a small coder rarely
 3. a test: runs the emitted block on the CPU and compares it with the transformers module at tiny sizes.
 
 All of it runs on the CPU. Nothing in this job opens a chip. Never import the real `ttnn`: importing it opens the device. The tests use the
-torch-backed stand-in in `tests/fake_ttnn_compute.py`.
+torch-backed stand-in in `orchard/skills/full-port-templates/cpu_ttnn.py`, which the tests load through
+`tests/fake_ttnn_compute.py`.
 
 Rules that decide success:
 
@@ -27,7 +28,8 @@ Rules that decide success:
 
 - `orchard/port_template.py`: `BlockFamily`, `Site`, `register_block_family`, `BLOCK_FAMILIES`, the four families, `FIXED_HELPERS`, `_compose_layer`.
 - `tests/test_port_template_registry.py`: the hyper-connection family and its tests. Copy its shape.
-- `tests/fake_ttnn_compute.py`: the fake ttnn. It computes with torch and tracks layouts.
+- `orchard/skills/full-port-templates/cpu_ttnn.py`: the fake ttnn. It computes with torch and tracks layouts. The tests load it through
+  `tests/fake_ttnn_compute.py`, and the supervisor runs each port against it before a board check, so an op you add to it is also used there.
 - `orchard/skills/full-port-templates/ttnn_cheat_sheet.json`: the verified ops and their argument names.
 
 ## Steps

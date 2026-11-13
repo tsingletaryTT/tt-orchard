@@ -1,0 +1,2 @@
+target = "0.9.179"
+summary = "The generated Qwen4 port decodes one row per token from kept state instead of running the whole sequence again (issue 759)."

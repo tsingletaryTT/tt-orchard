@@ -48,7 +48,6 @@ import hashlib
 import heapq
 import io
 import json
-import math
 import os
 import re
 import shutil
@@ -792,7 +791,7 @@ def main(args, *, out, run=run_group, probe=has_profiler, tools=has_tracy_tools,
         return EXIT_REFUSED
     for flag, value, positive in (("--timeout", args.timeout, True), ("--report-timeout", args.report_timeout, True), ("--wait-s", args.wait_s, False)):
         # argparse takes "nan" and "inf" as floats; a NaN deadline is never reached and an infinite one never ends
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or (positive and value == 0):
+        if not safeio.fits_float(value) or value < 0 or (positive and value == 0):
             print(f"tt-orchard profile: {flag} must be a finite number of seconds{' above 0' if positive else ', 0 or more'}", file=out)
             return EXIT_REFUSED
     out_dir = Path(args.out)

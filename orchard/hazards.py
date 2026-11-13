@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from orchard import safeio
 from orchard import model_config as mc
 
 TILE = 32
@@ -253,7 +254,7 @@ def _limits(limits) -> dict:
     for k, v in limits.items():
         if k not in LIMIT_NAMES:
             raise HazardInputError(f"limits names an unknown limit {k!r} (known: {', '.join(LIMIT_NAMES)})")
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 1:
+        if not safeio.fits_float(v) or v < 1:
             raise HazardInputError(f"limits {k} must be a finite number of at least 1")
     return dict(limits)
 

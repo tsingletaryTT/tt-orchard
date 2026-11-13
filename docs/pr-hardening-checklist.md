@@ -115,6 +115,10 @@ allows, `n=0` returning one token, a tensor shape of `10**20` that hangs a loop,
 
 - Bound sizes before arithmetic (`safeio.MAX_NUMEL`). Reject counts of zero or below. Count each buffer at its larger size.
 - Test: 0, -1, 1, the largest allowed value, and `10**20`.
+- A number from JSON that goes on to float arithmetic passes `safeio.fits_float` (or `safeio.as_float` where a float is needed).
+  `math.isfinite(10**400)` and `float(10**400)` raise OverflowError, and so does `10**400 / 2.0`. `safeio.is_finite_number` answers
+  True for any int, so use it only where the value is compared and never converted (issue 461).
+- Test: `10**400`, `-10**400`, `float("inf")` and `float("nan")` at the entry point that reads the value.
 
 ## 10. Secrets, paths and host names
 
@@ -150,3 +154,8 @@ goes on the first or last line of the call it marks.
 A second count in the same script (`tests/hardening_hazards_baseline.json`) holds link hazards: an `os.open` whose flags never name
 `O_NOFOLLOW` (a `dir_fd` anchors the lookup but a link in the last part is still followed, so it does not exempt the call), and the builtin `open` with a literal write mode (`"w"`, `"a"`, `"x"` or `"+"`). It works like the first count, uses
 the same marker, and `--update` and `--accept-growth` write both files.
+
+A third count (`scripts/finite_baseline.py`, `tests/finite_baseline.json`, `tests/test_finite_ratchet.py`) holds the float checks that an
+integer too large for a float can crash: `math.isfinite(...)` and the builtin `float(...)` of anything but a string literal. A line that
+is right to keep (the value is a float already, or the OverflowError is caught) carries `# finite: ok <reason>`. Lower the baseline with
+`python3 scripts/finite_baseline.py --update` when a call is replaced; `--update` refuses to write when any count rose.
