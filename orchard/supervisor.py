@@ -3496,9 +3496,14 @@ class Supervisor:
         """Move what an earlier attempt left in the stage directory (the run directories the plan writes and `audio_reference.json`) into a new
         `superseded-stage-1-<k>` directory beside them, so the references are made into fresh directories: the reference script refuses a run
         directory that exists. Nothing is deleted. The ledger says what is about to move before it moves, so a crash at any point leaves the old
-        evidence either in place or in the aside directory, and the next attempt finds what is left and moves that too (review of PR 615)."""
+        evidence either in place or in the aside directory, and the next attempt finds what is left and moves that too (review of PR 615).
+
+        `audio_reference.json` moves first (issue 617). It is the resume marker: while it is in place, a resume keeps the record and asks the gate
+        about it. Moved last, a crash between two renames would leave the marker pointing at run directories that are already aside; the gate
+        would report them missing, `_audio_reference_pin_stale` would answer False, and the stage could never resume. Moved first, a crash at
+        any later rename leaves no marker, so the next attempt makes the references again and sets the leftover directories aside."""
         names = sorted({item["dir"].split("/")[0] for item in plan} | {"acestep-root"})
-        present = [n for n in names + [audio_runtime.REFERENCE_FILE] if os.path.lexists(stage_dir / n)]
+        present = [n for n in [audio_runtime.REFERENCE_FILE] + names if os.path.lexists(stage_dir / n)]
         if not present:
             return
         k = 1
