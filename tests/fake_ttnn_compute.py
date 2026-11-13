@@ -397,8 +397,8 @@ def make() -> types.ModuleType:
                 raise RuntimeError(f"chunk_gated_delta_rule: {name} must be a TILE_LAYOUT device tensor, got {x.layout}")
             if len(x.t.shape) != 3:
                 raise RuntimeError(f"chunk_gated_delta_rule: {name} must be rank 3 (flat, token-major), got rank {len(x.t.shape)}")
-        if chunk_size != 32 or output_final_state or initial_state is not None or scale is not None:
-            raise RuntimeError("the fake covers the prefill call: chunk_size 32, no initial state, the default scale, no final state")
+        if chunk_size != 32 or initial_state is not None or scale is not None:
+            raise RuntimeError("the fake covers the prefill call: chunk_size 32, no initial state, the default scale (the final state may be asked for)")
         batch, seq, _ = q.t.shape
         if seq % chunk_size:
             raise RuntimeError("T must be a multiple of chunk_size on the flat path")
@@ -413,11 +413,32 @@ def make() -> types.ModuleType:
         qh = q.t.float().reshape(batch, seq, hk, dk).repeat_interleave(rep, dim=2)
         kh = k.t.float().reshape(batch, seq, hk, dk).repeat_interleave(rep, dim=2)
         vh = v.t.float().reshape(batch, seq, hv, dv)
-        out, _ = _probe_common().torch_chunk_gated_delta_rule(qh, kh, vh, g.t.float(), beta.t.float(), chunk_size=64, use_qk_l2norm_in_kernel=True)
-        return Tensor(out.float(), layout="ROW_MAJOR"), None
+        out, state = _probe_common().torch_chunk_gated_delta_rule(qh, kh, vh, g.t.float(), beta.t.float(), chunk_size=64, use_qk_l2norm_in_kernel=True,
+                                                                  output_final_state=output_final_state)
+        return Tensor(out.float(), layout="ROW_MAJOR"), (Tensor(state.float(), layout="TILE") if output_final_state else None)
+
+    def fused_recurrent_gated_delta_rule(q, k, v, g, beta, *, scale=None, initial_state=None, output_final_state=False, **kwargs):
+        """The decode step of the gated delta rule on torch (probe 3 ran the real op on a chip against the same recurrence): q and k are [B, T, heads, dim] TILE and
+        already L2-normalised by the caller (the op scales q by dim ** -0.5), v [B, T, value heads, V], g and beta [B, T, value heads], the state [B, value heads, K, V]
+        fp32. Returns (o, new state): o [B, T, value heads, V] fp32, ROW_MAJOR."""
+        _count("fused_recurrent_gated_delta_rule")
+        for name, x in (("q", q), ("k", k), ("v", v), ("g", g), ("beta", beta)):
+            if x.layout != "TILE":
+                raise RuntimeError(f"fused_recurrent_gated_delta_rule: {name} must be a TILE_LAYOUT device tensor, got {x.layout}")
+        if len(q.t.shape) != 4 or len(v.t.shape) != 4 or len(g.t.shape) != 3:
+            raise RuntimeError("fused_recurrent_gated_delta_rule: q, k, v are [B, T, heads, dim] and g, beta are [B, T, value heads]")
+        if initial_state is None or scale is not None:
+            raise RuntimeError("the fake covers the step with an initial state and the default scale")
+        hv = v.t.shape[2]
+        rep = hv // q.t.shape[2]
+        qh, kh = (x.t.float().repeat_interleave(rep, dim=2) for x in (q, k))
+        out, state = _probe_common().torch_recurrent_gated_delta_rule(qh, kh, v.t.float(), g.t.float(), beta.t.float(), initial_state=initial_state.t.float(),
+                                                                      output_final_state=True, use_qk_l2norm_in_kernel=False)
+        return Tensor(out.float(), layout="ROW_MAJOR"), Tensor(state.float(), layout="TILE")
 
     tr.scaled_dot_product_attention = scaled_dot_product_attention
     tr.chunk_gated_delta_rule = chunk_gated_delta_rule
+    tr.fused_recurrent_gated_delta_rule = fused_recurrent_gated_delta_rule
     m.transformer = tr
     return m
 
