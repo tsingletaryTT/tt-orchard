@@ -1,0 +1,4 @@
+target = "0.9.186"
+summary = "The layer-diff reference cache key holds a loader revision and the sha256 of the dense shim the loader uses; the reference hook checks its element budget before converting, and the port archive bytes are released once read."
+kind = "fix"
+pr = 777

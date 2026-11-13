@@ -757,6 +757,61 @@ def test_a_base_flag_that_still_blocks_is_not_followed_by_a_prompt(conf):
     assert code == 2 and rec.argv is None and w.pulled == []
 
 
+# ---- bringup: an operator's nearest model with no bundle (issue 559) ---------------------------
+
+QWEN_SMALL = "Qwen/Qwen3-0.6B"
+PIN_WHY = "the same attention and MLP layout as the rehearsal model"
+
+
+def test_base_naming_a_model_id_with_no_bundle_still_blocks_and_names_the_pin_option(conf):
+    """Without --nearest-why the rule is unchanged: a model id needs a bundle that serves it. The block says how to pin it anyway."""
+    code, out, rec = run_base(conf, ["--base", QWEN_SMALL], BaseWorld(found=[]))
+    flat = " ".join(out.replace("║", " ").split())
+    assert code == 2 and rec.argv is None
+    assert "nearest-model-missing" in flat and "--nearest-why" in flat
+
+
+def test_a_pinned_nearest_model_with_no_bundle_reaches_the_supervisor_with_the_pin_recorded(conf, tmp_path):
+    w = BaseWorld(found=[])
+    code, out, rec = run_base(conf, ["--base", QWEN_SMALL, "--nearest-why", PIN_WHY], w)
+    assert code == 0 and rec.argv is not None and w.pulled == []
+    assert "nearest-model-missing" not in out
+    inputs = [rec.argv[i + 1] for i, a in enumerate(rec.argv) if a == "--input"]
+    snap = fetch.snapshot_dir(tmp_path / "hf", QWEN_SMALL, GEMMA_REV)
+    assert f"base={snap}" in inputs                            # stage 0 compares against the pinned model
+    assert f"nearest_pin={QWEN_SMALL}" in inputs               # the ledger's run_start records who chose it
+    assert f"nearest_pin_why={PIN_WHY}" in inputs
+    assert not any(i.startswith("bundle=") for i in inputs)    # no bundle serves it, and the run says so
+    assert [f[0] for f in rec.fetched] == ["jialinyyzz/humanizer", QWEN_SMALL]
+    flat = " ".join(out.replace("║", " ").split())
+    assert "pinned by the operator" in flat and "no installed bundle serves it" in flat
+
+
+def test_a_pin_that_a_bundle_serves_takes_the_normal_route_and_still_records_the_pin(conf, tmp_path):
+    inst = [nearest.Installed("x/qwen3-0.6b-p150", QWEN_SMALL, "6", 1)]
+    w = BaseWorld(installed=inst, local={QWEN_SMALL: tmp_path / "q"})
+    code, out, rec = run_base(conf, ["--base", QWEN_SMALL, "--nearest-why", PIN_WHY], w)
+    inputs = [rec.argv[i + 1] for i, a in enumerate(rec.argv) if a == "--input"]
+    assert code == 0 and f"base={tmp_path / 'q'}" in inputs and f"nearest_pin={QWEN_SMALL}" in inputs
+
+
+def test_a_dry_run_with_a_pin_passes_the_base_row_and_starts_nothing(conf):
+    code, out, rec = run_base(conf, ["--dry-run", "--base", QWEN_SMALL, "--nearest-why", PIN_WHY], BaseWorld(found=[]))
+    assert code == 0 and rec.argv is None and rec.fetched == []
+    assert "nearest_pin=Qwen/Qwen3-0.6B" in out
+
+
+def test_nearest_why_without_base_is_refused(conf, capsys):
+    code, out, rec = run_base(conf, ["--nearest-why", PIN_WHY], BaseWorld(found=[]))
+    assert code == 2 and rec.argv is None and "--nearest-why needs --base" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("why", ["", "   ", "two\nlines", "a\x00b", "x" * 301])
+def test_a_nearest_why_that_is_empty_multiline_or_long_is_refused(conf, capsys, why):
+    code, out, rec = run_base(conf, ["--base", QWEN_SMALL, "--nearest-why", why], BaseWorld(found=[]))
+    assert code == 2 and rec.argv is None and "--nearest-why" in capsys.readouterr().err
+
+
 # ---- --mode: one box or the lab, per run -------------------------------------------------------
 
 @pytest.fixture

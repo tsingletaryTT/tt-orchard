@@ -56,12 +56,19 @@ def build(tmp_path, *, port_layers=None, ref_layers=None, schedule=None, seal=Tr
     return stage
 
 
+def construction_identity():
+    """The construction fields of the cache key for a snapshot that does not load through the dense shim (issue 630)."""
+    return {"loader_revision": load_tool().LOADER_REVISION, "dense_shim_sha256": None}
+
+
 def write_reference_cache(stage, ref, snap, dtype="float32"):
-    """The reference the tool would compute, as it would cache it: an npz and a sidecar that binds it to the prompt, the snapshot and the dtype."""
+    """The reference the tool would compute, as it would cache it: an npz and a sidecar that binds it to the prompt, the snapshot, the dtype and
+    the construction (loader revision and dense shim hash)."""
     npz = stage / "evidence" / "layer-reference.npz"
     np.savez(npz, **{f"layer_{k:03d}": a for k, a in enumerate(ref)})
     (stage / "evidence" / "layer-reference.json").write_text(json.dumps(
-        {"prompt_sha256": hashlib.sha256(json.dumps(PROMPT).encode()).hexdigest(), "snapshot": str(snap), "dtype": dtype, "npz_sha256": sha(npz), "layers": len(ref)}))
+        {"prompt_sha256": hashlib.sha256(json.dumps(PROMPT).encode()).hexdigest(), "snapshot": str(snap), "dtype": dtype, **construction_identity(),
+         "npz_sha256": sha(npz), "layers": len(ref)}))
 
 
 def run_tool(stage, *args, python=sys.executable, cwd=None):
@@ -315,7 +322,7 @@ def test_what_the_check_writes_is_what_layer_diff_reads(tmp_path):
     assert run_template(tmp_path, run, stage).returncode == 0
     ref = [np.full((len(PROMPT_IDS), 4), float(k + 1), dtype=np.float32) for k in range(3)]
     ref[2] = ref[2] * 2
-    key = {"prompt_sha256": hashlib.sha256(json.dumps(PROMPT_IDS).encode()).hexdigest(), "snapshot": str(snap), "dtype": "float32"}
+    key = {"prompt_sha256": hashlib.sha256(json.dumps(PROMPT_IDS).encode()).hexdigest(), "snapshot": str(snap), "dtype": "float32", **construction_identity()}
     npz = stage / "evidence" / "layer-reference.npz"
     np.savez(npz, **{f"layer_{k:03d}": a for k, a in enumerate(ref)})
     (stage / "evidence" / "layer-reference.json").write_text(json.dumps({**key, "npz_sha256": sha(npz), "layers": 3}))
