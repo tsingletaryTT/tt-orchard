@@ -133,7 +133,13 @@ def _parser() -> argparse.ArgumentParser:
                    help="block the run while credential files are visible to agent shells")
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it; the run then uses that bundle, or a bundle of its family for another chip count) or a Hugging "
-                                  "Face model id. Default: the model card's base_model")
+                                  "Face model id that an installed bundle serves. A model id with no bundle blocks the run unless "
+                                  "--nearest-why is given. Default: the model card's base_model")
+    b.add_argument("--nearest-why", metavar="TEXT",
+                   help="with --base <model id>: pin that model as the nearest model even when no installed bundle serves it, for this "
+                        "reason (one line, at most 300 characters). Stage 0 compares against it and its gate holds delta.json's "
+                        "nearest_model to it; the run records the model and the reason as the inputs nearest_pin and nearest_pin_why "
+                        "(issue 559). A stage that serves through a bundle still needs one")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
     b.add_argument("--no-graft-trial", action="store_true",
                    help="skip stage 2's graft trial. When the model has no mtp.* tensors and the nearest model has a head that "
@@ -775,6 +781,15 @@ def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
                    "stabilityai/stable-audio-3-small-music-base)" + ("" if state == "audio" else ". If the model is not audio, run again once the Hub answers"))
 
 
+def _pin_inputs(pin) -> dict:
+    """The run inputs for an operator's pinned nearest model (preflight's base row `data["pin"]`, issue 559): `nearest_pin` (the repo) and
+    `nearest_pin_why` (the reason). The supervisor records them in run_start, the run facts list them for stage 0, and stage 0's gate holds
+    delta.json's nearest_model to `nearest_pin` (orchard/stages.py). No pin, or a malformed record, gives none."""
+    if not isinstance(pin, dict) or not isinstance(pin.get("repo"), str) or not isinstance(pin.get("why"), str):
+        return {}
+    return {"nearest_pin": pin["repo"], "nearest_pin_why": pin["why"]}
+
+
 def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False, pull: bool = True) -> tuple[str | None, str | None]:
     """(the weights repo to base the run on, an error text): resolve_base_bundle without the bundle name."""
     repo, _, why = resolve_base_bundle(arg, sig, puller, out, style, dry_run=dry_run, pull=pull)
@@ -1297,6 +1312,11 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     from orchard.stages import thin_port_options_problem
     if why := thin_port_options_problem(full_port=args.full_port, thin_port=args.thin_port):
         return _refuse(why)
+    if args.nearest_why is not None:
+        if not args.base:
+            return _refuse("--nearest-why needs --base <model id>: it gives the reason for pinning that model as the nearest one")
+        if why := preflight.pin_why_problem(args.nearest_why):
+            return _refuse(why)
     if args.classify and args.dry_run:
         return _refuse("--classify and --dry-run cannot be given together: --dry-run prints the preflight checks and stops on a blocked "
                        "machine; --classify prints stage 0's classification and lists the machine blocks. Give one of them")
@@ -1337,7 +1357,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override,
                                       accept_inferred_base=args.accept_inferred_base, progress=progress,
-                                      stock_recorded=recorded_stock, no_fetch=args.no_fetch, base_bundle=named_bundle)
+                                      stock_recorded=recorded_stock, no_fetch=args.no_fetch, base_bundle=named_bundle,
+                                      pinned_why=args.nearest_why)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -1437,7 +1458,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
               **({"bundle": bundle_dir} if bundle_dir else {}),
               **({"stock_params": stock_dir} if stock_dir else {}),
               **({"text_runtime": base_data["text_runtime"]} if isinstance(base_data.get("text_runtime"), str) else {}),
-              **({"base_candidates": str(candidates_path)} if candidates_path else {})}
+              **({"base_candidates": str(candidates_path)} if candidates_path else {}),
+              **_pin_inputs(base_data.get("pin"))}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=not args.refuse_credentials_visible,
                                               graft_trial=not args.no_graft_trial,

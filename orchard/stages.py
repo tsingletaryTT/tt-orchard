@@ -235,9 +235,41 @@ def gate_delta(stage_dir, run_dir) -> GateResult:
         return GateResult(False, (err,))
     reasons, seen = [], []
     _delta_reasons(d, run_dir, reasons, seen, Path(stage_dir))
+    reasons += _nearest_pin_reasons(d, run_dir)
     reasons += _template_reasons(Path(stage_dir), "delta_triage.py")
     reasons += _stamp_reasons(d, "delta_triage.py", "delta.json")
     return _done(reasons, seen)
+
+
+NEAREST_PIN_INPUT = "nearest_pin"          # the input `bringup --base <id> --nearest-why` adds (issue 559); orchard/cli.py writes it
+
+
+def _nearest_pin_reasons(d: dict, run_dir) -> list[str]:
+    """Issue 559: when the operator pinned the nearest model (`bringup --base <model id> --nearest-why TEXT`), the supervisor's run_start
+    entry holds the input `nearest_pin`, and stage 0 must compare against that model. delta.json's `nearest_model` (`<repo>` or
+    `<repo>@<revision>`) has to name the pinned repository. Only run_start counts: it is the supervisor's record of what the operator
+    asked for, and the agent cannot write the ledger. A run with no ledger or no pin gives no reason. A ledger that cannot be read, or a
+    pin that is not a non-empty string, is a named reason: the check could not be made."""
+    from orchard.ledger import LedgerCorrupt, read_entries
+    from orchard.package import split_model_id
+    try:
+        entries = read_entries(Path(run_dir) / "ledger.jsonl")
+    except (LedgerCorrupt, OSError, ValueError) as exc:
+        return [f"the ledger could not be read to check the operator's pinned nearest model: {type(exc).__name__}"]
+    start = next((e for e in entries if e.get("event") == "run_start"), None)
+    data = start.get("data") if isinstance(start, dict) else None
+    inputs = data.get("inputs") if isinstance(data, dict) else None
+    if not isinstance(inputs, dict) or NEAREST_PIN_INPUT not in inputs:
+        return []
+    pin = inputs[NEAREST_PIN_INPUT]
+    if not isinstance(pin, str) or not pin.strip():
+        return [f"run_start's input {NEAREST_PIN_INPUT} is not a model id ({type(pin).__name__}), so the operator's pinned nearest "
+                "model cannot be checked"]
+    got = split_model_id(d.get("nearest_model"))[0]
+    if got != pin:
+        return [f"the operator pinned {pin} as the nearest model (bringup --base {pin} --nearest-why), and delta.json's nearest_model "
+                f"is {str(d.get('nearest_model'))[:200]!r}. Compare against {pin}"]
+    return []
 
 
 def _delta_reasons(d: dict, run_dir, reasons: list, seen: list, stage_dir: Path | None = None) -> None:
