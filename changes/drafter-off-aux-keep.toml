@@ -1,3 +1,4 @@
 target = "0.9.183"
 summary = "With the drafter off, stage 7 removes only the drafter's entry from TT_AUXILIARY_WEIGHTS and keeps the other entries, as stage 2 does; the package check refuses only a drafter entry."
 kind = "fix"
+pr = 769
