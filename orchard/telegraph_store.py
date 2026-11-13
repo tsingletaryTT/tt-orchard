@@ -23,11 +23,11 @@ Nothing here reads a credential or a prompt. The caller passes records that have
 from __future__ import annotations
 
 import json
-import math
 import os
 from dataclasses import dataclass, field
 from typing import Callable
 
+from orchard import safeio
 from orchard import db as dbm
 from orchard.db import (Database, DatabaseTooNew, LedgerRefused, LedgerUnavailable, ReadOnlyDatabase)
 
@@ -88,7 +88,7 @@ def _key_of(rec: dict, kind: str):
 
 def _ts_of(rec: dict):
     ts = rec.get("ts")
-    return float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) and math.isfinite(ts) else None
+    return float(ts) if safeio.fits_float(ts) else None
 
 
 def encode(rec: dict) -> str:

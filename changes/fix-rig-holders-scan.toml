@@ -1,0 +1,2 @@
+target = "0.9.182"
+summary = "The supervisor test rig no longer reads the real device holders of the machine (issue 761)."

@@ -444,7 +444,7 @@ MUTATIONS = {
                                              "q = _qsa_apply_rotary(model, q, cos, sin)\n    keys"),
     "the output gate is not applied": ("ttnn.multiply(joined, ttnn.sigmoid(gate))", "joined"),
     "the attention queries are not normalised": ("q = _apply_rotary(model, _qsa_norm_heads(model, prefix + \".q_norm\", q), cos, sin)", "q = _apply_rotary(model, q, cos, sin)"),
-    "the attention keys are not rotated": ("k = _apply_rotary(model, k, cos, sin)\n    mask", "mask"),
+    "the attention keys are not rotated": ("k = _apply_rotary(model, k, cos, sin)\n    if mode == \"step\":", "if mode == \"step\":"),
     "the attention scale is wrong": ("is_causal=False, scale=hd ** -0.5)", "is_causal=False, scale=1.0)"),
     "the query projection is split into gate and query the wrong way round": ("q = ttnn.permute(ttnn.slice(qg, (0, 0, 0, 0), (1, seq, heads, hd)), (0, 2, 1, 3))\n    gate = ttnn.reshape(ttnn.slice(qg, (0, 0, 0, hd), (1, seq, heads, 2 * hd)), (1, 1, seq, heads * hd))",
                                                                               "q = ttnn.permute(ttnn.slice(qg, (0, 0, 0, hd), (1, seq, heads, 2 * hd)), (0, 2, 1, 3))\n    gate = ttnn.reshape(ttnn.slice(qg, (0, 0, 0, 0), (1, seq, heads, hd)), (1, 1, seq, heads * hd))"),

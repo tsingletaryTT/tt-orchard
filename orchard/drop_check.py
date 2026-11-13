@@ -18,7 +18,9 @@ Verdicts and routes:
                                 or no capabilities file yet). Each reason is named.
   needs-operator                the release needs a reference interpreter whose transformers has its architecture class
                                 (scripts/reference_venv.py builds one); the operator sets reference_python and runs it again.
-  refused                       the repository id or revision is not acceptable; nothing was read.
+  refused                       the repository id or revision is not acceptable, or a request was redirected outside
+                                huggingface.co and the hf.co content hosts, or to a Hub path outside the allowed
+                                organisations (redirect_problem); nothing from that response was read.
 
 The capabilities file (schema 1), shipped with the Qwen4 package:
   {"schema": 1, "bundle": "<org>/<name>", "model_types": [...], "architectures": [...],
@@ -39,6 +41,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -49,6 +52,12 @@ ALLOWED_ORGS = ("Qwen",)
 QWEN4_BUNDLE = "mando2222/qwen4-27b-dense-v6-thin"
 QWEN38_BUNDLE = "mando2222/qwen3.8-27b-dflash2-vision-p300x2-q4kv-v6-thin"
 HUB = "https://huggingface.co"
+HUB_HOST = "huggingface.co"
+# The Hub redirects a large file (tokenizer.json of a Qwen repository, for one) to a content-delivery host under hf.co, such as
+# cdn-lfs.hf.co or cas-bridge.xethub.hf.co. A request may end there, or on the Hub host under an allowed organisation, and nowhere else.
+CONTENT_DOMAIN = "hf.co"
+# A Hub path that names a repository: /<org>/<name>/..., /api/models/<org>/<name>..., /api/resolve-cache/models/<org>/<name>/...
+HUB_REPO_PATH = re.compile(r"/(?:api/models/|api/resolve-cache/models/)?([^/]+)/([^/?#]+)(?:/.*)?")
 USER_AGENT = "tt-orchard-drop-check"
 TIMEOUT_S = 30
 
@@ -124,6 +133,12 @@ class TooLarge(Unreadable):
     """A file is larger than its budget."""
 
 
+class RedirectRefused(Unreadable):
+    """A request ended, after the Hub's redirects, on a URL outside the Hub and its content hosts, or on a Hub path outside the allowed
+    organisations (issue 667). Nothing from that response is used. fetch_metadata does not turn it into a reason: the check stops and
+    the release is refused, since its files may belong to another repository."""
+
+
 _BAD = object()     # _parse_json's result when the bytes are missing or not JSON (a JSON null is a value)
 
 
@@ -138,6 +153,34 @@ def repo_problem(repo) -> str | None:
         return "the repository id must be org/name with letters, digits, '.', '_' and '-' only"
     if m.group(1) not in ALLOWED_ORGS:
         return f"organisation {m.group(1)!r} is not allowed (allowed: {', '.join(ALLOWED_ORGS)})"
+    return None
+
+
+def redirect_problem(asked: str, final) -> str | None:
+    """None when a request for `asked` that ended on `final` (urllib's geturl(), after any redirects) may be read; else why not.
+
+    No redirect (`final` equal to `asked`) is accepted: the URL was built from a checked repository id. After a redirect the final URL
+    must be https on the default port with no user name, and its host must be huggingface.co or hf.co or a host under hf.co. On
+    huggingface.co the path must name a repository (org/name, as repo_problem accepts it) in an allowed organisation."""
+    if final == asked:
+        return None
+    if not isinstance(final, str):
+        return "the response did not say which URL it came from"
+    try:
+        u = urllib.parse.urlsplit(final)
+        host, port = (u.hostname or "").lower(), u.port
+    except ValueError:
+        return "the response came from a URL that cannot be parsed"
+    where = f"{host or '?'}{u.path}"
+    if u.scheme != "https" or port not in (None, 443) or u.username is not None or u.password is not None:
+        return f"the request was redirected to {u.scheme}://{where}, which is not a plain https URL"
+    if host == CONTENT_DOMAIN or host.endswith("." + CONTENT_DOMAIN):
+        return None
+    if host != HUB_HOST:
+        return f"the request was redirected to {host or '?'}, outside the Hub and its content hosts"
+    m = HUB_REPO_PATH.fullmatch(u.path)
+    if not m or repo_problem(f"{m.group(1)}/{m.group(2)}"):
+        return f"the request was redirected to {where}, which is not under an allowed organisation ({', '.join(ALLOWED_ORGS)})"
     return None
 
 
@@ -374,6 +417,9 @@ class HubClient:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with self.opener(req, timeout=TIMEOUT_S) as resp:
+                problem = redirect_problem(url, resp.geturl())       # checked before the body is read (issue 667)
+                if problem:
+                    raise RedirectRefused(f"{url.rsplit('/', 1)[-1]}: {problem}; nothing from it was read")
                 data = resp.read(max_bytes + 1)
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403, 404):
@@ -489,6 +535,8 @@ def fetch_metadata(client, repo: str, revision: str) -> tuple[dict, list[str]]:
     for name, cap in METADATA_FILES.items():
         try:
             data = client.get(repo, revision, name, max_bytes=cap)
+        except RedirectRefused:
+            raise
         except Unreadable as exc:
             problems.append(str(exc))
             continue
@@ -545,17 +593,23 @@ def _unreachable(args, exc) -> dict:
             "reasons": [f"{exc}; nothing was decided, so run the check again later"], "notes": [], "facts": {}, "command": []}
 
 
+def _refused(repo, revision, reason: str) -> tuple[dict, int]:
+    """The "refused" result: a bad repository id or revision, or a request the Hub redirected away (redirect_problem)."""
+    return ({"repo": repo if isinstance(repo, str) else None, "revision": revision if isinstance(revision, str) else None,
+             "verdict": "refused", "route": None, "reasons": [reason], "notes": [], "facts": {}, "command": []}, EXIT_REFUSED)
+
+
 def run(args) -> tuple[dict, int]:
     problem = repo_problem(args.repo) or (revision_problem(args.revision) if args.revision else None)
     if problem:
-        res = classify(args.repo, args.revision or "", {})
-        res["reasons"] = [problem]
-        return res, EXIT_REFUSED
+        return _refused(args.repo, args.revision, problem)
     client = DirClient(args.from_dir) if args.from_dir else HubClient()
     try:
         info = client.info(args.repo, args.revision)
     except HubUnreachable as exc:
         return _unreachable(args, exc), EXIT_UNREACHABLE
+    except RedirectRefused as exc:
+        return _refused(args.repo, args.revision, str(exc))
     if info is None:
         return ({"repo": args.repo, "revision": args.revision, "verdict": "not-found", "route": None,
                  "reasons": ["the repository does not exist, is private or gated, or the Hub did not answer"], "notes": [],
@@ -578,6 +632,8 @@ def run(args) -> tuple[dict, int]:
         files, problems = fetch_metadata(client, args.repo, revision) if not revision_problem(revision) else ({}, [])
     except HubUnreachable as exc:
         return _unreachable(args, exc), EXIT_UNREACHABLE
+    except RedirectRefused as exc:
+        return _refused(args.repo, revision, str(exc))
     res = classify(args.repo, revision, files, capabilities=caps, dev_config=dev,
                    class_probe=class_probe_for(args.reference_python), qwen4_bundle=args.bundle, qwen38_bundle=args.qwen38_bundle)
     res["notes"] = extra_notes + res["notes"]
