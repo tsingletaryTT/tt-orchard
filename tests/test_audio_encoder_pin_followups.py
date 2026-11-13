@@ -278,3 +278,38 @@ def test_a_mixed_answer_from_the_gate_does_not_regenerate(tmp_path, monkeypatch)
                            ([pin_problem, 5], False), ("not a list", False)):
         monkeypatch.setattr(audio_remote, "call", lambda *a, _answer=answer, **k: _answer)
         assert supervisor.Supervisor._audio_reference_pin_stale(fake, stage_dir, SimpleNamespace(reference_python="/ref/python")) is expect, answer
+
+
+# ---- 617 (review of PR 615): the resume marker moves first, so a crash between the renames can resume ---------------------------------
+
+def test_the_set_aside_moves_the_resume_marker_before_the_run_directories(tmp_path, monkeypatch):
+    """A crash after the first rename must leave no `audio_reference.json` behind. A marker that stays while its run directories are gone
+    points at missing runs: the gate reports them, `_audio_reference_pin_stale` answers False, and the stage can never resume."""
+    from orchard import audio_runtime
+    monkeypatch.setattr(audio_remote, "call", in_process)
+    run_dir, stage_dir, rec, _ = stage1(tmp_path)
+    replace_reference_run(run_dir, stage_dir, rec, encoder_attn="sdpa")
+    fake = regen_fake(tmp_path, run_dir)
+    real_rename, moved = supervisor.os.rename, []
+
+    def rename_once_then_die(src, dst):
+        if moved:
+            raise KeyboardInterrupt("the supervisor died between two renames")
+        moved.append(Path(src).name)
+        real_rename(src, dst)
+
+    monkeypatch.setattr(supervisor.os, "rename", rename_once_then_die)
+    with pytest.raises(KeyboardInterrupt):
+        run_resume(fake, stage_dir)
+    assert moved == [audio_runtime.REFERENCE_FILE]
+    assert not (stage_dir / audio_runtime.REFERENCE_FILE).exists()
+    assert (stage_dir / "reference").is_dir()                                    # the crash came before the run directories moved
+    monkeypatch.setattr(supervisor.os, "rename", real_rename)
+    healthy = RefusingRunner()
+    monkeypatch.setattr(st, "subprocess_runner", lambda env: healthy)
+    run_resume(fake, stage_dir)                                                  # no marker: the stage is made again, and the leftovers go aside
+    assert st.reference_problems(stage_dir, run_dir) == []
+    aside = aside_dirs(stage_dir)
+    assert len(aside) == 2
+    assert (stage_dir / aside[0] / audio_runtime.REFERENCE_FILE).is_file()       # the old marker is kept in the first aside directory
+    assert (stage_dir / aside[1] / "reference").is_dir()                         # its run directories went into the second one
