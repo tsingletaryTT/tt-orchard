@@ -56,8 +56,20 @@ def _is_int(x) -> bool:
     return isinstance(x, int) and not isinstance(x, bool)
 
 
+def _fits_float(x) -> bool:
+    """True for an int (not a bool) or a float that a float can hold and that is not NaN or an infinity. Never raises: `math.isfinite(10**400)` raises
+    OverflowError, so the int is converted inside a try and one too large for a float gives False (issue 461). This file imports only the
+    standard library, so it keeps its own copy of the shared `fits_float` helper."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(x))        # finite: ok an OverflowError from float(x) is caught below
+    except OverflowError:
+        return False
+
+
 def _is_unit(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and 0 <= x <= 1
+    return _fits_float(x) and 0 <= x <= 1
 
 
 # ---- the prompt set --------------------------------------------------------------------------------------------------------------------
@@ -397,7 +409,7 @@ def sweep_summary(cells) -> dict:
         if not isinstance(c, dict):
             continue
         dec, pre = c.get("decode_tok_s"), c.get("prefill_tok_s")
-        ok = isinstance(dec, (int, float)) and not isinstance(dec, bool) and math.isfinite(dec) and dec > 0
+        ok = _fits_float(dec) and dec > 0
         if not ok:
             missing += 1
         out.append({"input_tokens": c.get("input_tokens"), "concurrency": c.get("concurrency"),

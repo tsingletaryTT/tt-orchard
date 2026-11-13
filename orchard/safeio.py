@@ -173,6 +173,23 @@ def is_finite_number(x) -> bool:
     return isinstance(x, float) and math.isfinite(x)
 
 
+def fits_float(x) -> bool:
+    """True for an int (not a bool) or a float that a float can hold and that is not NaN or an infinity. Never raises.
+
+    Use it where the value goes on to float arithmetic: `10**400 / 2.0` raises OverflowError just as `math.isfinite(10**400)` does, so an int
+    that passes `is_finite_number` can still crash the line after the check. An int too large for a float gives False here and is refused by
+    the caller (issue 461)."""
+    if not is_finite_number(x):
+        return False
+    if isinstance(x, float):
+        return True
+    try:
+        float(x)
+    except OverflowError:
+        return False
+    return True
+
+
 def as_float(x, *, what: str = "value") -> float:
     """`x` as a float, for a place that needs one. A bool, a non-number, NaN and an infinity are refused, and so is an int too large for a float
     (it is never converted: `float(10**400)` raises OverflowError). Raises BadValue."""

@@ -1825,7 +1825,8 @@ def gate_package(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
     from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, acceptance_sources, graft_evidence_problems, graft_problems,
                                  graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
                                  sampling_summary, sampling_summary_problems, serving_problems,
-                                 served_drafter_state, split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
+                                 served_drafter_state, split_model_id, stage_2_drafter_repos, stage_2_serving, stage_2_vocab,
+                                 weights_wiring_problems)
     from orchard.can import hardening_problems
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
@@ -1852,6 +1853,7 @@ def gate_package(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
     reasons += sampling_summary_problems(run)
     reasons += [f"{p}, so the package cannot be checked against stage 2's decision" for p in decision_file_problems(run)]
     drafter_off, host_sampling = served_drafter_state(run)
+    drafters = stage_2_drafter_repos(run)   # None when stage 2's run.sh cannot be read; then every TT_AUXILIARY_WEIGHTS entry is refused
     sampling_decision = sampling_choice.read_decision(run / "stages" / "2")
     model_has_mtp = delta_model_has_mtp(delta)
     # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
@@ -1924,7 +1926,7 @@ def gate_package(stage_dir, run_dir, *, rehearsal: bool = False) -> GateResult:
                     serving_problems(run_sh, m.get("env") or {},
                                      drafter_off=drafter_off and not grafted,
                                      host_sampling=host_sampling and not grafted,
-                                     model_has_mtp=model_has_mtp, graft=has_graft)]
+                                     model_has_mtp=model_has_mtp, graft=has_graft, drafters=drafters)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
         reasons += [f"profile {name}: {x}" for x in hardening_problems(out)]     # the canning checks (orchard/can.py)

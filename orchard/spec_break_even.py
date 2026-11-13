@@ -20,8 +20,9 @@ Acceptance has to come from real text at the sampling the card claims; this modu
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
+
+from orchard import safeio
 
 DEFAULT_MARGIN = 0.05
 VERDICTS = ("gain", "break-even", "loss")
@@ -32,19 +33,19 @@ class BreakEvenInputError(ValueError):
 
 
 def _positive(x, what: str) -> float:
-    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x <= 0:
+    if not safeio.fits_float(x) or x <= 0:
         raise BreakEvenInputError(f"{what} must be a positive finite number")
     return float(x)
 
 
 def _non_negative(x, what: str) -> float:
-    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0:
+    if not safeio.fits_float(x) or x < 0:
         raise BreakEvenInputError(f"{what} must be a finite number of at least 0")
     return float(x)
 
 
 def _margin(m) -> float:
-    if isinstance(m, bool) or not isinstance(m, (int, float)) or not math.isfinite(m) or not 0 <= m < 1:
+    if not safeio.fits_float(m) or not 0 <= m < 1:
         raise BreakEvenInputError("margin must be a number from 0 up to (not including) 1")
     return float(m)
 

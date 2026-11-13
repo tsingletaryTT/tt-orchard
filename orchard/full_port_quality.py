@@ -100,7 +100,7 @@ def _sha_file(path) -> str | None:
 
 
 def _finite(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    return safeio.fits_float(x)
 
 
 def _numlist(x, n: int | None = None) -> bool:

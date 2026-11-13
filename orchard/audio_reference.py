@@ -84,8 +84,8 @@ def _no_constant(name):
 
 
 def _strict_float(text):
-    value = float(text)
-    if not math.isfinite(value):
+    value = float(text)                # finite: ok text is the JSON number's own text; float() of a string gives inf and never raises OverflowError
+    if not math.isfinite(value):       # finite: ok value is a float here
         raise ValueError(f"the number {text} is not finite")
     return value
 
@@ -475,7 +475,14 @@ def log_spectrum_distance(ref: np.ndarray, cand: np.ndarray, n_fft: int = 1024, 
 
 
 def _number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    """True for an int (not a bool) or a float that a float can hold and that is not NaN or an infinity; never raises (issue 461). This file ships
+    inside audio packages, which carry no `safeio`, so it keeps its own copy of the shared `fits_float` helper."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))        # finite: ok an OverflowError from float(value) is caught below
+    except OverflowError:
+        return False
 
 
 def bars_from_floor(floor_report: dict, margin: float = 3.0) -> dict:

@@ -35,6 +35,7 @@ import math
 
 import numpy as np
 
+from orchard import safeio
 from orchard import audio_reference as ar
 from orchard import text_reference as tr
 
@@ -192,7 +193,7 @@ def perplexity_report(ref: dict, chip: dict) -> dict:
     reasons = []
     for label, d in (("reference", ref), ("chip", chip)):
         p = d.get("perplexity") if isinstance(d, dict) else None
-        if not isinstance(p, (int, float)) or isinstance(p, bool) or not math.isfinite(p) or p <= 0:
+        if not safeio.fits_float(p) or p <= 0:
             reasons.append(f"the {label} perplexity is not a positive finite number")
         else:
             reasons += ppl_problems(d, label)

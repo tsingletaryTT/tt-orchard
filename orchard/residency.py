@@ -491,7 +491,7 @@ def categorize(name: str, shape) -> str:
 # ---- the estimate -----------------------------------------------------------------------------------------------------------
 
 def _number(value, what: str, *, lo: float, allow_equal: bool) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < lo or (value == lo and not allow_equal):
+    if not safeio.fits_float(value) or value < lo or (value == lo and not allow_equal):
         raise ResidencyError(f"{what} must be a finite number {'of at least' if allow_equal else 'above'} {lo:g}")
     return float(value)
 

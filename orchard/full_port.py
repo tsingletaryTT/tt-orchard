@@ -59,6 +59,12 @@ CHEAT_MD_NAME = "cheat_sheet.md"      # the rendered sheet the coder reads
 IDIOMS_SOURCE = TEMPLATE.parent / "example_decoder_idioms.md"      # idioms from a port that passed the check (helper-vs-coder); advice, not code to copy
 IDIOMS_NAME = "decoder_idioms.md"     # its name in the stage directory, next to the cheat sheet
 CONFIG_NAME = "port_check_config.json"
+# The CPU run before the board (issue 697, `port_check.py --cpu N`): the torch stand-in of ttnn and the probes' gated delta rule it reads, as paths
+# under the orchard checkout, and their names next to the template. The template's CPU_TTNN and cpu_ttnn.py's GDN_NAME use the same names.
+CPU_TTNN_SOURCE = "orchard/skills/full-port-templates/cpu_ttnn.py"
+CPU_TTNN_NAME = "cpu_ttnn.py"
+CPU_GDN_SOURCE = "scripts/qwen4_ops_probe/common.py"
+CPU_GDN_NAME = "cpu_ttnn_gdn.py"
 # The only command the supervisor runs for this stage. -P and -s keep files the coder leaves in stages/2/ off the template's sys.path.
 COMMAND = "python3 -P -s stages/2/port_check.py"
 DEADLINE_S = 3600
