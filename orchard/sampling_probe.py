@@ -14,9 +14,8 @@ that the record is well formed.
 """
 from __future__ import annotations
 
-import math
 
-from . import defaults, drafter_log, prompt_suite
+from . import defaults, drafter_log, prompt_suite, safeio
 
 ENTRY_NAMES = ("greedy", "sampled_a", "sampled_b")
 VERDICTS = ("not-run", "malformed", "greedy-refused", "sampled-refused", "sampled-incoherent", "inconclusive", "sampled-ignored",
@@ -30,7 +29,7 @@ MIN_TOKENS = 16         # choice: a reply shorter than this says too little abou
 
 
 def _number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    return safeio.fits_float(v)
 
 
 def problems(record) -> list[str]:

@@ -21,7 +21,6 @@ Speeds come from files the template stages wrote and are read through `orchard/s
 from __future__ import annotations
 
 import json
-import math
 import os
 from pathlib import Path
 
@@ -142,7 +141,7 @@ def read_floor(run_dir) -> dict | None:
 # ---- the measured speeds ---------------------------------------------------------------------------------------------------
 
 def _good(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0
+    return safeio.fits_float(v) and v > 0
 
 
 def _json(path: Path, limit: int = MAX_RECORD_BYTES):

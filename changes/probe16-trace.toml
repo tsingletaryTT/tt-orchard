@@ -1,0 +1,2 @@
+target = "0.9.176"
+summary = "Probe 16 gains trace replay and per-op timing for the 128-expert slot loop (issue 723)."

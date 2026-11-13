@@ -18,7 +18,6 @@ A run is changed only when no supervisor holds its ledger, so the ledger chain s
 from __future__ import annotations
 
 import json
-import math
 import os
 import hmac
 import re
@@ -562,7 +561,7 @@ def main(args, *, out=None, env=None, runner=None, spawn=None, extra_env=None, h
 # ---- the card step -----------------------------------------------------------------------------------------
 
 def _score(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    return safeio.fits_float(v)
 
 
 HEX = re.compile(r"[0-9a-f]+")

@@ -20,6 +20,7 @@ directory), then the same check on the chips, with the record written by the sup
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -27,7 +28,7 @@ from pathlib import Path
 
 import json
 
-from orchard import full_port, safeio
+from orchard import boundedwalk, full_port, safeio
 from orchard.skillsfresh import scrub_secrets
 from orchard.stack_pins import redact
 from orchard.stages import MOVE_ASIDE_DECISIONS
@@ -150,36 +151,55 @@ def stopped_noted(entries: list[dict], n: int) -> bool:
 LARGE_BLOCK = 1024 * 1024  # bytes sampled from each end of a file over the read cap
 
 
+SCAN_LIMIT_KEY = "<port directory past the scan bounds>"   # the only key of a fingerprint whose walk passed a bound (issue 457)
+
+
 def fingerprint(directory) -> dict[str, str]:
     """{relative path: sha256, or "link: <target>", or "unreadable: <reason>"} for every file under `directory` (none when it is missing).
-    A link is a difference, never a file that is followed: the check refuses a link under the port directory."""
+    A link is a difference, never a file that is followed: the check refuses a link under the port directory.
+
+    The directory is the coder's, so it is read with a bounded walk (issue 457): one entry at a time, at most `boundedwalk.PORT_ENTRIES` entries
+    and `boundedwalk.PORT_DEPTH` levels, links never followed, and each file read beneath the walk's descriptor only while it is still the file
+    that was listed. Past a bound the fingerprint is `{SCAN_LIMIT_KEY: "<the reason and the count read>"}` and holds nothing else, because a
+    partial listing would depend on the order the operating system served the entries in. The gate refuses such a port for the same bound, so
+    two fingerprints that both hold only that key report no change for a port that cannot pass in either state."""
     root = Path(directory)
     out: dict[str, str] = {}
     if not root.is_dir() or root.is_symlink():
         return out
-    for here, dirs, files in os.walk(root):
-        # bytecode a coder's own python run leaves behind is not an edit (issue 453); a link named __pycache__ is still listed below
-        dirs[:] = [d for d in dirs if d != "__pycache__" or os.path.islink(os.path.join(here, d))]
-        dirs.sort()
-        for name in sorted(files + [d for d in dirs if os.path.islink(os.path.join(here, d))]):
-            path = Path(here) / name
-            rel = os.path.relpath(path, root)
-            if path.is_symlink():
-                out[rel] = f"link: {os.readlink(path)}"
-                continue
-            try:
-                out[rel] = hashlib.sha256(safeio.read_bytes(path, max_bytes=full_port.JSON_MAX)).hexdigest()
-            except safeio.TooLarge:
-                # a file over the read cap (a weights file in port/) is told apart by its size, modification time and first and last block,
-                # so an edit to it is a change; it is a notice of a change, never a proof of none (issue 453)
+    # bytecode a coder's own python run leaves behind is not an edit (issue 453): the walk skips __pycache__, and a link of that name is still listed
+    walk = boundedwalk.Walk(root)
+    try:
+        with contextlib.closing(iter(walk)) as entries:
+            for parts, kind, identity in entries:
+                rel = "/".join(parts)
+                path = root.joinpath(*parts)
+                if kind == "link":
+                    try:
+                        out[rel] = f"link: {os.readlink(path)}"
+                    except OSError as exc:
+                        out[rel] = f"unreadable: {type(exc).__name__}"
+                    continue
+                if kind != "file":
+                    out[rel] = "unreadable: NotRegular"            # a pipe, a device or a socket is never opened
+                    continue
                 try:
-                    size, mtime_ns, head, tail = safeio.sample_blocks(path, block=LARGE_BLOCK)
-                    out[rel] = f"large: size={size} mtime_ns={mtime_ns} head={hashlib.sha256(head).hexdigest()} tail={hashlib.sha256(tail).hexdigest()}"
+                    out[rel] = hashlib.sha256(walk.read(parts, identity, full_port.JSON_MAX)).hexdigest()
+                except safeio.TooLarge:
+                    # a file over the read cap (a weights file in port/) is told apart by its size, modification time and first and last block,
+                    # so an edit to it is a change; it is a notice of a change, never a proof of none (issue 453)
+                    try:
+                        size, mtime_ns, head, tail = safeio.sample_blocks(path, block=LARGE_BLOCK)
+                        out[rel] = f"large: size={size} mtime_ns={mtime_ns} head={hashlib.sha256(head).hexdigest()} tail={hashlib.sha256(tail).hexdigest()}"
+                    except (safeio.SafeReadError, OSError, ValueError) as exc:
+                        out[rel] = f"unreadable: {type(exc).__name__}"
                 except (safeio.SafeReadError, OSError, ValueError) as exc:
                     out[rel] = f"unreadable: {type(exc).__name__}"
-            except (safeio.SafeReadError, OSError, ValueError) as exc:
-                out[rel] = f"unreadable: {type(exc).__name__}"
-    return out
+    except boundedwalk.Limit as exc:
+        return {SCAN_LIMIT_KEY: f"the port directory {exc} (the scan stopped after reading {walk.seen} entries)"}
+    except safeio.SafeReadError:
+        return {}                          # the directory went away, or became a link, after the check above
+    return dict(sorted(out.items()))
 
 
 def changed(before: dict, after: dict) -> list[str]:

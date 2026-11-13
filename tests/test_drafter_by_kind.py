@@ -8,7 +8,7 @@ incoai/Qwen3.8-27B-DFlash2) that reads the hidden states of the model it was tra
 works for a fine-tune of the nearest model and for no other architecture. The earlier rule switched the drafter off only when the new
 model had no `mtp.*` tensors, so a Qwen4 release that ships an MTP head would have kept a Qwen3.8 drafter on. `QWEN36_DRAFTER="mtp"`
 uses the model's own MTP head and keeps the earlier rule. With the drafter off, the drafter's entry also leaves `TT_AUXILIARY_WEIGHTS`
-(the run script downloads every entry before vLLM starts, and the package card names every repo in the environment as the drafter)."""
+(the run script downloads every entry before vLLM starts). The other entries stay, in stage 2 and in the package (issue 672)."""
 import json
 import sys
 from pathlib import Path
@@ -189,11 +189,11 @@ def test_a_package_with_the_drafter_off_names_no_drafter_repo():
     assert "TT_AUXILIARY_WEIGHTS" not in env and env["QWEN36_DRAFTER"] == "" and env["QWEN_SDPA_KV_DTYPE"] == "bf4"
 
 
-def test_a_package_with_the_drafter_off_carries_no_auxiliary_weights_at_all():
-    """The card names every repo in the package environment as the drafter (package.aux_repos), so a drafter-off package carries none."""
+def test_a_package_with_the_drafter_off_keeps_the_other_auxiliary_weights():
+    """Stage 7 removes only the drafter's entry, as stage 2 does (issue 672; tests/test_drafter_off_aux_keep.py has the rest)."""
     other = "acme/vision-tower@" + "1" * 40
     env = package.serving_env({**ENV, "TT_AUXILIARY_WEIGHTS": f"{AUX}, {other}"}, drafter_off=True)
-    assert "TT_AUXILIARY_WEIGHTS" not in env
+    assert env["TT_AUXILIARY_WEIGHTS"] == other
 
 
 def test_with_the_drafter_on_the_package_environment_is_unchanged():

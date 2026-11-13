@@ -28,13 +28,14 @@ ttnn and must not read the reference) make the plain forms visible.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
 import re
 from pathlib import Path
 
-from orchard import safeio, ttnn_calls
+from orchard import boundedwalk, safeio, ttnn_calls
 from orchard.defaults import SWAP_MIN_TOKENS, SWAP_TOP1_MIN
 
 RECORD_SCHEMA = "orchard-port-check/1"
@@ -59,6 +60,12 @@ CHEAT_MD_NAME = "cheat_sheet.md"      # the rendered sheet the coder reads
 IDIOMS_SOURCE = TEMPLATE.parent / "example_decoder_idioms.md"      # idioms from a port that passed the check (helper-vs-coder); advice, not code to copy
 IDIOMS_NAME = "decoder_idioms.md"     # its name in the stage directory, next to the cheat sheet
 CONFIG_NAME = "port_check_config.json"
+# The CPU run before the board (issue 697, `port_check.py --cpu N`): the torch stand-in of ttnn and the probes' gated delta rule it reads, as paths
+# under the orchard checkout, and their names next to the template. The template's CPU_TTNN and cpu_ttnn.py's GDN_NAME use the same names.
+CPU_TTNN_SOURCE = "orchard/skills/full-port-templates/cpu_ttnn.py"
+CPU_TTNN_NAME = "cpu_ttnn.py"
+CPU_GDN_SOURCE = "scripts/qwen4_ops_probe/common.py"
+CPU_GDN_NAME = "cpu_ttnn_gdn.py"
 # The only command the supervisor runs for this stage. -P and -s keep files the coder leaves in stages/2/ off the template's sys.path.
 COMMAND = "python3 -P -s stages/2/port_check.py"
 DEADLINE_S = 3600
@@ -695,6 +702,34 @@ def _device_ops_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: P
                            "with ttnn.from_torch(..., device=mesh_device) in load()")
 
 
+def _port_scan(port: Path, run_dir: Path, port_label: str, reasons: list) -> tuple[list[str], set[str]]:
+    """The links (sorted) and the `.py` files under the port directory `port`, each relative to the run directory, read with a bounded walk
+    (issue 457). The directory is the coder's, so it is read one entry at a time and the scan stops at `boundedwalk.PORT_ENTRIES` entries or
+    `boundedwalk.PORT_DEPTH` levels; passing a bound adds a reason with the counts, and the port is refused. Cache directories are entered, so
+    a link planted inside `__pycache__` is still found. A link standing where the port directory should be is a reason of its own; a missing
+    port directory adds nothing here (the `port_sources` checks above already name the missing files)."""
+    links: list[str] = []
+    on_disk: set[str] = set()
+    if os.path.islink(port):
+        reasons.append(f"{os.path.relpath(port, run_dir)} is a link: the port directory must be a real directory under the stage directory")
+        return links, on_disk
+    walk = boundedwalk.Walk(port, skip_caches=False)
+    try:
+        with contextlib.closing(iter(walk)) as entries:
+            for parts, kind, _identity in entries:
+                rel = os.path.relpath(port.joinpath(*parts), run_dir)
+                if kind == "link":
+                    links.append(rel)
+                elif kind == "file" and parts[-1].endswith(".py"):
+                    on_disk.add(rel)
+    except boundedwalk.Limit as exc:
+        reasons.append(f"{port_label} {exc} (the scan stopped after reading {walk.seen} entries): a port directory that large is not checked. "
+                       f"Keep the port under {boundedwalk.PORT_ENTRIES} entries and {boundedwalk.PORT_DEPTH} levels")
+    except safeio.SafeReadError:
+        pass                              # missing, or replaced while the gate ran: the port_sources checks name what is not there
+    return sorted(links), on_disk
+
+
 def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list, stage: int = 2, entry: int | None = None) -> None:
     """The port's source files: named, unchanged since the record, and not obviously a way to avoid the chip."""
     PORT_DIR, PORT_MODULE = port_dir(stage, entry), port_module(stage, entry)          # this stage's (or entry's) own; the module constants are stage 2's
@@ -724,11 +759,10 @@ def _source_reasons(record: dict, stage_dir: Path, run_dir: Path, reasons: list,
         return
     if PORT_MODULE not in listed:
         reasons.append(f"port_sources does not list {PORT_MODULE}, the port module the template calls")
-    links = [os.path.join(r, n) for r, ds, fs in os.walk(stage_dir / "port") for n in ds + fs if os.path.islink(os.path.join(r, n))]
+    links, on_disk = _port_scan(stage_dir / "port", run_dir, PORT_DIR, reasons)
     if links:
-        reasons.append(f"{os.path.relpath(links[0], run_dir)} is a link under {PORT_DIR}: its target is not hashed or read by the checks, "
+        reasons.append(f"{links[0]} is a link under {PORT_DIR}: its target is not hashed or read by the checks, "
                        "so files there must be regular files")
-    on_disk = {os.path.relpath(f, run_dir) for f in (stage_dir / "port").rglob("*.py") if f.is_file()}
     if on_disk - listed:
         reasons.append(f"{sorted(on_disk - listed)[0]} is in {PORT_DIR} but not in port_sources: it was added after the record was written")
     if not any("ttnn" in t for _, t in model_text):

@@ -1,0 +1,2 @@
+target = "0.9.180"
+summary = "Probe 18 compares decode matmuls with a DRAM-sharded weight against the default layout, on one chip (issue 723)."
