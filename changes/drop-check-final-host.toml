@@ -1,0 +1,3 @@
+target = "0.9.185"
+summary = "drop-check refuses a release when a Hub request was redirected outside huggingface.co and the hf.co content hosts, or to a Hub path outside the allowed organisations."
+kind = "fix"
