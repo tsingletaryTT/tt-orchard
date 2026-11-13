@@ -608,21 +608,51 @@ def render(result: dict, threshold: float, notes: list) -> list:
 
 
 DENSE_SHIM_NAME = "qwen4_dense.py"
+DENSE_SHIM_MAX = 1_000_000          # bytes: the shim is a few kilobytes; a larger file is refused before it is read in full
+
+# The revision of the code that builds the CPU reference (load_reference_model and reference_layers). It is part of the reference cache's key,
+# so a change in how the reference is constructed misses every cache made before it (issue 630). Raise it whenever that construction changes.
+#   1: AutoModelForCausalLM on the raw config (every layer a mixture-of-experts block for a Qwen4 checkpoint). Caches from this revision have
+#      no `loader_revision` field.
+#   2: a dense or mixed Qwen4 checkpoint loads through the dense shim (issue 520).
+LOADER_REVISION = 2
+
+# Elements of all reference layer outputs together. It matches port_check.py's MAX_NUMEL: the port side refuses to save more than this, so a
+# reference over it could not be compared anyway. The hook checks it before converting a layer to float32 (issue 612).
+REF_MAX_NUMEL = 2 ** 28
+
+
+def dense_shim_paths() -> list:
+    """Where the dense shim is looked for, in order: the stage 1 copy (found from the run directory, because stage 4 copies this tool into
+    stages/4/configs/<N>/ and HERE.parent is not stages/ there), the stage 1 copy beside HERE, and the shipped file next to the reference gate
+    template for a hand-made run without the copy. Issue 520."""
+    return [run_dir_of(HERE) / "stages" / "1" / DENSE_SHIM_NAME, HERE.parent / "1" / DENSE_SHIM_NAME,
+            HERE.parent / "reference-gate-templates" / DENSE_SHIM_NAME]
+
+
+def dense_shim_selected():
+    """(module, sha256) of the Qwen4 dense-layer shim that stage 1 used, or (None, None) when no candidate exists. The file is read once,
+    bounded and without following a link (read_snapshot), and the module is built from the bytes that were hashed, so the digest in the
+    cache key names the code that ran (issue 630). A candidate that exists but cannot be read that way raises RuntimeError: falling through
+    to the next candidate would load a shim that stage 1 did not leave."""
+    import importlib.util
+    for path in dense_shim_paths():
+        data, digest, why = read_snapshot(path, DENSE_SHIM_MAX)
+        if data is None:
+            if why == "missing":
+                continue
+            raise RuntimeError(f"the dense shim {path.parent.name}/{path.name} {why}")
+        spec = importlib.util.spec_from_loader("qwen4_dense", loader=None, origin=str(path))
+        module = importlib.util.module_from_spec(spec)
+        module.__file__ = str(path)
+        exec(compile(data, str(path), "exec"), module.__dict__)
+        return module, digest
+    return None, None
 
 
 def dense_shim():
-    """The Qwen4 dense-layer shim module that stage 1 used, or None. Stage 1 copies it to stages/1/ for a Qwen4 model; a run without that copy
-    (a hand-made one) falls back to the shipped file next to the reference gate template. Issue 520."""
-    import importlib.util
-    # Stage 4 copies this tool into stages/4/configs/<N>/, so HERE.parent is not stages/: the stage 1 copy is found from the run directory.
-    for path in (run_dir_of(HERE) / "stages" / "1" / DENSE_SHIM_NAME, HERE.parent / "1" / DENSE_SHIM_NAME,
-                 HERE.parent / "reference-gate-templates" / DENSE_SHIM_NAME):
-        if path.is_file():
-            spec = importlib.util.spec_from_file_location("qwen4_dense", path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module
-    return None
+    """The dense shim module, or None (see dense_shim_selected)."""
+    return dense_shim_selected()[0]
 
 
 def snapshot_config(snapshot: str):
@@ -633,19 +663,30 @@ def snapshot_config(snapshot: str):
     return raw
 
 
-def load_reference_model(snapshot: str, dtype: str):
+def reference_construction(snapshot: str):
+    """(shim or None, raw config or None, identity) for the CPU reference of `snapshot`. `shim` is the dense shim module when the checkpoint
+    loads through it (a dense or mixed `qwen4_exp` config), else None. `identity` is what the reference cache's key adds for the construction:
+    the loader revision, and the sha256 of the shim when the shim is used (None otherwise, so an edit of the shim does not discard the cache of
+    a model that never loads through it). The caller computes this once and hands the same tuple to the load, so the key and the load agree
+    on the shim (issue 630). Raises RuntimeError when a shim candidate exists but cannot be read safely."""
+    raw = snapshot_config(snapshot)
+    shim, digest = dense_shim_selected() if raw else (None, None)
+    uses = shim is not None and bool(shim.needs_dense_shim(raw))
+    return (shim if uses else None), raw, {"loader_revision": LOADER_REVISION, "dense_shim_sha256": digest if uses else None}
+
+
+def load_reference_model(snapshot: str, dtype: str, construction=None):
     """The CPU reference model for `snapshot`, loaded the way stage 1 loads it: a dense `qwen4_exp` checkpoint gets the shim's prepared config
     and the dense-layer context (transformers builds a mixture-of-experts block in every layer and refuses zero experts otherwise); every other
-    checkpoint is loaded as before. Issue 520."""
+    checkpoint is loaded as before. Issue 520. `construction` is reference_construction's tuple; without it the selection is made here."""
     import contextlib
     import torch
     from transformers import AutoModelForCausalLM
     want = getattr(torch, dtype)
     kw = {"local_files_only": True}
     context = contextlib.nullcontext()
-    raw = snapshot_config(snapshot)
-    shim = dense_shim() if raw else None
-    if shim is not None and shim.needs_dense_shim(raw):
+    shim, raw, _identity = construction if construction is not None else reference_construction(snapshot)
+    if shim is not None:
         import transformers
         kw["config"] = shim.prepare_config(transformers, raw)
         context = shim.dense_layers()
@@ -657,12 +698,14 @@ def load_reference_model(snapshot: str, dtype: str):
     return model
 
 
-def reference_layers(snapshot: str, ids: list, dtype: str) -> list:
+def reference_layers(snapshot: str, ids: list, dtype: str, construction=None) -> list:
     """The CPU reference's output of each decoder layer for the prompt `ids`, as float32 numpy arrays, one per layer. Forward hooks on the decoder layers
-    capture the raw layer outputs (transformers' own `hidden_states` ends with the final norm applied, so its last entry is not a layer output)."""
+    capture the raw layer outputs (transformers' own `hidden_states` ends with the final norm applied, so its last entry is not a layer output).
+    The hook counts each output's elements against REF_MAX_NUMEL before it converts the output to float32, so an oversized output is refused
+    before the conversion allocates its copy (issue 612); the ValueError ends the forward pass."""
     import numpy as np
     import torch
-    model = load_reference_model(snapshot, dtype)
+    model = load_reference_model(snapshot, dtype, construction)
     model.eval()
     stack = None
     for path in ("model.layers", "layers", "model.model.layers", "transformer.h", "model.decoder.layers"):
@@ -676,10 +719,14 @@ def reference_layers(snapshot: str, ids: list, dtype: str) -> list:
             break
     if stack is None:
         raise RuntimeError("no decoder layer list found (tried model.layers, layers, transformer.h, model.decoder.layers)")
-    captured = []
+    captured, left = [], [REF_MAX_NUMEL]
 
     def hook(_module, _inputs, output):
         out = output[0] if isinstance(output, (tuple, list)) else output
+        size = int(out.numel())
+        if size > left[0]:
+            raise ValueError(f"the reference layers hold more than {REF_MAX_NUMEL} elements in all (layer {len(captured)} has {size})")
+        left[0] -= size
         captured.append(out.detach().float().cpu().numpy().astype(np.float32))
 
     handles = [layer.register_forward_hook(hook) for layer in stack]
@@ -701,7 +748,9 @@ def prompt_ids(run_dir: Path):
 
 
 def cached_reference(stage: Path, key: dict):
-    """The cached reference layers when the sidecar names this prompt, snapshot and dtype and the npz is the file it hashed, else None."""
+    """The cached reference layers when the sidecar holds every field of `key` (the prompt, the snapshot, the dtype, the loader revision and the
+    dense shim's sha256) with the same value and the npz is the file it hashed, else None. A sidecar that lacks a field (one written before
+    the field existed) does not match."""
     meta, _ = read_json(stage / LAYER_REF_META_REL)
     if not meta or any(meta.get(k) != v for k, v in key.items()):
         return None
@@ -751,6 +800,7 @@ def inner(argv: list) -> int:
         print(f"refused: {LAYER_PORT_REL} is not the file whose sha256 was checked a moment ago (its sha256 changed since).")
         return 2
     arrays, why = load_layers(stage / LAYER_PORT_REL, LAYER_PORT_REL, data=data)
+    del data                      # the arrays are copies; the archive bytes would otherwise stay resident through the reference load (issue 613)
     if arrays is None:
         print("refused: " + why + ".")
         return 2
@@ -770,17 +820,22 @@ def inner(argv: list) -> int:
     if not isinstance(snapshot, str) or not snapshot or "\0" in snapshot:
         print(f"refused: {CONFIG_REL} {why or 'names no model_snapshot'}.")
         return 2
-    key = {"prompt_sha256": hashlib.sha256(json.dumps(ids).encode()).hexdigest(), "snapshot": snapshot, "dtype": dtype}
+    try:                          # the construction is selected once: its identity goes into the cache key and the same tuple goes to the load
+        construction = reference_construction(snapshot)
+    except Exception as exc:
+        print(f"cannot compute the reference: {exc.__class__.__name__}: {clean(str(exc), 250)}")
+        return 2
+    key = {"prompt_sha256": hashlib.sha256(json.dumps(ids).encode()).hexdigest(), "snapshot": snapshot, "dtype": dtype, **construction[2]}
     ref = cached_reference(stage, key)
     source = "cached reference"
     if ref is None:
         try:
-            ref = reference_layers(snapshot, ids, dtype)
+            ref = reference_layers(snapshot, ids, dtype, construction)
         except BaseException as exc:         # an import that is missing, a model the installed transformers does not know, no memory: a reason
             print(f"cannot compute the reference: {exc.__class__.__name__}: {clean(str(exc), 250)}")
             return 2
         source = f"computed now on the CPU ({dtype})"
-        try:                                  # the cache: a temporary file, a rename, and a sidecar that binds it to the prompt, the snapshot and the dtype
+        try:                                  # the cache: a temporary file, a rename, and a sidecar that binds it to every field of the key
             store_reference_cache(stage, key, ref, np)
         except OSError:
             pass                              # the cache is a convenience
