@@ -80,6 +80,35 @@ The early runs were not hands-off. They blocked, and each cause was a bug in tt-
 The later ones needed a person for disk space and for a restart after a power event, and each of those is now a preflight check or a
 block message. The harness has never run end to end with nobody touching the machine.
 
+### Since 2026-11-10
+
+What landed on `main` from 2026-11-10 to 2026-11-13 (pull requests 689 to 765; the project log entries of those days hold the details and numbers).
+
+- **The port generator writes a Qwen4-shaped port with no stub left (issue 696, PRs 708 to 725; arm E, PR 689).** With `--thin-port` the generator writes the
+  hyper-connection blocks, the gated delta net, the PLE block, the sparse attention with its indexer (also at the real Flash-Next widths) and the layer
+  functions. The tiny Qwen4 MoE rehearsal with a fully generated port passes stages 0 to 6 and 8 on chips (PR 751). Before this the coder wrote the port
+  and never passed (runs 18, 20 and 24).
+- **Experts split over chips (issue 723, PRs 745, 747, 752 to 755).** When the routed experts do not fit one chip, the generated MoE block places expert
+  c*per + j of every layer on chip c, runs the experts each chip holds and adds the partial outputs with an all-reduce. The expert weights can go up in bf16,
+  bfp8 or bfp4 (`ORCHARD_MOE_EXPERT_DTYPE`), and the loader reads one tensor at a time, because the real checkpoint (360 GB) cannot sit in host memory. The
+  rehearsal with bfp4 experts passes on 2 and 4 chips. Not done: the real Flash-Next size, and trained-weight fidelity.
+- **`tt-orchard plan` (issue 739, PRs 742 and 749).** From the safetensors headers it says how many chips a checkpoint needs in each weight format and
+  which format the dtype rule allows: bfp8 by default, bfp4 only with a measured fidelity score of at least 9.9 on at least 4,000 tokens (provisional).
+- **Stage 2 reports more evidence, report-only (issues 731 and 740, PRs 732, 738, 741, 743, 748).** A fidelity score taken from the Compression-Bench paper
+  (10 times exp(-KL), `scripts/fidelity_score.py`), the near-tie disagreements, whether prefill and prefill-then-decode agree at short and tile-boundary lengths,
+  and a count of the device matmuls so that a port that runs on the host cannot pass as a device port. A rehearsal pass says it is a rehearsal in the ledger.
+- **Board probes.** Probes 6 to 9 (rotary broadcast, top-k ties, masked attention), the QSA ops at Flash widths, probe 15 (experts over two chips with an
+  all-reduce) and probe 16 (the 128-expert loop on one chip: 0.9 ms per layer at one token, 25 ms at 256). An expert-use measurement on OLMoE-1B-7B (the
+  busiest 25 percent of experts take 61 percent of the picks).
+- **Process.** The coder stays up when a run blocks as agent-stuck (PR 712). A helper draft is tested before the coder's repair step (PR 692). The
+  seven telegraph four-process failures that were called flaky had one cause, a test that removed the repository from `sys.path` (PR 744). The supervisor
+  test rig no longer reads the real device holders of the machine, which made one test fail whenever a real coder was running (PR 765, issue 761).
+- **In review at the time of writing:** a faster expert loop in the generator (one gather and one scatter for all slots, fused silu, LoFi matmuls), a
+  cached decode for the generated Qwen4 port (issue 759: today `decode_step` of a generated port runs the whole sequence again), probes 16 to 18 (trace
+  replay, five loop variants, DRAM-sharded matmuls) and a CPU op count of the generated layers.
+- **Counts.** The full parallel run on 2026-11-13 on the head of PR 765 passed 29,722 tests (see Tests below). As of 2026-11-13 the repository has 354
+  merged pull requests and 106 open issues; the issue list was consolidated from 157 to about 104 on 2026-11-12.
+
 ### Since 2026-11-09
 
 What landed on `main` on 2026-11-09 (pull requests 639 to 675; the project log entries dated 2026-11-09 hold the details). Each item says which
@@ -296,7 +325,7 @@ What is shown, and by what:
   a reset does not always clear (issue 26), a board that dropped off the bus (issue 25) and an agent that loops when the harness drafts nothing (issue 68).
 - **The container path (a v5.1 package as the nearest model) has not yet shown a swapped model served.** The one real run used `raahemnabeel/qwen3-coder-30b-a3b`, whose generator downloads its own hard-coded repository, so the test measured the base model. The 4-chip container tests of the Qwen3.8-27B runs did not fetch anything (their isolated Hugging Face directory stayed empty), so those results stand. The harness now runs a test container with the Hub switched off and fails a test that fetched a model (issue 60 stays open).
 
-The suite has about 28,000 passing tests: 28,129 passed, 74 skipped and 1 expected failure in the full parallel run of 2026-11-09 on the head of PR 675 (`python3 -m pytest tests -n 3`, 1,291.9 s). The run of 2026-11-08 on the head of PR 633 passed 27,022 tests with 123 skipped and 4 expected failures; the skipped and expected-failure counts differ between the two runs and the difference was not investigated.
+The suite has about 29,700 passing tests: 29,722 passed, 91 skipped, 1 expected failure and 1 failure in the full parallel run of 2026-11-13 on the head of PR 765 (`python3 -m pytest tests -n 3`, 1,502 s); the failure is a load-dependent test (issue 679) that passes alone. The run of 2026-11-09 on the head of PR 675 passed 28,129 tests with 74 skipped. The run of 2026-11-08 on the head of PR 633 passed 27,022 tests with 123 skipped and 4 expected failures; the skipped and expected-failure counts differ between the two runs and the difference was not investigated.
 
 ### Stages
 
@@ -394,8 +423,8 @@ against 0.47 for a runtime that applied a causal mask).
 
 ### Tests
 
-The suite has about 28,000 passing tests: 28,129 passed, 74 skipped and 1 expected failure in the full parallel run of 2026-11-09 on the head of PR 675
-(`python3 -m pytest tests -n 3`, 1,291.9 s on a busy host). The run of 2026-11-08 on the head of PR 633 passed 27,022 tests with 123 skipped and 4 expected
+The suite has about 29,700 passing tests: 29,722 passed, 91 skipped, 1 expected failure and 1 failure in the full parallel run of 2026-11-13 on the head of PR 765
+(`python3 -m pytest tests -n 3`, 1,502 s on a busy host); the failure is a load-dependent test (issue 679) that passes alone. The run of 2026-11-09 on the head of PR 675 passed 28,129 tests with 74 skipped. The run of 2026-11-08 on the head of PR 633 passed 27,022 tests with 123 skipped and 4 expected
 failures; the skipped and expected-failure counts differ between the runs and the difference was not investigated. It needs no hardware and
 no network. Some skipped tests are opt-in, for example: one replays local agent transcripts (`ORCHARD_REPLAY=1`), one asks the real Hugging Face hub and GitHub
 (`ORCHARD_LIVE_RESEARCH=1`), and the browser tests of the web page run only where the `playwright` package and Chrome are present (issue 31).
