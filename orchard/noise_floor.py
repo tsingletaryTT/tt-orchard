@@ -39,6 +39,7 @@ from pathlib import Path
 
 import numpy as np
 
+from orchard import safeio
 from orchard import audio_reference as ar
 from orchard import first_divergence as fd
 
@@ -57,7 +58,7 @@ NOISE_PCC_BAR = 1.0 - 1e-9
 
 
 def _num(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    return safeio.fits_float(x)
 
 
 def group_of(kind: str, name: str, by: str) -> str:

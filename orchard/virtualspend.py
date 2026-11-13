@@ -31,6 +31,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from orchard import safeio
+
 KEYS = {"reference", "price_in", "price_out", "extra"}
 EXTRA_KEYS = {"name", "price_in", "price_out"}
 DEFAULT_REFERENCE = "claude-haiku-5-5"
@@ -74,7 +76,7 @@ class Config:
 
 
 def _price(value, key: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+    if not safeio.fits_float(value) or value < 0:
         raise ConfigError(f"virtual_spend.{key} must be a number of dollars per million tokens, zero or more")
     return float(value)
 

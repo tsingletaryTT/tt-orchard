@@ -33,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
+from orchard import safeio
 from orchard import audio_encoder_pin as enc_pin
 from orchard import pinned_files as pf
 
@@ -475,7 +476,7 @@ def log_spectrum_distance(ref: np.ndarray, cand: np.ndarray, n_fft: int = 1024, 
 
 
 def _number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    return safeio.fits_float(value)
 
 
 def bars_from_floor(floor_report: dict, margin: float = 3.0) -> dict:

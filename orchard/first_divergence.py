@@ -36,6 +36,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from orchard import safeio
 from orchard import audio_reference as ar
 
 ReferenceError = ar.ReferenceError
@@ -52,7 +53,7 @@ HIGH_NORM_FACTOR = 2.0          # choice: a row is high-norm above this many tim
 
 
 def _num(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    return safeio.fits_float(x)
 
 
 @dataclass(frozen=True)

@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
-import math
 import re
 import socket
 import sys
@@ -104,7 +103,7 @@ def check_settings(s) -> dict:
     if set(s) - set(SETTING_KEYS):
         raise ProbeError(f"the job request has these keys only: {', '.join(SETTING_KEYS)}")
     for key in ("duration", "cfg_scale"):
-        if key in s and (not isinstance(s[key], (int, float)) or isinstance(s[key], bool) or not math.isfinite(s[key])):
+        if key in s and not safeio.fits_float(s[key]):
             raise ProbeError(f"{key} must be a finite number")
     for key in ("steps", "seed"):
         if key in s and (not isinstance(s[key], int) or isinstance(s[key], bool)):
@@ -118,7 +117,7 @@ def request(method: str, url: str, body: dict | None = None, timeout: float = 30
     at a time cannot hold the probe past it. No proxy and no redirect is used (http.client has neither). A reply over MAX_REPLY_BYTES, a reply that is
     invalid or non-strict JSON, and a reply that is no object give a problem and no object; a connection that fails gives no status."""
     where = f"{method} {urllib.parse.urlsplit(url).path or '/'}"
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+    if not safeio.fits_float(timeout) or timeout <= 0:
         return None, None, f"{where}: the time limit is not a positive number"
     parts = urllib.parse.urlsplit(url)
     data = None if body is None else json.dumps(body).encode()
@@ -175,14 +174,14 @@ def request(method: str, url: str, body: dict | None = None, timeout: float = 30
 def check_times(poll_s, timeout_s) -> None:
     """poll_s above 0 and at most 10, timeout_s above 0, both finite numbers (a NaN would make every deadline comparison false)."""
     for name, v in (("poll_s", poll_s), ("timeout_s", timeout_s)):
-        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+        if not safeio.fits_float(v):
             raise ProbeError(f"{name} must be a finite number")
     if not 0 < poll_s <= 10 or timeout_s <= 0:
         raise ProbeError("poll_s must be above 0 and at most 10, and timeout_s above 0")
 
 
 def _num(v):
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return v if safeio.fits_float(v) else None
 
 
 def _bound(deadline: float, clock, cap: float = REQUEST_TIMEOUT_S) -> float:

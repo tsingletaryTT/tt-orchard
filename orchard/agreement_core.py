@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
+
+from orchard import safeio
 
 # ---- bars (choices; orchard/defaults.py holds the same numbers and a test keeps the two equal) -------------------------------------------
 BASELINE_TOP1_MIN = 0.85       # the stage 2 bar for the 32-token check (SWAP_TOP1_MIN)
@@ -57,7 +58,7 @@ def _is_int(x) -> bool:
 
 
 def _is_unit(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and 0 <= x <= 1
+    return safeio.fits_float(x) and 0 <= x <= 1
 
 
 # ---- the prompt set --------------------------------------------------------------------------------------------------------------------
@@ -397,7 +398,7 @@ def sweep_summary(cells) -> dict:
         if not isinstance(c, dict):
             continue
         dec, pre = c.get("decode_tok_s"), c.get("prefill_tok_s")
-        ok = isinstance(dec, (int, float)) and not isinstance(dec, bool) and math.isfinite(dec) and dec > 0
+        ok = safeio.fits_float(dec) and dec > 0
         if not ok:
             missing += 1
         out.append({"input_tokens": c.get("input_tokens"), "concurrency": c.get("concurrency"),

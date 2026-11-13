@@ -31,7 +31,6 @@ import hashlib
 import ipaddress
 import http.client
 import json
-import math
 import os
 import re
 import socket
@@ -45,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from orchard import safeio
 from orchard import db as dbm
 from orchard import telegraph_notice as notice_mod
 from orchard import telegraph_store as store_mod
@@ -258,20 +258,19 @@ def load(table: dict | None, *, base: Path) -> Config:
         raise ConfigError("telegraph.prices must be a table of model names to [input, output] dollars per million tokens")
     for model, pair in raw_prices.items():
         if (not isinstance(pair, list) or len(pair) != 2 or
-                not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0 for x in pair)):
+                not all(safeio.fits_float(x) and x >= 0 for x in pair)):
             raise ConfigError(f"telegraph.prices.{model} must be [input, output] dollars per million tokens")
         prices[model] = (float(pair[0]), float(pair[1]))
     cap = table.get("max_cost_usd")
     if cap is not None:
-        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(cap) or cap <= 0:
+        if not safeio.fits_float(cap) or cap <= 0:
             raise ConfigError("telegraph.max_cost_usd must be a finite number above zero")
         if not prices:
             raise ConfigError("telegraph.max_cost_usd needs telegraph.prices for the models it may call")
         cap = float(cap)
     per_cost = table.get("max_cost_per_problem_usd")
     if per_cost is not None:
-        if (isinstance(per_cost, bool) or not isinstance(per_cost, (int, float)) or not math.isfinite(per_cost)
-                or per_cost <= 0):
+        if not safeio.fits_float(per_cost) or per_cost <= 0:
             raise ConfigError("telegraph.max_cost_per_problem_usd must be a finite number above zero")
         if not prices:
             raise ConfigError("telegraph.max_cost_per_problem_usd needs telegraph.prices for the models it may call")

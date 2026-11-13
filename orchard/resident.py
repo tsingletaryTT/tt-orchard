@@ -32,10 +32,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import statistics
 from pathlib import Path
+
+from orchard import safeio
 
 WARMUP_RUNS = 1
 MIN_REPEATS = 3
@@ -56,7 +57,7 @@ class ResidentError(Exception):
 
 
 def _is_number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    return safeio.fits_float(v)
 
 
 def spread(values) -> dict:
