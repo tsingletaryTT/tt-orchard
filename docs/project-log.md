@@ -5580,6 +5580,26 @@ What this means for Flash-Next on four chips (my arithmetic from these numbers; 
 
 Not measured: the all-reduce and four chips together (probe 15 measured the all-reduce alone at about 0.1 ms), the read-back of the router's choices to the host that the loop needs once per layer, real routing skew (probe on OLMoE: the busiest 25% of experts take 61% of picks, which lowers the number of slots hit), trace replay (the loop is launch-bound, so a trace may remove much of the 0.13 ms per slot), and any quality result (the weights are random). 5 CPU tests; one mutation of the scatter matrix turned two of them red.
 
+## 2026-11-12: trace replay does not speed up the slot loop; the cost is in the ops (issue 723)
+
+Probe 16 gained `--trace` and `--ops` (run log `docs/run-logs/2026-11-12-probe16-trace-and-ops-one-chip.json`, one chip, 128 slots, Flash widths, bfp4). With `--trace` the loop is run once, captured as a trace, and replayed, with the inputs already on the chip.
+
+| case | untraced | trace replay |
+|---|---|---|
+| 3 slots hit (1 token) | 0.40 ms | 0.38 ms |
+| 17 slots hit (8 tokens) | 2.2 ms | 2.1 ms |
+| 56 slots hit (32 tokens) | 7.0 ms | 6.9 ms |
+| 127 slots hit (256 tokens) | 18.5 ms | 18.5 ms |
+| all 128 slots at 32 rows | 15.7 ms | 15.7 ms |
+
+Replaying the loop as a trace changes the time by less than 5%, so the 0.12 ms per slot is time the chip spends on the ops. Host launch overhead is not the cause, and a fixed-shape trace of all 128 slots would cost 15.7 ms per layer, more than the loop costs today at 8 or 32 tokens.
+
+`--ops` times each op of one slot on its own (32 rows, 50 calls back to back; microseconds): gate matmul 37, up matmul 37, embedding 19, down matmul 15.5, add 14, weight multiply 14, gate-times-up multiply 13, scatter matmul 12.5, silu 8. They sum to about 170 µs against 123 µs measured in the loop, so some ops overlap. Each small elementwise op costs 8 to 14 µs whatever its size, and each matmul with a bfp4 weight costs 12 to 37 µs at 32 rows. The weights themselves are 0.9 MB per matmul, which would take a few microseconds at DRAM bandwidth, so the matmuls run far from the memory limit.
+
+Ideas this points to (not tried): one matmul for gate and up with the two weights stored side by side; the routing weight folded into the scatter matrix, which removes the weight multiply; silu fused into the multiply; one embedding for all slots and one scatter matmul over the concatenated rows, which removes the per-slot add and scatter; a matmul program config chosen for 32-row inputs. If the first four work, a slot would cost about 90 µs, down from 170.
+
+Not measured here: any of those changes, four chips, the router read-back, quality. 5 CPU tests still pass; the new modes need a chip and have no CPU test.
+
 ## 2026-11-12: the generated Qwen4 port decodes from kept state (issue 759)
 
 Until now `decode_step` of a generated port appended the token and ran the whole sequence again. For a port whose every block keeps decode state (the composed Qwen4 layers: gated delta net or sparse attention, PLE block, connections, MLP or MoE) the generator now writes `_forward_step`, `prefill` and `decode_step` with a cache (`Plan.cached_decode`; any other plan keeps the old text). `prefill` runs the prompt and every block keeps what the next token needs in `model["cache"]["state"]`; `decode_step` runs one row through the layers from that state; a step at a position other than the next one runs the prompt again, which rebuilds the state. What each block keeps:

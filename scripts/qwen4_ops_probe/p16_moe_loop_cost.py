@@ -96,7 +96,77 @@ def selftest() -> dict:
     return {"probe": "p16_moe_loop_cost", "mode": "selftest", "ok": bool(stats["max_abs"] < 1e-4 and len(items) > 0), "slots_hit": len(items), "stats": stats}
 
 
-def run_device(ttnn, device, name: str, cfg: dict, repeat: int) -> dict:
+def untraced_times(ttnn, device, loop, dev_items, repeat):
+    """Wall seconds of `loop(dev_items)` per call, synchronized after each call (the first call compiles)."""
+    import time
+
+    out = []
+    for _ in range(repeat):
+        t0 = time.perf_counter()
+        loop(dev_items)
+        ttnn.synchronize_device(device)
+        out.append(round(time.perf_counter() - t0, 5))
+    return out
+
+
+def traced_times(ttnn, device, loop, dev_items, repeat):
+    """Capture `loop(dev_items)` once as a trace (after one untraced call so the programs are compiled), replay it `repeat` times and return the wall seconds
+    of each replay. The inputs must already be on the chip: a trace replays the same operations on the same buffers."""
+    import time
+
+    loop(dev_items)
+    ttnn.synchronize_device(device)
+    tid = ttnn.begin_trace_capture(device, cq_id=0)
+    loop(dev_items)
+    ttnn.end_trace_capture(device, tid, cq_id=0)
+    ttnn.synchronize_device(device)
+    out = []
+    try:
+        for _ in range(repeat):
+            t0 = time.perf_counter()
+            ttnn.execute_trace(device, tid, cq_id=0, blocking=False)
+            ttnn.synchronize_device(device)
+            out.append(round(time.perf_counter() - t0, 5))
+    finally:
+        ttnn.release_trace(device, tid)
+    return out
+
+
+def op_breakdown(ttnn, device, hidden, inter, dt, tokens, reps=50):
+    """Wall microseconds per call of each op of one slot (32 rows), each op run `reps` times back to back and synchronized once, so launch and queue time stay in
+    the number. The inputs are random; the point is which op takes the time of the 0.12 ms a slot costs."""
+    import time
+
+    g = torch.Generator().manual_seed(2)
+    up = lambda a, d=ttnn.bfloat16, l=ttnn.TILE_LAYOUT: ttnn.from_torch(a, dtype=d, layout=l, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    x_all = up(torch.randn(tokens, hidden, generator=g).bfloat16())
+    ids = up(torch.randint(0, tokens, (32,), generator=g, dtype=torch.int32), ttnn.uint32, ttnn.ROW_MAJOR_LAYOUT)
+    xe = ttnn.reshape(ttnn.embedding(ids, x_all, layout=ttnn.TILE_LAYOUT), (1, 1, 32, hidden))
+    gate = up((torch.randn(1, 1, hidden, inter, generator=g) * hidden ** -0.5).bfloat16(), dt)
+    down = up((torch.randn(1, 1, inter, hidden, generator=g) * inter ** -0.5).bfloat16(), dt)
+    wt = up(torch.rand(1, 1, 32, 1, generator=g).bfloat16())
+    back = up(torch.zeros(1, 1, tokens, 32).bfloat16())
+    h = ttnn.matmul(xe, gate)
+    hs = ttnn.silu(h)
+    ye = ttnn.matmul(hs, down)
+    part = ttnn.matmul(back, ye)
+    ops = {"embedding": lambda: ttnn.embedding(ids, x_all, layout=ttnn.TILE_LAYOUT),
+           "matmul_gate_or_up": lambda: ttnn.matmul(xe, gate), "silu": lambda: ttnn.silu(h), "multiply_gate_up": lambda: ttnn.multiply(h, h),
+           "matmul_down": lambda: ttnn.matmul(hs, down), "multiply_weight": lambda: ttnn.multiply(ye, wt),
+           "matmul_scatter": lambda: ttnn.matmul(back, ye), "add_partial": lambda: ttnn.add(part, part)}
+    out = {}
+    for name, fn in ops.items():
+        fn()
+        ttnn.synchronize_device(device)
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            fn()
+        ttnn.synchronize_device(device)
+        out[name] = round((time.perf_counter() - t0) / reps * 1e6, 1)
+    return out
+
+
+def run_device(ttnn, device, name: str, cfg: dict, repeat: int, trace: bool = False, ops: bool = False) -> dict:
     import time
 
     per = cfg["total_experts"] // CHIPS if name != "tiny" else cfg["total_experts"] // 2
@@ -148,6 +218,13 @@ def run_device(ttnn, device, name: str, cfg: dict, repeat: int) -> dict:
             host_s.append(round(a, 4)); up_s.append(round(b, 4)); dev_s.append(round(c, 4)); tot_s.append(round(d, 4))
         rows_out.update(slots_hit=len(items), rows_per_slot=[int(i[1].shape[0]) for i in items][:8], host_prep_seconds=host_s, upload_seconds=up_s,
                         device_seconds=dev_s, total_seconds=tot_s)
+        if trace:
+            rows_out["traced"] = {"hit_slots": traced_times(ttnn, device, device_loop, dev_items, repeat)}
+            full = upload([(j, torch.zeros(32, dtype=torch.int32), torch.zeros(32), torch.zeros(tokens, 32)) for j in range(per)])
+            rows_out["traced"]["all_slots_32_rows"] = {"untraced_seconds": untraced_times(ttnn, device, device_loop, full, repeat),
+                                                       "traced_seconds": traced_times(ttnn, device, device_loop, full, repeat)}
+        if ops:
+            rows_out["op_microseconds"] = op_breakdown(ttnn, device, hidden, inter, dt, tokens)
         res["by_tokens"].append(rows_out)
     return res
 
@@ -157,17 +234,23 @@ def main(argv=None) -> int:
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--presets", nargs="+", default=["flash"], choices=sorted(PRESETS))
     ap.add_argument("--repeat", type=int, default=4)
+    ap.add_argument("--ops", action="store_true", help="also time each op of one slot (32 rows) on its own")
+    ap.add_argument("--trace", action="store_true", help="also time the loop replayed as a trace (hit slots as run, and all slots at 32 rows)")
     args = ap.parse_args(argv)
     if args.selftest:
         r = selftest()
         common.emit(r)
         return 0 if r["ok"] else 1
-    ttnn, device = common.open_device()
+    if args.trace:
+        import ttnn
+        device = ttnn.open_device(device_id=0, trace_region_size=256 * 2 ** 20)
+    else:
+        ttnn, device = common.open_device()
     results = []
     try:
         for name in args.presets:
             try:
-                results.append(run_device(ttnn, device, name, PRESETS[name], args.repeat))
+                results.append(run_device(ttnn, device, name, PRESETS[name], args.repeat, args.trace, args.ops))
             except Exception as exc:  # noqa: BLE001
                 results.append({"preset": name, "error": common.short_exc(exc)})
     finally:
