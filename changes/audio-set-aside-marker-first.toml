@@ -1,3 +1,4 @@
 target = "0.9.186"
 summary = "The audio stage 1 set-aside moves audio_reference.json before the run directories, so a crash between two renames leaves no marker and the next attempt can resume."
 kind = "fix"
+pr = 775
