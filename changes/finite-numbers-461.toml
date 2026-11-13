@@ -1,0 +1,4 @@
+target = "0.9.183"
+summary = "Number checks in 22 modules refuse an integer too large for a float without raising OverflowError, and a ratchet counts math.isfinite and float() calls."
+pr = 770
+kind = "fix"

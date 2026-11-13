@@ -177,15 +177,19 @@ def retry_sampling(sampling: dict, *, capped: bool) -> dict:
     return changed
 
 
-def run(*, run_dir, stage_dir, snapshot, python, ledger, stage: int, post, endpoint: str, model: str, sampling: dict,
-        thinking: bool = False, sheet=None, construct=None, **bounds) -> Outcome:
-    """Gather the inputs from the run and do the step. Anything that stops the generator from planning returns status "skipped"."""
+def run(*, run_dir, stage_dir, snapshot, python, ledger, stage: int, post, endpoint: str | None, model: str | None, sampling: dict | None,
+        thinking: bool = False, sheet=None, construct=None, connect=None, **bounds) -> Outcome:
+    """Gather the inputs from the run and do the step. Anything that stops the generator from planning returns status "skipped".
+
+    `connect(n_stubs)`, when given, is called once, after the plan is made and before the first request, and only when the port has stubs to
+    send; it returns (endpoint, model, sampling) and replaces the three arguments. The supervisor uses it to start the coder only for a plan
+    that needs it (issue 713). A plan with no stub to send never calls it."""
     try:
         given = gather_inputs(run_dir=run_dir, stage_dir=stage_dir, snapshot=snapshot, python=python, construct=construct)
     except Skip as exc:
         return Outcome("skipped", str(exc))
     return run_with_inputs(stage_dir=stage_dir, ledger=ledger, stage=stage, post=post, endpoint=endpoint, model=model, sampling=sampling,
-                           inputs=given, thinking=thinking, sheet=sheet, **bounds)
+                           inputs=given, thinking=thinking, sheet=sheet, connect=connect, **bounds)
 
 
 STUBS_RECORD = "thin_stubs.json"          # in the stage directory (the port directory must hold only port_model.py)
@@ -207,9 +211,9 @@ def _record_stub_names(stage_dir, todo) -> None:
         pass                                   # a record that cannot be written leaves the repair step with its earlier rule
 
 
-def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str, model: str, sampling: dict, inputs: Inputs,
+def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str | None, model: str | None, sampling: dict | None, inputs: Inputs,
                     thinking: bool = False, sheet=None, max_requests: int | None = None, max_prompt_chars: int = PROMPT_CHARS_CAP,
-                    clock=time.time) -> Outcome:
+                    clock=time.time, connect=None) -> Outcome:
     """The step itself. `post(url, body, timeout)` is the agent loop's HTTP client. Returns an Outcome; never raises for a coder or input
     problem."""
     stage_dir = Path(stage_dir)
@@ -238,6 +242,10 @@ def run_with_inputs(*, stage_dir, ledger, stage: int, post, endpoint: str, model
     by_name = {s.function: s for s in plan.stubs}
     todo = stub_prompts.stub_names(text)
     _record_stub_names(stage_dir, todo)
+    asked = [name for name in todo if name in by_name]          # the stubs the loop below sends a request for
+    if connect is not None and asked:
+        endpoint, model, sampling = connect(len(asked))           # the coder is started here, for a plan that needs it (issue 713)
+    endpoint, sampling = endpoint or "", sampling or {}          # with no stub to send, neither is used
     cap = max_requests if max_requests is not None else request_cap(len(todo))
     url = endpoint.rstrip("/") + "/chat/completions"
     base = {**sampling, "max_tokens": min(sampling.get("max_tokens", STUB_MAX_TOKENS), STUB_MAX_TOKENS)}

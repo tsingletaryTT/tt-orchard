@@ -1,0 +1,295 @@
+{
+  "date": "2026-11-12",
+  "lease": "gozer run --chips 1; two runs of 15 repeats (all variants; then the last three variants again)",
+  "probe": "p17_moe_loop_variants",
+  "results": {
+    "by_tokens": [
+      {
+        "slots_hit": 3,
+        "tokens": 1,
+        "variants": {
+          "all_fuse_gate_up+fold_weight": {
+            "ms": 0.333,
+            "pcc_vs_baseline": 0.9999938011169434,
+            "us_per_slot": 111.0
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu": {
+            "ms": 0.289,
+            "pcc_vs_baseline": 0.9999938011169434,
+            "us_per_slot": 96.5
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu+lofi": {
+            "ms": 0.287,
+            "pcc_vs_baseline": 0.9998931884765625,
+            "us_per_slot": 95.7
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu+lofi+batch_scatter": {
+            "ms": 0.265,
+            "pcc_vs_baseline": 0.9998931884765625,
+            "us_per_slot": 88.5
+          },
+          "baseline": {
+            "ms": 0.396,
+            "pcc_vs_baseline": 1.0,
+            "us_per_slot": 131.9
+          },
+          "best_without_fuse_gate_up": {
+            "ms": 0.376,
+            "pcc_vs_baseline": 0.9998931884765625,
+            "us_per_slot": 125.3
+          },
+          "bmm_all_slots": {
+            "ms": 11.323,
+            "pcc_vs_baseline": 0.9998914003372192,
+            "us_per_slot": 3774.4
+          },
+          "bmm_all_slots_hifi": {
+            "ms": 11.298,
+            "pcc_vs_baseline": 0.9999925494194031,
+            "us_per_slot": 3766.0
+          },
+          "only_batch_scatter": {
+            "ms": 0.378,
+            "pcc_vs_baseline": 0.9999979138374329,
+            "us_per_slot": 126.0
+          },
+          "only_fold_weight": {
+            "ms": 0.376,
+            "pcc_vs_baseline": 0.9999938011169434,
+            "us_per_slot": 125.4
+          },
+          "only_fuse_gate_up": {
+            "ms": 0.371,
+            "pcc_vs_baseline": 1.0,
+            "us_per_slot": 123.7
+          },
+          "only_fuse_silu": {
+            "ms": 0.384,
+            "pcc_vs_baseline": 1.0,
+            "us_per_slot": 128.0
+          },
+          "only_lofi": {
+            "ms": 0.394,
+            "pcc_vs_baseline": 0.9999087452888489,
+            "us_per_slot": 131.3
+          }
+        }
+      },
+      {
+        "slots_hit": 17,
+        "tokens": 8,
+        "variants": {
+          "all_fuse_gate_up+fold_weight": {
+            "ms": 1.853,
+            "pcc_vs_baseline": 0.9999933242797852,
+            "us_per_slot": 109.0
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu": {
+            "ms": 1.623,
+            "pcc_vs_baseline": 0.9999933242797852,
+            "us_per_slot": 95.5
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu+lofi": {
+            "ms": 1.641,
+            "pcc_vs_baseline": 0.9998984336853027,
+            "us_per_slot": 96.6
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu+lofi+batch_scatter": {
+            "ms": 1.218,
+            "pcc_vs_baseline": 0.9998981356620789,
+            "us_per_slot": 71.7
+          },
+          "baseline": {
+            "ms": 2.139,
+            "pcc_vs_baseline": 0.9999998807907104,
+            "us_per_slot": 125.8
+          },
+          "best_without_fuse_gate_up": {
+            "ms": 1.743,
+            "pcc_vs_baseline": 0.9998981356620789,
+            "us_per_slot": 102.5
+          },
+          "bmm_all_slots": {
+            "ms": 11.298,
+            "pcc_vs_baseline": 0.9998978972434998,
+            "us_per_slot": 664.6
+          },
+          "bmm_all_slots_hifi": {
+            "ms": 11.274,
+            "pcc_vs_baseline": 0.9999929666519165,
+            "us_per_slot": 663.2
+          },
+          "only_batch_scatter": {
+            "ms": 1.881,
+            "pcc_vs_baseline": 0.9999986886978149,
+            "us_per_slot": 110.7
+          },
+          "only_fold_weight": {
+            "ms": 2.04,
+            "pcc_vs_baseline": 0.9999933242797852,
+            "us_per_slot": 120.0
+          },
+          "only_fuse_gate_up": {
+            "ms": 2.072,
+            "pcc_vs_baseline": 0.9999998807907104,
+            "us_per_slot": 121.9
+          },
+          "only_fuse_silu": {
+            "ms": 2.098,
+            "pcc_vs_baseline": 0.9999998807907104,
+            "us_per_slot": 123.4
+          },
+          "only_lofi": {
+            "ms": 2.145,
+            "pcc_vs_baseline": 0.9999072551727295,
+            "us_per_slot": 126.2
+          }
+        }
+      },
+      {
+        "slots_hit": 56,
+        "tokens": 32,
+        "variants": {
+          "all_fuse_gate_up+fold_weight": {
+            "ms": 6.271,
+            "pcc_vs_baseline": 0.9999914169311523,
+            "us_per_slot": 112.0
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu": {
+            "ms": 5.631,
+            "pcc_vs_baseline": 0.9999914169311523,
+            "us_per_slot": 100.6
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu+lofi": {
+            "ms": 5.499,
+            "pcc_vs_baseline": 0.9998964071273804,
+            "us_per_slot": 98.2
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu+lofi+batch_scatter": {
+            "ms": 3.942,
+            "pcc_vs_baseline": 0.9998959302902222,
+            "us_per_slot": 70.4
+          },
+          "baseline": {
+            "ms": 6.936,
+            "pcc_vs_baseline": 0.9999998807907104,
+            "us_per_slot": 123.9
+          },
+          "best_without_fuse_gate_up": {
+            "ms": 5.669,
+            "pcc_vs_baseline": 0.9998959302902222,
+            "us_per_slot": 101.2
+          },
+          "bmm_all_slots": {
+            "ms": 11.271,
+            "pcc_vs_baseline": 0.9998957514762878,
+            "us_per_slot": 201.3
+          },
+          "bmm_all_slots_hifi": {
+            "ms": 11.257,
+            "pcc_vs_baseline": 0.9999900460243225,
+            "us_per_slot": 201.0
+          },
+          "only_batch_scatter": {
+            "ms": 6.117,
+            "pcc_vs_baseline": 0.9999977350234985,
+            "us_per_slot": 109.2
+          },
+          "only_fold_weight": {
+            "ms": 6.616,
+            "pcc_vs_baseline": 0.9999914169311523,
+            "us_per_slot": 118.1
+          },
+          "only_fuse_gate_up": {
+            "ms": 7.347,
+            "pcc_vs_baseline": 0.9999998807907104,
+            "us_per_slot": 131.2
+          },
+          "only_fuse_silu": {
+            "ms": 6.796,
+            "pcc_vs_baseline": 0.9999998807907104,
+            "us_per_slot": 121.4
+          },
+          "only_lofi": {
+            "ms": 6.925,
+            "pcc_vs_baseline": 0.9999036192893982,
+            "us_per_slot": 123.7
+          }
+        }
+      },
+      {
+        "slots_hit": 127,
+        "tokens": 256,
+        "variants": {
+          "all_fuse_gate_up+fold_weight": {
+            "ms": 14.828,
+            "pcc_vs_baseline": 0.999998927116394,
+            "us_per_slot": 116.8
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu": {
+            "ms": 13.585,
+            "pcc_vs_baseline": 0.999998927116394,
+            "us_per_slot": 107.0
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu+lofi": {
+            "ms": 13.573,
+            "pcc_vs_baseline": 0.999920666217804,
+            "us_per_slot": 106.9
+          },
+          "all_fuse_gate_up+fold_weight+fuse_silu+lofi+batch_scatter": {
+            "ms": 9.816,
+            "pcc_vs_baseline": 0.9999209642410278,
+            "us_per_slot": 77.3
+          },
+          "baseline": {
+            "ms": 18.424,
+            "pcc_vs_baseline": 1.0,
+            "us_per_slot": 145.1
+          },
+          "best_without_fuse_gate_up": {
+            "ms": 12.901,
+            "pcc_vs_baseline": 0.9999209642410278,
+            "us_per_slot": 101.6
+          },
+          "bmm_all_slots": {
+            "ms": 11.298,
+            "pcc_vs_baseline": 0.9999209046363831,
+            "us_per_slot": 89.0
+          },
+          "bmm_all_slots_hifi": {
+            "ms": 11.35,
+            "pcc_vs_baseline": 0.9999974370002747,
+            "us_per_slot": 89.4
+          },
+          "only_batch_scatter": {
+            "ms": 13.909,
+            "pcc_vs_baseline": 1.0,
+            "us_per_slot": 109.5
+          },
+          "only_fold_weight": {
+            "ms": 17.722,
+            "pcc_vs_baseline": 0.999998927116394,
+            "us_per_slot": 139.5
+          },
+          "only_fuse_gate_up": {
+            "ms": 16.837,
+            "pcc_vs_baseline": 1.0,
+            "us_per_slot": 132.6
+          },
+          "only_fuse_silu": {
+            "ms": 18.148,
+            "pcc_vs_baseline": 1.0,
+            "us_per_slot": 142.9
+          },
+          "only_lofi": {
+            "ms": 18.38,
+            "pcc_vs_baseline": 0.9999248385429382,
+            "us_per_slot": 144.7
+          }
+        }
+      }
+    ],
+    "dtype": "bfp4",
+    "experts_on_chip": 128
+  }
+}

@@ -70,3 +70,23 @@ def test_sharding_needs_a_leading_dimension_equal_to_the_chip_count(tt):
     mesh = tt.MeshDevice(4)
     with pytest.raises(RuntimeError, match="leading dimension"):
         sharded(tt, mesh, torch.zeros(3, 1, 32, 32))
+
+
+def test_slice_and_concat_keep_a_sharded_tensor_sharded_and_cut_every_chips_slice(tt):
+    mesh = tt.MeshDevice(2)
+    w = sharded(tt, mesh, torch.arange(2 * 64 * 32, dtype=torch.float32).reshape(2, 1, 64, 32))
+    top = tt.slice(w, (0, 0, 0, 0), (1, 1, 32, 32))
+    assert top.chips == 2 and top.shape == (1, 1, 32, 32) and torch.equal(top.t, w.t[:, :, :32])
+    both = tt.concat([top, tt.slice(w, (0, 0, 32, 0), (1, 1, 64, 32))], dim=2)
+    assert both.chips == 2 and torch.equal(both.t, w.t)
+    with pytest.raises(RuntimeError, match="outside dimension 2"):
+        tt.slice(w, (0, 0, 0, 0), (1, 1, 96, 32))
+
+
+def test_multiply_applies_a_fused_silu_to_its_first_input_only_and_refuses_other_activations(tt):
+    a = fake.Tensor(torch.randn(1, 1, 32, 32), layout="TILE")
+    b = fake.Tensor(torch.randn(1, 1, 32, 32), layout="TILE")
+    got = tt.multiply(a, b, input_tensor_a_activations=[tt.UnaryOpType.SILU])
+    assert torch.allclose(got.t, torch.nn.functional.silu(a.t) * b.t)
+    with pytest.raises(RuntimeError, match="only SILU"):
+        tt.multiply(a, b, input_tensor_a_activations=["GELU"])

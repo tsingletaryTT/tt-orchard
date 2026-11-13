@@ -1,0 +1,2 @@
+target = "0.9.177"
+summary = "Probe 17 tries five changes to the 128-expert slot loop and a batched form on one chip (issue 723)."
