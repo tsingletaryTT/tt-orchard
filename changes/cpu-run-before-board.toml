@@ -1,0 +1,3 @@
+target = "0.9.183"
+summary = "Stage 2 runs the port on the CPU against the torch stand-in of ttnn, with the verified sheet's signatures checked, before any board check and after each repair; a fault of the port goes to repair without a board."
+kind = "feature"
