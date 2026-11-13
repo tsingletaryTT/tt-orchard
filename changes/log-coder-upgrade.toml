@@ -1,0 +1,2 @@
+target = "0.9.185"
+summary = "Log: the local Qwen3-Coder-Next bundle upgraded to the 2026-11-07 revision (prefill update), with a smoke test."
