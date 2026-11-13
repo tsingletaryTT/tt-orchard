@@ -889,6 +889,11 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
 # Run 20: the coder wrote a file and called `last-check` 23 times, each time reading the old failure and believing the fix had not worked.
 PRECHECK_DEADLINE_S = 60.0          # the static device-ops analysis opens no device: a minute is far more than it needs
 PRECHECK_OUTPUT_MAX = 64 * 1024
+# The CPU run of the port against the torch stand-in of ttnn (issue 697, `port_check.py --cpu N`): load, one prefill and one decode step on a
+# checkpoint of at most 4 GiB (the template's CPU_RUN_MAX_BYTES). Ten minutes covers a cold torch import and a load of that size; a run that
+# takes longer gives no verdict and the board check runs.
+CPU_RUN_DEADLINE_S = 600.0
+CPU_RUN_NO_VERDICT = 3              # the template's CPU_NO_VERDICT
 CHECK_RUNS_NOTE = ("The check runs again only when you reply with no tool call. A write does not run it, and `last-check` keeps showing this "
                     "failure until then. Start with `python3 stages/{n}/stage_tools.py last-check`: its `next:` line is the command to run.")
 
@@ -1422,8 +1427,16 @@ class Supervisor:
                     # a model that cannot fit the box starts no prepare step (issue 327)
                     self._check_residency(spec, hardware_pending=self._hardware_pending(
                         spec, resuming=p.open_stage == p.next_stage, escalated=p.next_stage in p.escalated))
-                if spec.needs_coder or self._coder_in_use():
-                    self._ensure_coder()
+                self._coder_deferred = False
+                # A skipped stage makes no model request, so it boots no coder (issue 713); a coder already in the run is still adopted or checked.
+                if (spec.needs_coder and not spec.skip) or self._coder_in_use():
+                    if self._coder_deferrable(spec):
+                        # Issue 713: the coder boots at the stage's first model request (`_need_coder`), or never when there is none.
+                        self._coder_deferred = True
+                        self.ledger.append("decision", spec.number, decision="coder start deferred",
+                                           reason="stage 2 of a thin-port run starts the coder at its first model request")
+                    else:
+                        self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
                                          escalated=p.next_stage in p.escalated)
             except Blocked as exc:
@@ -1536,6 +1549,25 @@ class Supervisor:
         self.ledger.append("decision", 1, decision=audio_runtime.AUDIO_RUNTIME_SELECTED, runtime=audio_runtime.RUNTIME, paths=paths.record(),
                            scripts=audio_runtime.script_hashes(), model=self.model_id)
         return "selected"
+
+    def _coder_deferrable(self, spec) -> bool:
+        """Issue 713: stage 2 of a `--thin-port` full port may start with no coder. The thin port step fills the generated port's stubs with
+        one request each, so a plan with no stubs makes no model request until a repair, a finish step or an escalation asks for one. Deferred
+        only when the run has no coder now: no unreleased coder lease in the ledger, so there is nothing to adopt or check. A park or restore
+        that was cut short holds an unreleased lease, so `_ensure_coder` still recovers it before the stage. A fresh run boots the coder for
+        stages 0 and 1, whose steps are model requests, so this applies to a run resumed at stage 2 after its coder was released."""
+        if spec.number != 2 or spec.draft != "full_port" or not thin_port(self.ledger.read()):
+            return False
+        return not self._coder_in_use()
+
+    def _need_coder(self, n: int, why: str) -> None:
+        """Start the coder before a model request when the stage deferred it (`_coder_deferrable`); otherwise do nothing. The ledger names the
+        request that needed it. The start is `_ensure_coder`, the same lease handling as a start before the stage."""
+        if not getattr(self, "_coder_deferred", False):
+            return
+        self._coder_deferred = False
+        self.ledger.append("decision", n, decision="coder started for a model request", reason=why)
+        self._ensure_coder()
 
     def _coder_in_use(self) -> bool:
         """The ledger holds a coder lease this run has not released: a coder is part of the run even when the next stage does not need it, so
@@ -4564,6 +4596,7 @@ class Supervisor:
     def _step(self, spec, phase: str, stage_dir: Path, escalated: bool, resumed: bool, extra: str | None = None):
         """One agent step. `extra`, when given, is added to the task message (stage 2's prepare gets the script's message)."""
         n = spec.number
+        self._need_coder(n, f"the stage's {phase} agent step")         # before the tier is probed: a deferred coder is not up yet (issue 713)
         tier = tier_for(self.cfg, n, phase=phase, escalated=escalated)
         try:
             used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
@@ -4626,11 +4659,28 @@ class Supervisor:
         n = spec.number
         if not (n == 2 and spec.draft == "full_port" and thin_port(self.ledger.read())):
             return None
-        used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "prepare")
-        self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
-        out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
-                                 python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=endpoint,
-                                 model=tcfg["model"], sampling=sampling, thinking=AGENT_THINKING)
+        if getattr(self, "_coder_deferred", False):
+            # Issue 713: the coder is started only when the plan has a stub to send, inside the step, after the plan is made.
+            asked = []
+
+            def connect(n_stubs: int):
+                asked.append(n_stubs)
+                self._need_coder(n, f"the thin port step has {n_stubs} stub(s) to fill")
+                used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "prepare")
+                self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
+                return endpoint, tcfg["model"], sampling
+            out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
+                                     python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=None,
+                                     model=None, sampling=None, thinking=AGENT_THINKING, connect=connect)
+            if out.status == "done" and not asked:
+                self.ledger.append("decision", n, decision="coder not started", reason="the plan has no stubs",
+                                   note="a later model request of the stage (a repair, a finish step, an escalation) starts it")
+        else:
+            used, endpoint, tcfg, sampling = self._thin_coder(spec, escalated, "prepare")
+            self.ledger.append("decision", n, decision="thin port step", tier=used, model=tcfg["model"], escalated=escalated, sampling=sampling)
+            out = thin_port_step.run(run_dir=self.run_dir, stage_dir=stage_dir, snapshot=self.inputs.get("model"),
+                                     python=self.inputs.get("reference_python"), ledger=self.ledger, stage=n, post=self.http, endpoint=endpoint,
+                                     model=tcfg["model"], sampling=sampling, thinking=AGENT_THINKING)
         if out.status == "skipped":
             self.ledger.append("decision", n, decision="thin port not used", reason=out.detail[:300],
                                note="the agent's prepare step runs as it would without the option")
@@ -4649,8 +4699,9 @@ class Supervisor:
 
     def _thin_coder(self, spec, escalated: bool, phase: str):
         """(tier name, endpoint, tier config, sampling) of the coder tier a thin step of stage `spec.number` uses, the tier an agent step of that phase
-        would use: a tier that is down blocks the run, a substitute is noted in the ledger."""
+        would use: a tier that is down blocks the run, a substitute is noted in the ledger. A deferred coder is started first (issue 713)."""
         n = spec.number
+        self._need_coder(n, f"a thin {phase} request")
         tier = tier_for(self.cfg, n, phase=phase, escalated=escalated)
         try:
             used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
@@ -4924,6 +4975,18 @@ class Supervisor:
         # The verified TTNN cheat sheet (issue 523): its data for `stage_tools.py cheat`, and the Markdown the coder reads. Both come from the
         # supervisor's shipped file and are put back each time. A sheet that cannot be read is skipped with a ledger decision, never a stage failure.
         copied = [full_port.TEMPLATE_NAME, full_port.CONFIG_NAME, full_port.TOOLS_NAME]
+        # The CPU stand-in of ttnn and the probes' gated delta rule it reads (issue 697): the template's `--cpu` run loads them from here. They
+        # are put back each time, so a copy the coder edited during prepare is not what the CPU run uses. A file that cannot be copied is removed
+        # (a link or a FIFO is unlinked and never followed), and the CPU run then gives no verdict.
+        for name, src in ((full_port.CPU_TTNN_NAME, full_port.CPU_TTNN_SOURCE), (full_port.CPU_GDN_NAME, full_port.CPU_GDN_SOURCE)):
+            try:
+                safeio.atomic_write(stage_dir / name, safeio.read_bytes(Path(self.paths.orchard_dir) / src, max_bytes=RUN_JSON_MAX), mode=0o644)
+                copied.append(name)
+            except (safeio.SafeReadError, OSError, ValueError):
+                try:
+                    (stage_dir / name).unlink(missing_ok=True)
+                except OSError:
+                    pass
         try:
             cheat_src = Path(self.paths.orchard_dir) / "orchard" / "skills" / "full-port-templates" / full_port.CHEAT_SOURCE.name
             cheat_bytes = safeio.read_bytes(cheat_src, max_bytes=RUN_JSON_MAX)
@@ -5723,37 +5786,75 @@ class Supervisor:
         The analysis is the template's own (`port_check.py --static --fresh`, a run of the same file the board check runs, with no device and no
         worker), so the verdict and its text are the gate's. Returns True when it failed: the failure is left as the attempt's test result in the
         form a failed board test leaves (test-result.json with exit code 2 and the output file with the template's FAILED line), a ledger decision
-        names it, and nothing else runs. Returns False when it passed, was refused, or gave no verdict: the hardware phase goes on as before."""
+        names it, and nothing else runs. Returns False when it passed, was refused, or gave no verdict: the hardware phase goes on as before.
+
+        After a pass, the CPU run of the port (issue 697, `port_check.py --cpu N`) runs the same way: the port's load, a prefill and a decode
+        step against the torch stand-in of ttnn behind the verified sheet's signatures. A fault it finds (a call the sheet refuses, a missing
+        name, key, index or import at a line of the port) is the attempt's test result in the same form, so it reaches the repair rounds
+        without a board. The hardware phase runs this method before every board check, so it also runs after each repair."""
         n = spec.number
         if n != 2 or spec.draft != "full_port" or self.lab is not None or test.get("command") != full_port.command(2):
             return False
+        code, timed_out, t0, out_path = self._precheck_spawn(stage_dir, test["command"] + " --static --fresh", PRECHECK_DEADLINE_S)
+        if code == 0 and not timed_out:
+            return self._cpu_run_precheck(spec, stage_dir, test)
+        if code != 2 or timed_out:
+            self.ledger.append("decision", n, decision="device-ops pre-check gave no verdict", returncode=code, timed_out=bool(timed_out),
+                               note="the board check runs as it would have")
+            return False
+        self._precheck_failed(spec, stage_dir, test, out_path, t0, decision="device-ops pre-check failed before the board")
+        return True
+
+    def _precheck_spawn(self, stage_dir: Path, command: str, deadline_s: float):
+        """Run one pre-board check of the port template with its output in the stage's test output file. Returns (exit code or None, timed
+        out, start time, output path). A command the runner refuses gives None and the refusal in the output."""
         out_path = stage_dir / "evidence" / "hw-test-output.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         t0 = self.clock()
         with _open_fresh(out_path) as out:
             try:
-                code, timed_out = spawn_checked(test["command"] + " --static --fresh", self.run_dir, agent_env(self.run_dir, extra=self.extra_env),
-                                                PRECHECK_DEADLINE_S, out)
+                code, timed_out = spawn_checked(command, self.run_dir, agent_env(self.run_dir, extra=self.extra_env), deadline_s, out)
             except Denied as exc:
                 code, timed_out = None, False
                 out.write(f"refused: {exc}\n".encode("utf-8"))
-        if code == 0 and not timed_out:
-            return False
-        if code != 2 or timed_out:
-            self.ledger.append("decision", n, decision="device-ops pre-check gave no verdict", returncode=code, timed_out=bool(timed_out),
-                               note="the board check runs as it would have")
-            return False
+        return code, timed_out, t0, out_path
+
+    def _precheck_failed(self, spec, stage_dir: Path, test: dict, out_path: Path, t0: float, *, decision: str) -> None:
+        """A pre-board check found a fault of the port: the ledger decision names it and its output becomes the attempt's test result, in the
+        form a failed board test leaves (test-result.json with exit code 2), so the repair rounds read it as they read a board failure."""
+        n = spec.number
         try:
             text = safeio.read_bytes(out_path, max_bytes=PRECHECK_OUTPUT_MAX).decode("utf-8", "replace")
         except (safeio.SafeReadError, OSError):
             text = ""
         self._note_port_at_test(n, stage_dir)
-        self.ledger.append("decision", n, decision="device-ops pre-check failed before the board", message=port_repair.failed_line(text, 700),
+        self.ledger.append("decision", n, decision=decision, message=port_repair.failed_line(text, 700),
                            note="no lease was taken and the coder was not parked; this is the attempt's test result")
         result = {"command": test["command"], "returncode": 2, "timed_out": False, "seconds": round(self.clock() - t0, 3), "chips": [],
                   "output": self._moved_aside_record(out_path)}
         self._publish_test_result(spec, stage_dir, result)
-        return True
+
+    def _cpu_run_precheck(self, spec, stage_dir: Path, test: dict) -> bool:
+        """The CPU run of the port before the board (issue 697). True when it found a fault of the port (the attempt's test result is then
+        written, as for the static check); False when it passed or gave no verdict, and the ledger says which, with the template's reason line,
+        so the board check that follows can be read against it. The stand-in device has the chips the board check will hold."""
+        n = spec.number
+        chips = self._phase_boards(spec, stage_dir) * CHIPS_PER_BOARD
+        code, timed_out, t0, out_path = self._precheck_spawn(stage_dir, f"{test['command']} --cpu {chips}", CPU_RUN_DEADLINE_S)
+        if code == 2 and not timed_out:
+            self._precheck_failed(spec, stage_dir, test, out_path, t0, decision="CPU run failed before the board")
+            return True
+        try:
+            text = safeio.read_bytes(out_path, max_bytes=PRECHECK_OUTPUT_MAX).decode("utf-8", "replace")
+        except (safeio.SafeReadError, OSError):
+            text = ""
+        line = next((ln for ln in reversed(text.splitlines()) if ln.startswith(("CPU run passed", "CPU run gave no verdict"))), "")
+        if code == 0 and not timed_out:
+            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3))
+        else:
+            self.ledger.append("decision", n, decision="CPU run gave no verdict", returncode=code, timed_out=bool(timed_out),
+                               reason=port_repair.safe_text(line, self._homes())[:600], note="the board check runs as it would have")
+        return False
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
                   output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,

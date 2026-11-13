@@ -1079,12 +1079,15 @@ def _drop_config() -> bytes:
 
 
 class _DropResponse:
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, url: str):
         import io
-        self._body = io.BytesIO(body)
+        self._body, self._url = io.BytesIO(body), url
 
     def read(self, n=-1):
         return self._body.read(n)
+
+    def geturl(self):
+        return self._url            # no redirect: the URL that was asked for
 
     def __enter__(self):
         return self
@@ -1099,7 +1102,7 @@ def _drop_opener(routes: dict):
         import urllib.error
         for suffix, body in routes.items():
             if req.full_url.endswith(suffix):
-                return _DropResponse(body)
+                return _DropResponse(body, req.full_url)
         raise urllib.error.HTTPError(req.full_url, 404, "not found", {}, None)
     return opener
 

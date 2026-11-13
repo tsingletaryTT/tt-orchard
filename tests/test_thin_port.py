@@ -317,3 +317,33 @@ def test_the_generator_command_line_reads_a_hub_snapshot_config_too(tmp_path):
     outside = _hub_snapshot(tmp_path / "o", config_target_outside=True)
     with pytest.raises(Exception, match="config.json"):
         pt.read_snapshot_config(outside)
+
+
+# ---- the coder is reached through `connect` only when a stub is sent (issue 713) ---------------------------------------------------------
+
+def test_connect_is_called_once_before_the_first_stub_request_and_its_endpoint_is_used(tmp_path):
+    coder, calls = Coder(), []
+
+    def connect(n_stubs):
+        calls.append((n_stubs, len(coder.bodies)))
+        return "http://127.0.0.1:2/v1", "m2", {"temperature": 0.1, "max_tokens": 4096}
+    stage_dir = tmp_path / "stages" / "2"
+    stage_dir.mkdir(parents=True)
+    out = tp.run_with_inputs(stage_dir=stage_dir, ledger=Ledger(), stage=2, post=coder, endpoint=None, model=None, sampling=None,
+                             inputs=inputs(), sheet=SHEET, connect=connect)
+    assert out.status == "done" and out.requests == 15
+    assert calls == [(15, 0)]                                              # once, with the stub count, before any request
+    assert set(coder.urls) == {"http://127.0.0.1:2/v1/chat/completions"} and {b["model"] for b in coder.bodies} == {"m2"}
+    assert {b["temperature"] for b in coder.bodies} == {0.1}
+
+
+def test_a_plan_with_no_stub_never_calls_connect_and_sends_nothing(tmp_path, monkeypatch):
+    monkeypatch.undo()                                  # the real block families: the tiny Qwen4 plan has no stub (issue 696)
+    coder, calls = Coder(), []
+    stage_dir = tmp_path / "stages" / "2"
+    stage_dir.mkdir(parents=True)
+    out = tp.run_with_inputs(stage_dir=stage_dir, ledger=Ledger(), stage=2, post=coder, endpoint=None, model=None, sampling=None,
+                             inputs=inputs(), sheet=SHEET, connect=lambda n: calls.append(n))
+    assert out.status == "done" and out.requests == 0 and out.stubs_left == []
+    assert calls == [] and coder.bodies == []
+    assert pt.stub_lines(port_text(stage_dir)) == []
