@@ -247,6 +247,12 @@ class Plan:
     prelude_family: tuple | None = None                # (family name, settings) when a family writes the step between the embedding and the first layer
     rotary: dict | None = None                         # {head_dim, rot, theta} when the rotary helpers are written (issue 696, slice 4)
 
+    @property
+    def cached_decode(self) -> bool:
+        """True when every block of every layer keeps decode state (the composed Qwen4 layers: gated delta net or sparse attention, PLE, connections, MLP or MoE), so `decode_step`
+        runs one row (issue 759). A plan with a stub, a standard attention layer or a generated plain attention keeps the whole-sequence decode."""
+        return bool(self.layers) and self.attention is None and all(l.composed and not l.standard and not l.composed.get("stub_sublayer") for l in self.layers)
+
     def summary(self) -> dict:
         """What the ledger or a run log records: the generated blocks and the stubs, without any file content."""
         return {"model_class": self.model_class, "layers": self.n_layers,
@@ -546,11 +552,16 @@ def _emit_gated_delta_net(function: str, site_path: str, settings: dict, where: 
 
 
 def _gdn_helpers() -> list:
-    return ["def _causal_conv(model, name, x, kernel, channels):",
-            '    """The depthwise causal convolution over the sequence of x [1, 1, S, channels], then silu: output row t is the sum over taps j of tap j (uploaded by load as `name.tap<j>`) times input row t - (kernel - 1 - j), with zero rows before the first."""',
+    return ["def _causal_conv(model, name, x, kernel, channels, state=None, mode=None, n=0):",
+            '    """The depthwise causal convolution over the sequence of x [1, 1, S, channels], then silu: output row t is the sum over taps j of tap j (uploaded by load as `name.tap<j>`) times input row t - (kernel - 1 - j), with zero rows before the first. With a decode cache: mode "prefill" keeps the last kernel - 1 real input rows (rows n - kernel + 1 .. n - 1) in state["tail"]; mode "step" takes x as one row, uses state["tail"] for the rows before it and keeps the new tail."""',
             f"    {GENERATED_BLOCK_MARK} gated_delta_net",
             "    seq = x.shape[2]",
-            "    xpad = ttnn.concat([_upload(model, torch.zeros(1, 1, kernel - 1, channels, dtype=torch.bfloat16), ttnn.ROW_MAJOR_LAYOUT), ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)], dim=2)",
+            '    before = state["tail"] if mode == "step" else _upload(model, torch.zeros(1, 1, kernel - 1, channels, dtype=torch.bfloat16), ttnn.ROW_MAJOR_LAYOUT)',
+            "    xpad = ttnn.concat([before, ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)], dim=2)",
+            '    if mode == "prefill":',
+            '        state["tail"] = ttnn.slice(xpad, (0, 0, n, 0), (1, 1, n + kernel - 1, channels))',
+            '    elif mode == "step":',
+            '        state["tail"] = ttnn.slice(xpad, (0, 0, 1, 0), (1, 1, kernel, channels))',
             "    acc = None",
             "    for j in range(kernel):",
             "        piece = ttnn.to_layout(ttnn.slice(xpad, (0, 0, j, 0), (1, 1, j + seq, channels)), ttnn.TILE_LAYOUT)",
@@ -558,8 +569,9 @@ def _gdn_helpers() -> list:
             "        acc = term if acc is None else ttnn.add(acc, term)",
             "    return ttnn.silu(acc)", "", "",
             "def _gated_delta_net(model, prefix, x, hk, hv, dk, dv, kernel, eps, gate):",
-            '    """The gated delta net at `prefix` on x [1, 1, S, hidden] (S a multiple of 32, no cache): the block output [1, 1, S, hidden]."""',
+            '    """The gated delta net at `prefix` on x [1, 1, S, hidden] (S a multiple of 32): the block output [1, 1, S, hidden]. With a decode cache (see `_cache_of`): "prefill" keeps the recurrent state after the n real rows (the padding rows get g = 0 and beta = 0, which leave the state alone) and the convolution tail; "step" runs x as one row from that state."""',
             f"    {GENERATED_BLOCK_MARK} gated_delta_net",
+            "    mode, state, n = _cache_of(model, prefix)",
             "    seq = x.shape[2]",
             "    key_dim, value_dim = hk * dk, hv * dv",
             "    conv_dim = 2 * key_dim + value_dim",
@@ -567,14 +579,27 @@ def _gdn_helpers() -> list:
             '    z = _linear(model, prefix + ".in_proj_z", x)',
             '    b = _linear(model, prefix + ".in_proj_b", x)',
             '    a = _linear(model, prefix + ".in_proj_a", x)',
-            '    qkv = _causal_conv(model, prefix + ".conv1d.weight", qkv, kernel, conv_dim)',
+            '    qkv = _causal_conv(model, prefix + ".conv1d.weight", qkv, kernel, conv_dim, state, mode, n)',
             "    beta = ttnn.sigmoid(b)",
             '    g = ttnn.multiply(ttnn.softplus(ttnn.add(a, model["dev"][prefix + ".dt_bias"])), model["dev"][prefix + ".A_log"])',
-            "    q = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 0), (1, 1, seq, key_dim)), (1, seq, key_dim))",
-            "    k = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, key_dim), (1, 1, seq, 2 * key_dim)), (1, seq, key_dim))",
-            "    v = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 2 * key_dim), (1, 1, seq, conv_dim)), (1, seq, value_dim))",
-            "    g, beta = ttnn.reshape(g, (1, seq, hv)), ttnn.reshape(beta, (1, seq, hv))",
-            "    o = ttnn.transformer.chunk_gated_delta_rule(q, k, v, g, beta, chunk_size=32, num_key_heads=hk)[0]          # [1, S, hv, dv], fp32, ROW_MAJOR",
+            '    if mode == "prefill":',
+            "        keep = _upload(model, (torch.arange(seq) < n).to(torch.bfloat16).reshape(1, seq, 1), ttnn.TILE_LAYOUT)",
+            "        g, beta = ttnn.multiply(ttnn.reshape(g, (1, seq, hv)), keep), ttnn.multiply(ttnn.reshape(beta, (1, seq, hv)), keep)",
+            '    if mode == "step":',
+            "        q = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 0), (1, 1, 1, key_dim)), (1, 1, hk, dk))",
+            "        k = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, key_dim), (1, 1, 1, 2 * key_dim)), (1, 1, hk, dk))",
+            "        v = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 2 * key_dim), (1, 1, 1, conv_dim)), (1, 1, hv, dv))",
+            "        q, k = (ttnn.multiply(ttnn.rms_norm(t, epsilon=1e-6 / dk), dk ** -0.5) for t in (q, k))          # the op wants q and k L2-normalised: x / sqrt(sum x^2 + 1e-6)",
+            "        o, state[\"rec\"] = ttnn.transformer.fused_recurrent_gated_delta_rule(q, k, v, ttnn.reshape(g, (1, 1, hv)), ttnn.reshape(beta, (1, 1, hv)), initial_state=state[\"rec\"], output_final_state=True)",
+            "        seq = 1",
+            "    else:",
+            "        q = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 0), (1, 1, seq, key_dim)), (1, seq, key_dim))",
+            "        k = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, key_dim), (1, 1, seq, 2 * key_dim)), (1, seq, key_dim))",
+            "        v = ttnn.reshape(ttnn.slice(qkv, (0, 0, 0, 2 * key_dim), (1, 1, seq, conv_dim)), (1, seq, value_dim))",
+            "        g, beta = ttnn.reshape(g, (1, seq, hv)), ttnn.reshape(beta, (1, seq, hv))",
+            '        o, final = ttnn.transformer.chunk_gated_delta_rule(q, k, v, g, beta, chunk_size=32, num_key_heads=hk, output_final_state=mode == "prefill")          # o [1, S, hv, dv], fp32, ROW_MAJOR',
+            '        if mode == "prefill":',
+            '            state["rec"] = final',
             "    o = ttnn.typecast(ttnn.to_layout(ttnn.reshape(o, (1, 1, seq * hv, dv)), ttnn.TILE_LAYOUT), ttnn.bfloat16)",
             '    o = ttnn.rms_norm(o, epsilon=eps, weight=model["dev"][prefix + ".norm.weight"])',
             "    z = ttnn.reshape(z, (1, 1, seq * hv, dv))",
@@ -741,12 +766,17 @@ def _ple_helpers() -> list:
             "    seq = x.shape[2]",
             "    normed = ttnn.reshape(ttnn.rms_norm(ttnn.reshape(x, (1, 1, seq * hc, hidden)), epsilon=eps), (1, 1, seq, hc * hidden))",
             '    return ttnn.multiply(normed, model["dev"][name + ".weight"])', "", "",
-            "def _dilated_causal_conv(model, name, x, kernel, dilation, channels):",
-            '    """The depthwise causal convolution of x [1, 1, S, channels] with dilation, then silu: output row t is the sum over taps j of tap j (uploaded by load as `name.tap<j>`) times row t - (kernel - 1 - j) * dilation."""',
+            "def _dilated_causal_conv(model, name, x, kernel, dilation, channels, state=None, mode=None, n=0):",
+            '    """The depthwise causal convolution of x [1, 1, S, channels] with dilation, then silu: output row t is the sum over taps j of tap j (uploaded by load as `name.tap<j>`) times row t - (kernel - 1 - j) * dilation. With a decode cache: mode "prefill" keeps the last (kernel - 1) * dilation real input rows in state["tail"]; mode "step" takes x as one row and uses and updates state["tail"]."""',
             mark,
             "    seq = x.shape[2]",
             "    pad = (kernel - 1) * dilation",
-            "    xpad = ttnn.concat([_upload(model, torch.zeros(1, 1, pad, channels, dtype=torch.bfloat16), ttnn.ROW_MAJOR_LAYOUT), ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)], dim=2)",
+            '    before = state["tail"] if mode == "step" else _upload(model, torch.zeros(1, 1, pad, channels, dtype=torch.bfloat16), ttnn.ROW_MAJOR_LAYOUT)',
+            "    xpad = ttnn.concat([before, ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)], dim=2)",
+            '    if mode == "prefill":',
+            '        state["tail"] = ttnn.slice(xpad, (0, 0, n, 0), (1, 1, n + pad, channels))',
+            '    elif mode == "step":',
+            '        state["tail"] = ttnn.slice(xpad, (0, 0, 1, 0), (1, 1, 1 + pad, channels))',
             "    acc = None",
             "    for j in range(kernel):",
             "        piece = ttnn.to_layout(ttnn.slice(xpad, (0, 0, j * dilation, 0), (1, 1, j * dilation + seq, channels)), ttnn.TILE_LAYOUT)",
@@ -758,7 +788,8 @@ def _ple_helpers() -> list:
             mark,
             "    seq = x.shape[2]",
             "    n = hc * hidden",
-            "    emb = _ple_ngram_embeddings(model, prefix, ids, ngram_size, heads_per_ngram, eos, tables)",
+            "    mode, state, at = _cache_of(model, prefix)",
+            "    emb = _ple_ngram_embeddings(model, prefix, ids, ngram_size, heads_per_ngram, eos, tables)[:, -seq:]          # decoding one token: ids is the whole history, the last row is the token's",
             "    e = _upload(model, emb.reshape(1, 1, seq, -1).to(torch.bfloat16), ttnn.TILE_LAYOUT)",
             '    key = _group_rms_norm(model, prefix + ".norm_key", _linear(model, prefix + ".key_proj", e), hc, hidden, eps)',
             '    value = _linear(model, prefix + ".value_proj", e)',
@@ -773,7 +804,7 @@ def _ple_helpers() -> list:
             "        gated_parts.append(ttnn.multiply(value, gate))",
             "    gated = ttnn.concat(gated_parts, dim=-1)",
             '    normed = _group_rms_norm(model, prefix + ".norm_conv", gated, hc, hidden, eps)',
-            '    return ttnn.add(gated, _dilated_causal_conv(model, prefix + ".conv1d.weight", normed, kernel, dilation, n))', "", ""]
+            '    return ttnn.add(gated, _dilated_causal_conv(model, prefix + ".conv1d.weight", normed, kernel, dilation, n, state, mode, at))', "", ""]
 
 
 def _describe_ple(function: str, settings: dict) -> str:
@@ -929,6 +960,9 @@ def _qsa_selection_mask(model, prefix, x, index_heads, index_dim, ratio, budget)
     pooled = _rms_norm(model, prefix + ".k_layernorm", _upload(model, pooled.reshape(1, 1, nb, index_dim), ttnn.TILE_LAYOUT))
     block_cos, block_sin = _qsa_rope_tables(model, torch.arange(nb) * ratio, index_dim)
     pooled = _to_host(model, _qsa_apply_rotary(model, pooled, block_cos, block_sin)).float().reshape(nb, index_dim)
+    mode, state, n = _cache_of(model, prefix)
+    if mode == "prefill":          # keep the pooled keys of the blocks the prompt completed and the raw keys of the unfinished block
+        state["pooled"], state["partial"] = pooled[: n // ratio], keys.reshape(seq, index_dim)[(n // ratio) * ratio: n]
     pk = _upload(model, pooled.t().reshape(1, 1, index_dim, nb).to(torch.bfloat16), ttnn.TILE_LAYOUT)
     scores = ttnn.multiply(ttnn.sum(ttnn.relu(ttnn.matmul(q, pk)), dim=1, keepdim=True), index_dim ** -0.5)
     const = _qsa_masks(model, seq, ratio)
@@ -941,22 +975,73 @@ def _qsa_selection_mask(model, prefix, x, index_heads, index_dim, ratio, budget)
     return ttnn.multiply(ttnn.subtract(visible, 1.0), 30000.0)
 
 
-def _qsa_attention(model, prefix, x, heads, kv_heads, hd, index_heads, index_dim, ratio, budget):
-    """The indexed attention at `prefix` on x [1, 1, S, hidden] (S a multiple of `ratio`): the block output [1, 1, S, hidden]."""
+def _qsa_step_mask(model, prefix, x, index_heads, index_dim, ratio, budget, pos, total):
+    """The additive attention mask [1, 1, 32, total] for the token at position `pos` (row 0; the other rows repeat it) from the indexer at `prefix`, from the state the prompt
+    and the earlier steps left: the pooled keys of the complete blocks and the raw keys of the unfinished block. Visible: the tokens of the top blocks and the tokens after the last
+    complete block. `total` is the key length, a multiple of 32; the columns after pos stay masked."""
     # MARK
+    mode, state, _n = _cache_of(model, prefix)
+    cos, sin = _qsa_rope_tables(model, torch.tensor([pos]), index_dim)
+    ip = _linear(model, prefix + ".index_qk_proj", x)
+    q = _qsa_split_heads(ttnn.slice(ip, (0, 0, 0, 0), (1, 1, 1, index_heads * index_dim)), index_heads, index_dim)
+    q = _qsa_apply_rotary(model, _qsa_norm_heads(model, prefix + ".q_layernorm", q), cos, sin)
+    key = _to_host(model, ttnn.slice(ip, (0, 0, 0, index_heads * index_dim), (1, 1, 1, (index_heads + 1) * index_dim))).float().reshape(1, index_dim)
+    state["partial"] = torch.cat([state["partial"], key], dim=0)
+    if state["partial"].shape[0] == ratio:          # this token completes a block: pool its keys, norm and rotate them at the block's first position
+        block = (pos + 1) // ratio - 1
+        pooled = state["partial"].mean(dim=0).to(torch.bfloat16)
+        pooled = _rms_norm(model, prefix + ".k_layernorm", _upload(model, pooled.reshape(1, 1, 1, index_dim), ttnn.TILE_LAYOUT))
+        block_cos, block_sin = _qsa_rope_tables(model, torch.tensor([block * ratio]), index_dim)
+        pooled = _to_host(model, _qsa_apply_rotary(model, pooled, block_cos, block_sin)).float().reshape(1, index_dim)
+        state["pooled"] = torch.cat([state["pooled"], pooled], dim=0)
+        state["partial"] = state["partial"][:0]
+    nb = state["pooled"].shape[0]
+    visible = torch.zeros(total)
+    visible[nb * ratio: pos + 1] = 1.0
+    if nb:
+        k = min(budget // ratio, nb)
+        pk = _upload(model, state["pooled"].t().reshape(1, 1, index_dim, nb).to(torch.bfloat16), ttnn.TILE_LAYOUT)
+        scores = ttnn.multiply(ttnn.sum(ttnn.relu(ttnn.matmul(q, pk)), dim=1, keepdim=True), index_dim ** -0.5)
+        values, indices = ttnn.topk(scores, k, dim=-1, largest=True, sorted=True, stable=True)
+        for b in _to_host(model, indices).reshape(-1)[:k].long().tolist():
+            visible[b * ratio: (b + 1) * ratio] = 1.0
+    mask = ((visible - 1.0) * 30000.0).reshape(1, 1, 1, total).repeat(1, 1, 32, 1)
+    return _upload(model, mask.to(torch.bfloat16), ttnn.TILE_LAYOUT)
+
+
+def _qsa_attention(model, prefix, x, heads, kv_heads, hd, index_heads, index_dim, ratio, budget):
+    """The indexed attention at `prefix` on x [1, 1, S, hidden] (S a multiple of `ratio`): the block output [1, 1, S, hidden]. With a decode cache (see `_cache_of`): "prefill" keeps the
+    keys and values of the n real rows in state["k"] and state["v"]; "step" runs x as one row at position n, adds its key and value to the cache and attends over all of it."""
+    # MARK
+    mode, state, n = _cache_of(model, prefix)
     seq = x.shape[2]
-    if len(x.shape) != 4 or x.shape[0] != 1 or x.shape[1] != 1 or seq % ratio:
+    if len(x.shape) != 4 or x.shape[0] != 1 or x.shape[1] != 1 or (mode != "step" and seq % ratio):
         raise ValueError(f"_qsa_attention needs x [1, 1, S, hidden] with S a multiple of {ratio}; got {list(x.shape)}")
     qg = ttnn.reshape(_linear(model, prefix + ".q_proj", x), (1, seq, heads, 2 * hd))
     q = ttnn.permute(ttnn.slice(qg, (0, 0, 0, 0), (1, seq, heads, hd)), (0, 2, 1, 3))
     gate = ttnn.reshape(ttnn.slice(qg, (0, 0, 0, hd), (1, seq, heads, 2 * hd)), (1, 1, seq, heads * hd))
     k = _qsa_norm_heads(model, prefix + ".k_norm", _qsa_split_heads(_linear(model, prefix + ".k_proj", x), kv_heads, hd))
     v = _qsa_split_heads(_linear(model, prefix + ".v_proj", x), kv_heads, hd)
-    cos, sin = _qsa_rope_tables(model, torch.arange(seq), hd)
+    cos, sin = _qsa_rope_tables(model, torch.arange(n, n + 1) if mode == "step" else torch.arange(seq), hd)
     q = _apply_rotary(model, _qsa_norm_heads(model, prefix + ".q_norm", q), cos, sin)
     k = _apply_rotary(model, k, cos, sin)
-    mask = _qsa_selection_mask(model, prefix + ".indexer", x, index_heads, index_dim, ratio, budget)
-    out = ttnn.transformer.scaled_dot_product_attention(q, k, v, attn_mask=mask, is_causal=False, scale=hd ** -0.5)
+    if mode == "step":
+        state["k"], state["v"] = ttnn.concat([state["k"], k], dim=2), ttnn.concat([state["v"], v], dim=2)
+        total = -(-(n + 1) // 32) * 32
+        mask = _qsa_step_mask(model, prefix + ".indexer", x, index_heads, index_dim, ratio, budget, n, total)
+        pad = total - (n + 1)
+        keys, values = state["k"], state["v"]
+        if pad:
+            keys = ttnn.concat([keys, _upload(model, torch.zeros(1, kv_heads, pad, hd, dtype=torch.bfloat16), ttnn.TILE_LAYOUT)], dim=2)
+            values = ttnn.concat([values, _upload(model, torch.zeros(1, kv_heads, pad, hd, dtype=torch.bfloat16), ttnn.TILE_LAYOUT)], dim=2)
+        q32 = ttnn.concat([q, _upload(model, torch.zeros(1, heads, 31, hd, dtype=torch.bfloat16), ttnn.TILE_LAYOUT)], dim=2)
+        out = ttnn.transformer.scaled_dot_product_attention(q32, keys, values, attn_mask=mask, is_causal=False, scale=hd ** -0.5)
+        out = ttnn.slice(out, (0, 0, 0, 0), (1, heads, 1, hd))
+    else:
+        if mode == "prefill":
+            state["k"], state["v"] = ttnn.slice(k, (0, 0, 0, 0), (1, kv_heads, n, hd)), ttnn.slice(v, (0, 0, 0, 0), (1, kv_heads, n, hd))
+        mask = _qsa_selection_mask(model, prefix + ".indexer", x, index_heads, index_dim, ratio, budget)
+        out = ttnn.transformer.scaled_dot_product_attention(q, k, v, attn_mask=mask, is_causal=False, scale=hd ** -0.5)
     joined = ttnn.reshape(ttnn.permute(out, (0, 2, 1, 3)), (1, 1, seq, heads * hd))
     return _linear(model, prefix + ".o_proj", ttnn.multiply(joined, ttnn.sigmoid(gate)))
 
@@ -1775,6 +1860,12 @@ def render(p: Plan) -> str:
           '    if model["n_devices"] > 1:',
           '        return ttnn.to_torch(t, mesh_composer=ttnn.ConcatMeshToTensor(model["mesh_device"], dim=0))[:1]',
           "    return ttnn.to_torch(t)", "", "",
+          "def _cache_of(model, name):",
+          '    """(mode, state, n) of the decode cache for the block `name`. mode is None when the model runs without a cache; "prefill" while a prompt is run and its state kept; "step" while one token is decoded from that state. state is the block\'s own dict. n is the number of real tokens of the prompt (prefill) or the position of the token being decoded (step)."""',
+          '    cache = model.get("cache")',
+          "    if cache is None:",
+          "        return None, None, 0",
+          '    return cache["mode"], cache["state"].setdefault(name, {}), cache["n"]', "", "",
           "def _linear(model, prefix, x):",
           '    """x [1, 1, S, in] @ W (+ bias) for the Linear module at `prefix`; W was uploaded as [in, out] in load."""',
           '    w = model["dev"][prefix + ".weight"]',
@@ -1963,15 +2054,19 @@ def render(p: Plan) -> str:
     L += [f'    logits = _linear(model, "{p.lm_head_path}", x)',
           "    out = _to_host(model, logits).float()",
           "    return out.reshape(-1, out.shape[-1])[n - 1, :VOCAB]", "", "",
-          f"LAYERS = {{{', '.join(f'{_lit(l.key)}: _layer_{l.key}' for l in p.layers)}}}", "", "",
-          "def prefill(model, ids):",
-          '    """Start the request afresh: run the prompt and return the logits for the next token."""',
-          '    model["ids"] = [int(t) for t in ids]',
-          '    return _forward(model, model["ids"])', "", "",
-          "def decode_step(model, token_id, position):",
-          '    """Append `token_id` at `position` and run the whole sequence again (no cache: the same device calls as prefill)."""',
-          '    model["ids"] = model["ids"][:position] + [int(token_id)]',
-          '    return _forward(model, model["ids"])', "", "",
+          f"LAYERS = {{{', '.join(f'{_lit(l.key)}: _layer_{l.key}' for l in p.layers)}}}", "", ""]
+    if p.cached_decode:
+        L += _cached_decode_text(p)
+    else:
+        L += ["def prefill(model, ids):",
+              '    """Start the request afresh: run the prompt and return the logits for the next token."""',
+              '    model["ids"] = [int(t) for t in ids]',
+              '    return _forward(model, model["ids"])', "", "",
+              "def decode_step(model, token_id, position):",
+              '    """Append `token_id` at `position` and run the whole sequence again (no cache: the same device calls as prefill)."""',
+              '    model["ids"] = model["ids"][:position] + [int(token_id)]',
+              '    return _forward(model, model["ids"])', "", ""]
+    L += [
           "def close(model):",
           '    """Free every device tensor load took. The check closes the device itself."""',
           '    for t in list(model["dev"].values()):',
@@ -1982,6 +2077,44 @@ def render(p: Plan) -> str:
           '    model["dev"].clear()',
           '    model["host"].clear()', ""]
     return "\n".join(L)
+
+
+def _cached_decode_text(p) -> list:
+    """`_forward_step`, `prefill` and `decode_step` of a port whose blocks all keep decode state (issue 759). `prefill` runs the prompt once and every block keeps what the next token
+    needs in model["cache"]["state"]; `decode_step` runs the one new token through the same layers with that state. A step at another position than the next one
+    (a rewind) runs the prompt again, which rebuilds the state."""
+    L = ["def _forward_step(model, token_id):",
+         '    """Logits for the token after `token_id`, from the state `prefill` and the earlier steps left: one row through every layer, as a float32 torch vector of VOCAB values."""',
+         '    ids = model["ids"]',
+         f'    x = _embedding(model, "{p.embed_path}", [token_id])']
+    if p.prelude_reason or p.prelude_family:
+        L.append("    x = _model_prelude(model, x, ids)")
+    L += ["    for i in range(N_LAYERS):",
+          "        x = LAYERS[LAYER_VARIANT[i]](model, i, x, ids, None, None)"]
+    if p.final_norm:
+        L.append(f'    x = _rms_norm(model, "{p.final_norm[0]}", x)')
+    for k in sorted({k for k, _ in p.epilogue} | set(p.model_blocks)):
+        L.append(f"    x = _model_{k}(model, x)")
+    L += [f'    logits = _linear(model, "{p.lm_head_path}", x)',
+          "    out = _to_host(model, logits).float()",
+          "    return out.reshape(-1, out.shape[-1])[0, :VOCAB]", "", "",
+          "def prefill(model, ids):",
+          '    """Start the request afresh: run the prompt, keep every block\'s decode state and return the logits for the next token."""',
+          '    model["ids"] = [int(t) for t in ids]',
+          '    model["cache"] = {"mode": "prefill", "n": len(model["ids"]), "state": {}}',
+          '    out = _forward(model, model["ids"])',
+          '    model["cache"]["mode"] = "step"',
+          "    return out", "", "",
+          "def decode_step(model, token_id, position):",
+          '    """Append `token_id` at `position` and return the logits for the token after it. At the next position this is one row through the layers with the kept state; at any other position the prompt is run again."""',
+          '    cache = model.get("cache")',
+          '    if cache is None or position != cache["n"]:',
+          '        return prefill(model, model["ids"][:position] + [int(token_id)])',
+          '    model["ids"] = model["ids"][:position] + [int(token_id)]',
+          '    out = _forward_step(model, int(token_id))',
+          '    cache["n"] = position + 1',
+          "    return out", "", ""]
+    return L
 
 
 def generate(*, config, construction, tensors, inventory=None, excerpts=None) -> tuple[str, Plan]:
