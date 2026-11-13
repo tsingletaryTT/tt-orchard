@@ -33,7 +33,6 @@ from pathlib import Path
 
 import numpy as np
 
-from orchard import safeio
 from orchard import audio_encoder_pin as enc_pin
 from orchard import pinned_files as pf
 
@@ -476,7 +475,14 @@ def log_spectrum_distance(ref: np.ndarray, cand: np.ndarray, n_fft: int = 1024, 
 
 
 def _number(value) -> bool:
-    return safeio.fits_float(value)
+    """True for an int (not a bool) or a float that a float can hold and that is not NaN or an infinity; never raises (issue 461). This file ships
+    inside audio packages, which carry no `safeio`, so it keeps its own copy of the shared `fits_float` helper."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))        # finite: ok an OverflowError from float(value) is caught below
+    except OverflowError:
+        return False
 
 
 def bars_from_floor(floor_report: dict, margin: float = 3.0) -> dict:

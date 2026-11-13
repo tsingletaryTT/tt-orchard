@@ -33,10 +33,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import math
 import statistics
 from pathlib import Path
-
-from orchard import safeio
 
 WARMUP_RUNS = 1
 MIN_REPEATS = 3
@@ -57,7 +56,14 @@ class ResidentError(Exception):
 
 
 def _is_number(v) -> bool:
-    return safeio.fits_float(v)
+    """True for an int (not a bool) or a float that a float can hold and that is not NaN or an infinity; never raises (issue 461). This file ships
+    inside audio packages, which carry no `safeio`, so it keeps its own copy of the shared `fits_float` helper."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(v))        # finite: ok an OverflowError from float(v) is caught below
+    except OverflowError:
+        return False
 
 
 def spread(values) -> dict:
