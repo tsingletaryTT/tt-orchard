@@ -1,0 +1,2 @@
+target = "0.9.183"
+summary = "README, site and CLAUDE.md status updated for 2026-11-10 to 2026-11-13: generated Qwen4 port, experts split over chips, plan command, stage 2 evidence, test counts."

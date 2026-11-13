@@ -254,6 +254,50 @@ def test_delta_gate_names_what_is_missing(tmp_path):
     assert not gate_delta(tmp_path / "nothing", tmp_path).ok        # no delta.json at all
 
 
+def _run_start(run, inputs, event="run_start"):
+    """A ledger whose first entry is `event` with these inputs, written the way the supervisor writes it."""
+    from orchard.ledger import Ledger
+    with Ledger(run / "ledger.jsonl") as led:
+        led.append(event, None, model="Altworld/Hemmingway-1", inputs=inputs)
+
+
+def test_delta_gate_holds_stage_0_to_the_operators_pinned_nearest_model(tmp_path):
+    """Issue 559: `bringup --base <id> --nearest-why` records `nearest_pin` in run_start. Stage 0 must compare against that model."""
+    sd, run = stage(tmp_path, 0, "delta.json", {**GOOD_DELTA, "nearest_model": "Qwen/Qwen3-1.7B@" + "a" * 40})
+    _run_start(run, {"nearest_pin": "Qwen/Qwen3-0.6B", "nearest_pin_why": "same layout"})
+    g = gate_delta(sd, run)
+    assert not g.ok and any("pinned Qwen/Qwen3-0.6B" in r for r in g.reasons), g.reasons
+
+
+@pytest.mark.parametrize("nearest", ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B@" + "a" * 40])
+def test_delta_gate_accepts_the_pinned_nearest_model_with_or_without_a_revision(tmp_path, nearest):
+    sd, run = stage(tmp_path, 0, "delta.json", {**GOOD_DELTA, "nearest_model": nearest})
+    _run_start(run, {"nearest_pin": "Qwen/Qwen3-0.6B", "nearest_pin_why": "same layout"})
+    g = gate_delta(sd, run)
+    assert g.ok, g.reasons
+
+
+def test_delta_gate_without_a_pin_leaves_the_nearest_model_to_stage_0(tmp_path):
+    sd, run = stage(tmp_path, 0, "delta.json", GOOD_DELTA)
+    _run_start(run, {"model": "/snap"})
+    assert gate_delta(sd, run).ok
+
+
+def test_delta_gate_reads_the_pin_only_from_run_start(tmp_path):
+    """A later entry cannot add a pin (an agent cannot write the ledger, but the rule is still the supervisor's run_start)."""
+    sd, run = stage(tmp_path, 0, "delta.json", GOOD_DELTA)
+    _run_start(run, {"nearest_pin": "Qwen/Qwen3-0.6B"}, event="decision")
+    assert gate_delta(sd, run).ok
+
+
+@pytest.mark.parametrize("pin", [None, 3, ["Qwen/Qwen3-0.6B"], {"repo": "x"}, ""])
+def test_delta_gate_names_a_malformed_pin_and_does_not_crash(tmp_path, pin):
+    sd, run = stage(tmp_path, 0, "delta.json", GOOD_DELTA)
+    _run_start(run, {"nearest_pin": pin})
+    g = gate_delta(sd, run)
+    assert not g.ok and any("nearest_pin" in r for r in g.reasons), g.reasons
+
+
 def test_evidence_outside_the_run_directory_does_not_count(tmp_path):
     outside = write(tmp_path, "outside.txt")
     sd, run = stage(tmp_path, 0, "delta.json", GOOD_DELTA)

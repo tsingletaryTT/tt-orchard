@@ -83,7 +83,8 @@ a new request and expects prefill to reset that request's state
 `ttnn.<op>(` calls: an `import ttnn` line does not count. The check counts the calls the port makes (issue 541). It fails the run, before
 the device is used, when no file has a reachable `ttnn.matmul`, `ttnn.linear` or similar call. It fails the first prefill when the pass
 makes fewer matmul-family calls than the model has layers (one per layer is the floor). It fails a decode step that makes fewer, unless
-the step replays a captured trace. It fails the run after `load` when most of the weight elements are still host torch or numpy tensors.
+the step replays a captured trace whose capture made the floor's worth of calls between `ttnn.begin_trace_capture` and a successful
+`ttnn.end_trace_capture`, and the replay passes that trace's id (issue 547). It fails the run after `load` when most of the weight elements are still host torch or numpy tensors.
 A port that computes in torch on the host and only imports `ttnn` therefore fails with a message that says to upload the weights with
 `ttnn.from_torch(..., device=mesh_device)` and run the projections with `ttnn.linear` or `ttnn.matmul`. The record keeps the counts under
 `device_ops`, and the gate checks them again.

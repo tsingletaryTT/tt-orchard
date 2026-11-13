@@ -191,6 +191,7 @@ def test_a_port_that_calls_ttnn_once_per_layer_passes_and_the_record_shows_the_c
     ops = json.loads((stage / "evidence" / "port-check.json").read_text())["device_ops"]
     assert ops["floor"] == 4 and ops["layers"] == 4 and ops["prefill_matmul_calls"] == 4 and ops["decode_matmul_calls_max"] == 4
     assert ops["top_calls"]["ttnn.linear"] > 4 and ops["static_matmul_calls"] >= 1
+    assert ops["trace_captures"] == []          # issue 547: the field is always written, empty when the port captured no trace
     write_result(stage)
     g = gate_full_port(stage, run)
     assert g.ok, g.reasons
@@ -263,15 +264,235 @@ def test_a_decode_that_never_uses_the_device_fails_after_the_teacher_forced_loop
     assert port_repair.parse_failure(done.stdout)["op"] == "decode"
 
 
+def traced_port(load: str, decode: str = "    ttnn.execute_trace(model['device'], TRACE[0])", prefill_linears: int = 4) -> str:
+    """A port for the trace tests (issue 547): `load` is the body of load() (it may set TRACE[0] and TRACE[1]), prefill makes
+    `prefill_linears` linear calls, and decode_step runs `decode` and then answers the way HONEST does."""
+    return f'''
+import ttnn
+VOCAB = 200
+TRACE = [None, None]
+def _peak(i):
+    v = [0.0] * VOCAB
+    v[i] = 1.0
+    return v
+def _linears(n):
+    for _ in range(n):
+        ttnn.linear(None, None)
+def load(model_dir, mesh_device):
+{load}
+    return {{"dir": model_dir, "device": mesh_device}}
+def prefill(model, ids):
+    _linears({prefill_linears})
+    return _peak(100)
+def decode_step(model, token_id, position):
+{decode}
+    return _peak(token_id + 1)
+def close(model):
+    pass
+'''
+
+
+CAPTURE_4 = ("    TRACE[0] = ttnn.begin_trace_capture(mesh_device)\n    _linears(4)\n"
+             "    ttnn.end_trace_capture(mesh_device, TRACE[0])")
+
+
+def trace_run(tmp_path, port, layers=4):
+    run, stage = with_layers(tmp_path, port, layers=layers)
+    return run_template(tmp_path, run, stage), stage
+
+
 def test_a_decode_that_replays_a_trace_captured_during_load_passes(tmp_path):
-    # load runs the capture pass (two linear calls), prefill makes two, every decode step only replays the trace.
-    port = port_with(LINEARS.format(n=2), load_extra="ttnn.linear(None, None)\n    ttnn.linear(None, None)")
-    port = port.replace("def decode_step(model, token_id, position):\n" + LINEARS.format(n=2),
-                        "def decode_step(model, token_id, position):\n    ttnn.execute_trace(None, None)")
-    run, stage = with_layers(tmp_path, port.replace('{"dir": model_dir, "device": mesh_device, "w": W}', '{"dir": model_dir, "device": mesh_device}'), layers=2)
-    done = run_template(tmp_path, run, stage)
+    # load captures a pass of four linear calls, prefill makes four, every decode step only replays that trace.
+    done, stage = trace_run(tmp_path, traced_port(CAPTURE_4))
     assert done.returncode == 0, done.stdout
-    assert json.loads((stage / "evidence" / "port-check.json").read_text())["device_ops"]["decode_trace_replays"] >= 1
+    ops = json.loads((stage / "evidence" / "port-check.json").read_text())["device_ops"]
+    assert ops["decode_trace_replays"] >= 1
+    assert ops["trace_captures"] == [{"id": 1, "matmul_calls": 4, "decode_replays": ops["decode_trace_replays"]}]
+
+
+def test_a_decode_that_replays_an_unrelated_empty_trace_is_refused_even_when_the_run_total_is_high(tmp_path):
+    """Issue 547, the case from the review of PR 543: eight matmuls outside any capture (four in load, four in prefill) and a decode that
+    replays a trace that holds none. The old rule (any replay plus a run total of twice the floor) passed it."""
+    load = ("    _linears(4)\n    TRACE[0] = ttnn.begin_trace_capture(mesh_device)\n"
+            "    ttnn.end_trace_capture(mesh_device, TRACE[0])")
+    done, _ = trace_run(tmp_path, traced_port(load))
+    assert done.returncode == 2 and "no decode step made as many as 4" in done.stdout, done.stdout
+    assert "a replayed trace whose capture made at least 4" in done.stdout
+
+
+def test_a_replay_of_another_trace_than_the_full_capture_is_refused(tmp_path):
+    load = CAPTURE_4 + ("\n    TRACE[1] = ttnn.begin_trace_capture(mesh_device)\n    ttnn.end_trace_capture(mesh_device, TRACE[1])")
+    done, _ = trace_run(tmp_path, traced_port(load, decode="    ttnn.execute_trace(model['device'], TRACE[1])"))
+    assert done.returncode == 2 and "no decode step made as many as 4" in done.stdout, done.stdout
+
+
+def test_a_capture_that_never_ended_does_not_excuse_the_decode(tmp_path):
+    load = "    TRACE[0] = ttnn.begin_trace_capture(mesh_device)\n    _linears(4)"
+    done, _ = trace_run(tmp_path, traced_port(load))
+    assert done.returncode == 2 and "no decode step made as many as 4" in done.stdout, done.stdout
+
+
+def test_a_capture_whose_end_failed_does_not_excuse_the_decode(tmp_path):
+    load = ("    class Bad:\n        fail_end = True\n    TRACE[0] = ttnn.begin_trace_capture(mesh_device)\n    _linears(4)\n"
+            "    try:\n        ttnn.end_trace_capture(Bad(), TRACE[0])\n    except RuntimeError:\n        pass")
+    done, _ = trace_run(tmp_path, traced_port(load))
+    assert done.returncode == 2 and "no decode step made as many as 4" in done.stdout, done.stdout
+
+
+def test_a_capture_below_the_floor_does_not_excuse_the_decode(tmp_path):
+    load = ("    TRACE[0] = ttnn.begin_trace_capture(mesh_device)\n    _linears(3)\n"
+            "    ttnn.end_trace_capture(mesh_device, TRACE[0])\n    _linears(5)")
+    done, _ = trace_run(tmp_path, traced_port(load))
+    assert done.returncode == 2 and "no decode step made as many as 4" in done.stdout, done.stdout
+
+
+def test_trace_ids_passed_by_keyword_are_matched(tmp_path):
+    load = ("    TRACE[0] = ttnn.begin_trace_capture(mesh_device=mesh_device)\n    _linears(4)\n"
+            "    ttnn.end_trace_capture(mesh_device=mesh_device, trace_id=TRACE[0])")
+    done, _ = trace_run(tmp_path, traced_port(load, decode="    ttnn.execute_trace(mesh_device=model['device'], trace_id=TRACE[0], blocking=False)"))
+    assert done.returncode == 0, done.stdout
+
+
+def load_template(tmp_path):
+    """The template as a module (it sits under a `stages` directory, since it finds the run directory from its own path)."""
+    import importlib.util
+    import shutil
+    where = tmp_path / "tpl" / "stages" / "2"
+    where.mkdir(parents=True)
+    shutil.copy(full_port.TEMPLATE, where / "port_check.py")
+    spec = importlib.util.spec_from_file_location("port_check_trace_test", where / "port_check.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class Ids:
+    """begin_trace_capture that hands out the ids it is given, in order (the runtime may reuse an id after release_trace)."""
+
+    def __init__(self, *ids):
+        self.ids = list(ids)
+
+    def __call__(self, device, **kw):
+        return self.ids.pop(0)
+
+
+def test_the_worker_trace_table_starts_a_capture_again_under_a_reused_id(tmp_path):
+    pc = load_template(tmp_path)
+    begin, end = pc.Counted(Ids(7, 7), "ttnn.begin_trace_capture"), pc.Counted(lambda d, t, **kw: None, "ttnn.end_trace_capture")
+    linear, replay = pc.Counted(lambda *a, **k: None, "ttnn.linear"), pc.Counted(lambda d, t, **kw: None, "ttnn.execute_trace")
+    tid = begin(None)
+    for _ in range(4):
+        linear(None, None)
+    end(None, tid)
+    assert pc.take_traces()["captures"] == [[7, 4]]
+    tid = begin(None)                     # the same id again, captured with no matmul
+    end(None, tid)
+    replay(None, tid)
+    got = pc.take_traces()
+    assert got == {"captures": [[7, 0]], "replays": [[7, 0, 1]]}      # the replay is of the empty pass
+    assert pc.take_traces()["replays"] == []        # the replays are per request; the captures stay
+
+
+def test_the_worker_trace_table_ignores_ids_it_cannot_read_and_is_bounded(tmp_path):
+    pc = load_template(tmp_path)
+    end, replay = pc.Counted(lambda d, t, **kw: None, "ttnn.end_trace_capture"), pc.Counted(lambda d, t, **kw: None, "ttnn.execute_trace")
+    ids = [None, "x", object(), True, -1, 2 ** 40] + list(range(pc.TRACE_MAX + 5))
+    begin = pc.Counted(Ids(*ids), "ttnn.begin_trace_capture")
+    for _ in ids:
+        tid = begin(None)
+        end(None, tid)
+        replay(None, tid)
+    got = pc.take_traces()
+    assert len(got["captures"]) == pc.TRACE_MAX and all(type(i) is int and 0 <= i < 2 ** 32 for i, _ in got["captures"])
+    assert len(got["replays"]) <= pc.TRACE_MAX
+
+
+def worker_ops(pc, *ids):
+    return (pc.Counted(Ids(*ids), "ttnn.begin_trace_capture"), pc.Counted(lambda d, t, **kw: None, "ttnn.end_trace_capture"),
+            pc.Counted(lambda *a, **k: None, "ttnn.linear"), pc.Counted(lambda d, t, **kw: None, "ttnn.execute_trace"))
+
+
+def test_an_end_that_names_another_id_records_no_capture(tmp_path):
+    pc = load_template(tmp_path)
+    begin, end, linear, replay = worker_ops(pc, 7)
+    begin(None)
+    for _ in range(4):
+        linear(None, None)
+    end(None, 8)
+    replay(None, 8)
+    assert pc.take_traces() == {"captures": [], "replays": []}
+
+
+def test_a_capture_whose_end_raised_is_not_recorded_by_a_later_end(tmp_path):
+    pc = load_template(tmp_path)
+    begin, _, linear, replay = worker_ops(pc, 7)
+    calls = []
+
+    def end_fn(d, t, **kw):
+        calls.append(t)
+        if len(calls) == 1:
+            raise RuntimeError("capture failed")
+    end = pc.Counted(end_fn, "ttnn.end_trace_capture")
+    tid = begin(None)
+    for _ in range(4):
+        linear(None, None)
+    with pytest.raises(RuntimeError):
+        end(None, tid)
+    end(None, tid)                         # the capture already failed; a second end does not revive it
+    assert pc.take_traces()["captures"] == []
+
+
+def test_a_new_capture_under_a_used_id_drops_the_old_pass_even_before_it_ends(tmp_path):
+    pc = load_template(tmp_path)
+    begin, end, linear, replay = worker_ops(pc, 7, 7)
+    tid = begin(None)
+    for _ in range(4):
+        linear(None, None)
+    end(None, tid)
+    begin(None)                            # captured again and never ended
+    replay(None, 7)
+    assert pc.take_traces() == {"captures": [], "replays": []}
+
+
+def test_a_bool_or_a_numeric_string_is_not_a_trace_id(tmp_path):
+    pc = load_template(tmp_path)
+    begin, end, linear, replay = worker_ops(pc, True, "5", 3.0)
+    for _ in range(3):
+        end(None, begin(None))
+    assert pc.take_traces()["captures"] == [] and pc.TRACES == {}
+
+
+def test_the_worker_table_itself_stays_within_its_bound(tmp_path):
+    pc = load_template(tmp_path)
+    n = pc.TRACE_MAX + 5
+    begin, end, linear, replay = worker_ops(pc, *range(n))
+    for _ in range(n):
+        tid = begin(None)
+        end(None, tid)
+        replay(None, tid)
+    assert len(pc.TRACES) == pc.TRACE_MAX and len(pc.TRACE_REPLAYS) <= pc.TRACE_MAX
+
+
+def test_the_parent_counts_replays_only_in_decode_steps(tmp_path):
+    pc = load_template(tmp_path)
+    ops = pc.DeviceOps(4, 4)
+    ops.add_traces({"captures": [[1, 4]], "replays": [[1, 4, 3]]})               # a load or prefill reply
+    assert ops.full_replays() == 0 and ops.record()["trace_captures"] == [{"id": 1, "matmul_calls": 4, "decode_replays": 0}]
+    ops.add_traces({"captures": [[1, 4]], "replays": [[1, 4, 2]]}, decode=True)
+    assert ops.full_replays() == 2
+
+
+@pytest.mark.parametrize("traces", [None, [], "x", {"captures": "x"}, {"captures": [[1]]}, {"captures": [["1", 4]]},
+                                    {"captures": [[1, -1]]}, {"captures": [[1, 10 ** 20]]}, {"captures": [[True, 4]]},
+                                    {"replays": [[1, "2"]]}, {"captures": [[1, 4]] * 1000}])
+def test_the_parent_takes_only_well_formed_trace_rows(tmp_path, traces):
+    pc = load_template(tmp_path)
+    ops = pc.DeviceOps(4, 4)
+    ops.add_traces(traces, decode=True)
+    rec = ops.record()["trace_captures"]
+    assert isinstance(rec, list) and len(rec) <= pc.TRACE_MAX
+    assert all(type(r["id"]) is int and type(r["matmul_calls"]) is int and r["matmul_calls"] >= 0 for r in rec)
+    assert not any(r["matmul_calls"] >= 4 and r["decode_replays"] for r in rec)
 
 
 def test_trace_replays_with_no_captured_pass_anywhere_do_not_excuse_the_decode(tmp_path):
@@ -305,7 +526,8 @@ def test_a_floor_of_one_applies_when_the_config_names_no_layer_count(tmp_path):
 
 def good_ops(**over):
     return {"floor": 4, "layers": 4, "prefill_matmul_calls": 4, "decode_matmul_calls_max": 4, "decode_trace_replays": 0,
-            "matmul_calls_total": 200, "static_matmul_calls": 3, "weights": {"host_elements": 0, "device_elements": 5000}, "top_calls": {}, **over}
+            "matmul_calls_total": 200, "static_matmul_calls": 3, "weights": {"host_elements": 0, "device_elements": 5000}, "top_calls": {},
+            "trace_captures": [], **over}
 
 
 def gate_reasons(tmp_path, ops, **kw):
@@ -334,8 +556,71 @@ def test_the_gate_refuses_each_record_that_does_not_show_device_work(tmp_path, o
     assert not g.ok and any(word in r for r in g.reasons), g.reasons
 
 
-def test_trace_replays_stand_for_the_decode_calls_when_the_whole_run_made_the_captured_pass(tmp_path):
-    assert gate_reasons(tmp_path, good_ops(decode_matmul_calls_max=0, decode_trace_replays=30, matmul_calls_total=8)).ok
+def test_trace_replays_stand_for_the_decode_calls_when_the_replayed_capture_met_the_floor(tmp_path):
+    ops = good_ops(decode_matmul_calls_max=0, decode_trace_replays=30, matmul_calls_total=8,
+                   trace_captures=[{"id": 1, "matmul_calls": 4, "decode_replays": 30}])
+    g = gate_reasons(tmp_path, ops)
+    assert g.ok, g.reasons
+
+
+@pytest.mark.parametrize("captures", [
+    [],                                                                   # replays of nothing captured (the PR 543 review case)
+    [{"id": 1, "matmul_calls": 0, "decode_replays": 30}],                  # the replayed trace holds no matmul
+    [{"id": 1, "matmul_calls": 3, "decode_replays": 30}],                  # below the floor of 4
+    [{"id": 1, "matmul_calls": 4, "decode_replays": 0}, {"id": 2, "matmul_calls": 0, "decode_replays": 30}],   # the full one is not replayed
+])
+def test_the_gate_refuses_replays_that_no_full_capture_backs_even_with_a_high_run_total(tmp_path, captures):
+    """Issue 547: the run total no longer stands for a replayed pass; the replayed capture itself must meet the floor."""
+    ops = good_ops(decode_matmul_calls_max=0, decode_trace_replays=30, matmul_calls_total=200, trace_captures=captures)
+    g = gate_reasons(tmp_path, ops)
+    assert not g.ok and any("no decode step" in r for r in g.reasons), g.reasons
+
+
+def test_a_record_without_trace_captures_cannot_excuse_its_decode_with_replays(tmp_path):
+    ops = good_ops(decode_matmul_calls_max=0, decode_trace_replays=30, matmul_calls_total=200)
+    del ops["trace_captures"]
+    g = gate_reasons(tmp_path, ops)
+    assert not g.ok and any("trace_captures" in r for r in g.reasons), g.reasons
+
+
+def test_a_record_without_trace_captures_still_passes_when_its_decode_met_the_floor(tmp_path):
+    ops = good_ops()
+    del ops["trace_captures"]
+    g = gate_reasons(tmp_path, ops)
+    assert g.ok, g.reasons
+
+
+@pytest.mark.parametrize("captures", [None, "x", 5, {"id": 1}, [None], [{"id": "1", "matmul_calls": 4, "decode_replays": 1}],
+                                      [{"id": 1, "matmul_calls": -1, "decode_replays": 1}], [{"id": 1, "matmul_calls": 4}],
+                                      [{"id": 1, "matmul_calls": 4, "decode_replays": 10 ** 20}],
+                                      [{"id": True, "matmul_calls": 4, "decode_replays": 1}],
+                                      [{"id": i, "matmul_calls": 4, "decode_replays": 1} for i in range(100)]])
+def test_a_malformed_trace_captures_field_is_refused(tmp_path, captures):
+    g = gate_reasons(tmp_path, good_ops(trace_captures=captures))
+    assert not g.ok and any("trace_captures" in r for r in g.reasons), g.reasons
+
+
+def test_a_full_capture_does_not_meet_a_floor_the_checkpoints_config_raises(tmp_path):
+    from test_full_port import build
+    import hashlib
+    snap = tmp_path / "snapshot_dir"
+    snap.mkdir()
+    (snap / "config.json").write_text(json.dumps({"num_hidden_layers": 40}))
+    ops = good_ops(prefill_matmul_calls=40, decode_matmul_calls_max=0, decode_trace_replays=5,
+                   trace_captures=[{"id": 1, "matmul_calls": 4, "decode_replays": 5}])
+    stage_dir, run = build(tmp_path, record={"device_ops": ops})
+    (stage_dir / "port_check_config.json").write_text(json.dumps({"model_snapshot": str(snap)}))
+    path = stage_dir / "evidence" / "port-check.json"
+    rec = json.loads(path.read_text())
+    rec["config"]["sha256"] = hashlib.sha256((stage_dir / "port_check_config.json").read_bytes()).hexdigest()
+    path.write_text(json.dumps(rec))
+    out = stage_dir / "evidence" / "hw-test-output.txt"
+    out.write_text(f"PORT_CHECK_SHA256 {hashlib.sha256(path.read_bytes()).hexdigest()}\n")
+    marker = json.loads((stage_dir / "test-result.json").read_text())
+    marker["output"]["sha256"] = hashlib.sha256(out.read_bytes()).hexdigest()
+    (stage_dir / "test-result.json").write_text(json.dumps(marker))
+    g = gate_full_port(stage_dir, run)
+    assert not g.ok and any("no decode step" in r for r in g.reasons), g.reasons
 
 
 @pytest.mark.parametrize("ops", [None, [], "x", 5])

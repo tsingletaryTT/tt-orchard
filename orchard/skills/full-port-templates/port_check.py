@@ -33,7 +33,8 @@ and host torch. The "chip run" computed on the CPU. This file now counts, and fa
   * the first prefill makes fewer matmul-family ttnn calls than the floor, one per decoder layer of the checkpoint's config (counted at run
     time: the worker puts a counting proxy in `sys.modules["ttnn"]` before it imports the port module, so a mention, a comment, an unused
     import or a function nobody calls adds nothing);
-  * no decode step makes that many (a step that replays a captured ttnn trace counts as the captured pass);
+  * no decode step makes that many (a step that replays a captured ttnn trace counts as the captured pass, but only when that capture ended
+    with end_trace_capture and itself made the floor's worth of calls; issue 547);
   * after `load`, the port's model holds more weight elements as host torch or numpy tensors than as ttnn tensors.
 The counts go into the record as `device_ops` and the gate (orchard/full_port.py) checks them again. Limits: the count is of calls made, so a
 port that calls ttnn.linear on a dummy tensor and computes elsewhere passes the count; the weight scan sees only what `load` returned and the
@@ -116,6 +117,16 @@ MIN_LOAD_S = 1e-6                # a load the clock cannot resolve is reported a
 PREFIX = "port| "
 COUNTS = collections.Counter()   # the worker's tally of ttnn calls since the last request began (see CountingModule)
 OPS_KEY = "ops"                  # the worker's reply field that carries the tally
+TRACES_KEY = "traces"            # the worker's reply field that carries its trace table (issue 547)
+TRACE_MAX = 64                   # trace ids kept in the worker's table, in a reply and in the record
+TRACE_ID_MAX = 2 ** 32           # a trace id is a uint32 in the runtime (ttnn.MeshTraceId); anything else is not read
+# The worker's trace table (issue 547). TRACES holds {trace id: matmul-family calls made while it was captured} for each capture that ended
+# with a successful end_trace_capture; it lasts across requests, since a port captures in load and replays in decode. TRACE_OPEN is the
+# capture in progress. TRACE_REPLAYS counts this request's execute_trace calls by (trace id, the matmul calls of that id's capture at the
+# time of the replay), so a replay is judged by the pass it replayed, even when the id is captured again later.
+TRACES: dict = {}
+TRACE_OPEN = {"id": None, "matmuls": 0}
+TRACE_REPLAYS = collections.Counter()
 DEVICE_OPS_FAILURE = "device-ops"          # the `op` of a failure of the device-op gate (orchard/port_repair.py reads it from the failure line)
 MAX_OP_NAMES = 60                # names kept per request's tally
 SCAN_NODES = 100_000             # objects visited by the weight scan
@@ -466,7 +477,28 @@ class Counted:
 
     def __call__(self, *args, **kwargs):
         COUNTS[self._name] += 1
-        return self._fn(*args, **kwargs)
+        leaf = self._name.rsplit(".", 1)[-1]
+        if TRACE_OPEN["id"] is not None and is_matmul(self._name):
+            TRACE_OPEN["matmuls"] += 1             # a call made while a trace is captured belongs to that capture
+        if leaf == "end_trace_capture":
+            key, opened, made = trace_key(trace_arg(args, kwargs)), TRACE_OPEN["id"], TRACE_OPEN["matmuls"]
+            TRACE_OPEN.update(id=None, matmuls=0)   # closed before the call: a capture whose end raises is never recorded
+            result = self._fn(*args, **kwargs)
+            if key is not None and key == opened and (key in TRACES or len(TRACES) < TRACE_MAX):
+                TRACES[key] = made
+            return result
+        result = self._fn(*args, **kwargs)
+        if leaf == "begin_trace_capture":
+            key = trace_key(result)
+            TRACES.pop(key, None)                  # the runtime may hand an id out again after release_trace: its old pass is gone
+            TRACE_OPEN.update(id=key, matmuls=0)
+        elif leaf == "execute_trace":
+            key = trace_key(trace_arg(args, kwargs))
+            if key is not None and key in TRACES:
+                row = (key, TRACES[key])
+                if row in TRACE_REPLAYS or len(TRACE_REPLAYS) < TRACE_MAX:
+                    TRACE_REPLAYS[row] += 1
+        return result
 
     def __getattr__(self, attr):                 # `ttnn.matmul.golden_function` and the like
         if attr in ("_fn", "_name"):
@@ -682,6 +714,34 @@ def take_counts() -> dict:
     return out
 
 
+def trace_key(value):
+    """A trace id as an int from 0 to TRACE_ID_MAX - 1, or None. The runtime's ttnn.MeshTraceId has __int__ and __eq__ and no hash
+    (ttnn-nanobind/operations/trace.cpp), and an older runtime returned a plain int, so int() reads both. A bool, a string, a float or
+    anything int() refuses is not an id."""
+    if value is None or isinstance(value, (bool, str, bytes, float)):
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return n if 0 <= n < TRACE_ID_MAX else None
+
+
+def trace_arg(args, kwargs):
+    """The trace id of end_trace_capture(mesh_device, trace_id, ...) or execute_trace(mesh_device, trace_id, ...), given by position or as
+    `trace_id=`."""
+    return args[1] if len(args) >= 2 else kwargs.get("trace_id")
+
+
+def take_traces() -> dict:
+    """The worker's trace table for a reply: every capture that ended, as [id, matmul calls], and this request's replays of those captures,
+    as [id, matmul calls of the capture replayed, replays]. The replays are cleared; the captures stay."""
+    out = {"captures": [[k, v] for k, v in list(TRACES.items())[:TRACE_MAX]],
+           "replays": [[k, m, n] for (k, m), n in list(TRACE_REPLAYS.items())[:TRACE_MAX]]}
+    TRACE_REPLAYS.clear()
+    return out
+
+
 def weight_kind(x):
     """("host" or "device", element count, shape, kind) for a tensor-like object, else None. `kind` is "torch", "numpy" or "ttnn". Torch and
     numpy tensors are host. A ttnn tensor is device unless it reports a storage type that is not on the device. Read from the type's module and
@@ -873,19 +933,22 @@ def worker(read_fd: int, write_fd: int) -> int:
                 reply({"ok": True})
             elif op == "load":           # timed: only the port's own load
                 COUNTS.clear()
+                TRACE_REPLAYS.clear()
                 model = mod.load(req["model_dir"], device)
-                reply({"ok": True, OPS_KEY: take_counts()})
+                reply({"ok": True, OPS_KEY: take_counts(), TRACES_KEY: take_traces()})
             elif op == "scan":           # untimed, right after `load`: where the port's weights live
                 reply({"ok": True, "weights": scan_weights(model, vars(mod), labels=["model", "port_module"])})
             elif op == "prefill":
                 COUNTS.clear()
+                TRACE_REPLAYS.clear()
                 out = mod.prefill(model, [int(i) for i in req["ids"]])
-                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(),
+                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
                        **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "decode":
                 COUNTS.clear()
+                TRACE_REPLAYS.clear()
                 out = mod.decode_step(model, int(req["token"]), int(req["position"]))
-                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(),
+                reply({"ok": True, "id": argmax(out), OPS_KEY: take_counts(), TRACES_KEY: take_traces(),
                        **({"lp": logprob(out, int(req["target"]))} if "target" in req else {})})
             elif op == "layers":         # optional, untimed, after the comparison: per-layer hidden states for `layer-diff`
                 reply(save_layers(mod, model, [int(i) for i in req["ids"]]))
@@ -1023,6 +1086,8 @@ class DeviceOps:
         self.prefill_matmul = None
         self.decode_matmul_max = 0
         self.decode_trace_replays = 0
+        self.captures = {}                           # {trace id: matmul calls}: the worker's latest table of captures that ended
+        self.capture_replays = collections.Counter()  # {(trace id, matmul calls of the capture replayed): decode replays}
         self.total = collections.Counter()
         self.weights = None
         self.static_matmul = None
@@ -1183,22 +1248,60 @@ class DeviceOps:
         self.decode_matmul_max = max(self.decode_matmul_max, self.matmuls(ops))
         self.decode_trace_replays += self.replays(ops)
 
+    @staticmethod
+    def _trace_rows(rows, width: int) -> list:
+        """The worker's trace rows that are lists of `width` whole numbers: an id from 0 to TRACE_ID_MAX - 1, then counts from 0 to 10**9.
+        At most TRACE_MAX rows are read; anything else is dropped."""
+        if not isinstance(rows, list):
+            return []
+        return [tuple(r) for r in rows[:TRACE_MAX]
+                if isinstance(r, list) and len(r) == width and all(type(x) is int for x in r)
+                and 0 <= r[0] < TRACE_ID_MAX and all(0 <= x <= 10 ** 9 for x in r[1:])]
+
+    def add_traces(self, traces, decode: bool = False) -> None:
+        """The worker's trace table after a request (issue 547). Replays count only in decode steps."""
+        if not isinstance(traces, dict):
+            return
+        self.captures = dict(self._trace_rows(traces.get("captures"), 2))
+        if decode:
+            for k, m, n in self._trace_rows(traces.get("replays"), 3):
+                if (k, m) in self.capture_replays or len(self.capture_replays) < TRACE_MAX:
+                    self.capture_replays[(k, m)] += n
+
+    def trace_record(self) -> list:
+        """The record's trace_captures: each capture a decode step replayed, with the matmul calls of the pass it replayed, then the captures in
+        the worker's last table that no decode step replayed. At most TRACE_MAX rows, the replayed ones first."""
+        rows = [{"id": k, "matmul_calls": m, "decode_replays": n} for (k, m), n in sorted(self.capture_replays.items())]
+        seen = set(self.capture_replays)
+        rows += [{"id": k, "matmul_calls": m, "decode_replays": 0} for k, m in sorted(self.captures.items()) if (k, m) not in seen]
+        return rows[:TRACE_MAX]
+
+    def full_replays(self) -> int:
+        """Decode replays of a capture that ended and made the floor's worth of matmul calls."""
+        return sum(n for (k, m), n in self.capture_replays.items() if m >= self.floor)
+
     def check_decode(self) -> None:
-        """Some decode step must make the floor's worth of matmul calls. A step that replays a captured trace makes none itself: the captured
-        pass (counted wherever it ran) must have made the floor's worth, which the total over the whole run shows."""
+        """Some decode step must make the floor's worth of matmul calls. A step that replays a captured trace makes none itself, so it counts
+        when the trace it replayed is a capture that ended with end_trace_capture and made the floor's worth of calls while it was captured
+        (issue 547). The run's total no longer stands for the replayed pass: eight calls outside any capture and a replay of an empty trace
+        passed that rule."""
         if self.decode_matmul_max >= self.floor:
             return
-        if self.decode_trace_replays and self.matmuls(self.total) >= 2 * self.floor:
+        if self.full_replays():
             return
+        seen = ", ".join(f"trace {k}: {m} calls" for k, m in sorted(self.captures.items())[:8]) or "none"
         raise PortFailed(f"{DEVICE_OPS_FAILURE}: no decode step made as many as {self.floor} matmul-family ttnn calls (the most in one step was "
                          f"{self.decode_matmul_max}; trace replays: {self.decode_trace_replays}). Decoding a token runs every layer, so a step makes "
-                         f"at least one ttnn.matmul or ttnn.linear per layer. " + self.what_to_do(), op="decode")
+                         f"at least one ttnn.matmul or ttnn.linear per layer. A step that replays a trace counts only for a replayed trace whose "
+                         f"capture made at least {self.floor} of them between begin_trace_capture and a successful end_trace_capture "
+                         f"(captures that ended: {seen}). " + self.what_to_do(), op="decode")
 
     def record(self) -> dict:
         top = sorted(self.total.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
         return {"floor": self.floor, "layers": self.layers, "prefill_matmul_calls": self.prefill_matmul, "decode_matmul_calls_max": self.decode_matmul_max,
                 "decode_trace_replays": self.decode_trace_replays, "matmul_calls_total": self.matmuls(self.total),
-                "static_matmul_calls": self.static_matmul, "weights": self.weights, "top_calls": dict(top)}
+                "static_matmul_calls": self.static_matmul, "weights": self.weights, "top_calls": dict(top),
+                "trace_captures": self.trace_record()}
 
 
 def read_config(model_dir: str) -> dict:
@@ -1444,6 +1547,7 @@ def main() -> int:
         t0 = time.monotonic()
         w.ask(op="load", model_dir=model_dir)
         device_ops.add_load(w.last.get(OPS_KEY))       # a warm-up pass that captures the decode trace runs here
+        device_ops.add_traces(w.last.get(TRACES_KEY))
         load_s = max(time.monotonic() - t0, MIN_LOAD_S)     # full precision; a rounded value could be 0.0, which the gate refuses
         print(f"loaded in {load_s}s", flush=True)
         w.ask(op="scan")                 # untimed: where the weights the port holds live
@@ -1452,11 +1556,13 @@ def main() -> int:
         chip = [w.ask(op="prefill", ids=prompt, target=ref[0])]
         chip_lp = [w.last.get("lp")]
         device_ops.add_prefill(w.last.get(OPS_KEY))
+        device_ops.add_traces(w.last.get(TRACES_KEY))
         device_ops.check_prefill()       # the first forward pass is the cheapest place to learn it never touched the device
         for i in range(1, n):
             chip.append(w.ask(op="decode", token=ref[i - 1], position=len(prompt) + i - 1, target=ref[i]))
             chip_lp.append(w.last.get("lp"))
             device_ops.add_decode(w.last.get(OPS_KEY))
+            device_ops.add_traces(w.last.get(TRACES_KEY), decode=True)
         device_ops.check_decode()
         # Free run: a fresh prefill, then the port's own greedy ids.
         free = [w.ask(op="prefill", ids=prompt)]

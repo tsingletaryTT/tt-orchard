@@ -35,7 +35,20 @@ def from_torch(x, dtype=None, layout=None, device=None): return Tensor((4, 4))
 def linear(x, w, **kw): return x
 def matmul(x, w, **kw): return x
 def add(a, b): return a
-def execute_trace(device, trace_id, **kw): pass
+class MeshTraceId:
+    """As the real binding (ttnn-nanobind/operations/trace.cpp): __int__ and __eq__, and so no hash."""
+    __hash__ = None
+    def __init__(self, n): self.n = n
+    def __int__(self): return self.n
+    def __eq__(self, other): return isinstance(other, MeshTraceId) and other.n == self.n
+_NEXT_TRACE = [0]
+def begin_trace_capture(mesh_device, *, cq_id=None):
+    _NEXT_TRACE[0] += 1
+    return MeshTraceId(_NEXT_TRACE[0])
+def end_trace_capture(mesh_device, trace_id, *, cq_id=None):
+    if getattr(mesh_device, "fail_end", False):
+        raise RuntimeError("trace capture failed")
+def execute_trace(mesh_device, trace_id, **kw): pass
 '''
 
 # An honest port: logits peak at the id after the last one it was given. prefill answers REF[0]; teacher forcing (reference id i - 1 in)
