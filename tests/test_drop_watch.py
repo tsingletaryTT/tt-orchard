@@ -243,13 +243,19 @@ def test_an_unreadable_hub_record_waits_for_the_operator(tmp_path):
 
 
 class ListingOpener:
-    def __init__(self, body):
-        self.body = body
+    """Answers every request with `body`. `final` is the URL the response says it came from (None: the URL asked for)."""
+
+    def __init__(self, body, final=None):
+        self.body, self.final = body, final
 
     def __call__(self, req, timeout=None):
         import io
+        url = self.final or req.full_url
 
         class R(io.BytesIO):
+            def geturl(self):
+                return url
+
             def __enter__(self):
                 return self
 
@@ -262,6 +268,26 @@ class ListingOpener:
                          ids=["nested-100000", "lone-surrogate", "nan"])
 def test_a_hub_listing_that_is_not_strict_json_lists_nothing(body):
     assert dw.Hub(opener=ListingOpener(body)).list_models("Qwen", "Qwen4-27B") == []
+
+
+def test_a_hub_listing_is_read_and_a_listing_redirected_off_the_hub_lists_nothing():
+    """The listing URL names no repository, so it is checked only when the Hub redirects it (issue 667)."""
+    body = b'[{"id": "Qwen/Qwen4-27B"}]'
+    assert dw.Hub(opener=ListingOpener(body)).list_models("Qwen", "Qwen4-27B") == ["Qwen/Qwen4-27B"]
+    assert dw.Hub(opener=ListingOpener(body, final="https://example.com/api/models")).list_models("Qwen", "Qwen4-27B") == []
+
+
+class RedirectedFilesHub(FakeHub):
+    def get(self, repo, revision, name, *, max_bytes):
+        raise dc.RedirectRefused(f"{name} was redirected to example.com, outside the Hub and its content hosts")
+
+
+def test_a_check_whose_files_were_redirected_away_waits_for_the_operator(tmp_path):
+    w = World(tmp_path, hub=RedirectedFilesHub(), free=True)
+    dw.save_state(w.watch_dir, {"state": "check", "revision": SHA})
+    res = w.tick()
+    assert res["state"] == "needs-operator" and w.launched == []
+    assert any("redirected" in e["text"] for e in res["events"] if e["kind"] == "needs-operator")
 
 
 @pytest.mark.parametrize("stdout", ["[" * 100_000, '{"chips": [{"state": "HELD", "who": "\\ud800"}]}'], ids=["nested-100000", "lone-surrogate"])
