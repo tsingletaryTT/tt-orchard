@@ -1,0 +1,3 @@
+target = "0.9.187"
+summary = "The full-port check and gate count a decode trace replay only when the replayed capture itself made the matmul floor."
+kind = "fix"

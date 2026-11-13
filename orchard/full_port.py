@@ -661,9 +661,27 @@ def _count(x) -> bool:
     return type(x) is int and 0 <= x <= 10 ** 12
 
 
+TRACE_ROWS_MAX = 64          # the template's TRACE_MAX: rows of device_ops.trace_captures
+
+
+def _trace_captures(ops: dict) -> tuple[list | None, bool]:
+    """(rows, malformed) for device_ops.trace_captures (issue 547), the captures the port's decode steps replayed and the matmul-family calls
+    each replayed pass made. Absent gives (None, False). A value that is not a list of at most TRACE_ROWS_MAX objects with whole-number `id`,
+    `matmul_calls` and `decode_replays` gives (None, True)."""
+    if "trace_captures" not in ops:
+        return None, False
+    rows = ops["trace_captures"]
+    keys = ("id", "matmul_calls", "decode_replays")
+    if (not isinstance(rows, list) or len(rows) > TRACE_ROWS_MAX
+            or not all(isinstance(r, dict) and all(_count(r.get(k)) for k in keys) for r in rows)):
+        return None, True
+    return [{k: r[k] for k in keys} for r in rows], False
+
+
 def _device_ops_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: Path) -> None:
     """The record's `device_ops` (written by the template from the calls its worker counted, issue 541) must show the port computed on the device:
-    at least `floor` matmul-family ttnn calls in the first prefill and in some decode step (or trace replays that stand for them), and weights that
+    at least `floor` matmul-family ttnn calls in the first prefill and in some decode step (or decode replays of a trace whose capture made
+    that many, from `trace_captures`, issue 547), and weights that
     are mostly ttnn tensors. A record without the field is refused: the check that wrote it did not count."""
     ops = record.get("device_ops")
     if not isinstance(ops, dict):
@@ -687,9 +705,19 @@ def _device_ops_reasons(record: dict, run_dir: Path, reasons: list, stage_dir: P
     if prefill < floor:
         reasons.append(f"the first prefill made {prefill} matmul-family ttnn calls, below the floor of {floor} (one per layer): the port did not "
                        "compute its forward pass on the device. Move the computation onto the ttnn tensors (see stages/2/cheat_sheet.md)")
-    if decode < floor and not (replays and total >= 2 * floor):
-        reasons.append(f"no decode step made {floor} matmul-family ttnn calls (the most was {decode}, trace replays {replays}): the port did "
-                       "not decode on the device")
+    captures, captures_bad = _trace_captures(ops)
+    if captures_bad:
+        reasons.append(f"{RECORD_FILE} device_ops.trace_captures must be a list of at most {TRACE_ROWS_MAX} objects with whole-number id, "
+                       f"matmul_calls and decode_replays, got {str(ops.get('trace_captures'))[:80]!r}")
+    if decode < floor:
+        # Issue 547: a decode step that replays a trace stands for a pass only when the replayed capture itself made the floor's worth of
+        # calls. The run's total does not: eight calls outside any capture and a replay of an empty trace passed that rule.
+        if captures is None and not captures_bad:
+            reasons.append(f"no decode step made {floor} matmul-family ttnn calls (the most was {decode}, trace replays {replays}), and "
+                           f"{RECORD_FILE} device_ops has no trace_captures, so no replay can stand for one. Run the supervisor's check again")
+        elif captures is not None and not any(r["decode_replays"] and r["matmul_calls"] >= floor for r in captures):
+            reasons.append(f"no decode step made {floor} matmul-family ttnn calls (the most was {decode}, trace replays {replays}), and no "
+                           f"replayed trace's capture made {floor}: the port did not decode on the device")
     weights = ops.get("weights")
     if weights is not None and not (isinstance(weights, dict) and _count(weights.get("host_elements")) and _count(weights.get("device_elements"))):
         # Issue 549: absent weight evidence stays allowed (the scan did not run), but evidence that was supplied has to be well formed.
