@@ -12,8 +12,6 @@ own type, a problem in its list, a None, or the safe choice) and does not crash.
 """
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from orchard import safeio

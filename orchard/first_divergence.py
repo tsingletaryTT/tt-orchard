@@ -131,7 +131,7 @@ def tensor_report(ref, cand, *, top: int = 5, high_norm_factor: float = HIGH_NOR
     A pair that cannot be compared (different shapes, a value that is not finite) is returned with `comparable` false and the reason."""
     ref, cand = np.asarray(ref), np.asarray(cand)
     m = ar.metrics(ref, cand)
-    out = {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in m.items()}
+    out = {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in m.items()}     # finite: ok only a float is checked
     out.setdefault("pcc", None)
     out["error_mostly_in_high_norm_rows"] = False
     out["high_norm"] = None
@@ -515,7 +515,7 @@ def summarise(rep: dict) -> list[str]:
 def _clean(obj):
     """Replace non-finite numbers by None so the report is strict JSON."""
     if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
+        return obj if math.isfinite(obj) else None        # finite: ok obj is a float here
     if isinstance(obj, dict):
         return {k: _clean(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):

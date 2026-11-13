@@ -85,8 +85,8 @@ def _no_constant(name):
 
 
 def _strict_float(text):
-    value = float(text)
-    if not math.isfinite(value):
+    value = float(text)                # finite: ok text is the JSON number's own text; float() of a string gives inf and never raises OverflowError
+    if not math.isfinite(value):       # finite: ok value is a float here
         raise ValueError(f"the number {text} is not finite")
     return value
 

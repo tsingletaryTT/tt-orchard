@@ -182,10 +182,10 @@ def _seconds(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     try:
-        seconds = float(value)
+        seconds = float(value)        # finite: ok an OverflowError is caught below
     except OverflowError:
         return None
-    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None        # finite: ok seconds is a float here
 
 
 def _request(rec: dict):
