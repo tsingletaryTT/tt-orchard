@@ -36,8 +36,11 @@ You do not write a comparison script.
    - `model_snapshot`: the new model's snapshot directory,
      `{{HF_HOME}}/hub/models--<org>--<name>/snapshots/<sha>/`. If the run facts list an input
      path for the model, use that path.
-   - `nearest_model_id`: the nearest supported model. Use the run facts' `input base` when it
-     names one. Otherwise read the `base_model:` line in the front matter of the new model's
+   - `nearest_model_id`: the nearest supported model. When the run facts list `input nearest_pin`, the
+     operator chose that model (`bringup --base <model id> --nearest-why`) and `input nearest_pin_why` says
+     why. Use exactly that repository with `input base` as its snapshot, even when no bundle serves it; the
+     stage 0 gate refuses a `nearest_model` that names another repository. Otherwise use the run facts'
+     `input base` when it names one. Otherwise read the `base_model:` line in the front matter of the new model's
      `README.md`. For a Qwen3.8-27B fine-tune it is `Qwen/Qwen3.8-27B`.
    - `nearest_snapshot`: the nearest model's snapshot directory, found the same way, or the
      `input base` path.
