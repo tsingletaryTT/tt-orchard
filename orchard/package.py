@@ -39,7 +39,6 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import math
 import os
 import re
 import shlex
@@ -1308,7 +1307,7 @@ def graft_trial_numbers(run_dir) -> tuple[Number, ...]:
     out = []
     for name, side, key, unit in GRAFT_TRIAL_ROWS:
         v = (trial.get(side) or {}).get(key) if isinstance(trial, dict) and isinstance(trial.get(side), dict) else None
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0:
+        if safeio.fits_float(v) and v > 0:
             out.append(Number(name, v, unit, "measured", evidence))
     rate = accept_rate((trial.get("variant") or {}).get("drafter")) if isinstance(trial, dict) and isinstance(trial.get("variant"), dict) else None
     if rate is not None:              # 0 is a measurement here, so this row is not held to the "positive" rule above
@@ -1331,7 +1330,7 @@ def sampling_source(run_dir) -> str:
 
 
 def _rounded(value, places):
-    return round(value, places) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+    return round(value, places) if safeio.fits_float(value) else None
 
 
 def sampling_summary(run_dir) -> dict | None:

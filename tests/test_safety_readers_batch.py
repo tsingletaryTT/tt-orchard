@@ -256,7 +256,6 @@ def test_an_undisturbed_restore_still_places_every_file(tmp_path):
 # ---- 461 (first part): shared helpers for a JSON number, and a count that may not grow -----------------------------------------------------
 
 import itertools
-import json
 import math
 
 HUGE = [10 ** 400, -10 ** 400]
@@ -282,45 +281,7 @@ def test_as_float_converts_what_fits_and_refuses_what_does_not_without_an_overfl
             safeio.as_float(v)
 
 
-ROOT = Path(__file__).resolve().parent.parent
-BASELINE = ROOT / "tests" / "isfinite_baseline.json"
-
-
-def _count_isfinite(path: Path) -> int:
-    import ast
-    n = 0
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "isfinite"
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == "math"):
-            n += 1
-    return n
-
-
-def _counts() -> dict:
-    out = {}
-    for f in sorted((ROOT / "orchard").rglob("*.py")):
-        rel = f.relative_to(ROOT).as_posix()
-        if rel == "orchard/safeio.py":
-            continue                       # the helpers themselves
-        n = _count_isfinite(f)
-        if n:
-            out[rel] = n
-    return out
-
-
-def test_no_file_gained_a_math_isfinite_call_that_a_huge_integer_can_crash():
-    """Issue 461: math.isfinite(x) raises OverflowError for an integer of more than about 308 digits. New code uses safeio.is_finite_number
-    (or as_float). A count may fall; it may not rise or appear in a new file. Lower tests/isfinite_baseline.json when a call site is replaced."""
-    baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
-    grew = {rel: (baseline.get(rel, 0), n) for rel, n in _counts().items() if n > baseline.get(rel, 0)}
-    assert not grew, "math.isfinite calls grew (was, now): " + ", ".join(f"{r} {a} -> {b}" for r, (a, b) in sorted(grew.items())) + \
-        ". Use safeio.is_finite_number or safeio.as_float."
-
-
-def test_the_counter_counts_what_it_says(tmp_path):
-    f = tmp_path / "m.py"
-    f.write_text("import math\na = math.isfinite(x)\nb = math.isfinite(y) and math.isfinite(z)\nc = other.isfinite(w)\n# math.isfinite(q)\n")
-    assert _count_isfinite(f) == 3
+# The count of math.isfinite calls that stood here moved to tests/test_finite_ratchet.py, which also counts float() and takes a marker.
 
 
 # ---- review of PR 622 ---------------------------------------------------------------------------------------------------------------------

@@ -25,9 +25,9 @@ the speed comes from something other than one token per weight read (speculative
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
+from orchard import safeio
 from orchard import model_config as mc
 
 # ---- bytes per weight ---------------------------------------------------------------------------------
@@ -74,7 +74,7 @@ def _check_dies(dies) -> int:
 
 
 def _check_bandwidth(bw) -> float:
-    if isinstance(bw, bool) or not isinstance(bw, (int, float)) or not math.isfinite(bw) or bw <= 0:
+    if not safeio.fits_float(bw) or bw <= 0:
         raise FloorInputError("per-die bandwidth must be a positive finite number of GB/s")
     return float(bw)
 
@@ -248,8 +248,7 @@ def floor_for_board(model_config, dtype_policy, board: str, *, dies: int | None 
 
 def share_of_floor(measured_tok_s, floor: DecodeFloor) -> float:
     """Measured tokens per second divided by the floor's tokens per second. Refuses a negative, non-finite or non-numeric speed."""
-    if isinstance(measured_tok_s, bool) or not isinstance(measured_tok_s, (int, float)) or not math.isfinite(measured_tok_s) \
-            or measured_tok_s < 0:
+    if not safeio.fits_float(measured_tok_s) or measured_tok_s < 0:
         raise FloorInputError("measured tokens per second must be a finite number of at least 0")
     return measured_tok_s / floor.floor_tok_s
 
@@ -273,9 +272,9 @@ LOW_SHARE_CAUSES = ("op count and gaps between ops", "weight streaming below the
 
 def low_share_hint(share, *, threshold: float) -> str | None:
     """Text only, never a gate: when `share` is below `threshold`, the likely causes in order; otherwise None."""
-    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or threshold <= 0:
+    if not safeio.fits_float(threshold) or threshold <= 0:
         raise FloorInputError("threshold must be a positive finite number")
-    if isinstance(share, bool) or not isinstance(share, (int, float)) or not math.isfinite(share) or share < 0:
+    if not safeio.fits_float(share) or share < 0:
         raise FloorInputError("share must be a finite number of at least 0")
     if share >= threshold:
         return None
