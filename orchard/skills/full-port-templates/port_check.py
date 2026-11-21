@@ -159,7 +159,16 @@ FORGED = threading.Event()       # set when a line from the worker mentions MARK
 CPU_TTNN = HERE / "cpu_ttnn.py"           # the stand-in, copied here by the supervisor (orchard/skills/full-port-templates/cpu_ttnn.py)
 CHEAT_FILE = HERE / "cheat_sheet.json"    # the verified sheet, copied here by the supervisor; its signatures are checked on every call
 CHEAT_MAX = 1 << 22                       # bytes of the sheet read
-CPU_RUN_MAX_BYTES = 4 << 30               # choice: a larger checkpoint is not loaded on the CPU (the stand-in keeps float32 copies of the weights)
+# The size limit of the CPU run (issues 697 and 782). The stand-in keeps float32 copies of the weights, so a bf16 checkpoint of B bytes holds about
+# 2 B of float32 and the load maps the file as well: about 3 B resident at the peak. The limit is a share of the host's available memory, so a
+# host with room checks a 2.3B-parameter model (4.59 GB) and a loaded host checks less. A checkpoint above the limit is not loaded.
+CPU_RUN_FLOOR_BYTES = 4 << 30             # choice: the limit before issue 782; a host that reports less memory, or none, still gets this
+CPU_RUN_CAP_BYTES = 12 << 30              # choice: about a 6B-parameter bf16 model; the supervisor gives the run ten minutes, so a larger load would time out
+CPU_RUN_MEMORY_DIVISOR = 5                # choice: the limit is MemAvailable // 5, which leaves room for the 3x peak above and the port's own use
+CPU_RUN_OVERRIDE_ENV = "ORCHARD_CPU_RUN_MAX_BYTES"     # set through the supervisor's `--env`; a whole number of bytes
+CPU_RUN_OVERRIDE_CEILING_BYTES = 64 << 30              # choice: an override above this is cut to it, so one setting cannot exhaust the host
+CPU_RUN_MEMINFO = "/proc/meminfo"
+CPU_RUN_MEMINFO_MAX = 1 << 16             # bytes of /proc/meminfo read (it is a few kilobytes)
 CPU_NO_VERDICT = 3                        # the exit code of a CPU run that neither passed nor found a fault of the port
 
 
@@ -1401,6 +1410,50 @@ def checkpoint_bytes(model_dir: str) -> int:
     return total
 
 
+def mem_available_bytes(meminfo=CPU_RUN_MEMINFO) -> int | None:
+    """MemAvailable from /proc/meminfo in bytes, or None when the file is missing, unreadable or has no usable line. The read is bounded."""
+    try:
+        with open(meminfo, "rb") as fh:          # hardening: ok the kernel's own /proc/meminfo (a test passes a file of its own); bounded read in a try
+            text = fh.read(CPU_RUN_MEMINFO_MAX).decode("ascii", "replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("MemAvailable:"):
+            parts = line.split()
+            if len(parts) == 3 and parts[1].isascii() and parts[1].isdigit() and parts[2] == "kB":
+                return int(parts[1]) * 1024
+            return None
+    return None
+
+
+def cpu_run_limit(environ=None, meminfo=CPU_RUN_MEMINFO) -> tuple:
+    """(the limit in bytes, a phrase that says where it came from) for the CPU run of a checkpoint.
+
+    The rule: the override in CPU_RUN_OVERRIDE_ENV when it is a whole number of bytes above zero (cut to CPU_RUN_OVERRIDE_CEILING_BYTES);
+    otherwise MemAvailable // CPU_RUN_MEMORY_DIVISOR, raised to CPU_RUN_FLOOR_BYTES and cut to CPU_RUN_CAP_BYTES. A host that does not report
+    MemAvailable gets the floor. The phrase is printed in the run's line and recorded in the ledger, so a reader can tell which rule applied."""
+    environ = os.environ if environ is None else environ
+    raw = environ.get(CPU_RUN_OVERRIDE_ENV)
+    ignored = ""
+    if raw is not None:
+        if raw.isascii() and raw.isdigit() and 0 < len(raw) <= 19 and int(raw) > 0:
+            value = int(raw)
+            if value > CPU_RUN_OVERRIDE_CEILING_BYTES:
+                return CPU_RUN_OVERRIDE_CEILING_BYTES, f"{CPU_RUN_OVERRIDE_ENV}={raw}, cut to the ceiling of {CPU_RUN_OVERRIDE_CEILING_BYTES} bytes"
+            return value, f"{CPU_RUN_OVERRIDE_ENV}={raw}"
+        ignored = f"{CPU_RUN_OVERRIDE_ENV} ignored (not a whole number of bytes above zero); "
+    avail = mem_available_bytes(meminfo)
+    if avail is None:
+        return CPU_RUN_FLOOR_BYTES, f"{ignored}the floor of {CPU_RUN_FLOOR_BYTES} bytes, because MemAvailable could not be read"
+    share = avail // CPU_RUN_MEMORY_DIVISOR
+    if share < CPU_RUN_FLOOR_BYTES:
+        return CPU_RUN_FLOOR_BYTES, (f"{ignored}the floor of {CPU_RUN_FLOOR_BYTES} bytes (a share of MemAvailable {avail} bytes, "
+                                     f"{share}, is below it)")
+    if share > CPU_RUN_CAP_BYTES:
+        return CPU_RUN_CAP_BYTES, f"{ignored}the cap of {CPU_RUN_CAP_BYTES} bytes (a share of MemAvailable {avail} bytes is {share})"
+    return share, f"{ignored}1/{CPU_RUN_MEMORY_DIVISOR} of MemAvailable {avail} bytes"
+
+
 def cpu_main(flags) -> int:
     """`port_check.py --cpu N` (issue 697): the port's load, one prefill of the stage 1 prompt and one decode step, in a worker that imports the
     CPU stand-in of ttnn (stages/2/cpu_ttnn.py) behind the verified sheet's signatures, with a stand-in device of N chips. No chip is opened
@@ -1408,7 +1461,7 @@ def cpu_main(flags) -> int:
 
     Exit 0: every request ran. Exit 2 with the usual FAILED and PORT_CHECK_FAILURE lines: a fault of the port, either a call the sheet refuses
     or a missing name, key, index or import (or a wrong call) raised at a line of the port (`cpu_fault`); the board would fail the same way.
-    Exit CPU_NO_VERDICT: anything else (the stand-in lacks an op, an error inside the stand-in, no torch, a checkpoint over CPU_RUN_MAX_BYTES,
+    Exit CPU_NO_VERDICT: anything else (the stand-in lacks an op, an error inside the stand-in, no torch, a checkpoint over the limit of cpu_run_limit,
     a missing stage 1 file); the line `CPU run gave no verdict: ...` says why and the board check decides. What a pass does not show: that the
     numbers are right, that the device accepts the shapes and layouts, or anything about code the three requests did not reach."""
     if len(flags) != 1 or not flags[0].isdigit() or not 0 < int(flags[0]) <= 64:
@@ -1425,9 +1478,10 @@ def cpu_main(flags) -> int:
     except (OSError, ValueError, KeyError, TypeError, PortFailed) as exc:
         print(f"CPU run gave no verdict: its inputs do not read ({type(exc).__name__}: {str(exc)[:300]})", flush=True)
         return CPU_NO_VERDICT
-    if size > CPU_RUN_MAX_BYTES:
-        print(f"CPU run gave no verdict: the checkpoint holds {size} bytes, above the CPU run's limit of {CPU_RUN_MAX_BYTES}; it was not loaded",
-              flush=True)
+    limit, limit_source = cpu_run_limit()
+    if size > limit:
+        print(f"CPU run gave no verdict: the checkpoint holds {size} bytes, above the CPU run's limit of {limit} bytes ({limit_source}); "
+              "it was not loaded", flush=True)
         return CPU_NO_VERDICT
     w = Worker()
     try:
@@ -1451,7 +1505,8 @@ def cpu_main(flags) -> int:
     if FORGED.is_set():
         raise PortFailed(f"the port printed a line that mentions {MARK}: only this file prints that line, so the run is refused")
     print(f"CPU run passed: load, a prefill of {len(prompt)} tokens and one decode step ran against the CPU stand-in of ttnn on {n_chips} "
-          "stand-in chip(s). No board was used, so this does not show the port runs on the chip or computes the right numbers.", flush=True)
+          "stand-in chip(s). No board was used, so this does not show the port runs on the chip or computes the right numbers. "
+          f"The checkpoint holds {size} bytes; the size limit was {limit} bytes ({limit_source}).", flush=True)
     return 0
 
 

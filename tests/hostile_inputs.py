@@ -395,6 +395,12 @@ def _tool_use_count(base: Path):
     return tool_use.count(base)
 
 
+def _thin_repair_load_history(base: Path):
+    """The history file of the thin repair rounds (`stages/2/thin_repair_history.json`, issue 783): the stage directory is the argument."""
+    from orchard import thin_repair
+    return thin_repair.load_history(base)
+
+
 def _ledger_read_entries(base: Path):
     from orchard import ledger
     return ledger.read_entries(base / "input.json")
@@ -1046,6 +1052,11 @@ def _port_facts_reference_source(base: Path):
     return port_facts.reference_source(base, "toy")
 
 
+def _port_excerpts_own_modeling(base: Path):
+    from orchard import port_excerpts
+    return port_excerpts.own_modeling_source(base / "snap", {"auto_map": {"AutoModelForCausalLM": "modeling_toy.ToyForCausalLM"}})
+
+
 def _profile_analyze_raw_file(base: Path):
     from orchard import profile_summary
     return profile_summary.analyze_raw_file(base / "input.json")
@@ -1278,6 +1289,7 @@ READERS: list[Reader] = [
     Reader("profile_summary.read_report_file", _profile_read_report_file, documented=(_SafeReadError, _ProfileError)),
     Reader("profile_summary.summarise_dir (hostile ops CSV)", _profile_summarise_dir, rel="ops_perf_results_hostile.csv"),
     Reader("tool_use.count", _tool_use_count, suffix=b"\n", rel="stages/2/log/prepare-00001.jsonl"),
+    Reader("thin_repair.load_history", _thin_repair_load_history, rel="thin_repair_history.json"),
     Reader("preflight._config_json", _preflight_config_json),
     Reader("preflight._index_problem", _preflight_index_problem),
     Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),
@@ -1366,6 +1378,7 @@ READERS: list[Reader] = [
     Reader("port_facts.build (hostile weights file)", _port_facts_build, rel="snap/model.safetensors", setup=_port_facts_config,
            documented=(_PortFactsError,)),
     Reader("port_facts.reference_source", _port_facts_reference_source, rel="models/toy/configuration_toy.py"),
+    Reader("port_excerpts.own_modeling_source", _port_excerpts_own_modeling, rel="snap/modeling_toy.py"),
     Reader("toolcall_bench._rows", _toolcall_bench_rows, suffix=b"\n", documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("stock_runtime._load_config", _stock_runtime_load_config),
     Reader("model_config.read_model_config", _model_config_read, documented=(_ModelConfigError,)),
