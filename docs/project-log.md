@@ -5795,3 +5795,14 @@ Change. The construction script keeps the plain load (with `trust_remote_code=Fa
 Checks. On the real Aion snapshot the excerpts give seven classes (14.8 KB) and the construction builds on the meta device and lists both `.py` files with their hashes. 48 new tests, 26 mutations each caught (one survived first and its test was rewritten). Targeted run: 6134 passed, 1 skipped.
 
 Open. The audit is not on disk before the model's code runs. Stage 1's secret-name pattern matches `TOKENIZERS_PARALLELISM`. Whether the port generator can write an Aion port once `--thin-port` starts is not shown.
+
+## 2026-11-21: test stand-ins for the supervisor carry port_check_positions (fix after PR 788)
+Prompt (operator): merge the open pull requests and continue. The full suite on `main` after the merges failed 16 tests, all with `AttributeError: 'types.SimpleNamespace' object has no attribute 'port_check_positions'` at the line in `Supervisor._pin_full_port` that PR 788 added (`self.port_check_positions`).
+
+Cause. Seven hand-built `SimpleNamespace` stand-ins in `tests/test_cheat_sheet_wiring.py`, `tests/test_decoder_idioms.py`, `tests/test_run_state_followups.py` and `tests/test_run_file_readers.py` call `_pin_full_port` and had no such attribute. The real constructor always sets it, so production code is unchanged. The PR 788 branch was checked with the full-port, supervisor, port-check, CLI and bringup-config test files, which do not include these four, and the integration suite of that day did not contain 788, so neither run showed the failures.
+
+Change. Each of the seven stand-ins now carries `port_check_positions=full_port.DEFAULT_POSITIONS`, the value the constructor gives a run that does not name the option. Tests only.
+
+Checks. The 16 failed on `main` at `c4b3bdc6` when run alone, and 248 tests in the four files plus `test_helper_draft_tested.py` and `test_helper_drives_review.py` pass with the change. The full parallel suite on this branch passed: 30,353 passed, 147 skipped, 1 xfailed, 0 failed (16 min 52 s).
+
+Process note. A merge of a pull request that adds an attribute to `Supervisor` needs the full suite on the pull request's own head first. The targeted subsets named in the fork briefs missed the files that build supervisor stand-ins.
