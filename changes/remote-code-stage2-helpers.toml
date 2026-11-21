@@ -1,0 +1,4 @@
+target = "0.9.188"
+summary = "Stage 2 builds the effective construction and the reference excerpts for a model that ships its own code, and names the cause when either step fails."
+pr = 786
+kind = "fix"

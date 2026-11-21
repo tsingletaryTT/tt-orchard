@@ -764,7 +764,7 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
     points at). Advisory: a config that cannot be read, a missing or hostile reference module and a write error each leave no file, a ledger
     decision that names the reason, and the coder works from the facts file and its skill as before."""
     try:
-        result = port_excerpts.for_root(root, port_facts.read_config(snapshot))
+        result = port_excerpts.for_root(root, port_facts.read_config(snapshot), snapshot=snapshot)
         if not result.text:
             ledger.append("decision", spec.number, decision="reference excerpts not written", problem=result.reason[:300])
             return False, None
@@ -774,7 +774,7 @@ def write_reference_excerpts(ledger, run_dir: Path, spec, stage_dir: Path, snaps
                       problem=f"{exc.__class__.__name__}: an unexpected error while writing the excerpts")
         return False, None
     ledger.append("decision", spec.number, decision="reference excerpts written", excerpts=record, bytes=len(result.text.encode("utf-8")),
-                  classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
+                  source=result.summary()["source"], classes=result.classes[:port_excerpts.MAX_CLASSES], left_out=len(result.left_out))
     return True, result.summary()
 
 
@@ -795,7 +795,8 @@ def write_effective_construction(ledger, run_dir: Path, spec, stage_dir: Path, s
                       problem=f"{exc.__class__.__name__}: an unexpected error while building the file")
         return False, None
     ledger.append("decision", spec.number, decision="effective construction written", construction=record,
-                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"])
+                  classes=summary["classes"], resolved_vs_default=summary["resolved_vs_default_total"],
+                  **({"remote_code": summary["remote_code"]} if summary.get("remote_code") else {}))
     return True, summary
 
 
@@ -861,8 +862,8 @@ def _stage_3_port_is_held(sup, run, dst_parts, spec) -> bool:
 PRECHECK_DEADLINE_S = 60.0          # the static device-ops analysis opens no device: a minute is far more than it needs
 PRECHECK_OUTPUT_MAX = 64 * 1024
 # The CPU run of the port against the torch stand-in of ttnn (issue 697, `port_check.py --cpu N`): load, one prefill and one decode step on a
-# checkpoint of at most 4 GiB (the template's CPU_RUN_MAX_BYTES). Ten minutes covers a cold torch import and a load of that size; a run that
-# takes longer gives no verdict and the board check runs.
+# checkpoint of at most the template's `cpu_run_limit` (a share of the host's available memory, between 4 and 12 GiB; issue 782). Ten minutes
+# covers a cold torch import and a load of that size; a run that takes longer gives no verdict and the board check runs.
 CPU_RUN_DEADLINE_S = 600.0
 CPU_RUN_NO_VERDICT = 3              # the template's CPU_NO_VERDICT
 CHECK_RUNS_NOTE = ("The check runs again only when you reply with no tool call. A write does not run it, and `last-check` keeps showing this "
@@ -914,6 +915,7 @@ class Supervisor:
         # run_start only when off; `build` hands over the recorded value on a resume.
         self.tool_dedupe = bool(tool_dedupe)
         self._repair_baseline: dict | None = None      # the port directory's fingerprint when a repair step starts (the step's `finished` check)
+        self._thin_handover = ""                       # the note for the agent's repair step when the thin repair's history stopped a function (issue 783)
         # Stage 0's stack freshness record (orchard/stack_pins.py): `(stage_dir, new_run) -> (record, sha256)`. None means no comparison was
         # supplied (the tests), and the record says nothing was compared. `_run_resumed` is set when a run starts on a ledger that has begun.
         self.stack_pins, self._run_resumed = stack_pins, False
@@ -3026,6 +3028,9 @@ class Supervisor:
                         return stop, [f"the thin repair round {k} ended: {stop}"], None
                     if thin_ok:
                         self._repair_baseline = None          # no coder step ends on a baseline in a round the thin repair settled
+                    elif self._thin_handover:
+                        # The history stopped the thin repair of a function (issue 783): the agent's step is told which function and its callers.
+                        friend_note = (friend_note + "\n\n" if friend_note else "") + self._thin_handover
                 if not driven_ok and not thin_ok:
                     if self.repair_help and getattr(self, "telegraph", None) is not None and not handed_back:
                         ask_now, ask_why = repair_help.start_trigger(self.ledger.read(), n, k, failure)
@@ -4702,6 +4707,7 @@ class Supervisor:
         ends). Anything the thin repair cannot place or settle (a numerics failure, a line outside a function, two refused replies, an endpoint
         that fails, a round past the cap) is recorded as `thin repair handed to the coder` and the agent's repair step runs as without the option."""
         n = spec.number
+        self._thin_handover = ""
         if n != 2 or not thin_port(self.ledger.read()):
             return False, None
         if stop := self._driven_stop(spec):
@@ -4716,10 +4722,12 @@ class Supervisor:
         fields = dict(round=k, function=result.function, error_type=result.etype, hint=result.hint, requests=result.requests,
                       prompt_chars=result.prompt_chars, completion_tokens=result.completion_tokens, seconds=round(self.clock() - started, 3))
         if result.status == "spliced":
-            self.ledger.append("decision", n, decision="thin repair round", outcome="spliced", tier=used, **fields)
+            # The hash ties the history file's diff for this round to the ledger (the diff is the coder's reply, so it is evidence).
+            self.ledger.append("decision", n, decision="thin repair round", outcome="spliced", tier=used, diff_sha256=result.diff_sha256, **fields)
             return True, self._driven_stop(spec)
         self.ledger.append("decision", n, decision="thin repair handed to the coder", reason=result.reason or result.status, outcome=result.status,
                            tier=used, **fields)
+        self._thin_handover = result.note                  # empty unless the history stopped the function: the agent's step reads it
         return False, None
 
     def _draft(self, spec, stage_dir: Path) -> None:
@@ -5833,7 +5841,8 @@ class Supervisor:
             text = ""
         line = next((ln for ln in reversed(text.splitlines()) if ln.startswith(("CPU run passed", "CPU run gave no verdict"))), "")
         if code == 0 and not timed_out:
-            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3))
+            self.ledger.append("decision", n, decision="CPU run passed before the board", chips=chips, seconds=round(self.clock() - t0, 3),
+                               size_limit=port_repair.safe_text(line, self._homes())[:600])
         else:
             self.ledger.append("decision", n, decision="CPU run gave no verdict", returncode=code, timed_out=bool(timed_out),
                                reason=port_repair.safe_text(line, self._homes())[:600], note="the board check runs as it would have")
