@@ -265,9 +265,11 @@ def test_a_layer_keyed_rope_block_the_tables_cannot_follow_leaves_a_named_stub(w
 
 
 def test_a_flat_rope_model_is_generated_byte_for_byte_as_before():
-    """The hashes were taken on origin/main before this change: the standard small decoder and the tiny Qwen4 rehearsal model."""
-    assert hashlib.sha256(std_generate()[0].encode()).hexdigest() == "c4ce91928d206703477caeef6ded6389f56d812e876ce32a95b6636ee07a1012"
-    assert hashlib.sha256(tiny_qwen4()[0].encode()).hexdigest() == "21ff801d7aab080c0ef26c99f5481878d561ce0cc95acfb17c9760d5cdff36a0"
+    """The standard small decoder and the tiny Qwen4 rehearsal model. The hashes moved once, when the generator began to write the one line
+    `TOKEN_CHOICE = "host-row"` (tests/test_port_template_token_choice.py holds the hashes from before that line and checks the text is the
+    same without it)."""
+    assert hashlib.sha256(std_generate()[0].encode()).hexdigest() == "6efab8c58df94df3e5872c33ef536685ec7954d4b9a1346f732436c83e3f9ccf"
+    assert hashlib.sha256(tiny_qwen4()[0].encode()).hexdigest() == "aa1dceb6c5204afce761ecba00ec2b0816d14736062f1baae86164738cf2c02d"
 
 
 # ---- the generated port against a torch forward at a length above the YaRN original length -----------------------------------------------------

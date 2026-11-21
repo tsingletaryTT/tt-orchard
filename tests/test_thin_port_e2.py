@@ -70,7 +70,9 @@ def test_the_model_keys_in_the_prompt_are_exactly_the_keys_the_generated_load_se
 
 def test_the_module_constants_in_the_prompt_are_the_ones_the_generated_port_defines(tiny):
     text, _ = tiny
-    assert _module_constants(text) == set(pt.MODULE_CONSTANTS)
+    # TOKEN_CHOICE is a declaration the stage 2 check reads (how the port's next token is chosen); no stub body uses it, so the prompt leaves it out.
+    assert _module_constants(text) - {"TOKEN_CHOICE"} == set(pt.MODULE_CONSTANTS)
+    assert "TOKEN_CHOICE" in _module_constants(text)
 
 
 def test_a_stub_request_names_every_model_key_and_constant_and_says_there_is_no_attribute_access(tiny):
